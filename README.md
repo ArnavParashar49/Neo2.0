@@ -29,9 +29,10 @@ The router is **Laya**, a 421M-parameter local decision model, with a small head
 | **Apps** | `open_app`, `activate_app`, `quit_app`, `apps_running`, `applescript`, `finder_reveal` |
 | **Mail · Calendar · Notes** | `mail_unread`, `mail_send`, `calendar_today`, `calendar_add`, `notes_create`, `reminder_add` |
 | **Web** | `web_search`, `web_fetch`, `safari_open`, `safari_read` |
+| **Browser** | `browser_open`, `browser_read` (ARIA snapshot + text), `browser_click`, `browser_type`, `browser_press`, `browser_scroll`, `browser_back`, `browser_screenshot` — NEO's own Chromium with a persistent profile, so logins stick |
 | **Files & shell** | `shell`, `read_file`, `write_file`, `edit_file`, `trash` |
 | **System** | `volume`, `brightness`, `timer`, `clock`, `sleep_display` |
-| **Memory** | `memory` — profile facts, lessons, notes; recalled into every prompt |
+| **Memory** | `memory` — profile facts, lessons, notes; hybrid keyword + embedding recall into every prompt |
 
 Every tool is a plain Python function registered with a decorator; adding one is a few lines (see below).
 
@@ -40,7 +41,7 @@ Every tool is a plain Python function registered with a decorator; adding one is
 ```
  mic ─► wake word (Vosk, local) ─► voice backend
                                      ├─ Gemini Live: native speech-to-speech, delegates work via agent_task
-                                     └─ local cascade: Parakeet STT → brain → Kokoro TTS (mlx-audio)
+                                     └─ local cascade: silero VAD → Parakeet STT (live partials) → brain → Kokoro TTS
                                                │
                                                ▼
                        Reflex — Laya + trained head (local, ~150 ms)
@@ -59,6 +60,10 @@ Every tool is a plain Python function registered with a decorator; adding one is
 
 **Brains are pluggable and fail over.** Gemini walks 3.8 → 3.7 → 3.5 Flash across every API key you give it (free-tier quota is per key *and* per model), backs off on overload, and hands text-only turns to Groq's `gpt-oss-120b` at ~700 tokens/s. `python -m neo --local` serves Gemma 4 12B on-device for offline use. An Anthropic key turns on Claude as an optional brain.
 
+**It checks its own work.** After any side-effect tool, the loop makes the model re-observe (Accessibility tree, file, page, inbox) and confirm the goal before it reports — one extra call, far fewer "done!" replies that weren't.
+
+**It remembers how it did things.** A successful multi-step task is saved as a *playbook* (goal + tool sequence). A similar request later gets that path in its prompt, so repeats are shorter and cheaper. Sessions are summarised at shutdown into memory, so "what did we do yesterday" works; recall is hybrid — FTS5 keyword search fused with local embeddings from Laya's encoder, already resident on the GPU.
+
 **Safety is structural, not a prompt.** Destructive tools (send mail, delete, overwrite, risky shell or AppleScript) *stage* the action and return `NEEDS_CONFIRM`; the loop stops, the orb turns to *shaping*, and nothing runs until you say yes. A confirmation is only accepted if it matches the exact action that was asked about, and any retraction ("okay, cancel that") wins over a leading "okay". Everything staged, confirmed or cancelled is appended to `~/.neo/audit.log`.
 
 ## Install
@@ -75,6 +80,8 @@ cp .env.example .env        # paste your keys (both free, no card)
 
 - `GEMINI_API_KEY` — [aistudio.google.com/apikey](https://aistudio.google.com/apikey). Add more in `GEMINI_API_KEYS=key2,key3` for more free quota.
 - `GROQ_API_KEY` — [console.groq.com/keys](https://console.groq.com/keys) (optional; instant chat replies).
+
+The browser tools need Chromium once: `.venv/bin/python -m playwright install chromium`.
 
 Grant **Accessibility** and **Screen Recording** to the app you launch NEO from (Terminal, or NEO.app) in *System Settings → Privacy & Security*. macOS asks for the **Microphone** on the first voice run. Models (Laya, Parakeet, Kokoro, Vosk) download on first run into `~/.neo`.
 
@@ -159,12 +166,12 @@ neo/
   agent/      loop.py (the one agent loop) · session.py (routing) · confirm.py · registry.py · prompt.py
   providers/  gemini.py · openai_compat.py (Groq, local) · claude.py · base.py (neutral message format)
   reflex/     laya_reflex.py · features.py · finetune.py · generate.py · dataset.py · schema.py
-  tools/      computer/ (ax, input, screen, apps, shell) · system.py · web.py · memory_tool.py
+  tools/      computer/ (ax, input, screen, apps, shell) · browser.py · system.py · web.py · memory_tool.py
   voice/      wake.py · local.py · live.py · audio.py · pipeline.py
-  memory/     store.py (SQLite + FTS5)
+  memory/     store.py (SQLite + FTS5 + vectors, playbooks, sessions) · embed.py · summarize.py
   server/     ws.py (websocket to the overlay)
 ui/           Tauri 2 + React overlay (src/App.tsx, src/ws.ts, src-tauri/src/lib.rs)
-tests/        62 tests, no network
+tests/        72 tests, no network
 ```
 
 ## Development
@@ -177,7 +184,7 @@ cd ui && npx tsc --noEmit && (cd src-tauri && cargo check)
 
 ## Status and roadmap
 
-Working end to end today: routing, quick actions, chat, web research, screen reading via the Accessibility tree, screenshots + vision, mail/calendar/notes, files and shell with confirmation, memory, the overlay, both voice backends. See [ROADMAP.md](ROADMAP.md) for what's verified and what's next (playbooks for repeated tasks, post-action verification, a Playwright browser tool, silero VAD, embedding-based memory, a signed NEO.app).
+Working end to end today: routing, quick actions, chat, web research, screen reading via the Accessibility tree, screenshots + vision, mail/calendar/notes, files and shell with confirmation, memory, the overlay, both voice backends. See [ROADMAP.md](ROADMAP.md) for what's verified and what's next (a signed NEO.app that launches the core itself, tool search for the offline model, cross-platform shims).
 
 NEO 2.0 is a from-scratch successor to [NEO v1](https://github.com/ArnavParashar49/NEO).
 

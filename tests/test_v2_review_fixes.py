@@ -245,9 +245,11 @@ def test_applescript_risky_scripts_are_gated():
     assert not script_is_risky('tell application "Safari" to get URL of current tab of window 1')
 
 
-def test_memory_recall_survives_apostrophes(tmp_path):
+def test_memory_recall_survives_apostrophes(tmp_path, monkeypatch):
+    from neo.memory import embed
     from neo.memory.store import Store
 
+    monkeypatch.setattr(embed, "embed_texts", lambda texts: None)  # keyword path only; no model download
     st = Store(tmp_path / "m.sqlite3")
     st.remember("User's favourite editor is Zed", "profile", "editor")
     assert [m.text for m in st.recall("what's my editor?")]

@@ -22,6 +22,12 @@ from neo.providers.base import Message, Provider, ToolCall, ToolResult, Turn
 
 Stopped = Literal["done", "max_steps", "needs_confirm", "needs_user", "thrash", "error"]
 
+_VERIFY_NOTE = (
+    "[verify] Before you report, confirm the goal was actually achieved with a read-only check "
+    "(ax_tree, read_file, browser_read, mail_unread, calendar_today…). If it is done, give the final "
+    "answer. If something is off, fix it first. Do not mention this note."
+)
+
 _SEARCHY = ("search", "fetch", "web", "lookup", "find")
 
 
@@ -113,6 +119,7 @@ async def run_agent(
     max_steps: int | None = None,
     effort: Literal["low", "medium", "high"] = "medium",
     images: list | None = None,
+    verify: bool = True,
 ) -> AgentResult:
     s = settings()
     reg = reg or default_registry()
@@ -126,6 +133,9 @@ async def run_agent(
     steps: list[Step] = []
     last_key, repeats = "", 0
     tools = reg.specs()
+    effectful = False  # a side-effect tool ran this run
+    last_readonly = True  # the most recent tool call was an observation
+    verified = False
 
     for _ in range(max_steps):
         await ev.set_state(NeoState.THINKING)
@@ -137,6 +147,11 @@ async def run_agent(
 
         messages.append(Message.assistant(turn.text, turn.tool_calls, raw=turn.raw))
         if not turn.tool_calls:
+            # Acted without looking afterwards? Make it check its work once before reporting.
+            if verify and effectful and not last_readonly and not verified:
+                verified = True
+                messages.append(Message.user(_VERIFY_NOTE))
+                continue
             await ev.set_state(NeoState.IDLE)
             return AgentResult(turn.text.strip(), "done", steps, messages)
 
@@ -173,6 +188,10 @@ async def run_agent(
         messages.append(Message.tool(results))
         for c, r in zip(turn.tool_calls, results, strict=False):
             steps.append(Step(c.name, c.args, r.content, r.ok))
+            t = reg.get(c.name)
+            readonly = bool(t and t.parallel_safe)
+            effectful = effectful or (not readonly and r.ok)
+            last_readonly = readonly
 
         for r in results:
             kind = _halt_kind(r.content)

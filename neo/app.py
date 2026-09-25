@@ -17,6 +17,9 @@ from neo.tools import load_all
 
 class App:
     def __init__(self) -> None:
+        import time
+
+        self.started = time.time()
         self.session = Session()
         self.voice = None  # set in run() when a backend is available
         self._busy = asyncio.Lock()
@@ -72,6 +75,9 @@ async def run() -> None:
     ui = UIServer(app.on_command)
     await ui.start()
     warmup(app.session.reflex)
+    from neo.memory.embed import warmup as warm_embed
+
+    warm_embed()
 
     if s.voice != "off":
         try:
@@ -90,3 +96,12 @@ async def run() -> None:
     await stop.wait()
     if app.voice:
         await app.voice.close()
+    try:
+        from neo.memory.summarize import summarize_session
+        from neo.tools.browser import shutdown as close_browser
+
+        await close_browser()
+        if s := await summarize_session(app.session.history, app.started):
+            print(f"[memory] session saved: {s[:100]}")
+    except Exception as e:  # noqa: BLE001
+        print(f"[memory] shutdown summary skipped: {str(e)[:80]}")

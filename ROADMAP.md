@@ -86,12 +86,20 @@ mic ─► wake word (local) ─► voice backend
 - Microphone permission on first voice run.
 - First real-world tuning pass: add misroutes to `~/.neo/reflex_extra.jsonl`, retrain (`python -m neo.reflex.finetune`).
 
+### Reliability + memory (2026-09-26)
+
+- Verification turn: after side-effect tools the loop makes the model re-observe before reporting.
+- Playbooks: successful multi-step tool paths saved and recalled by goal similarity into the prompt.
+- Browser tools on Playwright/Chromium with a persistent profile (ARIA snapshot, click/type/press/scroll/back/screenshot).
+- silero VAD replaces the energy gate; live partial transcripts stream to the overlay while you speak.
+- Memory: hybrid FTS5 + embedding recall (Laya's encoder), session summaries at shutdown.
+- Reflex head retrained on ~3k items (templates + LLM-generated, cross-labelled): 96.0% held-out at ~165 ms.
+
 ### Next
 
-- Proper VAD (silero) instead of the energy gate; streaming STT partials in the overlay.
-- Local embeddings for memory recall (FTS5 is keyword-only today).
 - `npm run tauri build` → signed NEO.app that spawns the Python core itself.
-- Skills: a small curated set loaded on demand (tool search), replacing the v1 271-folder dump.
+- Tool search for the offline model (small models drown in 37+ schemas).
+- Skills: a small curated set loaded on demand, replacing the v1 271-folder dump.
 
 ## Removed from v1 (and why)
 

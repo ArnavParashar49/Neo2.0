@@ -6,6 +6,7 @@ and decides which brain handles each utterance.
 
 from __future__ import annotations
 
+import asyncio
 import re
 from dataclasses import dataclass, field
 from typing import Literal
@@ -111,7 +112,7 @@ class Session:
         res = await run_agent(
             text,
             provider=brain(purpose),
-            system=self._system(),
+            system=self._system(await asyncio.to_thread(self._playbooks_for, text)),
             history=self._trimmed(),
             ctx=ToolContext(user_text=text),
             effort=effort,
@@ -121,8 +122,37 @@ class Session:
         if res.stopped == "needs_confirm" and self._stage_pending(res):
             await bus().say(res.question, final=True)
             return Reply(res.question, "confirm", d, res)
+        if res.stopped == "done":
+            await asyncio.to_thread(self._save_playbook, text, res)
         await bus().say(res.text, final=True)
         return Reply(res.text, "agent", d, res)
+
+    # ---- playbooks -------------------------------------------------------------------
+    @staticmethod
+    def _playbooks_for(goal: str) -> str:
+        try:
+            from neo.memory.store import store
+
+            return store().playbook_context(goal)
+        except Exception as e:  # noqa: BLE001
+            print(f"[playbook] recall failed: {str(e)[:80]}")
+            return ""
+
+    @staticmethod
+    def _save_playbook(goal: str, res: AgentResult) -> None:
+        """Keep the successful tool path of a multi-step task with at least one real action."""
+        ok_steps = [s for s in res.steps if s.ok]
+        if len(ok_steps) < 2:
+            return
+        try:
+            from neo.agent.registry import registry as _reg
+            from neo.memory.store import store
+
+            if not any((t := _reg().get(s.tool)) and not t.parallel_safe for s in ok_steps):
+                return
+            store().save_playbook(goal, [{"tool": s.tool, "args": s.args} for s in ok_steps], res.text)
+        except Exception as e:  # noqa: BLE001
+            print(f"[playbook] save failed: {str(e)[:80]}")
 
     def _stage_pending(self, res: AgentResult) -> bool:
         """Remember exactly which staged action the question refers to."""
@@ -173,8 +203,8 @@ class Session:
         return Reply(res.text, "agent", None, res)
 
     # ---- helpers ---------------------------------------------------------------------
-    def _system(self) -> str:
-        return build_prompt(self.memory_context)
+    def _system(self, extra: str = "") -> str:
+        return build_prompt(self.memory_context, extra)
 
     def _remember(self, *msgs: Message) -> None:
         self.history.extend(msgs)

@@ -1,4 +1,4 @@
-"""Local voice cascade: wake word → energy VAD → Parakeet STT → brain → Kokoro TTS.
+"""Local voice cascade: wake word → silero VAD → Parakeet STT → brain → Kokoro TTS.
 
 Fully offline, no quota. The mic loop never blocks on the brain: each utterance is handled in
 its own task, so the loop keeps feeding the wake spotter while NEO thinks or speaks — saying
@@ -24,8 +24,10 @@ TextHandler = Callable[[str], Awaitable[None]]
 _SENT_RE = re.compile(r"(?<=[.!?])\s+")
 _FOLLOWUP_S = 6.0  # keep listening this long after a reply without needing the wake word
 _MAX_UTTER_S = 20.0
-_SILENCE_S = 0.9
+_SILENCE_MS = 800  # trailing silence that ends an utterance (silero)
 _NO_SPEECH_S = 5.0
+_VAD_CHUNK = 512  # silero works on 32 ms windows at 16 kHz
+_PARTIAL_EVERY_S = 1.2  # re-transcribe the growing buffer this often for live partials
 
 
 class LocalVoice:
@@ -45,6 +47,8 @@ class LocalVoice:
         self._speaking = False
         self._capturing = False
         self._followup_until = 0.0
+        self._vad = None
+        self._vad_model = None
 
     # ---- lifecycle -------------------------------------------------------------------
     async def start(self) -> None:
@@ -61,6 +65,20 @@ class LocalVoice:
 
         self._stt = stt_load(s.stt_model)
         self._tts = tts_load(s.tts_model)
+        try:
+            from silero_vad import VADIterator, load_silero_vad
+
+            self._vad_model = load_silero_vad()
+            self._vad = VADIterator(
+                self._vad_model,
+                threshold=0.5,
+                sampling_rate=MIC_RATE,
+                min_silence_duration_ms=_SILENCE_MS,
+                speech_pad_ms=200,
+            )
+        except Exception as e:  # noqa: BLE001 — fall back to the energy gate
+            print(f"[voice] silero VAD unavailable ({e}); using energy gate")
+            self._vad = None
         # Warm both so the first real utterance is fast.
         self._tts_chunks("Ready.")
         import mlx.core as mx
@@ -160,35 +178,71 @@ class LocalVoice:
             await bus().set_state(NeoState.IDLE)
 
     async def _capture_utterance(self) -> str:
-        """Record until ~0.9 s of trailing silence (adaptive noise floor), then transcribe."""
+        """Record one utterance (silero VAD; energy gate as fallback), streaming partial transcripts
+        to the overlay while the user is still talking, then return the final transcript."""
         self._capturing = True
+        partial_task: asyncio.Task | None = None
         try:
             await bus().set_state(NeoState.LISTENING)
             frames: list[bytes] = []
-            noise = 0.004
             started = False
-            last_voice = time.time()
             t0 = time.time()
+            last_voice = t0
+            last_partial = t0
+            noise = 0.004
+            vad_buf = np.zeros(0, dtype=np.float32)
+            if self._vad is not None:
+                self._vad.reset_states()
             while time.time() - t0 < _MAX_UTTER_S:
                 f = await self.mic.read()
                 if not f:
                     return ""
-                level = rms(f)
-                if not started:
-                    noise = 0.9 * noise + 0.1 * level
-                thresh = max(0.012, noise * 3.5)
-                if level > thresh:
-                    started = True
-                    last_voice = time.time()
-                if started:
-                    frames.append(f)
-                    if time.time() - last_voice > _SILENCE_S and not self._ptt:
-                        break
-                elif time.time() - t0 > _NO_SPEECH_S and not self._ptt:  # nobody spoke
-                    return ""
+                ended = False
+                if self._vad is not None:
+                    vad_buf = np.concatenate(
+                        [vad_buf, np.frombuffer(f, dtype=np.int16).astype(np.float32) / 32768.0]
+                    )
+                    while len(vad_buf) >= _VAD_CHUNK:
+                        chunk, vad_buf = vad_buf[:_VAD_CHUNK], vad_buf[_VAD_CHUNK:]
+                        import torch
+
+                        ev = self._vad(torch.from_numpy(chunk.copy()), return_seconds=False)
+                        if ev and "start" in ev:
+                            started = True
+                            last_voice = time.time()
+                        elif ev and "end" in ev and started and not self._ptt:
+                            ended = True
+                    if started:
+                        frames.append(f)
+                        last_voice = time.time()
+                else:  # energy gate
+                    level = rms(f)
+                    if not started:
+                        noise = 0.9 * noise + 0.1 * level
+                    if level > max(0.012, noise * 3.5):
+                        started = True
+                        last_voice = time.time()
+                    if started:
+                        frames.append(f)
+                        if time.time() - last_voice > _SILENCE_MS / 1000 and not self._ptt:
+                            ended = True
+                if ended:
+                    break
+                if not started and time.time() - t0 > _NO_SPEECH_S and not self._ptt:
+                    return ""  # nobody spoke
+                # Live partials: re-transcribe the buffer so far, off the loop, at most every ~1 s.
+                if (
+                    started
+                    and time.time() - last_partial > _PARTIAL_EVERY_S
+                    and (partial_task is None or partial_task.done())
+                ):
+                    last_partial = time.time()
+                    partial_task = asyncio.create_task(self._emit_partial(b"".join(frames)))
             if not frames:
                 return ""
             await bus().set_state(NeoState.THINKING)
+            if partial_task and not partial_task.done():
+                partial_task.cancel()
             pcm = np.frombuffer(b"".join(frames), dtype=np.int16).astype(np.float32) / 32768.0
             if len(pcm) < MIC_RATE * 0.3:
                 return ""
@@ -200,3 +254,16 @@ class LocalVoice:
             self._capturing = False
             if self._wake:
                 self._wake.reset()
+
+    async def _emit_partial(self, raw: bytes) -> None:
+        try:
+            import mlx.core as mx
+
+            pcm = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+            res = await asyncio.to_thread(self._stt.generate, mx.array(pcm))
+            if res.text and self._capturing:
+                await bus().say(res.text.strip(), role="user", final=False)
+        except asyncio.CancelledError:
+            pass
+        except Exception:  # noqa: BLE001 — partials are cosmetic
+            pass

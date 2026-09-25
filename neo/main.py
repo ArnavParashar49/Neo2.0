@@ -43,6 +43,9 @@ async def text_repl(verbose: bool) -> None:
     if verbose:
         bus().subscribe(_print_event)
     print("NEO ready. Type a request (Ctrl-D to quit).")
+    import time
+
+    started = time.time()
     loop = asyncio.get_event_loop()
     while True:
         try:
@@ -55,6 +58,12 @@ async def text_repl(verbose: bool) -> None:
         sess.memory_context = store().prompt_context(text)
         reply = await sess.handle(text)
         print(f"neo> {reply.text}")
+    from neo.memory.summarize import summarize_session
+    from neo.tools.browser import shutdown as close_browser
+
+    await close_browser()
+    if summary := await summarize_session(sess.history, started):
+        print(f"[memory] session saved: {summary[:120]}", file=sys.stderr)
 
 
 def doctor() -> int:
