@@ -41,6 +41,9 @@ _RETRY_CODES = {500, 502, 503, 504}
 _QUOTA_COOLDOWN_S = 600.0  # a (model, key) that 429'd is skipped for this long
 _OVERLOAD_COOLDOWN_S = 90.0  # a model that 5xx'd after a retry is skipped for this long
 _BACKOFF_S = (1.2,)  # one short retry on 5xx; a bad night should fall through to Groq fast
+_SLOW_FAIL_S = 3.0  # a 5xx that took this long to arrive is real overload, not a blip: no retry
+_REQUEST_TIMEOUT_MS = 60_000  # never let one brain call eat the whole agent budget
+_COOLDOWN_FILE = "brain_cooldowns.json"  # (model, key) quota state survives a restart
 
 
 def _to_contents(messages: list[Message]) -> list[gt.Content]:
@@ -133,9 +136,42 @@ class GeminiProvider:
             [] if lite else [m for m in s.gemini_fallback_models if m != self.model]
         )
         keys = [key] if api_key else s.gemini_keys
-        self._clients = [genai.Client(api_key=k) for k in keys]
+        http = gt.HttpOptions(timeout=_REQUEST_TIMEOUT_MS)
+        self._clients = [genai.Client(api_key=k, http_options=http) for k in keys]
         self._client = self._clients[0]
         self._exhausted: dict[tuple[str, int], float] = {}  # (model, key index) → retry-after timestamp
+        self._load_cooldowns()
+
+    # ---- cooldown persistence -------------------------------------------------------------
+    # Learning that nine (model, key) pairs are out of quota costs nine round trips; a restart
+    # must not pay that again, so the map is kept on disk with its expiry times.
+    def _cooldown_path(self):
+        return settings().data_dir / _COOLDOWN_FILE
+
+    def _load_cooldowns(self) -> None:
+        import json
+        import time as _time
+
+        try:
+            raw = json.loads(self._cooldown_path().read_text())
+        except Exception:  # noqa: BLE001 — missing/corrupt file: start clean
+            return
+        now = _time.time()
+        for k, until in raw.items():
+            model, _, ki = k.rpartition("|")
+            if model and float(until) > now:
+                self._exhausted[(model, int(ki))] = float(until)
+
+    def _save_cooldowns(self) -> None:
+        import json
+        import time as _time
+
+        now = _time.time()
+        live = {f"{m}|{ki}": t for (m, ki), t in self._exhausted.items() if t > now}
+        try:
+            self._cooldown_path().write_text(json.dumps(live))
+        except Exception:  # noqa: BLE001 — best effort
+            pass
 
     async def _call(self, fn, **kw):
         """Walk model × key. 5xx → short backoff then next model; 429 → next key for this model
@@ -153,6 +189,7 @@ class GeminiProvider:
                 for i, delay in enumerate((0.0, *_BACKOFF_S)):
                     if delay:
                         await asyncio.sleep(delay)
+                    t0 = _time.time()
                     try:
                         r = await fn(client, model, **kw)
                         self.model, self._client = model, client
@@ -160,16 +197,19 @@ class GeminiProvider:
                     except Exception as e:  # noqa: BLE001
                         last = e
                         code = _code(e)
-                        if code in _RETRY_CODES and i < len(_BACKOFF_S):
-                            continue
+                        took = _time.time() - t0
+                        if code in _RETRY_CODES and i < len(_BACKOFF_S) and took < _SLOW_FAIL_S:
+                            continue  # a quick blip is worth one retry; a slow 5xx is not
                         if code == 429:
                             self._exhausted[(model, ki)] = _time.time() + _QUOTA_COOLDOWN_S
+                            self._save_cooldowns()
                             print(f"[gemini] {model} key#{ki + 1} quota exhausted; trying next key")
                             await _note(f"{_pretty(model)} key {ki + 1}: no quota, trying next")
                             break
                         if code in _RETRY_CODES:
-                            print(f"[gemini] {model} overloaded; trying next model")
+                            print(f"[gemini] {model} overloaded ({took:.0f}s); trying next model")
                             self._exhausted[(model, -1)] = _time.time() + _OVERLOAD_COOLDOWN_S
+                            self._save_cooldowns()
                             await _note(f"{_pretty(model)} overloaded, trying next")
                             overloaded = True
                             break

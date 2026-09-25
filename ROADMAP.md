@@ -110,6 +110,13 @@ mic ─► wake word (local) ─► voice backend
 - History context editing: tool results older than two turns are stubbed.
 - Flash-Lite lane for one-tool actions; Groq now viable as the agent fallback (verified live while Gemini was out of quota).
 
+### Mid-sentence acting + concurrency (2026-09-26)
+
+- EarlyActor: fast-path clauses run as soon as they stabilise in the live transcript (Live interim transcription / local STT partials); 30 s dedupe so the model's later call is a no-op.
+- Live: slow tools and agent_task are NON_BLOCKING with WHEN_IDLE result scheduling; the session keeps listening while work runs.
+- Session runs requests as concurrent jobs (agent jobs capped at 2); history appended in complete blocks; per-job events; "stop" cancels all.
+- EventBus aggregates per-job states by priority so parallel work never flickers the orb.
+
 ### Next
 
 - `npm run tauri build` → signed NEO.app that spawns the Python core itself.

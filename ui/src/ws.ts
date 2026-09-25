@@ -11,8 +11,8 @@ const MIN_DWELL_MS = 350; // a state must show at least this long before the nex
 export interface TurnMeta { route: string; brain: string; model: string; ms: number; tools: number }
 export interface ToolRun { name: string; args?: Record<string, unknown>; ok?: boolean; summary?: string; running: boolean }
 export type Item =
-  | { kind: "msg"; id: number; role: "user" | "assistant" | "system"; text: string; final: boolean; ts: number; meta?: TurnMeta }
-  | { kind: "tools"; id: number; tools: ToolRun[] };
+  | { kind: "msg"; id: number; role: "user" | "assistant" | "system"; text: string; final: boolean; ts: number; meta?: TurnMeta; job?: string }
+  | { kind: "tools"; id: number; tools: ToolRun[]; job?: string };
 
 export interface NeoEvent { type: string; data: Record<string, any>; ts: number }
 
@@ -56,13 +56,14 @@ export function useNeo() {
           setNote(String(ev.data.text ?? ""));
           break;
         case "transcript": {
-          const { role, text, final } = ev.data;
+          const { role, text, final, job } = ev.data;
           setItems((prev) => {
-            // Merge into the most recent still-open message of this role (Live interleaves roles).
+            // Replace the most recent still-open line of this role *and job* — several jobs (and
+            // the voice session) can be streaming at the same time.
             let i = prev.length - 1;
             while (i >= 0) {
               const it = prev[i];
-              if (it.kind === "msg" && it.role === role && !it.final) break;
+              if (it.kind === "msg" && it.role === role && !it.final && (it.job ?? "") === (job ?? "")) break;
               i--;
             }
             if (i >= 0) {
@@ -70,27 +71,32 @@ export function useNeo() {
               next[i] = { ...(prev[i] as Extract<Item, { kind: "msg" }>), text, final, ts: ev.ts };
               return next;
             }
-            return [...prev.slice(-120), { kind: "msg", id: nextId++, role, text, final, ts: ev.ts }];
+            return [...prev.slice(-120), { kind: "msg", id: nextId++, role, text, final, ts: ev.ts, job }];
           });
           break;
         }
         case "tool_start":
           setItems((prev) => {
-            const last = prev[prev.length - 1];
+            const job = ev.data.job ?? "";
             const run: ToolRun = { name: ev.data.name, args: ev.data.args, running: true };
-            if (last && last.kind === "tools") {
-              const next = [...prev];
-              next[next.length - 1] = { ...last, tools: [...last.tools, run] };
-              return next;
+            // Group with this job's most recent tool row, as long as nothing of its own came after it.
+            for (let i = prev.length - 1; i >= 0; i--) {
+              const it = prev[i];
+              if (it.kind === "msg" && (it.job ?? "") === job && it.role === "assistant" && it.final) break;
+              if (it.kind === "tools" && (it.job ?? "") === job) {
+                const next = [...prev];
+                next[i] = { ...it, tools: [...it.tools, run] };
+                return next;
+              }
             }
-            return [...prev, { kind: "tools", id: nextId++, tools: [run] }];
+            return [...prev, { kind: "tools", id: nextId++, tools: [run], job }];
           });
           break;
         case "tool_end":
           setItems((prev) => {
             for (let i = prev.length - 1; i >= 0; i--) {
               const it = prev[i];
-              if (it.kind !== "tools") continue;
+              if (it.kind !== "tools" || (it.job ?? "") !== (ev.data.job ?? "")) continue;
               const j = it.tools.findIndex((t) => t.running && t.name === ev.data.name);
               if (j < 0) continue;
               const tools = [...it.tools];
@@ -106,7 +112,7 @@ export function useNeo() {
           setItems((prev) => {
             for (let i = prev.length - 1; i >= 0; i--) {
               const it = prev[i];
-              if (it.kind === "msg" && it.role === "assistant") {
+              if (it.kind === "msg" && it.role === "assistant" && (it.job ?? "") === (ev.data.job ?? "")) {
                 const next = [...prev];
                 next[i] = { ...it, meta: ev.data as TurnMeta };
                 return next;

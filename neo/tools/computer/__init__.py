@@ -227,7 +227,7 @@ async def open_app(a: dict, c: ToolContext) -> str:
     category="apps",
 )
 async def activate_app(a: dict, c: ToolContext) -> str:
-    return apps.activate(a["name"])
+    return await apps.activate(a["name"])
 
 
 @tool("quit_app", "Quit an app gracefully.", _p({"name": {"type": "string"}}, ["name"]), category="apps")

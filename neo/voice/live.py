@@ -19,6 +19,7 @@ Design notes that came out of real use:
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from collections.abc import Awaitable, Callable
 
@@ -26,6 +27,7 @@ import numpy as np
 from google import genai
 from google.genai import types as gt
 
+from neo.agent.early import early
 from neo.agent.prompt import build as build_prompt
 from neo.agent.registry import ToolContext, registry
 from neo.config import settings
@@ -55,11 +57,18 @@ _CONNECT_TIMEOUT_S = 12.0
 _RECONNECT_WINDOW_S = 60.0  # reopen automatically if the socket dies within this long of activity
 _PLAYBACK_TAIL_S = 0.35  # keep the mic muted this long after NEO stops talking (room echo)
 _BARGE_IN_GRACE_S = 1.5  # ignore "stop" for the first moment of NEO's own speech (echo onset)
+_TURN_STALL_S = 20.0  # an unanswered turn keeps the session open this long, then silence rules apply
 _VAD_CHUNK = 512  # silero works on 32 ms windows at 16 kHz
 
 _LIVE_EXTRA = """You are speaking aloud, so keep replies short and natural. For anything that needs
 several steps or looking at the screen, files, mail or the web, call agent_task with a clear goal and
-then relay its result in one or two sentences. Don't narrate tool use."""
+then relay its result in one or two sentences. Don't narrate tool use. When the user is working in
+an app that is already open (a note, a document, a message) and asks you to type or add something,
+continue in that same place via agent_task — don't create a new note or file elsewhere."""
+
+
+def _canon(text: str) -> str:
+    return re.sub(r"[^a-z0-9 ]+", "", text.lower()).strip()
 
 
 def _declarations() -> list[gt.FunctionDeclaration]:
@@ -68,7 +77,12 @@ def _declarations() -> list[gt.FunctionDeclaration]:
         if t.name in _DIRECT_TOOLS:
             decls.append(
                 gt.FunctionDeclaration(
-                    name=t.name, description=t.description, parameters_json_schema=t.parameters
+                    name=t.name,
+                    description=t.description,
+                    parameters_json_schema=t.parameters,
+                    # Slow tools don't block the conversation: the model acknowledges, keeps
+                    # listening, and gets the result later (scheduled WHEN_IDLE).
+                    behavior=gt.Behavior.NON_BLOCKING if t.slow else gt.Behavior.BLOCKING,
                 )
             )
     decls.append(
@@ -76,6 +90,7 @@ def _declarations() -> list[gt.FunctionDeclaration]:
             name="agent_task",
             description="Hand a multi-step or on-screen task to NEO's agent (it can see the screen, control apps, "
             "read/write files, browse, send mail). Returns a short result to relay.",
+            behavior=gt.Behavior.NON_BLOCKING,
             parameters_json_schema={
                 "type": "object",
                 "properties": {"goal": {"type": "string"}},
@@ -104,6 +119,7 @@ class LiveVoice:
         self._connect_lock = asyncio.Lock()
         self._tasks: list[asyncio.Task] = []
         self._tool_tasks: dict[str, asyncio.Task] = {}  # function-call id → running tool task
+        self._goals: dict[str, str] = {}  # function-call id → agent_task goal in flight
         self._last_activity = 0.0
         self._ptt = False
         self._speaking = False  # audio for the current model turn is playing / still arriving
@@ -112,6 +128,8 @@ class LiveVoice:
         self._vad = None  # silero: local "is the user talking?" so we know when to stop listening
         self._vad_buf = np.zeros(0, dtype=np.float32)
         self._last_user_speech = 0.0
+        self._last_turn_end = 0.0  # when the model last finished a turn or got a tool result
+        self._turn_open = False  # the user has said something the model hasn't finished answering
         self._session_open = 0.0
 
     async def start(self) -> None:
@@ -168,7 +186,8 @@ class LiveVoice:
         await self._live.send_client_content(
             turns=gt.Content(role="user", parts=[gt.Part.from_text(text=text)])
         )
-        self._last_activity = time.time()
+        self._last_activity = self._last_user_speech = time.time()  # typed = said
+        self._turn_open = True
 
     # ---- state machine -----------------------------------------------------------------
     async def _refresh_state(self) -> None:
@@ -225,6 +244,7 @@ class LiveVoice:
             self._tasks.append(asyncio.create_task(self._recv_loop(live)))
             self._tasks.append(asyncio.create_task(self._idle_watch(live)))
             self._tasks.append(asyncio.create_task(self._silence_watch(live)))
+            self._tasks.append(asyncio.create_task(self._early_ticker(live)))
             await self._refresh_state()
 
     async def _close_session(self) -> None:
@@ -261,6 +281,15 @@ class LiveVoice:
                 return
 
     # ---- audio in ---------------------------------------------------------------------
+    async def _early_ticker(self, live) -> None:
+        """Let the early actor notice a clause that has gone quiet even if no new words arrive."""
+        while self._live is live:
+            await asyncio.sleep(0.15)
+            try:
+                await early().tick()
+            except Exception as e:  # noqa: BLE001
+                print(f"[early] {str(e)[:80]}")
+
     async def _silence_watch(self, live) -> None:
         """Stop listening after `listen_timeout_s` of no speech from the user (background noise
         doesn't count — silero decides what is speech). The wake word re-arms the session."""
@@ -271,12 +300,19 @@ class LiveVoice:
                 continue
             if any(not t.done() for t in self._tool_tasks.values()):
                 continue
-            quiet_since = max(self._last_user_speech, self.spk.last_stop, self._session_open)
-            if time.time() - quiet_since > timeout:
+            if self._turn_open and time.time() - self._last_activity < _TURN_STALL_S:
+                continue  # the model is still composing its answer
+            if time.time() - self._quiet_since() > timeout:
                 print(f"[live] no speech for {timeout:.0f}s; closing session")
                 self._closing = True
                 await self._close_session()
                 return
+
+    def _quiet_since(self) -> float:
+        """The last moment either side of the conversation did something."""
+        return max(
+            self._last_user_speech, self.spk.last_stop, self._session_open, self._last_turn_end
+        )
 
     def _hear(self, frame: bytes) -> None:
         """Feed the local VAD; remember when the user last spoke."""
@@ -362,8 +398,15 @@ class LiveVoice:
                 model_buf.clear()
                 await self._refresh_state()
             if sc.input_transcription and sc.input_transcription.text:
+                self._turn_open = True
                 user_buf.append(sc.input_transcription.text)
                 await bus().say("".join(user_buf), role="user", final=False)
+                early().feed("".join(user_buf))
+                await early().tick()
+            interim = getattr(sc, "interim_input_transcription", None)
+            if interim and interim.text:  # words as they're being said, before they're committed
+                early().feed("".join(user_buf) + " " + interim.text)
+                await early().tick()
             if sc.output_transcription and sc.output_transcription.text:
                 model_buf.append(sc.output_transcription.text)
                 await bus().say("".join(model_buf), final=False)
@@ -376,9 +419,13 @@ class LiveVoice:
                             await self._refresh_state()
                         self.spk.play_pcm16(part.inline_data.data)
             if sc.turn_complete:
+                self._turn_open = False
+                self._last_turn_end = time.time()
                 if user_buf:
                     await bus().say("".join(user_buf), role="user", final=True)
                     user_buf.clear()
+                await early().tick(final=True)
+                early().new_utterance()
                 if model_buf:
                     await bus().say("".join(model_buf), final=True)
                     model_buf.clear()
@@ -409,13 +456,22 @@ class LiveVoice:
         key = fc.id or fc.name
         try:
             if fc.name == "agent_task":
-                reply = await self._agent_session.handle(str(args.get("goal", "")))
-                result = reply.text
+                goal = str(args.get("goal", "")).strip()
+                if self._agent_task_running(goal, except_key=key):
+                    # The model re-asked for the same thing (it got an error, or the user repeated
+                    # themselves) while the first attempt is still working: never run it twice.
+                    result = "Still working on that — I'll tell you when it's done."
+                else:
+                    self._goals[key] = goal
+                    reply = await self._agent_session.handle(goal)
+                    result = reply.text
+            elif (done := early().recently_done(fc.name, args)) is not None:
+                result = done  # already ran while the user was still talking
             else:
-                await bus().set_state(NeoState.WORKING)
-                await bus().tool_start(fc.name, args)
+                await bus().set_state(NeoState.WORKING, job=key)
+                await bus().tool_start(fc.name, args, job=key)
                 out = await registry().invoke(fc.name, args, ToolContext(user_text=str(args)))
-                await bus().tool_end(fc.name, out.ok, out.text)
+                await bus().tool_end(fc.name, out.ok, out.text, job=key)
                 result = out.text
         except asyncio.CancelledError:
             result = "cancelled by the user"
@@ -423,11 +479,23 @@ class LiveVoice:
             result = f"Error: {e}"
         finally:
             self._tool_tasks.pop(key, None)
+            self._goals.pop(key, None)
+            await bus().end_job(key)
         self._last_activity = time.time()
-        resp = gt.FunctionResponse(id=fc.id, name=fc.name, response={"result": result[:4000]})
+        t = registry().get(fc.name)
+        non_blocking = fc.name == "agent_task" or bool(t and t.slow)
+        resp = gt.FunctionResponse(
+            id=fc.id,
+            name=fc.name,
+            response={"result": result[:4000]},
+            # For non-blocking calls, say the result when the user isn't talking.
+            scheduling=gt.FunctionResponseScheduling.WHEN_IDLE if non_blocking else None,
+        )
         if self._live is live:
             try:
                 await live.send_tool_response(function_responses=[resp])
+                self._last_turn_end = time.time()
+                self._turn_open = True  # the model owes a spoken reply for this result
             except Exception as e:  # noqa: BLE001
                 print(f"[live] tool response failed: {e}")
             # The model now composes its spoken reply: show "thinking" until audio arrives
@@ -438,6 +506,14 @@ class LiveVoice:
         else:  # session went away mid-task: don't lose the result
             await bus().say(result[:600], final=True)
             await self._refresh_state()
+
+    def _agent_task_running(self, goal: str, *, except_key: str) -> bool:
+        g = _canon(goal)
+        return any(
+            k != except_key and _canon(v) == g and not self._tool_tasks[k].done()
+            for k, v in self._goals.items()
+            if k in self._tool_tasks
+        )
 
     async def _settle_if_quiet(self, after_s: float) -> None:
         await asyncio.sleep(after_s)

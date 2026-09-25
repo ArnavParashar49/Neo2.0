@@ -1,12 +1,15 @@
 """Conversation session: reflex → route → (stream chat | quick tool | agent loop).
 
-One session per running NEO. Holds transcript history, the pending confirmation (if any),
-and decides which brain handles each utterance.
+Requests are *jobs* and several may run at once — you can ask for the time while NEO is still
+reading your mail. Each job reports its own orb state and tool activity under a job id; history
+is a sequence of complete blocks appended under a lock when a job finishes, so concurrent jobs
+never interleave inside each other's transcript. Long agent jobs are limited to a few at a time.
 """
 
 from __future__ import annotations
 
 import asyncio
+import itertools
 import re
 import time
 from dataclasses import dataclass, field
@@ -16,6 +19,7 @@ from neo.agent import confirm
 from neo.agent.loop import AgentResult, run_agent
 from neo.agent.prompt import build as build_prompt
 from neo.agent.registry import ToolContext, registry
+from neo.config import settings
 from neo.events import NeoState, bus
 from neo.providers import brain
 from neo.providers.base import ImagePart, Message, ToolResult
@@ -33,6 +37,8 @@ _NO = re.compile(
 )
 _MAX_HISTORY = 40  # messages kept verbatim; older ones are dropped (memory keeps the gist)
 _WAKE_PREFIX = re.compile(r"^\s*(?:hey|hi|ok|okay)?[\s,]*neo[\s,:!.-]*", re.I)
+_MAX_AGENT_JOBS = 2
+_job_ids = itertools.count(1)
 
 
 @dataclass
@@ -41,6 +47,7 @@ class Reply:
     route: Literal["chat", "quick", "agent", "confirm", "stop"]
     decision: Decision | None = None
     result: AgentResult | None = None
+    job: str = ""
 
 
 @dataclass
@@ -48,40 +55,54 @@ class Session:
     reflex: Reflex = field(default_factory=Reflex)
     history: list[Message] = field(default_factory=list)
     memory_context: str = ""
-    voice_owned: bool = False  # a Live voice session is driving the orb; don't drop to idle after turns
+    voice_owned: bool = False  # kept for callers; per-job states made it unnecessary
     _pending_tool: str = ""
     _pending_args: dict = field(default_factory=dict)
     _pending_action: str = ""
+    _hist_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    _agent_slots: asyncio.Semaphore = field(default_factory=lambda: asyncio.Semaphore(_MAX_AGENT_JOBS))
+    jobs: dict[str, asyncio.Task] = field(default_factory=dict)
 
     # ---- public --------------------------------------------------------------------
     async def handle(self, text: str, *, images: list[ImagePart] | None = None) -> Reply:
         text = _WAKE_PREFIX.sub("", text.strip(), count=1).strip() or text.strip()
         if not text:
             return Reply("", "chat")
-        await bus().say(text, role="user")
+        job = f"j{next(_job_ids)}"
+        await bus().say(text, role="user", job=job)
 
         if confirm.peek():
-            return await self._handle_confirmation(text)
+            return await self._handle_confirmation(text, job)
 
         d = await self.reflex.decide(text)
-        await bus().publish("reflex", **d.__dict__)
+        await bus().publish("reflex", job=job, **d.__dict__)
 
         if d.intent == "stop":
-            await self._settle()
-            return Reply("Okay.", "stop", d)
+            await self.cancel_all()
+            await bus().end_job(job)
+            return Reply("Okay.", "stop", d, job=job)
 
         # Regex fast paths are precise; trust them when the reflex agrees or isn't available.
         if (d.intent == "quick_action" or d.source == "rules") and (q := _match_fast_path(text)):
-            return await self._quick(text, d, *q)
+            return await self._quick(text, d, *q, job=job)
 
         if d.intent == "chat" and not images and not d.needs_screen:
-            return await self._chat(text, d)
+            return await self._chat(text, d, job)
 
-        return await self._agent(text, d, images)
+        return await self._agent(text, d, images, job)
+
+    async def cancel_all(self) -> int:
+        """Stop every running job (the user said stop)."""
+        n = 0
+        for t in list(self.jobs.values()):
+            if not t.done():
+                t.cancel()
+                n += 1
+        return n
 
     # ---- routes ----------------------------------------------------------------------
-    async def _chat(self, text: str, d: Decision) -> Reply:
-        await bus().set_state(NeoState.THINKING)
+    async def _chat(self, text: str, d: Decision, job: str) -> Reply:
+        await bus().set_state(NeoState.THINKING, job=job)
         t0 = time.time()
         msgs = self._trimmed() + [Message.user(text)]
         out: list[str] = []
@@ -90,41 +111,49 @@ class Session:
             first = True
             async for chunk in chain.stream(msgs, system=self._system()):
                 if first:
-                    await bus().set_state(NeoState.SPEAKING)
+                    await bus().set_state(NeoState.SPEAKING, job=job)
                     first = False
                 out.append(chunk)
-                await bus().say("".join(out), final=False)
+                await bus().say("".join(out), final=False, job=job)
         except Exception:  # noqa: BLE001 — fall back to the agent loop, which has its own failover
-            return await self._agent(text, d, None)
+            return await self._agent(text, d, None, job)
         reply = "".join(out).strip()
-        self._remember(Message.user(text), Message.assistant(reply))
-        await bus().say(reply, final=True)
+        await self._remember(Message.user(text), Message.assistant(reply))
+        await bus().say(reply, final=True, job=job)
         await bus().publish(
             "turn",
+            job=job,
             route="chat",
             brain=getattr(chain, "last_used", ""),
             model=getattr(chain, "last_model", ""),
             ms=int((time.time() - t0) * 1000),
             tools=0,
         )
-        await self._settle()
-        return Reply(reply, "chat", d)
+        await bus().end_job(job)
+        return Reply(reply, "chat", d, job=job)
 
-    async def _quick(self, text: str, d: Decision, tool: str, args: dict) -> Reply:
-        await bus().set_state(NeoState.WORKING)
+    async def _quick(self, text: str, d: Decision, tool: str, args: dict, *, job: str) -> Reply:
+        await bus().set_state(NeoState.WORKING, job=job)
         t0 = time.time()
-        await bus().tool_start(tool, args)
-        out = await registry().invoke(tool, args, ToolContext(user_text=text))
-        await bus().tool_end(tool, out.ok, out.text)
-        self._remember(Message.user(text), Message.assistant(out.text))
-        await bus().say(out.text, final=True)
-        await bus().publish(
-            "turn", route="quick", brain="", model="", ms=int((time.time() - t0) * 1000), tools=1
-        )
-        await self._settle()
-        return Reply(out.text, "quick", d)
+        from neo.agent.early import early
 
-    async def _agent(self, text: str, d: Decision | None, images: list[ImagePart] | None) -> Reply:
+        done = early().recently_done(tool, args)
+        if done is not None:
+            reply_text = done  # the early actor already did this while the user was speaking
+        else:
+            await bus().tool_start(tool, args, job=job)
+            out = await registry().invoke(tool, args, ToolContext(user_text=text))
+            await bus().tool_end(tool, out.ok, out.text, job=job)
+            reply_text = out.text
+        await self._remember(Message.user(text), Message.assistant(reply_text))
+        await bus().say(reply_text, final=True, job=job)
+        await bus().publish(
+            "turn", job=job, route="quick", brain="", model="", ms=int((time.time() - t0) * 1000), tools=1
+        )
+        await bus().end_job(job)
+        return Reply(reply_text, "quick", d, job=job)
+
+    async def _agent(self, text: str, d: Decision | None, images: list[ImagePart] | None, job: str) -> Reply:
         needs_screen = bool(images or (d and d.needs_screen))
         if needs_screen:
             purpose = "vision"
@@ -135,35 +164,47 @@ class Session:
         effort = "high" if (d and d.intent == "agent_task") else "medium"
         t0 = time.time()
         chain = brain(purpose)
-        playbook_ctx = await asyncio.to_thread(self._playbooks_for, text)
-        tools = await asyncio.to_thread(self._tools_for, text, needs_screen, playbook_ctx)
-        res = await run_agent(
-            text,
-            provider=chain,
-            system=self._system(playbook_ctx),
-            tools=tools,
-            history=self._trimmed(),
-            ctx=ToolContext(user_text=text),
-            effort=effort,
-            images=images,
-            idle_on_finish=not self.voice_owned,
-        )
-        self.history = res.messages
+        self.jobs[job] = asyncio.current_task()  # type: ignore[assignment]
+        try:
+            async with self._agent_slots:
+                playbook_ctx = await asyncio.to_thread(self._playbooks_for, text)
+                tools = await asyncio.to_thread(self._tools_for, text, needs_screen, playbook_ctx)
+                snapshot = self._trimmed()
+                res = await run_agent(
+                    text,
+                    provider=chain,
+                    system=self._system(playbook_ctx),
+                    tools=tools,
+                    history=snapshot,
+                    ctx=ToolContext(user_text=text),
+                    effort=effort,
+                    images=images,
+                    job=job,
+                )
+        except asyncio.CancelledError:
+            await bus().say("Stopped.", final=True, job=job)
+            await bus().end_job(job)
+            raise
+        finally:
+            self.jobs.pop(job, None)
+        await self._remember(*res.messages[len(snapshot) :])  # only this job's new turns
         if res.stopped == "needs_confirm" and self._stage_pending(res):
-            await bus().say(res.question, final=True)
-            return Reply(res.question, "confirm", d, res)
+            await bus().say(res.question, final=True, job=job)
+            return Reply(res.question, "confirm", d, res, job=job)
         if res.stopped == "done":
             await asyncio.to_thread(self._save_playbook, text, res)
-        await bus().say(res.text, final=True)
+        await bus().say(res.text, final=True, job=job)
         await bus().publish(
             "turn",
+            job=job,
             route="agent",
             brain=getattr(chain, "last_used", ""),
             model=getattr(chain, "last_model", ""),
             ms=int((time.time() - t0) * 1000),
             tools=len(res.steps),
         )
-        return Reply(res.text, "agent", d, res)
+        await bus().end_job(job)
+        return Reply(res.text, "agent", d, res, job=job)
 
     # ---- tool selection ---------------------------------------------------------------
     def _tools_for(self, text: str, needs_screen: bool, playbook_ctx: str):
@@ -204,6 +245,7 @@ class Session:
         except Exception as e:  # noqa: BLE001
             print(f"[playbook] save failed: {str(e)[:80]}")
 
+    # ---- confirmation ------------------------------------------------------------------
     def _stage_pending(self, res: AgentResult) -> bool:
         """Remember exactly which staged action the question refers to."""
         p = confirm.peek()
@@ -214,17 +256,21 @@ class Session:
         self._pending_tool, self._pending_args, self._pending_action = p.tool, dict(p.params), p.action_id
         return True
 
-    async def _handle_confirmation(self, text: str) -> Reply:
+    async def _handle_confirmation(self, text: str, job: str) -> Reply:
         if _NO.search(text) or not _YES.match(text):
             if _NO.search(text):
                 confirm.cancel()
                 self._pending_tool, self._pending_args, self._pending_action = "", {}, ""
-                await bus().say("Cancelled.", final=True)
-                await bus().set_state(NeoState.IDLE)
-                return Reply("Cancelled.", "confirm")
+                await bus().say("Cancelled.", final=True, job=job)
+                await bus().end_job(job)
+                await bus().set_state(
+                    NeoState.IDLE
+                ) if not bus().active_jobs and bus().state == NeoState.CONFIRMING else None
+                return Reply("Cancelled.", "confirm", job=job)
             # Not a yes/no — treat as a new request; drop the stale confirmation.
             confirm.cancel("superseded")
             self._pending_tool, self._pending_action = "", ""
+            await self._clear_confirming()
             return await self.handle(text)
 
         p = confirm.peek()
@@ -232,36 +278,45 @@ class Session:
             confirm.cancel("mismatch")
             self._pending_tool, self._pending_args, self._pending_action = "", {}, ""
             msg = "That request changed underneath me, so I didn't do anything. Ask again and I'll confirm first."
-            await bus().say(msg, final=True)
-            await bus().set_state(NeoState.IDLE)
-            return Reply(msg, "confirm")
+            await bus().say(msg, final=True, job=job)
+            await self._clear_confirming()
+            await bus().end_job(job)
+            return Reply(msg, "confirm", job=job)
         tool, args = self._pending_tool, dict(self._pending_args)
         self._pending_tool, self._pending_args, self._pending_action = "", {}, ""
         args["confirm"] = True
-        await bus().set_state(NeoState.WORKING)
+        await self._clear_confirming()
+        await bus().set_state(NeoState.WORKING, job=job)
+        await bus().tool_start(tool, args, job=job)
         out = await registry().invoke(tool, args, ToolContext(user_text=text))
+        await bus().tool_end(tool, out.ok, out.text, job=job)
         # Let the agent see the outcome and finish whatever it was doing.
         follow = f"[User confirmed. {tool} result: {out.text[:800]}] Continue and finish the task, or report the result."
+        snapshot = self._trimmed()
         res = await run_agent(
-            follow, provider=brain("agent"), system=self._system(), history=self.history, effort="medium"
+            follow, provider=brain("agent"), system=self._system(), history=snapshot, effort="medium", job=job
         )
-        self.history = res.messages
+        await self._remember(*res.messages[len(snapshot) :])
         if res.stopped == "needs_confirm" and self._stage_pending(res):
-            await bus().say(res.question, final=True)
-            return Reply(res.question, "confirm", None, res)
-        await bus().say(res.text, final=True)
-        return Reply(res.text, "agent", None, res)
+            await bus().say(res.question, final=True, job=job)
+            return Reply(res.question, "confirm", None, res, job=job)
+        await bus().say(res.text, final=True, job=job)
+        await bus().end_job(job)
+        return Reply(res.text, "agent", None, res, job=job)
+
+    async def _clear_confirming(self) -> None:
+        """The confirming state belongs to the job that asked; that job is over now."""
+        for j in list(bus().active_jobs):
+            if bus()._jobs.get(j) == NeoState.CONFIRMING:
+                await bus().end_job(j)
 
     # ---- helpers ---------------------------------------------------------------------
-    async def _settle(self) -> None:
-        if not self.voice_owned:
-            await bus().set_state(NeoState.IDLE)
-
     def _system(self, extra: str = "") -> str:
         return build_prompt(self.memory_context, extra)
 
-    def _remember(self, *msgs: Message) -> None:
-        self.history.extend(msgs)
+    async def _remember(self, *msgs: Message) -> None:
+        async with self._hist_lock:
+            self.history.extend(msgs)
 
     def _trimmed(self) -> list[Message]:
         """Recent history for the model. Tool results older than the last two turns are stubbed —
@@ -319,3 +374,6 @@ def _match_fast_path(text: str) -> tuple[str, dict] | None:
                     filled[k] = v
             return t.name, filled
     return None
+
+
+_ = settings  # settings are read by callers; keep the import for the module's public surface

@@ -65,22 +65,49 @@ def _halt_kind(text: str) -> Stopped | None:
     return None
 
 
-async def _settle(ev: EventBus, idle: bool) -> None:
-    """End of a run: go idle unless a voice session is driving the orb (it decides what's next)."""
-    if idle:
+async def _settle(ev: EventBus, idle: bool, job: str = "") -> None:
+    """End of a run. With a job id this only clears that job's state (the aggregate falls back
+    to whatever else is active); without one it drops the base state to idle when asked."""
+    if job:
+        await ev.end_job(job)
+    elif idle:
         await ev.set_state(NeoState.IDLE)
 
 
+# Screen observations go stale the moment the next one is taken; keeping every ax_tree dump of a
+# run in the prompt is pure token cost (and on an 8K-TPM brain, pure waiting).
+_OBSERVATIONS = {"ax_tree", "ax_find", "screenshot", "apps_running", "browser_read", "read_file"}
+_SUPERSEDED_KEEP = 200
+
+
+def _supersede_observations(messages: list[Message], *, start: int = 0) -> None:
+    """Replace all but the newest result of each observation tool in this run with a stub."""
+    seen: set[str] = set()
+    for m in reversed(messages[start:]):
+        if m.role != "tool":
+            continue
+        for r in m.tool_results:
+            if r.name not in _OBSERVATIONS:
+                continue
+            if r.name in seen and (len(r.content) > _SUPERSEDED_KEEP or r.images):
+                r.content = (
+                    r.content[:_SUPERSEDED_KEEP].rstrip()
+                    + f" …[older {r.name} result trimmed; a newer one follows]"
+                )
+                r.images = []  # an old screenshot is the most expensive stale thing of all
+            seen.add(r.name)
+
+
 async def _run_calls(
-    calls: list[ToolCall], reg: Registry, ctx: ToolContext, ev: EventBus, limit: int
+    calls: list[ToolCall], reg: Registry, ctx: ToolContext, ev: EventBus, limit: int, job: str = ""
 ) -> list[ToolResult]:
     async def one(c: ToolCall) -> ToolResult:
-        await ev.tool_start(c.name, c.args)
+        await ev.tool_start(c.name, c.args, job=job)
         t = reg.get(c.name)
         if t and any(k in c.name for k in _SEARCHY):
-            await ev.set_state(NeoState.SEARCHING)
+            await ev.set_state(NeoState.SEARCHING, job=job)
         out: ToolOutput = await reg.invoke(c.name, c.args, ctx)
-        await ev.tool_end(c.name, out.ok, out.text)
+        await ev.tool_end(c.name, out.ok, out.text, job=job)
         return ToolResult(
             call_id=c.id, name=c.name, content=_truncate(out.text, limit), ok=out.ok, images=out.images
         )
@@ -129,6 +156,7 @@ async def run_agent(
     idle_on_finish: bool = True,
     max_seconds: float | None = None,
     tools: list[ToolSpec] | None = None,
+    job: str = "",
 ) -> AgentResult:
     s = settings()
     reg = reg or default_registry()
@@ -152,7 +180,7 @@ async def run_agent(
 
     for _ in range(max_steps):
         if _time.monotonic() > deadline:
-            await _settle(ev, idle_on_finish)
+            await _settle(ev, idle_on_finish, job)
             summary = "; ".join(f"{st.tool}: {'ok' if st.ok else 'failed'}" for st in steps[-4:])
             return AgentResult(
                 f"This is taking longer than I allow myself ({int(max_seconds or s.max_seconds)}s), so I stopped. "
@@ -161,11 +189,12 @@ async def run_agent(
                 steps,
                 messages,
             )
-        await ev.set_state(NeoState.THINKING)
+        await ev.set_state(NeoState.THINKING, job=job)
+        _supersede_observations(messages, start=len(history or []))
         try:
             turn: Turn = await provider.complete(messages, system=system, tools=tools, effort=effort)
         except Exception as e:  # noqa: BLE001
-            await _settle(ev, idle_on_finish)
+            await _settle(ev, idle_on_finish, job)
             return AgentResult(f"I hit a problem talking to the model: {e}", "error", steps, messages)
 
         messages.append(Message.assistant(turn.text, turn.tool_calls, raw=turn.raw))
@@ -175,7 +204,7 @@ async def run_agent(
                 verified = True
                 messages.append(Message.user(_VERIFY_NOTE))
                 continue
-            await _settle(ev, idle_on_finish)
+            await _settle(ev, idle_on_finish, job)
             return AgentResult(turn.text.strip(), "done", steps, messages)
 
         # Thrash guard — the same side-effect call three turns in a row means the model is stuck.
@@ -197,7 +226,7 @@ async def run_agent(
                     ]
                 )
             )
-            await _settle(ev, idle_on_finish)
+            await _settle(ev, idle_on_finish, job)
             name = turn.tool_calls[0].name
             return AgentResult(
                 f"I kept repeating the same step ({name}) without progress, so I stopped.",
@@ -221,9 +250,9 @@ async def run_agent(
             meta_results.append(
                 ToolResult(c.id, "more_tools", f"Enabled: {listing}. They are available from your next step.")
             )
-        await ev.set_state(NeoState.WORKING)
+        await ev.set_state(NeoState.WORKING, job=job)
         results = meta_results + (
-            await _run_calls(real, reg, ctx, ev, s.max_tool_result_chars) if real else []
+            await _run_calls(real, reg, ctx, ev, s.max_tool_result_chars, job) if real else []
         )
         results.sort(key=lambda r: [c.id for c in turn.tool_calls].index(r.call_id))
         messages.append(Message.tool(results))
@@ -238,7 +267,7 @@ async def run_agent(
             kind = _halt_kind(r.content)
             if kind:
                 question = r.content.split(":", 1)[-1].strip()
-                await ev.set_state(NeoState.CONFIRMING if kind == "needs_confirm" else NeoState.IDLE)
+                await ev.set_state(NeoState.CONFIRMING if kind == "needs_confirm" else NeoState.IDLE, job=job)
                 from neo.agent.confirm import peek
 
                 p = peek()
@@ -251,7 +280,7 @@ async def run_agent(
                     pending_action=p.action_id if p else "",
                 )
 
-    await _settle(ev, idle_on_finish)
+    await _settle(ev, idle_on_finish, job)
     summary = "; ".join(f"{st.tool}: {'ok' if st.ok else 'failed'}" for st in steps[-4:])
     return AgentResult(
         f"I reached my step limit before finishing. Last steps — {summary}.", "max_steps", steps, messages

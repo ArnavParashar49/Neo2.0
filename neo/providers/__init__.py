@@ -47,22 +47,49 @@ def make(name: BrainName) -> Provider:
     return p
 
 
-class Chain:
-    """Ordered providers with automatic failover on RateLimited / ProviderError."""
+_DEMOTE_S = 300.0  # a brain that just failed goes to the back of the line for this long
 
-    def __init__(self, names: list[BrainName]) -> None:
+# Shared across chains: once Gemini has fallen over in one request, the next request (a fresh
+# Chain each time) should not pay the same failed round trips before reaching Groq.
+_demoted: dict[str, float] = {}
+
+
+class Chain:
+    """Ordered providers with automatic failover on RateLimited / ProviderError.
+
+    A provider that fails is *demoted* for a few minutes: still available, but tried after the
+    ones that work. `sticky=False` keeps the given order regardless (the vision chain must not
+    let a text-only brain answer first and silently drop the screenshot)."""
+
+    def __init__(self, names: list[BrainName], *, sticky: bool = True) -> None:
         self.names = names
+        self.sticky = sticky
         self.last_used: str = ""
         self.last_model: str = ""
 
     def _providers(self) -> list[Provider]:
         out: list[Provider] = []
-        for n in self.names:
+        for n in self._order():
             try:
                 out.append(make(n))
             except ProviderError as e:  # missing key → skip silently
                 print(f"[brain] {n} unavailable: {e}")
         return out
+
+    def _order(self) -> list[BrainName]:
+        import time as _time
+
+        if not self.sticky:
+            return list(self.names)
+        now = _time.time()
+        healthy = [n for n in self.names if _demoted.get(n, 0.0) <= now]
+        return healthy + [n for n in self.names if n not in healthy]
+
+    @staticmethod
+    def _demote(name: str) -> None:
+        import time as _time
+
+        _demoted[name] = _time.time() + _DEMOTE_S
 
     @property
     def name(self) -> str:
@@ -102,6 +129,8 @@ class Chain:
             except (RateLimited, ProviderError) as e:
                 print(f"[brain] {p.name} failed ({type(e).__name__}: {str(e)[:80]}); trying next")
                 errors.append(f"{p.name}: {str(e)[:80]}")
+                if self.sticky:
+                    self._demote(p.name)
                 from neo.events import bus
 
                 await bus().note(f"{p.name.capitalize()} unavailable, switching brain")
@@ -123,6 +152,8 @@ class Chain:
                 if produced:  # can't restart a half-streamed answer
                     raise
                 errors.append(f"{p.name}: {str(e)[:80]}")
+                if self.sticky:
+                    self._demote(p.name)
         raise self._no_brain(errors)
 
 
@@ -134,6 +165,7 @@ def brain(purpose: Purpose = "agent") -> Chain:
         # Only brains that can see the screenshot come first; text-only ones would drop it silently.
         vision: list[BrainName] = [n for n in (s.brain, "gemini", "claude") if n not in ("groq", "local")]
         order = vision + [n for n in (s.brain, s.fast_brain, s.offline_brain) if n not in vision]
+        return Chain(_dedupe(order), sticky=False)
     elif purpose == "offline":
         order = [s.offline_brain]
     elif purpose == "light":
@@ -141,8 +173,12 @@ def brain(purpose: Purpose = "agent") -> Chain:
         order = ["gemini_lite", s.fast_brain, s.brain, s.offline_brain]
     else:
         order = [s.brain, s.fast_brain, s.offline_brain]
+    return Chain(_dedupe(order))
+
+
+def _dedupe(order: list[BrainName]) -> list[BrainName]:
     seen: list[BrainName] = []
     for n in order:
         if n not in seen:
             seen.append(n)
-    return Chain(seen)
+    return seen

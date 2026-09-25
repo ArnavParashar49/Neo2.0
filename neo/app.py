@@ -22,28 +22,32 @@ class App:
         self.started = time.time()
         self.session = Session()
         self.voice = None  # set in run() when a backend is available
-        self._busy = asyncio.Lock()
-        self._current: asyncio.Task | None = None
+        self._tasks: set[asyncio.Task] = set()
 
     async def handle_text(self, text: str, *, speak: bool = True) -> None:
-        async with self._busy:
-            self._current = asyncio.current_task()
-            try:
-                self.session.memory_context = store().prompt_context(text)
-                reply = await self.session.handle(text)
-                if speak and self.voice and reply.text:
-                    await self.voice.speak(reply.text)
-            except asyncio.CancelledError:
-                await bus().say("Stopped.", final=True)
-                await bus().set_state(NeoState.IDLE)
-            finally:
-                self._current = None
+        """Handle one request. Several may be in flight at once (the session runs them as jobs)."""
+        self.session.memory_context = await asyncio.to_thread(store().prompt_context, text)
+        task = asyncio.current_task()
+        if task:
+            self._tasks.add(task)
+        try:
+            reply = await self.session.handle(text)
+            if speak and self.voice and reply.text:
+                await self.voice.speak(reply.text)
+        except asyncio.CancelledError:
+            await bus().say("Stopped.", final=True)
+        finally:
+            if task:
+                self._tasks.discard(task)
 
     def cancel_current(self) -> bool:
-        if self._current and not self._current.done():
-            self._current.cancel()
-            return True
-        return False
+        """Stop everything in flight (the stop button / "stop")."""
+        n = 0
+        for t in list(self._tasks):
+            if not t.done():
+                t.cancel()
+                n += 1
+        return n > 0
 
     async def on_command(self, cmd: dict[str, Any]) -> None:
         kind = cmd.get("cmd")

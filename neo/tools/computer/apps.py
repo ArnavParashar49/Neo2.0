@@ -67,11 +67,19 @@ async def open_app(name: str) -> str:
     return f"Opened {name}"
 
 
-def activate(name: str) -> str:
-    for a in NSWorkspace.sharedWorkspace().runningApplications():
+async def activate(name: str) -> str:
+    """Bring the app to the front and wait until it *is* frontmost, so the next ax_tree /
+    type_text acts on it rather than on whatever was in front a moment ago."""
+    ws = NSWorkspace.sharedWorkspace()
+    for a in ws.runningApplications():
         if (a.localizedName() or "").lower() == name.lower():
             a.activateWithOptions_(1 << 1)  # NSApplicationActivateIgnoringOtherApps
-            return f"Activated {name}"
+            for _ in range(20):  # up to ~1 s
+                front = ws.frontmostApplication()
+                if front and front.processIdentifier() == a.processIdentifier():
+                    return f"Activated {name} (frontmost)"
+                await asyncio.sleep(0.05)
+            return f"Activated {name}, but another app is still in front — check with ax_tree."
     return f"Error: {name} is not running"
 
 

@@ -41,6 +41,10 @@ _INTERACTIVE = {
     "AXWebArea",
 }
 _SKIP_ROLES = {"AXUnknown", "AXSplitter", "AXScrollBar", "AXValueIndicator", "AXGrowArea"}
+# Listed even when empty: an untitled, empty text area (a new note, a blank document, a search
+# box) is exactly the element the model needs to type into.
+_ALWAYS_SHOW = {"AXTextArea", "AXTextField", "AXSearchField", "AXComboBox", "AXWebArea"}
+_FIND_MAX_AGE_S = 30.0  # ax_find reuses the last tree (and its ids) unless it is older than this
 _MAX_ELEMENTS = 400
 _MAX_DEPTH = 40
 
@@ -81,6 +85,7 @@ class Element:
 
 _last_tree: dict[str, Element] = {}
 _last_tree_ts = 0.0
+_last_tree_app = ""
 
 
 def is_trusted() -> bool:
@@ -129,12 +134,19 @@ def running_apps() -> list[str]:
 
 
 def pid_for_app(name: str) -> int | None:
+    """The app's pid. An exact name wins over a substring match, and a real app (menu bar,
+    windows) wins over a helper process that shares the name — "Notes" must not resolve to
+    "LinkedNotesUIService", whose AX tree is empty."""
     name_l = name.lower()
+    best: tuple[int, int] | None = None  # (rank, pid) — lower rank is better
     for a in NSWorkspace.sharedWorkspace().runningApplications():
         n = (a.localizedName() or "").lower()
-        if n == name_l or name_l in n:
-            return int(a.processIdentifier())
-    return None
+        if not n or (n != name_l and name_l not in n):
+            continue
+        rank = (0 if n == name_l else 2) + (0 if a.activationPolicy() == 0 else 1)
+        if best is None or rank < best[0]:
+            best = (rank, int(a.processIdentifier()))
+    return best[1] if best else None
 
 
 def _walk(el, depth: int, out: list[Element], counter: list[int]) -> None:
@@ -148,7 +160,7 @@ def _walk(el, depth: int, out: list[Element], counter: list[int]) -> None:
         title = _str(_attr(el, "AXPlaceholderValue")) or _str(_attr(el, "AXLabel"))
     value = _str(_attr(el, AS.kAXValueAttribute))
     x, y, w, h = _point_size(el)
-    interesting = role in _INTERACTIVE and (title or value) and w > 0 and h > 0
+    interesting = role in _INTERACTIVE and (title or value or role in _ALWAYS_SHOW) and w > 0 and h > 0
     if role in ("AXWindow", "AXSheet", "AXDialog", "AXMenu"):
         interesting = True
     if interesting:
@@ -178,7 +190,7 @@ def _walk(el, depth: int, out: list[Element], counter: list[int]) -> None:
 
 def snapshot(app: str | None = None, *, max_lines: int = 250) -> str:
     """Return a compact text tree of the frontmost (or named) app's UI."""
-    global _last_tree, _last_tree_ts
+    global _last_tree, _last_tree_ts, _last_tree_app
     if not is_trusted():
         return "NEEDS_USER: Accessibility permission is off. Enable it for this app in System Settings → Privacy & Security → Accessibility, then try again."
     if app:
@@ -193,6 +205,7 @@ def snapshot(app: str | None = None, *, max_lines: int = 250) -> str:
     _walk(root, 0, els, [0])
     _last_tree = {e.id: e for e in els}
     _last_tree_ts = time.time()
+    _last_tree_app = name.lower()
     win = _attr(root, AS.kAXFocusedWindowAttribute)
     wtitle = _str(_attr(win, AS.kAXTitleAttribute)) if win is not None else ""
     lines = [f"App: {name}" + (f' — window "{wtitle}"' if wtitle else "")]
@@ -204,13 +217,21 @@ def snapshot(app: str | None = None, *, max_lines: int = 250) -> str:
 
 
 def find(query: str, app: str | None = None) -> str:
-    """Elements whose title/value contains `query` (case-insensitive)."""
-    if not _last_tree or time.time() - _last_tree_ts > 5:
+    """Elements whose title/value/role contains `query` (case-insensitive).
+
+    Searches the tree the model is already holding ids for; a fresh walk (new ids) only when
+    that tree is stale or belongs to a different app than asked for."""
+    other_app = bool(app) and _last_tree_app not in (app.lower(), "")
+    if not _last_tree or other_app or time.time() - _last_tree_ts > _FIND_MAX_AGE_S:
         snapshot(app)
     q = query.lower()
-    hits = [e for e in _last_tree.values() if q in e.title.lower() or q in e.value.lower()]
+    hits = [
+        e
+        for e in _last_tree.values()
+        if q in e.title.lower() or q in e.value.lower() or q in e.role.lower()
+    ]
     if not hits:
-        return f"No element matching '{query}'."
+        return f"No element matching '{query}' (tree from {int(time.time() - _last_tree_ts)}s ago)."
     return "\n".join(e.line() for e in hits[:40])
 
 
@@ -221,7 +242,7 @@ def get(eid: str) -> Element | None:
 def press(eid: str) -> str:
     e = get(eid)
     if not e:
-        return f"Error: unknown element {eid} — call ax_tree first."
+        return f"Error: unknown element {eid} — ids come from the latest ax_tree; call it again."
     action = "AXPress" if "AXPress" in e.actions else (e.actions[0] if e.actions else "")
     if not action:
         return f"Error: {eid} has no actions; try clicking its center {tuple(map(int, e.center))}."
@@ -236,7 +257,7 @@ def press(eid: str) -> str:
 def set_value(eid: str, value: str) -> str:
     e = get(eid)
     if not e:
-        return f"Error: unknown element {eid} — call ax_tree first."
+        return f"Error: unknown element {eid} — ids come from the latest ax_tree; call it again."
     err = AS.AXUIElementSetAttributeValue(e.ref, AS.kAXValueAttribute, value)
     return (
         f"Set {eid} value."

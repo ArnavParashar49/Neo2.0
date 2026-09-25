@@ -14,6 +14,7 @@ from collections.abc import Awaitable, Callable
 
 import numpy as np
 
+from neo.agent.early import early
 from neo.config import settings
 from neo.events import NeoState, bus
 from neo.voice.audio import MIC_RATE, Mic, Speaker, rms
@@ -164,9 +165,13 @@ class LocalVoice:
             self._armed.clear()
             self.mic.drain()
             text = await self._capture_utterance()
+            early().feed(text)
+            await early().tick(final=True)  # last clause of the utterance, if it's a quick command
+            text = early().remaining()
+            early().new_utterance()
             if not text:
-                self._followup_until = 0.0
-                await bus().set_state(NeoState.IDLE)
+                self._followup_until = time.time() + _FOLLOWUP_S if early().executed else 0.0
+                await bus().set_state(NeoState.LISTENING if early().executed else NeoState.IDLE)
                 continue
             self._handler = asyncio.create_task(self._handle(text))
 
@@ -267,6 +272,8 @@ class LocalVoice:
             res = await asyncio.to_thread(self._stt.generate, mx.array(pcm))
             if res.text and self._capturing:
                 await bus().say(res.text.strip(), role="user", final=False)
+                early().feed(res.text.strip())
+                await early().tick()  # act on a finished clause while the user keeps talking
         except asyncio.CancelledError:
             pass
         except Exception:  # noqa: BLE001 — partials are cosmetic

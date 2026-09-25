@@ -62,6 +62,8 @@ Every tool is a plain Python function registered with a decorator; adding one is
 
 **Brains are pluggable and fail over.** Gemini walks 3.8 → 3.7 → 3.5 Flash across every API key you give it (free-tier quota is per key *and* per model), backs off on overload, and hands text-only turns to Groq's `gpt-oss-120b` at ~700 tokens/s. `python -m neo --local` serves Gemma 4 12B on-device for offline use. An Anthropic key turns on Claude as an optional brain.
 
+**It acts while you're still talking.** The voice layer feeds the live transcript — words as you say them — through Laya and the fast-path matcher every few hundred milliseconds. A quick command that has clearly finished ("open YouTube and…") runs *before the sentence ends*; what already ran is remembered so the model's own later call for it is a no-op. Slow tools and agent tasks are non-blocking in the Live session: NEO acknowledges, keeps listening, and reports when the result is in and you're not mid-sentence. Several requests can run at once — ask for the time while it's still reading your mail — and the orb shows the most important thing going on.
+
 **It checks its own work.** After any side-effect tool, the loop makes the model re-observe (Accessibility tree, file, page, inbox) and confirm the goal before it reports — one extra call, far fewer "done!" replies that weren't.
 
 **It remembers how it did things.** A successful multi-step task is saved as a *playbook* (goal + tool sequence). A similar request later gets that path in its prompt, so repeats are shorter and cheaper. Sessions are summarised at shutdown into memory, so "what did we do yesterday" works; recall is hybrid — FTS5 keyword search fused with local embeddings from Laya's encoder, already resident on the GPU.
