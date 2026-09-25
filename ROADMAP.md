@@ -1,0 +1,106 @@
+# NEO 2.0 — Roadmap
+
+NEO 2.0 is a rewrite of NEO as a **free / local-first AI agent for your Mac**: it listens,
+thinks, and then does things on the computer the way you would — with a real agent loop,
+a fast local reflex layer, and an overlay UI built on thinking-orbs.
+
+## Target hardware
+
+MacBook Pro, Apple M3 Pro, 18 GB unified memory. macOS-first; thin cross-platform shims only.
+
+## Architecture
+
+```
+mic ─► wake word (local) ─► voice backend
+                              ├─ Gemini Live (native speech-to-speech, if free-tier quota allows)
+                              └─ local cascade: Parakeet STT → brain → Kokoro TTS   (mlx-audio)
+                                        │
+                                        ▼
+                     Reflex (Laya, local, ~33 ms)  intent → {chat | fast_tool | agent}
+                                                   risk   → {read_only | reversible | destructive}
+                                        │
+                                        ▼
+                     Brain (pluggable providers, picked per turn)
+                       • Gemini 3 Flash   — agentic + vision (free tier: 10 RPM / 250K TPM / 1500 RPD)
+                       • Groq gpt-oss-120b — fast text (free tier: 30 RPM / 8K TPM)
+                       • Gemma 4 12B Q4 (MLX) — offline / private
+                       • Claude Opus 5 — optional paid slot, off by default
+                                        │
+                                        ▼
+                     Agent loop (one loop, no planner): tool use, step budget, thrash guard,
+                     confirm-gate on destructive actions, append-only audit log
+                                        │
+                                        ▼
+                     Tools: macOS Accessibility tree, input injection, screenshots + vision
+                            fallback, AppleScript app tools (Mail/Calendar/Notes/Finder/Safari),
+                            bash, file editor, web search/fetch, system controls, memory
+                                        │
+                                        ▼
+                     Overlay UI: Tauri 2 + Vue 3, thinking-orbs states driven by agent events
+```
+
+### Orb ↔ state mapping
+
+| Orb state   | NEO state                            |
+|-------------|--------------------------------------|
+| breathing   | idle                                 |
+| listening   | mic open / user speaking             |
+| solving     | brain thinking                       |
+| working     | executing tools                      |
+| searching   | web / tool search                    |
+| composing   | speaking a reply                     |
+| connecting  | provider / voice session handshake   |
+| shaping     | waiting for user confirmation        |
+
+## Phases
+
+- [x] **0. Toolchain** — uv + Python 3.12, Rust, Tauri CLI, branch `v2`
+- [x] **1. Core** — `neo/` package: providers (Gemini / Groq / local MLX / Claude), agent loop, registry, confirm gate, Laya reflex + synthetic dataset + local head training
+- [x] **2. Computer control** — AX tree observation, CGEvent input, screenshot fallback, AppleScript app tools, shell/files
+- [x] **3. Voice** — wake word (Vosk) → Parakeet → brain → Kokoro with barge-in; Gemini Live backend with `agent_task` delegation
+- [x] **4. UI** — Tauri 2 + React overlay with thinking-orbs, transcript, confirm buttons, tray, ⌘⇧Space
+- [x] **5. Memory** — SQLite FTS5 store (profile / lesson / note), memory tool, prompt context
+- [x] **6. Purge** — v1 code removed, README rewritten, tests green
+
+### Verified so far (2026-09-25)
+
+- Overlay ⇄ core over websocket: transcript replay, orb state, quick actions with 0 LLM calls, timer, confirm flow.
+- Native Tauri window: transparent, always-on-top, bottom-right; tray + global hotkey compile and run.
+- Local voice models: load 19 s, Kokoro TTS 0.57 s / 2 s speech, Parakeet STT 0.33 s / 2 s utterance (M3 Pro).
+- Laya reflex on MPS: ~150 ms per decision; destructive / needs-screen well calibrated zero-shot.
+
+### Verified with real keys (2026-09-26)
+
+- Chat via Groq, web research via tools, **screenshot → Gemini vision**, memory store + recall — all end to end.
+- Gemini free tier overloads (503) at times: the provider now walks 3.8 → 3.7 → 3.5 Flash with backoff, and
+  the chain falls over to Groq for text. Gemini 3 needs `thought_signature` echoed on every replayed function
+  call; calls from other brains use Google's documented bypass value.
+- Reflex head: embedding-only variant, **95.8% held-out at ~165 ms**; sub-questions added nothing.
+- Adversarial review (5 finders × 3 verifiers, 116 agents) confirmed 37 defects — all fixed, each with a
+  regression test in `tests/test_v2_review_fixes.py` (61 tests total).
+
+### Still needs a human
+
+- `GEMINI_API_KEY` (and optionally `GROQ_API_KEY`) in `.env` to exercise the agent path end to end.
+- macOS **Accessibility** permission for whatever launches NEO (Terminal / NEO.app) — screen recording is already granted.
+- Microphone permission on first voice run.
+- First real-world tuning pass: add misroutes to `~/.neo/reflex_extra.jsonl`, retrain (`python -m neo.reflex.finetune`).
+
+### Next
+
+- Proper VAD (silero) instead of the energy gate; streaming STT partials in the overlay.
+- Local embeddings for memory recall (FTS5 is keyword-only today).
+- `npm run tauri build` → signed NEO.app that spawns the Python core itself.
+- Skills: a small curated set loaded on demand (tool search), replacing the v1 271-folder dump.
+
+## Removed from v1 (and why)
+
+| Removed | Replaced by |
+|---|---|
+| planner, goal dispatcher, agent swarm, sub_agents, hybrid/agents | one agent loop with provider-native parallel tool calls |
+| 271-folder `skills/` | ~10 curated skills loaded on demand |
+| ~7k lines of PySide6 UI | Tauri + Vue overlay (~10 MB runtime) |
+| litellm, model_pool, chromadb | `neo/providers`, SQLite + local embeddings |
+| YOLO / DeepFace local vision | Gemini vision on request only |
+| flight_finder, youtube, etc. | browser + computer use |
+| Windows/Linux deep paths, ARIA leftovers | macOS-first shims |

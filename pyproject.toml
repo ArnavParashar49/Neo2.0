@@ -1,0 +1,70 @@
+[project]
+name = "neo"
+version = "2.0.0"
+description = "NEO — a free, local-first AI agent for your Mac"
+requires-python = ">=3.11,<3.13"
+license = { text = "CC-BY-NC-4.0" }
+dependencies = [
+  # brains
+  "google-genai>=2.20",
+  "openai>=2",
+  "anthropic>=1",
+  # reflex (local decision model)
+  "laya>=0.3",
+  # local voice (Apple Silicon)
+  "mlx-audio; sys_platform == 'darwin'",
+  "mlx-lm; sys_platform == 'darwin'",
+  "misaki[en]; sys_platform == 'darwin'",
+  "vosk",
+  "sounddevice",
+  "soundfile",
+  # macOS control
+  "pyobjc-framework-Cocoa; sys_platform == 'darwin'",
+  "pyobjc-framework-Quartz; sys_platform == 'darwin'",
+  "pyobjc-framework-ApplicationServices; sys_platform == 'darwin'",
+  # tools
+  "pillow",
+  "httpx",
+  "ddgs",
+  "trafilatura",
+  "pypdf",
+  # core
+  "numpy",
+  "pydantic>=2",
+  "pydantic-settings>=2",
+  "python-dotenv",
+  "websockets>=13",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "pytest-asyncio", "ruff", "mypy"]
+
+[project.scripts]
+neo = "neo.main:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["neo*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 110
+extend-exclude = [".venv", "ui", "models"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM"]
+ignore = ["E501", "B008", "SIM105"]
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+follow_imports = "silent"
+check_untyped_defs = true
+exclude = "(^\\.venv/|^ui/|^models/)"

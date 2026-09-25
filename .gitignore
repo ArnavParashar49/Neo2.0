@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+
+# Local data lives in ~/.neo (memory, audit log, models, trained reflex head) — never here.
+memory/
+cache/
+*.log
+
+# Node / Tauri
+ui/node_modules/
+ui/dist/
+ui/src-tauri/target/
+ui/src-tauri/gen/schemas/
+
+# OS / IDE
+.DS_Store
+.idea/
+.vscode/
+.cursor/
+.claude/
+
+# Model weights
+*.pt
+*.onnx
+*.safetensors

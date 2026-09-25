@@ -1,0 +1,83 @@
+"""Reflex facade: rules → Laya (local) → Flash-Lite (cloud) with confidence-based escalation.
+
+All Laya access is serialised behind one lock: PyTorch on MPS is not thread-safe, and two
+concurrent forward passes (or a load racing a call) trip a Metal command-buffer assertion.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import re
+import threading
+
+from neo.config import settings
+from neo.reflex.schema import Decision, Intent
+
+_STOP_RE = re.compile(r"^\s*(stop|cancel|never ?mind|shut ?up|be quiet|go to sleep|quit|exit)\b", re.I)
+
+
+def _rules(text: str) -> Decision | None:
+    if _STOP_RE.match(text) and len(text.split()) <= 4:
+        return Decision("stop", 1.0, False, 0.0, False, 0.0, source="rules")
+    return None
+
+
+class Reflex:
+    def __init__(self) -> None:
+        self._laya = None
+        self._lite = None
+        self._laya_failed = False
+        self._lock = threading.Lock()
+
+    def _get_laya(self):
+        with self._lock:
+            if self._laya is None and not self._laya_failed and settings().reflex == "laya":
+                try:
+                    from neo.reflex.laya_reflex import LayaReflex
+
+                    self._laya = LayaReflex()
+                except Exception as e:  # noqa: BLE001 — missing torch/model → cloud fallback
+                    print(f"[reflex] Laya unavailable ({e}); falling back to Flash-Lite")
+                    self._laya_failed = True
+            return self._laya
+
+    def _laya_decide(self, text: str) -> Decision | None:
+        laya = self._get_laya()
+        if laya is None:
+            return None
+        with self._lock:
+            return laya.decide(text)
+
+    def _get_lite(self):
+        if self._lite is None and settings().gemini_api_key:
+            from neo.reflex.lite import LiteReflex
+
+            self._lite = LiteReflex()
+        return self._lite
+
+    async def decide(self, text: str) -> Decision:
+        if d := _rules(text):
+            return d
+        s = settings()
+        if s.reflex == "off":
+            return Decision("agent_task", 0.0, False, 0.0, False, 0.0, source="rules")
+        if s.reflex == "laya":
+            d = await asyncio.to_thread(self._laya_decide, text)
+            if d is not None and d.intent_confidence >= s.reflex_confidence_floor:
+                return d
+        lite = self._get_lite()
+        if lite:
+            try:
+                return await lite.decide(text)
+            except Exception as e:  # noqa: BLE001
+                print(f"[reflex] lite failed: {e}")
+        # Nothing available — be safe: treat as an agent task, confirm anything risky.
+        return Decision("agent_task", 0.0, True, 0.5, False, 0.0, source="rules")
+
+
+def warmup(reflex: Reflex) -> None:
+    """Load Laya in the background at startup so the first utterance isn't slow."""
+    threading.Thread(target=reflex._get_laya, daemon=True).start()
+
+
+__all__ = ["Reflex", "Decision", "Intent", "warmup"]
