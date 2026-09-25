@@ -13,7 +13,7 @@ from typing import Literal
 from neo.config import BrainName, settings
 from neo.providers.base import Message, Provider, ProviderError, RateLimited, ToolSpec, Turn
 
-Purpose = Literal["agent", "fast", "vision", "offline"]
+Purpose = Literal["agent", "fast", "vision", "offline", "light"]
 
 _cache: dict[str, Provider] = {}
 
@@ -29,6 +29,10 @@ def make(name: BrainName) -> Provider:
         from neo.providers.openai_compat import groq
 
         p = groq()
+    elif name == "gemini_lite":
+        from neo.providers.gemini import GeminiProvider
+
+        p = GeminiProvider(model=settings().gemini_lite_model)
     elif name == "local":
         from neo.providers.openai_compat import local
 
@@ -132,6 +136,9 @@ def brain(purpose: Purpose = "agent") -> Chain:
         order = vision + [n for n in (s.brain, s.fast_brain, s.offline_brain) if n not in vision]
     elif purpose == "offline":
         order = [s.offline_brain]
+    elif purpose == "light":
+        # One-tool actions that missed the regex fast path: cheapest capable brain first.
+        order = ["gemini_lite", s.fast_brain, s.brain, s.offline_brain]
     else:
         order = [s.brain, s.fast_brain, s.offline_brain]
     seen: list[BrainName] = []

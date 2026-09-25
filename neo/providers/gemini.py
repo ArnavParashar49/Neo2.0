@@ -128,7 +128,10 @@ class GeminiProvider:
         if not key:
             raise ProviderError("GEMINI_API_KEY is not set")
         self.model = model or s.gemini_model
-        self.models = [self.model] + [m for m in s.gemini_fallback_models if m != self.model]
+        lite = "lite" in self.model
+        self.models = [self.model] + (
+            [] if lite else [m for m in s.gemini_fallback_models if m != self.model]
+        )
         keys = [key] if api_key else s.gemini_keys
         self._clients = [genai.Client(api_key=k) for k in keys]
         self._client = self._clients[0]

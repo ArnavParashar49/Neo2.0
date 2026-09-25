@@ -104,10 +104,15 @@ mic ─► wake word (local) ─► voice backend
 - Core log now prints routing, tool calls and per-turn brain/latency.
 - Voice session closes after 5 s without user speech (local silero VAD); barge-in needs a committed "stop" so NEO's own voice can't cut it off.
 
+### Token diet (2026-09-26)
+
+- Per-request tool selection (embedding match + families + screen rule + playbook/history tools), capped at 18, with a `more_tools` meta-tool.
+- History context editing: tool results older than two turns are stubbed.
+- Flash-Lite lane for one-tool actions; Groq now viable as the agent fallback (verified live while Gemini was out of quota).
+
 ### Next
 
 - `npm run tauri build` → signed NEO.app that spawns the Python core itself.
-- Tool search for the offline model (small models drown in 37+ schemas).
 - Skills: a small curated set loaded on demand, replacing the v1 271-folder dump.
 
 ## Removed from v1 (and why)

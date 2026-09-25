@@ -18,7 +18,7 @@ from neo.agent.prompt import build as build_prompt
 from neo.agent.registry import ToolContext, registry
 from neo.events import NeoState, bus
 from neo.providers import brain
-from neo.providers.base import ImagePart, Message
+from neo.providers.base import ImagePart, Message, ToolResult
 from neo.reflex import Reflex
 from neo.reflex.schema import Decision
 
@@ -125,14 +125,23 @@ class Session:
         return Reply(out.text, "quick", d)
 
     async def _agent(self, text: str, d: Decision | None, images: list[ImagePart] | None) -> Reply:
-        purpose = "vision" if (images or (d and d.needs_screen)) else "agent"
+        needs_screen = bool(images or (d and d.needs_screen))
+        if needs_screen:
+            purpose = "vision"
+        elif d and d.intent == "quick_action":
+            purpose = "light"  # one simple action the regex fast path didn't cover
+        else:
+            purpose = "agent"
         effort = "high" if (d and d.intent == "agent_task") else "medium"
         t0 = time.time()
         chain = brain(purpose)
+        playbook_ctx = await asyncio.to_thread(self._playbooks_for, text)
+        tools = await asyncio.to_thread(self._tools_for, text, needs_screen, playbook_ctx)
         res = await run_agent(
             text,
             provider=chain,
-            system=self._system(await asyncio.to_thread(self._playbooks_for, text)),
+            system=self._system(playbook_ctx),
+            tools=tools,
             history=self._trimmed(),
             ctx=ToolContext(user_text=text),
             effort=effort,
@@ -155,6 +164,18 @@ class Session:
             tools=len(res.steps),
         )
         return Reply(res.text, "agent", d, res)
+
+    # ---- tool selection ---------------------------------------------------------------
+    def _tools_for(self, text: str, needs_screen: bool, playbook_ctx: str):
+        """Only the tools this request plausibly needs (see neo.agent.toolselect)."""
+        from neo.agent.toolselect import selector
+
+        recent = [c.name for m in self.history[-8:] if m.role == "assistant" for c in m.tool_calls]
+        pb_tools = re.findall(r"\b([a-z_]+)\(", playbook_ctx) if playbook_ctx else []
+        sel = selector().select(
+            text, needs_screen=needs_screen, playbook_tools=pb_tools, history_tools=recent
+        )
+        return sel.specs(registry())
 
     # ---- playbooks -------------------------------------------------------------------
     @staticmethod
@@ -243,11 +264,39 @@ class Session:
         self.history.extend(msgs)
 
     def _trimmed(self) -> list[Message]:
+        """Recent history for the model. Tool results older than the last two turns are stubbed —
+        they were consumed when fresh and are the bulk of the tokens otherwise."""
         h = self.history[-_MAX_HISTORY:]
-        # Never start a transcript with a tool-result turn.
-        while h and h[0].role == "tool":
+        while h and h[0].role == "tool":  # never start a transcript with a tool-result turn
             h = h[1:]
-        return h
+        keep_from = _last_user_index(h, 2)
+        out: list[Message] = []
+        for i, m in enumerate(h):
+            if m.role == "tool" and i < keep_from:
+                stubbed = [ToolResult(r.call_id, r.name, _stub(r.content), r.ok) for r in m.tool_results]
+                out.append(Message.tool(stubbed))
+            else:
+                out.append(m)
+        return out
+
+
+def _last_user_index(h: list[Message], n: int) -> int:
+    """Index of the n-th most recent user message (0 if fewer)."""
+    seen = 0
+    for i in range(len(h) - 1, -1, -1):
+        if h[i].role == "user":
+            seen += 1
+            if seen == n:
+                return i
+    return 0
+
+
+def _stub(text: str, keep: int = 160) -> str:
+    return (
+        text
+        if len(text) <= keep
+        else text[:keep].rstrip() + f" …[{len(text) - keep} chars trimmed from an earlier turn]"
+    )
 
 
 def _match_fast_path(text: str) -> tuple[str, dict] | None:

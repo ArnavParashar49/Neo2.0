@@ -210,6 +210,7 @@ async def hotkey(a: dict, c: ToolContext) -> str:
     fast_path=[
         (
             r"^\s*(?:please\s+)?(?:open|launch)\s+(?!(?:a|an|the|my|up|it|this|that)\b)"
+            r"(?!.*\b(?:please|now|for|and|with|then|to|in|on)\b)"
             r"(?P<target>[\w.+-]+(?:\s+[\w.+-]+){0,2})[\s.!]*$",
             {"target": "<target>"},
         )

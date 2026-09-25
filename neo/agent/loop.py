@@ -18,7 +18,7 @@ from neo.agent.registry import registry as default_registry
 from neo.config import settings
 from neo.events import EventBus, NeoState
 from neo.events import bus as default_bus
-from neo.providers.base import Message, Provider, ToolCall, ToolResult, Turn
+from neo.providers.base import Message, Provider, ToolCall, ToolResult, ToolSpec, Turn
 
 Stopped = Literal["done", "max_steps", "needs_confirm", "needs_user", "thrash", "error"]
 
@@ -128,6 +128,7 @@ async def run_agent(
     verify: bool = True,
     idle_on_finish: bool = True,
     max_seconds: float | None = None,
+    tools: list[ToolSpec] | None = None,
 ) -> AgentResult:
     s = settings()
     reg = reg or default_registry()
@@ -143,7 +144,8 @@ async def run_agent(
         messages.append(Message.user(goal, images=images or []))
     steps: list[Step] = []
     last_key, repeats = "", 0
-    tools = reg.specs()
+    tools = list(tools) if tools is not None else reg.specs()
+    enabled = {t.name for t in tools}
     effectful = False  # a side-effect tool ran this run
     last_readonly = True  # the most recent tool call was an observation
     verified = False
@@ -204,8 +206,26 @@ async def run_agent(
                 messages,
             )
 
+        # `more_tools` is answered here, not by the registry: it grows this run's tool list.
+        meta = [c for c in turn.tool_calls if c.name == "more_tools"]
+        real = [c for c in turn.tool_calls if c.name != "more_tools"]
+        meta_results: list[ToolResult] = []
+        for c in meta:
+            from neo.agent.toolselect import selector
+
+            found = selector().search(str(c.args.get("query", "")), exclude=enabled)
+            for t in found:
+                tools.append(t.spec())
+                enabled.add(t.name)
+            listing = ", ".join(t.name for t in found) or "nothing new"
+            meta_results.append(
+                ToolResult(c.id, "more_tools", f"Enabled: {listing}. They are available from your next step.")
+            )
         await ev.set_state(NeoState.WORKING)
-        results = await _run_calls(turn.tool_calls, reg, ctx, ev, s.max_tool_result_chars)
+        results = meta_results + (
+            await _run_calls(real, reg, ctx, ev, s.max_tool_result_chars) if real else []
+        )
+        results.sort(key=lambda r: [c.id for c in turn.tool_calls].index(r.call_id))
         messages.append(Message.tool(results))
         for c, r in zip(turn.tool_calls, results, strict=False):
             steps.append(Step(c.name, c.args, r.content, r.ok))

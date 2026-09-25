@@ -14,7 +14,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-BrainName = Literal["gemini", "groq", "local", "claude"]
+BrainName = Literal["gemini", "gemini_lite", "groq", "local", "claude"]
 VoiceBackend = Literal["auto", "live", "local", "off"]
 
 
