@@ -7,8 +7,8 @@ venv/
 .env
 
 # Local data lives in ~/.neo (memory, audit log, models, trained reflex head) — never here.
-memory/
-cache/
+/memory/
+/cache/
 *.log
 
 # Node / Tauri
