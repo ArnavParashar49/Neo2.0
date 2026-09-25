@@ -129,11 +129,14 @@ class Store:
                 self._put_vec("memory_vec", int(row[0]), text)
                 self._db.commit()
                 return int(row[0])
-        dup = self._db.execute("SELECT id FROM memory WHERE kind=? AND lower(text)=lower(?)", (kind, text)).fetchone()
+        dup = self._db.execute(
+            "SELECT id FROM memory WHERE kind=? AND lower(text)=lower(?)", (kind, text)
+        ).fetchone()
         if dup:
             return int(dup[0])
         cur = self._db.execute(
-            "INSERT INTO memory(kind,key,text,created,updated) VALUES (?,?,?,?,?)", (kind, key, text, now, now)
+            "INSERT INTO memory(kind,key,text,created,updated) VALUES (?,?,?,?,?)",
+            (kind, key, text, now, now),
         )
         mid = int(cur.lastrowid or 0)
         self._put_vec("memory_vec", mid, text)
@@ -187,7 +190,8 @@ class Store:
 
     def by_kind(self, kind: Kind, limit: int = 40) -> list[Memory]:
         rows = self._db.execute(
-            "SELECT id, kind, key, text, created FROM memory WHERE kind=? ORDER BY updated DESC LIMIT ?", (kind, limit)
+            "SELECT id, kind, key, text, created FROM memory WHERE kind=? ORDER BY updated DESC LIMIT ?",
+            (kind, limit),
         ).fetchall()
         return [Memory(*r) for r in rows]
 
@@ -216,7 +220,9 @@ class Store:
         hits = [(pid, s) for pid, s in self._semantic("playbook_vec", goal, k) if s >= min_sim]
         out = []
         for pid, s in hits:
-            r = self._db.execute("SELECT id, goal, steps, answer, created FROM playbook WHERE id=?", (pid,)).fetchone()
+            r = self._db.execute(
+                "SELECT id, goal, steps, answer, created FROM playbook WHERE id=?", (pid,)
+            ).fetchone()
             if r:
                 out.append(Playbook(int(r[0]), r[1], json.loads(r[2]), r[3] or "", r[4], s))
                 self._db.execute("UPDATE playbook SET uses=uses+1 WHERE id=?", (pid,))
@@ -227,7 +233,9 @@ class Store:
         pbs = self.similar_playbooks(goal)
         if not pbs:
             return ""
-        lines = ["[PLAYBOOKS] Similar requests you completed before — follow the same path unless something differs:"]
+        lines = [
+            "[PLAYBOOKS] Similar requests you completed before — follow the same path unless something differs:"
+        ]
         for pb in pbs:
             steps = " → ".join(f"{s['tool']}({_short_args(s.get('args', {}))})" for s in pb.steps[:10])
             lines.append(f"- “{pb.goal}”: {steps}")
@@ -236,13 +244,16 @@ class Store:
     # ---- sessions ----------------------------------------------------------------------
     def add_session_summary(self, summary: str, started: float, ended: float | None = None) -> int:
         cur = self._db.execute(
-            "INSERT INTO sessions(started, ended, summary) VALUES (?,?,?)", (started, ended or time.time(), summary.strip())
+            "INSERT INTO sessions(started, ended, summary) VALUES (?,?,?)",
+            (started, ended or time.time(), summary.strip()),
         )
         self._db.commit()
         return int(cur.lastrowid or 0)
 
     def recent_sessions(self, n: int = 3) -> list[tuple[float, str]]:
-        rows = self._db.execute("SELECT started, summary FROM sessions ORDER BY started DESC LIMIT ?", (n,)).fetchall()
+        rows = self._db.execute(
+            "SELECT started, summary FROM sessions ORDER BY started DESC LIMIT ?", (n,)
+        ).fetchall()
         return [(float(r[0]), r[1]) for r in rows if r[1]]
 
     # ---- prompt --------------------------------------------------------------------------
@@ -251,14 +262,17 @@ class Store:
         parts: list[str] = []
         prof = self.by_kind("profile")
         if prof:
-            parts.append("About the user: " + "; ".join((f"{m.key}: " if m.key else "") + m.text for m in prof))
+            parts.append(
+                "About the user: " + "; ".join((f"{m.key}: " if m.key else "") + m.text for m in prof)
+            )
         les = self.by_kind("lesson", 15)
         if les:
             parts.append("Lessons: " + " | ".join(m.text for m in les))
         sess = self.recent_sessions(2)
         if sess:
             parts.append(
-                "Recent sessions: " + " | ".join(f"{time.strftime('%a %d %b', time.localtime(t))}: {s}" for t, s in sess)
+                "Recent sessions: "
+                + " | ".join(f"{time.strftime('%a %d %b', time.localtime(t))}: {s}" for t, s in sess)
             )
         if query:
             notes = [m for m in self.recall(query, 6) if m.kind == "note"]

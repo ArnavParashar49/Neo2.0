@@ -38,7 +38,9 @@ logging.getLogger("google_genai.models").setLevel(logging.ERROR)
 _LEVEL = {"low": gt.ThinkingLevel.LOW, "medium": gt.ThinkingLevel.MEDIUM, "high": gt.ThinkingLevel.HIGH}
 _SKIP_SIGNATURE = b"skip_thought_signature_validator"
 _RETRY_CODES = {500, 502, 503, 504}
-_BACKOFF_S = (1.0, 2.5)
+_QUOTA_COOLDOWN_S = 600.0  # a (model, key) that 429'd is skipped for this long
+_OVERLOAD_COOLDOWN_S = 90.0  # a model that 5xx'd after a retry is skipped for this long
+_BACKOFF_S = (1.2,)  # one short retry on 5xx; a bad night should fall through to Groq fast
 
 
 def _to_contents(messages: list[Message]) -> list[gt.Content]:
@@ -95,6 +97,16 @@ def _tools(specs: list[ToolSpec] | None) -> list[gt.Tool] | None:
     ]
 
 
+def _pretty(model: str) -> str:
+    return model.replace("gemini-", "Gemini ").replace("-flash", " Flash").replace("-lite", " Lite")
+
+
+async def _note(text: str) -> None:
+    from neo.events import bus
+
+    await bus().note(text)
+
+
 def _code(e: Exception) -> int | None:
     return getattr(e, "code", None) if isinstance(e, gerrors.APIError) else None
 
@@ -120,14 +132,21 @@ class GeminiProvider:
         keys = [key] if api_key else s.gemini_keys
         self._clients = [genai.Client(api_key=k) for k in keys]
         self._client = self._clients[0]
+        self._exhausted: dict[tuple[str, int], float] = {}  # (model, key index) → retry-after timestamp
 
     async def _call(self, fn, **kw):
         """Walk model × key. 5xx → short backoff then next model; 429 → next key for this model
         (free-tier quota is per key *and* per model); other errors raise immediately."""
         last: Exception | None = None
+        import time as _time
+
         for model in self.models:
             overloaded = False
+            if self._exhausted.get((model, -1), 0.0) > _time.time():
+                continue  # recently overloaded — skip the whole model for a bit
             for ki, client in enumerate(self._clients):
+                if self._exhausted.get((model, ki), 0.0) > _time.time():
+                    continue  # quota known to be spent — don't pay a round trip to learn it again
                 for i, delay in enumerate((0.0, *_BACKOFF_S)):
                     if delay:
                         await asyncio.sleep(delay)
@@ -141,10 +160,14 @@ class GeminiProvider:
                         if code in _RETRY_CODES and i < len(_BACKOFF_S):
                             continue
                         if code == 429:
+                            self._exhausted[(model, ki)] = _time.time() + _QUOTA_COOLDOWN_S
                             print(f"[gemini] {model} key#{ki + 1} quota exhausted; trying next key")
+                            await _note(f"{_pretty(model)} key {ki + 1}: no quota, trying next")
                             break
                         if code in _RETRY_CODES:
                             print(f"[gemini] {model} overloaded; trying next model")
+                            self._exhausted[(model, -1)] = _time.time() + _OVERLOAD_COOLDOWN_S
+                            await _note(f"{_pretty(model)} overloaded, trying next")
                             overloaded = True
                             break
                         raise _map_error(e) from e

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import queue
 import threading
+import time
 
 import numpy as np
 import sounddevice as sd
@@ -80,6 +81,7 @@ class Speaker:
         self._thread: threading.Thread | None = None
         self._gen = 0
         self.playing = threading.Event()
+        self.last_stop = 0.0  # when playback last went quiet (for a half-duplex mic tail)
 
     def start(self) -> None:
         if self._thread:
@@ -90,20 +92,23 @@ class Speaker:
         self._thread.start()
 
     def _run(self) -> None:
-        while True:
-            item = self._q.get()
-            if item is None:
-                break
+        # `playing` stays set across the small gaps between streamed chunks; it only clears after
+        # the queue has been empty for a moment, so listeners see one continuous utterance.
+        item = self._q.get()
+        while item is not None:
             gen, chunk = item  # type: ignore[misc]
-            if gen != self._gen:
-                continue
-            self.playing.set()
+            if gen == self._gen:
+                self.playing.set()
+                try:
+                    self._stream.write(chunk)  # type: ignore[union-attr]
+                except Exception:
+                    pass
             try:
-                self._stream.write(chunk)  # type: ignore[union-attr]
-            except Exception:
-                pass
-            if self._q.empty():
+                item = self._q.get(timeout=0.5)  # tolerate network jitter between streamed chunks
+            except queue.Empty:
                 self.playing.clear()
+                self.last_stop = time.time()
+                item = self._q.get()
 
     def play(self, chunk: np.ndarray) -> None:
         if chunk.dtype == np.int16:
@@ -127,6 +132,7 @@ class Speaker:
             except Exception:
                 pass
         self.playing.clear()
+        self.last_stop = time.time()
 
     async def wait_done(self) -> None:
         while not self._q.empty() or self.playing.is_set():

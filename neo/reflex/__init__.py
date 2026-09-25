@@ -85,8 +85,21 @@ class Reflex:
 
 
 def warmup(reflex: Reflex | None = None) -> None:
-    """Load Laya in the background at startup so the first utterance isn't slow."""
-    threading.Thread(target=get_laya, daemon=True).start()
+    """Load Laya, then the memory embedder, in ONE background thread.
+
+    Both lazily import `transformers`; two threads doing that at once trip its lazy-module
+    loader ("cannot import name 'AutoTokenizer'"), which silently disabled the reflex."""
+
+    def _load() -> None:
+        get_laya()
+        try:
+            from neo.memory import embed
+
+            embed._get()
+        except Exception as e:  # noqa: BLE001
+            print(f"[memory] embedder warmup failed: {str(e)[:80]}")
+
+    threading.Thread(target=_load, daemon=True).start()
 
 
 __all__ = ["Reflex", "Decision", "Intent", "warmup", "get_laya", "laya_lock"]

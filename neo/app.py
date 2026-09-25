@@ -68,16 +68,25 @@ class App:
                 await self.voice.wake("ui")
 
 
+async def _lag_monitor() -> None:
+    """Log when the event loop stalls — a stalled loop silently kills websockets (keepalive)."""
+    import time
+
+    while True:
+        t0 = time.monotonic()
+        await asyncio.sleep(0.5)
+        lag = time.monotonic() - t0 - 0.5
+        if lag > 0.4:
+            print(f"[loop] stalled for {lag:.1f}s — something blocked the event loop")
+
+
 async def run() -> None:
     s = settings()
     load_all()
     app = App()
     ui = UIServer(app.on_command)
     await ui.start()
-    warmup(app.session.reflex)
-    from neo.memory.embed import warmup as warm_embed
-
-    warm_embed()
+    warmup(app.session.reflex)  # Laya, then the memory embedder, sequentially
 
     if s.voice != "off":
         try:
@@ -88,6 +97,7 @@ async def run() -> None:
             print(f"[voice] unavailable: {e}")
 
     await bus().set_state(NeoState.IDLE)
+    asyncio.create_task(_lag_monitor())
     print("NEO is running. Say 'Hey Neo', or type in the overlay.")
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()

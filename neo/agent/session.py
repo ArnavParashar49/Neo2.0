@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -47,6 +48,7 @@ class Session:
     reflex: Reflex = field(default_factory=Reflex)
     history: list[Message] = field(default_factory=list)
     memory_context: str = ""
+    voice_owned: bool = False  # a Live voice session is driving the orb; don't drop to idle after turns
     _pending_tool: str = ""
     _pending_args: dict = field(default_factory=dict)
     _pending_action: str = ""
@@ -65,7 +67,7 @@ class Session:
         await bus().publish("reflex", **d.__dict__)
 
         if d.intent == "stop":
-            await bus().set_state(NeoState.IDLE)
+            await self._settle()
             return Reply("Okay.", "stop", d)
 
         # Regex fast paths are precise; trust them when the reflex agrees or isn't available.
@@ -80,11 +82,13 @@ class Session:
     # ---- routes ----------------------------------------------------------------------
     async def _chat(self, text: str, d: Decision) -> Reply:
         await bus().set_state(NeoState.THINKING)
+        t0 = time.time()
         msgs = self._trimmed() + [Message.user(text)]
         out: list[str] = []
+        chain = brain("fast")
         try:
             first = True
-            async for chunk in brain("fast").stream(msgs, system=self._system()):
+            async for chunk in chain.stream(msgs, system=self._system()):
                 if first:
                     await bus().set_state(NeoState.SPEAKING)
                     first = False
@@ -95,28 +99,45 @@ class Session:
         reply = "".join(out).strip()
         self._remember(Message.user(text), Message.assistant(reply))
         await bus().say(reply, final=True)
-        await bus().set_state(NeoState.IDLE)
+        await bus().publish(
+            "turn",
+            route="chat",
+            brain=getattr(chain, "last_used", ""),
+            model=getattr(chain, "last_model", ""),
+            ms=int((time.time() - t0) * 1000),
+            tools=0,
+        )
+        await self._settle()
         return Reply(reply, "chat", d)
 
     async def _quick(self, text: str, d: Decision, tool: str, args: dict) -> Reply:
         await bus().set_state(NeoState.WORKING)
+        t0 = time.time()
+        await bus().tool_start(tool, args)
         out = await registry().invoke(tool, args, ToolContext(user_text=text))
+        await bus().tool_end(tool, out.ok, out.text)
         self._remember(Message.user(text), Message.assistant(out.text))
         await bus().say(out.text, final=True)
-        await bus().set_state(NeoState.IDLE)
+        await bus().publish(
+            "turn", route="quick", brain="", model="", ms=int((time.time() - t0) * 1000), tools=1
+        )
+        await self._settle()
         return Reply(out.text, "quick", d)
 
     async def _agent(self, text: str, d: Decision | None, images: list[ImagePart] | None) -> Reply:
         purpose = "vision" if (images or (d and d.needs_screen)) else "agent"
         effort = "high" if (d and d.intent == "agent_task") else "medium"
+        t0 = time.time()
+        chain = brain(purpose)
         res = await run_agent(
             text,
-            provider=brain(purpose),
+            provider=chain,
             system=self._system(await asyncio.to_thread(self._playbooks_for, text)),
             history=self._trimmed(),
             ctx=ToolContext(user_text=text),
             effort=effort,
             images=images,
+            idle_on_finish=not self.voice_owned,
         )
         self.history = res.messages
         if res.stopped == "needs_confirm" and self._stage_pending(res):
@@ -125,6 +146,14 @@ class Session:
         if res.stopped == "done":
             await asyncio.to_thread(self._save_playbook, text, res)
         await bus().say(res.text, final=True)
+        await bus().publish(
+            "turn",
+            route="agent",
+            brain=getattr(chain, "last_used", ""),
+            model=getattr(chain, "last_model", ""),
+            ms=int((time.time() - t0) * 1000),
+            tools=len(res.steps),
+        )
         return Reply(res.text, "agent", d, res)
 
     # ---- playbooks -------------------------------------------------------------------
@@ -203,6 +232,10 @@ class Session:
         return Reply(res.text, "agent", None, res)
 
     # ---- helpers ---------------------------------------------------------------------
+    async def _settle(self) -> None:
+        if not self.voice_owned:
+            await bus().set_state(NeoState.IDLE)
+
     def _system(self, extra: str = "") -> str:
         return build_prompt(self.memory_context, extra)
 

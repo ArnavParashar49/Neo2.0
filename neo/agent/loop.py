@@ -65,6 +65,12 @@ def _halt_kind(text: str) -> Stopped | None:
     return None
 
 
+async def _settle(ev: EventBus, idle: bool) -> None:
+    """End of a run: go idle unless a voice session is driving the orb (it decides what's next)."""
+    if idle:
+        await ev.set_state(NeoState.IDLE)
+
+
 async def _run_calls(
     calls: list[ToolCall], reg: Registry, ctx: ToolContext, ev: EventBus, limit: int
 ) -> list[ToolResult]:
@@ -120,6 +126,7 @@ async def run_agent(
     effort: Literal["low", "medium", "high"] = "medium",
     images: list | None = None,
     verify: bool = True,
+    idle_on_finish: bool = True,
 ) -> AgentResult:
     s = settings()
     reg = reg or default_registry()
@@ -142,7 +149,7 @@ async def run_agent(
         try:
             turn: Turn = await provider.complete(messages, system=system, tools=tools, effort=effort)
         except Exception as e:  # noqa: BLE001
-            await ev.set_state(NeoState.IDLE)
+            await _settle(ev, idle_on_finish)
             return AgentResult(f"I hit a problem talking to the model: {e}", "error", steps, messages)
 
         messages.append(Message.assistant(turn.text, turn.tool_calls, raw=turn.raw))
@@ -152,7 +159,7 @@ async def run_agent(
                 verified = True
                 messages.append(Message.user(_VERIFY_NOTE))
                 continue
-            await ev.set_state(NeoState.IDLE)
+            await _settle(ev, idle_on_finish)
             return AgentResult(turn.text.strip(), "done", steps, messages)
 
         # Thrash guard — the same side-effect call three turns in a row means the model is stuck.
@@ -174,7 +181,7 @@ async def run_agent(
                     ]
                 )
             )
-            await ev.set_state(NeoState.IDLE)
+            await _settle(ev, idle_on_finish)
             name = turn.tool_calls[0].name
             return AgentResult(
                 f"I kept repeating the same step ({name}) without progress, so I stopped.",
@@ -210,7 +217,7 @@ async def run_agent(
                     pending_action=p.action_id if p else "",
                 )
 
-    await ev.set_state(NeoState.IDLE)
+    await _settle(ev, idle_on_finish)
     summary = "; ".join(f"{st.tool}: {'ok' if st.ok else 'failed'}" for st in steps[-4:])
     return AgentResult(
         f"I reached my step limit before finishing. Last steps — {summary}.", "max_steps", steps, messages

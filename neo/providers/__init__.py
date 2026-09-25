@@ -49,6 +49,7 @@ class Chain:
     def __init__(self, names: list[BrainName]) -> None:
         self.names = names
         self.last_used: str = ""
+        self.last_model: str = ""
 
     def _providers(self) -> list[Provider]:
         out: list[Provider] = []
@@ -92,11 +93,14 @@ class Chain:
                 turn = await p.complete(
                     messages, system=system, tools=tools, effort=effort, max_tokens=max_tokens
                 )
-                self.last_used = p.name
+                self.last_used, self.last_model = p.name, getattr(p, "model", "")
                 return turn
             except (RateLimited, ProviderError) as e:
                 print(f"[brain] {p.name} failed ({type(e).__name__}: {str(e)[:80]}); trying next")
                 errors.append(f"{p.name}: {str(e)[:80]}")
+                from neo.events import bus
+
+                await bus().note(f"{p.name.capitalize()} unavailable, switching brain")
         raise self._no_brain(errors)
 
     async def stream(
@@ -109,7 +113,7 @@ class Chain:
                 async for chunk in p.stream(messages, system=system, max_tokens=max_tokens):
                     produced = True
                     yield chunk
-                self.last_used = p.name
+                self.last_used, self.last_model = p.name, getattr(p, "model", "")
                 return
             except (RateLimited, ProviderError) as e:
                 if produced:  # can't restart a half-streamed answer
