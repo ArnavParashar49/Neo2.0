@@ -22,6 +22,7 @@ import asyncio
 import time
 from collections.abc import Awaitable, Callable
 
+import numpy as np
 from google import genai
 from google.genai import types as gt
 
@@ -29,7 +30,7 @@ from neo.agent.prompt import build as build_prompt
 from neo.agent.registry import ToolContext, registry
 from neo.config import settings
 from neo.events import NeoState, bus
-from neo.voice.audio import Mic, Speaker
+from neo.voice.audio import Mic, Speaker, rms
 from neo.voice.wake import WakeSpotter
 
 TextHandler = Callable[[str], Awaitable[None]]
@@ -53,6 +54,8 @@ _IDLE_CLOSE_S = 90.0
 _CONNECT_TIMEOUT_S = 12.0
 _RECONNECT_WINDOW_S = 60.0  # reopen automatically if the socket dies within this long of activity
 _PLAYBACK_TAIL_S = 0.35  # keep the mic muted this long after NEO stops talking (room echo)
+_BARGE_IN_GRACE_S = 1.5  # ignore "stop" for the first moment of NEO's own speech (echo onset)
+_VAD_CHUNK = 512  # silero works on 32 ms windows at 16 kHz
 
 _LIVE_EXTRA = """You are speaking aloud, so keep replies short and natural. For anything that needs
 several steps or looking at the screen, files, mail or the web, call agent_task with a clear goal and
@@ -105,9 +108,20 @@ class LiveVoice:
         self._ptt = False
         self._speaking = False  # audio for the current model turn is playing / still arriving
         self._closing = False  # a close we asked for (idle timeout / shutdown) → don't reconnect
+        self._speaking_since = 0.0
+        self._vad = None  # silero: local "is the user talking?" so we know when to stop listening
+        self._vad_buf = np.zeros(0, dtype=np.float32)
+        self._last_user_speech = 0.0
+        self._session_open = 0.0
 
     async def start(self) -> None:
         self._wake = await asyncio.to_thread(WakeSpotter)
+        try:
+            from silero_vad import load_silero_vad
+
+            self._vad = await asyncio.to_thread(load_silero_vad)
+        except Exception as e:  # noqa: BLE001 — fall back to the energy gate
+            print(f"[live] silero VAD unavailable ({e}); using energy gate for the listen timeout")
         self.mic.start()
         self.spk.start()
         self._tasks.append(asyncio.create_task(self._mic_loop()))
@@ -203,10 +217,14 @@ class LiveVoice:
                 await bus().set_state(NeoState.IDLE)
                 return
             self._live_cm, self._live = cm, live
-            self._last_activity = time.time()
+            self._last_activity = self._session_open = self._last_user_speech = time.time()
+            if self._vad is not None:
+                self._vad.reset_states()
+            self._vad_buf = np.zeros(0, dtype=np.float32)
             self._agent_session.voice_owned = True
             self._tasks.append(asyncio.create_task(self._recv_loop(live)))
             self._tasks.append(asyncio.create_task(self._idle_watch(live)))
+            self._tasks.append(asyncio.create_task(self._silence_watch(live)))
             await self._refresh_state()
 
     async def _close_session(self) -> None:
@@ -243,6 +261,42 @@ class LiveVoice:
                 return
 
     # ---- audio in ---------------------------------------------------------------------
+    async def _silence_watch(self, live) -> None:
+        """Stop listening after `listen_timeout_s` of no speech from the user (background noise
+        doesn't count — silero decides what is speech). The wake word re-arms the session."""
+        timeout = settings().listen_timeout_s
+        while self._live is live:
+            await asyncio.sleep(0.25)
+            if self._ptt or self._speaking or self.spk.playing.is_set():
+                continue
+            if any(not t.done() for t in self._tool_tasks.values()):
+                continue
+            quiet_since = max(self._last_user_speech, self.spk.last_stop, self._session_open)
+            if time.time() - quiet_since > timeout:
+                print(f"[live] no speech for {timeout:.0f}s; closing session")
+                self._closing = True
+                await self._close_session()
+                return
+
+    def _hear(self, frame: bytes) -> None:
+        """Feed the local VAD; remember when the user last spoke."""
+        if self._vad is None:
+            if rms(frame) > 0.02:
+                self._last_user_speech = time.time()
+            return
+        self._vad_buf = np.concatenate(
+            [self._vad_buf, np.frombuffer(frame, dtype=np.int16).astype(np.float32) / 32768.0]
+        )
+        while len(self._vad_buf) >= _VAD_CHUNK:
+            chunk, self._vad_buf = self._vad_buf[:_VAD_CHUNK], self._vad_buf[_VAD_CHUNK:]
+            try:
+                import torch
+
+                if float(self._vad(torch.from_numpy(chunk.copy()), 16000).item()) > 0.6:
+                    self._last_user_speech = time.time()
+            except Exception:  # noqa: BLE001
+                pass
+
     def _mic_muted(self) -> bool:
         """Half-duplex: don't feed NEO its own voice."""
         if self._ptt:
@@ -261,16 +315,20 @@ class LiveVoice:
                 return
             hit = self._wake.feed(frame)
             if not self._live:
-                if hit == "wake":
+                if hit and hit.startswith("wake"):
                     try:
                         await self.wake("voice")
                     except Exception as e:  # noqa: BLE001
                         print(f"[live] wake failed: {e}")
                 continue
             if self._mic_muted():
-                if hit == "stop" or hit == "wake":
+                # NEO's own voice is in the mic now. Only a *committed* "stop", after the first
+                # moment of speech, may cut it off — partial hits and "neo" are its own echo.
+                if hit == "stop_final" and time.time() - self._speaking_since > _BARGE_IN_GRACE_S:
+                    print("[live] barge-in: user said stop")
                     await self.interrupt()
                 continue
+            self._hear(frame)
             try:
                 await self._live.send_realtime_input(
                     audio=gt.Blob(data=frame, mime_type="audio/pcm;rate=16000")
@@ -298,6 +356,7 @@ class LiveVoice:
         sc = msg.server_content
         if sc:
             if sc.interrupted:
+                print("[live] server-side interruption")
                 self.spk.interrupt()
                 self._speaking = False
                 model_buf.clear()
@@ -313,6 +372,7 @@ class LiveVoice:
                     if part.inline_data and part.inline_data.data:
                         if not self._speaking:
                             self._speaking = True
+                            self._speaking_since = time.time()
                             await self._refresh_state()
                         self.spk.play_pcm16(part.inline_data.data)
             if sc.turn_complete:

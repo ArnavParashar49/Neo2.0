@@ -102,6 +102,7 @@ mic ─► wake word (local) ─► voice backend
 - Per-tool timeouts (registry), 180 s wall-clock budget per agent run, Live connect timeout + auto-reconnect.
 - `mail_unread` scans the newest messages instead of a `whose` filter (10k-unread inboxes drop the connection).
 - Core log now prints routing, tool calls and per-turn brain/latency.
+- Voice session closes after 5 s without user speech (local silero VAD); barge-in needs a committed "stop" so NEO's own voice can't cut it off.
 
 ### Next
 

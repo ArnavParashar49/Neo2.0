@@ -124,6 +124,7 @@ Everything is an environment variable with the `NEO_` prefix (or a line in `.env
 | `NEO_FAST_BRAIN` | `groq` | brain for chat-only turns |
 | `NEO_VOICE` | `auto` | `auto` (Live if the key allows it, else local) · `live` · `local` · `off` |
 | `NEO_REFLEX` | `laya` | `laya` · `lite` (Gemini Flash-Lite) · `off` |
+| `NEO_LISTEN_TIMEOUT_S` | `5` | stop listening after this many seconds without speech from you (silero VAD; noise doesn't count) |
 | `NEO_LOCAL_MODEL` | `mlx-community/gemma-4-12B-it-4bit` | offline model served by `--local` |
 | `NEO_CONFIRM_DESTRUCTIVE` | `true` | set `false` only if you enjoy surprises |
 | `NEO_DATA_DIR` | `~/.neo` | memory DB, audit log, models, trained reflex head |

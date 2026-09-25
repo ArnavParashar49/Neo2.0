@@ -54,6 +54,7 @@ class Settings(BaseSettings):
     # ---- voice -----------------------------------------------------------------------
     voice: VoiceBackend = "auto"  # auto = Live if key + quota, else local cascade
     wake_word: str = "hey neo"
+    listen_timeout_s: float = 5.0  # close the voice session after this much silence from you
     stt_model: str = "mlx-community/parakeet-tdt-0.6b-v3"
     tts_model: str = "mlx-community/Kokoro-82M-bf16"
     tts_voice: str = "af_heart"

@@ -39,19 +39,22 @@ class WakeSpotter:
         self._rec = vosk.KaldiRecognizer(self._model, rate, grammar)
 
     def feed(self, frame: bytes) -> str | None:
-        """Returns 'wake' / 'stop' when spotted, else None."""
+        """Returns 'wake' / 'stop' on a partial hit, 'wake_final' / 'stop_final' once the
+        recogniser has committed to it (much fewer false positives), else None."""
         if self._rec.AcceptWaveform(frame):
             text = json.loads(self._rec.Result()).get("text", "")
+            final = True
         else:
             text = json.loads(self._rec.PartialResult()).get("partial", "")
+            final = False
         if not text:
             return None
         if _WAKE_RE.search(text):
             self._rec.Reset()
-            return "wake"
+            return "wake_final" if final else "wake"
         if _STOP_RE.search(text):
             self._rec.Reset()
-            return "stop"
+            return "stop_final" if final else "stop"
         return None
 
     def reset(self) -> None:

@@ -146,15 +146,19 @@ class LocalVoice:
             hit = self._wake.feed(frame)
             busy = self._speaking or (self._handler is not None and not self._handler.done())
             if busy:
-                if hit == "stop":
+                if (
+                    hit == "stop_final"
+                ):  # only a committed "stop" may cut NEO off (its own voice is in the mic)
                     await self.interrupt()
                     await bus().set_state(NeoState.IDLE)
-                elif hit == "wake":
-                    await self.interrupt()
-                    self._armed.set()
                 else:
                     continue
-            armed = self._armed.is_set() or hit == "wake" or self._ptt or time.time() < self._followup_until
+            armed = (
+                self._armed.is_set()
+                or (hit or "").startswith("wake")
+                or self._ptt
+                or time.time() < self._followup_until
+            )
             if not armed:
                 continue
             self._armed.clear()
