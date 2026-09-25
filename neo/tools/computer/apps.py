@@ -37,6 +37,13 @@ async def open_app(name: str) -> str:
         code, _, err = await _run(["open", f"https://{name}"])
     else:
         code, _, err = await _run(["open", "-a", name])
+        if code != 0 and " " not in name.strip() and name.isascii():
+            # Not an installed app — a single word is almost always a website ("youtube", "github").
+            site = f"https://www.{name.strip().lower()}.com"
+            code, _, err = await _run(["open", site])
+            if code == 0:
+                await asyncio.sleep(0.6)
+                return f"No app called {name!r}; opened {site} in your browser"
     if code != 0:
         return f"Error: couldn't open {name!r}: {err}"
     await asyncio.sleep(0.6)
