@@ -6,7 +6,7 @@ import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow, currentMonitor, primaryMonitor, LogicalPosition, LogicalSize } from "@tauri-apps/api/window";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { useNeo, NEO_STATES, ORB_STATES, type Item, type NeoState, type OrbState, type ToolRun, type TurnMeta } from "./ws";
+import { useNeo, type Item, type NeoState, type OrbState, type ToolRun, type TurnMeta } from "./ws";
 import "./App.css";
 
 const LABEL: Record<NeoState, string> = {
@@ -20,30 +20,18 @@ const LABEL: Record<NeoState, string> = {
   confirming: "Needs your OK",
 };
 
-/** Which thinking-orbs animation plays for each NEO state. Editable in the ⚙ panel; kept in localStorage. */
-const ORB_DEFAULTS: Record<NeoState, OrbState> = {
+/** Which thinking-orbs animation plays for each NEO state. */
+const ORB: Record<NeoState, OrbState> = {
   idle: "breathing",
   listening: "listening",
   thinking: "solving",
-  working: "working",
+  working: "solving",
   searching: "searching",
   speaking: "composing",
   connecting: "connecting",
   confirming: "shaping",
 };
-type OrbPrefs = { map: Record<NeoState, OrbState>; speed: number };
-const PREFS_KEY = "neo.orb.prefs";
-function loadPrefs(): OrbPrefs {
-  try {
-    const raw = localStorage.getItem(PREFS_KEY);
-    if (raw) {
-      const p = JSON.parse(raw) as Partial<OrbPrefs>;
-      return { map: { ...ORB_DEFAULTS, ...(p.map ?? {}) }, speed: p.speed ?? 1 };
-    }
-  } catch { /* private mode etc. */ }
-  return { map: { ...ORB_DEFAULTS }, speed: 1 };
-}
-function savePrefs(p: OrbPrefs) { try { localStorage.setItem(PREFS_KEY, JSON.stringify(p)); } catch { /* ignore */ } }
+const ORB_SPEED = 1;
 
 const SUGGESTIONS = [
   "What's on my screen?",
@@ -153,45 +141,13 @@ const Icon = {
   collapse: <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"><path d="M6 12h12" /></svg>,
   pin: <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M12 17v5M8 3h8l-1 7 3 3H6l3-3z" /></svg>,
   broom: <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"><path d="M4 20h16M6 20l2-8h8l2 8M12 12V4" /></svg>,
-  gear: <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z" /></svg>,
 };
-
-function OrbSettings({ prefs, onChange, onClose }: { prefs: OrbPrefs; onChange: (p: OrbPrefs) => void; onClose: () => void }) {
-  return (
-    <div className="settings">
-      <div className="settings-head">
-        <span>Orb animations</span>
-        <button className="link" onClick={() => onChange({ map: { ...ORB_DEFAULTS }, speed: 1 })}>Reset</button>
-        <button className="icon" onClick={onClose}>{Icon.collapse}</button>
-      </div>
-      <div className="settings-grid">
-        {NEO_STATES.map((st) => (
-          <label key={st} className="settings-row">
-            <span className="settings-state">{LABEL[st]}</span>
-            <ThinkingOrb state={prefs.map[st]} size={20} theme="dark" speed={prefs.speed} />
-            <select value={prefs.map[st]} onChange={(e) => onChange({ ...prefs, map: { ...prefs.map, [st]: e.target.value as OrbState } })}>
-              {ORB_STATES.map((o) => <option key={o} value={o}>{o}</option>)}
-            </select>
-          </label>
-        ))}
-        <label className="settings-row">
-          <span className="settings-state">Speed</span>
-          <input type="range" min={0.5} max={2} step={0.1} value={prefs.speed} onChange={(e) => onChange({ ...prefs, speed: Number(e.target.value) })} />
-          <span className="settings-val">{prefs.speed.toFixed(1)}×</span>
-        </label>
-      </div>
-    </div>
-  );
-}
 
 export default function App() {
   const neo = useNeo();
   const [expanded, setExpanded] = useState(false);
   const [pinned, setPinned] = useState(false);
-  const [showSettings, setShowSettings] = useState(false);
-  const [prefs, setPrefs] = useState<OrbPrefs>(loadPrefs);
-  const orb = prefs.map[neo.state] ?? ORB_DEFAULTS[neo.state];
-  const updatePrefs = (p: OrbPrefs) => { setPrefs(p); savePrefs(p); };
+  const orb = ORB[neo.state];
   const [text, setText] = useState("");
   const [hover, setHover] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -236,13 +192,13 @@ export default function App() {
 
   // Auto-collapse after a quiet stretch unless pinned, hovered, or being typed into.
   useEffect(() => {
-    if (!expanded || pinned || hover || showSettings || neo.state !== "idle") return;
+    if (!expanded || pinned || hover || neo.state !== "idle") return;
     const t = window.setTimeout(() => {
       if (document.activeElement === inputRef.current && text) return;
       setExpanded(false);
     }, IDLE_COLLAPSE_MS);
     return () => clearTimeout(t);
-  }, [expanded, pinned, hover, showSettings, neo.state, neo.items, text]);
+  }, [expanded, pinned, hover, neo.state, neo.items, text]);
 
   // Follow new content only when the user hasn't scrolled up.
   useEffect(() => {
@@ -289,7 +245,7 @@ export default function App() {
     return (
       <div className="pill" data-tauri-drag-region title={neo.connected ? "Click to open · drag to move · ⌘⇧Space" : "NEO core is offline"} onMouseDown={onOrbDown} onClick={onOrbClick}>
         {/* Tauri only starts a window drag from the element that carries the attribute, so it goes on the canvas too. */}
-        <ThinkingOrb state={orb} size={64} theme="dark" speed={prefs.speed} {...({ "data-tauri-drag-region": true } as object)} />
+        <ThinkingOrb state={orb} size={64} theme="dark" speed={ORB_SPEED} {...({ "data-tauri-drag-region": true } as object)} />
         {!neo.connected && <span className="offline-dot" />}
       </div>
     );
@@ -298,21 +254,18 @@ export default function App() {
   return (
     <div className="card" onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)}>
       <header className="head" data-tauri-drag-region>
-        <div className="orb" data-tauri-drag-region><ThinkingOrb state={orb} size={64} theme="dark" speed={prefs.speed} gravity {...({ "data-tauri-drag-region": true } as object)} /></div>
+        <div className="orb" data-tauri-drag-region><ThinkingOrb state={orb} size={64} theme="dark" speed={ORB_SPEED} gravity {...({ "data-tauri-drag-region": true } as object)} /></div>
         <div className="head-text" data-tauri-drag-region>
           <div className="title" data-tauri-drag-region>NEO</div>
           <div className={"status" + (neo.connected ? "" : " off")} data-tauri-drag-region>{neo.connected ? LABEL[neo.state] : "core offline — run  python -m neo"}</div>
           {neo.note && busy && <div className="note" data-tauri-drag-region>{neo.note}</div>}
         </div>
         <div className="head-actions">
-          <button className={"icon" + (showSettings ? " on" : "")} title="Orb animations" onClick={() => setShowSettings((v) => !v)}>{Icon.gear}</button>
           <button className={"icon" + (pinned ? " on" : "")} title={pinned ? "Unpin (auto-hide when idle)" : "Pin open"} onClick={() => setPinned((p) => !p)}>{Icon.pin}</button>
           <button className="icon" title="Clear transcript" onClick={neo.clear}>{Icon.broom}</button>
           <button className="icon" title="Collapse (Esc)" onClick={() => setExpanded(false)}>{Icon.collapse}</button>
         </div>
       </header>
-
-      {showSettings && <OrbSettings prefs={prefs} onChange={updatePrefs} onClose={() => setShowSettings(false)} />}
 
       <div className="log" ref={logRef} onScroll={onScroll}>
         {neo.items.length === 0 && (

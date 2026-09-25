@@ -6,8 +6,6 @@ export type NeoState =
   | "idle" | "listening" | "thinking" | "working" | "searching" | "speaking" | "connecting" | "confirming";
 export type OrbState =
   | "breathing" | "listening" | "solving" | "working" | "searching" | "composing" | "connecting" | "shaping" | "weaving";
-export const NEO_STATES: NeoState[] = ["idle", "listening", "thinking", "working", "searching", "speaking", "connecting", "confirming"];
-export const ORB_STATES: OrbState[] = ["breathing", "listening", "solving", "working", "searching", "composing", "connecting", "shaping", "weaving"];
 const MIN_DWELL_MS = 350; // a state must show at least this long before the next one replaces it
 
 export interface TurnMeta { route: string; brain: string; model: string; ms: number; tools: number }

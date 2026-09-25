@@ -41,12 +41,12 @@ mic ─► wake word (local) ─► voice backend
 
 ### Orb ↔ state mapping
 
-| NEO state   | Default orb animation (user-configurable in the ⚙ panel) |
-|-------------|-----------------------------------------------------------|
+| NEO state   | Orb animation (`ui/src/App.tsx`) |
+|-------------|----------------------------------|
 | idle        | breathing   |
 | listening   | listening   |
 | thinking    | solving     |
-| working     | working     |
+| working     | solving     |
 | searching   | searching   |
 | speaking    | composing   |
 | connecting  | connecting  |

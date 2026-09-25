@@ -101,18 +101,18 @@ markdown replies, and under each reply which brain answered and how long it took
 flight the header shows what's happening ("Gemini 3.8 Flash overloaded, trying next"). The thinking-orb mirrors
 NEO's state:
 
-| NEO state | Default orb animation |
+| NEO state | Orb animation |
 |---|---|
 | idle | breathing |
 | listening (mic open) | listening |
 | thinking | solving |
-| working (running tools) | working |
+| working (running tools) | solving |
 | searching (web / search) | searching |
 | speaking | composing |
 | connecting (opening a voice session) | connecting |
 | confirming (waiting for your OK) | shaping |
 
-The ⚙ panel in the card lets you pick any of the nine animations for each state and set the speed; the choice is remembered on this Mac.
+The mapping lives in `ui/src/App.tsx` (`ORB`).
 
 ## Configuration
 
