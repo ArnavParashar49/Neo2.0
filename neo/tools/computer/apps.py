@@ -29,6 +29,18 @@ async def osascript(script: str, timeout: float = 30) -> str:
     return out
 
 
+async def _resolves(host: str, timeout: float = 2.0) -> bool:
+    """DNS check so an unknown name doesn't open a dead page."""
+    import socket
+
+    loop = asyncio.get_running_loop()
+    try:
+        await asyncio.wait_for(loop.getaddrinfo(host, 443, type=socket.SOCK_STREAM), timeout)
+        return True
+    except (OSError, TimeoutError):
+        return False
+
+
 async def open_app(name: str) -> str:
     # URLs and file paths go straight to `open`; app names via -a.
     if "://" in name or name.startswith(("/", "~")):
@@ -38,12 +50,17 @@ async def open_app(name: str) -> str:
     else:
         code, _, err = await _run(["open", "-a", name])
         if code != 0 and " " not in name.strip() and name.isascii():
-            # Not an installed app — a single word is almost always a website ("youtube", "github").
-            site = f"https://www.{name.strip().lower()}.com"
-            code, _, err = await _run(["open", site])
-            if code == 0:
-                await asyncio.sleep(0.6)
-                return f"No app called {name!r}; opened {site} in your browser"
+            # Not an installed app — a single word is almost always a website ("youtube", "github"),
+            # but only open it if the domain actually resolves.
+            host = f"www.{name.strip().lower()}.com"
+            if await _resolves(host):
+                site = f"https://{host}"
+                code, _, err = await _run(["open", site])
+                if code == 0:
+                    await asyncio.sleep(0.6)
+                    return f"No app called {name!r}; opened {site} in your browser"
+            else:
+                return f"Error: {name!r} isn't an installed app and {host} doesn't exist"
     if code != 0:
         return f"Error: couldn't open {name!r}: {err}"
     await asyncio.sleep(0.6)

@@ -303,3 +303,19 @@ def test_session_stale_confirmation_is_refused(monkeypatch):
 
 
 _ = re
+
+
+def test_open_app_unknown_name_checks_dns(monkeypatch):
+    from neo.tools.computer import apps
+
+    async def no_app(cmd, timeout=30):
+        return (1, "", "Unable to find application named 'x'") if cmd[:2] == ["open", "-a"] else (0, "", "")
+
+    monkeypatch.setattr(apps, "_run", no_app)
+
+    async def resolves(host, timeout=2.0):
+        return host == "www.github.com"
+
+    monkeypatch.setattr(apps, "_resolves", resolves)
+    assert "opened https://www.github.com" in asyncio.run(apps.open_app("github"))
+    assert "doesn't exist" in asyncio.run(apps.open_app("nosuchthingzz"))
