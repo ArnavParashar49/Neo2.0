@@ -15,8 +15,8 @@
       {
         "label": "main",
         "title": "NEO",
-        "width": 400,
-        "height": 560,
+        "width": 84,
+        "height": 84,
         "resizable": false,
         "transparent": true,
         "decorations": false,
@@ -25,7 +25,8 @@
         "visibleOnAllWorkspaces": true,
         "skipTaskbar": true,
         "focus": false,
-        "visible": true
+        "visible": true,
+        "acceptFirstMouse": true
       }
     ],
     "security": {
@@ -34,7 +35,10 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["app", "dmg"],
+    "targets": [
+      "app",
+      "dmg"
+    ],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

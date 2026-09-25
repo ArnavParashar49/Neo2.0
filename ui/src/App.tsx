@@ -1,126 +1,350 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ThinkingOrb } from "thinking-orbs";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
-import { getCurrentWindow, currentMonitor, LogicalPosition, LogicalSize } from "@tauri-apps/api/window";
-import { useNeo, type OrbState } from "./ws";
+import { getCurrentWindow, currentMonitor, primaryMonitor, LogicalPosition, LogicalSize } from "@tauri-apps/api/window";
+import { openUrl } from "@tauri-apps/plugin-opener";
+import { useNeo, NEO_STATES, ORB_STATES, type Item, type NeoState, type OrbState, type ToolRun, type TurnMeta } from "./ws";
 import "./App.css";
 
-const LABEL: Record<OrbState, string> = {
-  breathing: "Idle",
+const LABEL: Record<NeoState, string> = {
+  idle: "Ready",
   listening: "Listening…",
-  solving: "Thinking…",
+  thinking: "Thinking…",
   working: "Working…",
   searching: "Searching…",
-  composing: "Speaking…",
+  speaking: "Speaking…",
   connecting: "Connecting…",
-  shaping: "Needs your OK",
+  confirming: "Needs your OK",
 };
 
-const CARD = { w: 400, h: 560 };
-const PILL = { w: 220, h: 64 };
+/** Which thinking-orbs animation plays for each NEO state. Editable in the ⚙ panel; kept in localStorage. */
+const ORB_DEFAULTS: Record<NeoState, OrbState> = {
+  idle: "breathing",
+  listening: "listening",
+  thinking: "solving",
+  working: "working",
+  searching: "searching",
+  speaking: "composing",
+  connecting: "connecting",
+  confirming: "shaping",
+};
+type OrbPrefs = { map: Record<NeoState, OrbState>; speed: number };
+const PREFS_KEY = "neo.orb.prefs";
+function loadPrefs(): OrbPrefs {
+  try {
+    const raw = localStorage.getItem(PREFS_KEY);
+    if (raw) {
+      const p = JSON.parse(raw) as Partial<OrbPrefs>;
+      return { map: { ...ORB_DEFAULTS, ...(p.map ?? {}) }, speed: p.speed ?? 1 };
+    }
+  } catch { /* private mode etc. */ }
+  return { map: { ...ORB_DEFAULTS }, speed: 1 };
+}
+function savePrefs(p: OrbPrefs) { try { localStorage.setItem(PREFS_KEY, JSON.stringify(p)); } catch { /* ignore */ } }
 
-async function placeBottomRight(size: { w: number; h: number }) {
+const SUGGESTIONS = [
+  "What's on my screen?",
+  "Read my unread mail",
+  "Set a 10 minute timer",
+  "Open GitHub and search for thinking-orbs",
+];
+
+const CARD = { w: 400, h: 600 };
+const PILL = { w: 84, h: 84 }; // just the floating orb
+const IDLE_COLLAPSE_MS = 40_000;
+const inTauri = "__TAURI_INTERNALS__" in window;
+type Size = { w: number; h: number };
+
+async function workArea() {
+  const mon = (await currentMonitor()) ?? (await primaryMonitor());
+  if (!mon) return null;
+  const s = mon.scaleFactor;
+  // Work area excludes the Dock and menu bar so nothing ends up hidden behind them.
+  const area = (mon as unknown as { workArea?: { position: { x: number; y: number }; size: { width: number; height: number } } }).workArea;
+  const pos = area?.position ?? mon.position, dim = area?.size ?? mon.size;
+  return { x: pos.x / s, y: pos.y / s, w: dim.width / s, h: dim.height / s };
+}
+
+/** First placement: bottom-right corner of the work area. */
+async function placeInitial(size: Size) {
+  if (!inTauri) return;
+  try {
+    const a = await workArea();
+    if (!a) return;
+    const win = getCurrentWindow();
+    await win.setSize(new LogicalSize(size.w, size.h));
+    await win.setPosition(new LogicalPosition(a.x + a.w - size.w - 20, a.y + a.h - size.h - 20));
+  } catch { /* not inside Tauri */ }
+}
+
+/** Resize keeping the window's bottom-right corner where it is (so the card unfolds from the orb,
+ *  and the orb lands back where the card was), clamped to the work area. */
+async function resizeAnchored(size: Size) {
+  if (!inTauri) return;
   try {
     const win = getCurrentWindow();
-    const mon = await currentMonitor();
-    if (!mon) return;
-    const s = mon.scaleFactor;
-    // Use the work area (excludes the Dock and menu bar) so the input row is never hidden.
-    const area = (mon as unknown as { workArea?: { position: { x: number; y: number }; size: { width: number; height: number } } }).workArea;
-    const pos = area?.position ?? mon.position, dim = area?.size ?? mon.size;
+    const s = await win.scaleFactor();
+    const pos = await win.outerPosition();
+    const cur = await win.outerSize();
+    const right = pos.x / s + cur.width / s, bottom = pos.y / s + cur.height / s;
+    let x = right - size.w, y = bottom - size.h;
+    const a = await workArea();
+    if (a) {
+      x = Math.min(Math.max(x, a.x + 8), a.x + a.w - size.w - 8);
+      y = Math.min(Math.max(y, a.y + 8), a.y + a.h - size.h - 8);
+    }
     await win.setSize(new LogicalSize(size.w, size.h));
-    await win.setPosition(new LogicalPosition(pos.x / s + dim.width / s - size.w - 20, pos.y / s + dim.height / s - size.h - 20));
-  } catch { /* not running inside Tauri (vite dev in a browser) */ }
+    await win.setPosition(new LogicalPosition(x, y));
+  } catch { /* not inside Tauri */ }
+}
+
+function brainName(m: TurnMeta): string {
+  if (m.route === "quick") return "quick action · no model";
+  const model = m.model || m.brain;
+  const pretty = model
+    .replace(/^openai\//, "")
+    .replace(/^gemini-(\d+\.\d+)-flash$/, "Gemini $1 Flash")
+    .replace(/^gpt-oss-120b$/, "Groq gpt-oss-120b")
+    .replace(/^mlx-community\//, "")
+    .replace(/^claude-/, "Claude ");
+  return pretty || m.brain || "local";
+}
+
+function Meta({ m }: { m: TurnMeta }) {
+  const secs = (m.ms / 1000).toFixed(m.ms < 10_000 ? 1 : 0) + " s";
+  const tools = m.route === "agent" && m.tools ? ` · ${m.tools} tool${m.tools === 1 ? "" : "s"}` : "";
+  return <div className="meta">{brainName(m)}{tools} · {secs}</div>;
+}
+
+function Tools({ tools }: { tools: ToolRun[] }) {
+  return (
+    <div className="tools">
+      {tools.map((t, i) => (
+        <span key={i} className={"chip" + (t.running ? " running" : t.ok === false ? " fail" : " ok")} title={t.summary || JSON.stringify(t.args ?? {})}>
+          <span className="dot" />{t.name}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+function Md({ text }: { text: string }) {
+  return (
+    <ReactMarkdown
+      remarkPlugins={[remarkGfm]}
+      components={{
+        a: ({ href, children }) => (
+          <a href={href} onClick={(e) => { e.preventDefault(); if (href) (inTauri ? openUrl(href) : window.open(href, "_blank")); }}>{children}</a>
+        ),
+      }}
+    >
+      {text}
+    </ReactMarkdown>
+  );
+}
+
+const Icon = {
+  mic: <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"><rect x="9" y="3" width="6" height="11" rx="3" /><path d="M5 11a7 7 0 0 0 14 0M12 18v3" /></svg>,
+  stop: <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2" /></svg>,
+  send: <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M12 19V5M5 12l7-7 7 7" /></svg>,
+  collapse: <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"><path d="M6 12h12" /></svg>,
+  pin: <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M12 17v5M8 3h8l-1 7 3 3H6l3-3z" /></svg>,
+  broom: <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"><path d="M4 20h16M6 20l2-8h8l2 8M12 12V4" /></svg>,
+  gear: <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z" /></svg>,
+};
+
+function OrbSettings({ prefs, onChange, onClose }: { prefs: OrbPrefs; onChange: (p: OrbPrefs) => void; onClose: () => void }) {
+  return (
+    <div className="settings">
+      <div className="settings-head">
+        <span>Orb animations</span>
+        <button className="link" onClick={() => onChange({ map: { ...ORB_DEFAULTS }, speed: 1 })}>Reset</button>
+        <button className="icon" onClick={onClose}>{Icon.collapse}</button>
+      </div>
+      <div className="settings-grid">
+        {NEO_STATES.map((st) => (
+          <label key={st} className="settings-row">
+            <span className="settings-state">{LABEL[st]}</span>
+            <ThinkingOrb state={prefs.map[st]} size={20} theme="dark" speed={prefs.speed} />
+            <select value={prefs.map[st]} onChange={(e) => onChange({ ...prefs, map: { ...prefs.map, [st]: e.target.value as OrbState } })}>
+              {ORB_STATES.map((o) => <option key={o} value={o}>{o}</option>)}
+            </select>
+          </label>
+        ))}
+        <label className="settings-row">
+          <span className="settings-state">Speed</span>
+          <input type="range" min={0.5} max={2} step={0.1} value={prefs.speed} onChange={(e) => onChange({ ...prefs, speed: Number(e.target.value) })} />
+          <span className="settings-val">{prefs.speed.toFixed(1)}×</span>
+        </label>
+      </div>
+    </div>
+  );
 }
 
 export default function App() {
   const neo = useNeo();
-  const [expanded, setExpanded] = useState(true);
+  const [expanded, setExpanded] = useState(false);
+  const [pinned, setPinned] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
+  const [prefs, setPrefs] = useState<OrbPrefs>(loadPrefs);
+  const orb = prefs.map[neo.state] ?? ORB_DEFAULTS[neo.state];
+  const updatePrefs = (p: OrbPrefs) => { setPrefs(p); savePrefs(p); };
   const [text, setText] = useState("");
+  const [hover, setHover] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
-  const scrollRef = useRef<HTMLDivElement>(null);
+  const logRef = useRef<HTMLDivElement>(null);
+  const stickToBottom = useRef(true);
+  const lastInput = useRef("");
+  const init = useRef<Promise<void> | null>(null);
+  const press = useRef<{ x: number; y: number } | null>(null);
 
-  useEffect(() => { placeBottomRight(expanded ? CARD : PILL); }, [expanded]);
+  // A window drag ends with a click event whose client coords match the press (the window moved
+  // with the cursor), so compare *screen* coords to tell a drag from a click.
+  const onOrbDown = (e: React.MouseEvent) => { press.current = { x: e.screenX, y: e.screenY }; };
+  const onOrbClick = (e: React.MouseEvent) => {
+    const p = press.current;
+    press.current = null;
+    if (p && Math.hypot(e.screenX - p.x, e.screenY - p.y) > 4) return; // it was a drag
+    expand();
+  };
+
+  const expand = useCallback(() => {
+    setExpanded(true);
+    setTimeout(() => inputRef.current?.focus(), 60);
+  }, []);
 
   useEffect(() => {
-    if (!("__TAURI_INTERNALS__" in window)) return; // plain browser (vite dev) — no native events
-    const un = listen("neo://wake", () => {
-      setExpanded(true);
-      neo.send({ cmd: "wake" });
-      setTimeout(() => inputRef.current?.focus(), 50);
-    });
+    // First mount: park the orb bottom-right. Every later change resizes around the orb's own
+    // corner — after the initial placement has finished, so a StrictMode double-run can't race it.
+    if (!init.current) { init.current = placeInitial(PILL); return; }
+    init.current.then(() => resizeAnchored(expanded ? CARD : PILL));
+  }, [expanded]);
+
+
+  // Native summon (hotkey / tray) → expand + arm the voice session.
+  useEffect(() => {
+    if (!inTauri) return;
+    const un = listen("neo://wake", () => { expand(); neo.send({ cmd: "wake" }); });
     return () => { un.then((f) => f()).catch(() => {}); };
-  }, [neo.send]);
+  }, [neo.send, expand]);
 
+  // A confirmation request always surfaces the card.
+  useEffect(() => { if (neo.state === "confirming") expand(); }, [neo.state, expand]);
+
+  // Auto-collapse after a quiet stretch unless pinned, hovered, or being typed into.
   useEffect(() => {
-    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
-  }, [neo.lines, neo.tool]);
+    if (!expanded || pinned || hover || showSettings || neo.state !== "idle") return;
+    const t = window.setTimeout(() => {
+      if (document.activeElement === inputRef.current && text) return;
+      setExpanded(false);
+    }, IDLE_COLLAPSE_MS);
+    return () => clearTimeout(t);
+  }, [expanded, pinned, hover, showSettings, neo.state, neo.items, text]);
 
+  // Follow new content only when the user hasn't scrolled up.
   useEffect(() => {
-    if (neo.state === "shaping") setExpanded(true);
-  }, [neo.state]);
+    const el = logRef.current;
+    if (el && stickToBottom.current) el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+  }, [neo.items, neo.state]);
 
-  const submit = () => {
-    const t = text.trim();
-    if (!t) return;
-    neo.send({ cmd: "text", text: t });
+  const onScroll = () => {
+    const el = logRef.current;
+    if (el) stickToBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
+  };
+
+  const submit = (t = text) => {
+    const v = t.trim();
+    if (!v) return;
+    lastInput.current = v;
+    stickToBottom.current = true;
+    neo.send({ cmd: "text", text: v });
     setText("");
   };
 
   const onKey = (e: React.KeyboardEvent) => {
     if (e.key === "Enter") submit();
-    if (e.key === "Escape") { setExpanded(false); invoke("hide_window").catch(() => {}); }
+    else if (e.key === "Escape") { setExpanded(false); }
+    else if (e.key === "ArrowUp" && !text) setText(lastInput.current);
   };
 
-  const busy = !["breathing", "listening"].includes(neo.state);
-  const last = [...neo.lines].reverse().find((l) => l.role === "assistant");
+  // Global keys while the card is up: ⏎ / ⎋ answer a confirmation.
+  useEffect(() => {
+    if (neo.state !== "confirming") return;
+    const h = (e: KeyboardEvent) => {
+      if (e.key === "Enter") { e.preventDefault(); neo.send({ cmd: "confirm", yes: true }); }
+      if (e.key === "Escape") { e.preventDefault(); neo.send({ cmd: "confirm", yes: false }); }
+    };
+    window.addEventListener("keydown", h);
+    return () => window.removeEventListener("keydown", h);
+  }, [neo.state, neo.send]);
+
+  const busy = !["idle", "listening"].includes(neo.state);
+  const lastReply = [...neo.items].reverse().find((i) => i.kind === "msg" && i.role === "assistant") as Extract<Item, { kind: "msg" }> | undefined;
+  const question = neo.state === "confirming" ? lastReply?.text : undefined;
 
   if (!expanded) {
     return (
-      <div className="pill" data-tauri-drag-region onClick={() => setExpanded(true)}>
-        <ThinkingOrb state={neo.state} size={32} theme="dark" />
-        <div className="pill-text">
-          <div className="pill-title">NEO</div>
-          <div className="pill-sub">{neo.connected ? LABEL[neo.state] : "offline"}</div>
-        </div>
+      <div className="pill" data-tauri-drag-region title={neo.connected ? "Click to open · drag to move · ⌘⇧Space" : "NEO core is offline"} onMouseDown={onOrbDown} onClick={onOrbClick}>
+        {/* Tauri only starts a window drag from the element that carries the attribute, so it goes on the canvas too. */}
+        <ThinkingOrb state={orb} size={64} theme="dark" speed={prefs.speed} {...({ "data-tauri-drag-region": true } as object)} />
+        {!neo.connected && <span className="offline-dot" />}
       </div>
     );
   }
 
   return (
-    <div className="card">
+    <div className="card" onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)}>
       <header className="head" data-tauri-drag-region>
-        <ThinkingOrb state={neo.state} size={64} theme="dark" gravity />
-        <div className="head-text">
-          <div className="title">NEO</div>
-          <div className={"status" + (neo.connected ? "" : " off")}>{neo.connected ? LABEL[neo.state] : "core offline — run `python -m neo`"}</div>
-          {neo.tool && (
-            <div className={"tool" + (neo.tool.running ? " running" : neo.tool.ok === false ? " fail" : "")}>
-              {neo.tool.running ? "▶" : neo.tool.ok === false ? "✕" : "✓"} {neo.tool.name}
-              {!neo.tool.running && neo.tool.summary ? ` — ${neo.tool.summary.slice(0, 60)}` : ""}
-            </div>
-          )}
+        <div className="orb" data-tauri-drag-region><ThinkingOrb state={orb} size={64} theme="dark" speed={prefs.speed} gravity {...({ "data-tauri-drag-region": true } as object)} /></div>
+        <div className="head-text" data-tauri-drag-region>
+          <div className="title" data-tauri-drag-region>NEO</div>
+          <div className={"status" + (neo.connected ? "" : " off")} data-tauri-drag-region>{neo.connected ? LABEL[neo.state] : "core offline — run  python -m neo"}</div>
+          {neo.note && busy && <div className="note" data-tauri-drag-region>{neo.note}</div>}
         </div>
-        <button className="ghost" title="Collapse (Esc hides)" onClick={() => setExpanded(false)}>–</button>
+        <div className="head-actions">
+          <button className={"icon" + (showSettings ? " on" : "")} title="Orb animations" onClick={() => setShowSettings((v) => !v)}>{Icon.gear}</button>
+          <button className={"icon" + (pinned ? " on" : "")} title={pinned ? "Unpin (auto-hide when idle)" : "Pin open"} onClick={() => setPinned((p) => !p)}>{Icon.pin}</button>
+          <button className="icon" title="Clear transcript" onClick={neo.clear}>{Icon.broom}</button>
+          <button className="icon" title="Collapse (Esc)" onClick={() => setExpanded(false)}>{Icon.collapse}</button>
+        </div>
       </header>
 
-      <div className="log" ref={scrollRef}>
-        {neo.lines.length === 0 && (
-          <div className="hint">Say <b>“Hey Neo”</b>, press <b>⌘⇧Space</b>, or type below.</div>
+      {showSettings && <OrbSettings prefs={prefs} onChange={updatePrefs} onClose={() => setShowSettings(false)} />}
+
+      <div className="log" ref={logRef} onScroll={onScroll}>
+        {neo.items.length === 0 && (
+          <div className="empty">
+            <div className="empty-hint">Say <b>“Hey Neo”</b>, or try one of these</div>
+            <div className="suggest">
+              {SUGGESTIONS.map((s) => <button key={s} onClick={() => submit(s)}>{s}</button>)}
+            </div>
+          </div>
         )}
-        {neo.lines.map((l, i) => (
-          <div key={i} className={"line " + l.role + (l.final ? "" : " partial")}>{l.text}</div>
-        ))}
-        {neo.error && <div className="line system">{neo.error}</div>}
+        {neo.items.map((it, idx) =>
+          (neo.state === "confirming" && it.kind === "msg" && it === lastReply && idx === neo.items.length - 1) ? null :
+          it.kind === "tools" ? (
+            <Tools key={it.id} tools={it.tools} />
+          ) : it.role === "user" ? (
+            <div key={it.id} className={"msg user" + (it.final ? "" : " partial")}>{it.text}</div>
+          ) : (
+            <div key={it.id} className={"msg assistant" + (it.final ? "" : " partial")}>
+              <Md text={it.text} />
+              {it.meta && <Meta m={it.meta} />}
+            </div>
+          ),
+        )}
+        {neo.error && <div className="msg system">{neo.error}</div>}
       </div>
 
-      {neo.state === "shaping" ? (
+      {neo.state === "confirming" ? (
         <div className="confirm">
-          <div className="confirm-q">{last?.text ?? "Go ahead?"}</div>
+          <div className="confirm-q">{question ?? "Go ahead?"}</div>
           <div className="confirm-btns">
-            <button className="primary" onClick={() => neo.send({ cmd: "confirm", yes: true })}>Yes, do it</button>
-            <button onClick={() => neo.send({ cmd: "confirm", yes: false })}>No</button>
+            <button className="primary" onClick={() => neo.send({ cmd: "confirm", yes: true })}>Yes, do it <kbd>⏎</kbd></button>
+            <button onClick={() => neo.send({ cmd: "confirm", yes: false })}>No <kbd>esc</kbd></button>
           </div>
         </div>
       ) : (
@@ -133,18 +357,26 @@ export default function App() {
             placeholder={busy ? "Working… type to queue" : "Ask NEO to do anything…"}
             spellCheck={false}
           />
-          <button
-            className={"mic" + (neo.state === "listening" ? " live" : "")}
-            title="Push to talk (hold)"
-            onMouseDown={() => neo.send({ cmd: "ptt", on: true })}
-            onMouseUp={() => neo.send({ cmd: "ptt", on: false })}
-            onMouseLeave={() => neo.send({ cmd: "ptt", on: false })}
-          >
-            ●
-          </button>
-          {busy && <button className="stop" title="Stop" onClick={() => neo.send({ cmd: "stop" })}>■</button>}
+          {text ? (
+            <button className="icon accent" title="Send" onClick={() => submit()}>{Icon.send}</button>
+          ) : (
+            <button
+              className={"icon" + (neo.state === "listening" ? " live" : "")}
+              title="Hold to talk"
+              onMouseDown={() => neo.send({ cmd: "ptt", on: true })}
+              onMouseUp={() => neo.send({ cmd: "ptt", on: false })}
+              onMouseLeave={() => neo.send({ cmd: "ptt", on: false })}
+            >
+              {Icon.mic}
+            </button>
+          )}
+          {busy && <button className="icon danger" title="Stop" onClick={() => neo.send({ cmd: "stop" })}>{Icon.stop}</button>}
         </div>
       )}
+      <div className="hide-btn-hint" aria-hidden />
     </div>
   );
 }
+
+// Hide the window fully from the tray / app menu (kept for the Rust side).
+export const hideWindow = () => invoke("hide_window").catch(() => {});

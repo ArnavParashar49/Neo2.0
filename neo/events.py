@@ -15,16 +15,16 @@ from typing import Any
 
 
 class NeoState(StrEnum):
-    """Maps 1:1 onto thinking-orbs states."""
+    """Semantic states. The overlay maps each one to a thinking-orbs animation (user-configurable)."""
 
-    IDLE = "breathing"
+    IDLE = "idle"
     LISTENING = "listening"
-    THINKING = "solving"
+    THINKING = "thinking"
     WORKING = "working"
     SEARCHING = "searching"
-    SPEAKING = "composing"
+    SPEAKING = "speaking"
     CONNECTING = "connecting"
-    CONFIRMING = "shaping"
+    CONFIRMING = "confirming"
 
 
 @dataclass
@@ -74,6 +74,10 @@ class EventBus:
     # Convenience wrappers used all over the codebase -----------------------------------
     async def say(self, text: str, *, final: bool = True, role: str = "assistant") -> None:
         await self.publish("transcript", role=role, text=text, final=final)
+
+    async def note(self, text: str) -> None:
+        """Short progress line for the UI while a turn is in flight (provider fallbacks etc.)."""
+        await self.publish("note", text=text)
 
     async def tool_start(self, name: str, args: dict[str, Any]) -> None:
         await self.publish("tool_start", name=name, args=args)

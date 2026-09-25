@@ -41,16 +41,16 @@ mic ─► wake word (local) ─► voice backend
 
 ### Orb ↔ state mapping
 
-| Orb state   | NEO state                            |
-|-------------|--------------------------------------|
-| breathing   | idle                                 |
-| listening   | mic open / user speaking             |
-| solving     | brain thinking                       |
-| working     | executing tools                      |
-| searching   | web / tool search                    |
-| composing   | speaking a reply                     |
-| connecting  | provider / voice session handshake   |
-| shaping     | waiting for user confirmation        |
+| NEO state   | Default orb animation (user-configurable in the ⚙ panel) |
+|-------------|-----------------------------------------------------------|
+| idle        | breathing   |
+| listening   | listening   |
+| thinking    | solving     |
+| working     | working     |
+| searching   | searching   |
+| speaking    | composing   |
+| connecting  | connecting  |
+| confirming  | shaping     |
 
 ## Phases
 
