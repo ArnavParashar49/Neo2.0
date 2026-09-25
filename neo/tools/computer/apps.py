@@ -98,20 +98,27 @@ end tell"""
     )
 
 
-async def mail_unread(limit: int = 10) -> str:
+async def mail_unread(limit: int = 10, scan: int = 150) -> str:
+    """Newest unread messages. Scans only the newest `scan` messages: Mail's `whose read status
+    is false` filter drops the connection (-609) on inboxes with thousands of unread mails."""
     script = f"""
 tell application "Mail"
+  set total to unread count of inbox
   set out to ""
-  set msgs to (messages of inbox whose read status is false)
   set n to 0
-  repeat with m in msgs
-    set out to out & (sender of m) & " | " & (subject of m) & " | " & (date received of m as string) & linefeed
-    set n to n + 1
-    if n ≥ {int(limit)} then exit repeat
+  set toScan to count of messages of inbox
+  if toScan > {int(scan)} then set toScan to {int(scan)}
+  repeat with i from 1 to toScan
+    set m to message i of inbox
+    if read status of m is false then
+      set out to out & (sender of m) & " | " & (subject of m) & " | " & (date received of m as string) & linefeed
+      set n to n + 1
+      if n ≥ {int(limit)} then exit repeat
+    end if
   end repeat
-  return out
+  return (total as string) & " unread in total. Newest:" & linefeed & out
 end tell"""
-    r = await osascript(script, timeout=60)
+    r = await osascript(script, timeout=45)
     return r or "No unread mail."
 
 

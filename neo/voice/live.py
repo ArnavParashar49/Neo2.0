@@ -45,6 +45,9 @@ _DIRECT_TOOLS = {
     "web_search",
     "reminder_add",
     "apps_running",
+    "mail_unread",
+    "notes_create",
+    "safari_open",
 }
 _IDLE_CLOSE_S = 90.0
 _CONNECT_TIMEOUT_S = 12.0
@@ -350,7 +353,9 @@ class LiveVoice:
                 result = reply.text
             else:
                 await bus().set_state(NeoState.WORKING)
+                await bus().tool_start(fc.name, args)
                 out = await registry().invoke(fc.name, args, ToolContext(user_text=str(args)))
+                await bus().tool_end(fc.name, out.ok, out.text)
                 result = out.text
         except asyncio.CancelledError:
             result = "cancelled by the user"

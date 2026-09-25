@@ -68,6 +68,21 @@ class App:
                 await self.voice.wake("ui")
 
 
+def _log_activity(ev) -> None:
+    """One line per tool call / route decision in the core log (what the REPL's -v shows)."""
+    d = ev.data
+    if ev.type == "tool_start":
+        print(f"  ▶ {d['name']} {str(d.get('args', {}))[:120]}")
+    elif ev.type == "tool_end":
+        print(f"  ◀ {d['name']} {'ok' if d['ok'] else 'FAIL'}: {str(d.get('summary', ''))[:140]}")
+    elif ev.type == "reflex":
+        print(f"  ~ {d['intent']} ({d['intent_confidence']:.2f}) via {d['source']} {d['latency_ms']:.0f}ms")
+    elif ev.type == "turn":
+        print(
+            f"  = {d['route']} via {d.get('model') or d.get('brain') or '-'} in {d['ms']}ms, {d['tools']} tools"
+        )
+
+
 async def _lag_monitor() -> None:
     """Log when the event loop stalls — a stalled loop silently kills websockets (keepalive)."""
     import time
@@ -98,6 +113,7 @@ async def run() -> None:
 
     await bus().set_state(NeoState.IDLE)
     asyncio.create_task(_lag_monitor())
+    bus().subscribe(_log_activity)
     print("NEO is running. Say 'Hey Neo', or type in the overlay.")
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()

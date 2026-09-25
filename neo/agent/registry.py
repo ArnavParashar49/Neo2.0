@@ -60,6 +60,7 @@ class RegisteredTool:
     slow: bool = False  # UI speaks a filler while it runs
     fast_path: list[tuple[str, dict[str, Any]]] = field(default_factory=list)  # (regex, args)
     hidden: bool = False  # not exposed to the model (internal/UI-only)
+    timeout: float = 120.0  # seconds; a hung tool returns an error instead of stalling the loop
 
     def spec(self) -> ToolSpec:
         return ToolSpec(self.name, self.description, self.parameters)
@@ -101,7 +102,7 @@ class Registry:
         try:
             r = t.handler(args or {}, ctx)
             if inspect.isawaitable(r):
-                r = await r
+                r = await asyncio.wait_for(r, t.timeout)
             if isinstance(r, ToolOutput):
                 return r
             text = (r or "Done.").strip() if isinstance(r, str) else str(r)
@@ -109,6 +110,8 @@ class Registry:
             return ToolOutput(text, ok=ok)
         except asyncio.CancelledError:
             raise
+        except TimeoutError:
+            return ToolOutput(f"Error: {name} took longer than {int(t.timeout)}s and was stopped", ok=False)
         except Exception as e:  # noqa: BLE001 — tool failures are data for the model
             return ToolOutput(f"Error: {name} failed: {e}", ok=False)
 
@@ -134,6 +137,7 @@ def tool(
     slow: bool = False,
     fast_path: list[tuple[str, dict[str, Any]]] | None = None,
     hidden: bool = False,
+    timeout: float = 120.0,
 ) -> Callable[[Handler], Handler]:
     def deco(fn: Handler) -> Handler:
         registry().register(
@@ -148,6 +152,7 @@ def tool(
                 slow=slow,
                 fast_path=fast_path or [],
                 hidden=hidden,
+                timeout=timeout,
             )
         )
         return fn

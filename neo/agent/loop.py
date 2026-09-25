@@ -127,12 +127,16 @@ async def run_agent(
     images: list | None = None,
     verify: bool = True,
     idle_on_finish: bool = True,
+    max_seconds: float | None = None,
 ) -> AgentResult:
     s = settings()
     reg = reg or default_registry()
     ev = ev or default_bus()
     ctx = ctx or ToolContext(user_text=goal)
     max_steps = max_steps or s.max_steps
+    import time as _time
+
+    deadline = _time.monotonic() + (max_seconds or s.max_seconds)
 
     messages: list[Message] = list(history or [])
     if goal:
@@ -145,6 +149,16 @@ async def run_agent(
     verified = False
 
     for _ in range(max_steps):
+        if _time.monotonic() > deadline:
+            await _settle(ev, idle_on_finish)
+            summary = "; ".join(f"{st.tool}: {'ok' if st.ok else 'failed'}" for st in steps[-4:])
+            return AgentResult(
+                f"This is taking longer than I allow myself ({int(max_seconds or s.max_seconds)}s), so I stopped. "
+                f"Last steps — {summary or 'none'}.",
+                "max_steps",
+                steps,
+                messages,
+            )
         await ev.set_state(NeoState.THINKING)
         try:
             turn: Turn = await provider.complete(messages, system=system, tools=tools, effort=effort)

@@ -312,9 +312,10 @@ async def mail_send(a: dict, c: ToolContext) -> str:
     parallel_safe=True,
     category="apps",
     slow=True,
+    timeout=50,
 )
 async def mail_unread(a: dict, c: ToolContext) -> str:
-    return await apps.mail_unread(int(a.get("limit", 10)))
+    return await apps.mail_unread(int(a.get("limit") or 10))
 
 
 @tool("calendar_today", "List today's calendar events.", _OBJ, parallel_safe=True, category="apps")

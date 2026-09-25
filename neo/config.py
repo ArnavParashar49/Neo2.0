@@ -61,6 +61,7 @@ class Settings(BaseSettings):
 
     # ---- agent -----------------------------------------------------------------------
     max_steps: int = 24
+    max_seconds: float = 180.0  # wall-clock budget for one agent run
     max_tool_result_chars: int = 6000
     confirm_destructive: bool = True
 

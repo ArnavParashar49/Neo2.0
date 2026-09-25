@@ -95,6 +95,14 @@ mic ─► wake word (local) ─► voice backend
 - Memory: hybrid FTS5 + embedding recall (Laya's encoder), session summaries at shutdown.
 - Reflex head retrained on ~3k items (templates + LLM-generated, cross-labelled): 96.0% held-out at ~165 ms.
 
+### Hardening after first real voice use (2026-09-26)
+
+- `session.receive()` yields one turn: re-enter it for the session's lifetime (the "answers once" bug).
+- Half-duplex mic while NEO speaks; speaker hysteresis; single voice state machine; 350 ms UI dwell.
+- Per-tool timeouts (registry), 180 s wall-clock budget per agent run, Live connect timeout + auto-reconnect.
+- `mail_unread` scans the newest messages instead of a `whose` filter (10k-unread inboxes drop the connection).
+- Core log now prints routing, tool calls and per-turn brain/latency.
+
 ### Next
 
 - `npm run tauri build` → signed NEO.app that spawns the Python core itself.
