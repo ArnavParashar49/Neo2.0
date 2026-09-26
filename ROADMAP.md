@@ -146,6 +146,13 @@ Two adversarial reviews (≈235 agents) confirmed 44 defects in the silent-comma
 - Fixes: WindowServer focus switch (`neo/tools/computer/focus.py`, the SkyLight calls AltTab/yabai use) — 0.15–0.2 s from the background, verified while the user was in Claude; front app and running apps read fresh from LaunchServices (`lsappinfo`); a Cocoa run-loop pump in the core; every keystroke/typing/click goes only to NEO's target app, confirmed in front, else NEEDS_USER and nothing is sent.
 - Live: a plain command the model wraps in agent_task runs through the fast paths on the user's own words.
 
+### Faster answers + Laya learns from use (2026-09-26)
+
+- Weather tool on Open-Meteo (free, no key; "here" = remembered city → `NEO_HOME_LOCATION` → IP location): first spoken word ~2.5 s, was ~40 s through search + agent.
+- Web search races DuckDuckGo, Brave and Bing (first with results wins, 4 s cap): ~1 s per search, was 2–6 s. Live: at most 2 searches + 1 page read per question, identical calls answered once, news=true for "latest" questions, simple questions never go to the agent. "Who won the last F1 race": first word at 3.9 s, was 18.7 s.
+- Laya learns from use (`neo/reflex/learn.py`): what actually happened labels each request — Live's tool choice (none → chat, one tool → quick action, agent_task), or the agent needing no tool / one fast tool. Rows in `~/.neo/reflex_extra.jsonl` (weighted 3×, always trained on); after ≥30 new rows and 3 idle minutes the heads retrain in-process on the loaded Laya and hot-swap — only if they score at least as well on a fixed hash-based held-out set.
+- Tests are isolated from the real `~/.neo` (a leaked row and earlier test artefacts in memory were removed; backup kept).
+
 ### Next
 
 - `npm run tauri build` → signed NEO.app that spawns the Python core itself.

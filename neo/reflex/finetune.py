@@ -197,11 +197,42 @@ def _reply_label(r: dict) -> int:
     return int(wants_reply(r["text"]))
 
 
+_SPLIT = "hash5-v1"
+_FLOOR = 0.85  # with nothing comparable, a new head must at least clear this
+
+
+def _held_out(text: str) -> bool:
+    import hashlib
+
+    return int(hashlib.md5(text.strip().lower().encode()).hexdigest(), 16) % 5 == 0
+
+
+def _score_current_head(path, X: np.ndarray, y: np.ndarray, te: np.ndarray) -> float | None:
+    try:
+        h = json.loads(path.read_text())
+        # Only a head trained on the same fixed split never saw these rows.
+        if h.get("version") != 2 or h.get("split") != _SPLIT or len(h["mu"]) != X.shape[1]:
+            return None
+        blk = h["intent"]
+        layers = [(np.array(W, np.float32), np.array(b, np.float32)) for W, b in blk["layers"]] if "layers" in blk else [
+            (np.array(blk["W"], np.float32), np.zeros(len(blk["W"]), np.float32))
+        ]
+        mu, sd = np.array(h["mu"], np.float32), np.array(h["sd"], np.float32)
+        pred = forward(layers, (X[te] - mu) / sd).argmax(1)
+        return float((pred == y[te]).mean())
+    except Exception:  # noqa: BLE001 — no head yet, or an unreadable one
+        return None
+
+
 def _dump(layers: list[tuple[np.ndarray, np.ndarray]]) -> list[list]:
     return [[W.tolist(), b.tolist()] for W, b in layers]
 
 
 def main() -> None:
+    train(_parser().parse_args())
+
+
+def _parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser()
     ap.add_argument("--refresh", action="store_true", help="re-extract features even if cached")
     ap.add_argument("--per-class", type=int, default=640)
@@ -209,8 +240,23 @@ def main() -> None:
     ap.add_argument("--zs-below", type=float, default=0.6, help="intent confidence under which zero-shot is consulted")
     ap.add_argument("--linear", action="store_true", help="linear heads instead of the small MLP")
     ap.add_argument("--own-weight", type=float, default=3.0, help="loss weight of NEO's own rows vs Hugging Face rows")
-    args = ap.parse_args()
+    ap.add_argument("--force", action="store_true", help="save the new head even if it scores lower")
+    return ap
 
+
+def defaults() -> argparse.Namespace:
+    return _parser().parse_args([])
+
+
+def train(args: argparse.Namespace, *, agent=None, lock=None) -> dict:
+    """Build the data, fill the feature cache, fit every head, save if it doesn't regress.
+
+    `agent`/`lock`: reuse a Laya instance that is already loaded (the running core) instead of
+    loading a second copy; every call into it holds `lock` (MPS is not thread-safe)."""
+    from contextlib import nullcontext
+
+    lock = lock or nullcontext()
+    quiet = agent is not None  # inside the core: no progress bars in the log
     rows = build(args.per_class)
     texts = [r["text"] for r in rows]
     y_intent = np.array([_INTENTS.index(r["intent"]) for r in rows])
@@ -229,33 +275,47 @@ def main() -> None:
             t_texts = [z["texts"][i] for i in z["teacher_idx"]]
         teach_by = {t: (d, s) for t, d, s in zip(t_texts, z["teacher"], z["zs"], strict=True)}
         print(f"cache: {len(emb_by)} embeddings, {len(teach_by)} teacher rows", file=sys.stderr)
+    # Teacher rows: those already labelled first, so new data doesn't reshuffle the sample and
+    # force hundreds of fresh ~130 ms zero-shot calls; the rest topped up at random.
     rng = np.random.default_rng(0)
     per = max(1, args.teacher // len(_INTENTS))
-    tidx = np.concatenate([rng.permutation(np.where(y_intent == i)[0])[:per] for i in range(len(_INTENTS))])
+    picked = []
+    for i in range(len(_INTENTS)):
+        idx = np.where(y_intent == i)[0]
+        cached = [j for j in idx if texts[j] in teach_by][:per]
+        rest = [j for j in rng.permutation(idx) if texts[j] not in teach_by][: per - len(cached)]
+        picked.append(np.array(cached + rest, dtype=int))
+    tidx = np.concatenate(picked)
     need_emb = [t for t in dict.fromkeys(texts) if t not in emb_by]
     need_teach = [texts[i] for i in tidx if texts[i] not in teach_by]
     if need_emb or need_teach:
-        import laya
+        if agent is None:
+            import laya
 
-        t0 = time.time()
-        agent = laya.load("convaiinnovations/laya", device=settings().laya_device)
-        print(f"laya loaded in {time.time() - t0:.1f}s", file=sys.stderr)
+            t0 = time.time()
+            agent = laya.load("convaiinnovations/laya", device=settings().laya_device)
+            print(f"laya loaded in {time.time() - t0:.1f}s", file=sys.stderr)
         if need_emb:
             t0 = time.time()
-            for t, e in zip(need_emb, embed_only(agent, need_emb, progress=True), strict=True):
-                emb_by[t] = e
+            for i in range(0, len(need_emb), 64):
+                chunk = need_emb[i : i + 64]
+                with lock:
+                    embs = embed_only(agent, chunk, progress=False)
+                for t, e in zip(chunk, embs, strict=True):
+                    emb_by[t] = e
             print(f"{len(need_emb)} embeddings in {time.time() - t0:.0f}s", file=sys.stderr)
         if need_teach:
             q = questions_for([])
             t0 = time.time()
             for n, t in enumerate(need_teach):
-                ans = agent.system_one({"text": t}, q)["answers"]
+                with lock:
+                    ans = agent.system_one({"text": t}, q)["answers"]
                 p = ans["intent"].get("probabilities", {})
                 teach_by[t] = (
                     np.array([float(ans["destructive"].get("noul", 0.0)), float(ans["needs_screen"].get("noul", 0.0))], np.float32),
                     np.array([float(p.get(k, 0.0)) for k in _INTENTS], np.float32),
                 )
-                if n % 100 == 0:
+                if n % 100 == 0 and not quiet:
                     print(f"\r  teacher {n}/{len(need_teach)}", end="", file=sys.stderr)
             print(f"\n  {len(need_teach)} teacher labels in {time.time() - t0:.0f}s", file=sys.stderr)
         np.savez(
@@ -276,10 +336,12 @@ def main() -> None:
     X = np.hstack([blocks["emb"], np.ones((len(texts), 1), np.float32)]).astype(np.float32)
     mu, sd = standardise(X)
     Xs = (X - mu) / sd
-    rng = np.random.default_rng(0)
-    idx = rng.permutation(len(rows))
-    cut = int(len(rows) * 0.8)
-    tr, te = idx[:cut], idx[cut:]
+    # A fixed held-out set: ~20% of sentences by a hash of their text, identical in every run,
+    # so the current head and a new one can be compared fairly. The user's own examples are
+    # always trained on — learning from them is the point.
+    own = np.array([r.get("source") == "reflex_extra.jsonl" for r in rows])
+    held = np.array([_held_out(t) for t in texts]) & ~own
+    te, tr = np.where(held)[0], np.where(~held)[0]
     tr_set = set(tr.tolist())
 
     # ---- intent --------------------------------------------------------------------------
@@ -349,10 +411,26 @@ def main() -> None:
     L_tool, acc_tool, _, T_tool = _fit(Xt, y_tool, len(classes), t_tr, t_te, "tool", classes, weights=weights[t_rows], mlp=mlp)
 
     head_path = settings().data_dir / "reflex_head.json"
+    # Judge the current head on *this* held-out split — scores from different data aren't
+    # comparable. (It may have trained on some of these rows, which only flatters it.)
+    prev = _score_current_head(head_path, X, y_intent, te)
+    report = {"rows": len(rows), "intent": acc_int, "tool": acc_tool, "reply": acc_reply, "previous": prev, "saved": False}
+    if prev is not None:
+        print(f"  current head on the same held-out rows: {prev:.3f}  (new: {acc_int:.3f})")
+    if prev is not None and acc_int < prev - 0.005 and not args.force:
+        print(f"\nkept the current head: new intent {acc_int:.3f} < current {prev:.3f}")
+        return report
+    if prev is None and acc_int < _FLOOR and not args.force:
+        print(f"\nkept the current head: new intent {acc_int:.3f} is below the {_FLOOR} floor")
+        return report
+    if head_path.exists():
+        head_path.with_suffix(".prev.json").write_text(head_path.read_text())  # one step of undo
+    report["saved"] = True
     head_path.write_text(
         json.dumps(
             {
                 "version": 2,
+                "split": _SPLIT,
                 "mu": mu.tolist(),
                 "sd": sd.tolist(),
                 "intent": {"layers": _dump(L_int), "classes": _INTENTS, "T": T_int},
@@ -370,8 +448,9 @@ def main() -> None:
     print(f"\nsaved v2 head → {head_path}  (intent {acc_int:.3f}, tool {acc_tool:.3f}; ~20 ms/decision)")
     pred = pred_te
     bad = [(texts[j], _INTENTS[y_intent[j]], _INTENTS[pred[k]]) for k, j in enumerate(te) if pred[k] != y_intent[j]]
-    for t, gold, got in bad[:15]:
+    for t, gold, got in bad[: 0 if quiet else 15]:
         print(f"  ✗ {t!r}: {gold} → {got}")
+    return report
 
 
 if __name__ == "__main__":

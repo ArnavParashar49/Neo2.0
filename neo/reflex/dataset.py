@@ -184,6 +184,37 @@ QUICK = [
     ("jot down some ideas about {topic}", True),
     ("remember this: {fact}", False),
     ("make a note that says {phrase}", True),
+    # weather (its own tool now) and searching a site
+    ("what's the weather in {city}", False),
+    ("will it rain tomorrow", False),
+    ("how hot is it outside", False),
+    ("do I need an umbrella today", False),
+    ("weather forecast for the weekend", False),
+    ("is it going to be cold in {city} tomorrow", False),
+    ("search {thing} on amazon", True),
+    ("look up {thing} on youtube", True),
+    ("find {thing} on google", True),
+    ("search youtube for {thing}", True),
+    ("open {thing} on amazon", True),
+    # clicking, scrolling and keys (the tool head's weakest classes)
+    ("click the {label} button", True),
+    ("click {label}", True),
+    ("tap {label}", False),
+    ("scroll down", True),
+    ("scroll up a bit", False),
+    ("page down", False),
+    ("press enter", False),
+    ("hit escape", False),
+    ("press tab", False),
+    ("go back", False),
+    ("reload the page", True),
+    ("zoom in", False),
+    ("close this tab", True),
+    ("next tab", False),
+    ("take a screenshot", True),
+    ("grab a screenshot of my screen", True),
+    ("type {phrase}", True),
+    ("type {phrase} in the search bar", True),
     ("remember that {fact}", True),
     ("note that {fact}", False),
     ("make a note called {phrase}", True),
@@ -201,6 +232,10 @@ PHRASES = [
     "Q3 planning",
     "groceries",
 ]
+CITIES = ["Dubai", "London", "Mumbai", "Tokyo", "New York", "Paris", "Delhi", "Berlin", "Toronto", "Sydney"]
+THINGS = ["a 2TB portable SSD", "noise cancelling headphones", "a standing desk", "lofi music", "a mechanical keyboard",
+          "iPhone cases", "running shoes", "the Crucial X9 Pro", "cat videos", "a USB-C hub"]
+LABELS = ["Sign in", "Play", "Next", "Send", "Continue", "Accept", "Download", "Save", "Submit", "Settings"]
 FACTS = [
     "my wifi password is on the fridge",
     "Sam's birthday is in June",
@@ -309,6 +344,10 @@ _TOOL_HINTS: list[tuple[str, str]] = [
     ("brightness|dimmer|brighter|dim the screen", "brightness"),
     ("remember that|remember this|note that", "memory"),
     ("note called|note saying|note that says|note titled", "notes_create"),
+    ("on amazon|on youtube|on google|on flipkart|search youtube|search amazon", "search_site"),
+    ("click|tap", "click_text"),
+    ("scroll|page down|page up", "scroll"),
+    ("press|hit|go back|reload|zoom|next tab|close this tab|screenshot", "hotkey"),
     ("what apps are open|which apps are running", "apps_running"),
 ]
 
@@ -346,6 +385,9 @@ def _fill(t: str, rnd: random.Random) -> str:
         n=rnd.choice([5, 10, 20, 30, 50, 75]),
         phrase=rnd.choice(PHRASES),
         fact=rnd.choice(FACTS),
+        city=rnd.choice(CITIES),
+        thing=rnd.choice(THINGS),
+        label=rnd.choice(LABELS),
     )
 
 

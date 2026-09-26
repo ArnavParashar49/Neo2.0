@@ -32,6 +32,13 @@ class LayaReflex:
         self._questions = questions_for(self._head["subq"]) if self._head else QUESTIONS
         self.decide("warm up")  # first MPS call is ~2 s; take it now
 
+    def reload_head(self) -> None:
+        """Swap in a freshly trained head (the caller holds the Laya lock)."""
+        head = _load_head(settings().data_dir / "reflex_head.json")
+        if head is not None:
+            self._head = head
+            self._questions = questions_for(head["subq"]) if head.get("subq") else QUESTIONS
+
     @property
     def has_head(self) -> bool:
         return self._head is not None

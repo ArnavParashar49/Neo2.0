@@ -169,6 +169,8 @@ class LiveVoice:
         self._utterance = ""  # what the user said in the current turn (for "did they ask something?")
         self._dialog: list[tuple[str, str]] = []  # the spoken conversation, for agent_task context
         self._lookups: dict[str, int] = {}  # web_search/web_fetch calls since the user last spoke
+        # What the model did with the user's last sentence — becomes a training label for Laya.
+        self._label: dict | None = None
         self._seen_calls: dict[str, str] = {}  # identical calls this question → the first one's key
         # Keystrokes, clicks and app switches run one at a time in the order the model asked:
         # non-blocking calls would otherwise race ("type X" and "press enter").
@@ -241,6 +243,7 @@ class LiveVoice:
         )
         self._last_activity = self._last_user_speech = time.time()  # typed = said
         self._new_question()
+        self._start_label(text)
         self._turn_open = True
 
     # ---- state machine -----------------------------------------------------------------
@@ -304,6 +307,7 @@ class LiveVoice:
             await self._refresh_state()
 
     async def _close_session(self) -> None:
+        self._file_label()
         cm, self._live_cm, self._live = self._live_cm, None, None
         self._speaking = False
         self._agent_session.voice_owned = False
@@ -490,6 +494,7 @@ class LiveVoice:
                 if user_buf:
                     await bus().say("".join(user_buf), role="user", final=True)
                     self._remember_line("user", "".join(user_buf))
+                    self._start_label("".join(user_buf))
                     user_buf.clear()
                 # The model heard the whole sentence and calls the tools itself; the early actor
                 # only ever acts mid-sentence here (its runs answer the model's matching calls).
@@ -497,6 +502,8 @@ class LiveVoice:
                 if model_buf:
                     await bus().say("".join(model_buf), final=True)
                     self._remember_line("NEO", "".join(model_buf))
+                    if self._label is not None:
+                        self._label["spoke"] = True
                     model_buf.clear()
                     # NEO has answered: the next question gets a fresh search budget. (Not on the
                     # user's transcript — room noise transcribed mid-search would reset it.)
@@ -505,7 +512,11 @@ class LiveVoice:
                 asyncio.create_task(self._after_playback())
         if msg.tool_call:
             asked = self._utterance or "".join(user_buf)
+            if self._label is None and asked:
+                self._start_label(asked)
             for fc in msg.tool_call.function_calls or []:
+                if self._label is not None:
+                    self._label["tools"].append(fc.name)
                 task = asyncio.create_task(self._run_tool(live, fc, asked))
                 self._tool_tasks[fc.id or fc.name] = task
             await self._refresh_state()
@@ -627,6 +638,31 @@ class LiveVoice:
         elif not silent:  # session went away mid-task: don't lose the result
             await bus().say(result[:600], final=True)
             await self._refresh_state()
+
+    def _start_label(self, text: str) -> None:
+        """A new user sentence: file the previous one's label, start watching this one."""
+        self._file_label()
+        self._label = {"text": " ".join(text.split()), "tools": [], "spoke": False}
+
+    def _file_label(self) -> None:
+        lab, self._label = self._label, None
+        if not lab or not lab["text"]:
+            return
+        tools = [t for t in lab["tools"] if t != "more_tools"]
+        if not tools and not lab["spoke"]:
+            return  # nothing came of it: probably room noise, not a request
+        if "agent_task" in tools:
+            intent, tool = "agent_task", ""
+        elif tools:
+            intent, tool = "quick_action", (tools[0] if len(set(tools)) == 1 else "")
+        else:
+            intent, tool = "chat", ""
+        try:
+            from neo.reflex.learn import record
+
+            record(lab["text"], intent, tool, source="live")
+        except Exception as e:  # noqa: BLE001
+            print(f"[reflex] couldn't record an example: {str(e)[:80]}")
 
     def _new_question(self) -> None:
         self._lookups, self._seen_calls = {}, {}

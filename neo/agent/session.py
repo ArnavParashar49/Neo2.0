@@ -259,6 +259,7 @@ class Session:
         finally:
             self.jobs.pop(job, None)
         await self._remember(*res.messages[len(snapshot) :])  # only this job's new turns
+        _learn_from(text, d, res)
         if res.stopped == "needs_confirm" and self._stage_pending(res):
             await bus().say(res.question, final=True, job=job)
             return Reply(res.question, "confirm", d, res, job=job)
@@ -435,6 +436,24 @@ def _last_user_index(h: list[Message], n: int) -> int:
             if seen == n:
                 return i
     return 0
+
+
+def _learn_from(text: str, d: Decision | None, res: AgentResult) -> None:
+    """If the reflex sent this to the agent and the agent's own behaviour says otherwise, keep
+    the correction for Laya. Requests relayed by Gemini Live are the model's paraphrase, not the
+    user's words — those are labelled on the Live side instead."""
+    if d is None or _conversation.get() or res.stopped != "done" or res.question:
+        return
+    used = [st.tool for st in res.steps if st.tool != "more_tools"]
+    try:
+        from neo.reflex.learn import record
+
+        if not used:
+            record(text, "chat", source="agent-outcome")
+        elif len(used) == 1 and (t := registry().get(used[0])) is not None and t.fast_path:
+            record(text, "quick_action", used[0], source="agent-outcome")
+    except Exception:  # noqa: BLE001 — learning is best effort
+        pass
 
 
 def _quietly(d: Decision | None, res: AgentResult) -> bool:

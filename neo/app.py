@@ -131,6 +131,15 @@ async def run() -> None:
     await bus().set_state(NeoState.IDLE)
     asyncio.create_task(_lag_monitor())
     asyncio.create_task(_cocoa_pump())
+    from neo.reflex.learn import learn_loop
+
+    def _idle() -> bool:
+        from neo.events import bus
+
+        voice_busy = bool(app.voice and getattr(app.voice, "_live", None))
+        return not voice_busy and not bus().active_jobs and not app._tasks
+
+    asyncio.create_task(learn_loop(_idle))
     bus().subscribe(_log_activity)
     print("NEO is running. Say 'Hey Neo', or type in the overlay.")
     stop = asyncio.Event()
