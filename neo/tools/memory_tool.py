@@ -28,7 +28,11 @@ from neo.memory.store import store
     chain=False,  # only as the whole utterance: a later clause means 'in that app'
     fast_path=[
         (
-            r"^\s*(?:please\s+)?(?:remember|keep\s+in\s+mind|note)\s+(?!to\b)(?:that\s+|this:?\s+)?(?P<text>.{4,}?)\s*[.!]*\s*$",
+            # "remember that I park on level 3" — a real fact of 2+ words; "note that down",
+            # "remember that" alone, and "remember to …" (a reminder) are not facts.
+            r"^\s*(?:please\s+)?(?:remember|keep\s+in\s+mind|note)\s+(?!to\b)(?:that\s+|this:?\s+)?"
+            r"(?!(?:down|it|this|that|them)\b)(?!.*\bdown\s*[.!]*\s*$)"
+            r"(?P<text>\S+(?:\s+\S+)+?)\s*[.!]*\s*$",
             {"action": "remember", "text": "<text>", "kind": "note"},
         ),
         (
@@ -37,6 +41,7 @@ from neo.memory.store import store
             {"action": "recall", "query": "<query>"},
         ),
     ],
+    payload=True,
 )
 async def memory(a: dict, c: ToolContext) -> str:
     st = store()

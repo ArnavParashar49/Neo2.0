@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import time
+import re
 
 from neo.agent.registry import ToolContext, ToolOutput, tool
 from neo.tools.computer import apps, ax, screen, shell
@@ -44,15 +46,15 @@ async def ax_find(a: dict, c: ToolContext) -> str:
 
 _TAIL = r"\s*[.!]*\s*$"
 _LEAD = r"^\s*(?:and\s+|now\s+|please\s+|then\s+)*(?:can\s+you\s+|could\s+you\s+)?"
-# Voice scroll at the pointer (x/y = -1 → wherever the mouse is).
-# "scroll down", "scroll down a bit", "scroll down the page in safari" — but not "scroll down and
-# tell me…" (a task).
-_SCROLL_CTX = r"(?:\s+(?!.*\b(?:and|then|until|till)\b)[\w' ]{0,40})?"
+# Voice scroll at the pointer. "scroll down", "scroll down a bit", "scroll up some more" — but a
+# place ("scroll down in Safari", "scroll to the comments") or a task ("… and tell me") goes to
+# the agent, which can scroll the right window.
+_SCROLL_CTX = r"(?:\s+(?:a\s+(?:bit|little|lot)|some|more|further|again|a\s+page|please|now))*"
 _SCROLL = [
-    (rf"{_LEAD}scroll\s+down{_SCROLL_CTX}{_TAIL}", {"x": -1, "y": -1, "dy": -8}),
-    (rf"{_LEAD}scroll\s+up{_SCROLL_CTX}{_TAIL}", {"x": -1, "y": -1, "dy": 8}),
-    (rf"{_LEAD}page\s+down{_TAIL}", {"x": -1, "y": -1, "dy": -30}),
-    (rf"{_LEAD}page\s+up{_TAIL}", {"x": -1, "y": -1, "dy": 30}),
+    (rf"{_LEAD}scroll\s+down{_SCROLL_CTX}{_TAIL}", {"at_pointer": True, "dy": -8}),
+    (rf"{_LEAD}scroll\s+up{_SCROLL_CTX}{_TAIL}", {"at_pointer": True, "dy": 8}),
+    (rf"{_LEAD}page\s+down{_TAIL}", {"at_pointer": True, "dy": -30}),
+    (rf"{_LEAD}page\s+up{_TAIL}", {"at_pointer": True, "dy": 30}),
 ]
 
 
@@ -194,6 +196,7 @@ async def drag(a: dict, c: ToolContext) -> str:
             "y": {"type": "number"},
             "dy": {"type": "integer"},
             "dx": {"type": "integer"},
+            "at_pointer": {"type": "boolean"},
         }
     ),
     category="computer",
@@ -202,7 +205,7 @@ async def drag(a: dict, c: ToolContext) -> str:
 )
 async def scroll(a: dict, c: ToolContext) -> str:
     x, y = a.get("x"), a.get("y")
-    if x is None or y is None or x < 0 or y < 0:
+    if a.get("at_pointer") or x is None or y is None:
         x, y = inp.mouse_position()  # "scroll down": wherever the pointer is
     return inp.scroll(x, y, int(a.get("dy", -5)), int(a.get("dx", 0)))
 
@@ -211,50 +214,62 @@ async def scroll(a: dict, c: ToolContext) -> str:
 # "type Laptops in the heading", "new line", "type some points about laptops": the words *are*
 # the payload, so no model is needed to understand them. These regexes make typing and keys
 # zero-LLM fast paths (the reflex still gates them), and composing a brief is one small chat
-# call plus typing — never the multi-step agent loop.
+# call plus typing — never the multi-step agent loop. Anything ambiguous is left to a model:
+# a pronoun ("write that down"), a message to someone ("write an email to Sam"), a thing
+# ("write the report"). The model knows what "that" is; a regex doesn't.
 
 # "type" is unambiguous. "write" is dictation only for short or quoted text, or with a place
-# ("write buy milk in the note"); "write the report and email it to Sam" is a task. "put",
-# "enter", "insert" are task verbs ("put the highlights in a note").
-_TYPE_VERB = r"(?:type)"
+# ("write buy milk in the note"). "put", "enter", "insert" are task verbs.
+_TYPE_VERB = r"type"
 _WRITE_VERB = r"(?:jot\s+down|write\s+down|write)"
-# "write an email to Sam …" is a task for Mail, not words to type where the cursor is.
 _NOT_DICTATION = (
-    r"(?!an?\s+(?:new\s+)?(?:e-?mail|mail|message|text|letter|reply|response|note|dm)\s+to\b)"
-    r"(?!(?:me|us)\b)"  # "write me a poem" is a request for an answer, not dictation
+    # a message to someone is a task for Mail/Messages
+    r"(?!(?:an?\s+|the\s+|new\s+|my\s+)*(?:e-?mails?|mails?|messages?|texts?|letters?|repl(?:y|ies)|responses?|dms?|notes?)\s+to\b)"
+    r"(?!(?:an?\s+|new\s+)*(?:e-?mails?|mail|messages?|letters?|dms?)\b)"
+    r"(?!to\s+\w+)"
+    r"(?!(?:me|us)\b)"  # "write me a poem" wants an answer, not dictation
+    # pronouns and particles: "write that down", "type it in", "type up the notes"
+    r"(?!(?:it|this|that|these|those|them|what|whatever|everything|up|in|out|down|over|back)\b)"
+)
+_WRITE_NOT_THING = r"(?!(?:the|my|our|his|her|their|your|a|an)\b)"  # "write the report" is a task
+_COUNT_NOUN = (
+    r"(?:bullet\s+)?(?:points?|bullets?|reasons?|ideas?|lines?|sentences?|tips?|ways?|things?|items?|"
+    r"facts?|examples?|questions?|paragraphs?|options?|steps?|names?|titles?|headlines?|taglines?|"
+    r"slogans?|jokes?|thoughts?|notes?|words?|pros?|cons?|benefits?|features?)"
 )
 # Payloads that are a *brief* to write, not text to type verbatim.
 _COMPOSE_CUE = (
-    r"(?:some|a\s+few|several|a\s+couple(?:\s+of)?|bullet(?:\s+points?)?|points?|"
-    r"(?:two|three|four|five|six|seven|eight|nine|ten|\d+)\s+\w+|"
-    r"an?\s+(?:short|quick|brief|long|nice|polite|formal|casual|simple|small|little)?\s*"
-    r"(?:list|paragraph|summary|essay|poem|story|sentence|line|description|caption|bio|"
-    r"intro|introduction|outline|recipe|plan|draft|note|haiku|joke|title|heading)s?\b|"
-    r"an?\s+\w+\s+(?:about|on)\b|something|anything)"
+    r"(?:(?:some|a\s+few|several|a\s+couple(?:\s+of)?|two|three|four|five|six|seven|eight|nine|ten|\d+)"
+    rf"\s+(?:\w+\s+){{0,2}}{_COUNT_NOUN}\b"
+    rf"|{_COUNT_NOUN}\s+(?:about|on|for|of|related\s+to|regarding)\b"
+    r"|an?\s+(?:short|quick|brief|long|nice|polite|formal|casual|simple|small|little|funny|good)?\s*"
+    r"(?:list|paragraph|summary|essay|poem|story|sentence|description|caption|bio|intro|introduction|"
+    r"outline|recipe|plan|draft|note|haiku|joke|title|heading|tagline|slogan|toast|limerick)s?\b"
+    r"|something\b|anything\b)"
 )
 # Apps a dictation may name as its place (patterns run case-insensitively, so no capital trick).
 _APP = (
     r"(?:the\s+)?(?:notes|textedit|pages|numbers|keynote|word|excel|docs|google\s+docs|sheets|safari|"
     r"chrome|firefox|mail|messages|slack|discord|whatsapp|telegram|terminal|vs\s*code|xcode|notion|"
-    r"obsidian|reminders|stickies|freeform|\w+\s+app)(?:\s+app)?"
+    r"obsidian|reminders|stickies|freeform)(?:\s+app)?"
 )
-# "… in the heading", "… into the search bar", "… as the title of the current note".
+# UI places only (never "the box", "the page", "the line" — those occur in dictated prose).
+_PLACE = (
+    r"(?:heading|title|header|subject(?:\s+line)?|search\s+(?:bar|box|field)|address\s+bar|url\s+bar|"
+    r"body|(?:text\s+)?field|text\s+box|input(?:\s+box)?|editor|cell|note|document|form|"
+    r"first\s+line|comment\s+box|message\s+box|chat\s+box)"
+)
+# "… in the heading", "… into the search bar", "… as the title of the current note (in Notes)".
 _TYPE_TARGET = (
-    r"(?:\s+(?:in|into|as|for|on)\s+(?:the\s+|this\s+|my\s+)?(?:\w+\s+)?"
-    r"(?:heading|title|header|subject|body|field|box|bar|notes?|document|editor|input|line|text|"
-    r"search|page|cell|form|message|comment|reply)"
-    r"(?:\s+(?:of|in)\s+(?:the\s+|this\s+|my\s+)?(?:current\s+|open\s+|new\s+)?\w+)?"
-    rf"(?:\s+in\s+{_APP})?"  # "… in Notes", "… in the Notes app"
-    rf"|\s+in\s+{_APP})?"  # or just "… in Notes"
+    rf"(?:\s+(?:in|into|as|for|on)\s+(?:the|this|my)\s+(?:current\s+|open\s+|new\s+|same\s+)?{_PLACE}"
+    r"(?:\s+(?:of|in)\s+(?:the|this|my)\s+(?:current\s+|open\s+|new\s+)?(?:note|document|page|file|email|message|window))?"
+    rf"(?:\s+in\s+{_APP})?"
+    rf"|\s+in\s+{_APP})?"
 )
+# "type in the search bar hello": the place may come first as well as last.
+_TYPE_PLACE_FIRST = rf"(?:(?:in|into|on)\s+(?:the|this|my)\s+{_PLACE}\s+)?"
 # A quoted payload ends at its closing quote: type 'Laptops' in the heading of the note in Notes.
 _PAYLOAD = r"(?P<text>\"[^\"]+\"|“[^”]+”|'[^']+'|.+?)"
-# "type in the search bar hello": the place may come first as well as last.
-_TYPE_PLACE_FIRST = (
-    r"(?:(?:in|into|on)\s+(?:the\s+|this\s+|my\s+)?(?:\w+\s+)?"
-    r"(?:heading|title|header|subject|body|field|box|bar|notes?|document|editor|input|search|form|"
-    r"cell|comment|reply)\s+)?"
-)
 _SHORT_PAYLOAD = r"(?P<text>\"[^\"]+\"|“[^”]+”|'[^']+'|\S+(?:\s+\S+){0,5}?)"
 _LITERAL_TYPE = (
     rf"{_LEAD}{_TYPE_VERB}\s+(?:the\s+(?:words?|text)\s+)?{_TYPE_PLACE_FIRST}{_NOT_DICTATION}"
@@ -262,33 +277,45 @@ _LITERAL_TYPE = (
 )
 _LITERAL_WRITE = (
     rf"{_LEAD}{_WRITE_VERB}\s+(?:the\s+(?:words?|text)\s+)?{_TYPE_PLACE_FIRST}{_NOT_DICTATION}"
-    rf"(?!{_COMPOSE_CUE}){_SHORT_PAYLOAD}{_TYPE_TARGET}{_TAIL}"
+    rf"{_WRITE_NOT_THING}(?!{_COMPOSE_CUE}){_SHORT_PAYLOAD}{_TYPE_TARGET}{_TAIL}"
 )
 _COMPOSE_TYPE = (
     rf"{_LEAD}(?:{_TYPE_VERB}|{_WRITE_VERB}|draft|compose)\s+{_TYPE_PLACE_FIRST}{_NOT_DICTATION}"
     rf"(?P<brief>{_COMPOSE_CUE}.*?){_TYPE_TARGET}{_TAIL}"
 )
+
+# ---- keys -------------------------------------------------------------------------------------
+# Some chords only mean the right thing in some apps: cmd+r is "reload" in a browser but "reply"
+# in Mail; cmd+up is "top of page" in a browser but "parent folder" in Finder. Those carry an
+# `app` guard and fail (→ the agent takes over) anywhere else.
+_BROWSERS = {"safari", "google chrome", "chrome", "firefox", "arc", "brave browser", "microsoft edge", "opera", "vivaldi", "orion"}
+_TAB_APPS = _BROWSERS | {"finder", "terminal", "iterm2", "code", "visual studio code", "xcode", "warp"}
+_CHAT_APPS = {"messages", "slack", "discord", "whatsapp", "telegram", "microsoft teams", "signal", "messenger"}
+_SHELL_APPS = {"terminal", "iterm2", "warp", "ghostty", "kitty", "alacritty"}
 _HOTKEYS: list[tuple[str, dict]] = [
     (
         rf"{_LEAD}(?:press|hit|push)\s+(?:the\s+)?(?P<keys>enter|return|tab|escape|esc|delete|"
-        rf"backspace|space|up|down|left|right|home|end)(?:\s+(?:key|arrow))?{_TAIL}",
+        rf"backspace|space|up|down|left|right|home|end)(?:\s+(?:key|arrow|bar))?{_TAIL}",
         {"keys": "<keys>"},
     ),
     (rf"{_LEAD}(?:new|next)\s+line{_TAIL}", {"keys": "return"}),
     (rf"{_LEAD}select\s+all{_TAIL}", {"keys": "cmd+a"}),
-    (rf"{_LEAD}(?:undo(?:\s+that)?|scratch\s+that){_TAIL}", {"keys": "cmd+z"}),
-    (rf"{_LEAD}redo(?:\s+that)?{_TAIL}", {"keys": "cmd+shift+z"}),
+    # undo/redo only right after NEO itself typed or pressed something
+    (rf"{_LEAD}(?:undo(?:\s+that)?|scratch\s+that){_TAIL}", {"keys": "cmd+z", "after": "input"}),
+    (rf"{_LEAD}redo(?:\s+that)?{_TAIL}", {"keys": "cmd+shift+z", "after": "input"}),
     (rf"{_LEAD}copy\s+(?:that|it|this){_TAIL}", {"keys": "cmd+c"}),
     (rf"{_LEAD}paste(?:\s+(?:that|it|this))?{_TAIL}", {"keys": "cmd+v"}),
     (rf"{_LEAD}save(?:\s+(?:that|it|this|the\s+(?:file|note|document)))?{_TAIL}", {"keys": "cmd+s"}),
-    (rf"{_LEAD}(?:make\s+|create\s+|start\s+|open\s+)?(?:a\s+)?new\s+(?:note|document|file|window){_TAIL}", {"keys": "cmd+n"}),
-    (rf"{_LEAD}(?:open\s+)?(?:a\s+)?new\s+tab{_TAIL}", {"keys": "cmd+t"}),
+    (rf"{_LEAD}(?:make\s+|create\s+|start\s+|open\s+)?(?:a\s+)?new\s+note{_TAIL}", {"keys": "cmd+n", "app": "Notes"}),
+    (rf"{_LEAD}(?:make\s+|create\s+|start\s+|open\s+)?(?:a\s+)?new\s+document{_TAIL}", {"keys": "cmd+n", "app": "document"}),
+    (rf"{_LEAD}(?:open\s+)?(?:a\s+)?new\s+window{_TAIL}", {"keys": "cmd+n"}),
+    (rf"{_LEAD}(?:open\s+)?(?:a\s+)?new\s+tab{_TAIL}", {"keys": "cmd+t", "app": "tabs"}),
     (rf"{_LEAD}close\s+(?:this|the|that)\s+(?:window|tab|note|document)(?:\s+please)?{_TAIL}", {"keys": "cmd+w"}),
     (rf"{_LEAD}(?:go\s+to\s+the\s+)?next\s+tab{_TAIL}", {"keys": "ctrl+tab"}),
     (rf"{_LEAD}(?:go\s+to\s+the\s+)?(?:previous|last|prev)\s+tab{_TAIL}", {"keys": "ctrl+shift+tab"}),
-    (rf"{_LEAD}go\s+back(?:\s+a\s+page)?{_TAIL}", {"keys": "cmd+["}),
-    (rf"{_LEAD}go\s+forward(?:\s+a\s+page)?{_TAIL}", {"keys": "cmd+]"}),
-    (rf"{_LEAD}(?:reload|refresh)(?:\s+(?:the|this)\s+page)?{_TAIL}", {"keys": "cmd+r"}),
+    (rf"{_LEAD}go\s+back(?:\s+a\s+page)?{_TAIL}", {"keys": "cmd+[", "app": "browser|finder"}),
+    (rf"{_LEAD}go\s+forward(?:\s+a\s+page)?{_TAIL}", {"keys": "cmd+]", "app": "browser|finder"}),
+    (rf"{_LEAD}(?:reload|refresh)(?:\s+(?:the|this)\s+page)?{_TAIL}", {"keys": "cmd+r", "app": "browser"}),
     (rf"{_LEAD}zoom\s+in{_TAIL}", {"keys": "cmd+="}),
     (rf"{_LEAD}zoom\s+out{_TAIL}", {"keys": "cmd+-"}),
     (rf"{_LEAD}(?:reset\s+(?:the\s+)?zoom|actual\s+size){_TAIL}", {"keys": "cmd+0"}),
@@ -298,19 +325,41 @@ _HOTKEYS: list[tuple[str, dict]] = [
     (rf"{_LEAD}(?:find|search)\s+(?:on|in)\s+(?:this|the)\s+page{_TAIL}", {"keys": "cmd+f"}),
     (rf"{_LEAD}(?:take|grab|capture)\s+(?:a\s+)?screenshot(?:\s+of\s+(?:this|the\s+screen|my\s+screen)?)?{_TAIL}", {"keys": "cmd+shift+3"}),
     (rf"{_LEAD}screenshot(?:\s+(?:this|the\s+screen|my\s+screen))?{_TAIL}", {"keys": "cmd+shift+3"}),
-    (rf"{_LEAD}scroll\s+to\s+(?:the\s+)?top{_TAIL}", {"keys": "cmd+up"}),
-    (rf"{_LEAD}scroll\s+to\s+(?:the\s+)?bottom{_TAIL}", {"keys": "cmd+down"}),
+    (rf"{_LEAD}scroll\s+to\s+(?:the\s+)?top{_TAIL}", {"keys": "cmd+up", "app": "browser"}),
+    (rf"{_LEAD}scroll\s+to\s+(?:the\s+)?bottom{_TAIL}", {"keys": "cmd+down", "app": "browser"}),
     (rf"{_LEAD}(?:open\s+)?spotlight{_TAIL}", {"keys": "cmd+space"}),
-    (rf"{_LEAD}(?:quit|close)\s+(?:this|the\s+current)\s+app{_TAIL}", {"keys": "cmd+q"}),
+    (rf"{_LEAD}(?:quit|close)\s+(?:this|the|the\s+current)\s+app{_TAIL}", {"keys": "cmd+q"}),
     (rf"{_LEAD}(?:switch|next)\s+app{_TAIL}", {"keys": "cmd+tab"}),
 ]
-# Click whatever on screen is called that: "click play", "press the send button", "tap next".
-_CLICK_LABEL = (
-    rf"{_LEAD}(?:click|tap|press|hit|select|choose)\s+(?:on\s+)?(?:the\s+)?"
-    r"(?!(?:enter|return|tab|escape|esc|delete|backspace|space|up|down|left|right|home|end|all)\b)"
-    r"(?P<label>.+?)(?:\s+(?:button|link|tab|icon|menu|item|option|checkbox))?"
-    rf"{_TAIL}"
+
+# ---- click by label -----------------------------------------------------------------------------
+_KEYNAMES = (
+    r"(?:enter|return|tab|escape|esc|delete|backspace|space(?:\s*bar)?|up|down|left|right|home|end|all|"
+    r"command|cmd|control|ctrl|option|alt|shift|fn|caps\s+lock|page\s+(?:up|down)|f\d+)"
 )
+_VAGUE_LABELS = {
+    "it", "this", "that", "these", "those", "them", "here", "there", "on", "in", "the", "a", "an",
+    "one", "none", "me", "us", "you", "him", "her", "something", "anything", "everything",
+    "nothing", "wisely", "again", "away", "around", "through", "twice", "once",
+}
+_CONTROL_NOUN = r"(?:button|link|tab|icon|menu\s+item|menu|option|checkbox|item)"
+_NOT_VAGUE = rf"(?!(?:on\s+)?(?:the\s+)?(?:{'|'.join(sorted(_VAGUE_LABELS))})\s*[.!]*\s*$)"
+_CLICK_PATHS: list[tuple[str, dict]] = [
+    # quoted: click "Sign in"
+    (rf"{_LEAD}(?:click|tap|press|hit|select|choose)\s+(?:on\s+)?(?:the\s+)?[\"“'](?P<label>[^\"”']+)[\"”'](?:\s+{_CONTROL_NOUN})?{_TAIL}", {"label": "<label>"}),
+    # click/tap <label> [button] — no key names, no "and …" (that's two things)
+    (
+        rf"{_LEAD}(?:click|tap)\s+{_NOT_VAGUE}(?:on\s+)?(?:the\s+)?(?!(?:the\s+)?{_KEYNAMES}\b)(?!.*\b(?:and|then)\b)"
+        rf"(?P<label>[\w'’&.+-]+(?:\s+[\w'’&.+-]+){{0,4}}?)(?:\s+{_CONTROL_NOUN})?{_TAIL}",
+        {"label": "<label>"},
+    ),
+    # press/hit/select/choose only with a control noun: "press the send button"
+    (
+        rf"{_LEAD}(?:press|hit|select|choose)\s+(?:on\s+)?(?:the\s+)?(?!(?:the\s+)?{_KEYNAMES}\b)(?!.*\b(?:and|then)\b)"
+        rf"(?P<label>[\w'’&.+-]+(?:\s+[\w'’&.+-]+){{0,4}}?)\s+{_CONTROL_NOUN}{_TAIL}",
+        {"label": "<label>"},
+    ),
+]
 _DOC_APPS = {"notes", "textedit", "pages", "stickies", "numbers", "keynote", "freeform"}
 _DICTATE_SYSTEM = (
     "You type on the user's behalf into the document they have open. Reply with ONLY the text to "
@@ -318,44 +367,80 @@ _DICTATE_SYSTEM = (
     "per line starting with '- '. Be concise (under 120 words unless asked otherwise) and write in "
     "the user's language."
 )
+_INPUT_TOOLS = ("type_text", "dictate", "hotkey", "click_text", "ax_set_value")
+_UNDO_WINDOW_S = 120.0
 
 
-def _unquote(text: str) -> str:
-    if len(text) >= 2 and text[0] in "\"“'" and text[-1] in "\"”'":
-        return text[1:-1]
-    return text
+_NEVER_TYPE_INTO = {"neo-ui", "neo"}  # NEO's own overlay
 
 
-async def _ensure_text_focus() -> str | None:
-    """Put the keyboard focus somewhere typeable. Returns an error message if that's impossible."""
-    if await asyncio.to_thread(ax.focused_editable):
-        return None
-    app, _ = ax.frontmost_app()
-    area = await asyncio.to_thread(ax.main_text_area)
-    if area is None and app.lower() in _DOC_APPS:
-        inp.hotkey("cmd+n")  # nothing open to type into: a fresh note/document
-        await asyncio.sleep(0.7)
-        if await asyncio.to_thread(ax.focused_editable):
-            return None
-        area = await asyncio.to_thread(ax.main_text_area)
-    if area is None:
-        return f"Error: nothing to type into is focused in {app or 'the front app'} — click into a text field first."
-    if area.focused:  # the editor already has the caret (Notes reports focus on the area, not system-wide)
-        return None
-    inp.click(*area.center)
-    await asyncio.sleep(0.2)
-    inp.hotkey("cmd+down")  # a click lands mid-text; dictation appends at the end
+async def _guard_front(want: str = "") -> str | None:
+    """Keystrokes only ever go to the app NEO is working in.
+
+    `want` (or else the app NEO last opened/activated, if that was recent) must be frontmost —
+    brought forward if needed. If macOS won't, nothing is sent and the user is told, instead of
+    typing into whatever they happen to be using."""
+    goal = want or apps.target()
+    front = apps.front_name()
+    if goal and front.lower() != goal.lower():
+        ok, real = await apps.bring_front(goal, wait=0.3)
+        if not ok:
+            return (
+                f"NEEDS_USER: {real} isn't in front ({apps.front_name() or 'another app'} is), "
+                f"so I didn't type or press anything — click {real} and say it again."
+            )
+        front = real
+    if front.lower() in _NEVER_TYPE_INTO:
+        return "NEEDS_USER: click where you want me to type first."
     return None
 
 
+async def _ensure_text_focus() -> tuple[str | None, bool]:
+    """Put the keyboard focus somewhere typeable in the front window of NEO's target app.
+
+    Returns (error, created) — `created` when a fresh note/document had to be made."""
+    if err := await _guard_front():
+        return err, False
+    if await asyncio.to_thread(ax.focused_is_secure):
+        return "Error: the cursor is in a password field — I won't type there.", False
+    if await asyncio.to_thread(ax.focused_editable):
+        return None, False
+    app, _ = ax.frontmost_app()
+    area = await asyncio.to_thread(ax.main_text_area)
+    created = False
+    if area is None and app.lower() in _DOC_APPS:
+        inp.hotkey("cmd+n")  # the front window shows no editor at all: a fresh note/document
+        created = True
+        await asyncio.sleep(0.7)
+        if await asyncio.to_thread(ax.focused_editable):
+            return None, created
+        area = await asyncio.to_thread(ax.main_text_area)
+    if area is None:
+        return f"Error: nothing to type into is focused in {app or 'the front app'} — click into a text field first.", created
+    if area.focused:  # the editor already has the caret (Notes reports focus on the area, not system-wide)
+        return None, created
+    inp.click(*area.center)
+    await asyncio.sleep(0.2)
+    inp.hotkey("cmd+down")  # a click lands mid-text; dictation appends at the end
+    return None, created
+
+
 async def _type(text: str) -> None:
-    """Type text; line breaks are pressed as Return so every app makes a real new line."""
+    """Type text so every line break is a real new line — and never a "send": in a single-line
+    field the lines are joined with spaces, in chat apps a line break is shift+return, and in a
+    shell nothing multi-line is ever entered."""
+    app = ax.frontmost_app()[0].lower()
+    role, _ = await asyncio.to_thread(ax.focused_role)
+    text = text.rstrip("\n")
+    if role in ax._SINGLE_LINE or app in _SHELL_APPS:
+        text = " ".join(part.strip() for part in text.split("\n") if part.strip())
+    newline = "shift+return" if app in _CHAT_APPS else "return"
     lines = text.split("\n")
     for i, line in enumerate(lines):
         if line:
             await asyncio.to_thread(inp.type_text, line)
         if i < len(lines) - 1:
-            inp.hotkey("return")
+            inp.hotkey(newline)
             await asyncio.sleep(0.03)
 
 
@@ -365,16 +450,16 @@ async def _type(text: str) -> None:
     _p({"text": {"type": "string"}}, ["text"]),
     category="computer",
     fast_path=[(_LITERAL_TYPE, {"text": "<text>"}), (_LITERAL_WRITE, {"text": "<text>"})],
-    early=False,  # the words are the payload: wait for the whole sentence
     quiet=True,
+    payload=True,
 )
 async def type_text(a: dict, c: ToolContext) -> str:
-    text = _unquote(str(a["text"]))
-    err = await _ensure_text_focus()
+    text = str(a["text"])
+    err, created = await _ensure_text_focus()
     if err:
         return err
     await _type(text)
-    return f"Typed “{text[:80]}”."
+    return f"Typed “{text[:80]}”" + (" into a new note." if created else ".")
 
 
 @tool(
@@ -385,39 +470,60 @@ async def type_text(a: dict, c: ToolContext) -> str:
     category="computer",
     slow=True,
     fast_path=[(_COMPOSE_TYPE, {"brief": "<brief>"})],
-    early=False,
     quiet=True,
+    payload=True,
 )
 async def dictate(a: dict, c: ToolContext) -> str:
     from neo.providers import brain
     from neo.providers.base import Message
 
     brief = str(a["brief"]).strip()
+    err, created = await _ensure_text_focus()  # check before spending a model call
+    if err:
+        return err
     turn = await brain("fast").complete([Message.user(brief)], system=_DICTATE_SYSTEM, max_tokens=400)
     text = (turn.text or "").strip().strip("\"“”")
     if not text:
         return "Error: I couldn't come up with anything to type."
-    err = await _ensure_text_focus()
-    if err:
-        return err
     area = await asyncio.to_thread(ax.main_text_area)
-    if area is not None and area.value.strip():
+    if area is not None and area.value.strip() and not area.value.endswith("\n"):
         text = "\n" + text  # the heading stays a heading; the points start on their own line
     await _type(text)
     first = text.strip().splitlines()[0][:80]
-    return f"Typed {len(text.splitlines())} line(s), starting “{first}”."
+    return f"Typed {len(text.strip().splitlines())} line(s), starting “{first}”" + (" (new note)." if created else ".")
 
 
 @tool(
     "hotkey",
-    "Press a key or chord, e.g. 'return', 'cmd+s', 'cmd+shift+t', 'escape', 'tab'.",
-    _p({"keys": {"type": "string"}}, ["keys"]),
+    "Press a key or chord, e.g. 'return', 'cmd+s', 'cmd+shift+t', 'escape', 'tab'. Optional app: "
+    "bring that app to the front first.",
+    _p({"keys": {"type": "string"}, "app": {"type": "string"}}, ["keys"]),
     category="computer",
     fast_path=_HOTKEYS,
     quiet=True,
 )
 async def hotkey(a: dict, c: ToolContext) -> str:
-    return inp.hotkey(a["keys"])
+    keys, want = str(a["keys"]), str(a.get("app") or "")
+    if a.get("after") == "input":
+        from neo.agent.registry import registry as _reg
+
+        last = _reg().last
+        if not last or last[0] not in _INPUT_TOOLS or time.time() - last[1] > _UNDO_WINDOW_S:
+            return "Error: undo what? I haven't typed anything just now."
+    specific = want not in ("", "browser", "browser|finder", "document", "tabs")
+    if err := await _guard_front(want if specific else ""):
+        return err
+    front = ax.frontmost_app()[0].lower()
+    if want == "browser" and front not in _BROWSERS:
+        return f"Error: '{keys}' only makes sense in a browser, and {front or 'nothing'} is in front."
+    if want == "browser|finder" and front not in _BROWSERS | {"finder"}:
+        return f"Error: going back only makes sense in a browser or Finder, and {front or 'nothing'} is in front."
+    if want == "document" and front not in _DOC_APPS:
+        return "Error: which app should the new document be in?"
+    if want == "tabs" and front not in _TAB_APPS:
+        if err := await _guard_front("Safari"):  # "new tab" from an app without tabs: the browser
+            return err
+    return inp.hotkey(keys)
 
 
 _CLICK_ROLES = ("AXButton", "AXLink", "AXMenuItem", "AXTab", "AXCheckBox", "AXRadioButton", "AXPopUpButton", "AXMenuButton", "AXCell", "AXRow", "AXStaticText", "AXImage")
@@ -425,40 +531,49 @@ _CLICK_ROLES = ("AXButton", "AXLink", "AXMenuItem", "AXTab", "AXCheckBox", "AXRa
 
 @tool(
     "click_text",
-    "Click the on-screen element whose label contains the text (button, link, tab, menu item…) "
-    "in the frontmost app.",
+    "Click the on-screen element with this label (button, link, tab, menu item…) in the front "
+    "window.",
     _p({"label": {"type": "string"}}, ["label"]),
     category="computer",
     quiet=True,
-    fast_path=[(_CLICK_LABEL, {"label": "<label>"})],
+    fast_path=_CLICK_PATHS,
+    payload=True,
 )
 async def click_text(a: dict, c: ToolContext) -> str:
-    label = str(a["label"]).strip().lower()
-    if not label:
-        return "Error: nothing to click."
-    await asyncio.to_thread(ax.snapshot)  # fresh tree of the frontmost app
-    hits = [
-        e
-        for e in ax._last_tree.values()
-        if e.enabled and e.w > 0 and (label in e.title.lower() or label in e.value.lower())
-    ]
+    label = " ".join(str(a["label"]).lower().split())
+    if not label or len(label) < 2 or all(w in _VAGUE_LABELS for w in label.split()):
+        return f"Error: click what? '{a['label']}' isn't a label I can find."
+    if err := await _guard_front():
+        return err
+    app, frame, els = await asyncio.to_thread(ax.window_elements)
+    if frame is None:
+        return f"Error: {app or 'the front app'} has no window in front."
+    fx, fy, fw, fh = frame
+    word = re.compile(rf"(?<![\w]){re.escape(label)}(?![\w])", re.I)
+
+    def visible(e) -> bool:
+        return e.w > 0 and e.h > 0 and e.x + e.w > fx and e.y + e.h > fy and e.x < fx + fw and e.y < fy + fh
+
+    cands = [e for e in els if e.enabled and visible(e)]
+    exact = [e for e in cands if e.title.lower().strip() == label or (not e.title and e.value.lower().strip() == label)]
+    hits = exact or [e for e in cands if word.search(e.title) or word.search(e.value)]
     if not hits:
-        return f"Error: nothing on screen called '{a['label']}'."
-    # exact title, then the most button-like role, then the smallest thing that matched
+        return f"Error: nothing in the front window of {app} is called '{a['label']}'."
+    if not exact and len({(e.title or e.value).lower() for e in hits}) > 1:
+        names = ", ".join(sorted({(e.title or e.value)[:30] for e in hits})[:4])
+        return f"Error: several things match '{a['label']}' ({names}) — which one?"
     hits.sort(
         key=lambda e: (
-            e.title.lower() != label,
             _CLICK_ROLES.index(e.role) if e.role in _CLICK_ROLES else len(_CLICK_ROLES),
             e.w * e.h,
         )
     )
     e = hits[0]
-    if "AXPress" in e.actions:
-        out = ax.press(e.id)
-        if not out.startswith("Error"):
-            return f"Clicked '{e.title or e.value}' ({e.role.removeprefix('AX')})"
+    name = (e.title or e.value)[:40]
+    if "AXPress" in e.actions and not (await asyncio.to_thread(ax.press_element, e)).startswith("Error"):
+        return f"Clicked '{name}' ({e.role.removeprefix('AX')})"
     inp.click(*e.center)
-    return f"Clicked '{e.title or e.value}' ({e.role.removeprefix('AX')}) at {tuple(map(int, e.center))}"
+    return f"Clicked '{name}' ({e.role.removeprefix('AX')}) at {tuple(map(int, e.center))}"
 
 
 # ---- apps -----------------------------------------------------------------------------
@@ -480,6 +595,7 @@ async def click_text(a: dict, c: ToolContext) -> str:
         )
     ],
     quiet=True,
+    early=True,
 )
 async def open_app(a: dict, c: ToolContext) -> str:
     return await apps.open_app(a["target"])
@@ -671,6 +787,7 @@ async def calendar_add(a: dict, c: ToolContext) -> str:
             {"title": "", "body": "<body>"},
         )
     ],
+    payload=True,
 )
 async def notes_create(a: dict, c: ToolContext) -> str:
     title, body = (a.get("title") or "").strip(), (a.get("body") or "").strip()

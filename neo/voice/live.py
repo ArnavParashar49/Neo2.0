@@ -22,6 +22,7 @@ import asyncio
 import re
 import time
 from collections.abc import Awaitable, Callable
+from contextlib import nullcontext as _nullcontext
 
 import numpy as np
 from google import genai
@@ -32,6 +33,7 @@ from neo.agent.prompt import build as build_prompt
 from neo.agent.registry import ToolContext, registry
 from neo.config import settings
 from neo.events import NeoState, bus
+from neo.reflex.schema import asks_something
 from neo.voice.audio import Mic, Speaker, rms
 from neo.voice.wake import WakeSpotter
 
@@ -67,13 +69,25 @@ _VAD_CHUNK = 512  # silero works on 32 ms windows at 16 kHz
 
 _LIVE_EXTRA = """You are speaking aloud, so keep replies short and natural. When the user gives a command
 (open, type, set, play, remind…), just call the tool — don't announce it, confirm it, or say "done";
-stay quiet unless something went wrong. Speak when the user asks a question or wants information. For anything that needs
+stay quiet unless something went wrong. When one sentence asks for several things ("type github.com
+and press enter"), make every call, in order. Speak when the user asks a question or wants information.
+If a tool result starts with NEEDS_USER, tell the user exactly that, briefly. For anything that needs
 several steps or looking at the screen, files, mail or the web, call agent_task with a clear goal and
 then relay its result in one or two sentences. Don't narrate tool use. When the user is working in
 an app that is already open (a note, a document, a message) and asks you to type or add something,
 continue in that same place — type_text for literal words, dictate when NEO should come up with
 the words, hotkey for keys like return or cmd+s — and don't create a new note or file elsewhere.
 agent_task is for things that need looking at the screen or several steps."""
+
+
+def _multi_step(text: str) -> bool:
+    """Does the utterance ask for more than one thing?"""
+    from neo.agent import fastpath
+
+    steps = fastpath.plan(text)
+    if steps is not None:
+        return len(steps) > 1
+    return bool(re.search(r"\b(?:and|then|after\s+that)\b|,", text, re.I))
 
 
 def _canon(text: str) -> str:
@@ -131,6 +145,11 @@ class LiveVoice:
         self._tasks: list[asyncio.Task] = []
         self._tool_tasks: dict[str, asyncio.Task] = {}  # function-call id → running tool task
         self._goals: dict[str, str] = {}  # function-call id → agent_task goal in flight
+        self._server_cancelled: set[str] = set()
+        self._utterance = ""  # what the user said in the current turn (for "did they ask something?")
+        # Keystrokes, clicks and app switches run one at a time in the order the model asked:
+        # non-blocking calls would otherwise race ("type X" and "press enter").
+        self._ui_lock = asyncio.Lock()
         self._last_activity = 0.0
         self._ptt = False
         self._speaking = False  # audio for the current model turn is playing / still arriving
@@ -248,6 +267,8 @@ class LiveVoice:
                 return
             self._live_cm, self._live = cm, live
             self._last_activity = self._session_open = self._last_user_speech = time.time()
+            self._turn_open, self._utterance = False, ""
+            early().new_utterance()
             if self._vad is not None:
                 self._vad.reset_states()
             self._vad_buf = np.zeros(0, dtype=np.float32)
@@ -420,15 +441,14 @@ class LiveVoice:
                 self._turn_open = True
                 self._last_user_speech = time.time()  # the server heard you, whatever the local VAD thinks
                 user_buf.append(sc.input_transcription.text)
-                await bus().say("".join(user_buf), role="user", final=False)
-                early().feed("".join(user_buf))
-                await early().tick()
+                self._utterance = "".join(user_buf)
+                await bus().say(self._utterance, role="user", final=False)
+                early().feed(self._utterance)  # the 150 ms ticker acts on it — never inline here
             interim = getattr(sc, "interim_input_transcription", None)
             if interim and interim.text:  # words as they're being said, before they're committed
                 self._turn_open = True
                 self._last_user_speech = time.time()
                 early().feed("".join(user_buf) + " " + interim.text)
-                await early().tick()
             if sc.output_transcription and sc.output_transcription.text:
                 model_buf.append(sc.output_transcription.text)
                 await bus().say("".join(model_buf), final=False)
@@ -446,7 +466,8 @@ class LiveVoice:
                 if user_buf:
                     await bus().say("".join(user_buf), role="user", final=True)
                     user_buf.clear()
-                await early().tick(final=True)
+                # The model heard the whole sentence and calls the tools itself; the early actor
+                # only ever acts mid-sentence here (its runs answer the model's matching calls).
                 early().new_utterance()
                 if model_buf:
                     await bus().say("".join(model_buf), final=True)
@@ -454,14 +475,16 @@ class LiveVoice:
                 # Don't block the receive loop on playback — server-side events must keep flowing.
                 asyncio.create_task(self._after_playback())
         if msg.tool_call:
+            asked = self._utterance or "".join(user_buf)
             for fc in msg.tool_call.function_calls or []:
-                task = asyncio.create_task(self._run_tool(live, fc))
+                task = asyncio.create_task(self._run_tool(live, fc, asked))
                 self._tool_tasks[fc.id or fc.name] = task
             await self._refresh_state()
         if msg.tool_call_cancellation:
             for cid in msg.tool_call_cancellation.ids or []:
                 t = self._tool_tasks.pop(cid, None)
                 if t:
+                    self._server_cancelled.add(cid)  # the server withdrew it: send nothing back
                     t.cancel()
         if msg.go_away:
             print("[live] server asked us to go away; will reconnect on next activity")
@@ -473,41 +496,61 @@ class LiveVoice:
             self._speaking = False
             await self._refresh_state()
 
-    async def _run_tool(self, live, fc) -> None:
+    async def _run_tool(self, live, fc, asked: str = "") -> None:
         args = dict(fc.args or {})
         key = fc.id or fc.name
-        silent = False  # done quietly: the model gets the result but isn't prompted to speak
+        t = registry().get(fc.name)
+        # Quiet = an action that just gets done. Its result goes back SILENT (no narration) unless
+        # it failed, needs the user, or the user also asked something in the same breath.
+        silent = False
         try:
             if fc.name == "agent_task":
                 goal = str(args.get("goal", "")).strip()
                 if self._agent_task_running(goal, except_key=key):
-                    # The model re-asked for the same thing (it got an error, or the user repeated
-                    # themselves) while the first attempt is still working: never run it twice.
-                    result = "Still working on that — I'll tell you when it's done."
+                    # The model re-asked for what is already running (an error, or the user
+                    # repeated themselves): never run it twice, and don't promise anything —
+                    # the first call's result will be delivered when it's done.
+                    result, silent = "(already running — its result will follow)", True
                 else:
                     self._goals[key] = goal
                     reply = await self._agent_session.handle(goal)
                     result, silent = reply.text, reply.silent
-            elif (done := early().recently_done(fc.name, args)) is not None:
+            elif (done := early().claim(fc.name, args)) is not None:
                 result = done  # already ran while the user was still talking
-                silent = bool((t := registry().get(fc.name)) and t.quiet)
+                silent = bool(t and t.quiet)
             else:
-                await bus().set_state(NeoState.WORKING, job=key)
-                await bus().tool_start(fc.name, args, job=key)
-                out = await registry().invoke(fc.name, args, ToolContext(user_text=str(args)))
-                await bus().tool_end(fc.name, out.ok, out.text, job=key)
+                ui = bool(t and t.quiet)  # keystrokes/clicks/app switches: strictly in order
+                async with self._ui_lock if ui else _nullcontext():
+                    await bus().set_state(NeoState.WORKING, job=key)
+                    await bus().tool_start(fc.name, args, job=key)
+                    out = await registry().invoke(fc.name, args, ToolContext(user_text=asked or str(args)))
+                    await bus().tool_end(fc.name, out.ok, out.text, job=key)
                 result = out.text
-                silent = bool(out.ok and (t := registry().get(fc.name)) and t.quiet)
+                silent = bool(out.ok and t and t.quiet and not out.text.startswith("NEEDS_"))
         except asyncio.CancelledError:
-            result = "cancelled by the user"
+            if key in self._server_cancelled:  # withdrawn by the server: it expects no response
+                self._server_cancelled.discard(key)
+                self._tool_tasks.pop(key, None)
+                self._goals.pop(key, None)
+                await bus().end_job(key)
+                return
+            result, silent = "cancelled by the user", True
         except Exception as e:  # noqa: BLE001 — the model must always get a response back
             result = f"Error: {e}"
         finally:
+            # Activity first: the silence watch must not see "no tools, long quiet" in the gap
+            # between this tool leaving the running set and its result reaching the model.
+            self._last_activity = self._last_turn_end = time.time()
             self._tool_tasks.pop(key, None)
             self._goals.pop(key, None)
             await bus().end_job(key)
+        if silent and asked and asks_something(asked):
+            silent = False  # "open notes and tell me how many notes I have": answer the question
+        if silent and asked and _multi_step(asked):
+            # "type github.com and press enter": the model issues one call at a time, and a
+            # SILENT result would never prompt it for the next one.
+            silent = False
         self._last_activity = time.time()
-        t = registry().get(fc.name)
         non_blocking = fc.name == "agent_task" or bool(t and (t.slow or t.quiet))
         if not non_blocking:
             scheduling = None
@@ -525,20 +568,20 @@ class LiveVoice:
             try:
                 await live.send_tool_response(function_responses=[resp])
                 self._last_turn_end = time.time()
-                self._turn_open = True  # the model owes a spoken reply for this result
+                if not silent:
+                    self._turn_open = True  # the model owes a spoken reply for this result
             except Exception as e:  # noqa: BLE001
                 print(f"[live] tool response failed: {e}")
             # The model now composes its spoken reply: show "thinking" until audio arrives
             # instead of blinking through "listening" for the half-second in between. A silent
             # result gets no reply at all — straight back to listening.
-            if not any(not t.done() for t in self._tool_tasks.values()):
+            if not any(not x.done() for x in self._tool_tasks.values()):
                 if silent:
-                    self._turn_open = False
                     await self._refresh_state()
                 else:
                     await bus().set_state(NeoState.THINKING)
                     asyncio.create_task(self._settle_if_quiet(2.5))
-        else:  # session went away mid-task: don't lose the result
+        elif not silent:  # session went away mid-task: don't lose the result
             await bus().say(result[:600], final=True)
             await self._refresh_state()
 

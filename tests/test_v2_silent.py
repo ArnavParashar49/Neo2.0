@@ -100,15 +100,28 @@ def test_information_tool_is_spoken_even_when_phrased_as_a_command(monkeypatch):
     assert any(e[0] == "transcript" and e[2] == "assistant" and "noon" in e[1] for e in seen)
 
 
-def test_failed_quiet_action_is_reported(monkeypatch):
+def test_failed_quiet_action_hands_the_request_to_the_agent(monkeypatch):
+    import neo.agent.session as sess_mod
+
     async def fake_open(a, c):
         return "Error: no such app"
 
     monkeypatch.setattr(registry().get("open_app"), "handler", fake_open)
-    from neo.agent.registry import ToolOutput  # noqa: F401 — ok flag comes from the registry
 
+    class B:
+        name = "fake"
+        supports_vision = False
+        supports_tools = True
+
+        async def complete(self, messages, **kw):
+            return Turn(text="I couldn't find an app called blorp.")
+
+        async def stream(self, messages, **kw):
+            yield ""
+
+    monkeypatch.setattr(sess_mod, "brain", lambda purpose="agent": B())
     r = asyncio.run(Session(reflex=_reflex("quick_action", False)).handle("open blorp"))
-    assert not r.silent
+    assert r.route == "agent" and not r.silent and "blorp" in r.text
 
 
 def _agent_session(monkeypatch, reply, text_out="Done."):

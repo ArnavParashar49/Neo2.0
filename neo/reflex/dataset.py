@@ -295,18 +295,18 @@ _PREFIX = ["can you ", "could you ", "please ", "hey neo, ", "neo, ", "hey neo "
 
 # Which NEO tool a quick-action template means (the tool head learns these; "" = none/other).
 _TOOL_HINTS: list[tuple[str, str]] = [
+    ("open|launch|go to|bring up|switch to", "open_app"),
+    ("close|quit", "quit_app"),
     ("weather|rain|cold is it|hot is it|forecast", "web_search"),
     ("screenshot", "screenshot"),
     ("lock the screen|display to sleep|sleep the display", "sleep_display"),
-    ("calendar|meetings today", "calendar_today"),
+    ("(?:what'?s |anything )?on my calendar|my calendar|meetings today|my schedule|my agenda", "calendar_today"),
     ("unread email|new mail|inbox|my email", "mail_unread"),
     ("remind me|reminder", "reminder_add"),
     ("what time|the time|what's the date|today's date", "clock"),
     ("timer", "timer"),
     ("volume|mute|unmute|turn it up|turn it down|louder|quieter", "volume"),
     ("brightness|dimmer|brighter|dim the screen", "brightness"),
-    ("open|launch|go to|bring up|switch to", "open_app"),
-    ("close|quit", "quit_app"),
     ("remember that|remember this|note that", "memory"),
     ("note called|note saying|note that says|note titled", "notes_create"),
     ("what apps are open|which apps are running", "apps_running"),

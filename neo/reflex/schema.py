@@ -58,6 +58,20 @@ def wants_reply(text: str) -> bool:
     return t.endswith("?") or bool(_REPLY_RE.match(t))
 
 
+# Anywhere in the sentence — "open notes and tell me how many there are" asks something even
+# though it starts with a command.
+_ASKS_RE = re.compile(
+    r"\b(?:tell\s+me|let\s+me\s+know|what|what's|whats|how\s+many|how\s+much|which|who|when|where|why|"
+    r"read\s+(?:it|them|me|out)|show\s+me|is\s+there|are\s+there|do\s+i\s+have|did\s+i|summari[sz]e)\b",
+    re.I,
+)
+
+
+def asks_something(text: str) -> bool:
+    """Does the utterance ask for information anywhere in it?"""
+    return wants_reply(text) or bool(_ASKS_RE.search(text))
+
+
 @dataclass
 class Decision:
     intent: Intent

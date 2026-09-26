@@ -14,7 +14,17 @@ import threading
 from neo.config import settings
 from neo.reflex.schema import Decision, Intent, wants_reply
 
-_STOP_RE = re.compile(r"^\s*(stop|cancel|never ?mind|shut ?up|be quiet|go to sleep|quit|exit)\b", re.I)
+# Only the bare words cancel everything; "stop the timer" / "quit the app" are commands.
+_STOP_RE = re.compile(
+    r"^\s*(?:(?:hey\s+)?neo[\s,]+)?(?:okay\s+|ok\s+)?(?:stop|cancel|never\s*mind|shut\s*up|be\s+quiet|go\s+to\s+sleep|"
+    r"quit|exit|stop\s+talking|that'?s\s+enough|forget\s+it|cancel\s+that|stop\s+it)"
+    r"(?:[\s,]+(?:it|that|now|please|neo|talking|already))*\s*[.!]*\s*$",
+    re.I,
+)
+
+
+def is_bare_stop(text: str) -> bool:
+    return bool(_STOP_RE.match(text))
 
 _lock = threading.Lock()
 _laya = None
@@ -41,7 +51,7 @@ def get_laya():
 
 
 def _rules(text: str) -> Decision | None:
-    if _STOP_RE.match(text) and len(text.split()) <= 4:
+    if is_bare_stop(text):
         return Decision("stop", 1.0, False, 0.0, False, 0.0, source="rules")
     return None
 
@@ -117,4 +127,4 @@ def warmup(reflex: Reflex | None = None) -> None:
     threading.Thread(target=_load, daemon=True).start()
 
 
-__all__ = ["Reflex", "Decision", "Intent", "warmup", "get_laya", "laya_lock"]
+__all__ = ["Reflex", "Decision", "Intent", "warmup", "get_laya", "laya_lock", "is_bare_stop"]

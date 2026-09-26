@@ -92,7 +92,7 @@ class LayaReflex:
             s_p = max(s_p, float(ans.get("needs_screen", {}).get("noul", 0.0)))
         reply, reply_p = True, 1.0
         if h.get("reply") is not None and intent not in ("chat", "stop"):
-            reply_p = float(_softmax(_forward(h["reply"], xs) / h["T"]["reply"])[1])
+            reply_p = min(float(_softmax(_forward(h["reply"], xs) / h["T"]["reply"])[1]), 0.9999)
             reply = reply_p >= 0.5
         tool, tool_p = "", 0.0
         if intent == "quick_action" and h.get("tool"):

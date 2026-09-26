@@ -32,11 +32,11 @@ def _env(tmp_path, monkeypatch):
         ("select all", ("hotkey", {"keys": "cmd+a"})),
         ("close this tab", ("hotkey", {"keys": "cmd+w"})),
         ("next tab", ("hotkey", {"keys": "ctrl+tab"})),
-        ("go back", ("hotkey", {"keys": "cmd+["})),
+        ("go back", ("hotkey", {"keys": "cmd+[", "app": "browser|finder"})),
         ("zoom in", ("hotkey", {"keys": "cmd+="})),
         ("take a screenshot", ("hotkey", {"keys": "cmd+shift+3"})),
-        ("scroll down", ("scroll", {"x": -1, "y": -1, "dy": -8})),
-        ("scroll to the top", ("hotkey", {"keys": "cmd+up"})),
+        ("scroll down", ("scroll", {"at_pointer": True, "dy": -8})),
+        ("scroll to the top", ("hotkey", {"keys": "cmd+up", "app": "browser"})),
         ("quit spotify", ("quit_app", {"name": "spotify"})),
         ("close this window", ("hotkey", {"keys": "cmd+w"})),
         ("switch to safari", ("open_app", {"target": "safari"})),
@@ -62,24 +62,48 @@ def test_control_fast_paths(text, expected):
 
 
 def test_click_text_prefers_exact_titles_and_buttons(monkeypatch):
-    from neo.tools.computer import ax
     from neo.tools import computer as comp
+    from neo.tools.computer import ax
 
-    els = {
-        "e1": ax.Element("e1", "AXStaticText", "Play next episode", "", 0, 0, 200, 20, actions=[]),
-        "e2": ax.Element("e2", "AXButton", "Play", "", 10, 10, 40, 40, actions=["AXPress"]),
-        "e3": ax.Element("e3", "AXButton", "Play", "", 0, 0, 400, 400, actions=["AXPress"]),
-    }
-    monkeypatch.setattr(ax, "snapshot", lambda app=None, **kw: None)
-    monkeypatch.setattr(ax, "_last_tree", els)
+    els = [
+        ax.Element("e1", "AXStaticText", "Play next episode", "", 0, 0, 200, 20, actions=[]),
+        ax.Element("e2", "AXButton", "Play", "", 10, 10, 40, 40, actions=["AXPress"]),
+        ax.Element("e3", "AXButton", "Play", "", 0, 0, 400, 400, actions=["AXPress"]),
+        ax.Element("e4", "AXButton", "Display", "", 0, 0, 40, 40, actions=["AXPress"]),
+        ax.Element("e5", "AXButton", "Play", "", 5000, 5000, 40, 40, actions=["AXPress"]),  # off-window
+    ]
+    monkeypatch.setattr(ax, "window_elements", lambda app=None: ("Music", (0, 0, 1000, 800), els))
+    monkeypatch.setattr(comp.apps, "_target", None)
+    monkeypatch.setattr(comp.apps, "front_name", lambda: "Music")
     pressed = []
-    monkeypatch.setattr(ax, "press", lambda eid: pressed.append(eid) or "Pressed")
+    monkeypatch.setattr(ax, "press_element", lambda e: pressed.append(e.id) or "Pressed")
     clicked = []
     monkeypatch.setattr(comp.inp, "click", lambda x, y, **kw: clicked.append((x, y)) or "clicked")
     out = asyncio.run(registry().invoke("click_text", {"label": "play"}, ToolContext(user_text="")))
-    assert out.ok and pressed == ["e2"] and clicked == []  # exact title, button role, smallest
-    out = asyncio.run(registry().invoke("click_text", {"label": "settings"}, ToolContext(user_text="")))
-    assert not out.ok and "nothing on screen" in out.text
+    assert out.ok and pressed == ["e2"] and clicked == []  # exact title, button, smallest, on screen
+    pressed.clear()
+    out = asyncio.run(registry().invoke("click_text", {"label": "ok"}, ToolContext(user_text="")))
+    assert not out.ok  # "ok" is not a substring hit on "Bookmarks"-like labels
+    out = asyncio.run(registry().invoke("click_text", {"label": "it"}, ToolContext(user_text="")))
+    assert not out.ok and pressed == []  # vague labels are never clicked
+
+
+def test_click_text_asks_when_ambiguous(monkeypatch):
+    from neo.tools.computer import ax
+
+    els = [
+        ax.Element("e1", "AXButton", "Save draft", "", 0, 0, 40, 40, actions=["AXPress"]),
+        ax.Element("e2", "AXButton", "Save as", "", 50, 0, 40, 40, actions=["AXPress"]),
+    ]
+    monkeypatch.setattr(ax, "window_elements", lambda app=None: ("Mail", (0, 0, 1000, 800), els))
+    from neo.tools import computer as comp
+
+    monkeypatch.setattr(comp.apps, "_target", None)
+    monkeypatch.setattr(comp.apps, "front_name", lambda: "Mail")
+    pressed = []
+    monkeypatch.setattr(ax, "press_element", lambda e: pressed.append(e.id) or "Pressed")
+    out = asyncio.run(registry().invoke("click_text", {"label": "save"}, ToolContext(user_text="")))
+    assert not out.ok and "which one" in out.text and pressed == []
 
 
 def test_scroll_fast_path_uses_the_pointer(monkeypatch):
@@ -91,6 +115,9 @@ def test_scroll_fast_path_uses_the_pointer(monkeypatch):
     tool, args = _match_fast_path("scroll down")
     asyncio.run(registry().invoke(tool, args, ToolContext(user_text="")))
     assert seen == {"x": 640.0, "y": 400.0, "dy": -8}
+    # an explicit coordinate left of the main display is a real coordinate, not "the pointer"
+    asyncio.run(registry().invoke("scroll", {"x": -300, "y": 200, "dy": -3}, ToolContext(user_text="")))
+    assert seen == {"x": -300, "y": 200, "dy": -3}
 
 
 def test_control_tools_are_quiet_and_live_direct():
@@ -111,11 +138,15 @@ def test_dictate_appends_on_a_new_line_when_the_note_has_text(monkeypatch):
     typed = []
 
     async def no_focus():
-        return None
+        return None, False
 
     monkeypatch.setattr(comp, "_ensure_text_focus", no_focus)
     monkeypatch.setattr(comp.inp, "type_text", lambda s, **kw: typed.append(s) or "ok")
     monkeypatch.setattr(comp.inp, "hotkey", lambda k: typed.append(f"<{k}>") or "ok")
+    monkeypatch.setattr(ax, "frontmost_app", lambda: ("Notes", 1))
+    monkeypatch.setattr(comp.apps, "front_name", lambda: "Notes")
+    monkeypatch.setattr(comp.apps, "_target", None)
+    monkeypatch.setattr(ax, "focused_role", lambda: ("AXTextArea", ""))
     monkeypatch.setattr(ax, "main_text_area", lambda app=None: ax.Element("e1", "AXTextArea", "", "Laptops", 0, 0, 10, 10))
 
     class B:

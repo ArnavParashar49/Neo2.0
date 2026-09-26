@@ -76,20 +76,18 @@ def test_early_actor_runs_a_finished_clause_and_leaves_the_rest(_tools):
 
     async def run():
         ea.feed("open youtube and")
-        assert (
-            await ea.tick() == []
-        )  # "open youtube" is followed by "and" → clause finished, but stable window
+        assert await ea.tick() == []  # finished clause, but the transcript only just changed
         ea._changed -= 1.0  # pretend 1 s passed
         res = await ea.tick()
-        assert res and calls == [("open_app", {"target": "youtube"})]
+        assert [r.tool for r in res] == ["open_app"] and calls == [("open_app", {"target": "youtube"})]
         ea.feed("open youtube and search for cat videos")
         ea._changed -= 1.0
         assert await ea.tick(final=True) == []  # the search belongs to YouTube: left for the agent…
         assert ea.remaining() == "open youtube and search for cat videos"  # …with its context
-        assert (
-            ea.recently_done("open_app", {"target": "YouTube "}) == "Opened youtube"
-        )  # case/space-insensitive
-        assert ea.recently_done("open_app", {"target": "spotify"}) is None
+        # the model's own call for what already ran is answered once (case/space-insensitive)…
+        assert ea.claim("open_app", {"target": "YouTube "}) == "Opened youtube"
+        assert ea.claim("open_app", {"target": "youtube"}) is None  # …and only once
+        assert ea.claim("open_app", {"target": "spotify"}) is None
 
     asyncio.run(run())
 
@@ -105,27 +103,38 @@ def test_early_actor_waits_while_the_clause_is_still_being_spoken(_tools):
         assert await ea.tick() == []  # just changed → not stable
         ea._changed -= 1.0
         assert await ea.tick() and _tools[-1][0] == "volume"
-        ea.new_utterance()
+        assert [r.tool for r in ea.new_utterance()] == ["volume"]
         assert ea.remaining() == ""
 
     asyncio.run(run())
 
 
-def test_early_actor_dedupes_within_window(_tools):
+def test_a_repeated_command_runs_again(_tools):
+    """The one-shot claim stands in for the model's call, never for the user saying it again."""
     ea = EarlyActor()
 
     async def run():
-        ea.feed("open youtube")
-        await ea.tick(final=True)
-        ea.new_utterance()
-        ea.feed("open youtube")
-        await ea.tick(final=True)
-        assert len(_tools) == 1  # second one answered from the cache
-        ea._done = {k: (t - 100, r) for k, (t, r) in ea._done.items()}  # window expired
-        ea.new_utterance()
-        ea.feed("open youtube")
-        await ea.tick(final=True)
+        for _ in range(2):
+            ea.feed("open youtube")
+            await ea.tick(final=True)
+            ea.new_utterance()
         assert len(_tools) == 2
+
+    asyncio.run(run())
+
+
+def test_same_action_runs_once_per_utterance(_tools):
+    ea = EarlyActor()
+
+    async def run():
+        ea.feed("open youtube and")
+        ea._changed -= 1.0
+        await ea.tick()
+        await ea.tick()  # the ticker fires again on the same text
+        ea.feed("open youtube and")
+        ea._changed -= 1.0
+        await ea.tick(final=True)
+        assert len(_tools) == 1
 
     asyncio.run(run())
 
@@ -218,14 +227,14 @@ def test_quick_route_uses_early_result_when_already_done(monkeypatch, _tools):
     ea = early_mod.early()
 
     async def run():
-        ea.feed("open youtube")
-        await ea.tick(final=True)
+        ea.feed("open youtube and")  # opened mid-sentence…
+        ea._changed -= 1.0
+        await ea.tick()
         ea.new_utterance()
-        r = await Session(reflex=R()).handle("open youtube")
-        return r
+        return await Session(reflex=R()).handle("open youtube")  # …then the same request arrives whole
 
     r = asyncio.run(run())
-    assert r.route == "quick" and r.text == "Opened youtube"
+    assert r.route == "quick" and r.silent
     assert len(_tools) == 1  # not executed a second time
 
 

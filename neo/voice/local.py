@@ -15,6 +15,7 @@ from collections.abc import Awaitable, Callable
 import numpy as np
 
 from neo.agent.early import early
+from neo.agent.registry import registry
 from neo.config import settings
 from neo.events import NeoState, bus
 from neo.voice.audio import MIC_RATE, Mic, Speaker, rms
@@ -166,12 +167,18 @@ class LocalVoice:
             self.mic.drain()
             text = await self._capture_utterance()
             early().feed(text)
-            await early().tick(final=True)  # last clause of the utterance, if it's a quick command
+            await early().tick(final=True)  # the whole utterance, if fast paths can cover it
             text = early().remaining()
-            early().new_utterance()
+            ran = early().new_utterance()
             if not text:
-                self._followup_until = time.time() + _FOLLOWUP_S if early().executed else 0.0
-                await bus().set_state(NeoState.LISTENING if early().executed else NeoState.IDLE)
+                # Everything ran without a model. Actions stay silent; answers and failures are spoken.
+                for r in ran:
+                    t = registry().get(r.tool)
+                    if r.text and not (r.ok and t is not None and t.quiet and not r.text.startswith("NEEDS_")):
+                        await bus().say(r.text, final=True)
+                        await self.speak(r.text)
+                self._followup_until = time.time() + _FOLLOWUP_S if ran else 0.0
+                await bus().set_state(NeoState.LISTENING if ran else NeoState.IDLE)
                 continue
             self._handler = asyncio.create_task(self._handle(text))
 
@@ -273,7 +280,7 @@ class LocalVoice:
             if res.text and self._capturing:
                 await bus().say(res.text.strip(), role="user", final=False)
                 early().feed(res.text.strip())
-                await early().tick()  # act on a finished clause while the user keeps talking
+                asyncio.create_task(early().tick())  # act on a finished clause; never block the STT
         except asyncio.CancelledError:
             pass
         except Exception:  # noqa: BLE001 — partials are cosmetic

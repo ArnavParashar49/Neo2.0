@@ -68,6 +68,7 @@ _TIMER2_RE = _P + r"(?:set|start)\s+(?:a\s+)?(?P<minutes>\d+(?:\.\d+)?)\s*(?:min
         (_DOWN_RE, {"action": "down"}),
     ],
     quiet=True,
+    early=True,
 )
 async def volume(a: dict, c: ToolContext) -> str:
     act = a.get("action", "set")
@@ -101,6 +102,7 @@ async def volume(a: dict, c: ToolContext) -> str:
     category="system",
     fast_path=[(_BR_DOWN, {"direction": "down"}), (_BR_UP, {"direction": "up"})],
     quiet=True,
+    early=True,
 )
 async def brightness(a: dict, c: ToolContext) -> str:
     key = 144 if a.get("direction") == "up" else 145

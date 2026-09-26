@@ -1,36 +1,77 @@
 """Act while the user is still talking.
 
 The voice layer feeds the running transcript of the current utterance in here as it grows.
-Whenever the not-yet-handled part has been stable for a moment (the speaker paused, or moved
-on to the next clause) and a fast-path regex fully matches it, the matching quick tool runs
-immediately — "open youtube and …" opens YouTube before the sentence is over. This is the
-Jev-demo behaviour: a fast decision layer over the live transcript, acting on confidence.
 
-Safety comes from *what* may run early: only tools that declare fast-path patterns (open app,
-volume, brightness, timer, clock) — cheap, idempotent, nothing destructive. Everything that
-ran is remembered for a short while so the language model's own later call for the same thing
-is answered "already done" instead of running twice.
+* Mid-sentence (`tick()`): a clause that is finished — followed by "and"/"then"/a comma, or
+  sitting unchanged for a moment at the end — runs at once *if its tool opted in*
+  (`early=True`: open_app, volume, brightness — cheap, idempotent, and their patterns refuse
+  to match a sentence that continues). "open youtube and …" opens YouTube before the sentence
+  is over. Keystrokes, clicks and anything with a free-text payload never run mid-sentence:
+  "select all" might be the start of "select all the photos from June".
+* At the end (`tick(final=True)`, local cascade): the whole rest of the utterance is planned
+  with the fast paths (`neo.agent.fastpath.plan`) and run if it can be covered completely;
+  otherwise nothing more runs and `remaining()` hands the utterance to the pipeline.
+
+Everything that ran early leaves a one-shot *claim*: when the language model then asks for the
+same thing (Gemini Live hears the whole sentence too), the claim answers it instead of running
+it twice. A claim is consumed once, so a command the user repeats later still runs.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
-import re
 import time
+from dataclasses import dataclass
 
+from neo.agent import fastpath
 from neo.agent.registry import ToolContext, registry
 from neo.events import bus
 
 _STABLE_S = 0.35  # a clause must sit unchanged this long before it counts as "said"
-_DEDUPE_S = 30.0  # the model's own call for the same tool+args within this window is a no-op
+_CLAIM_S = 15.0  # how long an early run can stand in for the model's own call for it
 _FILLERS = {"please", "now", "thanks", "thank you", "ok", "okay"}
 _SETTLE_AFTER_APP_S = 0.8  # "open notes and type hi": give the app a moment to come up first
-_CLAUSE_SPLIT = re.compile(r"\s*(?:,|;|\band then\b|\bthen\b|\band\b|\bafter that\b)\s*", re.I)
+_APP_TOOLS = ("open_app", "activate_app")
+
+_KEY_ALIASES = {
+    "enter": "return",
+    "esc": "escape",
+    "command": "cmd",
+    "control": "ctrl",
+    "option": "alt",
+    "backspace": "delete",
+}
+_MOD_ORDER = ("cmd", "ctrl", "alt", "shift")
 
 
-def _key(tool: str, args: dict) -> str:
-    return tool + json.dumps({k: str(v).strip().lower() for k, v in args.items()}, sort_keys=True)
+def _canon_keys(keys: str) -> str:
+    parts = [_KEY_ALIASES.get(p, p) for p in str(keys).lower().replace(" ", "").split("+") if p]
+    mods = sorted((p for p in parts if p in _MOD_ORDER), key=_MOD_ORDER.index)
+    return "+".join(mods + [p for p in parts if p not in _MOD_ORDER])
+
+
+def key(tool: str, args: dict) -> str:
+    """Identity of an action, tolerant of how the model spells the same thing."""
+    def canon(v) -> str:
+        if isinstance(v, float) and v.is_integer():
+            v = int(v)
+        return str(v).strip().lower()
+
+    norm = {k: canon(v) for k, v in args.items() if v not in (None, "")}
+    if tool == "hotkey" and "keys" in norm:
+        norm["keys"] = _canon_keys(norm["keys"])
+    if tool == "scroll":  # pointer-relative vs absolute coordinates: same intent
+        norm = {k: v for k, v in norm.items() if k in ("dy", "dx")}
+    return tool + json.dumps(norm, sort_keys=True)
+
+
+@dataclass
+class Ran:
+    tool: str
+    args: dict
+    ok: bool
+    text: str
 
 
 class EarlyActor:
@@ -38,24 +79,29 @@ class EarlyActor:
         self._text = ""
         self._changed = 0.0
         self._consumed = 0  # chars of the current utterance already acted on
-        self._done: dict[str, tuple[float, str]] = {}  # key → (when, result)
-        self._running: set[str] = set()
-        self._log: list[tuple[str, dict, float]] = []  # everything that ran early, with when
+        self._utt = 0  # bumps on every new utterance
+        self._ran_keys: set[str] = set()  # this utterance: never the same action twice
+        self._claims: dict[str, tuple[float, Ran]] = {}  # early runs the model hasn't asked for yet
         self._lock = asyncio.Lock()
-        self.executed: list[tuple[str, dict]] = []  # this utterance, in order
+        self.executed: list[Ran] = []  # this utterance, in order
 
     # ---- utterance lifecycle ----------------------------------------------------------------
-    def new_utterance(self) -> None:
+    def new_utterance(self) -> list[Ran]:
+        """Start the next utterance; returns what ran for the one that just ended."""
+        done = self.executed
         self._text, self._changed, self._consumed = "", 0.0, 0
+        self._utt += 1
+        self._ran_keys = set()
         self.executed = []
+        return done
 
     def feed(self, text: str) -> None:
         """The full transcript of the current utterance so far (may be revised)."""
         text = text.strip()
         if text != self._text:
+            if not text.startswith(self._text[: self._consumed]):
+                self._consumed = 0  # the recogniser revised words we already acted on
             self._text, self._changed = text, time.time()
-            if len(text) < self._consumed:  # the recogniser revised earlier words — start over
-                self._consumed = 0
 
     def remaining(self) -> str:
         """What the caller should still hand to the normal pipeline.
@@ -69,73 +115,87 @@ class EarlyActor:
         return self._text if self._consumed else left
 
     # ---- acting ----------------------------------------------------------------------------
-    async def tick(self, *, final: bool = False) -> list[str]:
-        """Run any fast-path clause that has stabilised. Returns results of what ran."""
+    async def tick(self, *, final: bool = False) -> list[Ran]:
+        """Run whatever may run now. Returns what ran during this call."""
         if not self._text or (not final and time.time() - self._changed < _STABLE_S):
             return []
         async with self._lock:
-            from neo.agent.session import _match_fast_path
-
-            pending = self._text[self._consumed :]
-            results: list[str] = []
+            utt, text, start = self._utt, self._text, self._consumed
+            pending = text[start:]
+            ran: list[Ran] = []
+            if final:
+                steps = fastpath.plan(pending, first_index=len(self.executed))
+                if not steps:
+                    return []
+                for tool, args in steps:
+                    ran.append(await self._run(tool, args, utt))
+                    if self._utt != utt:
+                        return ran
+                if all(r.ok for r in ran):
+                    self._consumed = len(text)
+                return ran
             pos = 0
-            for m in list(_CLAUSE_SPLIT.finditer(pending)) + [None]:
+            stable = time.time() - self._changed >= _STABLE_S
+            for m in list(fastpath.SPLIT.finditer(pending)) + [None]:
                 end = m.start() if m else len(pending)
                 clause = pending[pos:end].strip(" ,.;!?")
                 nxt = m.end() if m else len(pending)
                 if not clause:
                     pos = nxt
                     continue
-                if not final and m is None and time.time() - self._changed < _STABLE_S:
+                if m is None and not stable:
                     break  # the last clause is still being spoken
-                hit = _match_fast_path(clause)
-                if hit:
-                    tool, args = hit
-                    t = registry().get(tool)
-                    if not final and t is not None and not t.early:
-                        break  # "type …": the words are the payload, so wait for the whole sentence
-                    if (self._consumed + pos) > 0 and t is not None and not t.chain:
-                        break  # "… and search for X": that search belongs to the app just opened
-                    if self.executed and self.executed[-1][0] in ("open_app", "activate_app") and tool not in ("open_app", "activate_app"):
-                        await asyncio.sleep(_SETTLE_AFTER_APP_S)
-                    results.append(await self._run(tool, args))
-                    self._consumed += nxt
-                    pos = nxt
-                else:
-                    break  # a non-command clause: leave the rest for the full pipeline
-            return results
+                hit = fastpath.match(clause)
+                t = registry().get(hit[0]) if hit else None
+                if t is None or not t.early or t.payload:
+                    break  # not a command we may run mid-sentence: the rest waits
+                if (len(self.executed) + len(ran)) > 0 and not t.chain:
+                    break
+                r = await self._run(hit[0], hit[1], utt)
+                if self._utt != utt or not r.ok:
+                    break
+                ran.append(r)
+                pos = nxt
+            if self._utt == utt and pos:
+                self._consumed = start + pos
+            return ran
 
-    async def _run(self, tool: str, args: dict) -> str:
-        key = _key(tool, args)
-        if key in self._running:
-            return ""
-        recent = self.recently_done(tool, args)
-        if recent is not None:
-            return recent
-        self._running.add(key)
-        try:
-            await bus().tool_start(tool, args, job="early")
-            out = await registry().invoke(tool, args, ToolContext(user_text=self._text))
-            await bus().tool_end(tool, out.ok, out.text, job="early")
-            if out.ok:
-                self._done[key] = (time.time(), out.text)
-                self.executed.append((tool, args))
-                self._log.append((tool, args, time.time()))
-                del self._log[:-50]
-            return out.text
-        finally:
-            self._running.discard(key)
+    async def _run(self, tool: str, args: dict, utt: int) -> Ran:
+        k = key(tool, args)
+        if k in self._ran_keys:
+            return next((r for r in self.executed if key(r.tool, r.args) == k), Ran(tool, args, True, ""))
+        self._ran_keys.add(k)
+        if self.executed and self.executed[-1].tool in _APP_TOOLS and tool not in _APP_TOOLS:
+            await asyncio.sleep(_SETTLE_AFTER_APP_S)
+        await bus().tool_start(tool, args, job="early")
+        out = await registry().invoke(tool, args, ToolContext(user_text=self._text))
+        await bus().tool_end(tool, out.ok, out.text, job="early")
+        r = Ran(tool, args, out.ok, out.text)
+        if self._utt == utt:
+            self.executed.append(r)
+        if out.ok:
+            self._claims[k] = (time.time(), r)
+        return r
 
-    def recent(self, within_s: float) -> list[tuple[str, dict]]:
-        """Tools that ran early in the last `within_s` seconds (for the agent's context)."""
+    # ---- claims: the model's own call for what already ran --------------------------------
+    def claim(self, tool: str, args: dict) -> str | None:
+        """If this ran early and nobody has claimed it yet, claim it and return its result."""
+        self._expire()
+        rec = self._claims.pop(key(tool, args), None)
+        return rec[1].text if rec else None
+
+    def unclaimed(self) -> list[Ran]:
+        """Everything that ran early and nobody has accounted for — consumed by the caller
+        (the agent prompt says these are done, so the model doesn't redo them)."""
+        self._expire()
+        out = [r for _, r in sorted(self._claims.values(), key=lambda x: x[0])]
+        self._claims.clear()
+        return out
+
+    def _expire(self) -> None:
         now = time.time()
-        return [(t, a) for t, a, when in self._log if now - when < within_s]
-
-    def recently_done(self, tool: str, args: dict) -> str | None:
-        rec = self._done.get(_key(tool, args))
-        if rec and time.time() - rec[0] < _DEDUPE_S:
-            return rec[1]
-        return None
+        for k in [k for k, (t, _) in self._claims.items() if now - t > _CLAIM_S]:
+            del self._claims[k]
 
 
 _actor: EarlyActor | None = None

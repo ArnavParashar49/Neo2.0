@@ -121,15 +121,30 @@ def _str(v) -> str:
 
 
 # Transient system UI that can be "frontmost" for a moment without being what the user works in.
-_TRANSIENT = {"UserNotificationCenter", "NotificationCenter", "Control Center", "Spotlight", "loginwindow", "Dock"}
+_TRANSIENT = {
+    "UserNotificationCenter",
+    "NotificationCenter",
+    "Notification Center",
+    "Control Center",
+    "Spotlight",
+    "loginwindow",
+    "Dock",
+}
 
 
 def frontmost_app() -> tuple[str, int]:
-    """The app the user is working in: the one owning the menu bar, not a passing notification."""
+    """The app the user is working in. A passing notification that happens to be frontmost is
+    skipped for the menu-bar app — but a system dialog the user is actually in (it has a
+    focused window) is kept."""
     ws = NSWorkspace.sharedWorkspace()
     app = ws.frontmostApplication()
     if app is None or (app.localizedName() or "") in _TRANSIENT:
-        app = ws.menuBarOwningApplication() or app
+        has_window = False
+        if app is not None:
+            root = AS.AXUIElementCreateApplication(int(app.processIdentifier()))
+            has_window = _attr(root, AS.kAXFocusedWindowAttribute) is not None
+        if not has_window:
+            app = ws.menuBarOwningApplication() or app
     return (app.localizedName() or "", int(app.processIdentifier())) if app else ("", 0)
 
 
@@ -229,7 +244,8 @@ def find(query: str, app: str | None = None) -> str:
 
     Searches the tree the model is already holding ids for; a fresh walk (new ids) only when
     that tree is stale or belongs to a different app than asked for."""
-    other_app = bool(app) and _last_tree_app not in (app.lower(), "")
+    wanted = (app or frontmost_app()[0]).lower()
+    other_app = _last_tree_app not in (wanted, "")
     if not _last_tree or other_app or time.time() - _last_tree_ts > _FIND_MAX_AGE_S:
         snapshot(app)
     q = query.lower()
@@ -275,33 +291,110 @@ def set_value(eid: str, value: str) -> str:
 
 
 _EDITABLE = {"AXTextArea", "AXTextField", "AXSearchField", "AXComboBox"}
+_SINGLE_LINE = {"AXTextField", "AXSearchField", "AXComboBox"}
+
+
+def focused_role() -> tuple[str, str]:
+    """(role, subrole) of whatever has the keyboard focus, or ("", "")."""
+    el = _attr(AS.AXUIElementCreateSystemWide(), AS.kAXFocusedUIElementAttribute)
+    if el is None:
+        return "", ""
+    return _str(_attr(el, AS.kAXRoleAttribute)), _str(_attr(el, AS.kAXSubroleAttribute))
+
+
+def focused_is_secure() -> bool:
+    """Is the caret in a password field? NEO never types there."""
+    role, sub = focused_role()
+    return "AXSecureTextField" in (role, sub)
 
 
 def focused_editable() -> bool:
-    """Is the keyboard focus in something you can type into?"""
-    sys_el = AS.AXUIElementCreateSystemWide()
-    el = _attr(sys_el, AS.kAXFocusedUIElementAttribute)
+    """Is the keyboard focus in something you can type into (never a password field)?"""
+    el = _attr(AS.AXUIElementCreateSystemWide(), AS.kAXFocusedUIElementAttribute)
     if el is None:
         return False
     role = _str(_attr(el, AS.kAXRoleAttribute))
+    if "AXSecureTextField" in (role, _str(_attr(el, AS.kAXSubroleAttribute))):
+        return False
     if role in _EDITABLE:
         return True
-    # Web editors (Notes' body is not one, but Gmail/Docs are) report AXWebArea + a text role
-    # via the focused element's parent chain; a settable AXValue is the practical test.
+    # Web editors (Gmail, Docs) report other roles; a settable AXValue is the practical test.
     err, settable = AS.AXUIElementIsAttributeSettable(el, AS.kAXValueAttribute, None)
     return err == 0 and bool(settable) and role not in ("AXSlider", "AXCheckBox", "AXRadioButton")
 
 
-def main_text_area(app: str | None = None) -> Element | None:
-    """The biggest text area of the frontmost (or named) app — the document body, not the
-    search box. None when the app shows no editor (e.g. Notes with no note selected)."""
-    pid = pid_for_app(app) if app else frontmost_app()[1]
+def focused_window(app: str | None = None):
+    """(app name, AX window element) of the frontmost (or named) app's focused window."""
+    if app:
+        pid, name = pid_for_app(app), app
+    else:
+        name, pid = frontmost_app()
     if not pid:
-        return None
+        return name, None
+    root = AS.AXUIElementCreateApplication(pid)
+    win = _attr(root, AS.kAXFocusedWindowAttribute) or _attr(root, AS.kAXMainWindowAttribute)
+    return name, win
+
+
+def window_elements(app: str | None = None) -> tuple[str, tuple[float, float, float, float] | None, list[Element]]:
+    """Elements of the focused window only (not every window of the app), plus its frame."""
+    name, win = focused_window(app)
+    if win is None:
+        return name, None, []
     els: list[Element] = []
-    _walk(AS.AXUIElementCreateApplication(pid), 0, els, [0])
-    areas = [e for e in els if e.role == "AXTextArea" and e.enabled and e.w > 40 and e.h > 20]
-    return max(areas, key=lambda e: e.w * e.h) if areas else None
+    _walk(win, 0, els, [0])
+    return name, _point_size(win), els
+
+
+def _text_areas(el, depth: int, out: list[Element]) -> None:
+    """Every text area under `el` — its own walk, so a busy sidebar can't hit an element cap."""
+    if depth > _MAX_DEPTH or len(out) > 50:
+        return
+    role = _str(_attr(el, AS.kAXRoleAttribute))
+    if role == "AXTextArea":
+        x, y, w, h = _point_size(el)
+        out.append(
+            Element(
+                id=f"t{len(out)}",
+                role=role,
+                title="",
+                value=_str(_attr(el, AS.kAXValueAttribute)),
+                x=x,
+                y=y,
+                w=w,
+                h=h,
+                enabled=bool(_attr(el, AS.kAXEnabledAttribute, True)),
+                focused=bool(_attr(el, AS.kAXFocusedAttribute, False)),
+                ref=el,
+            )
+        )
+        return
+    for c in _attr(el, AS.kAXChildrenAttribute) or []:
+        _text_areas(c, depth + 1, out)
+
+
+def main_text_area(app: str | None = None) -> Element | None:
+    """The document body of the focused window: the focused text area, else the biggest one.
+    None when that window shows no editor (e.g. Notes with no note selected)."""
+    _, win = focused_window(app)
+    if win is None:
+        return None
+    areas: list[Element] = []
+    _text_areas(win, 0, areas)
+    areas = [e for e in areas if e.enabled and e.w > 40 and e.h > 20]
+    if not areas:
+        return None
+    focused = [e for e in areas if e.focused]
+    return focused[0] if focused else max(areas, key=lambda e: e.w * e.h)
+
+
+def press_element(e: Element) -> str:
+    """Press the element in hand (not by id through the shared tree another call may replace)."""
+    action = "AXPress" if "AXPress" in e.actions else ""
+    if not action:
+        return "Error: no press action"
+    err = AS.AXUIElementPerformAction(e.ref, action)
+    return "Pressed" if err == 0 else f"Error: AX action failed ({err})"
 
 
 def focused_element_text() -> str:

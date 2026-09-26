@@ -130,6 +130,16 @@ mic ─► wake word (local) ─► voice backend
 - Listening window counts Gemini's own transcription as speech; session-close reasons are logged.
 - Laya v2: MLP heads with temperature calibration, reply head, HF data (`hf_data.py`), per-text feature cache; v2 decisions never escalate to the cloud lite model.
 
+### Review fixes: control layer + early actor (2026-09-26)
+
+Two adversarial reviews (≈235 agents) confirmed 44 defects in the silent-command / control / dictation batch; all fixed with regression tests (199 green):
+
+- Early actor rewritten on a planner (`neo/agent/fastpath.py`): a plan covers the whole utterance or nothing; payload tools (type/dictate/click/note/memory/search) take the rest of the sentence ("type salt and pepper" is never split), a trailing command is split off ("… and press enter"); mid-sentence only opt-in tools run (open_app, volume, brightness); one-shot claims replace the 30 s dedupe (a repeated command runs again; the model's own call for an early action doesn't); Live never runs tools inside the receive loop and never re-runs the whole utterance at turn end.
+- Dictation: pronouns / messages / things go to the model ("write that down", "write an email to Sam", "write the report"); only UI places are stripped as targets; compose cues need count nouns; line breaks never send (single-line fields join, chat apps use shift+return, shells never get a multi-line enter); never types into password fields.
+- Control: click only on whole-word labels in the focused window, visible, unambiguous; vague labels ("click it") go to the model; browser-only chords (reload, top/bottom) only in browsers; "undo" only right after NEO typed; "new note" goes to Notes; a failed quick action hands the request to the agent.
+- Live: keystrokes run in the order asked; a question in the same breath as a command is answered; server-cancelled calls get no response; no stale turn across sessions.
+- Session: confirmation crash fixed; only a bare "stop" cancels everything; Laya's no-arg lane only for read-only tools without qualifiers; tool head trained with a real "none" class.
+
 ### Next
 
 - `npm run tauri build` → signed NEO.app that spawns the Python core itself.

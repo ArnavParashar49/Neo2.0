@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any, Literal
@@ -59,8 +60,9 @@ class RegisteredTool:
     category: str = "general"
     slow: bool = False  # UI speaks a filler while it runs
     fast_path: list[tuple[str, dict[str, Any]]] = field(default_factory=list)  # (regex, args)
-    early: bool = True  # fast path may fire mid-sentence; False = wait for the utterance to end
-    chain: bool = True  # may run as a later clause ("open notes and type hi"); False = whole utterance only
+    early: bool = False  # fast path may fire mid-sentence (opt in: cheap, idempotent tools only)
+    chain: bool = True  # may run as a later clause ("open notes and type hi"); False = first step only
+    payload: bool = False  # the fast path captures free text that runs to the end of the sentence
     quiet: bool = False  # an action: when it succeeds, NEO just does it — no spoken reply
     hidden: bool = False  # not exposed to the model (internal/UI-only)
     timeout: float = 120.0  # seconds; a hung tool returns an error instead of stalling the loop
@@ -71,6 +73,7 @@ class RegisteredTool:
 
 class Registry:
     def __init__(self) -> None:
+        self.last: tuple[str, float, bool] | None = None  # (tool, when, ok) of the latest invoke
         self._tools: dict[str, RegisteredTool] = {}
 
     def register(self, t: RegisteredTool) -> RegisteredTool:
@@ -99,6 +102,11 @@ class Registry:
         )
 
     async def invoke(self, name: str, args: dict[str, Any], ctx: ToolContext) -> ToolOutput:
+        out = await self._invoke(name, args, ctx)
+        self.last = (name, time.time(), out.ok)
+        return out
+
+    async def _invoke(self, name: str, args: dict[str, Any], ctx: ToolContext) -> ToolOutput:
         t = self.get(name)
         if not t:
             return ToolOutput(f"Unknown tool: {name}", ok=False)
@@ -139,8 +147,9 @@ def tool(
     category: str = "general",
     slow: bool = False,
     fast_path: list[tuple[str, dict[str, Any]]] | None = None,
-    early: bool = True,
+    early: bool = False,
     chain: bool = True,
+    payload: bool = False,
     quiet: bool = False,
     hidden: bool = False,
     timeout: float = 120.0,
@@ -159,6 +168,7 @@ def tool(
                 fast_path=fast_path or [],
                 early=early,
                 chain=chain,
+                payload=payload,
                 quiet=quiet,
                 hidden=hidden,
                 timeout=timeout,

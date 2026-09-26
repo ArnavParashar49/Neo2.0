@@ -8,7 +8,7 @@ import pytest
 
 from neo.agent import early as early_mod
 from neo.agent.early import EarlyActor
-from neo.agent.registry import registry
+from neo.agent.registry import ToolContext, registry
 from neo.agent.session import Session, _match_fast_path
 from neo.events import EventBus
 from neo.providers.base import Turn
@@ -46,9 +46,9 @@ def _env(tmp_path, monkeypatch):
         ("hit the return key", ("hotkey", {"keys": "return"})),
         ("new line", ("hotkey", {"keys": "return"})),
         ("select all", ("hotkey", {"keys": "cmd+a"})),
-        ("scratch that", ("hotkey", {"keys": "cmd+z"})),
-        ("make a new note", ("hotkey", {"keys": "cmd+n"})),
-        ("open new tab", ("hotkey", {"keys": "cmd+t"})),
+        ("scratch that", ("hotkey", {"keys": "cmd+z", "after": "input"})),
+        ("make a new note", ("hotkey", {"keys": "cmd+n", "app": "Notes"})),
+        ("open new tab", ("hotkey", {"keys": "cmd+t", "app": "tabs"})),
         ("open notes", ("open_app", {"target": "notes"})),  # untouched
         # not dictation: tasks, questions, conversation
         ("write an email to john saying hi", None),
@@ -70,12 +70,20 @@ def _stub_typing(monkeypatch):
     typed: list[str] = []
 
     async def no_focus_needed():
-        return None
+        return None, False
 
     monkeypatch.setattr(comp, "_ensure_text_focus", no_focus_needed)
     monkeypatch.setattr(comp.inp, "type_text", lambda s, **kw: typed.append(s) or f"Typed {len(s)}")
     monkeypatch.setattr(comp.inp, "hotkey", lambda k: typed.append(f"<{k}>") or f"Pressed {k}")
+    monkeypatch.setattr(comp.ax, "frontmost_app", lambda: (front[0], 1))
+    monkeypatch.setattr(comp.apps, "front_name", lambda: front[0])
+    monkeypatch.setattr(comp.apps, "_target", None)
+    monkeypatch.setattr(comp.ax, "focused_role", lambda: (role[0], ""))
+    monkeypatch.setattr(comp.ax, "main_text_area", lambda app=None: None)
     return typed
+
+
+front, role = ["Notes"], ["AXTextArea"]  # what the stubbed Mac reports; tests may change these
 
 
 def test_type_text_presses_return_between_lines(monkeypatch):
@@ -83,7 +91,37 @@ def test_type_text_presses_return_between_lines(monkeypatch):
     from neo.agent.registry import ToolContext
 
     out = asyncio.run(registry().invoke("type_text", {"text": "a\nb\n"}, ToolContext(user_text="")))
-    assert out.ok and typed == ["a", "<return>", "b", "<return>"]
+    assert out.ok and typed == ["a", "<return>", "b"]  # a trailing newline is never a Return
+
+
+@pytest.mark.parametrize(
+    "app, focus, expected",
+    [
+        ("Safari", "AXTextField", ["a b"]),  # single-line field: joined, never submitted
+        ("Slack", "AXTextArea", ["a", "<shift+return>", "b"]),  # chat: a line break, not "send"
+        ("Terminal", "AXTextArea", ["a b"]),  # a shell never gets a multi-line enter
+        ("Notes", "AXTextArea", ["a", "<return>", "b"]),
+    ],
+)
+def test_line_breaks_never_send(monkeypatch, app, focus, expected):
+    typed = _stub_typing(monkeypatch)
+    front[0] = app
+    role[0] = focus
+    try:
+        out = asyncio.run(registry().invoke("type_text", {"text": "a\nb"}, ToolContext(user_text="")))
+        assert out.ok and typed == expected
+    finally:
+        front[0], role[0] = "Notes", "AXTextArea"
+
+
+def test_never_types_into_a_password_field(monkeypatch):
+    from neo.tools import computer as comp
+
+    typed = []
+    monkeypatch.setattr(comp.ax, "focused_is_secure", lambda: True)
+    monkeypatch.setattr(comp.inp, "type_text", lambda s, **kw: typed.append(s) or "ok")
+    out = asyncio.run(registry().invoke("type_text", {"text": "hunter2"}, ToolContext(user_text="")))
+    assert not out.ok and "password" in out.text and typed == []
 
 
 def test_dictate_composes_with_the_fast_brain_then_types(monkeypatch):
@@ -121,12 +159,11 @@ def test_early_actor_waits_for_the_sentence_end_before_typing(monkeypatch):
         ea.feed("type Laptops in the heading")
         assert await ea.tick(final=True) and typed == ["Laptops"]
         assert ea.remaining() == ""
-        assert ea.recent(5.0) == [("type_text", {"text": "Laptops"})]
 
     asyncio.run(run())
 
 
-def test_open_app_still_fires_early_but_dictation_after(monkeypatch):
+def test_open_app_fires_early_but_dictation_waits_and_keeps_its_and(monkeypatch):
     typed = _stub_typing(monkeypatch)
     calls = []
 
@@ -138,12 +175,13 @@ def test_open_app_still_fires_early_but_dictation_after(monkeypatch):
     ea = EarlyActor()
 
     async def run():
-        ea.feed("open notes and type hello")
+        ea.feed("open notes and type salt and pepper")
         ea._changed -= 1.0
         await ea.tick()
         assert calls == ["notes"] and typed == []  # the app opens mid-sentence; the typing waits
         await ea.tick(final=True)
-        assert typed == ["hello"]
+        assert typed == ["salt and pepper"]  # never split at "and"
+        assert calls == ["notes"]  # and the app isn't opened twice
 
     asyncio.run(run())
 
@@ -162,17 +200,106 @@ def test_session_takes_the_fast_path_even_when_the_reflex_says_agent_task(monkey
     assert r.route == "quick" and typed == ["Laptops"] and "Laptops" in r.text
 
 
-def test_agent_prompt_lists_what_already_ran(monkeypatch):
-    typed = _stub_typing(monkeypatch)
+def test_agent_prompt_lists_what_already_ran_once(monkeypatch):
+    calls = []
+
+    async def fake_open(a, c):
+        calls.append(a["target"])
+        return "Opened"
+
+    monkeypatch.setattr(registry().get("open_app"), "handler", fake_open)
     from neo.agent.session import _already_done_note
 
     assert _already_done_note() == ""
     ea = early_mod.early()
 
     async def run():
-        ea.feed("type hi")
-        await ea.tick(final=True)
+        ea.feed("open notes and summarize my inbox into it")
+        ea._changed -= 1.0
+        await ea.tick()
 
     asyncio.run(run())
     note = _already_done_note()
-    assert "do NOT repeat" in note and "type_text" in note and "hi" in note
+    assert "do NOT repeat" in note and "open_app" in note and "notes" in note
+    assert _already_done_note() == ""  # consumed: the next request doesn't inherit it
+
+
+# ---- keystrokes only go to the app NEO is working in ---------------------------------------------
+
+
+def _guard_env(monkeypatch, *, front_app, target, can_raise):
+    from neo.tools import computer as comp
+
+    typed: list[str] = []
+    state = {"front": front_app}
+
+    async def bring_front(name, wait=1.5):
+        if can_raise:
+            state["front"] = name
+        return can_raise, name
+
+    monkeypatch.setattr(comp.apps, "front_name", lambda: state["front"])
+    monkeypatch.setattr(comp.apps, "bring_front", bring_front)
+    monkeypatch.setattr(comp.apps, "_target", (target, __import__("time").time()) if target else None)
+    monkeypatch.setattr(comp.ax, "frontmost_app", lambda: (state["front"], 1))
+    monkeypatch.setattr(comp.ax, "focused_is_secure", lambda: False)
+    monkeypatch.setattr(comp.ax, "focused_editable", lambda: True)
+    monkeypatch.setattr(comp.ax, "focused_role", lambda: ("AXTextArea", ""))
+    monkeypatch.setattr(comp.ax, "main_text_area", lambda app=None: None)
+    monkeypatch.setattr(comp.inp, "type_text", lambda t, **kw: typed.append(t) or "ok")
+    monkeypatch.setattr(comp.inp, "hotkey", lambda k: typed.append(f"<{k}>") or "ok")
+    return typed, state
+
+
+def test_never_types_into_another_app_when_the_target_wont_come_forward(monkeypatch):
+    typed, _ = _guard_env(monkeypatch, front_app="Claude", target="Notes", can_raise=False)
+    out = asyncio.run(registry().invoke("type_text", {"text": "salt and pepper"}, ToolContext(user_text="")))
+    assert out.text.startswith("NEEDS_USER") and "Notes" in out.text and typed == []
+    out = asyncio.run(registry().invoke("hotkey", {"keys": "cmd+w"}, ToolContext(user_text="")))
+    assert out.text.startswith("NEEDS_USER") and typed == []  # no ⌘W into the user's app either
+
+
+def test_brings_the_target_forward_then_types(monkeypatch):
+    typed, state = _guard_env(monkeypatch, front_app="Claude", target="Notes", can_raise=True)
+    out = asyncio.run(registry().invoke("type_text", {"text": "Laptops"}, ToolContext(user_text="")))
+    assert out.ok and typed == ["Laptops"] and state["front"] == "Notes"
+
+
+def test_without_a_recent_target_types_where_the_cursor_is(monkeypatch):
+    typed, _ = _guard_env(monkeypatch, front_app="TextEdit", target=None, can_raise=False)
+    out = asyncio.run(registry().invoke("type_text", {"text": "hi"}, ToolContext(user_text="")))
+    assert out.ok and typed == ["hi"]
+
+
+def test_new_note_presses_nothing_unless_notes_is_in_front(monkeypatch):
+    typed, _ = _guard_env(monkeypatch, front_app="Claude", target=None, can_raise=False)
+    out = asyncio.run(registry().invoke("hotkey", {"keys": "cmd+n", "app": "Notes"}, ToolContext(user_text="")))
+    assert out.text.startswith("NEEDS_USER") and typed == []
+
+
+def test_never_types_into_neos_own_overlay(monkeypatch):
+    typed, _ = _guard_env(monkeypatch, front_app="neo-ui", target=None, can_raise=False)
+    out = asyncio.run(registry().invoke("type_text", {"text": "hi"}, ToolContext(user_text="")))
+    assert out.text.startswith("NEEDS_USER") and typed == []
+
+
+def test_needs_user_is_spoken_not_handed_to_the_agent(monkeypatch):
+    import neo.agent.session as sess_mod
+
+    typed, _ = _guard_env(monkeypatch, front_app="Claude", target="Notes", can_raise=False)
+    monkeypatch.setattr(sess_mod, "brain", lambda purpose="agent": pytest.fail("no model: tell the user"))
+
+    class R:
+        async def decide(self, t):
+            return Decision("quick_action", 0.95, False, 0.0, False, 0.0, "laya+head")
+
+    r = asyncio.run(Session(reflex=R()).handle("type hello"))
+    assert r.route == "quick" and not r.silent and "didn't type" in r.text and typed == []
+
+
+def test_live_multi_step_commands_are_not_silent():
+    from neo.voice.live import _multi_step
+
+    assert _multi_step("type github.com and press enter")
+    assert not _multi_step("type salt and pepper")
+    assert not _multi_step("open notes")

@@ -15,7 +15,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Literal
 
-from neo.agent import confirm
+from neo.agent import confirm, fastpath
 from neo.agent.loop import AgentResult, run_agent
 from neo.agent.prompt import build as build_prompt
 from neo.agent.registry import ToolContext, registry
@@ -23,7 +23,7 @@ from neo.config import settings
 from neo.events import NeoState, bus
 from neo.providers import brain
 from neo.providers.base import ImagePart, Message, ToolResult
-from neo.reflex import Reflex
+from neo.reflex import Reflex, is_bare_stop
 from neo.reflex.schema import Decision
 
 # A confirmation must be a short, pure affirmative; any retraction anywhere wins over a leading "ok".
@@ -38,6 +38,13 @@ _NO = re.compile(
 _MAX_HISTORY = 40  # messages kept verbatim; older ones are dropped (memory keeps the gist)
 _WAKE_PREFIX = re.compile(r"^\s*(?:hey|hi|ok|okay)?[\s,]*neo[\s,:!.-]*", re.I)
 _MAX_AGENT_JOBS = 2
+# "what time is it in Tokyo", "what's on my calendar tomorrow": a qualifier the no-argument tool
+# can't take — those go to a model that sees the tool (and can ask for more).
+_QUALIFIER = re.compile(
+    r"\b(?:in|at|on|for|from|since|until|by|about|with|tomorrow|yesterday|next|last|ago|week|month|"
+    r"year|weekend|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b|\d",
+    re.I,
+)
 _job_ids = itertools.count(1)
 
 
@@ -81,28 +88,30 @@ class Session:
         d = await self.reflex.decide(text)
         await bus().publish("reflex", job=job, **d.__dict__)
 
-        # Regex fast paths are precise; trust them unless the reflex says this is conversation.
-        # ("type Laptops in the heading" reads as an agent task to the reflex, but the words are
-        # the whole job — no model needed.) They come before "stop": a long sentence the head
-        # mislabels as stop must never cancel everything that is running.
-        if d.intent != "chat" and (q := _match_fast_path(text)):
-            return await self._quick(text, d, *q, job=job)
-
-        if d.intent == "stop" and (d.source == "rules" or len(text.split()) <= 4):
+        # A bare "stop" / "never mind" cancels everything; "stop the timer" is a command.
+        if is_bare_stop(text) or (d.intent == "stop" and len(text.split()) <= 2 and d.intent_confidence >= 0.9):
             await self.cancel_all()
             await bus().end_job(job)
             return Reply("Okay.", "stop", d, job=job)
 
+        # Regex fast paths are precise; trust them unless the reflex says this is conversation.
+        # ("type Laptops in the heading" reads as an agent task to the reflex, but the words are
+        # the whole job — no model needed.) A plan covers the whole utterance or nothing.
+        if d.intent != "chat" and (steps := fastpath.plan(text)):
+            return await self._quick(text, d, steps, job=job)
+
         if d.intent == "chat" and not images and not d.needs_screen:
             return await self._chat(text, d, job)
 
-        # Laya named the tool itself: run it without the agent loop. No arguments → straight
-        # away; arguments → one small model call that only sees that tool's schema.
+        # Laya named the tool itself: skip the agent loop. A read-only tool without arguments
+        # runs straight away (unless the request carries a qualifier it can't take); anything
+        # else — and every action — gets one small model call that only sees that tool.
         if d.intent == "quick_action" and d.tool and d.tool_p >= settings().reflex_tool_floor:
             if (t := registry().get(d.tool)) is not None and not t.hidden:
                 print(f"  ~ laya picked {d.tool} ({d.tool_p:.2f})")
-                if not t.parameters.get("required"):
-                    return await self._quick(text, d, d.tool, {}, job=job)
+                bare = not t.parameters.get("required") and not t.parameters.get("properties")
+                if bare and not t.quiet and not _QUALIFIER.search(text):
+                    return await self._quick(text, d, [(d.tool, {})], job=job)
                 return await self._agent(text, d, images, job, only=[d.tool])
 
         return await self._agent(text, d, images, job)
@@ -148,28 +157,46 @@ class Session:
         await bus().end_job(job)
         return Reply(reply, "chat", d, job=job)
 
-    async def _quick(self, text: str, d: Decision, tool: str, args: dict, *, job: str) -> Reply:
+    async def _quick(self, text: str, d: Decision, steps: list[tuple[str, dict]], *, job: str) -> Reply:
+        """Run fast-path steps in order with no model. Actions that worked are silent; answers,
+        and anything that needs the user, are spoken. An action that fails hands the whole
+        request to the agent, which can look at the screen and find another way."""
         await bus().set_state(NeoState.WORKING, job=job)
         t0 = time.time()
-        from neo.agent.early import early
+        from neo.agent.early import _APP_TOOLS, _SETTLE_AFTER_APP_S, early
 
-        done = early().recently_done(tool, args)
-        if done is not None:
-            reply_text, ok = done, True  # the early actor already did this while the user was speaking
-        else:
-            await bus().tool_start(tool, args, job=job)
-            out = await registry().invoke(tool, args, ToolContext(user_text=text))
-            await bus().tool_end(tool, out.ok, out.text, job=job)
-            reply_text, ok = out.text, out.ok
+        spoken: list[str] = []
+        texts: list[str] = []
+        prev = ""
+        for tool, args in steps:
+            t = registry().get(tool)
+            done = early().claim(tool, args)
+            if done is not None:
+                out_text, ok = done, True  # the early actor already did this while the user was speaking
+            else:
+                if prev in _APP_TOOLS and tool not in _APP_TOOLS:
+                    await asyncio.sleep(_SETTLE_AFTER_APP_S)
+                await bus().tool_start(tool, args, job=job)
+                out = await registry().invoke(tool, args, ToolContext(user_text=text))
+                await bus().tool_end(tool, out.ok, out.text, job=job)
+                out_text, ok = out.text, out.ok
+                if not ok and t is not None and t.quiet:
+                    print(f"  ~ {tool} failed ({out_text[:60]}); handing to the agent")
+                    return await self._agent(text, d, None, job)
+            prev = tool
+            texts.append(out_text)
+            needs_user = out_text.startswith(("NEEDS_", "Error"))
+            if not (t and t.quiet and ok) or needs_user:
+                spoken.append(out_text)
+        reply_text = " ".join(spoken) if spoken else "; ".join(texts)
         await self._remember(Message.user(text), Message.assistant(reply_text))
-        t = registry().get(tool)
-        silent = bool(t and t.quiet and ok)  # an action that worked: just done, nothing to say
+        silent = not spoken  # every step was an action that worked: just done, nothing to say
         if silent:
             await bus().note(reply_text[:120])
         else:
             await bus().say(reply_text, final=True, job=job)
         await bus().publish(
-            "turn", job=job, route="quick", brain="", model="", ms=int((time.time() - t0) * 1000), tools=1
+            "turn", job=job, route="quick", brain="", model="", ms=int((time.time() - t0) * 1000), tools=len(steps)
         )
         await bus().end_job(job)
         return Reply(reply_text, "quick", d, job=job, silent=silent)
@@ -339,13 +366,10 @@ class Session:
         if res.stopped == "needs_confirm" and self._stage_pending(res):
             await bus().say(res.question, final=True, job=job)
             return Reply(res.question, "confirm", None, res, job=job)
-        silent = _quietly(d, res)
-        if silent:
-            await bus().note(res.text[:160])
-        else:
-            await bus().say(res.text, final=True, job=job)
+        # The user just said yes to something consequential: always tell them how it went.
+        await bus().say(res.text, final=True, job=job)
         await bus().end_job(job)
-        return Reply(res.text, "agent", None, res, job=job, silent=silent)
+        return Reply(res.text, "agent", None, res, job=job)
 
     async def _expire_confirm(self, action_id: str) -> None:
         """If nobody answers, the question lapses and the orb stops asking."""
@@ -411,21 +435,19 @@ def _quietly(d: Decision | None, res: AgentResult) -> bool:
     return not any(w in low for w in ("?", "couldn't", "could not", "can't", "cannot", "unable", "error", "failed"))
 
 
-def _strip_quotes(v):
-    """type 'Laptops' → Laptops: a quoted payload's quotes are punctuation, not text."""
-    if isinstance(v, str) and len(v) >= 2 and v[0] in "\"“'" and v[-1] in "\"”'":
-        return v[1:-1]
-    return v
+_strip_quotes = fastpath.strip_quotes
+_match_fast_path = fastpath.match
 
 
 def _already_done_note() -> str:
-    """What the early actor / fast lane just did for this request, so the model doesn't redo it."""
+    """What the early actor did while the user was still talking and nobody has accounted for
+    yet — i.e. for *this* request — so the model doesn't redo it. Consumes those records."""
     from neo.agent.early import early
 
-    recent = early().recent(20.0)
-    if not recent:
+    done = [r for r in early().unclaimed() if r.ok]
+    if not done:
         return ""
-    lines = "; ".join(f"{t}({', '.join(f'{k}={v!r}' for k, v in a.items())})" for t, a in recent)
+    lines = "; ".join(f"{r.tool}({', '.join(f'{k}={v!r}' for k, v in r.args.items())})" for r in done)
     return f"\n\nAlready done a moment ago for this request (do NOT repeat): {lines}"
 
 
@@ -435,28 +457,6 @@ def _stub(text: str, keep: int = 160) -> str:
         if len(text) <= keep
         else text[:keep].rstrip() + f" …[{len(text) - keep} chars trimmed from an earlier turn]"
     )
-
-
-def _match_fast_path(text: str) -> tuple[str, dict] | None:
-    """Zero-LLM dispatch for tools that declare regex fast paths (volume, brightness…).
-
-    System tools (volume, brightness, timer, clock) are tried before app tools so a broad
-    pattern like open_app can never shadow a specific one."""
-    tools = sorted(registry().all(), key=lambda t: 0 if t.category == "system" else 1)
-    for t in tools:
-        for pattern, args in t.fast_path:
-            m = re.search(pattern, text, re.I)
-            if not m:
-                continue
-            # "<name>" values are filled from the named regex group of the same name.
-            filled: dict = {}
-            for k, v in args.items():
-                if isinstance(v, str) and v.startswith("<") and v.endswith(">"):
-                    filled[k] = _strip_quotes(m.groupdict().get(v[1:-1]))
-                else:
-                    filled[k] = v
-            return t.name, filled
-    return None
 
 
 _ = settings  # settings are read by callers; keep the import for the module's public surface

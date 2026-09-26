@@ -60,6 +60,7 @@ def _news(query: str, n: int) -> str:
             {"query": "<query>"},
         )
     ],
+    payload=True,
 )
 async def web_search(a: dict, c: ToolContext) -> str:
     n = int(a.get("n") or 6)

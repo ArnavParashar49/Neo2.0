@@ -331,6 +331,11 @@ def main() -> None:
 
     # ---- tool (quick actions, plus any row that names a tool) -------------------------------
     tool_rows = [i for i, r in enumerate(rows) if r["intent"] == "quick_action" or r.get("tool")]
+    # A real "none" region: without chat/agent rows the head has never seen an utterance that
+    # needs no single tool, and names one confidently for anything the intent head misroutes.
+    rng_none = np.random.default_rng(1)
+    others = [i for i, r in enumerate(rows) if r["intent"] in ("chat", "agent_task") and not r.get("tool")]
+    tool_rows += rng_none.permutation(others)[: len(tool_rows) // 2].tolist()
     counts: dict[str, int] = {}
     for i in tool_rows:
         counts[rows[i].get("tool") or "none"] = counts.get(rows[i].get("tool") or "none", 0) + 1

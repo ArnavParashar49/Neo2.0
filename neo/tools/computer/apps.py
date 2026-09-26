@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import re
 import shlex
+import time
 
 from AppKit import NSWorkspace
 
@@ -41,6 +42,82 @@ async def _resolves(host: str, timeout: float = 2.0) -> bool:
         return False
 
 
+# ---- which app NEO is working in ----------------------------------------------------------
+# NEO is a background process, and macOS (cooperative activation) may refuse to bring an app it
+# opens to the front while the user is busy in another one. So every open/activate *verifies*
+# the app is really frontmost, and remembers it as the target: keystrokes are only ever sent
+# to the target (see computer/__init__.py::_guard_front), never to whatever else has focus.
+_target: tuple[str, float] | None = None
+_TARGET_S = 180.0  # after this long without NEO touching an app, "type X" means "where the cursor is"
+
+
+def set_target(name: str) -> None:
+    global _target
+    _target = (name, time.time()) if name else None
+
+
+def target() -> str | None:
+    if _target and time.time() - _target[1] < _TARGET_S:
+        return _target[0]
+    return None
+
+
+def front_name() -> str:
+    app = NSWorkspace.sharedWorkspace().frontmostApplication()
+    return (app.localizedName() or "") if app else ""
+
+
+def _running(name: str):
+    want = name.lower().removesuffix(".app")
+    apps_ = [a for a in NSWorkspace.sharedWorkspace().runningApplications() if a.localizedName()]
+    return next((a for a in apps_ if a.localizedName().lower() == want), None) or next(
+        (a for a in apps_ if a.activationPolicy() == 0 and want in a.localizedName().lower()), None
+    )
+
+
+async def _wait_front(pid: int, seconds: float) -> bool:
+    ws = NSWorkspace.sharedWorkspace()
+    for _ in range(int(seconds / 0.05)):
+        front = ws.frontmostApplication()
+        if front and front.processIdentifier() == pid:
+            return True
+        await asyncio.sleep(0.05)
+    return False
+
+
+async def bring_front(name: str, *, wait: float = 1.5) -> tuple[bool, str]:
+    """Make the app frontmost, escalating: NSRunningApplication → AppleScript activate →
+    System Events (works for a background process with Accessibility). Returns
+    (is_front, localized name)."""
+    a = None
+    for _ in range(int(wait / 0.1) or 1):  # a just-launched app takes a moment to register
+        a = _running(name)
+        if a is not None:
+            break
+        await asyncio.sleep(0.1)
+    if a is None:
+        return False, name
+    real, pid = a.localizedName(), int(a.processIdentifier())
+    if await _wait_front(pid, 0.1):
+        return True, real
+    a.activateWithOptions_(1 << 1)  # NSApplicationActivateIgnoringOtherApps
+    if await _wait_front(pid, 0.5):
+        return True, real
+    try:  # Accessibility (NEO has it): what Hammerspoon-style tools use to switch apps
+        import ApplicationServices as AS
+
+        AS.AXUIElementSetAttributeValue(AS.AXUIElementCreateApplication(pid), "AXFrontmost", True)
+    except Exception:  # noqa: BLE001
+        pass
+    if await _wait_front(pid, 0.5):
+        return True, real
+    await osascript(f"tell application {_q(real)} to activate")
+    if await _wait_front(pid, 0.5):
+        return True, real
+    await osascript(f'tell application "System Events" to set frontmost of (first process whose unix id is {pid}) to true')
+    return await _wait_front(pid, 1.0), real  # macOS sometimes grants it late
+
+
 async def open_app(name: str) -> str:
     # URLs and file paths go straight to `open`; app names via -a.
     if "://" in name or name.startswith(("/", "~")):
@@ -58,32 +135,36 @@ async def open_app(name: str) -> str:
                 code, _, err = await _run(["open", site])
                 if code == 0:
                     await asyncio.sleep(0.6)
+                    set_target(front_name())  # the browser that took the URL
                     return f"No app called {name!r}; opened {site} in your browser"
             else:
                 return f"Error: {name!r} isn't an installed app and {host} doesn't exist"
+        if code == 0:
+            ok, real = await bring_front(name)
+            set_target(real)
+            if not ok:
+                return (
+                    f"NEEDS_USER: {real} is open but macOS kept {front_name() or 'another app'} in front — "
+                    f"click {real} (I won't type anywhere else)."
+                )
+            return f"Opened {real}"
     if code != 0:
         return f"Error: couldn't open {name!r}: {err}"
     await asyncio.sleep(0.6)
+    set_target(front_name())
     return f"Opened {name}"
 
 
 async def activate(name: str) -> str:
     """Bring the app to the front and wait until it *is* frontmost, so the next ax_tree /
     type_text acts on it rather than on whatever was in front a moment ago."""
-    ws = NSWorkspace.sharedWorkspace()
-    for a in ws.runningApplications():
-        if (a.localizedName() or "").lower() == name.lower():
-            a.activateWithOptions_(1 << 1)  # NSApplicationActivateIgnoringOtherApps
-            for attempt in range(2):
-                for _ in range(12):  # up to ~0.6 s
-                    front = ws.frontmostApplication()
-                    if front and front.processIdentifier() == a.processIdentifier():
-                        return f"Activated {name} (frontmost)"
-                    await asyncio.sleep(0.05)
-                if attempt == 0:  # a background process may not be allowed to steal focus; the app can
-                    await osascript(f"tell application {_q(a.localizedName())} to activate")
-            return f"Activated {name}, but another app is still in front — check with ax_tree."
-    return f"Error: {name} is not running"
+    if _running(name) is None:
+        return f"Error: {name} is not running"
+    ok, real = await bring_front(name, wait=0.3)
+    set_target(real)
+    if ok:
+        return f"Activated {real} (frontmost)"
+    return f"NEEDS_USER: macOS kept {front_name() or 'another app'} in front instead of {real} — click {real}."
 
 
 async def quit_app(name: str) -> str:
