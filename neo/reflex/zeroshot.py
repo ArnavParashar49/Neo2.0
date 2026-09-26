@@ -152,6 +152,12 @@ def available() -> bool:
         return settings().reflex == "laya" and _fetching is None and time.monotonic() - _failed_at >= RETRY_S
 
 
+def loaded() -> bool:
+    """Whether the model is in memory now: a question costs no load."""
+    with _mu:
+        return _agent is not None
+
+
 def ask(state: Any, questions: dict, wait_s: float, stale: threading.Event | None = None) -> dict | None:
     """One zero-shot pass (call it from a worker thread). None when Laya is off, failed to load or
     is still downloading, still loading or busy after ``wait_s``, or the caller gave up (``stale``)

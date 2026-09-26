@@ -303,7 +303,9 @@ class Session:
                 out = await registry().invoke(tool, args, ctx)
                 await bus().tool_end(tool, out.ok, out.text, job=job)
                 outcomes.step(job, tool, out.ok, halt=out.halt)
-                if not out.ok:  # e.g. weather for "the forecast for Q3 sales": the agent can do better
+                # e.g. weather for "the forecast for Q3 sales": the agent can do better. Never NEO's
+                # own question to the user: that is the user's to answer, not a model's.
+                if not out.ok and not out.halt:
                     print(f"  ~ {tool} failed; handing to the agent")
                     ran = "; ".join(f"{tl}({', '.join(f'{k}={v!r}' for k, v in a.items())})" for tl, a in steps[:i])
                     note = f"\n[ALREADY DONE] These steps of the request already ran — don't repeat them: {ran}" if ran else ""
@@ -709,7 +711,9 @@ def _learn_from(job: str, res: AgentResult) -> None:
 
 # Tools whose result is information for the user: a run that used one has something to say,
 # however the request was phrased ("John ki unread emails mein kya likha hai").
-_INFO_TOOLS = {"web_search", "web_fetch", "weather", "clock", "calendar_today", "mail_unread", "safari_read"}
+_INFO_TOOLS = {
+    "web_search", "web_fetch", "weather", "clock", "calendar_today", "mail_unread", "page_read", "safari_read",
+}  # fmt: skip
 
 
 def _quietly(d: Decision | None, res: AgentResult) -> bool:

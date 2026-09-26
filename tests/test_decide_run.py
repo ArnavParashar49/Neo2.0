@@ -148,6 +148,29 @@ def test_a_timeout_after_the_commit_point_is_unknown_and_the_action_still_finish
     assert drv.calls == [("test.notebook", "script_make")]
 
 
+def test_an_error_past_the_commit_point_is_unknown_and_never_repeated(cands):
+    """A read-back that raises after the save went out: the item may exist all the same."""
+    chosen, _ = cands
+    chosen += [cand(NOTEBOOK, "script_make"), cand(JOTTER, "ax_new")]
+
+    async def saved_then_broke():
+        await run.commit(asyncio.sleep(0))
+        raise ValueError("objc hiccup")
+
+    drv = FakeDriver({("test.notebook", "script_make"): saved_then_broke, ("test.jotter", "ax_new"): OK})
+    first = asyncio.run(run.run_best(drv, req(sig=("milk",))))
+    assert (first.ok, first.unsure, first.say) == (False, True, True) and "may have done it in Notebook" in first.text
+    again = asyncio.run(run.run_best(drv, req(sig=("milk",))))
+    assert (again.text, again.unsure) == (first.text, True) and drv.calls == [("test.notebook", "script_make")]
+
+    async def broke_before():  # nothing went out: a bug, as before (the tool reports the error)
+        raise ValueError("before")
+
+    drv = FakeDriver({("test.notebook", "script_make"): broke_before})
+    with pytest.raises(ValueError):
+        asyncio.run(run.run_best(drv, req(sig=("bread",))))
+
+
 def test_a_timeout_before_the_commit_point_is_blamed_and_the_next_is_tried(cands):
     chosen, _ = cands
     chosen += [cand(NOTEBOOK, "script_make"), cand(JOTTER, "ax_new")]
@@ -231,6 +254,20 @@ def test_the_same_add_twice_within_the_window_is_one_add(cands):
     assert asyncio.run(run.run_best(drv, req())).ok and len(asked) == 2  # no signature: never deduplicated
     run.forget()
     assert run.idempotent("write_note", sig) is None and run.last("write_note") is None
+
+
+def test_an_add_that_may_have_happened_is_not_tried_again_within_the_window(cands):
+    chosen, asked = cands
+    chosen += [cand(NOTEBOOK, "script_make"), cand(JOTTER, "ax_new")]
+    unknown = Outcome(False, "I may have saved it in Notebook but couldn't check.", effect=Effect.UNKNOWN)
+    drv = FakeDriver({("test.notebook", "script_make"): unknown, ("test.jotter", "ax_new"): OK})
+    first = asyncio.run(run.run_best(drv, req(sig=("milk", "5 pm"), also=(("milk", "at 5"),))))
+    assert first.unsure and run.to_output(first).ok  # no failure: nobody should retry it
+    # the model retrying a "failed" tool, the time said either way
+    for again in (req(sig=("milk", "5 pm")), req(sig=("milk", "17:00"), also=(("milk", "at 5"),))):
+        r = asyncio.run(run.run_best(drv, again))
+        assert (r.text, r.ok, r.say, r.unsure) == (first.text, False, True, True)
+    assert drv.calls == [("test.notebook", "script_make")] and len(asked) == 1
 
 
 def test_nothing_is_learned_from_a_request_that_began_before_an_erase(cands, monkeypatch):
@@ -352,4 +389,5 @@ def test_to_output_keeps_halts_and_the_speech_choice():
     out = run.to_output(run.Result("Saved in Notebook.", True, say=False))
     assert (out.text, out.ok, out.halt, out.say) == ("Saved in Notebook.", True, False, False)
     q = run.to_output(run.Result(ask_user("Which Priya?"), False, say=True))
-    assert q.halt and q.text.startswith("NEEDS_USER") and q.say is True
+    assert q.halt and q.ok and q.text.startswith("NEEDS_USER") and q.say is True  # a question, no failure
+    assert not run.to_output(run.Result("Notebook couldn't", False)).ok

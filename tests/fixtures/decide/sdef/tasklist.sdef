@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE dictionary SYSTEM "file://localhost/System/Library/DTDs/sdef.dtd">
+<!-- Test fixture: a to-do app shaped like the one macOS ships - lists in accounts, a default list
+     and a default account, reminders with a due date, an all-day due date and an alert date. -->
+<dictionary title="Tasklist Terminology">
+	<suite name="Standard Suite" code="core" description="Common terms">
+		<command name="make" code="corecrel" description="Make a new object">
+			<parameter name="new" code="kocl" type="type" description="The class of the new object."/>
+			<parameter name="at" code="insh" type="location specifier" optional="yes" description="Where."/>
+			<parameter name="with properties" code="prdt" type="record" optional="yes" description="Initial values."/>
+			<result type="specifier"/>
+		</command>
+	</suite>
+	<suite name="Tasklist Suite" code="remi" description="To-do terms">
+		<command name="show" code="remishow" description="Show an object">
+			<direct-parameter type="specifier"/>
+		</command>
+		<class-extension extends="application">
+			<element type="account" access="r"/>
+			<property name="default account" code="dact" type="account" access="r" description="The default account"/>
+			<element type="list"/>
+			<property name="default list" code="dlis" type="list" access="r" description="The default list"/>
+			<element type="reminder"/>
+		</class-extension>
+		<class name="account" code="acct" description="An account">
+			<property name="id" code="ID  " type="text" access="r"/>
+			<property name="name" code="pnam" type="text" access="r"/>
+			<element type="list"/>
+			<element type="reminder"/>
+		</class>
+		<class name="item" code="cobj" description="An item"/>
+		<class name="list" code="list" inherits="item" description="A list">
+			<property name="id" code="ID  " type="text" access="r"/>
+			<property name="name" code="pnam" type="text"/>
+			<element type="reminder"/>
+		</class>
+		<class name="reminder" code="remi" inherits="item" description="A reminder">
+			<property name="name" code="pnam" type="text"/>
+			<property name="id" code="ID  " type="text" access="r"/>
+			<property name="creation date" code="ascd" type="date" access="r"/>
+			<property name="body" code="body" type="text" description="The notes attached to the reminder"/>
+			<property name="completed" code="comb" type="boolean"/>
+			<property name="due date" code="dued" type="date" description="will set both date and time"/>
+			<property name="allday due date" code="adue" type="date" description="will only set a date"/>
+			<property name="remind me date" code="rmdt" type="date"/>
+			<property name="priority" code="prio" type="integer"/>
+		</class>
+	</suite>
+</dictionary>

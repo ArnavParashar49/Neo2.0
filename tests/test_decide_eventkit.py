@@ -1,6 +1,6 @@
 """neo.decide.eventkit + routes: the Mac's calendar and reminder stores, on a fake EventKit
-installed as sys.modules["EventKit"]. No store is opened for real, and nothing ever asks for
-access: every request method of the fake fails the test if it is called."""
+installed as sys.modules["EventKit"]. No store is opened for real, and macOS is never asked for
+access: every request method of the fake fails the test unless a test lets the fake answer it."""
 
 from __future__ import annotations
 
@@ -374,3 +374,61 @@ def test_with_access_the_route_counts_the_users_own_use(ek):
     assert "2 writable calendars" in app.note and "events on 3 of the last 30 days" in app.note
     assert "Home" not in app.note and "Work" not in app.note  # counts only, never titles
     assert not routes.pending(app)
+
+
+# ---- asking (a kind switched on only), cached titles, finding a reminder ------------------------------------
+
+
+@pytest.fixture
+def answers(ek, monkeypatch):
+    """Let the fake store answer access requests (the real one is never there): full access on
+    macOS 14+, the older one-for-all request before it."""
+    asked: list[tuple[str, int]] = []
+    store = ek.module.EKEventStore
+    modern = {"on": True}
+
+    def grant(how, entity, handler):
+        asked.append((how, entity))
+        ek.status[entity] = FULL
+        threading.Thread(target=handler, args=(True, None)).start()
+
+    monkeypatch.setattr(store, "respondsToSelector_", lambda self, sel: modern["on"], raising=False)
+    monkeypatch.setattr(store, "requestFullAccessToEventsWithCompletion_", lambda self, h: grant("full", 0, h), raising=False)
+    monkeypatch.setattr(store, "requestFullAccessToRemindersWithCompletion_", lambda self, h: grant("full", 1, h), raising=False)
+    monkeypatch.setattr(store, "requestAccessToEntityType_completion_", lambda self, e, h: grant("old", e, h), raising=False)
+    return asked, modern
+
+
+def test_request_asks_once_for_full_access_and_only_with_the_usage_key(ek, answers, monkeypatch):
+    import asyncio
+
+    asked, modern = answers
+    ek.status = {0: NOT_ASKED, 1: NOT_ASKED}
+    assert asyncio.run(eventkit.request("event")) == "full" and asked == [("full", 0)]
+    assert asyncio.run(eventkit.request("event")) == "full" and asked == [("full", 0)]  # decided: not again
+    modern["on"] = False
+    assert asyncio.run(eventkit.request("reminder")) == "full" and asked[-1] == ("old", 1)
+    ek.status[0] = DENIED
+    assert asyncio.run(eventkit.request("event")) == "denied" and len(asked) == 2
+    ek.status[0] = NOT_ASKED
+    monkeypatch.setattr(evidence, "responsible_usage", lambda: frozenset())
+    assert asyncio.run(eventkit.request("event")) == "not_determined" and len(asked) == 2
+
+
+def test_titles_are_cached_from_reads_only_and_erased(ek):
+    assert eventkit.titles("reminder") is None
+    eventkit.calendars("reminder")
+    assert eventkit.titles("reminder") == ("Inbox", "Shopping")
+    eventkit.counts("event")
+    assert eventkit.titles("event") == ("Home", "Work")  # writable ones only
+    eventkit.forget()
+    assert eventkit.titles("event") is None and eventkit.titles("reminder") is None
+
+
+def test_a_reminder_an_app_just_added_is_found_by_title(ek):
+    now = datetime.now()
+    old = Item(None, title="call mom", created=ns(now - timedelta(days=3)))
+    new = Item(None, title="Call  Mom", created=ns(now))
+    ek.reminders += [old, new]
+    assert eventkit.find_reminder("call mom", now - timedelta(seconds=5)) == new.ident
+    assert eventkit.find_reminder("call dad", now - timedelta(seconds=5)) is None

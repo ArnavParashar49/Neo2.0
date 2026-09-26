@@ -33,6 +33,8 @@ __all__ = [
     "restore_web_tree",
     "runtime",
     "window",
+    "pid_of",
+    "needs_sign_in",
     "menu_item",
     "focused_editable",
     "composer",
@@ -40,8 +42,11 @@ __all__ = [
     "header_title",
     "transcript_count",
     "set_text",
+    "set_search",
     "clear_text",
     "commit_button",
+    "web_area",
+    "in_web",
     "web_url",
     "web_text",
     "dock_badge",
@@ -103,6 +108,16 @@ def runtime(app_path: str) -> str:
 
 def window(app: Any) -> Any:
     return _media()._window(app)
+
+
+def pid_of(bundle_id: str) -> int | None:
+    """The running app's pid, asked fresh (None when it isn't running)."""
+    return _media()._pid_of(bundle_id)
+
+
+def needs_sign_in(win: Any) -> bool:
+    """The window shows a password field (a sign-in wall)."""
+    return _media()._needs_sign_in(win)
 
 
 def _bfs(root: Any, max_nodes: int = 4000, max_depth: int = 60):
@@ -316,8 +331,18 @@ def _type(pid: int, text: str, newline: str) -> None:
 def set_text(el: Any, text: str, *, newline: str = "return") -> bool:
     """Put ``text`` into the input and check it reads back the same: AXValue first; if the input
     ignores that (many web inputs), focus it and type into its process."""
-    if not _editable(el):
+    return _editable(el) and _put(el, text, newline)
+
+
+def set_search(el: Any, text: str) -> bool:
+    """:func:`set_text` for a search or address field (which :func:`set_text` refuses, so a
+    message never lands in one), never a password field."""
+    if el is None or "AXSecureTextField" in (_s(attr(el, "AXRole")), _s(attr(el, "AXSubrole"))):
         return False
+    return _s(attr(el, "AXRole")) in (*_EDIT_ROLES, "AXComboBox", "AXSearchField") and _put(el, text, "return")
+
+
+def _put(el: Any, text: str, newline: str) -> bool:
     set_attr(el, "AXFocused", True)
     if set_attr(el, "AXValue", text) and _norm(_s(attr(el, "AXValue"))) == _norm(text):
         return True
@@ -339,16 +364,29 @@ def clear_text(el: Any, expected: str) -> bool:
 # ---- web views and the Dock -------------------------------------------------------------------------------
 
 
-def _web_area(pid: int) -> Any | None:
+def web_area(pid: int) -> Any | None:
+    """The web content of the app's front window (a browser tab, a web view)."""
     win = window(app_el(pid))
     if win is None:
         return None
     return next((el for el, _d, _p in _bfs(win, 3000, 40) if _s(attr(el, "AXRole")) == "AXWebArea"), None)
 
 
+def in_web(el: Any, max_depth: int = 60) -> bool:
+    """Is ``el`` web content (a page's own field, say) rather than one of the app's controls? A
+    chain of parents that doesn't end within ``max_depth`` can't be told, so it counts as web."""
+    for _ in range(max_depth):
+        if el is None:
+            return False
+        if _s(attr(el, "AXRole")) == "AXWebArea":
+            return True
+        el = attr(el, "AXParent")
+    return True
+
+
 def web_url(pid: int) -> str:
     """The address of the page in the app's front window ('' if it shows none)."""
-    area = _web_area(pid)
+    area = web_area(pid)
     url = attr(area, "AXURL") if area is not None else None
     if url is None:
         return ""
@@ -360,7 +398,7 @@ def web_url(pid: int) -> str:
 
 def web_text(pid: int, limit: int = 8000) -> str:
     """The visible text of the page in the app's front window, up to ``limit`` characters."""
-    area = _web_area(pid)
+    area = web_area(pid)
     parts: list[str] = []
     size = 0
     for el, _d, _p in _bfs(area, 20000, 120) if area is not None else ():
@@ -395,3 +433,27 @@ def dock_badge(app_name: str) -> str | None:
         if _s(attr(el, "AXSubrole")) == "AXApplicationDockItem" and _s(attr(el, "AXTitle")).strip().casefold() == want:
             return _s(attr(el, "AXStatusLabel")) or None
     return None
+
+
+# ---- a new note or document through the window (write_note) ------------------------------------------
+
+__all__ += ["window_pid", "value", "is_empty", "multiline"]
+
+
+async def window_pid(app: Any, ready_s: float) -> int | None:
+    """The app's pid once it shows a window, opening it first when it has none (media's launch)."""
+    return await _media()._launch(app, ready_s)
+
+
+def value(el: Any) -> str:
+    """The text an input holds now."""
+    return _s(attr(el, "AXValue"))
+
+
+def is_empty(el: Any) -> bool:
+    return not _norm(value(el))
+
+
+def multiline(el: Any) -> bool:
+    """A text area or a web editable: a line break is text there, not a submit."""
+    return _s(attr(el, "AXRole")) == "AXTextArea" or attr(el, "AXEditableAncestor") is not None

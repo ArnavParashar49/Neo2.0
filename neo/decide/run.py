@@ -9,7 +9,8 @@ order, the budgets and when to stop, generalising :func:`neo.decide.media.play_b
 
 **At most once.** An attempt that may already have created or sent something (it passed its
 commit point, see :func:`commit`, and then timed out or was cancelled, or it says so with
-``Effect.UNKNOWN``) ends the loop: NEO never makes a second copy or sends twice.
+``Effect.UNKNOWN``) ends the loop, and the same add asked again within RECENT_S gets the same
+answer: NEO never makes a second copy or sends twice.
 
 **Nothing learned after an erase.** :func:`begin_request` notes the privacy generation; every
 write this module (and the engine's preferences and the learned stores) makes is dropped once the
@@ -87,6 +88,7 @@ class Req:
     about: str = ""  # hashed contact id (sends)
     named: str = ""  # the app named through the tool's `app` arg
     sig: tuple = ()  # what makes two adds the same one (idempotency); () = never deduplicated
+    also: tuple[tuple, ...] = ()  # more keys for the same add (a time as said, beside sig's resolved one)
 
 
 @dataclass
@@ -94,6 +96,7 @@ class Result:
     text: str
     ok: bool
     say: bool | None = None  # True: speak even a quiet tool's result; False: keep a success silent
+    unsure: bool = False  # not ok, yet it may have happened (Effect.UNKNOWN): nobody tries it again
 
 
 @dataclass(frozen=True)
@@ -189,7 +192,8 @@ class Driver(Protocol):
 
     def describe(self, app: App) -> str: ...  # capability words for Laya ("can script send")
 
-    async def attempt(self, req: Req, cand: Candidate, method: str) -> Outcome: ...
+    # None: nothing to go by (a hint that isn't there), not an attempt
+    async def attempt(self, req: Req, cand: Candidate, method: str) -> Outcome | None: ...
 
     async def fallback(self, req: Req, key: str) -> Outcome | None: ...
 
@@ -268,17 +272,19 @@ def last(kind: str, within_s: float = RECENT_S) -> tuple[str, str] | None:
 
 
 def idempotent(kind: str, sig: tuple) -> dict | None:
-    """The receipt of the same add within the last RECENT_S (a repeated or retried request)."""
+    """The receipt of the same add within the last RECENT_S (a repeated or retried request);
+    ``{"unconfirmed": <what was said>}`` when that add may or may not have happened."""
     hit = _receipts.get((kind, sig))
     return hit[1] if hit and time.monotonic() - hit[0] <= RECENT_S else None
 
 
-def _remember_receipt(kind: str, sig: tuple, receipt: dict) -> None:
+def _remember_receipt(kind: str, sigs: list[tuple], receipt: dict) -> None:
     now = time.monotonic()
     for k in [k for k, (t, _r) in _receipts.items() if now - t > RECENT_S]:
         del _receipts[k]
     if not erased():
-        _receipts[(kind, sig)] = (now, dict(receipt))
+        for sig in sigs:
+            _receipts[(kind, sig)] = (now, dict(receipt))
 
 
 def forget() -> None:
@@ -334,6 +340,12 @@ async def _attempt_once(
         if a.committed:  # the user said stop after it went out: say so rather than nothing
             return Outcome(False, unknown, reason="unconfirmed", effect=Effect.UNKNOWN, say=True), True
         raise
+    except Exception as e:
+        if not a.committed:
+            raise
+        # it broke after the action went out (a read-back, say): the item may exist all the same
+        print(f"[decide] {_who(cand)} ({method}) broke past its commit ({type(e).__name__}: {str(e)[:60]})")
+        return Outcome(False, unknown, reason="unconfirmed", effect=Effect.UNKNOWN, say=True), True
     finally:
         _attempt.reset(token)
 
@@ -373,7 +385,10 @@ async def run_best(driver: Driver, req: Req, *, max_attempts: int = 6) -> Result
     from neo.decide import engine
 
     begin_request()
-    if req.sig and idempotent(req.kind, req.sig) is not None:
+    sigs = [s for s in (req.sig, *req.also) if s]
+    if (seen := next((r for s in sigs if (r := idempotent(req.kind, s)) is not None), None)) is not None:
+        if said := seen.get("unconfirmed"):  # a retry of an add that may have happened: not again
+            return Result(said, False, say=True, unsure=True)
         return Result("Already added a moment ago.", True, say=True)
     t0 = time.monotonic()
     try:
@@ -405,20 +420,22 @@ async def run_best(driver: Driver, req: Req, *, max_attempts: int = 6) -> Result
         # whose object never resolved did nothing), so only UNKNOWN stops the loop here
         out, _ = await _attempt_once(driver, req, c, m, budget, unknown)
         if out is None:
-            continue  # the fallback doesn't apply: not an attempt
+            continue  # a fallback that doesn't apply, or a hint with nothing to show: not an attempt
         attempts += 1
         record(req.kind, c.key, m, out)
         if out.ok:
             remember_last(req.kind, c.key, req.about)
-            if req.sig:
-                _remember_receipt(req.kind, req.sig, out.receipt)
+            _remember_receipt(req.kind, sigs, out.receipt)
             await _note(trail)
             return Result(out.data or out.text, True, say=_speak(out, not outs, habitual))
         outs.append(out)
         trail.append(f"{_who(c)} ({m}): {out.text}")
         if out.effect is Effect.UNKNOWN or out.reason in _STOP:
+            unsure = out.effect is Effect.UNKNOWN
+            if unsure:
+                _remember_receipt(req.kind, sigs, {"unconfirmed": out.text})
             await _note(trail)
-            return Result(out.text, False, say=True if out.say is None else out.say)
+            return Result(out.text, False, say=True if out.say is None else out.say, unsure=unsure)
     await _note(trail)
     if (why := _one_reason(outs)) is None:
         return Result("Nothing on this Mac can do that.", False, say=True)
@@ -459,10 +476,13 @@ async def run_plan(driver: Driver, plan: Plan, req: Req) -> Outcome:
 
 
 def to_output(r: Result) -> ToolOutput:
-    """A driver's result as the tool's output (a NEEDS_USER / NEEDS_CONFIRM halt stays one)."""
+    """A driver's result as the tool's output (a NEEDS_USER / NEEDS_CONFIRM halt stays one). A
+    question for the user and an add that may have happened are no failure: nobody (a fast path
+    handing over to the agent, a model, Live) should try them again."""
     from neo.agent.confirm import Halt
     from neo.agent.registry import ToolOutput
 
-    out = ToolOutput(str(r.text), ok=r.ok, halt=isinstance(r.text, Halt))
+    halt = isinstance(r.text, Halt)
+    out = ToolOutput(str(r.text), ok=r.ok or r.unsure or halt, halt=halt)
     out.say = r.say  # the session's speech policy reads it (ToolOutput.say)
     return out

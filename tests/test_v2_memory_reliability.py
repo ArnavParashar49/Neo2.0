@@ -171,7 +171,7 @@ def test_playbook_saved_after_successful_multistep_run(tmp_path, monkeypatch):
     from neo.agent.registry import registry
 
     for name in ("open_app", "notes_create", "apps_running"):
-        registry().get(name).handler = ok  # type: ignore[union-attr]
+        monkeypatch.setattr(registry().get(name), "handler", ok)  # restored after the test
     monkeypatch.setattr(sess_mod, "brain", lambda purpose="agent": brain)
     r = asyncio.run(Session(reflex=R()).handle("put the highlights of my last three emails in a note"))
     assert r.route == "agent"

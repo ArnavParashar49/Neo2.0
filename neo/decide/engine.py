@@ -16,9 +16,10 @@ For a request NEO works out, from evidence only (no app names anywhere in this f
      is unsure or unavailable, by the prior alone. A destination that is no app (the Mac's shared
      calendar or reminders store, :mod:`neo.decide.routes`) is weighed like one, and for kinds
      with preferences the user's corrections and per-person choices scale the prior;
-   * the task's fallback (the web, through the default browser);
-   * used apps that are less likely to work than the fallback (see WEB_AFF), installed-but-unused
-     apps, then apps that keep failing (still tried, so they can recover).
+   * the task's fallback (the web, through the default browser; a local last resort such as a
+     file for some kinds);
+   * used apps that are less likely to work than the web fallback (see WEB_AFF), installed-but-
+     unused apps, then apps that keep failing (still tried, so they can recover).
 
 3. what worked (:func:`record`): a discounted Beta(a, b) per (kind, app, method) in
    ``<data_dir>/decide.json``. Three blamed failures in a row demote an arm; failures that are not
@@ -38,6 +39,7 @@ import asyncio
 import contextlib
 import copy
 import importlib
+import inspect
 import json
 import os
 import re
@@ -103,8 +105,9 @@ class Task:
     prefs: bool = False
 
 
-# The drivers of these kinds arrive phase by phase; until a kind's driver lands, its Task keeps the
-# candidates it had (add_event its .ics types, no routes or file/.ics fallbacks yet).
+# The kinds and their evidence. Sends (send_message, send_email) have no driver yet (R4/R5); every
+# other kind is driven by its module in DRIVERS once the user switched it on (neo.config
+# decide_modes).
 TASKS: dict[str, Task] = {
     "play_media": Task(
         "play a song, album, artist, playlist, podcast, video or show",
@@ -140,6 +143,7 @@ TASKS: dict[str, Task] = {
         "write down, jot or save a note",
         wants=("note.make",),
         signals=("intent:INCreateNoteIntent", "intent:INAppendToNoteIntent", "library_text_editor~"),
+        fallback="file",
         laya_min_used=1,
         proven_fit=True,
         prefs=True,
@@ -148,27 +152,44 @@ TASKS: dict[str, Task] = {
         "remind me later, or add a to-do or list item",
         wants=("reminder.make",),
         signals=("intent:INAddTasksIntent",),
+        routes=("eventkit.reminders",),
         laya_min_used=1,
         proven_fit=True,
         prefs=True,
     ),
+    # an app that only opens calendar files is no candidate: the .ics hand-off is the fallback
     "add_event": Task(
         "put a meeting or appointment on my calendar",
         wants=("event.make",),
-        signals=("type:ics", "type:public.calendar-event"),
+        routes=("eventkit.events",),
+        fallback="ics",
         laya_min_used=1,
         proven_fit=True,
         prefs=True,
     ),
-    "read_calendar": Task("what's on my calendar or schedule", wants=("event.read",), laya_min_used=1),
+    "read_calendar": Task(
+        "what's on my calendar or schedule",
+        wants=("event.read",),
+        routes=("eventkit.events",),
+        laya_min_used=1,
+    ),
     "open_app": Task("open, launch or switch to an app", fallback="web", methods=("open",)),
     "web_search": Task("search the web or a website", fallback="web", methods=("url", "ax")),
     "other": Task("anything else", methods=("ax",)),
 }
 
-# kind -> module exposing ``methods_for(app) -> tuple[str, ...]`` (the kind's driver). A kind
-# without one gets the generic Task.methods, filtered by what the app exposes.
-DRIVERS: dict[str, str] = {"play_media": "neo.decide.media"}
+# kind -> module exposing ``methods_for(app[, kind]) -> tuple[str, ...]`` (the kind's driver). A
+# kind without one gets the generic Task.methods, filtered by what the app exposes.
+DRIVERS: dict[str, str] = {
+    "play_media": "neo.decide.media",
+    "write_note": "neo.decide.kinds.note",
+    "add_event": "neo.decide.kinds.schedule",
+    "add_reminder": "neo.decide.kinds.schedule",
+    "read_calendar": "neo.decide.kinds.schedule",
+    "read_mail": "neo.decide.kinds.mail",
+    "open_app": "neo.decide.kinds.launch",
+    "web_search": "neo.decide.kinds.site",
+}
 
 WEB = "web"  # app key (and method) of the web fallback candidate
 
@@ -283,6 +304,28 @@ class Kind(NamedTuple):
 _OTHER = Kind("other", 0.0)
 _NO_KIND_HEAD = object()  # _reflex_call: the reflex has no kind head (zero-shot may guess)
 
+# Set while a shadow dry run (neo.decide.shadow) decides. Nobody waits for its answer, so it asks
+# Laya only while the zero-shot model is loaded: it never starts the ~1.7 GB load, nor holds the
+# shared Laya lock through one while the user may be saying the next thing. The dict notes for the
+# shadow log that it went without ("laya": False, the prior decided).
+dry_run: ContextVar[dict | None] = ContextVar("neo_decide_dry_run", default=None)
+
+
+def _dry_without_laya() -> bool:
+    """This is a dry run and the zero-shot model isn't loaded: Laya isn't asked."""
+    note = dry_run.get()
+    if note is None:
+        return False
+    try:
+        from neo.reflex import zeroshot
+
+        if zeroshot.loaded():
+            return False
+    except Exception:  # noqa: BLE001 - no Laya: the prior decides
+        pass
+    note["laya"] = False
+    return True
+
 
 def _laya_call(state: Any, questions: dict, stale: threading.Event) -> dict | None:
     """One zero-shot pass on :mod:`neo.reflex.zeroshot` (in a worker thread); None if it can't answer."""
@@ -348,10 +391,14 @@ async def _off_loop(fn: Any, *args: Any, timeout: float | None = None) -> Any:
 
 
 async def _ask_laya(state: Any, questions: dict, timeout: float | None = None) -> dict | None:
+    if _dry_without_laya():
+        return None
     return await _off_loop(_laya_call, state, questions, timeout=timeout)
 
 
 def _zero_shot_can_answer() -> bool:
+    if _dry_without_laya():
+        return False
     try:
         from neo.reflex import zeroshot
 
@@ -994,7 +1041,8 @@ def _methods(kind: str, task: Task, app: App, caps: frozenset[str]) -> tuple[str
             fn = None
         if fn is not None:
             try:
-                return tuple(fn(app))
+                # a driver of several kinds gives this kind's methods only
+                return tuple(fn(app, kind) if len(inspect.signature(fn).parameters) > 1 else fn(app))
             except Exception:  # noqa: BLE001 - a driver bug must not sink the whole decision
                 return ()
     if app.kind == "route":  # 'route:<framework>.<store>' is driven through that framework
@@ -1321,9 +1369,10 @@ async def choose(
         fallback.append(
             Candidate(None, fb_mean, 0.0, f"fallback: {fb}{on}; {_record_words(data, kind, fb)}", (fb,), site=site)
         )
-    # A used app goes before the fallback when its prior beats the fallback's (see WEB_AFF), when
-    # it has done this before at least as reliably, or when Laya is sure it's the one; the others
-    # (e.g. a player opened once, weeks ago, with nothing in its library) go after it.
+    # A used app goes before the web fallback when its prior beats the fallback's (see WEB_AFF),
+    # when it has done this before at least as reliably, or when Laya is sure it's the one; the
+    # others (e.g. a player opened once, weeks ago, with nothing in its library) go after it. A
+    # local fallback (a file) is only what's left when the apps fail: every used app goes first.
     bar = fb_mean * (AFF_FLOOR + (1 - AFF_FLOOR) * WEB_AFF)
     before: list[Candidate] = []
     after: list[Candidate] = []
@@ -1331,6 +1380,7 @@ async def choose(
     for n, (i, s, p) in enumerate(ordered):
         keep = (
             not fallback
+            or task.fallback != WEB
             or i.prior >= bar
             or (i.proven and i.mean >= fb_mean)
             or (n == 0 and p >= LAYA_SURE_P)
