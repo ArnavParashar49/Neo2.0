@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -199,10 +200,11 @@ async def web_fetch(a: dict, c: ToolContext) -> str:
             max_redirects=5,
         ) as cl:
             r = await cl.get(url)
+            r.raise_for_status()
     except Exception as e:  # noqa: BLE001
         return f"Error fetching {url}: {e}"
     ctype = r.headers.get("content-type", "")
-    if "pdf" in ctype and not r.is_error:
+    if "pdf" in ctype:
         import io
 
         from pypdf import PdfReader
@@ -210,29 +212,16 @@ async def web_fetch(a: dict, c: ToolContext) -> str:
         rd = PdfReader(io.BytesIO(r.content))
         return "\n".join((p.extract_text() or "") for p in rd.pages[:30])[:limit]
     html = r.text if _is_html(ctype, r.text) else ""
-    if r.is_error:
-        # A page that turns away clients without JavaScript ("enable JavaScript and cookies to
-        # continue") may let a real browser through.
-        if html and r.status_code in (403, 503):
-            main, full = await asyncio.to_thread(_texts, html)
-            if render.needs_render(html, main, full):
-                text = await _rendered(str(r.url), policy, let_in=True)
-                if len(text) >= render.THIN_CHARS:
-                    return text[:limit]
-        try:
-            r.raise_for_status()
-        except Exception as e:  # noqa: BLE001
-            return f"Error fetching {url}: {e}"
     if not html:
         text = await asyncio.to_thread(_main_text, r.text) or await asyncio.to_thread(_plain_text, r.text)
         return text[:limit] or "(no readable text)"
-    main, full = await asyncio.to_thread(_texts, html)
-    text = main
-    if render.needs_render(html, main, full):  # built by its scripts: what the server sent is a shell
-        rendered = await _rendered(str(r.url), policy)
-        text = rendered if len(rendered) > len(text.strip()) else text
-    if not text.strip():
-        text = full
+    main, full, shell = await asyncio.to_thread(_judge, html)
+    text = main if main.strip() else full
+    # Built by its scripts: what the server sent is a shell. Never a link that carries data (a
+    # token…): the page's scripts would run, and could act on it.
+    if shell and not policy.url_carries_data(str(r.url)):
+        sent = max(len(main.strip()), len(full.strip()))
+        text = await _rendered(str(r.url), policy, sent=sent) or text
     return text[:limit] or "(no readable text)"
 
 
@@ -264,24 +253,46 @@ def _texts(html: str) -> tuple[str, str]:
     return main, full
 
 
-async def _rendered(url: str, policy, *, let_in: bool = False) -> str:
-    """The text of `url` once its scripts have built it, from a headless browser nobody sees
-    ("" if it couldn't be rendered — the page as the server sent it stands). `let_in`: the server
-    turned the plain fetch away, and only a page it then serves counts."""
+def _judge(html: str) -> tuple[str, str, bool]:
+    """The page's main text, all of its text, and whether its scripts build it — all off NEO's
+    loop (a hostile page can be slow to read)."""
+    main, full = _texts(html)
+    return main, full, render.needs_render(html, main, full)
+
+
+async def _rendered(url: str, policy, *, sent: int) -> str:
+    """The text of `url` once its scripts have built it, from a headless browser nobody sees —
+    or "" when that's no better than the `sent` characters the server sent (it couldn't be
+    rendered, it ended on an error page, or it shows no more): then the page as sent stands."""
     try:
         page = await render.render(url, policy.private_host)
     except render.RenderError as e:
         why = re.sub(r"[a-z][\w+.-]*://\S+", "<url>", str(e))  # the log stays content-free
         print(f"[web] a script-built page wasn't rendered: {why[:120]}")
         return ""
-    print(f"[web] rendered a script-built page in {page.seconds:.1f} s")
-    if let_in and not 200 <= page.status < 400:
+    except Exception as e:  # noqa: BLE001 — whatever went wrong, the page as sent stands
+        print(f"[web] a script-built page wasn't rendered: {type(e).__name__}")
         return ""
-    main = (await asyncio.to_thread(_main_text, page.html)).strip()
+    print(f"[web] rendered a script-built page in {page.seconds:.1f} s")
+    if not 200 <= page.status < 400:  # a bot check, a server error…
+        return ""
+    main = (await asyncio.to_thread(_main_text, page.html)).strip() if page.html else ""
     shown = page.text.strip()
+    if max(len(main), len(shown)) <= sent:  # a wall, a spinner: no more than the server sent
+        return ""
     # The article extractor may find little in an app's markup (a feed, a thread): then what the
     # page shows.
-    return main if len(main) >= max(render.THIN_CHARS, len(shown) // 4) else shown
+    text = main if len(main) >= max(render.THIN_CHARS, len(shown) // 4) else shown
+    there = _site(page.url)
+    return f"Redirected to {there}:\n\n{text}" if there and there != _site(url) else text
+
+
+def _site(url: str) -> str:
+    try:
+        host = (urlsplit(url).hostname or "").lower()
+    except ValueError:
+        return ""
+    return host.removeprefix("www.")
 
 
 @tool(

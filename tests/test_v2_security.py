@@ -193,7 +193,8 @@ def test_opening_files_and_links():
 @pytest.mark.parametrize(
     "url",
     ["http://127.0.0.1:8080", "http://localhost:11434/api", "http://192.168.1.1", "http://169.254.169.254/latest",
-     "file:///etc/passwd", "http://[::1]/", "http://printer.local/"],
+     "file:///etc/passwd", "http://[::1]/", "http://printer.local/",
+     "http://100.100.1.1/", "http://[fec0::1]/"],  # a VPN's shared range (Tailscale), site-local
 )
 def test_background_fetches_never_reach_this_mac_or_the_lan(url):
     assert policy.private_host(url)

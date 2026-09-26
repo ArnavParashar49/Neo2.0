@@ -416,4 +416,7 @@ def private_host(url: str) -> str:
         ip = ipaddress.ip_address(info[4][0].split("%")[0])
         if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_reserved or ip.is_unspecified:
             return "it's on this Mac or the local network"
+        # a VPN's or carrier's shared range (100.64/10: Tailscale peers), IPv6 site-local (fec0::/10)
+        if not ip.is_global or getattr(ip, "is_site_local", False):
+            return "it's on this Mac or the local network"
     return ""

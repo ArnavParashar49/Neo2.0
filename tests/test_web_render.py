@@ -11,6 +11,8 @@ import asyncio
 import functools
 import ipaddress
 import os
+import threading
+import time
 from contextlib import suppress
 
 import httpx
@@ -87,6 +89,25 @@ def test_an_empty_mount_point_is_a_shell():
     )
     main, full = _texts(page)
     assert len(full) > 300 and render.needs_render(page, main, full)
+    unquoted = page.replace('<div id="app">', "<div id=app>")
+    assert render.needs_render(unquoted, main, full)
+
+
+@pytest.mark.parametrize(
+    "hostile",
+    [
+        "<div " * 12_000,  # a tag that never closes
+        "<noscript>" * 10_000,  # a <noscript> that never closes
+        "<noscript>" + "<a " * 40_000 + "</noscript>",  # tags inside one that never close
+    ],
+    ids=["unclosed-tag", "unclosed-noscript", "unclosed-tags-in-noscript"],
+)
+def test_hostile_markup_is_judged_in_linear_time(hostile):
+    # a page can't stall the judgement (and every thread with it: the regex holds the GIL)
+    page = f"<html><head><script>x()</script></head><body><p>{WORDS * 7}</p>{hostile}</body></html>"
+    t = time.perf_counter()
+    render.needs_render(page, WORDS * 7, WORDS * 7)
+    assert time.perf_counter() - t < 1.0
 
 
 # ---- web_fetch ------------------------------------------------------------------------------------
@@ -104,6 +125,8 @@ def site(monkeypatch):
         if path == "/old":
             return httpx.Response(301, headers={"location": "https://site.test/app"})
         status, body = pages.get(path, (404, "<html><body>not here</body></html>"))
+        if 300 <= status < 400:
+            return httpx.Response(status, headers={"location": body})
         return httpx.Response(status, text=body, headers={"content-type": "text/html; charset=utf-8"})
 
     async def fake_render(url, guard=None, **kw):
@@ -174,18 +197,91 @@ def test_a_rendering_with_less_to_read_is_not_used(site):
     assert "enable JavaScript" in out
 
 
-def test_a_page_that_turns_away_clients_without_javascript_is_tried_in_the_browser(site):
+def test_a_page_that_turns_away_automated_clients_is_not_tried_in_a_browser(site):
+    # "Enable JavaScript and cookies to continue" with a 403 is a bot check: the site's answer
+    # stands — NEO doesn't try to get past it
     pages, rendered, asked = site
     gate = "<html><head><script src='/challenge.js'></script></head><body><noscript>Enable JavaScript and cookies to continue</noscript></body></html>"
     pages["/pkg"] = (403, gate)
-    rendered["https://site.test/pkg"] = _page(html=BUILT, url="https://site.test/pkg")
-    assert "herons" in _fetch("https://site.test/pkg")
-    # the browser was turned away too: the error stands, not the challenge's words
-    rendered["https://site.test/pkg"] = _page(
-        text="Just a moment… " * 40, status=403, url="https://site.test/pkg"
+    pages["/busy"] = (503, gate)
+    rendered["https://site.test/pkg"] = rendered["https://site.test/busy"] = _page(html=BUILT)
+    for path, code in (("/pkg", "403"), ("/busy", "503")):
+        out = _fetch(f"https://site.test{path}")
+        assert out.startswith("Error fetching") and code in out
+    assert asked == []
+
+
+def test_a_rendering_that_ends_on_an_error_page_is_not_used(site):
+    pages, rendered, asked = site
+    pages["/app"] = (200, SHELL)
+    rendered["https://site.test/app"] = _page(text="Verifying you are human. " * 40, status=403)
+    out = _fetch("https://site.test/app")
+    assert asked and "Verifying" not in out and "enable JavaScript" in out
+
+
+def test_a_rendering_must_show_more_than_the_server_sent(site):
+    # the server's page had real words (and a menu); a wall that shows less is not an upgrade
+    pages, rendered, asked = site
+    nav = "".join(f'<li><a href="/c{i}">Category number {i} of the shop</a></li>' for i in range(30))
+    shop = (
+        "<html><head><title>Shop</title><script src='/app.js'></script></head><body><nav><ul>"
+        + nav
+        + "</ul></nav><h1>Stone mill grinder</h1><p>A hand-cranked stone mill grinder that turns grain"
+        " into flour in minutes, with a cast iron body, two granite stones and a clamp that fits any"
+        " table up to five centimetres thick.</p><div id='root'></div></body></html>"
     )
-    out = _fetch("https://site.test/pkg")
-    assert out.startswith("Error fetching") and "403" in out
+    main, full = _texts(shop)
+    wall = "Verifying you are human. This may take a few seconds. " * 12
+    assert len(main) < len(wall) < len(full) and render.needs_render(shop, main, full)
+    pages["/grinder"] = (200, shop)
+    rendered["https://site.test/grinder"] = _page(text=wall, url="https://site.test/grinder")
+    out = _fetch("https://site.test/grinder")
+    assert asked and "Verifying" not in out and "granite stones" in out
+
+
+def test_a_rendering_that_led_to_another_site_says_so(site):
+    pages, rendered, asked = site
+    pages["/app"] = (200, SHELL)
+    rendered["https://site.test/app"] = _page(html=BUILT, url="https://accounts.other.test/signin?next=%2F")
+    out = _fetch("https://site.test/app")
+    assert out.startswith("Redirected to accounts.other.test") and "herons" in out
+    rendered["https://site.test/app"] = _page(html=BUILT, url="https://www.site.test/app")
+    assert not _fetch("https://site.test/app").startswith("Redirected")  # the same site
+
+
+def test_a_link_that_carries_data_is_never_rendered(site):
+    # a short link that lands on a token-bearing page ("Confirming…" and a script): loading it in a
+    # browser could let its script act on the token
+    pages, rendered, asked = site
+    token = "a1b2c3d4e5" * 7
+    pages["/s/xyz"] = (302, f"https://site.test/confirm?t={token}")
+    pages["/confirm"] = (200, SHELL.replace("<title>App</title>", "<title>Confirming…</title>"))
+    rendered[f"https://site.test/confirm?t={token}"] = _page(html=BUILT)
+    out = _fetch("https://site.test/s/xyz")
+    assert asked == [] and "enable JavaScript" in out
+
+
+def test_any_failure_to_render_leaves_the_page_as_sent(site):
+    pages, rendered, asked = site
+    pages["/app"] = (200, SHELL)
+    rendered["https://site.test/app"] = RuntimeError("Target page, context or browser has been closed")
+    out = _fetch("https://site.test/app")
+    assert asked and "enable JavaScript" in out
+
+
+def test_the_page_is_judged_off_the_voice_loop(site, monkeypatch):
+    pages, rendered, asked = site
+    pages["/story"] = (200, ARTICLE)
+    on_loop = []
+    judge = render.needs_render
+
+    def spy(*a):
+        on_loop.append(threading.current_thread() is threading.main_thread())
+        return judge(*a)
+
+    monkeypatch.setattr(render, "needs_render", spy)
+    _fetch("https://site.test/story")
+    assert on_loop == [False]
 
 
 def test_other_errors_are_not_rendered(site):
@@ -220,6 +316,7 @@ def test_a_private_address_is_refused_before_anything_loads(monkeypatch):
         ("::ffff:127.0.0.1", False),  # this Mac, written as IPv6
         ("fd00::1", False),
         ("fe80::1", False),
+        ("fec0::1", False),  # site-local
         ("224.0.0.251", False),
     ],
 )
@@ -391,16 +488,16 @@ def test_plain_http_goes_one_request_per_connection():
 
 
 class FakeRequest:
-    def __init__(self, url, rtype, nav):
-        self.url, self.resource_type, self._nav = url, rtype, nav
+    def __init__(self, url, rtype, nav, method="GET"):
+        self.url, self.resource_type, self._nav, self.method = url, rtype, nav, method
 
     def is_navigation_request(self):
         return self._nav
 
 
 class FakeRoute:
-    def __init__(self, url, rtype="document", nav=False):
-        self.request, self.outcome = FakeRequest(url, rtype, nav), ""
+    def __init__(self, url, rtype="document", nav=False, method="GET"):
+        self.request, self.outcome = FakeRequest(url, rtype, nav, method), ""
 
     async def abort(self, code=None):
         self.outcome = "abort"
@@ -421,8 +518,8 @@ class FakePage:
     def on(self, event, cb):
         self.handlers.setdefault(event, []).append(cb)
 
-    async def _through_route(self, url, rtype, nav=False):
-        route = FakeRoute(url, rtype, nav)
+    async def _through_route(self, url, rtype, nav=False, method="GET"):
+        route = FakeRoute(url, rtype, nav, method)
         await self.ctx.handler(route)
         self.ctx.routes.append(route)
         return route
@@ -431,8 +528,8 @@ class FakePage:
         s = self.ctx.site
         if (await self._through_route(url, "document", nav=True)).outcome != "continue":
             raise Exception(f"net::ERR_BLOCKED_BY_CLIENT at {url}")
-        for sub, rtype in s.get("requests", []):
-            await self._through_route(sub, rtype)
+        for sub, rtype, *how in s.get("requests", []):
+            await self._through_route(sub, rtype, *how)
         if s.get("hang"):
             await asyncio.sleep(3600)
         status = s.get("status", 200)
@@ -492,6 +589,8 @@ class FakeBrowser:
         return not self.closed
 
     async def new_context(self, **kwargs):
+        if why := self.site.get("context_error"):
+            raise Exception(why)  # Playwright's own errors (TargetClosedError…)
         ctx = FakeContext(self, kwargs)
         self.contexts.append(ctx)
         return ctx
@@ -565,7 +664,8 @@ def test_one_browser_serves_every_page_each_in_a_fresh_private_context(browser):
     kw = b.contexts[0].kwargs
     assert kw["accept_downloads"] is False and kw["service_workers"] == "block"
     assert kw["proxy"]["server"].startswith("http://127.0.0.1:")
-    assert "Headless" not in kw["user_agent"] and "Chrome/141." in kw["user_agent"]
+    assert "user_agent" not in kw  # Chromium's own, which says it's headless
+    assert not any("AutomationControlled" in a for a in b.launch_kwargs["args"])  # nor hides that it's automated
     assert b.contexts[0].kwargs["proxy"] != b.contexts[1].kwargs["proxy"]  # a proxy per page
 
 
@@ -581,6 +681,13 @@ def test_what_the_page_asks_for_is_checked(browser):
             ("https://api.site.test/posts", "fetch"),
             ("blob:https://site.test/1234", "script"),
             ("http://site.test:99999/x", "fetch"),  # a port that can't be
+            # a form the page submits by itself: reading a page never sends one
+            ("https://site.test/confirm", "document", True, "POST"),
+            ("https://site.test/search?q=mill", "document", True, "GET"),
+            # a link that carries data (a token…), in the page or a frame, isn't opened
+            ("https://site.test/approve?t=" + "a1b2c3d4e5" * 6, "document", True, "GET"),
+            # an app loading its data by POST (GraphQL, search APIs) still works
+            ("https://api.site.test/graphql", "fetch", False, "POST"),
         ],
     }
     r, started = browser(site)
@@ -597,6 +704,10 @@ def test_what_the_page_asks_for_is_checked(browser):
         "https://api.site.test/posts": "continue",
         "blob:https://site.test/1234": "continue",
         "http://site.test:99999/x": "abort",
+        "https://site.test/confirm": "abort",
+        "https://site.test/search?q=mill": "continue",
+        "https://site.test/approve?t=" + "a1b2c3d4e5" * 6: "abort",
+        "https://api.site.test/graphql": "continue",
     }
 
 
@@ -605,6 +716,35 @@ def test_a_page_on_the_local_network_is_not_loaded(browser):
     with pytest.raises(render.RenderError, match="local network"):
         _render(r, "http://192.168.1.1/")
     assert started[0].browsers[0].contexts[0].closed
+
+
+def test_a_link_that_carries_data_is_not_loaded(browser):
+    r, started = browser({"html": BUILT})
+    with pytest.raises(render.RenderError, match="carries data"):
+        _render(r, "https://site.test/confirm?t=" + "a1b2c3d4e5" * 6)
+
+
+def test_any_browser_failure_is_a_render_error(browser):
+    r, started = browser({"html": BUILT, "context_error": "BrowserContext.new_context: Target closed"})
+    with pytest.raises(render.RenderError, match="Target closed"):
+        _render(r, "https://site.test/a")
+
+
+def test_the_browser_never_skips_the_proxy_for_this_mac(monkeypatch):
+    # Playwright stops sending loopback through a context's proxy when this is set: never for NEO
+    monkeypatch.setenv("PLAYWRIGHT_DISABLE_FORCED_CHROMIUM_PROXIED_LOOPBACK", "1")
+    seen = []
+
+    async def start():
+        seen.append(os.environ.get("PLAYWRIGHT_DISABLE_FORCED_CHROMIUM_PROXIED_LOOPBACK"))
+        return FakePlaywright({"html": BUILT})
+
+    r = render._Renderer(start=start)
+    try:
+        _render(r, "https://site.test/a")
+    finally:
+        r.close_now()
+    assert seen == [None]
 
 
 def test_a_redirect_the_browser_follows_itself_is_stopped_by_the_proxy(browser):

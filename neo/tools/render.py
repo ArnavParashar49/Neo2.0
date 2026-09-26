@@ -6,6 +6,11 @@ fresh, private browser context — no profile, no cookies, never NEO's visible b
 thrown away once the text is out. One headless Chromium serves every call and shuts itself down
 after a couple of idle minutes, so a second page in a row is quick.
 
+Reading a page only reads: the page may not submit a form (a navigation that isn't a GET), nor
+open a link that carries data (a token in it — a script there could act on it). The browser says
+what it is (Chromium's own headless user agent, automation not hidden): a site that turns away
+automated clients is taken at its word.
+
 Nothing the page asks for may reach this Mac or the local network. Two guards:
 
 * every request the page makes is checked (route interception, the same rule as web_fetch:
@@ -23,6 +28,7 @@ from __future__ import annotations
 import asyncio
 import atexit
 import ipaddress
+import os
 import re
 import socket
 import threading
@@ -50,7 +56,6 @@ _SETTLED_CHARS = 400
 _POLL_S = 0.25
 
 _ARGS = [
-    "--disable-blink-features=AutomationControlled",
     "--disable-quic",  # all traffic over TCP, through the proxy
     "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
     "--dns-prefetch-disable",
@@ -75,14 +80,18 @@ class Rendered:
 
 # ---- when a page needs rendering ------------------------------------------------------------------
 
+# Every pattern stops at the next tag ([^<>], no .* across the page), so a hostile page is judged
+# in linear time: this runs on every fetched page, and a regex holds the GIL while it runs.
 _SCRIPT = re.compile(r"<script\b", re.I)
-_NOSCRIPT = re.compile(r"<noscript\b[^>]*>(.*?)</noscript>", re.I | re.S)
+_NOSCRIPT = re.compile(r"<noscript\b[^<>]*>((?:(?!</?noscript\b)[\s\S])*)</noscript>", re.I)
+_TAG = re.compile(r"<[^<>]*>")
 # An empty element a framework mounts the page into: <div id="root"></div>, <app-root></app-root>
 _MOUNT = re.compile(
-    r"<(?P<tag>div|main|section|body)\b[^>]*\bid\s*=\s*[\"']?(?:root|app|__next|__nuxt|___gatsby|svelte|application)"
-    r"[\"'\s>][^>]*>\s*</(?P=tag)>|<app-root\b[^>]*>\s*</app-root>",
+    r"<(?P<tag>div|main|section|body)\b[^<>]*?\bid\s*=\s*[\"']?(?:root|app|__next|__nuxt|___gatsby|svelte|application)"
+    r"(?:[\"'\s/][^<>]*)?>\s*</(?P=tag)>|<app-root\b[^<>]*>\s*</app-root>",
     re.I,
 )
+_SCAN = 2_000_000  # characters of a page looked at (a shell's markers come early)
 THIN_CHARS = 300  # the server sent (next to) nothing to read
 _SHELL = 2000  # little enough that a page asking for JavaScript is a shell
 _NO_MAIN = 150  # an article extractor found no main text…
@@ -92,6 +101,7 @@ _LITTLE = 1000  # …in a page with only a little text around it
 def needs_render(html: str, main: str, full: str) -> bool:
     """Is this page built by its scripts? `main` is its extracted main text, `full` all the text
     the server sent. Without a script there's nothing a browser would add."""
+    html = html[:_SCAN]
     if not _SCRIPT.search(html):
         return False
     m, f = len(main.strip()), len(full.strip())
@@ -103,7 +113,7 @@ def needs_render(html: str, main: str, full: str) -> bool:
 
 
 def _asks_for_js(html: str) -> bool:
-    return any("javascript" in re.sub(r"<[^>]+>", " ", inner).lower() for inner in _NOSCRIPT.findall(html))
+    return any("javascript" in _TAG.sub(" ", inner).lower() for inner in _NOSCRIPT.findall(html))
 
 
 # ---- the proxy: public addresses only -------------------------------------------------------------
@@ -111,8 +121,11 @@ def _asks_for_js(html: str) -> bool:
 
 def public_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     """An address on the public internet (not this Mac, the LAN, a VPN's shared range…)."""
-    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
-        ip = ip.ipv4_mapped
+    if isinstance(ip, ipaddress.IPv6Address):
+        if ip.ipv4_mapped:
+            ip = ip.ipv4_mapped
+        elif ip.is_site_local:  # fec0::/10 — deprecated, but still a LAN's
+            return False
     return ip.is_global and not ip.is_multicast
 
 
@@ -280,6 +293,22 @@ async def _response_head(r: asyncio.StreamReader) -> bytes:
 
 # ---- the headless browser -------------------------------------------------------------------------
 
+# Set, Playwright lets a context reach loopback and link-local addresses directly instead of through
+# its proxy (the driver inherits NEO's environment): never for this browser.
+_LOOPBACK_ENV = "PLAYWRIGHT_DISABLE_FORCED_CHROMIUM_PROXIED_LOOPBACK"
+
+
+def _not_to_open(method: str, url: str) -> str:
+    """Why reading a page must not open this page or frame ("" = fine): reading only reads."""
+    if (method or "GET").upper() not in ("GET", "HEAD"):
+        return "the page tried to send a form"
+    if urlsplit(url).scheme.lower() in ("http", "https"):
+        from neo.tools.computer.policy import url_carries_data
+
+        if url_carries_data(url):
+            return "that link carries data (a token, say), which a script there could act on"
+    return ""
+
 
 async def _start_playwright():
     from playwright.async_api import async_playwright
@@ -367,6 +396,7 @@ class _Renderer:
             if time.monotonic() < self._broken_until:
                 raise RenderError(self._broken_why)
             try:
+                os.environ.pop(_LOOPBACK_ENV, None)
                 self._pw = await (self._start or _start_playwright)()
                 # Contexts each get their own proxy; anything outside one goes nowhere.
                 self._browser = await self._pw.chromium.launch(
@@ -421,6 +451,10 @@ class _Renderer:
                     raise RenderError("the page took too long to load") from None
                 finally:
                     await gate.close()
+            except RenderError:
+                raise
+            except Exception as e:  # noqa: BLE001 — the browser died, a socket wouldn't open…
+                raise RenderError(_first_line(e)) from None
             finally:
                 self._active -= 1
                 if self._active == 0:
@@ -435,7 +469,6 @@ class _Renderer:
             accept_downloads=False,
             service_workers="block",
             java_script_enabled=True,
-            user_agent=_user_agent(browser),
             viewport={"width": 1280, "height": 900},
         )
         try:
@@ -460,8 +493,12 @@ class _Renderer:
                 try:
                     if req.resource_type in _SKIP_TYPES:
                         return await r.abort("blockedbyclient")
-                    if why := await why_not(req.url):
-                        if req.is_navigation_request():
+                    nav = req.is_navigation_request()
+                    why = await why_not(req.url)
+                    if nav and not why:
+                        why = _not_to_open(req.method, req.url)
+                    if why:
+                        if nav:
                             blocked.append(why)
                         return await r.abort("blockedbyclient")
                     await r.continue_()
@@ -549,19 +586,6 @@ async def _settle(page, deadline: float, gate: _Gate) -> None:
     finally:
         if not idle.done():
             idle.cancel()
-
-
-def _user_agent(browser) -> str:
-    """Chromium's own user agent, without the "Headless" some sites turn away."""
-    try:
-        major = str(browser.version).split(".", 1)[0]
-    except Exception:  # noqa: BLE001
-        major = ""
-    major = major if major.isdigit() else "140"
-    return (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) "
-        f"Chrome/{major}.0.0.0 Safari/537.36"
-    )
 
 
 def _first_line(e: Exception) -> str:
