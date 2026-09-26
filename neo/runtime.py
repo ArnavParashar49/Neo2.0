@@ -74,6 +74,8 @@ class Runtime:
 
     def __post_init__(self) -> None:
         with _live_lock:
+            if self.library:
+                _refuse_shared_data_dir(self)
             _live.add(self)
 
     def scope(self, conversation: str = "default") -> Scope:
@@ -172,6 +174,20 @@ def library_bound() -> bool:
     """A library agent is bound right now (its requests, not NEO.app's)."""
     rt = current_runtime()
     return rt is not None and rt.library
+
+
+def _refuse_shared_data_dir(rt: Runtime) -> None:
+    """One live agent per data dir: two would share a memory, an audit log and a browser profile
+    (its logins), and one nested in another's would be the other's secret. Under _live_lock."""
+    from neo.config import overlaps
+
+    mine = Path(rt.settings.data_dir)
+    for other in _live:
+        if other.library and overlaps(mine, other.settings.data_dir):
+            raise ValueError(
+                f"data_dir {mine} is another agent's ({other.name!r} uses {other.settings.data_dir}): "
+                "give each agent its own folder, or close the other first"
+            )
 
 
 def live_runtimes() -> list[Runtime]:

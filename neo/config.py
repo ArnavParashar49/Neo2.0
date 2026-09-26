@@ -220,7 +220,9 @@ class LibrarySettings(Settings):
 
     Only what the host passes in: never the environment, ~/.neo/.env or a .env next to the
     package — a host process's NEO_CONFIRM_DESTRUCTIVE=false or its own keys must not reach an
-    agent it didn't give them to. `data_dir` is required and is never ~/.neo (or inside it).
+    agent it didn't give them to. `data_dir` is required, and is the agent's own folder: never
+    ~/.neo, inside it or holding it (however it's named), never a folder of other files, and never
+    another live agent's (neo.runtime). `models_path` is never in ~/.neo either.
     Pinned whatever is passed: confirmation on; every task kind runs its legacy script (the
     evidence-chosen drivers, their dry runs and their learning are process-wide, NEO.app's);
     Laya's learning and its teacher off; notes that no notes app could take go under data_dir.
@@ -252,7 +254,10 @@ class LibrarySettings(Settings):
     @model_validator(mode="after")
     def _pinned(self) -> LibrarySettings:
         _refuse_neo_home(self.data_dir)
+        if self.models_path is not None:
+            _refuse_neo_home(self.models_path, "models_path")
         _refuse_real_data_under_tests(self.data_dir)
+        _refuse_foreign_folder(self.data_dir)
         self.confirm_destructive = True
         self.decide_modes = dict.fromkeys(sorted({*DECIDE_DEFAULTS, *self.decide_modes}), "legacy")
         self.decide_kind_routing = False
@@ -265,27 +270,109 @@ class LibrarySettings(Settings):
 
     def ensure_dirs(self) -> None:
         """Create what's missing, private to this user. A folder the host already made keeps its
-        own permissions; the models folder only exists when local embeddings are on."""
+        own permissions; the models folder only exists when local embeddings are on. The data dir
+        gets NEO's marker: from then on it is NEO's own folder, and taken again next time."""
         _mkdirs_private(self.data_dir)
+        try:
+            fd = os.open(self.data_dir / AGENT_MARKER, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            pass
+        else:
+            with os.fdopen(fd, "w") as f:
+                f.write(_MARKER_TEXT)
         if self.embeddings == "local":
             _mkdirs_private(self.models_dir)
 
 
-def _in_neo_home(data_dir: Path) -> bool:
-    """~/.neo itself or anything inside it. APFS ignores case and Unicode normalisation, so
-    ~/.NEO/x is inside it too."""
-    home = (Path.home() / ".neo").resolve()
-
-    def parts(p: Path) -> list[str]:
-        return [unicodedata.normalize("NFC", x).casefold() for x in p.parts]
-
-    return parts(Path(data_dir).expanduser().resolve())[: len(home.parts)] == parts(home)
+# An embedded agent's data dir holds this file once NEO has made the folder its own (ensure_dirs):
+# a folder of someone else's files is never taken over (NEO keeps it secret, and an erase clears it).
+AGENT_MARKER = ".neo-agent"
+_MARKER_TEXT = "This folder holds an embedded NEO agent's data (memory, audit log, browser profile).\n"
+_IGNORED = {".DS_Store"}  # what Finder leaves in any folder it showed
 
 
-def _refuse_neo_home(data_dir: Path) -> None:
-    if _in_neo_home(data_dir):
-        home = (Path.home() / ".neo").resolve()
-        raise ValueError(f"an embedded agent never uses NEO.app's own data ({home}): pick another data_dir")
+def _fold(parts: tuple[str, ...]) -> list[str]:
+    # APFS ignores case and Unicode normalisation: ~/.NEO is ~/.neo.
+    return [unicodedata.normalize("NFC", x).casefold() for x in parts]
+
+
+def _file_id(p: Path) -> tuple[int, int] | None:
+    try:
+        st = os.stat(p)
+    except (OSError, ValueError):
+        return None
+    return st.st_dev, st.st_ino
+
+
+def _ancestry(p: str | os.PathLike) -> list[tuple[Path, tuple[str, ...]]]:
+    """`p` (absolute, ~ expanded) and each folder above it, each with the parts below it."""
+    parts = Path(os.path.abspath(os.path.expanduser(str(p)))).parts
+    return [(Path(*parts[:i]), parts[i:]) for i in range(len(parts), 0, -1)]
+
+
+def overlaps(a: str | os.PathLike, b: str | os.PathLike) -> bool:
+    """`a` and `b` are the same folder, or one lies inside the other — however either is named:
+    case, Unicode normalisation, symlinks, or the /System/Volumes/Data firmlink. Compared by what
+    is on disk (the deepest folder above both that exists), then by name below it."""
+    below_b: dict[tuple[int, int], tuple[str, ...]] = {}
+    for anc, rest in _ancestry(b):
+        fid = _file_id(anc)
+        if fid is not None:
+            below_b.setdefault(fid, rest)
+    for anc, rest in _ancestry(a):
+        fid = _file_id(anc)
+        if fid is not None and fid in below_b:
+            ra, rb = _fold(rest), _fold(below_b[fid])
+            n = min(len(ra), len(rb))
+            return ra[:n] == rb[:n]
+    ra, rb = _fold(Path(os.path.abspath(a)).parts), _fold(Path(os.path.abspath(b)).parts)
+    n = min(len(ra), len(rb))
+    return ra[:n] == rb[:n]
+
+
+def _neo_homes() -> list[Path]:
+    """NEO.app's own data: ~/.neo of $HOME, and of the login's home when a host moved $HOME."""
+    homes = [Path.home()]
+    try:
+        import pwd
+
+        homes.append(Path(pwd.getpwuid(os.getuid()).pw_dir))
+    except (ImportError, KeyError, OSError):
+        pass
+    out: list[Path] = []
+    for h in homes:
+        if (p := h / ".neo") not in out:
+            out.append(p)
+    return out
+
+
+def _in_neo_home(path: Path) -> Path | None:
+    """The ~/.neo that `path` is, lies inside, or holds (the home folder, "/"), if any."""
+    return next((h for h in _neo_homes() if overlaps(path, h)), None)
+
+
+def _refuse_neo_home(path: Path, what: str = "data_dir") -> None:
+    if (home := _in_neo_home(path)) is not None:
+        raise ValueError(
+            f"an embedded agent never uses NEO.app's own data ({home}): {what} {path} is it, lies "
+            f"inside it or holds it — pick a folder of the agent's own"
+        )
+
+
+def _refuse_foreign_folder(data_dir: Path) -> None:
+    """The data dir is missing, empty, or already NEO's (its marker): a folder of the host's or
+    the user's own files never becomes an agent's (a secret to NEO's tools, cleared by an erase)."""
+    try:
+        names = {p.name for p in Path(data_dir).iterdir()} - _IGNORED
+    except FileNotFoundError:
+        return
+    except OSError as e:  # a file, or a folder this user can't list
+        raise ValueError(f"data_dir {data_dir} can't be the agent's folder ({e.strerror or e})") from None
+    if names and AGENT_MARKER not in names:
+        raise ValueError(
+            f"data_dir {data_dir} already holds other files: give the agent its own folder (a new "
+            "or empty one; NEO marks it as its own)"
+        )
 
 
 def _mkdirs_private(path: Path) -> None:
@@ -339,6 +426,5 @@ def _refuse_real_data_under_tests(data_dir: Path) -> None:
     conftest skipped the isolation fixture and an erase test wiped the real ~/.neo."""
     if "pytest" not in sys.modules and "PYTEST_CURRENT_TEST" not in os.environ:
         return
-    real = (Path.home() / ".neo").resolve()
-    if _in_neo_home(data_dir):
+    if (real := _in_neo_home(data_dir)) is not None:
         raise RuntimeError(f"refusing to use the real {real} under pytest: set NEO_DATA_DIR to a temporary directory")

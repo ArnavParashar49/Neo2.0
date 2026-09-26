@@ -129,10 +129,11 @@ def test_copies_are_independent_of_the_catalog(web_agent):
         cat.description = old
 
 
-def test_task_modes_rewrite_the_catalog_not_an_agent(web_agent, monkeypatch):
+def test_task_modes_rewrite_the_catalog_not_an_agent(web_agent, monkeypatch, tmp_path):
+    from neo.config import LibrarySettings
     from neo.tools import tasks
 
-    agent = runtime.Runtime("mac", web_agent.settings, catalog().subset(["page_read"]))
+    agent = runtime.Runtime("mac", LibrarySettings(data_dir=tmp_path / "mac"), catalog().subset(["page_read"]))
     with runtime.bind(agent.scope()):
         assert registry().get("page_read").hidden
         monkeypatch.setattr(tasks, "mode", lambda kind: "on")

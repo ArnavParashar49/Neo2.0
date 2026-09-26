@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 import pytest
 from neo_lib import make_runtime
@@ -115,3 +116,16 @@ def test_neo_apps_shell_environment_is_unchanged(monkeypatch):
     assert "GEMINI_API_KEY" not in env  # the credential-looking names, as before
     for k in ("DATABASE_URL", "SENTRY_DSN", "STRIPE_SK", "EDITOR", "LANG"):
         assert env[k] == _HOST_ENV[k]
+
+
+def test_a_data_dir_named_through_the_data_volume(tmp_path):
+    """The host named the folder through /System/Volumes/Data; a tool names its files the usual way."""
+    real = tmp_path.resolve() / "agent"
+    alias = Path("/System/Volumes/Data" + str(real))
+    if not alias.parent.exists():
+        pytest.skip("no APFS data volume here")
+    rt = make_runtime(alias, "a")  # live while referenced
+    for p in (real / "memory.sqlite3", alias / "memory.sqlite3", real / "browser" / "Cookies"):
+        assert policy.is_secret(p), p
+    assert policy.covers_secret(real.parent) and not policy.shell_is_read_only(f"cat {real}/audit.log")
+    rt.close()

@@ -14,8 +14,10 @@ from neo.agent.registry import Registry
 
 
 def _rt(name: str, data_dir: str = "/tmp/x", **kw) -> runtime.Runtime:
+    """The bare scaffolding (binding, spawned work, lazy members): not a library agent, whose
+    settings and data dir are checked (test_library_settings, test_agent_data_dirs)."""
     s = SimpleNamespace(data_dir=Path(data_dir), extra_secret_paths=[])
-    return runtime.Runtime(name, s, Registry(), **kw)  # type: ignore[arg-type]
+    return runtime.Runtime(name, s, Registry(), **{"library": False, **kw})  # type: ignore[arg-type]
 
 
 def test_binding_nests_and_unbinds():

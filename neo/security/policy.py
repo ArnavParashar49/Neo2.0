@@ -60,8 +60,7 @@ def _variants(path: str | os.PathLike, base: str | os.PathLike | None = None) ->
     except (OSError, RuntimeError):
         pass
     for v in list(out):
-        if tuple(_fold(x) for x in v.parts[:4]) == tuple(_fold(x) for x in _DATA_VOLUME):
-            out.append(Path("/", *v.parts[4:]))
+        out.extend(_off_data_volume(v))
     return out
 
 
@@ -84,9 +83,18 @@ def _extra_roots() -> list[Path]:
     out: list[Path] = []
     for r in secret_roots():
         for v in (r, _resolved(r)):
-            if v not in out:
-                out.append(v)
+            # named through the data volume: its files are reached the usual way too (_variants)
+            for w in (v, *_off_data_volume(v)):
+                if w not in out:
+                    out.append(w)
     return out
+
+
+def _off_data_volume(p: Path) -> list[Path]:
+    """/System/Volumes/Data/Users/x → /Users/x (the firmlinked, usual name), else nothing."""
+    if tuple(_fold(x) for x in p.parts[:4]) == tuple(_fold(x) for x in _DATA_VOLUME):
+        return [Path("/", *p.parts[4:])]
+    return []
 
 
 def _resolved(p: Path) -> Path:
