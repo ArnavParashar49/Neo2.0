@@ -74,6 +74,7 @@ _HOLD_S = 1.2  # a command's reply is held this long: if no tool call comes, it 
 # Told to say nothing, the model often sends a turn of near-silent audio instead. Below this level
 # a chunk is silence: it never counts toward the hold, and never turns the orb to "speaking".
 _VOICE_RMS = 0.006
+_THINK_SETTLE_S = 2.5  # "thinking" for a reply the user will hear; back to listening if none comes
 _LANE_S = 30.0  # how long the model's calls for a sentence NEO ran itself are skipped
 _SETTLE_S = 0.3  # no new words for this long after the model starts answering = sentence over
 _CONNECT_TIMEOUT_S = 12.0
@@ -173,24 +174,98 @@ _TRAILING_JOIN = re.compile(r"(?:\b(?:and|then|also|plus)|,)\s*$", re.I)
 
 
 # How people address NEO and soften a command — "Neo, …", "hey Neo …", "can you …?", "… please".
-# None of it changes what is asked, so the fast paths and the speech gate look past it.
+# None of it changes what is asked, so the fast paths and the speech gate look past it. Only "Neo"
+# itself is an address: "Neil, close this tab" may well be said to someone else in the room.
 _ADDRESS = re.compile(
     r"^\s*(?:(?:hey|hi|hello|hallo|ok(?:ay)?|yo|arre|oye|so|um+|uh+|acha|achha)\b\s*[,!.]?\s*)*"
-    r"(?:(?:neo|neil|nio)\b[\s,!.:-]*)?",
+    r"(?:neo\b[\s,!.:-]*)?",
     re.I,
 )
-_POLITE = re.compile(r"^\s*(?:(?:can|could|would|will)\s+you\s+(?:please\s+)?|please\s+|kindly\s+|zara\s+)", re.I)
-_POLITE_TAIL = re.compile(r"[\s,]*\b(?:please|pls|for\s+me|na|yaar)\s*[.!?]*\s*$", re.I)
+# Verbs that make "can you <verb> …?" a request to do something, not a question about NEO.
+_DO_VERBS = (
+    r"open|launch|start|close|quit|kill|exit|stop|pause|resume|play|skip|mute|unmute|send|message|text|"
+    r"e-?mail|mail|call|ring|dial|remind|add|set|create|make|schedule|book|type|write|save|delete|remove|"
+    r"move|copy|paste|press|click|scroll|turn|switch|put|go|navigate|increase|decrease|raise|lower|lock|"
+    r"restart|shut|enable|disable|minimi[sz]e|maximi[sz]e|take|bring|empty|clear|reply|forward"
+)
+_DOES = re.compile(
+    rf"^(?:{_DO_VERBS})\b|\b(?:karo|kar\s+do|kijiye|kar\s+dijiye|chalao|chala\s+do|bajao|baja\s+do|lagao|"
+    r"laga\s+do|kholo|khol\s+do|bhejo|bhej\s+do|likho|likh\s+do|hatao|hata\s+do|badhao|badha\s+do|ghatao|"
+    r"ghata\s+do)$",  # or a Hindi one at the end: "zara volume badhao?"
+    re.I,
+)
+# ... unless it asks something back too: "can you open Safari and check if my order shipped?"
+_CHECKS = re.compile(r"\b(?:check|see|find\s+out|look|tell\s+me)\s+(?:if|whether)\b|\bwhether\b", re.I)
+_POLITE = re.compile(
+    r"^\s*(?:(?P<ask>(?:can|could|would|will)\s+you)\s+(?:please\s+)?|please\s+|kindly\s+|"
+    rf"zara\s+(?!(?:{_DO_VERBS})\b))",  # "zara volume badhao" — but "Zara open YouTube" may be to Zara
+    re.I,
+)
+_POLITE_TAIL = re.compile(r"(?:[\s,]*\b(?:please|pls|for\s+me|na|yaar)\b)+\s*[.!?]*\s*$", re.I)
+# The argument that names what a step acts on: in "can you …?" it has to name something.
+_NAMED_ARG = {"open_app": "target", "quit_app": "name", "play_music": "query", "search_site": "query"}
+_SMALL_WORDS = {"of", "the", "a", "an", "and", "for", "to", "in", "on", "at", "by", "with", "from", "me", "my", "you", "your", "is", "it"}
+
+
+def _head(text: str) -> tuple[str, str]:
+    """(the request without how NEO was addressed or its polite lead, that lead: "ask" for "can
+    you …", "please" for "please …", "" for none): "Neo, can you open YouTube?" → ("open YouTube?",
+    "ask"). Nothing comes off the end, so a payload keeps every word the user said."""
+    t = _ADDRESS.sub("", text, count=1)
+    lead = ""
+    if m := _POLITE.match(t):
+        lead, t = ("ask" if m.group("ask") else "please"), t[m.end() :]
+    return (" ".join(t.split()) or " ".join(text.split())), lead
 
 
 def _core(text: str) -> tuple[str, bool]:
-    """(the request itself, whether it came in a polite frame): "Neo, can you open YouTube?" →
-    ("open YouTube", True). A polite frame's "?" doesn't make a command a question."""
-    t = _ADDRESS.sub("", text, count=1)
-    polite = bool(_POLITE.match(t))
-    t = _POLITE.sub("", t, count=1)
-    t = _POLITE_TAIL.sub("", t).strip().rstrip("?.!").strip()
-    return (t or " ".join(text.split())), polite
+    """(the request itself, whether it came in a polite frame): "Neo, can you open YouTube,
+    please?" → ("open YouTube", True). For judging what is asked — never a payload to run."""
+    head, lead = _head(text)
+    t = _POLITE_TAIL.sub("", head).strip().rstrip("?.!").strip()
+    return (t or head), bool(lead)
+
+
+def _names_something(value) -> bool:
+    """"YouTube", "VS Code", "github.com", "505", "Shape of You" — not "files", "PDFs", "time" or
+    "YouTube later": a name, the way a transcript writes names, not a kind of thing."""
+    words = [w for w in str(value or "").split() if w.lower() not in _SMALL_WORDS]
+    return bool(words) and all(
+        w[0].isdigit()
+        or "." in w.strip(".")
+        or re.match(r"[a-z]+[A-Z]", w) is not None  # iPhone, eBay
+        or (w[0].isupper() and not re.fullmatch(r"[A-Z]{2,}s", w))  # but not PDFs, URLs
+        for w in words
+    )
+
+
+def _plan(text: str) -> list[tuple[str, dict]] | None:
+    """The fast-path plan for what the user asked, looking past how they said it. A trailing
+    "please" comes off plain commands only ("open YouTube, please"); a payload (the words to type,
+    a song, a search) is never cut short — "play Pray for Me" is left to the model, not run as "Pray".
+    "Can you …?" runs here only when it names what to act on: "can you open YouTube?" asks for
+    YouTube, "can you open files?" may be a question about NEO — the model decides that one."""
+    from neo.agent import fastpath
+
+    head, lead = _head(text)
+    core = _core(text)[0]
+    if _TRAILING_JOIN.search(core):
+        return None  # "close this tab and please…": the sentence isn't over
+    steps = fastpath.plan(head)
+    if _POLITE_TAIL.search(head):
+        plain = fastpath.plan(core)
+        if any(fastpath.is_payload(t) for t, _ in (steps or []) + (plain or [])):
+            # "play bohemian rhapsody please", "play Please Please Please", "type thanks yaar":
+            # the last word is manners or part of the payload — the model, which hears it, knows.
+            return None
+        steps = plain or steps  # "open YouTube, please", "close Spotify yaar"
+    if steps and lead == "ask" and steps != fastpath.plan(_ADDRESS.sub("", text, count=1)):
+        # (A tool whose own pattern takes "can you …" — "can you type hello" — decided already.)
+        for tool, args in steps:
+            arg = _NAMED_ARG.get(tool)
+            if (arg and not _names_something(args.get(arg))) or (not arg and fastpath.is_payload(tool)):
+                return None
+    return steps
 
 
 def _command_steps(text: str, *, settled: bool = False) -> list[tuple[str, dict]] | None:
@@ -207,7 +282,7 @@ def _command_steps(text: str, *, settled: bool = False) -> list[tuple[str, dict]
     text = " ".join(text.split())
     if not text or _TRAILING_JOIN.search(text):
         return None
-    steps = fastpath.plan(_core(text)[0])
+    steps = _plan(text)
     if not steps:
         return None
     for tool, args in steps:
@@ -235,10 +310,14 @@ _HI_ASKS = re.compile(
 
 def _asks(text: str) -> bool:
     """Does the user want to hear something back? ("search cats on youtube" opens a page: no;
-    "can you open YouTube?" is a command said politely: no; "is it raining?": yes.)"""
+    "can you open YouTube?" is a command said politely: no; "can you hear me?" and "is it
+    raining?": yes.)"""
     core, polite = _core(text)
-    question = asks_something(core) or (text.strip().endswith("?") and not polite) or bool(_HI_ASKS.search(text))
-    return question and _command_steps(text) is None
+    request = polite and bool(_DOES.search(core)) and not _CHECKS.search(core)  # "could you send …?"
+    question = asks_something(core) or (text.strip().endswith("?") and not request) or bool(_HI_ASKS.search(text))
+    # A command the fast paths cover is no question, whether or not the lane may run it ("search
+    # youtube for cats please" is left to the model, but it still only opens a page).
+    return question and _command_steps(text) is None and _command_steps(core) is None
 
 
 def _is_action_call(fc) -> bool:
@@ -334,6 +413,7 @@ class LiveVoice:
     _result_pending = False  # a non-silent result went back and the model hasn't replied to it yet
     _pending_note: str | None = None  # an inform() held back while the user was mid-sentence
     _last_answer_silent = False
+    _think_seq = 0  # bumps with every "thinking": only the latest one's settle may end it
     # command lane (see _maybe_command_lane) — tied to sentences by number, never by their text
     _utt_id = 0  # bumps with every new sentence (spoken or typed)
     _calls_this_turn = 0  # model tool calls since the last turn_complete
@@ -373,7 +453,8 @@ class LiveVoice:
         # after one, tools that could leak data or plant memories ask the user first.
         self._taint: list[str] = []
         self._utt_started = 0.0  # when the user began their current sentence
-        self._held: list[bytes] = []  # audio held back while deciding whether a turn is a command
+        # audio held back while deciding whether a turn is a command: (chunk, has a voice in it)
+        self._held: list[tuple[bytes, bool]] = []
         self._last_answer: tuple[float, str] = (0.0, "")  # (when, result) of the latest yes/no
         # Called with (kind, why) when Live keeps failing — "quota" or "network" — so the app can
         # say so and switch to the on-device voice for a while.
@@ -783,7 +864,7 @@ class LiveVoice:
             if sc.turn_complete:
                 if self._gate == "hold":
                     # A spoken reply with no tool call at all ("you're welcome"): it was conversation.
-                    await self._open_gate(model_buf)
+                    await self._open_gate(model_buf, final=True)
                 spoke = self._gate == "open"
                 self._gate, self._held = None, []
                 if spoke and model_buf and self._asked and self._last_response_at >= self._asked[2]:
@@ -970,27 +1051,32 @@ class LiveVoice:
         gate = self._turn_gate(user_buf)
         if gate == "mute":
             return
+        voiced = rms(data) >= _VOICE_RMS
         if gate == "hold":
-            if not self._held and rms(data) < _VOICE_RMS:
+            if not voiced and not self._held:
                 return  # silence before any voice: nothing to hold (a silent turn never opens)
-            self._held.append(data)
-            if sum(len(d) for d in self._held) / 2 / 24000 < _HOLD_S:
+            self._held.append((data, voiced))
+            # Only voice counts toward the hold: "Mm." and then the model's near-silence while it
+            # gets round to a call is no spoken reply. (A real one keeps its pauses when it plays.)
+            if sum(len(d) for d, v in self._held if v) / 2 / 24000 < _HOLD_S:
                 return
             await self._open_gate(model_buf)  # a real spoken reply, not a preamble to a call
             return
-        self._play(data)
+        self._play(data, voiced)
 
-    async def _open_gate(self, model_buf: list[str]) -> None:
+    async def _open_gate(self, model_buf: list[str], *, final: bool = False) -> None:
         held, self._held, self._gate = self._held, [], "open"
-        for d in held:
-            self._play(d)
+        while final and held and not held[-1][1]:
+            held.pop()  # the turn is over: the silence at its end has nothing to say
+        for d, v in held:
+            self._play(d, v)
         if model_buf:
             await bus().say("".join(model_buf), final=False)
         await self._refresh_state()
 
-    def _play(self, data: bytes) -> None:
+    def _play(self, data: bytes, voiced: bool) -> None:
         if not self._speaking:
-            if rms(data) < _VOICE_RMS:
+            if not voiced:
                 return  # silence isn't speaking: the orb only turns when there's a voice to hear
             self._speaking = True
             self._speaking_since = time.time()
@@ -1135,6 +1221,7 @@ class LiveVoice:
             response={"result": result[:4000]},
             scheduling=scheduling,
         )
+        heard = False  # will the user hear the model's reply to this result?
         if self._live is live:
             try:
                 failed_or_asks = result.startswith(("Error", "NEEDS_", "(content) NEEDS_")) or "didn't work" in result[:40]
@@ -1145,6 +1232,7 @@ class LiveVoice:
                     self._gate = "open" if failed_or_asks or not wrote else "mute"
                     self._held = []
                     self._note_question(result)
+                    heard = not silent and self._gate == "open"
                 elif scheduling is not gt.FunctionResponseScheduling.SILENT:
                     # The model will respond to this result in a later turn: may that be spoken?
                     # Yes for answers, failures and questions back; no for "step done, carry on".
@@ -1152,21 +1240,22 @@ class LiveVoice:
                     self._result_speech = self._result_speech or not sequencing or failed_or_asks
                     self._last_response_at = time.time()
                     self._note_question(result)
+                    heard = self._result_speech
                 await live.send_tool_response(function_responses=[resp])
                 self._last_turn_end = time.time()
                 if not silent:
                     self._turn_open = True  # the model owes a spoken reply for this result
             except Exception as e:  # noqa: BLE001
                 print(f"[live] tool response failed: {e}")
-            # The model now composes its spoken reply: show "thinking" until audio arrives
-            # instead of blinking through "listening" for the half-second in between. A silent
-            # result gets no reply at all — straight back to listening.
+            # The model now composes a reply the user will hear: show "thinking" until audio
+            # arrives instead of blinking through "listening" for the half-second in between. A
+            # result it answers unheard (SILENT, a step of a longer command, a memory write) is
+            # done — straight back to listening; the next step shows "working" when it starts.
             if not any(not x.done() for x in self._tool_tasks.values()):
-                if silent:
-                    await self._refresh_state()
+                if heard:
+                    await self._think()
                 else:
-                    await bus().set_state(NeoState.THINKING)
-                    asyncio.create_task(self._settle_if_quiet(2.5))
+                    await self._refresh_state()
         elif not silent and not sequencing:  # session went away mid-task: don't lose the result
             await bus().say(result[:600], final=True)
             await self._refresh_state()
@@ -1272,7 +1361,15 @@ class LiveVoice:
             if k in self._tool_tasks
         )
 
-    async def _settle_if_quiet(self, after_s: float) -> None:
+    async def _think(self) -> None:
+        """The model is composing a reply the user will hear: "thinking" until its audio arrives,
+        or back to listening after a moment if none does."""
+        self._think_seq += 1
+        await bus().set_state(NeoState.THINKING)
+        asyncio.create_task(self._settle_if_quiet(_THINK_SETTLE_S, self._think_seq))
+
+    async def _settle_if_quiet(self, after_s: float, seq: int) -> None:
         await asyncio.sleep(after_s)
-        if not self._speaking and not self.spk.playing.is_set():
+        # A later "thinking" has its own settle: an earlier one never cuts it short.
+        if seq == self._think_seq and not self._speaking and not self.spk.playing.is_set():
             await self._refresh_state()
