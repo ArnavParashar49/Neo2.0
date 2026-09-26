@@ -33,6 +33,7 @@ from datetime import datetime
 from functools import cached_property
 
 from neo.decide import sdef
+from neo.decide._objc import pooled
 
 __all__ = [
     "App",
@@ -580,6 +581,7 @@ _LIBPROC = None
 _MAIN_EXE = re.compile(r"Contents/MacOS/[^/]+|Wrapper/[^/]+\.app/[^/]+|WrappedBundle/[^/]+")
 
 
+@pooled
 def _running_reals() -> set[str]:
     """Real paths of app bundles with a live process - read fresh from the process table (NSWorkspace's
     list goes stale in a process that doesn't pump a Cocoa run loop)."""
@@ -619,6 +621,7 @@ def _running_reals() -> set[str]:
             return set()
 
 
+@pooled
 def _dock_ids() -> set[str]:
     """Bundle ids of the apps shown in the Dock (public CFPreferences read; ids only)."""
     try:
@@ -636,6 +639,7 @@ def _dock_ids() -> set[str]:
         return set()
 
 
+@pooled
 def _scheme_defaults() -> dict[str, str]:
     """{standard scheme: real path of its default handler}."""
     try:
@@ -823,6 +827,7 @@ def _static_for(path: str, need_category: bool) -> _Static | None:
     return s
 
 
+@pooled
 def inventory(refresh: bool = False) -> list[App]:
     """All real user-facing apps on this Mac (sorted by name). Cached; ``refresh`` re-enumerates
     and re-reads everything. Without it, usage and the running state are still re-read cheaply."""
@@ -892,6 +897,7 @@ def _inventory(
     return list(apps)
 
 
+@pooled
 def _app_for_path(path: str) -> App | None:
     """The inventory entry for a bundle path, or one built on the spot for an app elsewhere."""
     rp = os.path.realpath(path)
@@ -908,6 +914,7 @@ def _app_for_path(path: str) -> App | None:
         return _assemble(s, use, _running_reals(), _cache.dock, _cache.defaults)
 
 
+@pooled
 def _ls_path_for_id(bundle_id: str) -> str | None:
     """Where LaunchServices has an app with this bundle id (anywhere on disk)."""
     try:
@@ -919,6 +926,7 @@ def _ls_path_for_id(bundle_id: str) -> str | None:
     return str(u.path()) if u is not None else None
 
 
+@pooled
 def _ls_default_path(url_or_uti: str) -> str | None:
     """LaunchServices' default handler (bundle path) for a URL/scheme, a UTI or a file extension."""
     try:
@@ -943,6 +951,7 @@ def _ls_default_path(url_or_uti: str) -> str | None:
     return str(u.path()) if u is not None else None
 
 
+@pooled
 def app_by_id(bundle_id: str) -> App | None:
     want = (bundle_id or "").strip()
     if not want:
@@ -954,6 +963,7 @@ def app_by_id(bundle_id: str) -> App | None:
     return _app_for_path(p) if p else None
 
 
+@pooled
 def default_for(url_or_uti: str) -> App | None:
     """The default handler for a URL / scheme ('mailto:', 'https://...') or a content type
     ('public.mp3', or a bare extension 'mp3')."""

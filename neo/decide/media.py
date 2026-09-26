@@ -52,6 +52,7 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
 from neo.config import settings
+from neo.decide._objc import pooled
 
 if TYPE_CHECKING:
     from neo.decide.inventory import App
@@ -607,6 +608,7 @@ def responsible_pid(pid: int) -> int:
     return r if r > 0 else pid
 
 
+@pooled
 def _bundle_id_of_pid(pid: int) -> str:
     try:
         from AppKit import NSRunningApplication
@@ -865,6 +867,7 @@ _BASE_WORDS = {"play": ("Play",), "search": ("Search",), "find": ("Find",), "pau
 
 
 @lru_cache(maxsize=1)
+@pooled
 def lexicon() -> dict[str, frozenset[str]]:
     """{'play': {'Play', 'Lecture', …}, 'search': …, 'find': …, 'pause': …} for English and the
     user's preferred languages."""
@@ -1074,6 +1077,7 @@ def _press(hit: _Hit, pid: int, app_el) -> bool:
     return False
 
 
+@pooled
 def _ax_flow(pid: int, app_path: str, query: str, stop: threading.Event, ready_s: float, action_s: float) -> tuple[bool, str, str]:
     """Worker thread: type the query into the app's own search box and press the best matching
     play control. (pressed, label or why not, reason). The web-content switch is restored however
@@ -1144,6 +1148,7 @@ class _Target:
     path: str
 
 
+@pooled
 def _pid_of(bundle_id: str) -> int | None:
     """Fresh from LaunchServices (NSWorkspace's cached list misses apps launched after NEO)."""
     try:
@@ -1182,6 +1187,7 @@ async def _launch(app: App, ready_s: float) -> int | None:
         await asyncio.sleep(0.2)
 
 
+@pooled
 def _default_browser() -> Any | None:
     try:
         a = _inventory().default_for("https:")

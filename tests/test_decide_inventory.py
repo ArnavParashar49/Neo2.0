@@ -699,3 +699,22 @@ def test_includes_and_plists_that_are_not_regular_files_never_hang(tmp_path):
     assert inv._plist_key(str(tmp_path / "Piped.app")) is None
     assert inv._read_info(str(tmp_path / "Piped.app")) == ({}, "")
     assert sdef.load(str(tmp_path / "Piped.app")) is None
+
+
+def test_cocoa_entry_points_drain_an_autorelease_pool(monkeypatch):
+    from neo.decide import _objc, inventory, media
+
+    entered = []
+
+    class Pool:
+        def __enter__(self):
+            entered.append(1)
+
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(_objc, "pool", lambda: Pool())
+    assert _objc.pooled(lambda: 7)() == 7 and entered == [1]
+    # the thread entry points (called via asyncio.to_thread) are the wrapped ones
+    for fn in (inventory.inventory, inventory.default_for, media._pid_of, media._ax_flow, media._default_browser):
+        assert hasattr(fn, "__wrapped__"), fn
