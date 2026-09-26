@@ -151,6 +151,7 @@ Everything is an environment variable with the `NEO_` prefix (or a line in `.env
 | `NEO_CONFIRM_DESTRUCTIVE` | `true` | set `false` only if you enjoy surprises |
 | `NEO_CLOUD_MEMORY` | `full` | what NEO's memory sends to cloud models: `full` · `profile` (stable facts only) · `off` |
 | `NEO_LEARN` | `on` | `off` stops Laya recording your requests to learn from |
+| `NEO_LEARN_TEACHER` | `off` | `local` · `cloud`: while NEO is idle, a model re-checks up to 50 a day of the requests Laya was least sure about — `local` only with the local model, `cloud` only with the provider that already handled that request |
 | `NEO_HOME_LOCATION` | — | where "the weather" means if NEO doesn't know your city (else it guesses from your IP) |
 | `NEO_DATA_DIR` | `~/.neo` | memory DB, audit log, models, trained reflex head |
 
@@ -185,6 +186,7 @@ The head is trained locally in about a minute (plus feature extraction):
 
 ```bash
 .venv/bin/python -m neo.reflex.generate   # optional: grow the dataset with Gemini + Groq, cross-labelled
+.venv/bin/python -m neo.reflex.generate --focus chat:quick_action   # or --from-confusion FILE, --lang hinglish: ≤300 rows at one weak boundary
 .venv/bin/python -m neo.reflex.finetune   # extract features, compare variants, save the fastest ≥94%
 ```
 

@@ -56,6 +56,9 @@ class Settings(BaseSettings):
     reflex_tool_floor: float = 0.85  # Laya may pick the tool itself above this confidence
     home_location: str = ""  # e.g. "Dubai" — where "the weather" means, if not remembered
     learn: bool = True  # NEO_LEARN=off: Laya stops recording requests to learn from
+    # NEO_LEARN_TEACHER=local|cloud: while idle, have a model re-check the requests Laya was least
+    # sure about (reflex/teacher.py) — the local model, or only the provider that already saw each one.
+    learn_teacher: Literal["off", "local", "cloud"] = "off"
     # How much of NEO's memory rides along to the cloud models: full | profile | off
     cloud_memory: Literal["full", "profile", "off"] = "full"
 
@@ -70,6 +73,14 @@ class Settings(BaseSettings):
         if s in ("off", "none", "no", "false", "0", "nothing"):
             return "off"
         return "profile"
+
+    @field_validator("learn_teacher", mode="before")
+    @classmethod
+    def _learn_teacher(cls, v):
+        """Anything but exactly local or cloud is off: this sends requests to a model, so it only
+        runs when asked for (and a typo must never stop NEO from starting)."""
+        s = str(v or "off").strip().lower()
+        return s if s in ("local", "cloud") else "off"
 
     # ---- voice -----------------------------------------------------------------------
     voice: VoiceBackend = "auto"  # auto = Live if key + quota, else local cascade
