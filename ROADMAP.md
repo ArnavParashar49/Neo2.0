@@ -159,6 +159,14 @@ Two adversarial reviews (≈235 agents) confirmed 44 defects in the silent-comma
 - ⌥⌘ summons NEO (listen-only event tap: press both and release with nothing in between; real ⌥⌘ shortcuts and ⌥⌘-click don't count; re-enables itself after secure input). ⌘⇧Space stays as the fallback.
 - The core asks for Accessibility and Screen Recording at startup when missing; Info.plist carries the microphone and Apple Events usage strings. New orb icon.
 
+### Review fixes: NEO.app, ⌥⌘, learning, search (2026-09-26)
+
+A 30-agent review confirmed 25 defects in the NEO.app / learning / speed batch; all fixed:
+- NEO.app: the core exits when the app disappears (parent watch), a pidfile lets a relaunch replace an orphan instead of adopting it, 12 s shutdown grace with a bounded session summary, Restart works after the supervisor gave up, status in the menu, core output piped through the app with size-based rotation, login item follows the app's current location and launches the binary directly; menu-bar-only mode set before the event loop, so NEO never shows in the Dock (not even in recent apps).
+- ⌥⌘: a gesture model from the first modifier press (⌘⇥-then-⌥, ⇧⌥⌘/⌃⌥⌘ and held keys never fire), head-of-chain tap, keeps retrying until Accessibility is granted and then updates the menu.
+- Learning: Live labels follow the user's turn (a partial transcript at tool time and the final wording are one label), agent_task relays that ran fast paths are labelled by what ran, clarifying questions aren't learned as chat, private content (dictation, memories, notes, mail, codes/numbers) is never stored, 180-day / 2,000-row retention, `NEO_LEARN=off`, append-only writes, the no-regression gate covers the intent, reply and tool heads, atomic head writes, retraining never blocks shutdown.
+- Search/weather: pronoun queries ("search for it on Amazon") and multi-command sentences never hit search_site's fast path; weather needs a real place/time ("the forecast for Q3 sales", "how cold is it in here" aren't weather); time words ("next week", "tomorrow morning", "on Friday") are understood; any failed fast-path step hands the request to the agent; failed/cancelled lookups can be retried; per-question state resets on interruptions and new sessions; the spoken context is time-limited and passed as quoted material in the user's turn, never in the system prompt; open_app only raises the browser for web URLs.
+
 ### Next
 
 - Developer ID signing + notarization, so permissions survive rebuilds and the app can be shared.

@@ -39,7 +39,8 @@ fn hide_window(app: AppHandle) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    #[allow(unused_mut)]
+    let mut app = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
@@ -56,22 +57,34 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
-            // The brain: start NEO's Python core (or connect to one that's already running).
+            // The brain: start NEO's Python core (or use one that's already running).
             app.state::<core::Core>().start();
-            core::default_launch_at_login();
+            core::sync_launch_at_login();
 
-            // ⌥⌘ (pressed together and released) summons NEO. It needs Accessibility; until that's
-            // granted, ⌘⇧Space still works.
-            let handle = app.handle().clone();
-            let chord_ok = chord::watch(move || {
-                let h = handle.clone();
-                let _ = handle.run_on_main_thread(move || toggle(&h));
-            });
             let summon = Shortcut::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::Space);
             app.global_shortcut().register(summon)?;
+            let show_item = MenuItem::with_id(app, "show", "Show NEO   ⌘⇧Space", true, None::<&str>)?;
+            let status_item = MenuItem::with_id(app, "status", "NEO: starting…", false, None::<&str>)?;
 
-            let label = if chord_ok { "Show NEO   ⌥⌘" } else { "Show NEO   ⌘⇧Space" };
-            let show_item = MenuItem::with_id(app, "show", label, true, None::<&str>)?;
+            // ⌥⌘ (pressed together and released) summons NEO. It needs Accessibility: until
+            // that's granted it keeps retrying, and ⌘⇧Space works meanwhile.
+            let handle = app.handle().clone();
+            let (ready_handle, ready_item) = (app.handle().clone(), show_item.clone());
+            let chord_ok = chord::watch(
+                move || {
+                    let h = handle.clone();
+                    let _ = handle.run_on_main_thread(move || toggle(&h));
+                },
+                move || {
+                    let item = ready_item.clone();
+                    let _ = ready_handle.run_on_main_thread(move || {
+                        let _ = item.set_text("Show NEO   ⌥⌘");
+                    });
+                },
+            );
+            if chord_ok {
+                show_item.set_text("Show NEO   ⌥⌘")?;
+            }
             let restart_item = MenuItem::with_id(app, "restart", "Restart NEO", true, None::<&str>)?;
             let logs_item = MenuItem::with_id(app, "logs", "Open Logs", true, None::<&str>)?;
             let login_item =
@@ -79,7 +92,10 @@ pub fn run() {
             let quit_item = MenuItem::with_id(app, "quit", "Quit NEO", true, None::<&str>)?;
             let sep = PredefinedMenuItem::separator(app)?;
             let sep2 = PredefinedMenuItem::separator(app)?;
-            let menu = Menu::with_items(app, &[&show_item, &sep, &restart_item, &logs_item, &login_item, &sep2, &quit_item])?;
+            let menu = Menu::with_items(
+                app,
+                &[&status_item, &show_item, &sep, &restart_item, &logs_item, &login_item, &sep2, &quit_item],
+            )?;
             let login_check = login_item.clone();
             TrayIconBuilder::with_id("neo")
                 .icon(Image::from_bytes(include_bytes!("../icons/tray.png"))?)
@@ -90,7 +106,11 @@ pub fn run() {
                 .on_menu_event(move |app, e| match e.id.as_ref() {
                     "quit" => app.exit(0),
                     "show" => show(app),
-                    "restart" => app.state::<core::Core>().restart(),
+                    "restart" => {
+                        // Off the main thread: stopping the core can take a few seconds.
+                        let core = app.state::<core::Core>().inner().clone();
+                        std::thread::spawn(move || core.restart());
+                    }
                     "logs" => {
                         let _ = std::process::Command::new("open").arg(core::logs_dir()).spawn();
                     }
@@ -109,11 +129,35 @@ pub fn run() {
                     }
                 })
                 .build(app)?;
+
+            let (core, handle, item) = (app.state::<core::Core>().inner().clone(), app.handle().clone(), status_item.clone());
+            std::thread::spawn(move || {
+                let mut last = String::new();
+                loop {
+                    let now = core.status.lock().unwrap().clone();
+                    if now != last {
+                        last = now.clone();
+                        let (h, item) = (handle.clone(), item.clone());
+                        let _ = handle.run_on_main_thread(move || {
+                            let _ = item.set_text(format!("NEO: {now}"));
+                            if let Some(tray) = h.tray_by_id("neo") {
+                                let _ = tray.set_tooltip(Some(format!("NEO — {now}")));
+                            }
+                        });
+                    }
+                    std::thread::sleep(std::time::Duration::from_secs(2));
+                }
+            });
             Ok(())
         })
         .build(tauri::generate_context!())
-        .expect("error while building NEO")
-        .run(|app, event| {
+        .expect("error while building NEO");
+    // Menu-bar only from the very first moment. Set in `setup` it came too late: the window
+    // framework makes the app a regular (Dock) app while launching, the Dock sees that instant
+    // and lists NEO under recent apps.
+    #[cfg(target_os = "macos")]
+    app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+    app.run(|app, event| {
             if let RunEvent::Exit = event {
                 app.state::<core::Core>().stop(); // the core leaves with the app
             }

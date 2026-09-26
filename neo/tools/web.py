@@ -44,7 +44,17 @@ _AMAZON = {
 }
 SITE_NAMES = sorted(_SITES, key=len, reverse=True)
 _SITE_RE = "|".join(n.replace(" ", r"\s+") for n in SITE_NAMES)
-_VAGUE_QUERY = r"(?!(?:it|this|that|these|those|them|one|the\s+same|the\s+first\s+one|the\s+cheaper\s+one)\s+(?:on|in)\b)"
+# "search for it on amazon", "open that one on google": the thing comes from the conversation,
+# which only the model has — never a fast path.
+_VAGUE_QUERY = (
+    r"(?!(?:for\s+)?(?:it|this|that|these|those|them|one|the\s+same(?:\s+\w+)?|(?:the|this|that)\s+(?:\w+\s+)?one)"
+    r"\s+(?:on|in|at)\b)"
+)
+_VAGUE_QUERY_AFTER_FOR = r"(?!(?:for\s+)?(?:it|this|that|these|those|them|one|(?:the|this|that)\s+(?:\w+\s+)?one)\s*[.!?]*\s*$)"
+# Sites named by a generic word ("maps", "news", "images", "x") need an explicit search verb —
+# "open the news on …" / "find x on …" are too ambiguous for a fast path.
+_GENERIC_SITES = {"maps", "news", "images", "x"}
+_ENGINE_RE = "|".join(n.replace(" ", r"\s+") for n in SITE_NAMES if n not in _GENERIC_SITES)
 
 
 def _country() -> str:
@@ -216,20 +226,27 @@ async def web_fetch(a: dict, c: ToolContext) -> str:
     chain=True,
     fast_path=[
         (
-            # "search 2tb ssd on amazon", "look up cat videos on youtube", "find X in google maps"
-            rf"^\s*(?:please\s+)?(?:search(?:\s+for)?|look\s+up|find|open|show\s+me|google)\s+{_VAGUE_QUERY}"
+            # "search 2tb ssd on amazon", "look up cat videos on youtube", "find X in google maps".
+            # One thing only: "open notes and search … on amazon" is two steps for the planner.
+            rf"^\s*(?:please\s+)?(?:search(?:\s+for)?|look\s+up|google)\s+{_VAGUE_QUERY}(?!.*\b(?:and|then)\b)"
             rf"(?P<query>.+?)\s+(?:on|in|at)\s+(?P<site>{_SITE_RE})\s*[.!?]*\s*$",
             {"site": "<site>", "query": "<query>"},
         ),
         (
+            # "open"/"find"/"show me" … on a named site (not a generic word like "maps" or "news")
+            rf"^\s*(?:please\s+)?(?:open|find|show\s+me)\s+{_VAGUE_QUERY}(?!.*\b(?:and|then)\b)"
+            rf"(?P<query>.+?)\s+(?:on|in|at)\s+(?P<site>{_ENGINE_RE})\s*[.!?]*\s*$",
+            {"site": "<site>", "query": "<query>"},
+        ),
+        (
             # "search amazon for 2tb ssd", "search youtube for cat videos"
-            rf"^\s*(?:please\s+)?(?:search|look\s+up|check)\s+(?P<site>{_SITE_RE})\s+for\s+(?P<query>.+?)\s*[.!?]*\s*$",
+            rf"^\s*(?:please\s+)?(?:search|look\s+up|check)\s+(?P<site>{_SITE_RE})\s+for\s+{_VAGUE_QUERY_AFTER_FOR}(?P<query>.+?)\s*[.!?]*\s*$",
             {"site": "<site>", "query": "<query>"},
         ),
         (
             # "open youtube and search for cat videos"
-            rf"^\s*(?:please\s+)?(?:open|go\s+to)\s+(?P<site>{_SITE_RE})\s+(?:and|then)\s+(?:search|look\s+up|find)(?:\s+for)?\s+"
-            r"(?P<query>.+?)\s*[.!?]*\s*$",
+            rf"^\s*(?:please\s+)?(?:open|go\s+to)\s+(?P<site>{_ENGINE_RE})\s+(?:and|then)\s+(?:search|look\s+up|find)(?:\s+for)?\s+"
+            rf"{_VAGUE_QUERY_AFTER_FOR}(?P<query>.+?)\s*[.!?]*\s*$",
             {"site": "<site>", "query": "<query>"},
         ),
     ],
@@ -238,8 +255,10 @@ async def search_site(a: dict, c: ToolContext) -> str:
     from neo.tools.computer import apps
 
     site, query = str(a["site"]).strip(), str(a["query"]).strip()
-    if not query or query.lower() in ("it", "this", "that", "them", "one"):
+    q = " ".join(query.lower().split()).removeprefix("for ").strip(" .!?")
+    if not q or q in ("it", "this", "that", "them", "those", "these", "one", "the same") or q.endswith(" one"):
         return "Error: search for what? Name the thing to search for."
+    query = query.strip()[4:].strip() if query.lower().startswith("for ") else query
     url = site_search_url(site, query)
     out = await apps.open_app(url)
     return out if out.startswith(("Error", "NEEDS_")) else f"Searching {site} for “{query}”."

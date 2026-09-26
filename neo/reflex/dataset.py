@@ -427,9 +427,14 @@ def build(n_per_class: int = 320, seed: int = 7) -> list[dict]:
     for name in ("reflex_generated.jsonl", "reflex_extra.jsonl", "reflex_hf.jsonl"):
         extra = settings().data_dir / name
         if extra.exists():
-            for line in extra.read_text().splitlines():
-                if line.strip():
-                    r = json.loads(line)
+            if name == "reflex_extra.jsonl":  # the user's own requests: deduped, within retention
+                from neo.reflex.learn import _read as read_examples
+
+                src = read_examples(extra)
+            else:
+                src = [json.loads(line) for line in extra.read_text().splitlines() if line.strip()]
+            for r in src:
+                if r:
                     rows.append(
                         {
                             "text": r["text"],

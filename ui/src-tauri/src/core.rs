@@ -1,11 +1,13 @@
 //! Runs NEO's Python core as a child of the app and keeps it running.
 //!
 //! NEO.app is the process macOS asks for permissions (Accessibility, Microphone, Screen
-//! Recording): the core it starts inherits them. If a core is already listening on the
-//! websocket (a developer running `python -m neo` by hand), the app just connects to it.
+//! Recording): the core it starts inherits them. The core also watches its parent and exits if
+//! the app goes away without stopping it (force quit, crash), so a core with the mic open can't
+//! be left behind; if one ever is, the next launch recognises it by its pidfile and replaces it.
+//! A core started some other way (a developer's `python -m neo`) is used as-is.
 
-use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::fs::{self, File, OpenOptions};
+use std::io::{BufRead, BufReader, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -18,12 +20,14 @@ const PORT: u16 = 8765;
 const MAX_RESTARTS: usize = 5; // within RESTART_WINDOW, then give up (a crash loop helps nobody)
 const RESTART_WINDOW: Duration = Duration::from_secs(300);
 const LOG_ROTATE_BYTES: u64 = 10 * 1024 * 1024;
+const GRACE: Duration = Duration::from_secs(12); // the core saves its session summary on SIGTERM
 
 #[derive(Clone, Default)]
 pub struct Core {
     child: Arc<Mutex<Option<Child>>>,
     stopping: Arc<AtomicBool>,
     restart_now: Arc<AtomicBool>,
+    supervising: Arc<AtomicBool>,
     pub status: Arc<Mutex<String>>,
 }
 
@@ -33,6 +37,10 @@ fn home() -> PathBuf {
 
 pub fn logs_dir() -> PathBuf {
     home().join(".neo").join("logs")
+}
+
+fn pidfile() -> PathBuf {
+    home().join(".neo").join("core.pid")
 }
 
 /// Where the NEO repo (with its .venv) lives: $NEO_HOME, else ~/.neo/app.json {"core_dir"},
@@ -49,10 +57,11 @@ fn core_dir() -> PathBuf {
         }
     }
     // ui/src-tauri → the repo root, as it was on the build machine.
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("..")
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
+    dir.canonicalize().unwrap_or(dir)
 }
 
-fn already_running() -> bool {
+fn port_in_use() -> bool {
     let addr = SocketAddr::from(([127, 0, 0, 1], PORT));
     TcpStream::connect_timeout(&addr, Duration::from_millis(300)).is_ok()
 }
@@ -60,81 +69,173 @@ fn already_running() -> bool {
 fn log(msg: &str) {
     let _ = fs::create_dir_all(logs_dir());
     if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(logs_dir().join("app.log")) {
-        let _ = writeln!(f, "{} {msg}", chrono_now());
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let _ = writeln!(f, "[{secs}] {msg}");
     }
 }
 
-fn chrono_now() -> String {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    format!("[{secs}]")
+fn alive(pid: i32) -> bool {
+    unsafe { libc::kill(pid, 0) == 0 }
 }
 
-fn spawn(dir: &PathBuf) -> std::io::Result<Child> {
-    let _ = fs::create_dir_all(logs_dir());
-    let log_path = logs_dir().join("core.log");
-    if fs::metadata(&log_path).map(|m| m.len() > LOG_ROTATE_BYTES).unwrap_or(false) {
-        let _ = fs::rename(&log_path, logs_dir().join("core.log.1"));
+/// A core this app started earlier and lost (its parent is gone, so it was re-parented to
+/// launchd): stop it, so this launch owns the core again.
+fn reclaim_orphan() {
+    let Ok(text) = fs::read_to_string(pidfile()) else { return };
+    let Ok(pid) = text.trim().parse::<i32>() else { return };
+    if pid <= 1 || !alive(pid) {
+        let _ = fs::remove_file(pidfile());
+        return;
     }
-    let out = OpenOptions::new().create(true).append(true).open(&log_path)?;
-    let err = out.try_clone()?;
+    let out = Command::new("ps").args(["-o", "ppid=,command=", "-p", &pid.to_string()]).output();
+    let Ok(out) = out else { return };
+    let line = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let orphaned = line.split_whitespace().next() == Some("1");
+    if orphaned && line.contains("-m neo") {
+        log(&format!("found an orphaned core (pid {pid}) — stopping it"));
+        unsafe {
+            libc::kill(pid, libc::SIGTERM);
+        }
+        let t0 = Instant::now();
+        while alive(pid) && t0.elapsed() < GRACE {
+            thread::sleep(Duration::from_millis(200));
+        }
+        if alive(pid) {
+            unsafe {
+                libc::kill(pid, libc::SIGKILL);
+            }
+        }
+        let _ = fs::remove_file(pidfile());
+        for _ in 0..30 {
+            if !port_in_use() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(200));
+        }
+    }
+}
+
+/// core.log, rotated by size as the core writes to it (its output is piped through the app).
+struct RotatingLog {
+    path: PathBuf,
+    file: Option<File>,
+    written: u64,
+}
+
+impl RotatingLog {
+    fn new(path: PathBuf) -> Self {
+        let written = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        Self { path, file: None, written }
+    }
+
+    fn line(&mut self, text: &str) {
+        if self.written > LOG_ROTATE_BYTES {
+            self.file = None;
+            let _ = fs::rename(&self.path, self.path.with_extension("log.1"));
+            self.written = 0;
+        }
+        if self.file.is_none() {
+            self.file = OpenOptions::new().create(true).append(true).open(&self.path).ok();
+        }
+        if let Some(f) = self.file.as_mut() {
+            if writeln!(f, "{text}").is_ok() {
+                self.written += text.len() as u64 + 1;
+            }
+        }
+    }
+}
+
+fn spawn(dir: &PathBuf, sink: Arc<Mutex<RotatingLog>>) -> std::io::Result<Child> {
     // Apps started from Finder get a bare PATH; the core shells out to Homebrew tools too.
     let path = format!(
         "/opt/homebrew/bin:/usr/local/bin:{}",
         std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin:/usr/sbin:/sbin".into())
     );
-    Command::new(dir.join(".venv").join("bin").join("python"))
+    let mut child = Command::new(dir.join(".venv").join("bin").join("python"))
         .args(["-u", "-m", "neo"])
         .current_dir(dir)
         .env("PATH", path)
         .env("PYTHONUNBUFFERED", "1")
-        .env("NEO_LAUNCHED_BY_APP", "1")
+        .env("NEO_LAUNCHED_BY_APP", "1") // the core exits if this app disappears
         .stdin(Stdio::null())
-        .stdout(Stdio::from(out))
-        .stderr(Stdio::from(err))
-        .spawn()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let _ = fs::write(pidfile(), child.id().to_string());
+    if let Some(out) = child.stdout.take() {
+        let sink = sink.clone();
+        thread::spawn(move || {
+            for line in BufReader::new(out).lines().map_while(Result::ok) {
+                sink.lock().unwrap().line(&line);
+            }
+        });
+    }
+    if let Some(err) = child.stderr.take() {
+        thread::spawn(move || {
+            for line in BufReader::new(err).lines().map_while(Result::ok) {
+                sink.lock().unwrap().line(&line);
+            }
+        });
+    }
+    Ok(child)
 }
 
 impl Core {
-    /// Start the core (unless one is already up) and supervise it on a background thread.
+    fn set_status(&self, s: &str) {
+        *self.status.lock().unwrap() = s.to_string();
+    }
+
+    /// Start the core (or use one that is already running) and supervise it.
     pub fn start(&self) {
-        if already_running() {
-            *self.status.lock().unwrap() = "connected to a core that was already running".into();
-            log("a core is already listening on 8765 — not starting another");
+        if self.supervising.swap(true, Ordering::SeqCst) {
+            return; // a supervisor is already running
+        }
+        self.stopping.store(false, Ordering::SeqCst);
+        self.restart_now.store(false, Ordering::SeqCst);
+        let me = self.clone();
+        thread::spawn(move || {
+            me.supervise();
+            me.supervising.store(false, Ordering::SeqCst);
+        });
+    }
+
+    fn supervise(&self) {
+        reclaim_orphan();
+        if port_in_use() {
+            self.set_status("using a core started outside the app");
+            log("a core is already listening on 8765 (not ours) — using it");
             return;
         }
         let dir = core_dir();
         if !dir.join(".venv").join("bin").join("python").exists() {
             let msg = format!("can't find NEO's Python environment in {}", dir.display());
-            *self.status.lock().unwrap() = msg.clone();
+            self.set_status(&msg);
             log(&msg);
             return;
         }
-        let me = self.clone();
-        thread::spawn(move || me.supervise(dir));
-    }
-
-    fn supervise(&self, dir: PathBuf) {
+        let _ = fs::create_dir_all(logs_dir());
+        let sink = Arc::new(Mutex::new(RotatingLog::new(logs_dir().join("core.log"))));
         let mut restarts: Vec<Instant> = Vec::new();
         loop {
             if self.stopping.load(Ordering::SeqCst) {
                 return;
             }
-            match spawn(&dir) {
+            match spawn(&dir, sink.clone()) {
                 Ok(child) => {
                     log(&format!("core started (pid {})", child.id()));
-                    *self.status.lock().unwrap() = "running".into();
+                    self.set_status("running");
                     *self.child.lock().unwrap() = Some(child);
                 }
                 Err(e) => {
                     log(&format!("couldn't start the core: {e}"));
-                    *self.status.lock().unwrap() = format!("couldn't start: {e}");
+                    self.set_status(&format!("couldn't start: {e}"));
                     return;
                 }
             }
-            // Wait for it to exit (polling, so stop() can take the child out of the mutex).
+            // Wait for it to exit (polling, so terminate() can reach the child too).
             loop {
                 thread::sleep(Duration::from_millis(500));
                 let mut guard = self.child.lock().unwrap();
@@ -151,6 +252,7 @@ impl Core {
                     }
                 }
             }
+            let _ = fs::remove_file(pidfile());
             if self.stopping.load(Ordering::SeqCst) {
                 return;
             }
@@ -163,41 +265,61 @@ impl Core {
             restarts.push(now);
             if restarts.len() > MAX_RESTARTS {
                 log("the core keeps crashing — stopped restarting it (see core.log)");
-                *self.status.lock().unwrap() = "crashed repeatedly — see ~/.neo/logs/core.log".into();
+                self.set_status("crashed repeatedly — see Open Logs, then Restart NEO");
                 return;
             }
-            *self.status.lock().unwrap() = "restarting".into();
-            thread::sleep(Duration::from_secs(2 * restarts.len() as u64));
+            self.set_status("restarting");
+            // Back off, but wake at once if the user picks Restart NEO.
+            let until = Instant::now() + Duration::from_secs(2 * restarts.len() as u64);
+            while Instant::now() < until && !self.restart_now.load(Ordering::SeqCst) {
+                if self.stopping.load(Ordering::SeqCst) {
+                    return;
+                }
+                thread::sleep(Duration::from_millis(100));
+            }
+            self.restart_now.store(false, Ordering::SeqCst);
         }
     }
 
-    /// Ask the running core to stop (SIGTERM, so it can save its session), then make sure.
-    fn terminate(&self) {
-        let pid = self.child.lock().unwrap().as_ref().map(|c| c.id());
-        if let Some(pid) = pid {
-            unsafe {
-                libc::kill(pid as i32, libc::SIGTERM);
-            }
-            for _ in 0..40 {
-                thread::sleep(Duration::from_millis(100));
-                if self.child.lock().unwrap().is_none() {
-                    return; // the supervisor saw it exit
-                }
-                if let Some(c) = self.child.lock().unwrap().as_mut() {
+    /// SIGTERM the running core (it saves its session summary) and wait; SIGKILL after GRACE.
+    /// Returns whether there was a core to stop.
+    fn terminate(&self) -> bool {
+        let Some(pid) = self.child.lock().unwrap().as_ref().map(|c| c.id()) else {
+            return false;
+        };
+        unsafe {
+            libc::kill(pid as i32, libc::SIGTERM);
+        }
+        let t0 = Instant::now();
+        while t0.elapsed() < GRACE {
+            thread::sleep(Duration::from_millis(100));
+            let mut guard = self.child.lock().unwrap();
+            match guard.as_mut() {
+                None => return true, // the supervisor saw it exit
+                Some(c) => {
                     if let Ok(Some(_)) = c.try_wait() {
-                        return;
+                        return true;
                     }
                 }
             }
-            if let Some(c) = self.child.lock().unwrap().as_mut() {
-                let _ = c.kill();
-            }
         }
+        if let Some(c) = self.child.lock().unwrap().as_mut() {
+            let _ = c.kill();
+        }
+        true
     }
 
+    /// Restart the core — or, if the supervisor already gave up, start supervising again.
     pub fn restart(&self) {
+        if !self.supervising.load(Ordering::SeqCst) {
+            self.set_status("starting");
+            self.start();
+            return;
+        }
         self.restart_now.store(true, Ordering::SeqCst);
-        self.terminate();
+        if !self.terminate() {
+            // Nothing running (between restarts): the backoff loop sees restart_now and goes now.
+        }
     }
 
     pub fn stop(&self) {
@@ -222,6 +344,31 @@ pub fn launch_at_login() -> bool {
     agent_plist().exists()
 }
 
+fn xml_escape(s: &str) -> String {
+    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+}
+
+fn plist_for(exe: &std::path::Path) -> String {
+    // launchd runs the app binary itself — not `open -a`, which counts as the user opening it
+    // and puts NEO in the Dock's recent apps.
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.arnav.neo</string>
+  <key>ProgramArguments</key>
+  <array><string>{}</string></array>
+  <key>RunAtLoad</key><true/>
+  <key>LimitLoadToSessionType</key><string>Aqua</string>
+  <key>ProcessType</key><string>Interactive</string>
+</dict>
+</plist>
+"#,
+        xml_escape(&exe.display().to_string())
+    )
+}
+
 pub fn set_launch_at_login(on: bool) -> std::io::Result<()> {
     if !on {
         let _ = fs::remove_file(agent_plist());
@@ -230,39 +377,64 @@ pub fn set_launch_at_login(on: bool) -> std::io::Result<()> {
     let Some(app) = bundle_path() else {
         return Ok(()); // a dev build has no .app to launch
     };
+    let Ok(exe) = std::env::current_exe() else { return Ok(()) };
+    let _ = app;
     fs::create_dir_all(agent_plist().parent().unwrap())?;
-    fs::write(
-        agent_plist(),
-        format!(
-            r#"<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key><string>com.arnav.neo</string>
-  <key>ProgramArguments</key>
-  <array><string>/usr/bin/open</string><string>-a</string><string>{}</string></array>
-  <key>RunAtLoad</key><true/>
-</dict>
-</plist>
-"#,
-            app.display()
-        ),
-    )
+    fs::write(agent_plist(), plist_for(&exe))
 }
 
-/// First run of the bundled app: start at login unless the user turned that off before.
-pub fn default_launch_at_login() {
-    let marker = home().join(".neo").join("app-login-decided");
-    if marker.exists() || bundle_path().is_none() {
+/// Every bundled launch: on the first run, open at login by default; afterwards keep the login
+/// item pointing at *this* copy of NEO.app (it may have been moved or rebuilt), if it's on.
+pub fn sync_launch_at_login() {
+    if bundle_path().is_none() {
         return;
     }
-    let _ = set_launch_at_login(true);
-    let _ = fs::create_dir_all(marker.parent().unwrap());
-    let _ = fs::write(marker, "on");
+    let marker = home().join(".neo").join("app-login-decided");
+    if !marker.exists() {
+        let _ = set_launch_at_login(true);
+        let _ = fs::create_dir_all(marker.parent().unwrap());
+        let _ = fs::write(marker, "on");
+        return;
+    }
+    if launch_at_login() {
+        if let Ok(exe) = std::env::current_exe() {
+            let want = plist_for(&exe);
+            if fs::read_to_string(agent_plist()).map(|cur| cur != want).unwrap_or(true) {
+                let _ = fs::write(agent_plist(), want);
+                log("login item updated to this copy of NEO.app");
+            }
+        }
+    }
 }
 
 pub fn remember_login_choice() {
     let marker = home().join(".neo").join("app-login-decided");
     let _ = fs::create_dir_all(marker.parent().unwrap());
     let _ = fs::write(marker, if launch_at_login() { "on" } else { "off" });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn login_item_runs_the_binary_and_escapes_the_path() {
+        let p = plist_for(std::path::Path::new("/Applications/NEO & Co.app/Contents/MacOS/neo-ui"));
+        assert!(p.contains("<string>/Applications/NEO &amp; Co.app/Contents/MacOS/neo-ui</string>"));
+        assert!(!p.contains("/usr/bin/open"));
+        assert!(p.contains("LimitLoadToSessionType"));
+    }
+
+    #[test]
+    fn the_log_rotates_by_size_while_the_core_runs() {
+        let dir = std::env::temp_dir().join(format!("neo-log-test-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("core.log");
+        let mut log = RotatingLog::new(path.clone());
+        log.written = LOG_ROTATE_BYTES + 1; // as if it had grown past the limit
+        log.line("after rotation");
+        assert!(dir.join("core.log.1").exists() || !path.with_extension("log.1").exists());
+        assert_eq!(fs::read_to_string(&path).unwrap(), "after rotation\n");
+        let _ = fs::remove_dir_all(dir);
+    }
 }

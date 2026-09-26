@@ -67,6 +67,7 @@ _CONNECT_TIMEOUT_S = 12.0
 _RECONNECT_WINDOW_S = 60.0  # reopen automatically if the socket dies within this long of activity
 _PLAYBACK_TAIL_S = 0.35  # keep the mic muted this long after NEO stops talking (room echo)
 _BARGE_IN_GRACE_S = 1.5  # ignore "stop" for the first moment of NEO's own speech (echo onset)
+_CONTEXT_S = 600.0  # spoken context older than this isn't "just now"
 _LOOKUP_BUDGET = {"web_search": 2, "web_fetch": 1}  # per question; then the model answers with what it has
 _TURN_STALL_S = 20.0  # an unanswered turn keeps the session open this long, then silence rules apply
 _VAD_CHUNK = 512  # silero works on 32 ms windows at 16 kHz
@@ -98,6 +99,15 @@ agent_task is for things that need looking at the screen or several steps."""
 
 def _ago(now: float, t: float) -> str:
     return f"{now - t:.1f}s ago" if t else "never"
+
+
+_VAGUE_WORDS = {"it", "this", "that", "these", "those", "them", "one", "the one", "that one", "this one", "the same"}
+
+
+def _vague(value) -> bool:
+    """A fast-path argument that only makes sense with the conversation ("search for it")."""
+    v = " ".join(str(value or "").lower().split()).removeprefix("for ").removeprefix("the ")
+    return v in _VAGUE_WORDS or v.endswith(" one")
 
 
 def _multi_step(text: str) -> bool:
@@ -167,10 +177,11 @@ class LiveVoice:
         self._goals: dict[str, str] = {}  # function-call id → agent_task goal in flight
         self._server_cancelled: set[str] = set()
         self._utterance = ""  # what the user said in the current turn (for "did they ask something?")
-        self._dialog: list[tuple[str, str]] = []  # the spoken conversation, for agent_task context
+        self._dialog: list[tuple[float, str, str]] = []  # (when, who, text): context for agent_task
         self._lookups: dict[str, int] = {}  # web_search/web_fetch calls since the user last spoke
         # What the model did with the user's last sentence — becomes a training label for Laya.
         self._label: dict | None = None
+        self._call_labels: dict[str, dict] = {}  # function-call id → the label it belongs to
         self._seen_calls: dict[str, str] = {}  # identical calls this question → the first one's key
         # Keystrokes, clicks and app switches run one at a time in the order the model asked:
         # non-blocking calls would otherwise race ("type X" and "press enter").
@@ -228,6 +239,7 @@ class LiveVoice:
         self._speaking = False
         for t in list(self._tool_tasks.values()):
             t.cancel()
+        self._new_question()
         await self._refresh_state()
 
     async def speak(self, text: str) -> None:  # Live speaks for itself
@@ -243,7 +255,10 @@ class LiveVoice:
         )
         self._last_activity = self._last_user_speech = time.time()  # typed = said
         self._new_question()
-        self._start_label(text)
+        self._utterance = text
+        self._remember_line("user", text)
+        self._file_label()
+        self._label = {"text": " ".join(text.split()), "tools": [], "spoke": False, "open": False}
         self._turn_open = True
 
     # ---- state machine -----------------------------------------------------------------
@@ -295,6 +310,7 @@ class LiveVoice:
             self._live_cm, self._live = cm, live
             self._last_activity = self._session_open = self._last_user_speech = time.time()
             self._turn_open, self._utterance = False, ""
+            self._new_question()
             early().new_utterance()
             if self._vad is not None:
                 self._vad.reset_states()
@@ -308,6 +324,9 @@ class LiveVoice:
 
     async def _close_session(self) -> None:
         self._file_label()
+        self._new_question()
+        if self._closing:  # the conversation is over (not a dropped socket): forget its context
+            self._dialog.clear()
         cm, self._live_cm, self._live = self._live_cm, None, None
         self._speaking = False
         self._agent_session.voice_owned = False
@@ -464,12 +483,17 @@ class LiveVoice:
                 self.spk.interrupt()
                 self._speaking = False
                 model_buf.clear()
+                self._new_question()
                 await self._refresh_state()
             if sc.input_transcription and sc.input_transcription.text:
                 self._turn_open = True
                 self._last_user_speech = time.time()  # the server heard you, whatever the local VAD thinks
+                if self._label is None or not self._label.get("open"):
+                    self._file_label()  # the previous request is over: its label is final
+                    self._label = {"text": "", "tools": [], "spoke": False, "open": True}
                 user_buf.append(sc.input_transcription.text)
                 self._utterance = "".join(user_buf)
+                self._label["text"] = " ".join(self._utterance.split())
                 await bus().say(self._utterance, role="user", final=False)
                 early().feed(self._utterance)  # the 150 ms ticker acts on it — never inline here
             interim = getattr(sc, "interim_input_transcription", None)
@@ -494,8 +518,11 @@ class LiveVoice:
                 if user_buf:
                     await bus().say("".join(user_buf), role="user", final=True)
                     self._remember_line("user", "".join(user_buf))
-                    self._start_label("".join(user_buf))
+                    if self._label is not None and self._label.get("open"):
+                        self._label["text"] = " ".join("".join(user_buf).split())  # the final wording
+                        self._label["open"] = False
                     user_buf.clear()
+                self._utterance = ""  # a later tool call without new words isn't about this sentence
                 # The model heard the whole sentence and calls the tools itself; the early actor
                 # only ever acts mid-sentence here (its runs answer the model's matching calls).
                 early().new_utterance()
@@ -511,12 +538,13 @@ class LiveVoice:
                 # Don't block the receive loop on playback — server-side events must keep flowing.
                 asyncio.create_task(self._after_playback())
         if msg.tool_call:
-            asked = self._utterance or "".join(user_buf)
+            asked = self._utterance or "".join(user_buf) or (self._label or {}).get("text", "")
             if self._label is None and asked:
-                self._start_label(asked)
+                self._label = {"text": " ".join(asked.split()), "tools": [], "spoke": False, "open": False}
             for fc in msg.tool_call.function_calls or []:
                 if self._label is not None:
                     self._label["tools"].append(fc.name)
+                    self._call_labels[fc.id or fc.name] = self._label
                 task = asyncio.create_task(self._run_tool(live, fc, asked))
                 self._tool_tasks[fc.id or fc.name] = task
             await self._refresh_state()
@@ -558,9 +586,14 @@ class LiveVoice:
                     # of the model's paraphrase through the agent loop (seconds to a minute).
                     from neo.agent import fastpath
 
-                    text = asked if asked and fastpath.plan(asked) else goal
+                    steps = fastpath.plan(asked) if asked else None
+                    vague = steps and any(_vague(v) for _, a in steps for v in a.values())
+                    text = asked if steps and not vague else goal
                     reply = await self._agent_session.handle(text, conversation=self._conversation(asked))
                     result, silent = reply.text, reply.silent
+                    lab = self._call_labels.get(key)
+                    if lab is not None and reply.route == "quick" and reply.tools:
+                        lab["tools"] = [x for x in lab["tools"] if x != "agent_task"] + list(reply.tools)
             elif (first := self._duplicate_of(fc.name, args, key)) is not None:
                 # The model asked for exactly this again (non-blocking calls invite it). Answering
                 # twice made it speak twice — once in the wrong language.
@@ -573,6 +606,7 @@ class LiveVoice:
             else:
                 if fc.name in _LOOKUP_BUDGET:
                     self._lookups[fc.name] = self._lookups.get(fc.name, 0) + 1
+                self._register_call(fc.name, args, key)
                 ui = bool(t and t.quiet)  # keystrokes/clicks/app switches: strictly in order
                 async with self._ui_lock if ui else _nullcontext():
                     await bus().set_state(NeoState.WORKING, job=key)
@@ -581,6 +615,8 @@ class LiveVoice:
                     await bus().tool_end(fc.name, out.ok, out.text, job=key)
                 result = out.text
                 silent = bool(out.ok and t and t.quiet and not out.text.startswith("NEEDS_"))
+                if not out.ok:
+                    self._forget_call(fc.name, args)  # a failed call may be tried again
         except asyncio.CancelledError:
             if key in self._server_cancelled:  # withdrawn by the server: it expects no response
                 self._server_cancelled.discard(key)
@@ -589,12 +625,14 @@ class LiveVoice:
                 await bus().end_job(key)
                 return
             result, silent = "cancelled by the user", True
+            self._forget_call(fc.name, args)
         except Exception as e:  # noqa: BLE001 — the model must always get a response back
             result = f"Error: {e}"
         finally:
             # Activity first: the silence watch must not see "no tools, long quiet" in the gap
             # between this tool leaving the running set and its result reaching the model.
             self._last_activity = self._last_turn_end = time.time()
+            self._call_labels.pop(key, None)
             self._tool_tasks.pop(key, None)
             self._goals.pop(key, None)
             await bus().end_job(key)
@@ -639,11 +677,6 @@ class LiveVoice:
             await bus().say(result[:600], final=True)
             await self._refresh_state()
 
-    def _start_label(self, text: str) -> None:
-        """A new user sentence: file the previous one's label, start watching this one."""
-        self._file_label()
-        self._label = {"text": " ".join(text.split()), "tools": [], "spoke": False}
-
     def _file_label(self) -> None:
         lab, self._label = self._label, None
         if not lab or not lab["text"]:
@@ -668,28 +701,41 @@ class LiveVoice:
         self._lookups, self._seen_calls = {}, {}
 
     def _duplicate_of(self, name: str, args: dict, key: str) -> str | None:
-        """The key of an identical call already made for this question (read-only tools only —
-        a repeated keystroke or click is the user's intent, not a duplicate)."""
+        """The key of an identical call already running or done for this question (read-only
+        tools only — a repeated keystroke or click is the user's intent, not a duplicate)."""
         t = registry().get(name)
         if name == "agent_task" or (t is not None and t.quiet):
             return None
         from neo.agent.early import key as action_key
 
-        k = action_key(name, args)
-        if k in self._seen_calls:
-            return self._seen_calls[k]
-        self._seen_calls[k] = key
-        return None
+        return self._seen_calls.get(action_key(name, args))
+
+    def _register_call(self, name: str, args: dict, key: str) -> None:
+        from neo.agent.early import key as action_key
+
+        self._seen_calls.setdefault(action_key(name, args), key)
+
+    def _forget_call(self, name: str, args: dict) -> None:
+        from neo.agent.early import key as action_key
+
+        self._seen_calls.pop(action_key(name, args), None)
 
     def _remember_line(self, who: str, text: str) -> None:
         text = " ".join(text.split())
         if text:
-            self._dialog.append((who, text[:600]))
+            self._dialog.append((time.time(), who, text[:600]))
             del self._dialog[:-12]
 
     def _conversation(self, asked: str) -> str:
-        lines = [f"{who}: {text}" for who, text in self._dialog[-10:]]
-        if asked and (not self._dialog or self._dialog[-1][1] != " ".join(asked.split())):
+        """The last few minutes of the spoken conversation (NEO's own lines kept short: they can
+        quote web pages). The agent gets this as quoted context, never as instructions."""
+        now = time.time()
+        lines = [
+            f"{who}: {text if who == 'user' else text[:200]}"
+            for when, who, text in self._dialog[-10:]
+            if now - when < _CONTEXT_S
+        ]
+        if asked and (not lines or not lines[-1].endswith(" ".join(asked.split()))):
             lines.append(f"user: {asked}")  # the sentence that triggered this, not yet final
         return "\n".join(lines)
 

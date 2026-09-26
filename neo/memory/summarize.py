@@ -5,6 +5,8 @@ Lets the next session answer "what did we do yesterday" and carry over unfinishe
 
 from __future__ import annotations
 
+import asyncio
+
 import time
 
 from neo.memory.store import store
@@ -31,14 +33,15 @@ def _transcript(history: list[Message], max_chars: int = 12000) -> str:
     return text[-max_chars:]
 
 
-async def summarize_session(history: list[Message], started: float) -> str:
-    """Write a summary for this session into the store; returns it (empty if nothing to say)."""
+async def summarize_session(history: list[Message], started: float, *, budget_s: float = 5.0) -> str:
+    """Write a summary for this session into the store; returns it (empty if nothing to say).
+    The model gets `budget_s`; slower than that (shutdown can't wait) → the crude summary."""
     text = _transcript(history)
     if text.count("User:") < 1:
         return ""
     try:
-        turn = await brain("fast").complete(
-            [Message.user(text)], system=_PROMPT, effort="low", max_tokens=200
+        turn = await asyncio.wait_for(
+            brain("fast").complete([Message.user(text)], system=_PROMPT, effort="low", max_tokens=200), budget_s
         )
         summary = turn.text.strip()
     except Exception as e:  # noqa: BLE001 — no brain at shutdown? keep a crude fallback

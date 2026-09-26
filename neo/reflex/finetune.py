@@ -38,7 +38,7 @@ _SCREEN_RE = re.compile(
 _MIN_TOOL_ROWS = 12
 
 
-def train(
+def train_linear(
     X: np.ndarray, y: np.ndarray, k: int, *, epochs: int = 2000, lr: float = 0.1, l2: float = 1e-4
 ) -> np.ndarray:
     """Full-batch gradient descent with Nesterov momentum on standardised features."""
@@ -146,7 +146,7 @@ def _fit(X, y, k, tr, te, name: str, classes: list[str], *, weights=None, mlp=Tr
     if mlp:
         layers = train_mlp(X[tr], y[tr], k, weights=None if weights is None else weights[tr])
     else:
-        layers = [(train(X[tr], y[tr], k), np.zeros(k, np.float32))]
+        layers = [(train_linear(X[tr], y[tr], k), np.zeros(k, np.float32))]
     logits = forward(layers, X[te]) if len(te) else np.zeros((0, k), np.float32)
     pred = logits.argmax(1) if len(te) else np.zeros(0, int)
     acc = float((pred == y[te]).mean()) if len(te) else float("nan")
@@ -207,21 +207,34 @@ def _held_out(text: str) -> bool:
     return int(hashlib.md5(text.strip().lower().encode()).hexdigest(), 16) % 5 == 0
 
 
-def _score_current_head(path, X: np.ndarray, y: np.ndarray, te: np.ndarray) -> float | None:
+def _score_current_head(path, *, Xs_raw: np.ndarray, blocks: dict) -> dict:
+    """Accuracy of the head on disk for each block it can be compared on, on the same held-out
+    rows as the new one ({} when it was trained on a different split and would be flattered)."""
     try:
         h = json.loads(path.read_text())
-        # Only a head trained on the same fixed split never saw these rows.
-        if h.get("version") != 2 or h.get("split") != _SPLIT or len(h["mu"]) != X.shape[1]:
-            return None
-        blk = h["intent"]
+    except Exception:  # noqa: BLE001 — no head yet
+        return {}
+    if h.get("version") != 2 or h.get("split") != _SPLIT or len(h["mu"]) != Xs_raw.shape[1]:
+        return {}
+    mu, sd = np.array(h["mu"], np.float32), np.array(h["sd"], np.float32)
+    out = {}
+    for name, (y, te, tool_info) in blocks.items():
+        blk = h.get(name)
+        if not blk or te is None or not len(te):
+            continue
         layers = [(np.array(W, np.float32), np.array(b, np.float32)) for W, b in blk["layers"]] if "layers" in blk else [
             (np.array(blk["W"], np.float32), np.zeros(len(blk["W"]), np.float32))
         ]
-        mu, sd = np.array(h["mu"], np.float32), np.array(h["sd"], np.float32)
-        pred = forward(layers, (X[te] - mu) / sd).argmax(1)
-        return float((pred == y[te]).mean())
-    except Exception:  # noqa: BLE001 — no head yet, or an unreadable one
-        return None
+        if tool_info is not None:  # the tool head: rows are a subset, and classes must match
+            t_rows, classes = tool_info
+            if list(blk.get("classes", [])) != list(classes):
+                continue
+            X = (Xs_raw[t_rows] - mu) / sd
+        else:
+            X = (Xs_raw - mu) / sd
+        pred = forward(layers, X[te]).argmax(1)
+        out[name] = float((pred == y[te]).mean())
+    return out
 
 
 def _dump(layers: list[tuple[np.ndarray, np.ndarray]]) -> list[list]:
@@ -413,12 +426,20 @@ def train(args: argparse.Namespace, *, agent=None, lock=None) -> dict:
     head_path = settings().data_dir / "reflex_head.json"
     # Judge the current head on *this* held-out split — scores from different data aren't
     # comparable. (It may have trained on some of these rows, which only flatters it.)
-    prev = _score_current_head(head_path, X, y_intent, te)
+    cur = _score_current_head(head_path, Xs_raw=X, blocks={
+        "intent": (y_intent, te, None),
+        "reply": (r_lab.clip(0), r_te, None),
+        "tool": (y_tool, t_te, (t_rows, classes)),
+    })
+    prev = cur.get("intent")
     report = {"rows": len(rows), "intent": acc_int, "tool": acc_tool, "reply": acc_reply, "previous": prev, "saved": False}
-    if prev is not None:
-        print(f"  current head on the same held-out rows: {prev:.3f}  (new: {acc_int:.3f})")
-    if prev is not None and acc_int < prev - 0.005 and not args.force:
-        print(f"\nkept the current head: new intent {acc_int:.3f} < current {prev:.3f}")
+    new_scores = {"intent": acc_int, "reply": acc_reply, "tool": acc_tool}
+    tolerance = {"intent": 0.005, "reply": 0.01, "tool": 0.02}
+    worse = [k for k, v in cur.items() if v is not None and new_scores[k] < v - tolerance[k]]
+    if cur:
+        print("  current head on the same held-out rows: " + "  ".join(f"{k} {v:.3f}→{new_scores[k]:.3f}" for k, v in cur.items()))
+    if worse and not args.force:
+        print(f"\nkept the current head: the new one is worse at {', '.join(worse)}")
         return report
     if prev is None and acc_int < _FLOOR and not args.force:
         print(f"\nkept the current head: new intent {acc_int:.3f} is below the {_FLOOR} floor")
@@ -426,7 +447,8 @@ def train(args: argparse.Namespace, *, agent=None, lock=None) -> dict:
     if head_path.exists():
         head_path.with_suffix(".prev.json").write_text(head_path.read_text())  # one step of undo
     report["saved"] = True
-    head_path.write_text(
+    tmp = head_path.with_suffix(".tmp")  # written whole, then swapped in: never a torn head
+    tmp.write_text(
         json.dumps(
             {
                 "version": 2,
@@ -445,6 +467,7 @@ def train(args: argparse.Namespace, *, agent=None, lock=None) -> dict:
             }
         )
     )
+    tmp.replace(head_path)
     print(f"\nsaved v2 head → {head_path}  (intent {acc_int:.3f}, tool {acc_tool:.3f}; ~20 ms/decision)")
     pred = pred_te
     bad = [(texts[j], _INTENTS[y_intent[j]], _INTENTS[pred[k]]) for k, j in enumerate(te) if pred[k] != y_intent[j]]

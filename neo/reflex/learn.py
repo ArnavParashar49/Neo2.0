@@ -8,7 +8,10 @@ Every request the user makes ends up handled somehow, and *how* is a label for w
   with a single fast tool → it was a quick action.
 
 Those rows go to ``~/.neo/reflex_extra.jsonl`` (the file ``dataset.build`` already reads — on
-this Mac only). When enough new ones have piled up and NEO has been idle for a while, the heads
+this Mac only). What is never stored: dictated text, notes, memories and mail (the words are
+content, not a request), and anything that looks like a password, code or card number. The file
+keeps the latest 2,000 requests from the last 180 days; ``NEO_LEARN=off`` turns learning off and
+``forget_examples()`` wipes it. When enough new ones have piled up and NEO has been idle for a while, the heads
 are retrained inside the running core, reusing the Laya model already in memory, and swapped in
 — only if they score at least as well as the current ones.
 """
@@ -33,6 +36,15 @@ _IDLE_S = 180.0  # NEO must be idle this long before training starts
 _lock = threading.Lock()
 _training = False
 
+_KEEP_ROWS = 2000
+_KEEP_DAYS = 180
+# The request's *text* is the content here — not something to keep.
+_CONTENT_TOOLS = {"type_text", "dictate", "memory", "notes_create", "mail_send", "write_file", "edit_file"}
+_SECRET = re.compile(
+    r"\b(?:password|passcode|pass\s*word|pin|otp|one[-\s]?time\s+code|cvv|api\s*key|token|secret|ssn)\b"
+    r"|\d[\d\s-]{5,}\d",  # long digit runs: codes, card and phone numbers
+    re.I,
+)
 _SKIP = re.compile(r"^\s*(?:(?:hey\s+)?neo|stop|cancel|never\s*mind|ok(?:ay)?|yes|yeah|no|thanks?(?:\s+you)?)\s*[.!?]*\s*$", re.I)
 
 
@@ -40,33 +52,74 @@ def _path(name: str) -> Path:
     return settings().data_dir / name
 
 
-def record(text: str, intent: str, tool: str = "", source: str = "") -> bool:
+def enabled() -> bool:
+    return settings().learn
+
+
+def record(text: str, intent: str, tool: str = "", source: str = "", tools: tuple[str, ...] = ()) -> bool:
     """Remember what this request turned out to be. Returns whether it was kept."""
     text = " ".join(str(text).split())
-    if len(text.split()) < 2 or len(text) > 300 or _SKIP.match(text):
+    if not enabled() or len(text.split()) < 2 or len(text) > 300 or _SKIP.match(text) or _SECRET.search(text):
         return False
     if intent not in ("chat", "quick_action", "agent_task"):
+        return False
+    if _CONTENT_TOOLS & ({tool} | set(tools)):
         return False
     row = {"text": text, "intent": intent, "tool": tool if intent == "quick_action" else "", "source": source, "ts": time.time()}
     with _lock:
         path = _path(EXTRA)
-        rows = _read(path)
-        key = text.lower()
-        rows = [r for r in rows if r.get("text", "").lower() != key]  # the latest verdict wins
-        rows.append(row)
-        path.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows))
+        with path.open("a", encoding="utf-8") as f:  # append: O(1), no rewrite on the event loop
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        if path.stat().st_size > 400_000:
+            _compact(path)
     return True
 
 
-def _read(path: Path) -> list[dict]:
+def _compact(path: Path) -> None:
+    """Latest verdict per sentence, the most recent _KEEP_ROWS, nothing older than _KEEP_DAYS."""
+    cutoff = time.time() - _KEEP_DAYS * 86400
+    latest: dict[str, dict] = {}
+    for r in _read_raw(path):
+        if r.get("ts", 0) >= cutoff:
+            latest.pop(r["text"].lower(), None)
+            latest[r["text"].lower()] = r
+    keep = list(latest.values())[-_KEEP_ROWS:]
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in keep), encoding="utf-8")
+    tmp.replace(path)
+
+
+def forget_examples() -> int:
+    """Delete every stored request (and the cached features of them). Returns how many."""
+    with _lock:
+        n = len(_read(_path(EXTRA)))
+        for name in (EXTRA, STATE):
+            _path(name).unlink(missing_ok=True)
+    return n
+
+
+def _read_raw(path: Path) -> list[dict]:
     out = []
     if path.exists():
-        for line in path.read_text().splitlines():
+        for line in path.read_text(encoding="utf-8").splitlines():
             try:
-                out.append(json.loads(line))
+                r = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            if isinstance(r, dict) and r.get("text"):
+                out.append(r)
     return out
+
+
+def _read(path: Path) -> list[dict]:
+    """The rows as training sees them: latest verdict per sentence, within the retention limits."""
+    cutoff = time.time() - _KEEP_DAYS * 86400
+    latest: dict[str, dict] = {}
+    for r in _read_raw(path):
+        if r.get("ts", 0) >= cutoff:
+            latest.pop(r["text"].lower(), None)
+            latest[r["text"].lower()] = r
+    return list(latest.values())[-_KEEP_ROWS:]
 
 
 def _state() -> dict:
@@ -127,8 +180,20 @@ async def learn_loop(is_idle) -> None:
                 idle_since = None
                 continue
             idle_since = idle_since or time.time()
-            if time.time() - idle_since >= _IDLE_S and due():
-                await asyncio.to_thread(retrain)
+            if enabled() and time.time() - idle_since >= _IDLE_S and due():
+                done = asyncio.get_running_loop().create_future()
+
+                def run() -> None:
+                    try:
+                        retrain()
+                    finally:
+                        done.get_loop().call_soon_threadsafe(lambda: done.done() or done.set_result(None))
+
+                # A daemon thread, not the default executor: quitting NEO mid-retrain must not
+                # wait minutes for it (the head file is written atomically, so a cut-off run
+                # leaves the old head in place).
+                threading.Thread(target=run, daemon=True, name="laya-retrain").start()
+                await done
                 idle_since = None
         except Exception as e:  # noqa: BLE001 — learning must never take NEO down
             print(f"[reflex] retrain failed: {str(e)[:120]}")

@@ -154,7 +154,10 @@ async def open_app(name: str) -> str:
             return f"Opened {real}"
     if code != 0:
         return f"Error: couldn't open {name!r}: {err}"
-    if "://" in name or "." in name:  # a URL: bring the browser that got it to the front
+    web = name.startswith(("http://", "https://")) or (
+        "." in name and " " not in name and "://" not in name and not name.startswith(("/", "~"))
+    )
+    if web:  # a web page: bring the browser that got it to the front (not for files or app schemes)
         browser = default_browser()
         if browser:
             ok, real = await bring_front(browser)

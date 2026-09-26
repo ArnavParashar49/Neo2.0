@@ -93,7 +93,17 @@ def forecast(place: str = "", when: str = "today") -> str:
             f"low {round(day['temperature_2m_min'][i])}°, {day['precipitation_probability_max'][i] or 0}% chance of rain"
         )
 
-    w = " ".join((when or "today").lower().split())
+    w = " ".join((when or "today").lower().split()).removeprefix("on ")
+    w = {"tomorrow morning": "tomorrow", "tomorrow afternoon": "tomorrow", "tomorrow evening": "tomorrow",
+         "tomorrow night": "tomorrow", "this morning": "today", "this afternoon": "today", "this evening": "today",
+         "later": "today", "later today": "today", "next week": "week", "next weekend": "week"}.get(w, w)
+    days = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
+    if w in days:  # "on friday": that day's forecast
+        import datetime as _dt
+
+        ahead = (days.index(w) - _dt.date.fromisoformat(day["time"][0]).weekday()) % 7
+        if ahead < len(day["time"]):
+            return f"{name} on {w.capitalize()}: {daily(ahead)}."
     if w in ("week", "this week", "weekend", "this weekend", "next few days", "the week"):
         days = [f"{day['time'][i]}: {daily(i)}" for i in range(len(day["time"]))]
         return f"{name} — next 7 days:\n" + "\n".join(days)
@@ -107,8 +117,19 @@ def forecast(place: str = "", when: str = "today") -> str:
     return f"{name} tomorrow: {daily(1)}. (Now: {round(cur['temperature_2m'])}°C, {_WMO.get(cur['weather_code'], 'mixed')}.)"
 
 
-_PLACE = r"(?:\s+(?:in|at|for|around)\s+(?P<place>[a-z][\w .'-]{1,40}?))?"
-_WHEN_RE = r"(?:\s+(?:for\s+)?(?:the\s+)?(?P<when>today|tonight|tomorrow|(?:this\s+)?week(?:end)?|now|right\s+now))?"
+# Time words, so a place never swallows them ("paris next week", "london tomorrow morning").
+_TIME = (
+    r"(?:today|tonight|tomorrow(?:\s+(?:morning|afternoon|evening|night))?|this\s+(?:morning|afternoon|evening)|"
+    r"later(?:\s+today)?|(?:this|next)\s+week(?:end)?|week(?:end)?|now|right\s+now|"
+    r"(?:on\s+)?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday))"
+)
+# A place: 1–4 words starting with a letter, never a time word, never "the/my/our …" (that's a
+# thing — "the forecast for our sales" — not a city).
+_PLACE = (
+    r"(?:\s+(?:in|at|around)\s+(?!(?:the|my|our|your|this|that|here)\b)(?!" + _TIME + r"\b)"
+    r"(?P<place>[a-z][\w.'-]*(?:\s+(?!" + _TIME + r"\b)[a-z][\w.'-]*){0,3}?))?"
+)
+_WHEN_RE = r"(?:\s+(?:for\s+)?(?:the\s+)?(?P<when>" + _TIME + r"))?"
 _WHEN2 = _WHEN_RE.replace("<when>", "<when2>")  # "in new york tomorrow": the time may come after the place
 _ARGS = {"place": "<place>", "when": "<when>", "when2": "<when2>"}
 _Q = r"\s*[?.!]*\s*$"
@@ -130,8 +151,12 @@ _Q = r"\s*[?.!]*\s*$"
         (rf"^\s*(?:how(?:'s| is)\s+the\s+weather|what(?:'s| is)\s+it\s+like\s+outside){_WHEN_RE}{_PLACE}{_WHEN2}{_Q}", _ARGS),
         (rf"^\s*(?:is\s+it|will\s+it|is\s+it\s+going\s+to|it\s+will)\s+(?:rain|snow|be\s+(?:hot|cold|sunny|cloudy|windy))(?:ing)?{_WHEN_RE}{_PLACE}{_WHEN2}{_Q}", _ARGS),
         (rf"^\s*how\s+(?:hot|cold|warm)\s+is\s+it(?:\s+outside)?{_WHEN_RE}{_PLACE}{_WHEN2}{_Q}", _ARGS),
-        (rf"^\s*what(?:'s| is)\s+the\s+(?:temperature|temp|forecast)(?:\s+outside)?{_WHEN_RE}{_PLACE}{_WHEN2}{_Q}", _ARGS),
-        (rf"^\s*(?:the\s+)?(?:weather\s+)?forecast{_WHEN_RE}{_PLACE}{_WHEN2}{_Q}", _ARGS),
+        # "temperature"/"forecast" only count with "outside", "weather", a place or a time —
+        # "what's the temperature of the sun" and "the forecast for Q3 sales" are not weather.
+        (rf"^\s*what(?:'s| is)\s+the\s+(?:temperature|temp)\s+outside{_WHEN_RE}{_PLACE}{_WHEN2}{_Q}", _ARGS),
+        (rf"^\s*what(?:'s| is)\s+the\s+(?:temperature|temp|forecast)(?=\s+(?:in|at|around|for\s+(?:today|tonight|tomorrow|the\s+week)|today|tonight|tomorrow|this|next))(?:\s+outside)?{_WHEN_RE}{_PLACE}{_WHEN2}{_Q}", _ARGS),
+        (rf"^\s*(?:the\s+)?weather\s+forecast{_WHEN_RE}{_PLACE}{_WHEN2}{_Q}", _ARGS),
+        (rf"^\s*(?:the\s+)?forecast(?=\s+(?:for\s+)?(?:the\s+)?(?:today|tonight|tomorrow|week|weekend|this|next|in\s))" + rf"{_WHEN_RE}{_PLACE}{_WHEN2}{_Q}", _ARGS),
         (rf"^\s*do\s+i\s+need\s+an\s+umbrella{_WHEN_RE}{_PLACE}{_WHEN2}{_Q}", _ARGS),
     ],
 )

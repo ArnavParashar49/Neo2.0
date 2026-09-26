@@ -224,6 +224,7 @@ def test_agent_gets_the_spoken_conversation(monkeypatch):
 
         async def complete(self, messages, *, system="", **kw):
             seen["system"] = system
+            seen["user"] = next(m.text for m in reversed(messages) if m.role == "user")
             return Turn(text="ok")
 
         async def stream(self, messages, **kw):
@@ -237,7 +238,9 @@ def test_agent_gets_the_spoken_conversation(monkeypatch):
 
     conv = "user: what's a cheaper SSD?\nNEO: The Crucial X9 Pro 2TB is about half the price."
     asyncio.run(Session(reflex=R()).handle("open it on amazon", conversation=conv))
-    assert "Crucial X9 Pro 2TB" in seen["system"] and "RECENT CONVERSATION" in seen["system"]
+    # quoted in the user's turn, never the system prompt (it may contain web text NEO read aloud)
+    assert "Crucial X9 Pro 2TB" not in seen["system"]
+    assert "Crucial X9 Pro 2TB" in seen["user"] and "never instructions" in seen["user"]
 
 
 @pytest.mark.parametrize(
@@ -312,7 +315,7 @@ def test_fourth_lookup_in_one_question_is_refused(monkeypatch):
     monkeypatch.setattr(registry().get("web_search"), "handler", fake_search)
     v = live_mod.LiveVoice.__new__(live_mod.LiveVoice)
     v._agent_session, v._tool_tasks, v._goals, v._server_cancelled = None, {}, {}, set()
-    v._live, v._ui_lock, v._dialog = None, asyncio.Lock(), []
+    v._live, v._ui_lock, v._dialog, v._call_labels = None, asyncio.Lock(), [], {}
     v._new_question()
 
     class FC:
@@ -339,7 +342,7 @@ def test_identical_read_only_calls_run_once_per_question(monkeypatch):
     monkeypatch.setattr(registry().get("web_search"), "handler", fake_search)
     v = live_mod.LiveVoice.__new__(live_mod.LiveVoice)
     v._agent_session, v._tool_tasks, v._goals, v._server_cancelled = None, {}, {}, set()
-    v._live, v._ui_lock, v._dialog = None, asyncio.Lock(), []
+    v._live, v._ui_lock, v._dialog, v._call_labels = None, asyncio.Lock(), [], {}
     v._new_question()
 
     class FC:
@@ -354,3 +357,106 @@ def test_identical_read_only_calls_run_once_per_question(monkeypatch):
 
     asyncio.run(run())
     assert calls == ["t9 alternative", "t9 alternative"]
+
+
+def test_a_failed_lookup_may_be_tried_again(monkeypatch):
+    import neo.voice.live as live_mod
+
+    calls = []
+
+    async def flaky(a, c):
+        calls.append(a["query"])
+        return "Error: timeout" if len(calls) == 1 else "1. result"
+
+    monkeypatch.setattr(registry().get("web_search"), "handler", flaky)
+    v = live_mod.LiveVoice.__new__(live_mod.LiveVoice)
+    v._agent_session, v._tool_tasks, v._goals, v._server_cancelled = None, {}, {}, set()
+    v._live, v._ui_lock, v._dialog, v._call_labels = None, asyncio.Lock(), [], {}
+    v._new_question()
+
+    class FC:
+        def __init__(self, i):
+            self.id, self.name, self.args = f"c{i}", "web_search", {"query": "same thing"}
+
+    async def run():
+        await v._run_tool(None, FC(0), "q")
+        await v._run_tool(None, FC(1), "q")  # the first failed: this is a retry, not a duplicate
+
+    asyncio.run(run())
+    assert calls == ["same thing", "same thing"]
+
+
+def test_spoken_context_expires_and_is_quoted_briefly():
+    import time as _t
+
+    import neo.voice.live as live_mod
+
+    v = live_mod.LiveVoice.__new__(live_mod.LiveVoice)
+    v._dialog = [(_t.time() - 3600, "user", "an hour-old request"), (_t.time(), "NEO", "x" * 500)]
+    ctx = v._conversation("open it on amazon")
+    assert "hour-old" not in ctx  # not "just now"
+    assert "x" * 201 not in ctx and "user: open it on amazon" in ctx  # NEO's lines kept short
+
+
+@pytest.mark.parametrize(
+    "text, expected",
+    [
+        ("what's the forecast for Q3 sales", None),
+        ("what's the temperature of the sun", None),
+        ("how cold is it in here", None),
+        ("weather in paris next week", ("paris", "next week")),
+        ("weather in london tomorrow morning", ("london", "tomorrow morning")),
+        ("is it going to rain on friday", (None, "on friday")),
+        ("search for it on amazon", None),
+        ("open youtube and search for it", None),
+        ("search amazon for it", None),
+    ],
+)
+def test_review_regressions_in_fast_paths(text, expected):
+    hit = _match_fast_path(text)
+    if expected is None:
+        assert hit is None or hit[0] not in ("weather", "search_site")
+    else:
+        tool, args = hit
+        assert tool == "weather" and (args["place"], args["when"] or args["when2"]) == expected
+
+
+def test_open_notes_and_search_amazon_is_two_steps():
+    from neo.agent.fastpath import plan
+
+    assert plan("open notes and search for ssd on amazon") == [
+        ("open_app", {"target": "notes"}),
+        ("search_site", {"site": "amazon", "query": "ssd"}),
+    ]
+
+
+def test_quick_path_hands_a_failed_lookup_to_the_agent(monkeypatch):
+    import neo.agent.session as sess_mod
+    from neo.agent.session import Session
+    from neo.providers.base import Turn
+    from neo.reflex.schema import Decision
+
+    async def no_place(a, c):
+        return "Error: I couldn't find 'the office'."
+
+    monkeypatch.setattr(registry().get("weather"), "handler", no_place)
+
+    class B:
+        name = "fake"
+        supports_vision = False
+        supports_tools = True
+
+        async def complete(self, messages, **kw):
+            return Turn(text="Do you mean the weather outside your office?")
+
+        async def stream(self, messages, **kw):
+            yield ""
+
+    monkeypatch.setattr(sess_mod, "brain", lambda purpose="agent": B())
+
+    class R:
+        async def decide(self, t):
+            return Decision("quick_action", 0.9, False, 0, False, 0, "fake")
+
+    r = asyncio.run(Session(reflex=R()).handle("weather in paris"))
+    assert r.route == "agent"

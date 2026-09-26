@@ -52,6 +52,7 @@ class Settings(BaseSettings):
     reflex_confidence_floor: float = 0.55  # below this, escalate to the lite model
     reflex_tool_floor: float = 0.85  # Laya may pick the tool itself above this confidence
     home_location: str = ""  # e.g. "Dubai" — where "the weather" means, if not remembered
+    learn: bool = True  # NEO_LEARN=off: Laya stops recording requests to learn from
 
     # ---- voice -----------------------------------------------------------------------
     voice: VoiceBackend = "auto"  # auto = Live if key + quota, else local cascade

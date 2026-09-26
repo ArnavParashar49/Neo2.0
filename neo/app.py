@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import signal
 from typing import Any
 
@@ -150,15 +151,37 @@ async def run() -> None:
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, stop.set)
+    if os.environ.get("NEO_LAUNCHED_BY_APP"):
+        asyncio.create_task(_exit_with_parent(stop))
     await stop.wait()
+    # Everything below must finish well inside NEO.app's grace period (it SIGKILLs after 12 s).
     if app.voice:
-        await app.voice.close()
+        try:
+            await asyncio.wait_for(app.voice.close(), 2)
+        except Exception:  # noqa: BLE001
+            pass
     try:
         from neo.memory.summarize import summarize_session
         from neo.tools.browser import shutdown as close_browser
 
-        await close_browser()
-        if s := await summarize_session(app.session.history, app.started):
+        await asyncio.wait_for(close_browser(), 2)
+        if s := await asyncio.wait_for(summarize_session(app.session.history, app.started), _SUMMARY_BUDGET_S):
             print(f"[memory] session saved: {s[:100]}")
+    except TimeoutError:
+        print("[memory] shutdown summary took too long — skipped")
     except Exception as e:  # noqa: BLE001
         print(f"[memory] shutdown summary skipped: {str(e)[:80]}")
+
+
+_SUMMARY_BUDGET_S = 7.0  # the model gets 5 s inside; this covers the crude fallback + the write
+
+
+async def _exit_with_parent(stop: asyncio.Event) -> None:
+    """Started by NEO.app: if the app goes away without stopping us (force quit, crash), stop
+    too — a core with the mic open and nobody to show it must never be left behind."""
+    parent = os.getppid()
+    while not stop.is_set():
+        await asyncio.sleep(1.0)
+        if os.getppid() != parent:  # re-parented to launchd: the app is gone
+            print("[neo] NEO.app went away — shutting down")
+            stop.set()
