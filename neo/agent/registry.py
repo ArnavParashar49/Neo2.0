@@ -133,7 +133,7 @@ class Registry:
         if t.name in self._tools:
             if self.strict and not replace:
                 raise ValueError(f"a tool named {t.name!r} is already registered")
-            print(f"[registry] replacing tool {t.name}")
+            log.info(f"[registry] replacing tool {t.name}")
         self._tools[t.name] = t
         return t
 

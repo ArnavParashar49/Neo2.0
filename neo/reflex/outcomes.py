@@ -32,6 +32,7 @@ from __future__ import annotations
 import contextvars
 import functools
 import itertools
+import logging
 import re
 import threading
 import time
@@ -40,6 +41,8 @@ from dataclasses import dataclass, field
 
 from neo import runtime
 from neo.reflex import learn
+
+log = logging.getLogger(__name__)
 
 SETTLE_S = 20.0  # an episode nothing followed up on for this long is final
 WINDOW_S = 20.0  # a correction has to come this soon after the request it corrects
@@ -135,7 +138,7 @@ def _safe(fn: Callable) -> Callable:
         try:
             return fn(*a, **kw)
         except Exception as e:  # noqa: BLE001
-            print(f"[reflex] outcome ledger: {type(e).__name__}: {str(e)[:100]}")
+            log.warning(f"[reflex] outcome ledger: {type(e).__name__}: {str(e)[:100]}")
             return None
 
     return wrap

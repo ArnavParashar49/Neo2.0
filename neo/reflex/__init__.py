@@ -8,11 +8,14 @@ and two concurrent forward passes (or a load racing a call) trip a Metal command
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 import threading
 
 from neo.config import settings
 from neo.reflex.schema import Decision, Intent, wants_reply
+
+log = logging.getLogger(__name__)
 
 # Only the bare words cancel everything; "stop the timer" / "quit the app" are commands. Hindi and
 # Hinglish too ("bas karo", "ruk jao", "चुप"): every trained head gets those wrong, the rule can't.
@@ -49,7 +52,7 @@ def get_laya():
 
                 _laya = LayaReflex()
             except Exception as e:  # noqa: BLE001 — missing torch/model → cloud fallback
-                print(f"[reflex] Laya unavailable ({e}); falling back to Flash-Lite")
+                log.warning(f"[reflex] Laya unavailable ({e}); falling back to Flash-Lite")
                 _laya_failed = True
         return _laya
 
@@ -105,7 +108,7 @@ class Reflex:
             try:
                 return await lite.decide(text)
             except Exception as e:  # noqa: BLE001
-                print(f"[reflex] lite failed: {e}")
+                log.warning(f"[reflex] lite failed: {e}")
         # Nothing available — be safe: treat as an agent task, confirm anything risky.
         return Decision("agent_task", 0.0, True, 0.5, False, 0.0, source="rules")
 
@@ -133,7 +136,7 @@ def warmup(reflex: Reflex | None = None) -> None:
 
             embed._get()
         except Exception as e:  # noqa: BLE001
-            print(f"[memory] embedder warmup failed: {str(e)[:80]}")
+            log.warning(f"[memory] embedder warmup failed: {str(e)[:80]}")
 
     threading.Thread(target=_load, daemon=True).start()
 

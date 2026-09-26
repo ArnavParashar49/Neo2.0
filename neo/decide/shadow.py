@@ -15,11 +15,14 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 import os
 import time
 from collections.abc import Awaitable, Iterator, Mapping
 from pathlib import Path
 from typing import Any
+
+log = logging.getLogger(__name__)
 
 __all__ = ["KEEP_S", "TIMEOUT_S", "path", "record", "later", "starting", "forget"]
 
@@ -90,7 +93,7 @@ def later(kind: str, facts: Awaitable[Mapping[str, Any]], **extra: Any) -> None:
         try:
             record(kind, {**got, **went_without, **extra})
         except OSError as e:
-            print(f"[decide] shadow log for {kind} not written ({str(e)[:60]})")
+            log.warning(f"[decide] shadow log for {kind} not written ({str(e)[:60]})")
 
     t = asyncio.get_running_loop().create_task(go())
     _tasks.add(t)
@@ -104,7 +107,7 @@ def starting(kind: str) -> Iterator[None]:
     try:
         yield
     except Exception as e:  # noqa: BLE001
-        print(f"[decide] shadow {kind} not started ({str(e)[:60]})")
+        log.warning(f"[decide] shadow {kind} not started ({str(e)[:60]})")
 
 
 def forget() -> int:

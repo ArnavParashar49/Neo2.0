@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import itertools
+import logging
 import re
 import time
 import types
@@ -28,6 +29,8 @@ from neo.providers import brain
 from neo.providers.base import ImagePart, Message, ToolResult
 from neo.reflex import Reflex, is_bare_stop, outcomes
 from neo.reflex.schema import Decision
+
+log = logging.getLogger(__name__)
 
 # A confirmation must be a short, pure affirmative; any retraction anywhere wins over a leading "ok"
 # ("haan, mat bhejo" is a no). English, Hinglish and Hindi. "ji" / "जी" alone is also "I'm
@@ -205,7 +208,7 @@ class Session:
             and (t := registry().get(d.tool)) is not None
             and not t.hidden
         ):
-            print(f"  ~ laya picked {d.tool} ({d.tool_p:.2f})")
+            log.info(f"  ~ laya picked {d.tool} ({d.tool_p:.2f})")
             outcomes.count("tool_lane")
             # "any rain later?" → weather with its defaults: fine for a read-only tool built for
             # direct use (it has fast paths) when nothing in the request needs an argument.
@@ -324,7 +327,7 @@ class Session:
                 # e.g. weather for "the forecast for Q3 sales": the agent can do better. Never NEO's
                 # own question to the user: that is the user's to answer, not a model's.
                 if not out.ok and not out.halt:
-                    print(f"  ~ {tool} failed; handing to the agent")
+                    log.info(f"  ~ {tool} failed; handing to the agent")
                     ran = "; ".join(f"{tl}({', '.join(f'{k}={v!r}' for k, v in a.items())})" for tl, a in steps[:i])
                     note = f"\n[ALREADY DONE] These steps of the request already ran — don't repeat them: {ran}" if ran else ""
                     return await self._agent(text, d, None, job, done_note=note)
@@ -452,7 +455,7 @@ class Session:
 
             return store().playbook_context(goal)
         except Exception as e:  # noqa: BLE001
-            print(f"[playbook] recall failed: {str(e)[:80]}")
+            log.warning(f"[playbook] recall failed: {str(e)[:80]}")
             return ""
 
     @staticmethod
@@ -473,7 +476,7 @@ class Session:
 
             store().save_playbook(goal, path_only([{"tool": s.tool, "args": s.args} for s in ok_steps]), "")
         except Exception as e:  # noqa: BLE001
-            print(f"[playbook] save failed: {str(e)[:80]}")
+            log.warning(f"[playbook] save failed: {str(e)[:80]}")
 
     # ---- confirmation ------------------------------------------------------------------
     def _stage_pending(
@@ -678,7 +681,7 @@ class Session:
         try:
             return await summarize_session(msgs, started, budget_s=budget_s)
         except Exception as e:  # noqa: BLE001 — a summary is a nicety, never a failure
-            print(f"[memory] summary skipped: {str(e)[:80]}")
+            log.warning(f"[memory] summary skipped: {str(e)[:80]}")
             return ""
 
     async def checkpoint(self, *, final: bool = False, budget_s: float = 8.0) -> str:

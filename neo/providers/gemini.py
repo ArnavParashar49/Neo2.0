@@ -32,6 +32,8 @@ from neo.providers.base import (
     Usage,
 )
 
+log = logging.getLogger(__name__)
+
 _LEVEL = {"low": gt.ThinkingLevel.LOW, "medium": gt.ThinkingLevel.MEDIUM, "high": gt.ThinkingLevel.HIGH}
 _SKIP_SIGNATURE = b"skip_thought_signature_validator"
 _RETRY_CODES = {500, 502, 503, 504}
@@ -218,11 +220,11 @@ class GeminiProvider:
                         if code == 429:
                             self._exhausted[(model, ki)] = _time.time() + _QUOTA_COOLDOWN_S
                             self._save_cooldowns()
-                            print(f"[gemini] {model} key#{ki + 1} quota exhausted; trying next key")
+                            log.warning(f"[gemini] {model} key#{ki + 1} quota exhausted; trying next key")
                             await _note(f"{_pretty(model)} key {ki + 1}: no quota, trying next")
                             break
                         if code in _RETRY_CODES:
-                            print(f"[gemini] {model} overloaded ({took:.0f}s); trying next model")
+                            log.warning(f"[gemini] {model} overloaded ({took:.0f}s); trying next model")
                             self._exhausted[(model, -1)] = _time.time() + _OVERLOAD_COOLDOWN_S
                             self._save_cooldowns()
                             await _note(f"{_pretty(model)} overloaded, trying next")

@@ -9,11 +9,14 @@ callers fall back to keyword search.
 
 from __future__ import annotations
 
+import logging
 import threading
 
 import numpy as np
 
 from neo.config import settings
+
+log = logging.getLogger(__name__)
 
 MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 DIM = 384
@@ -25,6 +28,8 @@ _failed = False
 
 def _get():
     global _model, _failed
+    if settings().embeddings == "off":
+        return None
     with _lock:
         if _model is None and not _failed:
             try:
@@ -36,7 +41,7 @@ def _get():
                     MODEL, device="cpu", cache_folder=str(settings().models_dir), revision=models.EMBEDDER_REVISION
                 )
             except Exception as e:  # noqa: BLE001 — embeddings are an optimisation, never a failure
-                print(f"[memory] embedding model unavailable: {str(e)[:100]}")
+                log.warning(f"[memory] embedding model unavailable: {str(e)[:100]}")
                 _failed = True
         return _model
 

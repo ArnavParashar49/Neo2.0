@@ -9,6 +9,7 @@ state falls back to whatever else is active instead of flickering through idle.
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -16,6 +17,8 @@ from enum import StrEnum
 from typing import Any
 
 from neo import runtime
+
+log = logging.getLogger(__name__)
 
 
 class NeoState(StrEnum):
@@ -86,7 +89,7 @@ class EventBus:
                 if asyncio.iscoroutine(r):
                     await r
             except Exception as e:  # noqa: BLE001 — a bad subscriber must not kill the bus
-                print(f"[events] subscriber error on {type}: {e}")
+                log.warning(f"[events] subscriber error on {type}: {e}")
 
     def _aggregate(self) -> NeoState:
         best = self._base

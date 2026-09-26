@@ -6,11 +6,14 @@ Lets the next session answer "what did we do yesterday" and carry over unfinishe
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 
 from neo.memory.store import store
 from neo.providers import brain
 from neo.providers.base import Message
+
+log = logging.getLogger(__name__)
 
 _PROMPT = (
     "Summarise this conversation between a user and their Mac assistant NEO in 2-4 short lines: "
@@ -49,7 +52,7 @@ async def summarize_session(history: list[Message], started: float, *, budget_s:
     except Exception as e:  # noqa: BLE001 — no brain at shutdown? keep a crude fallback
         firsts = [m.text for m in history if m.role == "user" and m.text][:4]
         summary = "Asked about: " + "; ".join(f[:60] for f in firsts) if firsts else ""
-        print(f"[memory] summary fallback ({str(e)[:60]})")
+        log.warning(f"[memory] summary fallback ({str(e)[:60]})")
     if summary and privacy.generation() != gen:
         return ""  # the user erased NEO's memory while this was being written: it must not come back
     if summary:

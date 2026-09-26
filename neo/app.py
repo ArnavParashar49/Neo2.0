@@ -205,6 +205,9 @@ async def _cocoa_pump() -> None:
 
 
 async def run() -> None:
+    from neo import log_to_stdout
+
+    log_to_stdout()
     s = settings()
     from neo.permissions import request_missing
 

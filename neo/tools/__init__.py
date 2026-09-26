@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import importlib
+import logging
 import sys
+
+log = logging.getLogger(__name__)
 
 _MODULES = ["neo.tools.system", "neo.tools.web", "neo.tools.weather", "neo.tools.memory_tool", "neo.tools.browser"]
 _MAC_ONLY = ["neo.tools.media"]
@@ -18,10 +21,10 @@ def load_all() -> list[str]:
             importlib.import_module(m)
             loaded.append(m)
         except Exception as e:  # noqa: BLE001 — one broken tool module must not stop startup
-            print(f"[tools] failed to load {m}: {e}")
+            log.warning(f"[tools] failed to load {m}: {e}")
     if "neo.tools.tasks" in sys.modules:  # each task kind's tools as its mode shows them
         try:
             sys.modules["neo.tools.tasks"].apply_modes()
         except Exception as e:  # noqa: BLE001 — the tools keep the surface they were registered with
-            print(f"[tools] task modes not applied: {e}")
+            log.warning(f"[tools] task modes not applied: {e}")
     return loaded

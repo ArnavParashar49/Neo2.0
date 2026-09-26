@@ -11,12 +11,15 @@ that agent's keys, and with the host's own providers for any purpose it supplied
 
 from __future__ import annotations
 
+import logging
 from collections.abc import AsyncIterator, Mapping, Sequence
 from typing import Literal
 
 from neo import runtime
 from neo.config import BrainName, settings
 from neo.providers.base import Message, Provider, ProviderError, RateLimited, ToolSpec, Turn
+
+log = logging.getLogger(__name__)
 
 Purpose = Literal["agent", "fast", "vision", "offline", "light"]
 
@@ -126,7 +129,7 @@ class Chain:
             try:
                 out.append(make(n))
             except ProviderError as e:  # missing key → skip silently
-                print(f"[brain] {n} unavailable: {e}")
+                log.info(f"[brain] {n} unavailable: {e}")
         return out
 
     def _order(self) -> list[BrainName | Provider]:
@@ -181,7 +184,7 @@ class Chain:
                 self.last_used, self.last_model = p.name, getattr(p, "model", "")
                 return turn
             except (RateLimited, ProviderError) as e:
-                print(f"[brain] {p.name} failed ({type(e).__name__}: {str(e)[:80]}); trying next")
+                log.warning(f"[brain] {p.name} failed ({type(e).__name__}: {str(e)[:80]}); trying next")
                 errors.append(f"{p.name}: {str(e)[:80]}")
                 if self.sticky:
                     self._demote(p.name)

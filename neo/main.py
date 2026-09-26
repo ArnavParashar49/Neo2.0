@@ -151,6 +151,9 @@ async def _erase_everything() -> dict:
 
 def main() -> None:
     os.umask(0o077)  # everything NEO writes (memory, logs, learned examples) is private to this user
+    from neo import log_to_stdout
+
+    log_to_stdout()  # NEO's status lines, as NEO.app's core.log and the terminal have always shown them
     ap = argparse.ArgumentParser(prog="neo")
     ap.add_argument("--text", action="store_true", help="text REPL, no voice/UI")
     ap.add_argument("--doctor", action="store_true", help="check setup")
