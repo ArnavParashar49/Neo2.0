@@ -324,13 +324,16 @@ def test_the_days_events_repeats_expanded_declined_skipped(ek):
 
 def test_counts_are_numbers_only_and_cached(ek):
     now = datetime.now()
-    ek.add_event("a", now - timedelta(days=2, hours=1))
-    ek.add_event("b", now - timedelta(days=2, hours=3))
+    # a and b on one calendar day, whatever the hour the suite runs at (just after midnight,
+    # "2 days and 3 hours ago" was the day before "2 days and 1 hour ago")
+    noon = (now - timedelta(days=2)).replace(hour=12, minute=0, second=0, microsecond=0)
+    ek.add_event("a", noon + timedelta(hours=1))
+    ek.add_event("b", noon - timedelta(hours=1))
     ek.add_event("c", now - timedelta(days=9))
     ek.add_event("old", now - timedelta(days=45))
     c = eventkit.counts("event")
     assert (c.writable, c.sources, c.days_30) == (2, 2, 2)
-    assert c.last == pytest.approx((now - timedelta(days=2, hours=1)).timestamp(), abs=2)
+    assert c.last == pytest.approx((noon + timedelta(hours=1)).timestamp(), abs=2)
     ek.add_event("d", now - timedelta(days=1))
     assert eventkit.counts("event").days_30 == 2  # cached
     eventkit.forget()
