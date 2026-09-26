@@ -72,9 +72,16 @@ Every tool is a plain Python function registered with a decorator; adding one is
 
 **It checks its own work.** After any side-effect tool, the loop makes the model re-observe (Accessibility tree, file, page, inbox) and confirm the goal before it reports — one extra call, far fewer "done!" replies that weren't.
 
-**It remembers how it did things.** A successful multi-step task is saved as a *playbook* (goal + tool sequence). A similar request later gets that path in its prompt, so repeats are shorter and cheaper. Sessions are summarised at shutdown into memory, so "what did we do yesterday" works; recall is hybrid — FTS5 keyword search fused with local embeddings from Laya's encoder, already resident on the GPU.
+**It remembers how it did things.** A successful multi-step task is saved as a *playbook* (goal + the tools it used, never the text it typed or sent). A similar request later gets that path in its prompt, so repeats are shorter and cheaper. The conversation is summarised every 20 idle minutes and at shutdown, so "what did we do yesterday" works and a crash loses little; recall is hybrid — FTS5 keyword search fused with local embeddings from Laya's encoder, already resident on the GPU.
 
-**Safety is structural, not a prompt.** Destructive tools (send mail, delete, overwrite, risky shell or AppleScript) *stage* the action and return `NEEDS_CONFIRM`; the loop stops, the orb turns to *shaping*, and nothing runs until you say yes. A confirmation is only accepted if it matches the exact action that was asked about, and any retraction ("okay, cancel that") wins over a leading "okay". Everything staged, confirmed or cancelled is appended to `~/.neo/audit.log`.
+**Safety is structural, not a prompt.** Anything consequential *stages* the action and returns `NEEDS_CONFIRM`; the run stops, the overlay shows exactly what will run (the full command, script, file path and contents, or mail body), and nothing happens until *you* approve it:
+
+- **What runs without asking is an allowlist.** Shell commands only when every part is read-only (`ls`, `cat`, `git status`…, no redirects or substitutions); AppleScript only when it just reads (`get`, `count`); new files only in Desktop, Documents and Downloads. Everything else — deleting, overwriting, editing, installing, sending mail, Return in a terminal, buttons like *Send*, *Buy* or *Delete* (or an *OK* in a dialog that says it deletes), submitting a web form that isn't a search box — asks first.
+- **Only you can approve.** Your typed or spoken "yes", or the card's button (⌘⏎) for that exact action. A model can't approve anything, a stale card can't approve a later action, and the approval covers exactly what the card showed — if anything changed, NEO asks again. By voice, "yes" only counts once NEO has read the question out.
+- **Web pages, emails, files and the screen are data, never instructions.** They reach the model fenced as untrusted; they can't fake a confirmation, and after reading them NEO asks before saving memories or opening links that could carry your data out. Background fetches never reach your Mac or home network.
+- **Secrets are off limits.** NEO doesn't read or write SSH/GPG keys, `.env` files, cloud credentials, keychains, browser profiles or its own data, and commands it runs don't inherit API keys.
+
+Every staged, confirmed or cancelled action is appended to `~/.neo/audit.log` (the action, not the words of a message; about 1 MB, 180 days).
 
 ## Install
 
@@ -83,9 +90,10 @@ Requirements: macOS 13+ on Apple Silicon (built and tested on an M3 Pro, 18 GB),
 ```bash
 brew install uv rustup && rustup default stable
 git clone https://github.com/ArnavParashar49/Neo2.0 && cd Neo2.0
-uv venv --python 3.12 && uv pip install -e ".[dev]"
+uv venv --python 3.12 && uv pip install -r requirements.lock && uv pip install -e ".[dev]"
 cp .env.example .env        # paste your keys (both free, no card)
 .venv/bin/python -m neo --doctor
+scripts/install-app.sh      # build NEO.app, install it to /Applications and start it
 ```
 
 - `GEMINI_API_KEY` — [aistudio.google.com/apikey](https://aistudio.google.com/apikey). Add more in `GEMINI_API_KEYS=key2,key3` for more free quota.
@@ -93,9 +101,11 @@ cp .env.example .env        # paste your keys (both free, no card)
 
 The browser tools need Chromium once: `.venv/bin/python -m playwright install chromium`.
 
-**NEO.app** (recommended): `cd ui && npm run tauri build`, then copy `ui/src-tauri/target/release/bundle/macos/NEO.app` to `/Applications` and open it. It lives in the menu bar (the dotted orb): it starts NEO's Python core from this checkout, restarts it if it crashes, stops it on quit, and opens at login (menu → *Open at Login* to turn that off). **⌥⌘** — press Option and Command together and let go — shows NEO; ⌘⇧Space works too. The first launch asks for **Accessibility** and **Screen Recording** for NEO (and the microphone when you first talk to it); allow them in *System Settings → Privacy & Security*. Logs: menu → *Open Logs* (`~/.neo/logs`). NEO learns how you phrase things from what it actually did for each request (stored only on this Mac, in `~/.neo/reflex_extra.jsonl`: no dictated text, notes, memories, mail or anything that looks like a code; kept 180 days) — `NEO_LEARN=off` in `.env` turns that off. NEO.app is ad-hoc signed, so macOS may ask again after you rebuild it; changes to the Python code don't need a rebuild — menu → *Restart NEO*.
+**NEO.app** (recommended): run `scripts/install-app.sh` from the project folder. It installs NEO's Python runtime (exact versions from `requirements.lock`) in `~/Library/Application Support/NEO`, copies your `.env` to `~/.neo/.env`, builds and signs the app, puts it in `/Applications` (replacing any older copy) and starts it. Re-run it after pulling changes; `scripts/uninstall-app.sh` removes the app (`--purge` also moves `~/.neo` to the Trash).
 
-Without the app: grant **Accessibility** and **Screen Recording** to the terminal you run `python -m neo` from to the app you launch NEO from (Terminal, or NEO.app) in *System Settings → Privacy & Security*. macOS asks for the **Microphone** on the first voice run. Models (Laya, Parakeet, Kokoro, Vosk) download on first run into `~/.neo`.
+It lives in the menu bar (the dotted orb), with no Dock icon: it runs the core, restarts it if it crashes or hangs, stops it on quit, and opens at login (menu → *Open at Login*). **⌥⌘** — press Option and Command together and let go — shows NEO; ⌘⇧Space works too. The first launch asks for **Accessibility** and **Screen Recording** (and the microphone when you first talk to it); the menu shows what's still missing, with shortcuts to the right settings pane. The app is signed by its bundle id, so what you grant once stays granted across updates. The menu also has *Settings & API Keys…* (opens `~/.neo/.env`), *Open Logs*, *Restart NEO* and *Erase NEO's Memory…*.
+
+Without the app: grant **Accessibility** and **Screen Recording** to the terminal you run `python -m neo` from, in *System Settings → Privacy & Security*. macOS asks for the **Microphone** on the first voice run. Models (Laya, Parakeet, Kokoro, Vosk) download on first run; the wake-word model is checked against a pinned checksum.
 
 ## Run
 
@@ -109,7 +119,7 @@ The overlay lives in the bottom-right corner as a small pill (orb + status + las
 **⌥⌘** (press both, let go), a click, or whenever NEO needs a confirmation; it folds back to the pill after a quiet stretch unless you
 pin it. The card shows the conversation as a timeline — your messages, the tools NEO ran (as chips), rendered
 markdown replies, and under each reply which brain answered and how long it took (*Groq gpt-oss-120b · 1.4 s*,
-*quick action · no model*). Destructive actions surface a confirm card you can answer with ⏎ / Esc. While a turn is in
+*quick action · no model*). Anything that needs your OK surfaces a card showing exactly what will run; ⌘⏎ approves, Esc declines. Setup problems (no API key, microphone blocked, voice down) show at the top of the card. While a turn is in
 flight the header shows what's happening ("Gemini 3.8 Flash overloaded, trying next"). The thinking-orb mirrors
 NEO's state:
 
@@ -139,7 +149,35 @@ Everything is an environment variable with the `NEO_` prefix (or a line in `.env
 | `NEO_LISTEN_TIMEOUT_S` | `5` | stop listening after this many seconds without speech from you (silero VAD; noise doesn't count) |
 | `NEO_LOCAL_MODEL` | `mlx-community/gemma-4-12B-it-4bit` | offline model served by `--local` |
 | `NEO_CONFIRM_DESTRUCTIVE` | `true` | set `false` only if you enjoy surprises |
+| `NEO_CLOUD_MEMORY` | `full` | what NEO's memory sends to cloud models: `full` · `profile` (stable facts only) · `off` |
+| `NEO_LEARN` | `on` | `off` stops Laya recording your requests to learn from |
+| `NEO_HOME_LOCATION` | — | where "the weather" means if NEO doesn't know your city (else it guesses from your IP) |
 | `NEO_DATA_DIR` | `~/.neo` | memory DB, audit log, models, trained reflex head |
+
+With NEO.app, settings live in `~/.neo/.env` (menu → *Settings & API Keys…*, then *Restart NEO*).
+
+## Privacy
+
+NEO keeps its data on this Mac, in `~/.neo` (readable only by you). What leaves it, and where:
+
+| Goes to | What | When |
+|---|---|---|
+| **Google** (Gemini API, Gemini Live) | what you say and type, the recent conversation, NEO's memory about you (see `NEO_CLOUD_MEMORY`), tool results, and screenshots when a task needs to see the screen | every request that needs a model; voice sessions stream your microphone audio while listening |
+| **Groq** (optional key) | chat turns, and the conversation text when NEO writes a session summary | quick answers and summaries |
+| **DuckDuckGo, Brave, Bing** | your search queries (raced for speed) | web searches |
+| **Open-Meteo**, and **ipinfo.io** if NEO doesn't know your city | the place, or your IP address to guess it | weather |
+| any website NEO opens or fetches for you | normal web requests | browsing tasks |
+
+The free tiers of Gemini and Groq allow those companies to use what you send to improve their products; use paid keys, `NEO_CLOUD_MEMORY=profile|off`, or the local brain (`--local`) if that matters for you. The wake word, speech-to-text and text-to-speech of the on-device voice, and Laya's decisions all run locally.
+
+What NEO keeps, and for how long:
+
+- **Memory** (facts and preferences you tell it) until you delete it; **playbooks** (the path of past tasks, without message text) — the newest 300; **session summaries** — 90 days.
+- **Requests Laya learns from** (`reflex_extra.jsonl`: no dictated text, notes, memories, mail, or anything that looks like a code or password) — the latest 2,000 within 180 days; `NEO_LEARN=off` stops it.
+- **Logs** (`~/.neo/logs`) record which tools ran and whether they worked — never what you typed, said, sent or read. The **audit log** records confirmed actions (not the words of messages).
+- The overlay is hidden from screen sharing, recordings and screenshots.
+
+**Erase everything:** menu → *Erase NEO's Memory…* (or `python -m neo --forget-all`) deletes memories, playbooks, session summaries, learned requests and their cached features, logs, the audit log and the logins in NEO's own browser. Your settings and keys stay. No model or web page can trigger it.
 
 ## Training the reflex
 
@@ -205,7 +243,7 @@ cd ui && npx tsc --noEmit && (cd src-tauri && cargo check)
 
 ## Status and roadmap
 
-Working end to end today: routing, quick actions, chat, web research, screen reading via the Accessibility tree, screenshots + vision, mail/calendar/notes, files and shell with confirmation, memory, the overlay, both voice backends. See [ROADMAP.md](ROADMAP.md) for what's verified and what's next (a signed NEO.app that launches the core itself, tool search for the offline model, cross-platform shims).
+Working end to end today: routing, quick actions, chat, web research, screen reading via the Accessibility tree, screenshots + vision, mail/calendar/notes, files and shell with confirmation, memory, the overlay, both voice backends (with automatic fallback when Gemini Live is out of quota or offline), and NEO.app with its supervised core. See [ROADMAP.md](ROADMAP.md) for what's verified and what's next.
 
 NEO 2.0 is a from-scratch successor to [NEO v1](https://github.com/ArnavParashar49/NEO).
 
