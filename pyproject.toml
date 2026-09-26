@@ -5,6 +5,7 @@ description = "NEO — a free, local-first AI agent for your Mac"
 requires-python = ">=3.11,<3.13"
 license = "MIT"
 license-files = ["LICENSE"]
+authors = [{ name = "Arnav Parashar" }]
 dependencies = [
   # brains
   "google-genai>=2.20",
@@ -46,6 +47,12 @@ dependencies = [
   "python-dotenv",
   "websockets>=13",
 ]
+
+[project.urls]
+Homepage = "https://github.com/ArnavParashar49/Neo2.0"
+Repository = "https://github.com/ArnavParashar49/Neo2.0"
+GitHub = "https://github.com/ArnavParashar49"
+LinkedIn = "https://www.linkedin.com/in/arnavparashar49/"
 
 [project.optional-dependencies]
 dev = ["pytest", "pytest-asyncio", "ruff", "mypy"]
