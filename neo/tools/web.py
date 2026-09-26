@@ -28,8 +28,7 @@ _SITES: dict[str, str] = {
     "twitter": "https://x.com/search?q={q}",
     "x": "https://x.com/search?q={q}",
     "linkedin": "https://www.linkedin.com/search/results/all/?keywords={q}",
-    "spotify": "https://open.spotify.com/search/{q}",
-    "netflix": "https://www.netflix.com/search?q={q}",
+
     "imdb": "https://www.imdb.com/find/?q={q}",
     "duckduckgo": "https://duckduckgo.com/?q={q}",
     "bing": "https://www.bing.com/search?q={q}",
@@ -239,7 +238,8 @@ async def web_fetch(a: dict, c: ToolContext) -> str:
 @tool(
     "search_site",
     "Open a search for `query` on a website in the browser — google, youtube, amazon (the user's "
-    "country store), flipkart, maps, wikipedia, github, reddit, spotify, netflix… or any domain. "
+    "country store), flipkart, maps, wikipedia, github, reddit… or any domain. To PLAY music or "
+    "video, use play_music instead. "
     "Use for 'search X on amazon', 'open it on google', 'find X on youtube'. The query must be the "
     "actual thing (e.g. the product name from the conversation), never 'it'.",
     {

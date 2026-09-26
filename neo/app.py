@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import signal
+import sys
 import time
 from typing import Any
 
@@ -221,6 +222,10 @@ async def run() -> None:
     from neo.tools.system import restore_timers
 
     restore_timers()  # timers set before a restart still go off
+    if sys.platform == "darwin":
+        from neo.decide import engine as decide
+
+        decide.warm()  # scan the apps now, so "play …" doesn't wait for it the first time
 
     # Text works from here on; voice comes up alongside (it may be downloading models).
     await bus().set_state(NeoState.IDLE)

@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleIdentifier</key>
+	<string>com.example.browser.app.abcdef</string>
+	<key>CFBundleName</key>
+	<string>Some Site</string>
+	<key>CrAppModeShortcutName</key>
+	<string>Some Site</string>
+	<key>CrAppModeShortcutURL</key>
+	<string>https://music.example.com/</string>
+</dict>
+</plist>

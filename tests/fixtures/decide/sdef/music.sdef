@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE dictionary SYSTEM "file://localhost/System/Library/DTDs/sdef.dtd">
+<!-- Test fixture: a library player (search a playlist, play the hit), XInclude 2003 + an undefined entity. -->
+<dictionary title="Music-like Terminology" xmlns:xi="http://www.w3.org/2003/XInclude">
+	<xi:include href="standard.sdef" xpointer="xpointer(/dictionary/suite)"/>
+	<suite name="Library Suite" code="hook" description="Playback&nbsp;and library terms.">
+		<enumeration name="ePlS" code="ePlS">
+			<enumerator name="stopped" code="kPSS"/>
+			<enumerator name="playing" code="kPSP"/>
+			<enumerator name="paused" code="kPSp"/>
+		</enumeration>
+		<command name="play" code="hookPlay" description="play the current track or the specified track or file.">
+			<direct-parameter type="specifier" optional="yes" description="item to play"/>
+			<parameter name="once" code="POne" type="boolean" optional="yes" description="play once, then stop"/>
+		</command>
+		<command name="playpause" code="hookPlPs" description="toggle the playing/paused state of the current track"/>
+		<command name="pause" code="hookPaus" description="pause playback"/>
+		<command name="search" code="hookSrch" description="search a playlist for tracks matching the search string.">
+			<direct-parameter type="playlist" description="the playlist to search"/>
+			<parameter name="for" code="pTrm" type="text" description="the search text"/>
+			<result type="track" description="reference to found track(s)"/>
+		</command>
+		<class-extension extends="application">
+			<element type="playlist"/>
+			<property name="player state" code="pPlS" type="ePlS" access="r" description="is the player stopped, paused, or playing?"/>
+			<property name="current track" code="pTrk" type="track" access="r" description="the current targeted track"/>
+		</class-extension>
+		<class name="item" code="cobj" description="an item">
+			<property name="name" code="pnam" type="text" description="the name of the item"/>
+		</class>
+		<class name="playlist" code="cPly" inherits="item" description="a list of tracks">
+			<element type="track"/>
+		</class>
+		<class name="track" code="cTrk" inherits="item" description="playable audio">
+			<property name="artist" code="pArt" type="text" description="the artist"/>
+		</class>
+	</suite>
+</dictionary>

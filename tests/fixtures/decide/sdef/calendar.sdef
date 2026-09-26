@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE dictionary SYSTEM "file://localhost/System/Library/DTDs/sdef.dtd">
+<!-- Test fixture: a calendar app whose (hidden) make creates events in calendars. -->
+<dictionary title="Calendar-like Terminology">
+	<suite name="Calendar Suite" code="wrbt" description="Calendar terms">
+		<command name="make" code="corecrel" hidden="yes" description="Make a new object">
+			<parameter name="new" code="kocl" type="type"/>
+			<parameter name="at" code="insh" type="location specifier" optional="yes"/>
+			<parameter name="with properties" code="prdt" type="record" optional="yes"/>
+			<result type="specifier"/>
+		</command>
+		<command name="GetURL" code="GURLGURL" description="Subscribe to a remote calendar">
+			<direct-parameter type="text"/>
+		</command>
+		<class-extension extends="application">
+			<element type="calendar"/>
+		</class-extension>
+		<class name="calendar" code="wres" description="A calendar.">
+			<element type="event"/>
+			<property name="name" code="pnam" type="text"/>
+		</class>
+		<class name="event" code="wrev" description="An event.">
+			<property name="summary" code="wr11" type="text"/>
+			<property name="start date" code="wr1s" type="date"/>
+			<property name="end date" code="wr5s" type="date"/>
+		</class>
+	</suite>
+</dictionary>

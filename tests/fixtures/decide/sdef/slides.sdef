@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE dictionary SYSTEM "file://localhost/System/Library/DTDs/sdef.dtd">
+<!-- Test fixture (negative): a presentation app - a boolean "playing" but no play/playpause verb. -->
+<dictionary title="Slides Terminology">
+	<suite name="Slides Suite" code="kyno" description="Presentation terms">
+		<command name="start" code="kynostrt" description="Start the slideshow.">
+			<direct-parameter type="document" optional="yes"/>
+		</command>
+		<command name="stop" code="kynostop" description="Stop the slideshow."/>
+		<class name="application" code="capp" description="The app.">
+			<property name="playing" code="plng" type="boolean" access="r" description="Is a slideshow playing?"/>
+		</class>
+	</suite>
+</dictionary>

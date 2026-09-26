@@ -49,7 +49,7 @@ def _env(tmp_path, monkeypatch):
         ("make a note called groceries saying milk and eggs", ("notes_create", {"title": "groceries", "body": "milk and eggs"})),
         ("create a note saying buy milk", ("notes_create", {"title": "", "body": "buy milk"})),
         ("search for the best laptops under 1000", ("web_search", {"query": "the best laptops under 1000"})),
-        ("search for cat videos in spotify", ("search_site", {"site": "spotify", "query": "cat videos"})),
+        ("search for cat videos in youtube", ("search_site", {"site": "youtube", "query": "cat videos"})),
         ("search 2tb ssd on amazon", ("search_site", {"site": "amazon", "query": "2tb ssd"})),
         ("search amazon for crucial x9 pro", ("search_site", {"site": "amazon", "query": "crucial x9 pro"})),
         ("open youtube and search for cat videos", ("search_site", {"site": "youtube", "query": "cat videos"})),

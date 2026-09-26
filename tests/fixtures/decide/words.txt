@@ -1,0 +1,16 @@
+music
+note
+message
+weather
+calendar
+mail
+reminder
+writer
+slide
+browser
+daemon
+streamer
+tool
+studio
+play
+open

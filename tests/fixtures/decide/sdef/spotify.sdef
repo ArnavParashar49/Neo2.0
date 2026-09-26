@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE dictionary SYSTEM "file://localhost/System/Library/DTDs/sdef.dtd">
+<!-- Test fixture: a streaming player that plays by URI and reports the current item's URI. -->
+<dictionary title="Dictionary">
+	<suite name="Streamer Suite" code="spfy" description="Player specific classes.">
+		<enumeration name="ePlS" code="ePlS">
+			<enumerator name="stopped" code="kPSS"/>
+			<enumerator name="playing" code="kPSP"/>
+			<enumerator name="paused" code="kPSp"/>
+		</enumeration>
+		<class name="application" code="capp" description="The player application.">
+			<property name="current track" code="pTrk" description="The current playing track." type="track" access="r"/>
+			<property name="player state" code="pPlS" description="Is it stopped, paused, or playing?" type="ePlS" access="r"/>
+			<property name="sound volume" code="pVol" description="The sound output volume" type="integer"/>
+		</class>
+		<class name="track" code="spTr" description="A track." plural="tracks">
+			<property name="artist" code="pArt" description="The artist of the track." type="text" access="r"/>
+			<property name="name" code="pnam" description="The name of the track." type="text" access="r"/>
+			<property name="artwork url" code="aUrl" description="The URL of the cover." type="text" access="r"/>
+			<property name="spotify url" code="spur" description="The URL of the track." type="text"/>
+		</class>
+		<command name="next track" code="spfyNext" description="Skip to the next track."/>
+		<command name="playpause" code="spfyPlPs" description="Toggle play/pause."/>
+		<command name="pause" code="spfyPaus" description="Pause playback."/>
+		<command name="play" code="spfyPlay" description="Resume playback."/>
+		<command name="play track" code="spfyPCtx" description="Start playback of a track in the given context.">
+			<direct-parameter description="the URI of the track to play" type="text"/>
+			<parameter name="in context" code="cotx" description="the URI of the context to play in" type="text" optional="yes"/>
+		</command>
+	</suite>
+	<!-- <xi:include href="standard.sdef" xpointer="xpointer(/dictionary/suite)"/> -->
+	<suite name="Standard Suite" code="????" description="Common classes and commands for all applications.">
+		<class name="application" code="capp" description="The application's top level scripting object.">
+			<property name="name" code="pnam" description="The name of the application." type="text" access="r"/>
+			<property name="frontmost" code="pisf" description="Is this the frontmost application?" type="boolean" access="r"/>
+		</class>
+	</suite>
+</dictionary>

@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDocumentTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeExtensions</key>
+			<array>
+				<string>aup3</string>
+				<string>mp3</string>
+				<string>wav</string>
+				<string>flac</string>
+				<string>ogg</string>
+			</array>
+			<key>CFBundleTypeName</key>
+			<string>Audacity File</string>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+		</dict>
+	</array>
+	<key>CFBundleIdentifier</key>
+	<string>com.example.audacitylike</string>
+	<key>CFBundleName</key>
+	<string>Audacity-like</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>audacitylike</string>
+			</array>
+		</dict>
+	</array>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.music</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>record</string>
+</dict>
+</plist>

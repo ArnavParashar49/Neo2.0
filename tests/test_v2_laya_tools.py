@@ -162,4 +162,4 @@ def test_dataset_tool_labels():
     assert tool_for("is it going to rain today") == "weather"
     assert tool_for("type hello world") == "type_text"
     assert tool_for("remember that I park on level 3") == "memory"
-    assert tool_for("play some jazz") == ""
+    assert tool_for("play some jazz") == "play_music"  # Laya learns "play …" as the music task

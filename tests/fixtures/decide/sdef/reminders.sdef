@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE dictionary SYSTEM "file://localhost/System/Library/DTDs/sdef.dtd">
+<!-- Test fixture: a to-do app with reminders in lists. -->
+<dictionary title="Reminders-like Terminology" xmlns:xi="http://www.w3.org/2003/XInclude">
+	<xi:include href="standard.sdef" xpointer="xpointer(/dictionary/suite)"/>
+	<suite name="Reminders Suite" code="remi" description="To-do terms">
+		<command name="show" code="remishow" description="Show an object">
+			<direct-parameter type="specifier"/>
+		</command>
+		<class-extension extends="application">
+			<element type="list"/>
+		</class-extension>
+		<class name="list" code="list" description="A list">
+			<element type="reminder"/>
+			<property name="name" code="pnam" type="text"/>
+		</class>
+		<class name="reminder" code="remi" description="A reminder">
+			<property name="name" code="pnam" type="text"/>
+			<property name="due date" code="dued" type="date"/>
+		</class>
+	</suite>
+</dictionary>

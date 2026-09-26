@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE dictionary SYSTEM "file://localhost/System/Library/DTDs/sdef.dtd">
+<!-- Test fixture: a chat app: send text or a file to a participant or a chat. -->
+<dictionary title="Messages-like Terminology">
+	<suite name="Chat Suite" code="icht" description="Chat terms">
+		<command name="send" code="ichtsend" description="Sends a message to a participant or to a chat.">
+			<direct-parameter>
+				<type type="file"/>
+				<type type="text"/>
+			</direct-parameter>
+			<parameter name="to" code="TO  ">
+				<type type="participant"/>
+				<type type="chat"/>
+			</parameter>
+		</command>
+		<command name="login" code="ichtlogi" description="Login to all accounts."/>
+		<class name="participant" code="pres" description="A participant.">
+			<property name="handle" code="hndl" type="text" access="r" description="The handle"/>
+		</class>
+		<class name="chat" code="imct" description="A chat.">
+			<property name="id" code="ID  " type="text" access="r" description="The chat id"/>
+		</class>
+	</suite>
+</dictionary>

@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE dictionary SYSTEM "file://localhost/System/Library/DTDs/sdef.dtd">
+<!-- Test fixture: a small stand-in for the OS's standard suite (same public four-char codes). -->
+<dictionary title="Standard Terminology">
+	<suite name="Standard Suite" code="????" description="Common classes and commands for all applications.">
+		<command name="open" code="aevtodoc" description="Open a document.">
+			<direct-parameter description="The file(s) to be opened.">
+				<type type="file"/>
+				<type type="file" list="yes"/>
+			</direct-parameter>
+		</command>
+		<command name="quit" code="aevtquit" description="Quit the application."/>
+		<command name="delete" code="coredelo" description="Delete an object.">
+			<direct-parameter type="specifier" description="The object(s) to delete."/>
+		</command>
+		<command name="duplicate" code="coreclon" description="Copy an object.">
+			<direct-parameter type="specifier" description="The object(s) to copy."/>
+		</command>
+		<command name="move" code="coremove" description="Move an object to a new location.">
+			<direct-parameter type="specifier" description="The object(s) to move."/>
+			<parameter name="to" code="insh" type="location specifier" description="The new location."/>
+		</command>
+		<command name="make" code="corecrel" description="Create a new object.">
+			<parameter name="new" code="kocl" type="type" description="The class of the new object."/>
+			<parameter name="at" code="insh" type="location specifier" optional="yes" description="The location."/>
+			<parameter name="with data" code="data" type="any" optional="yes" description="The initial contents."/>
+			<parameter name="with properties" code="prdt" type="record" optional="yes" description="The initial values."/>
+			<result type="specifier" description="The new object."/>
+		</command>
+		<class name="application" code="capp" description="The application's top-level scripting object.">
+			<element type="window"/>
+			<property name="name" code="pnam" type="text" access="r" description="The name of the application."/>
+			<property name="frontmost" code="pisf" type="boolean" access="r" description="Is this the active application?"/>
+			<property name="version" code="vers" type="text" access="r" description="The version number."/>
+		</class>
+		<class name="window" code="cwin" description="A window.">
+			<property name="name" code="pnam" type="text" access="r" description="The title of the window."/>
+		</class>
+	</suite>
+</dictionary>

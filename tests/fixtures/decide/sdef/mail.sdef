@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE dictionary SYSTEM "file://localhost/System/Library/DTDs/sdef.dtd">
+<!-- Test fixture: a mail app; the standard suite is pulled INTO a suite through a filtering xpointer. -->
+<dictionary title="Mail-like Terminology" xmlns:xi="http://www.w3.org/2003/XInclude">
+	<suite name="Standard Suite" code="????" description="Common classes and commands for all applications.">
+		<xi:include href="standard.sdef" xpointer="xpointer(/dictionary/suite/node()[not(self::command and ((@name = 'delete') or (@name = 'duplicate') or (@name = 'move')))])"/>
+		<command name="delete" code="maildelo" description="Delete an object.">
+			<direct-parameter type="specifier" description="The object(s) to delete."/>
+		</command>
+	</suite>
+	<suite name="Mail" code="emal" description="Classes and commands for the mail app">
+		<command name="send" code="emsgsend" description="Sends a message.">
+			<direct-parameter type="outgoing message" description="The message to send."/>
+			<result type="boolean" description="True if sending was successful."/>
+		</command>
+		<command name="mailto" code="emalemto" description="Opens a mailto URL.">
+			<direct-parameter type="text" description="The mailto URL."/>
+		</command>
+		<class name="outgoing message" code="bcke" plural="outgoing messages" description="A new email message">
+			<element type="to recipient"/>
+			<property name="subject" code="subj" type="text" description="The subject of the message"/>
+			<property name="content" code="ctnt" type="rich text" description="The contents of the message"/>
+			<property name="visible" code="pvis" type="boolean" description="Show the compose window"/>
+		</class>
+		<class name="recipient" code="rcpt" description="An email recipient">
+			<property name="address" code="radd" type="text" description="The recipient's address"/>
+		</class>
+		<class name="to recipient" code="trcp" inherits="recipient" description="A recipient in the To: field"/>
+		<class-extension extends="application">
+			<element type="outgoing message"/>
+		</class-extension>
+	</suite>
+</dictionary>

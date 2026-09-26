@@ -6,12 +6,13 @@ import importlib
 import sys
 
 _MODULES = ["neo.tools.system", "neo.tools.web", "neo.tools.weather", "neo.tools.memory_tool", "neo.tools.browser"]
+_MAC_ONLY = ["neo.tools.media"]
 _MAC_MODULES = ["neo.tools.computer"]
 
 
 def load_all() -> list[str]:
     loaded: list[str] = []
-    mods = _MODULES + (_MAC_MODULES if sys.platform == "darwin" else [])
+    mods = _MODULES + (_MAC_MODULES + _MAC_ONLY if sys.platform == "darwin" else [])
     for m in mods:
         try:
             importlib.import_module(m)

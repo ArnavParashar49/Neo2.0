@@ -108,6 +108,16 @@ CHAT = [
     ("recommend a book about {topic}", True),
 ]
 QUICK = [
+    ("play {song}", True),
+    ("play the song {song}", True),
+    ("play {song} by {artist}", True),
+    ("play some {genre}", True),
+    ("put on some {genre} music", True),
+    ("play {song} on youtube", True),
+    ("i want to listen to {song}", True),
+    ("play the {artist} song {song}", True),
+    ("{song} chalao", False),
+    ("{song} gaana bajao", False),
     ("open {app}", True),
     ("launch {app}", True),
     ("open {site}", True),
@@ -330,6 +340,7 @@ _PREFIX = ["can you ", "could you ", "please ", "hey neo, ", "neo, ", "hey neo "
 
 # Which NEO tool a quick-action template means (the tool head learns these; "" = none/other).
 _TOOL_HINTS: list[tuple[str, str]] = [
+    ("play|put on|listen to|chalao|bajao", "play_music"),
     ("open|launch|go to|bring up|switch to", "open_app"),
     ("close|quit", "quit_app"),
     ("weather|rain|cold is it|hot is it|forecast|umbrella", "weather"),
@@ -350,6 +361,10 @@ _TOOL_HINTS: list[tuple[str, str]] = [
     ("press|hit|go back|reload|zoom|next tab|close this tab|screenshot", "hotkey"),
     ("what apps are open|which apps are running", "apps_running"),
 ]
+
+
+# Hugging Face intents that now have a NEO tool (older ~/.neo/reflex_hf.jsonl files carry "").
+_HF_TOOLS = {"play_music": "play_music", "play_radio": "play_music", "play_podcasts": "play_music", "play_audiobook": "play_music"}
 
 
 def tool_for(text: str) -> str:
@@ -373,8 +388,18 @@ def tool_for(text: str) -> str:
     return ""
 
 
+SONGS = ["505", "Blinding Lights", "Shape of You", "Kesariya", "Bohemian Rhapsody", "Levitating", "Tum Hi Ho",
+         "Believer", "Heat Waves", "Channa Mereya", "Perfect", "Starboy", "Apna Bana Le", "Yellow", "Numb"]
+ARTISTS = ["Arctic Monkeys", "The Weeknd", "Ed Sheeran", "Arijit Singh", "Queen", "Dua Lipa", "Coldplay",
+           "Imagine Dragons", "Taylor Swift", "AP Dhillon", "Linkin Park"]
+GENRES = ["jazz", "lofi", "rock", "bollywood", "classical", "hip hop", "punjabi", "chill"]
+
+
 def _fill(t: str, rnd: random.Random) -> str:
     return t.format(
+        song=rnd.choice(SONGS),
+        artist=rnd.choice(ARTISTS),
+        genre=rnd.choice(GENRES),
         app=rnd.choice(APPS),
         site=rnd.choice(SITES),
         file=rnd.choice(FILES),
@@ -442,7 +467,9 @@ def build(n_per_class: int = 320, seed: int = 7) -> list[dict]:
                             "source": name,
                             "hf_intent": r.get("source", "").split(":", 1)[-1] if name == "reflex_hf.jsonl" else "",
                             "destructive": r.get("destructive", False),
-                            "tool": r.get("tool", tool_for(r["text"]) if r["intent"] == "quick_action" else ""),
+                            "tool": r.get("tool") or _HF_TOOLS.get(r.get("source", "").split(":", 1)[-1], "")
+                            if name == "reflex_hf.jsonl"
+                            else r.get("tool", tool_for(r["text"]) if r["intent"] == "quick_action" else ""),
                         }
                     )
     rnd.shuffle(rows)

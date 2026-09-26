@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE dictionary SYSTEM "file://localhost/System/Library/DTDs/sdef.dtd">
+<!-- Test fixture (negative): a document editor - makes documents, plays nothing, sends nothing. -->
+<dictionary title="Writer Terminology" xmlns:xi="http://www.w3.org/2003/XInclude">
+	<xi:include href="standard.sdef" xpointer="xpointer(/dictionary/suite)"/>
+	<suite name="Writer Suite" code="wrtr" description="Document terms">
+		<command name="print" code="aevtpdoc" description="Print a document.">
+			<direct-parameter type="document"/>
+		</command>
+		<command name="print" code="wrtrprnt" hidden="yes" description="Legacy print.">
+			<direct-parameter type="text"/>
+		</command>
+		<class-extension extends="application">
+			<element type="document"/>
+		</class-extension>
+		<class name="document" code="docu" description="A document.">
+			<property name="name" code="pnam" type="text"/>
+			<property name="text" code="ctxt" type="text"/>
+		</class>
+	</suite>
+</dictionary>

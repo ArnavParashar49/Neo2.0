@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE dictionary SYSTEM "file://localhost/System/Library/DTDs/sdef.dtd">
+<!-- Test fixture: a notes app; `make` comes from the included standard suite (XInclude 2001). -->
+<dictionary title="Notes-like Terminology" xmlns:xi="http://www.w3.org/2001/XInclude">
+	<xi:include href="standard.sdef" xpointer="xpointer(/dictionary/suite)"/>
+	<suite name="Notes Suite" code="note" description="Terms for controlling the notes app">
+		<command name="show" code="noteshow" description="Show an object in the UI">
+			<direct-parameter type="specifier" description="The object to be shown"/>
+		</command>
+		<class-extension extends="application">
+			<element type="folder"/>
+			<element type="note"/>
+		</class-extension>
+		<class name="folder" code="cfol" description="a folder containing notes">
+			<element type="note"/>
+			<property name="name" code="pnam" type="text" description="the name of the folder"/>
+		</class>
+		<class name="note" code="note" description="a note">
+			<property name="name" code="pnam" type="text" description="the name of the note"/>
+			<property name="body" code="body" type="text" description="the HTML content of the note"/>
+		</class>
+	</suite>
+</dictionary>
