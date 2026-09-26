@@ -76,7 +76,7 @@ async def _settle(ev: EventBus, idle: bool, job: str = "") -> None:
 
 # Screen observations go stale the moment the next one is taken; keeping every ax_tree dump of a
 # run in the prompt is pure token cost (and on an 8K-TPM brain, pure waiting).
-_OBSERVATIONS = {"ax_tree", "ax_find", "screenshot", "apps_running", "browser_read", "read_file"}
+_OBSERVATIONS = {"ax_tree", "ax_find", "screenshot", "apps_running", "browser_read", "page_read", "read_file"}
 _SUPERSEDED_KEEP = 200
 
 

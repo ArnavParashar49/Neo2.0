@@ -228,8 +228,10 @@ async def run() -> None:
     restore_timers()  # timers set before a restart still go off
     if sys.platform == "darwin":
         from neo.decide import engine as decide
+        from neo.decide.kinds import schedule
 
         decide.warm()  # scan the apps now, so "play …" doesn't wait for it the first time
+        schedule.prune()  # calendar files an earlier run handed to a calendar app
 
     # Text works from here on; voice comes up alongside (it may be downloading models).
     await bus().set_state(NeoState.IDLE)

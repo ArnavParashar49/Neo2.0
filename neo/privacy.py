@@ -37,11 +37,12 @@ async def forget_everything() -> dict[str, int]:
     memory.forget()  # the corrections' embeddings (RAM only)
     finetune.feature_cache().unlink(missing_ok=True)  # rebuilt from the public datasets on the next retrain
     from neo.decide import engine as decide
-    from neo.decide import eventkit, learned, media, run, sites
+    from neo.decide import eventkit, learned, media, run, shadow, sites
 
     counts["app choices"] = decide.forget()
     counts["learned media"] = media.forget()
     counts["learned places & people"] = learned.forget()
+    counts["task dry runs"] = shadow.forget()  # the shadow log
     run.forget()  # receipts and last actions (memory only)
     eventkit.forget()
     sites.forget()  # site words searched for lately (memory only)

@@ -13,12 +13,22 @@ from neo.config import Settings
 
 # A scratch conftest doing `from tests.conftest import *` must get the underscore fixtures too —
 # without them a test runs against the user's real ~/.neo.
-__all__ = ["_isolated_data_dir", "_never_the_real_data_dir", "_no_real_embeddings", "_fresh_learning_state"]
+__all__ = [
+    "_isolated_data_dir",
+    "_never_the_real_data_dir",
+    "_no_real_embeddings",
+    "_fresh_learning_state",
+    "_no_shadow_dry_runs",
+]
 
 # Hermetic: no test may read the developer's real keys or settings (~/.neo/.env, ./.env).
 Settings.model_config["env_file"] = None
-for _k in ("GEMINI_API_KEY", "GEMINI_API_KEYS", "GROQ_API_KEY", "ANTHROPIC_API_KEY"):
+for _k in ("GEMINI_API_KEY", "GEMINI_API_KEYS", "GROQ_API_KEY", "ANTHROPIC_API_KEY", "NEO_DECIDE_MODES"):
     os.environ.pop(_k, None)
+
+from neo.decide import shadow as _shadow  # noqa: E402
+
+_REAL_LATER = _shadow.later
 
 
 @pytest.fixture(autouse=True)
@@ -64,3 +74,58 @@ def _fresh_learning_state():
     outcomes.forget()
     memory.forget()
     learn._counts.clear()
+
+
+@pytest.fixture(autouse=True)
+def _no_shadow_dry_runs(monkeypatch):
+    """The task kinds ship in shadow mode: after a tool's legacy answer, the kind's driver works
+    out in the background what it would have done, looking at the real apps, stores and web. In
+    tests that never happens: the dry run is dropped unstarted. A test that faked everything a
+    dry run touches asks for the `shadow_runs` fixture."""
+
+    def drop(kind, facts, **extra):
+        facts.close()
+
+    monkeypatch.setattr(_shadow, "later", drop)
+
+
+@pytest.fixture
+def shadow_runs(monkeypatch):
+    """Dry runs of kinds in shadow mode run (their drivers faked by the test)."""
+    monkeypatch.setattr(_shadow, "later", _REAL_LATER)
+
+
+@pytest.fixture
+def real_handlers(monkeypatch):
+    """The task kinds' tools with their own handlers (another test may have swapped one)."""
+    from neo.agent.registry import registry
+    from neo.tools import load_all
+
+    load_all()
+    from neo.tools import computer, tasks, web
+
+    for mod, names in (
+        (tasks, ("notes_create", "reminder_add", "calendar_add", "calendar_today", "mail_unread")),
+        (computer, ("open_app", "hotkey", "page_read", "safari_read")),
+        (web, ("web_search", "search_site")),
+    ):
+        for name in names:
+            monkeypatch.setattr(registry().get(name), "handler", getattr(mod, name))
+
+
+@pytest.fixture
+def decide_modes(monkeypatch):
+    """Set the task kinds' modes for one test (`decide_modes(add_event="on")`), with the tools shown
+    as those modes want; the release defaults come back afterwards."""
+    from neo import config
+    from neo.tools import load_all
+
+    def use(**modes: str) -> None:
+        monkeypatch.setenv("NEO_DECIDE_MODES", ",".join(f"{k}={m}" for k, m in modes.items()))
+        monkeypatch.setattr(config, "_settings", None)
+        load_all()
+
+    yield use
+    monkeypatch.delenv("NEO_DECIDE_MODES", raising=False)
+    monkeypatch.setattr(config, "_settings", None)
+    load_all()

@@ -8,6 +8,7 @@ import time
 
 from neo.agent import confirm
 from neo.agent.registry import ToolContext, ToolOutput, tool
+from neo.config import decide_mode
 from neo.tools.computer import apps, ax, legacy, policy, screen, shell
 from neo.tools.computer import input as inp
 
@@ -355,6 +356,12 @@ _HOTKEYS: list[tuple[str, dict]] = [
     (rf"{_LEAD}copy\s+(?:that|it|this){_TAIL}", {"keys": "cmd+c"}),
     (rf"{_LEAD}paste(?:\s+(?:that|it|this))?{_TAIL}", {"keys": "cmd+v"}),
     (rf"{_LEAD}save(?:\s+(?:that|it|this|the\s+(?:file|note|document)))?{_TAIL}", {"keys": "cmd+s"}),
+    # the notes app this user uses (by evidence) while write_note is on; else the legacy guard
+    (
+        rf"{_LEAD}(?:make\s+|create\s+|start\s+|open\s+)?(?:a\s+)?new\s+note{_TAIL}",
+        {"keys": "cmd+n", "app": "note"},
+        lambda f: decide_mode("write_note") == "on",
+    ),
     (rf"{_LEAD}(?:make\s+|create\s+|start\s+|open\s+)?(?:a\s+)?new\s+note{_TAIL}", {"keys": "cmd+n", "app": "Notes"}),
     (rf"{_LEAD}(?:make\s+|create\s+|start\s+|open\s+)?(?:a\s+)?new\s+document{_TAIL}", {"keys": "cmd+n", "app": "document"}),
     (rf"{_LEAD}(?:open\s+)?(?:a\s+)?new\s+window{_TAIL}", {"keys": "cmd+n"}),
@@ -409,7 +416,21 @@ _CLICK_PATHS: list[tuple[str, dict]] = [
         {"label": "<label>"},
     ),
 ]
-_DOC_APPS = {"notes", "textedit", "pages", "stickies", "numbers", "keynote", "freeform"}
+_DOC_APPS = {"notes", "textedit", "pages", "stickies", "numbers", "keynote", "freeform"}  # legacy's list
+
+
+def _doc_like(name: str, pid: int | None) -> bool:
+    """The front app makes a fresh note or document with ⌘N: by evidence while write_note is on
+    (neo.decide.kinds.note.doc_like), else by legacy's list of names."""
+    if decide_mode("write_note") != "on":
+        return name.lower() in _DOC_APPS
+    from neo.decide import inventory
+    from neo.decide.kinds import note
+
+    app = inventory.app_for_pid(pid) if pid else None
+    return app is not None and note.doc_like(app)
+
+
 _DICTATE_SYSTEM = (
     "You type on the user's behalf into the document they have open. Reply with ONLY the text to "
     "type: no preamble, no quotes, no markdown headings or bold. For points or a list, one item "
@@ -454,10 +475,10 @@ async def _ensure_text_focus() -> tuple[str | None, bool]:
         return "Error: the cursor is in a password field — I won't type there.", False
     if await asyncio.to_thread(ax.focused_editable):
         return None, False
-    app, _ = ax.frontmost_app()
+    app, pid = ax.frontmost_app()
     area = await asyncio.to_thread(ax.main_text_area)
     created = False
-    if area is None and app.lower() in _DOC_APPS:
+    if area is None and await asyncio.to_thread(_doc_like, app, pid):
         inp.hotkey("cmd+n")  # the front window shows no editor at all: a fresh note/document
         created = True
         await asyncio.sleep(0.7)
@@ -559,16 +580,19 @@ async def hotkey(a: dict, c: ToolContext) -> str:
         last = _reg().last
         if not last or last[0] not in _INPUT_TOOLS or time.time() - last[1] > _UNDO_WINDOW_S:
             return "Error: undo what? I haven't typed anything just now."
+    if want == "note":
+        return await _new_note(c)
     specific = want not in ("", "browser", "browser|finder", "document", "tabs")
     if err := await _guard_front(want if specific else ""):
         return err
-    front = ax.frontmost_app()[0].lower()
+    front_name, front_pid = ax.frontmost_app()
+    front = front_name.lower()
     browsers = await asyncio.to_thread(_browser_names) if want in ("browser", "browser|finder", "tabs") else set()
     if want == "browser" and front not in browsers:
         return f"Error: '{keys}' only makes sense in a browser, and {front or 'nothing'} is in front."
     if want == "browser|finder" and front not in browsers | {"finder"}:
         return f"Error: going back only makes sense in a browser or Finder, and {front or 'nothing'} is in front."
-    if want == "document" and front not in _DOC_APPS:
+    if want == "document" and not await asyncio.to_thread(_doc_like, front, front_pid):
         return "Error: which app should the new document be in?"
     # "new tab" from an app without tabs: the user's default browser
     if want == "tabs" and front not in _TAB_APPS | browsers:
@@ -579,6 +603,24 @@ async def hotkey(a: dict, c: ToolContext) -> str:
     if gate := await _ask_before_keys(a, keys, ax.frontmost_app()[0], c):
         return gate
     return inp.hotkey(keys)
+
+
+async def _new_note(c: ToolContext) -> str:
+    """"new note" (write_note on): the New command of the notes app this user uses, found by its
+    ⌘N shortcut in the app's own menus; the chord itself when the menu doesn't show one."""
+    from neo.decide import axkit
+    from neo.decide.kinds import note
+
+    app = await note.top_app(c.user_text)
+    if app is None:
+        return "Error: there's no notes app on this Mac."
+    if err := await _guard_front(app.name):
+        return err
+    pid = await axkit.window_pid(app, 5.0)
+    item = await asyncio.to_thread(axkit.menu_item, pid, "n", 0) if pid else None
+    if item and await asyncio.to_thread(axkit.perform, item[0], "AXPress"):
+        return f"New note in {app.name}."
+    return inp.hotkey("cmd+n")
 
 
 _MOD_NAMES = {"command": "cmd", "meta": "cmd", "option": "alt", "control": "ctrl"}
@@ -682,13 +724,19 @@ async def click_text(a: dict, c: ToolContext) -> str:
             r"(?!.*\b(?:please|now|for|and|with|then|to|in|on)\b)"
             r"(?P<target>[\w.+-]+(?:\s+[\w.+-]+){0,2})[\s.!]*$",
             {"target": "<target>"},
-        )
+        ),
+        (  # "safari kholo", "mera mail khol do"
+            r"^\s*(?:(?:mera|meri|mere)\s+)?(?!(?:ye|yeh|isko|usko|woh|wo)\b)"
+            r"(?P<target>[\w.+-]+(?:\s+[\w.+-]+){0,2}?)\s+(?:kholo|khol\s+do|khol\s+dijiye)\s*[.!।]*\s*$",
+            {"target": "<target>"},
+            lambda f: decide_mode("open_app") == "on",
+        ),
     ],
     quiet=True,
     early=True,
     idempotent=True,
 )
-async def open_app(a: dict, c: ToolContext) -> str:
+async def open_app(a: dict, c: ToolContext):
     target = str(a["target"]).strip()
     why = policy.open_risk(target)
     if not why and c.tainted() and ("://" in target or "." in target) and policy.url_carries_data(target):
@@ -697,7 +745,22 @@ async def open_app(a: dict, c: ToolContext) -> str:
         gate = confirm.gated("open_app", a, f"open {target[:80]} — {why}", detail=target)
         if isinstance(gate, str):
             return gate
-    return await apps.open_app(target)
+    m = decide_mode("open_app")
+    if m == "on":
+        from neo.decide import run
+        from neo.decide.kinds import launch
+
+        return run.to_output(await launch.open_target(target))
+    out = await apps.open_app(target)
+    if m == "shadow":
+        from neo.decide import shadow
+
+        with shadow.starting("open_app"):
+            from neo.decide.kinds import launch
+
+            ok = not out.startswith(("Error", "NEEDS_"))
+            shadow.later("open_app", launch.shadow(target, out), legacy_ok=ok)
+    return out
 
 
 @tool(
@@ -792,6 +855,33 @@ async def open_url(a: dict, c: ToolContext) -> str:
 
 
 @tool(
+    "page_read",
+    "Read the visible text and URL of the front browser tab.",
+    _OBJ,
+    parallel_safe=True,
+    category="web",
+    untrusted=True,
+    hidden=True,  # shown once web_search is on (neo.tools.tasks.apply_modes)
+)
+async def page_read(a: dict, c: ToolContext):
+    m = decide_mode("web_search")
+    if m == "on":
+        from neo.decide import run
+        from neo.decide.kinds import site
+
+        return run.to_output(await site.page_read())
+    out = f"URL: {await legacy.safari_current_url()}\n\n" + await legacy.safari_page_text()
+    if m == "shadow":
+        from neo.decide import shadow
+
+        with shadow.starting("web_search"):
+            from neo.decide.kinds import site
+
+            shadow.later("web_search", site.shadow_page_read())
+    return out
+
+
+@tool(
     "safari_read",
     "Read the visible text of Safari's current tab (and its URL).",
     _OBJ,
@@ -799,9 +889,9 @@ async def open_url(a: dict, c: ToolContext) -> str:
     category="web",
     untrusted=True,
 )
-async def safari_read(a: dict, c: ToolContext) -> str:
-    url = await legacy.safari_current_url()
-    return f"URL: {url}\n\n" + await legacy.safari_page_text()
+async def safari_read(a: dict, c: ToolContext):
+    """The old name of page_read (hidden once web_search is on; goes in R6)."""
+    return await page_read(a, c)
 
 
 # The task tools (neo/tools/tasks.py) were registered right here before they moved: loading them

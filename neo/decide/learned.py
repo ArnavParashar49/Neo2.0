@@ -1,7 +1,9 @@
 """Small things NEO learned about where things go on this Mac, one store per namespace.
 
-* ``sites`` - a site word (and country) -> the host a confirmed visit landed on;
-* ``templates`` - a host -> its search URL template (the terms slot only, nothing else);
+* ``sites`` - a site word (and country) -> the host a confirmed visit landed on, and whether it
+  was a search or an open;
+* ``templates`` - a site or a section of one (host + path prefix) -> its search URL template (the
+  terms slot only, nothing else);
 * ``bindings`` - a hashed phrase -> the contact it meant and which of their handles (by label);
 * ``containers`` - (kind, app) -> the folder / list / calendar id the user chose;
 * ``store_views`` - kind:app -> the app writes into an OS store route;

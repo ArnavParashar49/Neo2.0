@@ -709,7 +709,9 @@ def _learn_from(job: str, res: AgentResult) -> None:
 
 # Tools whose result is information for the user: a run that used one has something to say,
 # however the request was phrased ("John ki unread emails mein kya likha hai").
-_INFO_TOOLS = {"web_search", "web_fetch", "weather", "clock", "calendar_today", "mail_unread", "safari_read"}
+_INFO_TOOLS = {
+    "web_search", "web_fetch", "weather", "clock", "calendar_today", "mail_unread", "page_read", "safari_read",
+}  # fmt: skip
 
 
 def _quietly(d: Decision | None, res: AgentResult) -> bool:

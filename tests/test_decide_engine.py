@@ -18,8 +18,10 @@ import types
 import numpy as np
 import pytest
 
-from neo.decide import engine
+from neo.decide import engine, routes
 from neo.reflex import zeroshot
+
+_DRIVERS = dict(engine.DRIVERS)  # as shipped (the fixture below swaps them for generic methods)
 
 try:
     from neo.decide.inventory import App
@@ -139,6 +141,7 @@ def _hermetic(monkeypatch):
         monkeypatch.setitem(sys.modules, "neo.decide.inventory", _STUB_INVENTORY)
     monkeypatch.setattr(engine, "DRIVERS", {})  # generic methods: script / url / ax
     monkeypatch.setattr(engine, "_app_caps", lambda app: CAPS.get(app.bundle_id, frozenset()))
+    monkeypatch.setattr(routes, "route_app", lambda kind, route: None)  # no store is asked about
     monkeypatch.setattr(neo.reflex, "get_laya", lambda: None)
     monkeypatch.setattr(zeroshot, "_agent", None)  # Laya is off in tests: nothing ever loads
     engine._cache.clear()
@@ -379,12 +382,13 @@ def test_every_browser_is_left_to_the_web_fallback_unless_named():
 def test_other_kinds_find_their_apps_from_declared_evidence():
     mailer = mk("Postbox", "test.mail", handles=("mailto",), **LIGHT)
     chat = mk("Chatter", "test.chat", category="public.app-category.social-networking", **HEAVY)
-    cal = mk("Datebook", "test.cal", viewer_types=("com.example.ical.ics",), **LIGHT)
-    apps = [*APPS, mailer, chat, cal]
+    # an app that only opens calendar files is no candidate: the .ics hand-off is the fallback
+    ics = mk("Datebook", "test.cal", viewer_types=("com.example.ical.ics",), **LIGHT)
+    apps = [*APPS, mailer, chat, ics]
     assert order(choose("send_email", "email mom", apps)) == ["Postbox"]
     assert order(choose("send_message", "text mom", apps)) == ["Chatter"]
-    assert order(choose("add_event", "lunch friday at 1", apps)) == ["Datebook"]
-    assert order(choose("write_note", "note: buy milk", apps)) == ["Notepadly"]
+    assert order(choose("add_event", "lunch friday at 1", apps)) == ["ics"]
+    assert order(choose("write_note", "note: buy milk", apps)) == ["Notepadly", "file"]
     assert order(choose("open_app", "open the thing", apps)) == ["web"]  # nothing named
     assert order(choose("web_search", "search for cats", apps)) == ["web"]
     assert order(choose("no_such_kind", "hmm", apps)) == []
@@ -399,6 +403,34 @@ def test_a_registered_driver_supplies_the_methods(monkeypatch):
     c = choose("play_media", "play a song", APPS)
     assert order(c) == ["Tunewave", "web", "Podnest"]  # an app the driver can't drive is dropped
     assert c[0].methods == ("learned_uri", "ax_search_play")  # best prior first
+
+
+def test_a_driver_of_several_kinds_gives_each_kind_its_own_methods(monkeypatch):
+    cal = mk("Datebook", "test.cal", **HEAVY)
+    monkeypatch.setitem(CAPS, "test.cal", frozenset({"event.make", "event.read"}))
+    drv = types.SimpleNamespace(methods_for=lambda app, kind=None: {"add_event": ("script_make",)}.get(kind, ("script_read",)))
+    monkeypatch.setitem(sys.modules, "fake_schedule_driver", drv)
+    monkeypatch.setattr(engine, "DRIVERS", {"add_event": "fake_schedule_driver", "read_calendar": "fake_schedule_driver"})
+    assert choose("add_event", "lunch at 1", [cal])[0].methods == ("script_make",)
+    assert choose("read_calendar", "what's on today", [cal])[0].methods == ("script_read",)
+
+
+def test_the_kinds_with_drivers_are_wired_as_planned():
+    import importlib
+    import inspect
+
+    from neo.decide.kinds import note
+
+    t = engine.TASKS
+    assert (t["add_event"].routes, t["add_event"].fallback, t["add_event"].signals) == (("eventkit.events",), "ics", ())
+    assert (t["add_reminder"].routes, t["add_reminder"].fallback) == (("eventkit.reminders",), None)
+    assert t["read_calendar"].routes == ("eventkit.events",) and t["write_note"].fallback == "file"
+    kinds = {"play_media", "write_note", "add_event", "add_reminder", "read_calendar", "read_mail", "open_app", "web_search"}
+    assert set(_DRIVERS) == kinds  # sends (R4/R5) have none yet
+    for kind, mod in _DRIVERS.items():
+        fn = importlib.import_module(mod).methods_for
+        assert kind == "play_media" or len(inspect.signature(fn).parameters) == 2, kind
+    assert _DRIVERS["write_note"] == note.__name__
 
 
 def test_many_used_apps_go_through_laya_shortlist(monkeypatch):
@@ -1006,7 +1038,7 @@ def test_a_notes_library_is_a_weak_note_candidate_and_a_document_editor_is_not()
     unused = mk("Jotter2", "test.jotter2", editor_types=("public.plain-text",), **UNUSED)
     ide = mk("Codebox", "test.codebox", editor_types=("public.plain-text",), category="public.app-category.developer-tools", **HEAVY)
     got = order(choose("write_note", "note: buy milk", [library, editor, unused, ide, NOTEPADLY]))
-    assert set(got) == {"Jotter", "Notepadly"}
+    assert set(got) == {"Jotter", "Notepadly", "file"} and got[-1] == "file"
 
 
 def test_the_web_search_tag_counts_only_for_a_browser():
@@ -1023,7 +1055,7 @@ def test_an_app_that_did_the_kind_before_is_a_candidate_without_declared_evidenc
     quiet = mk("Quietnote", "test.quiet", **LIGHT)
     assert "Quietnote" not in order(choose("write_note", "note: x", [quiet]))
     engine.record("write_note", "test.quiet", "ax", True)
-    assert order(choose("write_note", "note: x", [quiet])) == ["Quietnote"]
+    assert order(choose("write_note", "note: x", [quiet])) == ["Quietnote", "file"]
     assert engine.proven("write_note", "test.quiet") and not engine.proven("write_note", "test.other")
     engine.record("read_calendar", "test.quiet", "ax", True)  # read_calendar takes declared evidence only
     assert order(choose("read_calendar", "what's on today", [quiet])) == []

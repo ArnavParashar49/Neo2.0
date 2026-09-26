@@ -8,8 +8,9 @@ import re
 import httpx
 
 from neo.agent.registry import ToolContext, tool
+from neo.config import decide_mode
 
-# The table of known sites and their search pages (legacy until sites are found by evidence).
+# The table of known sites and their search pages: web_search's legacy, until the kind is on.
 from neo.tools.computer.legacy import _ENGINE_RE, _SITE_RE, site_search_url
 
 # "search for it on amazon", "open that one on google": the thing comes from the conversation,
@@ -19,6 +20,26 @@ _VAGUE_QUERY = (
     r"\s+(?:on|in|at)\b)"
 )
 _VAGUE_QUERY_AFTER_FOR = r"(?!(?:for\s+)?(?:it|this|that|these|those|them|one|(?:the|this|that)\s+(?:\w+\s+)?one)\s*[.!?]*\s*$)"
+# a site as the user says it: a name or a domain, up to three words ("<brand> maps")
+_SITE = r"(?P<site>[\w.+-]+(?:\s+[\w.+-]+){0,2})"
+
+
+# While web_search is on, which site a search means is told by evidence (neo.decide.kinds.site):
+# the patterns with a site table give way to generic ones whose checks claim known sites only.
+def _legacy_fp(filled: dict) -> bool:
+    return decide_mode("web_search") != "on"
+
+
+def _claims_web(filled: dict) -> bool:
+    from neo.decide.kinds import site
+
+    return decide_mode("web_search") == "on" and site.claims_web_search(filled)
+
+
+def _claims_site(filled: dict) -> bool:
+    from neo.decide.kinds import site
+
+    return decide_mode("web_search") == "on" and site.claims_search_site(filled)
 
 
 def _country() -> str:
@@ -112,7 +133,16 @@ def _news(query: str, n: int) -> str:
             rf"(?!(?:{_SITE_RE})\s+for\b)"  # "search amazon for X" opens the site's search
             r"(?P<query>.{3,}?)\s*[?.!]*\s*$",
             {"query": "<query>"},
-        )
+            _legacy_fp,
+        ),
+        (
+            # the same verbs; what the query ends with ("in <W>", "on <W>") is judged by evidence
+            r"^\s*(?:please\s+)?(?:search(?:\s+the\s+(?:web|internet))?(?:\s+for)?|google|look\s+up|"
+            r"web\s+search(?:\s+for)?|find\s+(?:me\s+)?(?:info(?:rmation)?\s+(?:on|about)|out\s+about))\s+"
+            r"(?P<query>.{3,}?)\s*[?.!]*\s*$",
+            {"query": "<query>"},
+            _claims_web,
+        ),
     ],
     payload=True,
     untrusted=True,
@@ -210,28 +240,58 @@ async def web_fetch(a: dict, c: ToolContext) -> str:
             rf"^\s*(?:please\s+)?(?:search(?:\s+for)?|look\s+up|google)\s+{_VAGUE_QUERY}(?!.*\b(?:and|then)\b)"
             rf"(?P<query>.+?)\s+(?:on|in|at)\s+(?P<site>{_SITE_RE})\s*[.!?]*\s*$",
             {"site": "<site>", "query": "<query>"},
+            _legacy_fp,
         ),
         (
             # "open"/"find"/"show me" … on a named site (not a generic word like "maps" or "news")
             rf"^\s*(?:please\s+)?(?:open|find|show\s+me)\s+{_VAGUE_QUERY}(?!.*\b(?:and|then)\b)"
             rf"(?P<query>.+?)\s+(?:on|in|at)\s+(?P<site>{_ENGINE_RE})\s*[.!?]*\s*$",
             {"site": "<site>", "query": "<query>"},
+            _legacy_fp,
         ),
         (
             # "search amazon for 2tb ssd", "search youtube for cat videos"
             rf"^\s*(?:please\s+)?(?:search|look\s+up|check)\s+(?P<site>{_SITE_RE})\s+for\s+{_VAGUE_QUERY_AFTER_FOR}(?P<query>.+?)\s*[.!?]*\s*$",
             {"site": "<site>", "query": "<query>"},
+            _legacy_fp,
         ),
         (
             # "open youtube and search for cat videos"
             rf"^\s*(?:please\s+)?(?:open|go\s+to)\s+(?P<site>{_ENGINE_RE})\s+(?:and|then)\s+(?:search|look\s+up|find)(?:\s+for)?\s+"
             rf"{_VAGUE_QUERY_AFTER_FOR}(?P<query>.+?)\s*[.!?]*\s*$",
             {"site": "<site>", "query": "<query>"},
+            _legacy_fp,
+        ),
+        # The same four shapes for any site NEO knows is a website (web_search on). The greedy
+        # query makes the site the words after the last "on/in/at".
+        (
+            rf"^\s*(?:please\s+)?(?:search(?:\s+for)?|look\s+up|google)\s+{_VAGUE_QUERY}(?!.*\b(?:and|then)\b)"
+            rf"(?P<query>.+)\s+(?:on|in|at)\s+{_SITE}\s*[.!?]*\s*$",
+            {"site": "<site>", "query": "<query>"},
+            _claims_site,
+        ),
+        (
+            rf"^\s*(?:please\s+)?(?:open|find|show\s+me)\s+{_VAGUE_QUERY}(?!.*\b(?:and|then)\b)"
+            rf"(?P<query>.+)\s+(?:on|in|at)\s+{_SITE}\s*[.!?]*\s*$",
+            {"site": "<site>", "query": "<query>"},
+            _claims_site,
+        ),
+        (
+            rf"^\s*(?:please\s+)?(?:search|look\s+up|check)\s+{_SITE}\s+for\s+{_VAGUE_QUERY_AFTER_FOR}"
+            r"(?P<query>.+?)\s*[.!?]*\s*$",
+            {"site": "<site>", "query": "<query>"},
+            _claims_site,
+        ),
+        (
+            rf"^\s*(?:please\s+)?(?:open|go\s+to)\s+{_SITE}\s+(?:and|then)\s+(?:search|look\s+up|find)(?:\s+for)?\s+"
+            rf"{_VAGUE_QUERY_AFTER_FOR}(?P<query>.+?)\s*[.!?]*\s*$",
+            {"site": "<site>", "query": "<query>"},
+            _claims_site,
         ),
     ],
     idempotent=True,
 )
-async def search_site(a: dict, c: ToolContext) -> str:
+async def search_site(a: dict, c: ToolContext):
     from neo.tools.computer import apps
 
     site, query = str(a["site"]).strip(), str(a["query"]).strip()
@@ -239,6 +299,30 @@ async def search_site(a: dict, c: ToolContext) -> str:
     if not q or q in ("it", "this", "that", "them", "those", "these", "one", "the same") or q.endswith(" one"):
         return "Error: search for what? Name the thing to search for."
     query = query.strip()[4:].strip() if query.lower().startswith("for ") else query
+    m = decide_mode("web_search")
+    if m == "on":
+        from neo.agent import confirm
+        from neo.decide import run
+        from neo.decide.kinds import site as sk
+
+        if c.tainted() and sk.carries_data(site, query):
+            gate = confirm.gated(
+                "search_site",
+                a,
+                f"search {site} for something that carries data (after reading {c.tainted()})",
+                detail=f"{site}: {query}",
+            )
+            if isinstance(gate, str):
+                return gate
+        return run.to_output(await sk.search(site, query, browser=str(a.get("browser") or "")))
     url = site_search_url(site, query)
     out = await apps.open_app(url)
+    if m == "shadow":
+        from neo.decide import shadow
+
+        with shadow.starting("web_search"):
+            from neo.decide.kinds import site as sk
+
+            ok = not out.startswith(("Error", "NEEDS_"))
+            shadow.later("web_search", sk.shadow(site, url), legacy_ok=ok)
     return out if out.startswith(("Error", "NEEDS_")) else f"Searching {site} for “{query}”."

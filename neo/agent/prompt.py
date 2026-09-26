@@ -33,12 +33,26 @@ How to work:
 - If a request refers to something you can't see ("it", "that one", "the cheaper one") and it
   isn't in the conversation you were given, ask the user. Never search NEO's own logs, data
   folders or temp files to reconstruct what was said.
-- To search a website ("find X on Amazon", "open it on Google"), use search_site with the real
-  product or topic as the query.
+- {search_site}
 - Memory: when the user states a preference, corrects you, or shares a personal fact, save it
   silently with the memory tool. Recall memory before personal or recurring tasks.
 - Respond in the user's language; pass tool arguments in English.
 """
+
+
+# web_search's line while it is legacy or shadow, and once it is on (sites told by evidence)
+_SEARCH_SITE = (
+    'To search a website ("find X on Amazon", "open it on Google"), use search_site with the real\n'
+    "  product or topic as the query.",
+    'To search a website ("find X on <site>", "open it on <site>"), use search_site with the site the\n'
+    "  user named and the real thing as the query.",
+)
+
+
+def persona() -> str:
+    from neo.config import decide_mode
+
+    return PERSONA.replace("{search_site}", _SEARCH_SITE[decide_mode("web_search") == "on"])
 
 
 def system_context() -> str:
@@ -50,7 +64,7 @@ def system_context() -> str:
 
 
 def build(memory_context: str = "", extra: str = "") -> str:
-    parts = [PERSONA]
+    parts = [persona()]
     if memory_context:
         parts.append(
             "\n[MEMORY] What you know about the user and past tasks — facts and preferences to "

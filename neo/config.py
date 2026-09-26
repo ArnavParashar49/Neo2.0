@@ -186,6 +186,20 @@ def settings() -> Settings:
     return _settings
 
 
+# The release default of each kind that has an evidence-chosen driver: "shadow" until the user,
+# present, has checked the new path once (then NEO_DECIDE_MODES="<kind>=on"). Any other kind
+# runs its legacy code.
+DECIDE_DEFAULTS: dict[str, DecideMode] = dict.fromkeys(
+    ("write_note", "add_reminder", "add_event", "read_calendar", "read_mail", "open_app", "web_search"),
+    "shadow",
+)
+
+
+def decide_mode(kind: str) -> DecideMode:
+    """How a task kind runs now: the user's `decide_modes` setting, else its release default."""
+    return settings().decide_modes.get(kind, DECIDE_DEFAULTS.get(kind, "legacy"))
+
+
 def _refuse_real_data_under_tests(data_dir: Path) -> None:
     """A test (or a scratch harness borrowing the suite's fixtures) that isn't isolated must fail
     loudly, never read, train on or erase the user's real memory. This happened once: a scratch

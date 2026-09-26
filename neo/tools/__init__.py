@@ -19,4 +19,9 @@ def load_all() -> list[str]:
             loaded.append(m)
         except Exception as e:  # noqa: BLE001 — one broken tool module must not stop startup
             print(f"[tools] failed to load {m}: {e}")
+    if "neo.tools.tasks" in sys.modules:  # each task kind's tools as its mode shows them
+        try:
+            sys.modules["neo.tools.tasks"].apply_modes()
+        except Exception as e:  # noqa: BLE001 — the tools keep the surface they were registered with
+            print(f"[tools] task modes not applied: {e}")
     return loaded

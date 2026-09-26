@@ -39,6 +39,7 @@ import asyncio
 import contextlib
 import copy
 import importlib
+import inspect
 import json
 import os
 import re
@@ -104,8 +105,9 @@ class Task:
     prefs: bool = False
 
 
-# The drivers of these kinds arrive phase by phase; until a kind's driver lands, its Task keeps the
-# candidates it had (add_event its .ics types, no routes or file/.ics fallbacks yet).
+# The kinds and their evidence. Sends (send_message, send_email) have no driver yet (R4/R5); every
+# other kind is driven by its module in DRIVERS once the user switched it on (neo.config
+# decide_modes).
 TASKS: dict[str, Task] = {
     "play_media": Task(
         "play a song, album, artist, playlist, podcast, video or show",
@@ -141,6 +143,7 @@ TASKS: dict[str, Task] = {
         "write down, jot or save a note",
         wants=("note.make",),
         signals=("intent:INCreateNoteIntent", "intent:INAppendToNoteIntent", "library_text_editor~"),
+        fallback="file",
         laya_min_used=1,
         proven_fit=True,
         prefs=True,
@@ -149,27 +152,44 @@ TASKS: dict[str, Task] = {
         "remind me later, or add a to-do or list item",
         wants=("reminder.make",),
         signals=("intent:INAddTasksIntent",),
+        routes=("eventkit.reminders",),
         laya_min_used=1,
         proven_fit=True,
         prefs=True,
     ),
+    # an app that only opens calendar files is no candidate: the .ics hand-off is the fallback
     "add_event": Task(
         "put a meeting or appointment on my calendar",
         wants=("event.make",),
-        signals=("type:ics", "type:public.calendar-event"),
+        routes=("eventkit.events",),
+        fallback="ics",
         laya_min_used=1,
         proven_fit=True,
         prefs=True,
     ),
-    "read_calendar": Task("what's on my calendar or schedule", wants=("event.read",), laya_min_used=1),
+    "read_calendar": Task(
+        "what's on my calendar or schedule",
+        wants=("event.read",),
+        routes=("eventkit.events",),
+        laya_min_used=1,
+    ),
     "open_app": Task("open, launch or switch to an app", fallback="web", methods=("open",)),
     "web_search": Task("search the web or a website", fallback="web", methods=("url", "ax")),
     "other": Task("anything else", methods=("ax",)),
 }
 
-# kind -> module exposing ``methods_for(app) -> tuple[str, ...]`` (the kind's driver). A kind
-# without one gets the generic Task.methods, filtered by what the app exposes.
-DRIVERS: dict[str, str] = {"play_media": "neo.decide.media"}
+# kind -> module exposing ``methods_for(app[, kind]) -> tuple[str, ...]`` (the kind's driver). A
+# kind without one gets the generic Task.methods, filtered by what the app exposes.
+DRIVERS: dict[str, str] = {
+    "play_media": "neo.decide.media",
+    "write_note": "neo.decide.kinds.note",
+    "add_event": "neo.decide.kinds.schedule",
+    "add_reminder": "neo.decide.kinds.schedule",
+    "read_calendar": "neo.decide.kinds.schedule",
+    "read_mail": "neo.decide.kinds.mail",
+    "open_app": "neo.decide.kinds.launch",
+    "web_search": "neo.decide.kinds.site",
+}
 
 WEB = "web"  # app key (and method) of the web fallback candidate
 
@@ -995,7 +1015,8 @@ def _methods(kind: str, task: Task, app: App, caps: frozenset[str]) -> tuple[str
             fn = None
         if fn is not None:
             try:
-                return tuple(fn(app))
+                # a driver of several kinds gives this kind's methods only
+                return tuple(fn(app, kind) if len(inspect.signature(fn).parameters) > 1 else fn(app))
             except Exception:  # noqa: BLE001 - a driver bug must not sink the whole decision
                 return ()
     if app.kind == "route":  # 'route:<framework>.<store>' is driven through that framework
