@@ -199,20 +199,20 @@ async def quit_app(name: str) -> str:
     return await osascript(f"tell application {_q(name)} to quit") or f"Quit {name}"
 
 
-async def safari_open(url: str, new_tab: bool = True) -> str:
+async def open_url(url: str, browser_id: str = "", browser_name: str = "") -> str:
+    """Open a web page: in the browser given by bundle id, else in the user's default browser
+    (whatever macOS says that is), and bring that browser to the front."""
     if not re.match(r"^[a-z][\w+.-]*:", url, re.I) or re.match(r"^[\w.-]+:\d+(?:/|$)", url):
         url = "https://" + url  # "github.com", "localhost:3000"
-    script = (
-        'tell application "Safari"\n activate\n'
-        + (
-            f" if (count of windows) = 0 then make new document\n tell window 1 to set current tab to (make new tab with properties {{URL:{_q(url)}}})\n"
-            if new_tab
-            else f" set URL of current tab of window 1 to {_q(url)}\n"
-        )
-        + "end tell"
-    )
-    r = await osascript(script)
-    return r if r.startswith("Error") else f"Opened {url} in Safari"
+    code, _, err = await _run(["open", "-b", browser_id, url] if browser_id else ["open", url])
+    if code != 0:
+        return f"Error: couldn't open {url}: {err}"
+    browser = browser_name or default_browser()
+    if browser:
+        ok, real = await bring_front(browser)
+        set_target(real)
+        return f"Opened {url} in {real}" if ok else f"Opened {url} in {real} (it may be behind {front_name()})"
+    return f"Opened {url}"
 
 
 async def safari_page_text(max_chars: int = 8000) -> str:

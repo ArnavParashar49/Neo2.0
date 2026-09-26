@@ -32,6 +32,7 @@ _VAGUE = {"it", "this", "that", "something", "anything", "some music", "music", 
         ),
         (r"^\s*(?P<query>.+?)\s+(?:chalao|chala\s+do|bajao|baja\s+do|lagao|laga\s+do|play\s+karo)\s*[.!?]*\s*$", {"query": "<query>"}),
     ],
+    idempotent=True,
 )
 async def play_music(a: dict, c: ToolContext) -> str:
     query = " ".join(str(a.get("query") or "").split()).strip(" .!?\"'")

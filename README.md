@@ -28,7 +28,7 @@ The router is **Laya**, a 421M-parameter local decision model. One encoder pass 
 | **Act** | `click`, `drag`, `scroll`, `type_text`, `hotkey`, `ax_press`, `ax_set_value` |
 | **Apps** | `open_app`, `activate_app`, `quit_app`, `apps_running`, `applescript`, `finder_reveal` |
 | **Mail · Calendar · Notes** | `mail_unread`, `mail_send`, `calendar_today`, `calendar_add`, `notes_create`, `reminder_add` |
-| **Web** | `web_search`, `web_fetch`, `safari_open`, `safari_read` |
+| **Web** | `web_search`, `web_fetch`, `open_url` (default or named browser), `safari_read` |
 | **Browser** | `browser_open`, `browser_read` (ARIA snapshot + text), `browser_click`, `browser_type`, `browser_press`, `browser_scroll`, `browser_back`, `browser_screenshot` — NEO's own Chromium with a persistent profile, so logins stick |
 | **Files & shell** | `shell`, `read_file`, `write_file`, `edit_file`, `trash` |
 | **System** | `volume`, `brightness`, `timer`, `clock`, `sleep_display` |

@@ -295,3 +295,23 @@ def test_an_approved_action_via_the_models_call_stays_quiet(voice):
 
     asyncio.run(run())
     assert voice.spk.played == []
+
+
+def test_the_same_open_again_is_a_retry_but_the_same_keystroke_is_not(voice, monkeypatch):
+    from neo import config
+
+    monkeypatch.setenv("NEO_LIVE_COMMAND_LANE", "false")
+    monkeypatch.setattr(config, "_settings", None)
+    url = {"url": "web.whatsapp.com"}
+
+    async def run():
+        await feed(voice, heard("open whatsapp on google"))
+        for i in range(5):  # the model re-issued the same call five times
+            await feed(voice, call("open_url", dict(url), f"o{i}"))
+        await feed(voice, call("type_text", {"text": "hi"}, "t1"), call("type_text", {"text": "hi"}, "t2"), DONE, settle=0.2)
+
+    asyncio.run(run())
+    assert voice.ran.count(("open_url", url)) == 1  # one tab, not five
+    assert voice.ran.count(("type_text", {"text": "hi"})) == 2  # typing twice is what was asked
+    retries = [r for r in voice._live.responses if "same call as" in r.response["result"]]
+    assert len(retries) == 4

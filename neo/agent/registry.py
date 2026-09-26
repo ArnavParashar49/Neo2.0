@@ -76,6 +76,9 @@ class RegisteredTool:
     hidden: bool = False  # not exposed to the model (internal/UI-only)
     timeout: float = 120.0  # seconds; a hung tool returns an error instead of stalling the loop
     untrusted: bool = False  # output is third-party content (web, mail, files, screen): data, never instructions
+    # doing it twice in a row gives nothing more (opening the same page or app): a repeat of the
+    # same call moments later is a model retry, not the user's intent — unlike a keystroke
+    idempotent: bool = False
 
     def spec(self) -> ToolSpec:
         return ToolSpec(self.name, self.description, self.parameters)
@@ -179,6 +182,7 @@ def tool(
     hidden: bool = False,
     timeout: float = 120.0,
     untrusted: bool = False,
+    idempotent: bool = False,
 ) -> Callable[[Handler], Handler]:
     def deco(fn: Handler) -> Handler:
         registry().register(
@@ -199,6 +203,7 @@ def tool(
                 hidden=hidden,
                 timeout=timeout,
                 untrusted=untrusted,
+                idempotent=idempotent,
             )
         )
         return fn

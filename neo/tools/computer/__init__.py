@@ -323,8 +323,22 @@ _COMPOSE_TYPE = (
 # Some chords only mean the right thing in some apps: cmd+r is "reload" in a browser but "reply"
 # in Mail; cmd+up is "top of page" in a browser but "parent folder" in Finder. Those carry an
 # `app` guard and fail (→ the agent takes over) anywhere else.
-_BROWSERS = {"safari", "google chrome", "chrome", "firefox", "arc", "brave browser", "microsoft edge", "opera", "vivaldi", "orion"}
-_TAB_APPS = _BROWSERS | {"finder", "terminal", "iterm2", "code", "visual studio code", "xcode", "warp"}
+_TAB_APPS = {"finder", "terminal", "iterm2", "code", "visual studio code", "xcode", "warp"}  # + every browser
+
+
+def _browser_names() -> set[str]:
+    """The browsers on this Mac, lower-case: the default one, plus every app the inventory finds
+    opening web pages (by evidence, not by name)."""
+    names: set[str] = set()
+    try:
+        from neo.decide.inventory import inventory
+
+        names = {a.name.lower() for a in inventory() if "https" in a.handles or a.media_evidence[:1] == ("web browser",)}
+    except Exception:  # noqa: BLE001
+        pass
+    if d := apps.default_browser():
+        names.add(d.lower())
+    return names
 _CHAT_APPS = {"messages", "slack", "discord", "whatsapp", "telegram", "microsoft teams", "signal", "messenger"}
 _SHELL_APPS = {"terminal", "iterm2", "warp", "ghostty", "kitty", "alacritty"}
 _HOTKEYS: list[tuple[str, dict]] = [
@@ -549,15 +563,19 @@ async def hotkey(a: dict, c: ToolContext) -> str:
     if err := await _guard_front(want if specific else ""):
         return err
     front = ax.frontmost_app()[0].lower()
-    if want == "browser" and front not in _BROWSERS:
+    browsers = await asyncio.to_thread(_browser_names) if want in ("browser", "browser|finder", "tabs") else set()
+    if want == "browser" and front not in browsers:
         return f"Error: '{keys}' only makes sense in a browser, and {front or 'nothing'} is in front."
-    if want == "browser|finder" and front not in _BROWSERS | {"finder"}:
+    if want == "browser|finder" and front not in browsers | {"finder"}:
         return f"Error: going back only makes sense in a browser or Finder, and {front or 'nothing'} is in front."
     if want == "document" and front not in _DOC_APPS:
         return "Error: which app should the new document be in?"
-    # "new tab" from an app without tabs: the browser
-    if want == "tabs" and front not in _TAB_APPS and (err := await _guard_front("Safari")):
-        return err
+    # "new tab" from an app without tabs: the user's default browser
+    if want == "tabs" and front not in _TAB_APPS | browsers:
+        if not (browser := apps.default_browser()):
+            return "Error: there's no default browser to open a tab in."
+        if err := await _guard_front(browser):
+            return err
     if gate := await _ask_before_keys(a, keys, ax.frontmost_app()[0], c):
         return gate
     return inp.hotkey(keys)
@@ -668,6 +686,7 @@ async def click_text(a: dict, c: ToolContext) -> str:
     ],
     quiet=True,
     early=True,
+    idempotent=True,
 )
 async def open_app(a: dict, c: ToolContext) -> str:
     target = str(a["target"]).strip()
@@ -687,6 +706,7 @@ async def open_app(a: dict, c: ToolContext) -> str:
     _p({"name": {"type": "string"}}, ["name"]),
     category="apps",
     quiet=True,
+    idempotent=True,
 )
 async def activate_app(a: dict, c: ToolContext) -> str:
     return await apps.activate(a["name"])
@@ -731,24 +751,44 @@ async def applescript(a: dict, c: ToolContext) -> str:
     return await apps.osascript(script, timeout=60)
 
 
+def _named_browser(name: str):
+    """The installed browser the user named ("chrome", "the arc browser"), by the inventory's
+    evidence (it opens web pages); None for anything else ("google", "the internet")."""
+    try:
+        from neo.decide.inventory import inventory, named_in
+
+        app = named_in(name, inventory())
+    except Exception:  # noqa: BLE001
+        return None
+    if app is None:
+        return None
+    if "https" in app.handles or (app.media_evidence[:1] == ("web browser",)):
+        return app
+    return None
+
+
 @tool(
-    "safari_open",
-    "Open a URL in Safari.",
-    _p({"url": {"type": "string"}, "new_tab": {"type": "boolean"}}, ["url"]),
+    "open_url",
+    "Open a web page in the user's default browser, or in the browser they named (browser: the "
+    "name they said). Use this for any website - never assume a particular browser.",
+    _p({"url": {"type": "string"}, "browser": {"type": "string"}}, ["url"]),
     category="web",
     quiet=True,
+    idempotent=True,
 )
-async def safari_open(a: dict, c: ToolContext) -> str:
+async def open_url(a: dict, c: ToolContext) -> str:
     url = str(a["url"]).strip()
     scheme = url.split(":", 1)[0].lower() if re.match(r"^[a-z][\w+.-]*:", url, re.I) else "https"
     why = "" if scheme in ("http", "https") else f"{scheme}: links run code or open other apps"
     if not why and c.tainted() and policy.url_carries_data(url):
         why = f"the link carries data, after reading {c.tainted()}"
     if why:
-        gate = confirm.gated("safari_open", a, f"open {url[:80]} in Safari — {why}", detail=url)
+        gate = confirm.gated("open_url", a, f"open {url[:80]} — {why}", detail=url)
         if isinstance(gate, str):
             return gate
-    return await apps.safari_open(url, bool(a.get("new_tab", True)))
+    browser = str(a.get("browser") or "").strip()
+    app = await asyncio.to_thread(_named_browser, browser) if browser else None
+    return await apps.open_url(url, app.bundle_id if app else "", app.name if app else "")
 
 
 @tool(

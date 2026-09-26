@@ -277,6 +277,7 @@ async def web_fetch(a: dict, c: ToolContext) -> str:
             {"site": "<site>", "query": "<query>"},
         ),
     ],
+    idempotent=True,
 )
 async def search_site(a: dict, c: ToolContext) -> str:
     from neo.tools.computer import apps

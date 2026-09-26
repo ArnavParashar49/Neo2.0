@@ -320,3 +320,58 @@ def test_open_app_unknown_name_checks_dns(monkeypatch):
     monkeypatch.setattr(apps, "_resolves", resolves)
     assert "opened https://www.github.com" in asyncio.run(apps.open_app("github"))
     assert "doesn't exist" in asyncio.run(apps.open_app("nosuchthingzz"))
+
+
+def test_open_url_uses_the_default_browser_or_the_one_named(monkeypatch):
+    from types import SimpleNamespace
+
+    import neo.tools.computer as comp
+    from neo.agent.registry import ToolContext
+    from neo.tools.computer import apps
+
+    ran = []
+
+    async def fake_run(cmd, timeout=30):
+        ran.append(cmd)
+        return 0, "", ""
+
+    async def front(name, wait=1.0):
+        return True, name
+
+    monkeypatch.setattr(apps, "_run", fake_run)
+    monkeypatch.setattr(apps, "bring_front", front)
+    monkeypatch.setattr(apps, "default_browser", lambda: "Fixture Browser")
+    other = SimpleNamespace(bundle_id="com.fixture.other", name="Other Browser")
+    monkeypatch.setattr(comp, "_named_browser", lambda name: other if name == "other" else None)
+    out = asyncio.run(comp.open_url({"url": "web.whatsapp.com"}, ToolContext()))
+    assert ran[-1] == ["open", "https://web.whatsapp.com"] and out.endswith("in Fixture Browser")
+    out = asyncio.run(comp.open_url({"url": "web.whatsapp.com", "browser": "other"}, ToolContext()))
+    assert ran[-1] == ["open", "-b", "com.fixture.other", "https://web.whatsapp.com"] and out.endswith("in Other Browser")
+    out = asyncio.run(comp.open_url({"url": "web.whatsapp.com", "browser": "google"}, ToolContext()))
+    assert ran[-1] == ["open", "https://web.whatsapp.com"]  # not a browser on this Mac: the default one
+
+
+def test_a_new_tab_from_an_app_without_tabs_goes_to_the_default_browser(monkeypatch):
+    import neo.tools.computer as comp
+    from neo.agent.registry import ToolContext
+    from neo.tools.computer import apps
+
+    fronted = []
+
+    async def guard(name):
+        fronted.append(name)
+        return None
+
+    monkeypatch.setattr(comp, "_guard_front", guard)
+    monkeypatch.setattr(comp.ax, "frontmost_app", lambda: ("Notes", 1))
+    monkeypatch.setattr(apps, "default_browser", lambda: "Fixture Browser")
+    monkeypatch.setattr(comp, "_browser_names", lambda: {"fixture browser"})
+    monkeypatch.setattr(comp, "_ask_before_keys", lambda *a, **k: _none())
+    monkeypatch.setattr(comp.inp, "hotkey", lambda keys: f"pressed {keys}")
+    out = asyncio.run(comp.hotkey({"keys": "cmd+t", "app": "tabs"}, ToolContext()))
+    assert fronted[-1] == "Fixture Browser" and out == "pressed cmd+t"
+    assert "only makes sense in a browser" in asyncio.run(comp.hotkey({"keys": "cmd+r", "app": "browser"}, ToolContext()))
+
+
+async def _none():
+    return None
