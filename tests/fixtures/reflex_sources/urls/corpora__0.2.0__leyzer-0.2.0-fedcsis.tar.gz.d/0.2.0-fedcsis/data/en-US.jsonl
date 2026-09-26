@@ -1,0 +1,6 @@
+{"id": "1", "domain": "Console", "intent": "ConsoleRM", "utterance": "remove the folder old_backups", "partition": "train"}
+{"id": "2", "domain": "Email", "intent": "OpenEmail", "utterance": "do i have any new mail", "partition": "train"}
+{"id": "3", "domain": "Email", "intent": "OpenEmail", "utterance": "open my email app", "partition": "test"}
+{"id": "4", "domain": "Wikipedia", "intent": "ScrollDown", "utterance": "scroll a bit further down the article", "partition": "valid"}
+{"id": "5", "domain": "Fitbit", "intent": "ShowSteps", "utterance": "how many steps did i walk today", "partition": "train"}
+{"id": "6", "domain": "Youtube", "intent": "FindQuery", "utterance": "look for cooking videos on youtube", "partition": "train"}

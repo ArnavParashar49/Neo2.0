@@ -1,0 +1,4 @@
+{"en": "Remind me to water the plants at 6 pm.", "hi_en": "6 baje mujhe paudhon ko paani dena yaad dila dena", "hi_en_parse": "[IN:CREATE_REMINDER 6 baje mujhe [SL:TODO paudhon ko paani dena ] yaad dila dena ]", "generated_by": "synthetic"}
+{"en": "Pause the timer.", "hi_en": "Timer ko pause karo", "hi_en_parse": "[IN:PAUSE_TIMER Timer ko pause karo ]", "generated_by": "synthetic"}
+{"en": "Play some old Hindi songs.", "hi_en": "Kuch purane Hindi gaane chalao.", "hi_en_parse": "[IN:PLAY_MUSIC Kuch purane Hindi gaane chalao ]", "generated_by": "human"}
+{"en": "Set an alarm for 5 am tomorrow.", "hi_en": "kal subah 5 baje ka alarm set karo.", "hi_en_parse": "[IN:CREATE_ALARM kal subah 5 baje ka alarm set karo ]", "generated_by": "synthetic"}

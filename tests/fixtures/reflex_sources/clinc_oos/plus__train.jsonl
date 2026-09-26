@@ -1,0 +1,17 @@
+{"text": "what is the forecast for tomorrow in boston", "intent": "weather"}
+{"text": "text my sister that dinner is at eight", "intent": "text"}
+{"text": "never mind forget what i said", "intent": "cancel"}
+{"text": "how do you say good night in german", "intent": "translate"}
+{"text": "please wire two hundred dollars to my savings", "intent": "transfer"}
+{"text": "set an alarm for six thirty am", "intent": "alarm"}
+{"text": "some label nobody maps", "intent": "made_up_label"}
+{"text": "how do i report my lost card", "intent": "report_lost_card"}
+{"text": "what's on my calendar for april 15", "intent": "calendar"}
+{"text": "what's on my calendar today", "intent": "calendar"}
+{"text": "clear my calendar for tomorrow", "intent": "calendar_update"}
+{"text": "add dentist to my calendar for friday", "intent": "calendar_update"}
+{"text": "take eggs off my shopping list", "intent": "shopping_list_update"}
+{"text": "what is the apr on my visa card", "intent": "apr"}
+{"text": "unsync from my phone", "intent": "sync_device"}
+{"text": "bye for now", "intent": "goodbye"}
+{"text": "it was nice chatting with you", "intent": "goodbye"}

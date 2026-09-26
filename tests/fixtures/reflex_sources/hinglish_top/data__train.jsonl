@@ -1,0 +1,3 @@
+{"en_query": "Set an alarm for 5 am tomorrow .", "cs_query": "Kal subah 5 baje ka alarm set karo", "cs_parse": "[IN:CREATE_ALARM [SL:DATE_TIME Kal subah 5 baje ] ka alarm set karo ]"}
+{"en_query": "Text Ravi that I am running late .", "cs_query": "Ravi ko text karo ki main late ho raha hoon", "cs_parse": "[IN:SEND_MESSAGE [SL:RECIPIENT Ravi ] ko text karo ki [SL:CONTENT_EXACT main late ho raha hoon ] ]"}
+{"en_query": "Order me a pizza .", "cs_query": "Mere liye pizza order kar do", "cs_parse": "[IN:UNSUPPORTED_EVENT Mere liye pizza order kar do ]"}

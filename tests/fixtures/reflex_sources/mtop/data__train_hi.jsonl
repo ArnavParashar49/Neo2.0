@@ -1,0 +1,4 @@
+{"id": 1001, "intent": "IN:CREATE_CALL", "utterance": "दादी को वीडियो कॉल करो"}
+{"id": 1002, "intent": "IN:GET_RECIPES", "utterance": "दाल मखनी कैसे बनाते हैं"}
+{"id": 1007, "intent": "IN:CREATE_REMINDER", "utterance": "एरिक को याद दिलाओ कि शो शुक्रवार को है"}
+{"id": 1009, "intent": "IN:SILENCE_ALARM", "utterance": "बंद होजाओ"}
