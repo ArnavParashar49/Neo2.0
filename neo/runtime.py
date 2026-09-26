@@ -73,7 +73,8 @@ class Runtime:
     lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
 
     def __post_init__(self) -> None:
-        _live.add(self)
+        with _live_lock:
+            _live.add(self)
 
     def scope(self, conversation: str = "default") -> Scope:
         """The conversation's scope (its own gate, events and session), created on first use."""
@@ -96,7 +97,8 @@ class Runtime:
 
     def close(self) -> None:
         """No longer live: its data dir stops counting as one of the process's secret roots."""
-        _live.discard(self)
+        with _live_lock:
+            _live.discard(self)
 
 
 @dataclass(eq=False)
@@ -123,6 +125,7 @@ class Scope:
 _scope: ContextVar[Scope | None] = ContextVar("neo_scope", default=None)
 _library = False  # set once an embedded agent exists; sticky for the process
 _live: weakref.WeakSet[Runtime] = weakref.WeakSet()
+_live_lock = threading.Lock()  # the policy reads it from worker threads
 
 
 def current_scope() -> Scope | None:
@@ -172,7 +175,8 @@ def library_bound() -> bool:
 
 
 def live_runtimes() -> list[Runtime]:
-    return list(_live)
+    with _live_lock:
+        return list(_live)
 
 
 def secret_roots() -> list[Path]:
@@ -180,7 +184,7 @@ def secret_roots() -> list[Path]:
     agent's data dir and extra secret paths, and the app's own data dir once its settings have
     been built (read from the module global — this never builds settings)."""
     roots: list[Path] = []
-    for rt in list(_live):
+    for rt in live_runtimes():
         s = rt.settings
         roots.append(Path(s.data_dir))
         roots.extend(Path(p) for p in getattr(s, "extra_secret_paths", None) or ())
