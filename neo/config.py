@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import unicodedata
 from pathlib import Path
 from typing import Annotated, Literal, get_args
 
@@ -270,10 +271,20 @@ class LibrarySettings(Settings):
             _mkdirs_private(self.models_dir)
 
 
-def _refuse_neo_home(data_dir: Path) -> None:
+def _in_neo_home(data_dir: Path) -> bool:
+    """~/.neo itself or anything inside it. APFS ignores case and Unicode normalisation, so
+    ~/.NEO/x is inside it too."""
     home = (Path.home() / ".neo").resolve()
-    d = Path(data_dir).expanduser().resolve()
-    if d == home or home in d.parents:
+
+    def parts(p: Path) -> list[str]:
+        return [unicodedata.normalize("NFC", x).casefold() for x in p.parts]
+
+    return parts(Path(data_dir).expanduser().resolve())[: len(home.parts)] == parts(home)
+
+
+def _refuse_neo_home(data_dir: Path) -> None:
+    if _in_neo_home(data_dir):
+        home = (Path.home() / ".neo").resolve()
         raise ValueError(f"an embedded agent never uses NEO.app's own data ({home}): pick another data_dir")
 
 
@@ -329,5 +340,5 @@ def _refuse_real_data_under_tests(data_dir: Path) -> None:
     if "pytest" not in sys.modules and "PYTEST_CURRENT_TEST" not in os.environ:
         return
     real = (Path.home() / ".neo").resolve()
-    if data_dir.resolve() == real or real in data_dir.resolve().parents:
+    if _in_neo_home(data_dir):
         raise RuntimeError(f"refusing to use the real {real} under pytest: set NEO_DATA_DIR to a temporary directory")

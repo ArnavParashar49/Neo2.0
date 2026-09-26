@@ -111,10 +111,11 @@ def test_data_dir_is_required_and_never_neo_home(tmp_path, monkeypatch):
     with pytest.raises(ValidationError, match="data_dir"):
         LibrarySettings()
     monkeypatch.setenv("HOME", str(tmp_path))
-    for d in (tmp_path / ".neo", tmp_path / ".neo" / "agents" / "a", "~/.neo"):
+    for d in (tmp_path / ".neo", tmp_path / ".neo" / "agents" / "a", "~/.neo", "~/.NEO/a", "~/.Neo"):
         with pytest.raises(ValidationError, match="never uses NEO.app's own data"):
             LibrarySettings(data_dir=d)
     assert LibrarySettings(data_dir="~/myapp/neo").data_dir == (tmp_path / "myapp" / "neo").resolve()
+    assert LibrarySettings(data_dir="~/.neo-agent").data_dir == (tmp_path / ".neo-agent").resolve()  # not inside
 
 
 def test_typos_and_unknown_reflex_modes_are_refused(tmp_path):
