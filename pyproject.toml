@@ -3,7 +3,8 @@ name = "neo"
 version = "2.1.0"
 description = "NEO — a free, local-first AI agent for your Mac"
 requires-python = ">=3.11,<3.13"
-license = { text = "CC-BY-NC-4.0" }
+license = "MIT"
+license-files = ["LICENSE"]
 dependencies = [
   # brains
   "google-genai>=2.20",
@@ -54,7 +55,7 @@ train = ["datasets"]  # python -m neo.reflex.hf_data (Laya's Hugging Face traini
 neo = "neo.main:main"
 
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]  # SPDX license expression (PEP 639)
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
