@@ -254,4 +254,6 @@ NEO 2.0 is a from-scratch successor to [NEO v1](https://github.com/ArnavParashar
 
 ## License
 
-CC BY-NC 4.0.
+[MIT](LICENSE). The models and datasets NEO downloads keep their own licences: training
+rows derived from public datasets are generated on your Mac and never committed (see
+`neo/reflex/sources.py` for each source's licence).
