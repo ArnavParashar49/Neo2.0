@@ -20,8 +20,8 @@ _STOP_RE = re.compile(
     r"^\s*(?:(?:hey\s+)?neo[\s,]+)?(?:okay\s+|ok\s+|arre\s+|arey\s+)?(?:stop|cancel|never\s*mind|shut\s*up|be\s+quiet|"
     r"go\s+to\s+sleep|quit|exit|stop\s+talking|that'?s\s+enough|forget\s+it|cancel\s+that|stop\s+it|"
     r"ruko|ruk\s+ja(?:o)?|bas(?:\s+kar(?:o|\s+do)?)?|chup(?:\s+(?:ho\s+ja(?:o)?|raho|kar(?:o)?))?|"
-    r"reh?ne\s+do|rahne\s+do|chhod\s+do|chhodo|ja+ne\s+do|band\s+karo|so\s+ja(?:o)?|"
-    r"रुको|रुक\s+जाओ|बस(?:\s+करो)?|चुप(?:\s+(?:हो\s+जाओ|रहो|करो))?|रहने\s+दो|छोड़ो|छोड़\s+दो|जाने\s+दो|बंद\s+करो)"
+    r"reh?ne\s+do|rahne\s+do|chhod\s+do|chhodo|ja+ne\s+do|so\s+ja(?:o)?|"
+    r"रुको|रुक\s+जाओ|बस(?:\s+करो)?|चुप(?:\s+(?:हो\s+जाओ|रहो|करो))?|रहने\s+दो|छोड़ो|छोड़\s+दो|जाने\s+दो)"
     r"(?:[\s,]+(?:it|that|now|please|neo|talking|already|na|yaar|abhi|ab|bhai|प्लीज़|अभी))*\s*[.!।]*\s*$",
     re.I,
 )

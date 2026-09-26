@@ -17,7 +17,8 @@ def test_bare_stop(text):
 @pytest.mark.parametrize(
     "text",
     ["stop the timer", "quit the app", "bas karo timer", "ruk jao aur music band karo", "band karo music",
-     "bus stop kahan hai", "chup chap music chalao"],
+     "bus stop kahan hai", "chup chap music chalao",
+     "band karo"]  # ambiguous: usually "turn it off" (the music), not "cancel NEO",
 )
 def test_a_command_containing_the_word_is_not_a_stop(text):
     assert not is_bare_stop(text)
