@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Literal
 
 from neo.agent.confirm import NEEDS_CONFIRM, NEEDS_USER
@@ -101,6 +101,9 @@ def _supersede_observations(messages: list[Message], *, start: int = 0) -> None:
 async def _run_calls(
     calls: list[ToolCall], reg: Registry, ctx: ToolContext, ev: EventBus, limit: int, job: str = ""
 ) -> list[ToolResult]:
+    # A model chose these calls, whoever started the run (the taint list stays shared).
+    ctx = ctx if ctx.origin == "agent" else replace(ctx, origin="agent")
+
     async def one(c: ToolCall) -> ToolResult:
         await ev.tool_start(c.name, c.args, job=job)
         t = reg.get(c.name)

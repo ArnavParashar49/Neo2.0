@@ -34,6 +34,23 @@ class ToolOutput:
     images: list[ImagePart] = field(default_factory=list)
     ok: bool = True
     halt: bool = False  # a NEEDS_CONFIRM / NEEDS_USER that NEO's own code produced (confirm.Halt)
+    # Overrides the tool's `quiet` for a success: True makes a quiet action speak (a first use,
+    # a guessed time, a result NEO couldn't check), False keeps an answer tool's success silent.
+    say: bool | None = None
+
+
+def voiced(out: ToolOutput, quiet: bool) -> bool:
+    """Is this result said aloud? A failure or a question for the user always is; a success
+    follows the tool's own `say`, else only a non-quiet tool's success is."""
+    if not out.ok or out.text.startswith("NEEDS_"):
+        return True
+    return out.say if out.say is not None else not quiet
+
+
+# Who chose this call: the user's own words through a fast path ("user"), Gemini Live calling
+# the tool directly ("live"), a model inside the agent loop ("agent"), or the session running a
+# staged action after the user's yes ("approval").
+Origin = Literal["user", "live", "agent", "approval"]
 
 
 @dataclass
@@ -46,6 +63,7 @@ class ToolContext:
     # Shared by reference across one request's tool calls; tools that could leak data or plant
     # instructions ask the user first once it is non-empty.
     taint: list[str] = field(default_factory=list)
+    origin: Origin = "agent"
 
     def get(self, key: str, default: Any = None) -> Any:
         return self.extras.get(key, default)
@@ -56,6 +74,9 @@ class ToolContext:
 
 
 Handler = Callable[[dict[str, Any], ToolContext], Awaitable[str | ToolOutput] | str | ToolOutput]
+# (regex, args) or (regex, args, check): `check(filled_args)` runs on cached data only and says
+# whether the pattern really claims the utterance; False hands it to the next pattern.
+FastPath = tuple[str, dict[str, Any]] | tuple[str, dict[str, Any], Callable[[dict[str, Any]], bool]]
 
 
 @dataclass
@@ -68,7 +89,7 @@ class RegisteredTool:
     parallel_safe: bool = False
     category: str = "general"
     slow: bool = False  # UI speaks a filler while it runs
-    fast_path: list[tuple[str, dict[str, Any]]] = field(default_factory=list)  # (regex, args)
+    fast_path: list[FastPath] = field(default_factory=list)
     early: bool = False  # fast path may fire mid-sentence (opt in: cheap, idempotent tools only)
     chain: bool = True  # may run as a later clause ("open notes and type hi"); False = first step only
     payload: bool = False  # the fast path captures free text that runs to the end of the sentence
@@ -115,9 +136,18 @@ class Registry:
         )
 
     async def invoke(self, name: str, args: dict[str, Any], ctx: ToolContext) -> ToolOutput:
+        from neo.agent import confirm
+
         # `confirm` / `cancel` belong to the user, not to a tool call: whatever a model passes is
-        # dropped here (approval travels through confirm.approved()).
-        args = {k: v for k, v in (args or {}).items() if k not in ("confirm", "cancel")}
+        # dropped here (approval travels through confirm.approved()). So are NEO's own `_` args
+        # (a staged send's `_plan`): they only exist in params NEO staged itself, so outside an
+        # approval they come from a model, a page or an email and must never steer a tool.
+        approving = confirm.approval_active()
+        args = {
+            k: v
+            for k, v in (args or {}).items()
+            if k not in ("confirm", "cancel") and (approving or not k.startswith("_"))
+        }
         out = await self._invoke(name, args, ctx)
         self.last = (name, time.time(), out.ok)
         t = self.get(name)
@@ -174,7 +204,7 @@ def tool(
     parallel_safe: bool = False,
     category: str = "general",
     slow: bool = False,
-    fast_path: list[tuple[str, dict[str, Any]]] | None = None,
+    fast_path: list[FastPath] | None = None,
     early: bool = False,
     chain: bool = True,
     payload: bool = False,

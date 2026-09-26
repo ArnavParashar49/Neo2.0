@@ -6,7 +6,7 @@ import importlib
 import sys
 
 _MODULES = ["neo.tools.system", "neo.tools.web", "neo.tools.weather", "neo.tools.memory_tool", "neo.tools.browser"]
-_MAC_ONLY = ["neo.tools.media"]
+_MAC_ONLY = ["neo.tools.tasks", "neo.tools.media"]
 _MAC_MODULES = ["neo.tools.computer"]
 
 

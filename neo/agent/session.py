@@ -19,7 +19,7 @@ from typing import Literal
 from neo.agent import confirm, fastpath
 from neo.agent.loop import AgentResult, run_agent
 from neo.agent.prompt import build as build_prompt
-from neo.agent.registry import ToolContext, fence, registry
+from neo.agent.registry import ToolContext, ToolOutput, fence, registry, voiced
 from neo.config import settings
 from neo.events import NeoState, bus
 from neo.providers import brain
@@ -27,14 +27,21 @@ from neo.providers.base import ImagePart, Message, ToolResult
 from neo.reflex import Reflex, is_bare_stop, outcomes
 from neo.reflex.schema import Decision
 
-# A confirmation must be a short, pure affirmative; any retraction anywhere wins over a leading "ok".
+# A confirmation must be a short, pure affirmative; any retraction anywhere wins over a leading "ok"
+# ("haan, mat bhejo" is a no). English, Hinglish and Hindi.
 _YES = re.compile(
     r"^\s*(?:yes|yeah|yep|yup|sure|ok(?:ay)?|go ahead|do it|confirm(?:ed)?|please do|proceed|go for it|"
-    r"yes please|sure thing|absolutely|correct)(?:[\s,]+(?:please|go ahead|do it|thanks))*[\s.!]*$",
+    r"yes please|sure thing|absolutely|correct|haan(?:\s+ji)?|haa|ji(?:\s+haan)?|th(?:ee|i)k\s+hai|kar\s+do|"
+    r"bhej\s+do|हाँ|हां|जी|ठीक\s+है|भेज\s+दो|कर\s+दो)"
+    r"(?:[\s,]+(?:please|go ahead|do it|thanks|ji|kar\s+do|bhej\s+do|जी|कर\s+दो|भेज\s+दो))*[\s.!।]*$",
     re.I,
 )
 _NO = re.compile(
-    r"\b(?:no|nope|don'?t|do not|cancel|stop|never ?mind|leave it|not yet|wait|hold on|abort)\b", re.I
+    r"\b(?:no|nope|don'?t|do not|cancel|stop|never ?mind|leave it|not yet|wait|hold on|abort|"
+    r"nahi|nahin|mat|ruko|rehne\s+do)\b"
+    # Devanagari vowel signs aren't word characters, so \b can't mark where these words end.
+    r"|(?<![\w\u0900-\u0963\u0971-\u097F])(?:नहीं|नही|मत|रुको|रहने\s+दो)(?![\w\u0900-\u0963\u0971-\u097F])",
+    re.I,
 )
 _MAX_HISTORY = 40  # messages sent to the model; older ones are dropped (memory keeps the gist)
 _HISTORY_CAP = 160  # messages held in memory at all; beyond this the oldest are summarised and let go
@@ -96,6 +103,9 @@ class Session:
     _pending_args: dict = field(default_factory=dict)
     _pending_action: str = ""
     _pending_taint: list = field(default_factory=list)
+    # Who asked the pending question: an agent run of this session (the answer's result goes back
+    # to a model to finish the job) or a direct command (the answer's result is the reply).
+    _pending_origin: Literal["agent", "direct"] = "agent"
     _answer_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     _summarized: int = 0  # history[:_summarized] is already in a session summary
     _chunk_started: float = field(default_factory=time.time)
@@ -137,7 +147,7 @@ class Session:
                 await bus().end_job(job)
                 return Reply(msg, "confirm", job=job)
         elif self._pending_action:  # the staged question expired: drop it and the "confirming" orb
-            self._pending_tool, self._pending_args, self._pending_action = "", {}, ""
+            self._drop_pending()
             await self._clear_confirming()
 
         d = await self.reflex.decide(text)
@@ -202,7 +212,7 @@ class Session:
                 n += 1
         if confirm.peek() is not None:
             confirm.cancel("stopped")
-            self._pending_tool, self._pending_args, self._pending_action = "", {}, ""
+            self._drop_pending()
             await self._clear_confirming()
         return n
 
@@ -263,32 +273,35 @@ class Session:
         spoken: list[str] = []
         texts: list[str] = []
         prev = ""
+        asked: confirm.Pending | None = None  # the question a step stopped to ask
         for i, (tool, args) in enumerate(steps):
             t = registry().get(tool)
             async with early()._lock:  # an early run still in flight finishes — and leaves its claim — first
                 pass
             done = early().claim(tool, args)
             if done is not None:
-                out_text, ok = done, True  # the early actor already did this while the user was speaking
+                out = ToolOutput(done)  # the early actor already did this while the user was speaking
                 outcomes.step(job, tool, True)
             else:
                 if prev in _APP_TOOLS and tool not in _APP_TOOLS:
                     await asyncio.sleep(_SETTLE_AFTER_APP_S)
                 await bus().tool_start(tool, args, job=job)
-                out = await registry().invoke(tool, args, ToolContext(user_text=text, taint=list(_request_taint.get())))
+                ctx = ToolContext(user_text=text, taint=list(_request_taint.get()), origin="user")
+                out = await registry().invoke(tool, args, ctx)
                 await bus().tool_end(tool, out.ok, out.text, job=job)
-                out_text, ok = out.text, out.ok
-                outcomes.step(job, tool, ok, halt=getattr(out, "halt", False))
-                if not ok:  # e.g. weather for "the forecast for Q3 sales": the agent can do better
+                outcomes.step(job, tool, out.ok, halt=out.halt)
+                if not out.ok:  # e.g. weather for "the forecast for Q3 sales": the agent can do better
                     print(f"  ~ {tool} failed; handing to the agent")
                     ran = "; ".join(f"{tl}({', '.join(f'{k}={v!r}' for k, v in a.items())})" for tl, a in steps[:i])
                     note = f"\n[ALREADY DONE] These steps of the request already ran — don't repeat them: {ran}" if ran else ""
                     return await self._agent(text, d, None, job, done_note=note)
+                if out.halt and out.text.startswith(confirm.NEEDS_CONFIRM):
+                    asked = confirm.peek()
             prev = tool
-            texts.append(out_text)
-            needs_user = out_text.startswith(("NEEDS_", "Error"))
-            if not (t and t.quiet and ok) or needs_user:
-                spoken.append(out_text)
+            texts.append(out.text)
+            needs_user = out.text.startswith(("NEEDS_", "Error"))
+            if needs_user or voiced(out, bool(t and t.quiet)):
+                spoken.append(out.text)
         reply_text = " ".join(spoken) if spoken else "; ".join(texts)
         await self._remember(Message.user(text), Message.assistant(reply_text))
         silent = not spoken  # every step was an action that worked: just done, nothing to say
@@ -300,7 +313,13 @@ class Session:
             "turn", job=job, route="quick", brain="", model="", ms=int((time.time() - t0) * 1000), tools=len(steps)
         )
         outcomes.end(job)
-        await bus().end_job(job)
+        if asked is not None and (p := confirm.peek()) is not None and p.action_id == asked.action_id:
+            # The question is this session's to answer, like an agent's (the answer runs it, and no
+            # model finishes the job afterwards); the orb keeps asking until then.
+            self._adopt(p, _request_taint.get(), "direct")
+            await bus().set_state(NeoState.CONFIRMING, job=job)
+        else:
+            await bus().end_job(job)
         return Reply(reply_text, "quick", d, job=job, silent=silent, tools=tuple(t for t, _ in steps))
 
     async def _agent(
@@ -425,16 +444,24 @@ class Session:
 
     # ---- confirmation ------------------------------------------------------------------
     def _stage_pending(self, res: AgentResult, taint: list[str] | None = None) -> bool:
-        """Remember exactly which staged action the question refers to."""
+        """Remember exactly which staged action the agent's question refers to."""
         p = confirm.peek()
         if not p or (res.pending_action and p.action_id != res.pending_action):
             confirm.cancel("stale")
-            self._pending_tool, self._pending_args, self._pending_action = "", {}, ""
+            self._drop_pending()
             return False
-        self._pending_tool, self._pending_args, self._pending_action = p.tool, dict(p.params), p.action_id
-        self._pending_taint = list(taint or [])
-        asyncio.create_task(self._expire_confirm(p.action_id))
+        self._adopt(p, taint or [], "agent")
         return True
+
+    def _adopt(self, p: confirm.Pending, taint: list[str] | tuple[str, ...], origin: Literal["agent", "direct"]) -> None:
+        """The question the user now hears is this staged action, asked by `origin`."""
+        self._pending_tool, self._pending_args, self._pending_action = p.tool, dict(p.params), p.action_id
+        self._pending_taint, self._pending_origin = list(taint), origin
+        asyncio.create_task(self._expire_confirm(p.action_id))
+
+    def _drop_pending(self) -> None:
+        self._pending_tool, self._pending_args, self._pending_action = "", {}, ""
+        self._pending_taint, self._pending_origin = [], "agent"
 
     async def _handle_confirmation(self, text: str, job: str) -> Reply:
         """The user's own words while a question is pending."""
@@ -442,7 +469,7 @@ class Session:
         if ans is None:
             # Not a yes/no — treat as a new request; drop the stale confirmation.
             confirm.cancel("superseded")
-            self._pending_tool, self._pending_action = "", ""
+            self._drop_pending()
             await self._clear_confirming()
             await bus().end_job(job)
             return await self.handle(text, from_user=True, taint=_request_taint.get())
@@ -462,7 +489,7 @@ class Session:
             if not yes:
                 confirm.cancel()
                 outcomes.confirm(False)  # "no" at a confirmation: not what they wanted
-                self._pending_tool, self._pending_args, self._pending_action = "", {}, ""
+                self._drop_pending()
                 await bus().say("Cancelled.", final=True, job=job)
                 await self._clear_confirming()
                 await bus().end_job(job)
@@ -470,31 +497,46 @@ class Session:
             if self._pending_action and p.action_id != self._pending_action and not action_id:
                 # Something else was staged after the question the user heard: don't guess.
                 confirm.cancel("mismatch")
-                self._pending_tool, self._pending_args, self._pending_action = "", {}, ""
+                self._drop_pending()
                 msg = "That request changed underneath me, so I didn't do anything. Ask again and I'll confirm first."
                 await bus().say(msg, final=True, job=job)
                 await self._clear_confirming()
                 await bus().end_job(job)
                 return Reply(msg, "confirm", job=job)
-            ours = p.action_id == self._pending_action  # an agent job of this session asked it
-            taint = list(self._pending_taint) if ours else []
+            staged_here = p.action_id == self._pending_action
+            ours = staged_here and self._pending_origin == "agent"  # an agent job of this session asked it
+            # The card was built with the request's taint: the approved call rebuilds it the same.
+            taint = list(self._pending_taint) if staged_here else []
             tool, args, aid = p.tool, dict(p.params), p.action_id
-            self._pending_tool, self._pending_args, self._pending_action = "", {}, ""
+            self._drop_pending()
             await self._clear_confirming()
             await bus().set_state(NeoState.WORKING, job=job)
             await bus().tool_start(tool, args, job=job)
+            approval = ToolContext(user_text=text or "yes", taint=list(taint), origin="approval")
             with confirm.approved(aid):
-                out = await registry().invoke(tool, args, ToolContext(user_text=text or "yes", taint=list(taint)))
+                out = await registry().invoke(tool, args, approval)
             await bus().tool_end(tool, out.ok, out.text, job=job)
-            # The request that asked (if still open) now waits for the run that finishes the job.
-            episode = outcomes.confirm(True, tool, out.ok, more=ours)
+            # The approved call may stage a new card ("<App> couldn't open Priya's chat. Send it
+            # with <Other app> instead?"): that is the question now, owned by whoever owned this one.
+            np = confirm.peek()
+            restaged = np if out.halt and np is not None and np.action_id != aid else None
+            # The request that asked (if still open) now waits for the run that finishes the job,
+            # or for the answer to the new card.
+            episode = outcomes.confirm(True, "" if restaged else tool, out.ok, more=ours)
+            if restaged is not None:
+                if episode:
+                    outcomes.step(episode, tool, out.ok, halt=True)
+                self._adopt(restaged, taint, "agent" if ours else "direct")
+                await bus().set_state(NeoState.CONFIRMING, job=job)
+                await bus().say(out.text, final=True, job=job)
+                return Reply(out.text, "confirm", job=job)
         if not ours:
-            # Asked by a direct voice command: there's no agent run to hand the result back to.
+            # Asked by a direct command: there's no agent run to hand the result back to.
             msg = out.text if out.ok else f"That didn't work: {out.text}"
             await bus().say(msg[:600], final=True, job=job)
             await bus().end_job(job)
-            # Done as approved: nothing to say. Only a failure is worth hearing.
-            return Reply(msg, "confirm", job=job, silent=out.ok and not out.text.startswith("NEEDS_"))
+            # Done as approved: nothing to say, unless it failed or the tool wants it heard.
+            return Reply(msg, "confirm", job=job, silent=not voiced(out, quiet=True))
         # Let the agent see the outcome and finish whatever it was doing.
         t = registry().get(tool)
         result = fence(tool, out.text[:800]) if t and t.untrusted and out.ok else out.text[:800]
@@ -528,7 +570,7 @@ class Session:
         await asyncio.sleep(confirm._TTL_S)
         if self._pending_action == action_id:
             confirm.cancel("expired")
-            self._pending_tool, self._pending_args, self._pending_action = "", {}, ""
+            self._drop_pending()
             await bus().note("No answer — I didn't do it.")
             await self._clear_confirming()
 

@@ -168,7 +168,7 @@ class EarlyActor:
         if self.executed and self.executed[-1].tool in _APP_TOOLS and tool not in _APP_TOOLS:
             await asyncio.sleep(_SETTLE_AFTER_APP_S)
         await bus().tool_start(tool, args, job="early")
-        out = await registry().invoke(tool, args, ToolContext(user_text=self._text))
+        out = await registry().invoke(tool, args, ToolContext(user_text=self._text, origin="user"))
         await bus().tool_end(tool, out.ok, out.text, job="early")
         r = Ran(tool, args, out.ok, out.text)
         if self._utt == utt:

@@ -5,7 +5,19 @@
   <key>NSMicrophoneUsageDescription</key>
   <string>NEO listens for “Hey Neo” and to what you say to it.</string>
   <key>NSAppleEventsUsageDescription</key>
-  <string>NEO controls apps like Notes, Mail and Safari when you ask it to.</string>
+  <string>NEO controls the apps you ask it to use.</string>
+  <key>NSCalendarsFullAccessUsageDescription</key>
+  <string>NEO adds the events you ask for and tells you what’s on your calendar.</string>
+  <key>NSCalendarsWriteOnlyAccessUsageDescription</key>
+  <string>NEO adds the events you ask for.</string>
+  <key>NSCalendarsUsageDescription</key>
+  <string>NEO adds the events you ask for and tells you what’s on your calendar.</string>
+  <key>NSRemindersFullAccessUsageDescription</key>
+  <string>NEO adds the reminders you ask for.</string>
+  <key>NSRemindersUsageDescription</key>
+  <string>NEO adds the reminders you ask for.</string>
+  <key>NSContactsUsageDescription</key>
+  <string>NEO finds the person you ask it to message or email.</string>
   <key>LSUIElement</key>
   <true/>
 </dict>

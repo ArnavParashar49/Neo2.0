@@ -75,7 +75,9 @@ def op_key(tool: str, params: dict[str, Any], summary: str = "", detail: str = "
     return hashlib.sha256(blob.encode()).hexdigest()
 
 
-_CONTENT_KEYS = {"body", "content", "text", "new_string", "old_string", "brief", "value", "subject"}
+_CONTENT_KEYS = {
+    "body", "content", "text", "new_string", "old_string", "brief", "value", "subject", "notes", "message",
+}
 
 
 def _redact(params: dict[str, Any]) -> dict[str, Any]:
@@ -262,14 +264,23 @@ def cancel(reason: str = "user cancelled") -> str:
     return "CANCELLED"
 
 
-def gated(tool: str, params: dict[str, Any], summary: str, detail: str = "") -> dict[str, Any] | str:
+def approval_active() -> bool:
+    """True only inside :func:`approved`: the session re-invoking a staged action after the
+    user's yes."""
+    return _approved.get() is not None
+
+
+def gated(
+    tool: str, params: dict[str, Any], summary: str, detail: str = "", *, always: bool = False
+) -> dict[str, Any] | str:
     """One-liner for tool handlers.
 
     Returns the released params when the user approved this exact operation (or when
     confirmation is turned off), otherwise the ``NEEDS_CONFIRM`` string for the model.
+    `always`: ask even with confirmation turned off — for what reaches another person (a send).
     """
     params = clean(params)
-    if not settings().confirm_destructive:
+    if not settings().confirm_destructive and not always:
         return params
     released = consume(op_key(tool, params, summary, detail))
     if released is not None:
