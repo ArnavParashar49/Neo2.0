@@ -239,6 +239,7 @@ async def run() -> None:
     if s.voice != "off":
         asyncio.create_task(_voice_supervisor(app, stop))
     from neo.reflex.learn import learn_loop
+    from neo.reflex.teacher import teacher_loop
 
     def _idle() -> bool:
         from neo.events import bus
@@ -247,6 +248,7 @@ async def run() -> None:
         return not voice_busy and not bus().active_jobs and not app._tasks
 
     asyncio.create_task(learn_loop(_idle))
+    asyncio.create_task(teacher_loop(_idle))  # returns at once unless NEO_LEARN_TEACHER is on
     asyncio.create_task(_checkpoint_loop(app, _idle))
     bus().subscribe(_log_activity)
     print("NEO is running. Say 'Neo', or type in the overlay.")
