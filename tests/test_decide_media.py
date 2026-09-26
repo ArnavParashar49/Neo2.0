@@ -859,3 +859,17 @@ async def test_now_playing_never_makes_macos_ask(monkeypatch, osa):
     monkeypatch.setattr(media, "automation", lambda bid, ask=False: media.AE_NOT_ASKED)
     assert await media._now_playing(make_app(library_dict())) is None
     assert not osa.calls
+
+
+async def test_the_erase_forgets_learned_items_and_a_request_in_flight_learns_nothing(monkeypatch, engine):
+    from neo import privacy
+
+    media._uri_store(BID, "505", "fixtureplayer:track:1", "505")
+    assert media._uri_lookup(BID, "505") is not None
+    assert media.forget() == 1 and media._uri_lookup(BID, "505") is None
+
+    media._gen.set(privacy.generation())
+    monkeypatch.setattr(privacy, "_generation", privacy.generation() + 1)  # erased mid-request
+    media._uri_store(BID, "505", "fixtureplayer:track:1", "505")
+    media._record(BID, "script_search_play", True)
+    assert media._uri_lookup(BID, "505") is None and engine.records == []

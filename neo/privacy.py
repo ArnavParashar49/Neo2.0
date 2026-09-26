@@ -1,9 +1,10 @@
 """Erase everything NEO has kept about the user, in one step.
 
 What goes: memories (profile, lessons, notes), playbooks, session summaries, the requests Laya
-learned from and their cached features, the audit trail, the core's logs, and NEO's own browser
-profile (its cookies and logins). What stays: settings and keys (~/.neo/.env), timers that are
-still running, and downloaded models — none of them is about the user.
+learned from and their cached features, which apps worked for what (and the songs/videos NEO
+learned to replay), the audit trail, the core's logs, and NEO's own browser profile (its cookies
+and logins). What stays: settings and keys (~/.neo/.env), timers that are still running, and
+downloaded models — none of them is about the user.
 
 Reached only from the overlay (after its own confirmation) or `python -m neo --forget-all`: never
 a tool a model can call, so a web page or an email can't wipe anything.
@@ -33,6 +34,11 @@ async def forget_everything() -> dict[str, int]:
     counts = store().forget_all()
     counts["learned requests"] = learn.forget_examples()
     finetune.feature_cache().unlink(missing_ok=True)  # rebuilt from the public datasets on the next retrain
+    from neo.decide import engine as decide
+    from neo.decide import media
+
+    counts["app choices"] = decide.forget()
+    counts["learned media"] = media.forget()
     for p in (s.audit_log, s.audit_log.with_name(s.audit_log.name + ".1")):
         p.unlink(missing_ok=True)
     logs = s.data_dir / "logs"

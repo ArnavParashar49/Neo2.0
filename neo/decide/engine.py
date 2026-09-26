@@ -287,6 +287,16 @@ def _fresh() -> dict:
     return {"version": 1, "arms": {}}
 
 
+def forget() -> int:
+    """Erase what NEO learned about this user's apps (the privacy erase). Returns arms dropped."""
+    with _lock:
+        n = sum(len(m) for per_app in _load()["arms"].values() for m in per_app.values())
+        _cache.clear()
+        for p in _path().parent.glob(f"{_path().name}*"):  # the store and any set-aside copy
+            p.unlink(missing_ok=True)
+        return n
+
+
 def _clean(raw: Any) -> dict:
     """Keep only well-formed arms: a hand-edited or half-migrated file must not break decisions."""
     out = _fresh()
@@ -873,4 +883,5 @@ __all__ = [
     "warm",
     "record",
     "prior",
+    "forget",
 ]

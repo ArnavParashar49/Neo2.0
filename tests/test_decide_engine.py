@@ -643,3 +643,13 @@ def test_the_first_app_scan_runs_off_the_event_loop(monkeypatch):
     monkeypatch.setattr(engine, "_inventory", scan)
     assert order(asyncio.run(engine.choose("play_media", "play a song", None)))[0] == "Tunewave"
     assert seen == [False]
+
+
+def test_the_privacy_erase_forgets_what_was_learned_about_apps():
+    from neo.config import settings
+
+    engine.record("play_media", "test.tunewave", "ax", True)
+    (settings().data_dir / "decide.json.corrupt").write_text("{}")
+    assert engine.forget() == 1
+    assert not list(settings().data_dir.glob("decide.json*"))
+    assert engine.prior("play_media", "test.tunewave", "ax") == pytest.approx(0.5)

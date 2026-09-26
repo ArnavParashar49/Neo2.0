@@ -44,6 +44,7 @@ import subprocess
 import threading
 import time
 from collections import deque
+from contextvars import ContextVar
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -104,7 +105,28 @@ def _inventory():
     return inventory
 
 
+_gen: ContextVar[int | None] = ContextVar("neo_media_generation", default=None)
+
+
+def _erased() -> bool:
+    """The user erased NEO's memory after this request started: learn nothing from it."""
+    from neo import privacy
+
+    started = _gen.get()
+    return started is not None and started != privacy.generation()
+
+
+def forget() -> int:
+    """Erase the item ids NEO learned (the privacy erase). Returns how many there were."""
+    with _uri_lock:
+        n = sum(len(v) for v in _uri_load().values() if isinstance(v, dict))
+        _uri_path().unlink(missing_ok=True)
+        return n
+
+
 def _record(key: str, method: str, ok: bool, reason: str = "") -> None:
+    if _erased():
+        return
     try:
         _engine().record(KIND, key, method, ok, reason)
     except Exception as e:  # noqa: BLE001 - learning must never break playback
@@ -1273,6 +1295,8 @@ def _uri_lookup(bundle_id: str, query: str) -> dict | None:
 
 
 def _uri_store(bundle_id: str, query: str, uri: str, title: str) -> None:
+    if _erased():
+        return
     if not _qkey(query) or not uri or len(uri) > 2000:
         return
     with _uri_lock:
@@ -1709,8 +1733,10 @@ def _late_start(tried: list[tuple[Any, str, str]], base: set[int]) -> tuple[Any,
 async def play_best(query: str, text: str = "") -> str:
     """'Neo, play <query>': try the chosen apps in order (overall ~25 s), learn from each attempt,
     and say what happened."""
+    from neo import privacy
     from neo.agent.confirm import ask_user
 
+    _gen.set(privacy.generation())
     t0 = time.monotonic()
     q = await asyncio.to_thread(_strip_named, " ".join(str(query or "").split()))  # may scan the apps
     try:
