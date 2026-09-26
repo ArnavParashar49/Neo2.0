@@ -19,6 +19,7 @@ __all__ = [
     "_no_real_embeddings",
     "_fresh_learning_state",
     "_no_shadow_dry_runs",
+    "_app_mode",
 ]
 
 # Hermetic: no test may read the developer's real keys or settings (~/.neo/.env, ./.env).
@@ -87,6 +88,20 @@ def _no_shadow_dry_runs(monkeypatch):
         facts.close()
 
     monkeypatch.setattr(_shadow, "later", drop)
+
+
+@pytest.fixture(autouse=True)
+def _app_mode(monkeypatch):
+    """Every test starts as NEO.app does: not embedded, no agent bound, no live agents. A test
+    that embeds agents (library mode) never leaves that on for the next one."""
+    import weakref
+
+    from neo import runtime
+
+    monkeypatch.setattr(runtime, "_library", False)
+    monkeypatch.setattr(runtime, "_live", weakref.WeakSet())
+    yield
+    monkeypatch.setattr(runtime, "_library", False)
 
 
 @pytest.fixture
