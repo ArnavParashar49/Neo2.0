@@ -22,7 +22,8 @@ rows are kept 180 days, teacher-only ones 30; at most 2,000, the least useful dr
 inside the running core, reusing the Laya model already in memory, and swapped in — only if they
 score at least as well as the current ones. A reflex with no head for its encoder at all (a new
 encoder, a first run, an erase with no head to go back to) is retrained once as soon as NEO is idle,
-without waiting for new requests: zero-shot is far worse than any head.
+without waiting for new requests: zero-shot is far worse than any head. That one happens with
+learning off too, on the public data alone: none of your requests is read for it.
 """
 
 from __future__ import annotations
@@ -307,12 +308,18 @@ def pending() -> int:
 
 
 def due(now: float | None = None) -> bool:
+    """Whether a retrain is worth it now: new requests or corrections (learning on), or a loaded
+    reflex without a head for its encoder (tried once; learning on or off). Never on a stand-in
+    encoder while the head on disk is the configured one's (see _stands_in)."""
     now = now or time.time()
-    n, fixes = _pending()
     st = _state()
-    since = now - float(st.get("trained_at", 0.0))
-    if n >= _BURST or (n >= _MIN_NEW and since >= _MIN_GAP_S) or fixes >= _MIN_FIXES:
-        return True
+    if _stands_in():
+        return False
+    if enabled():
+        n, fixes = _pending()
+        since = now - float(st.get("trained_at", 0.0))
+        if n >= _BURST or (n >= _MIN_NEW and since >= _MIN_GAP_S) or fixes >= _MIN_FIXES:
+            return True
     headless = _headless()
     return headless is not None and st.get("headless_tried") != headless
 
@@ -330,26 +337,62 @@ def _headless() -> str | None:
     return f"{models.LAYA_REVISION}:{getattr(laya, 'encoder', '')}"
 
 
+def _stands_in() -> bool:
+    """The loaded reflex runs on a stand-in encoder (the configured one's files are missing offline:
+    laya_reflex._load) while the head on disk is the configured encoder's. A retrain here would
+    overwrite that head and its base head with ones for the stand-in; the configured encoder's
+    come back with its files, so nothing retrains until then."""
+    from neo import reflex
+
+    laya = reflex._laya
+    want = settings().reflex_encoder
+    return laya is not None and getattr(laya, "encoder", want) != want and _head_is_for(want)
+
+
+_head_for: dict[tuple, bool] = {}  # (file identity, encoder) -> whether the head file is for it
+
+
+def _head_is_for(encoder: str) -> bool:
+    from neo import models
+    from neo.reflex.features import encoder_of
+
+    path = _path("reflex_head.json")
+    try:
+        st = path.stat()
+        key = (st.st_mtime_ns, st.st_size, encoder)
+        if key not in _head_for:  # the file is ~20 MB: read it once per version, not every idle minute
+            h = json.loads(path.read_text())
+            _head_for.clear()
+            _head_for[key] = isinstance(h, dict) and encoder_of(h) == (models.LAYA_REVISION, models.LAYA_SUBFOLDERS[encoder])
+        return _head_for[key]
+    except (OSError, ValueError, KeyError):
+        return False
+
+
 def retrain() -> dict | None:
-    """Retrain the heads in this process on the already-loaded Laya, then hot-swap them."""
+    """Retrain the heads in this process on the already-loaded Laya, then hot-swap them. With
+    learning off, on the public data alone (only a reflex without a head is retrained then)."""
     global _training
     from neo.reflex import finetune, get_laya, laya_lock
 
     laya = get_laya()
-    if laya is None or _training:
+    if laya is None or _training or _stands_in():
         return None
     _training = True
     started = time.time()
     gen = _erase_gen
     try:
         seq = int(_state().get("seq", 0))  # rows after this one arrive while training: still new
-        # This retrain is the one try a reflex without a usable head gets (see due()).
+        # This retrain is the one try a reflex without a usable head gets (see due()), unless it
+        # installs one: a head lost again later (a command-line retrain for the other encoder
+        # overwrote it, the file went) gets another.
         tried = {"headless_tried": h} if (h := _headless()) else {}
-        n_rows = len(_read(_path(EXTRA)))
+        own = enabled()
+        n_rows = len(_read(_path(EXTRA))) if own else 0
         t0 = time.time()
         try:
             report = finetune.train(
-                finetune.defaults(), agent=laya._agent, lock=laya_lock(), cancelled=lambda: _erase_gen != gen
+                finetune.defaults(), agent=laya._agent, lock=laya_lock(), cancelled=lambda: _erase_gen != gen, own=own
             )
         except Exception as e:  # noqa: BLE001
             # Count it as a try: the next one waits the usual gap instead of re-running (and
@@ -365,10 +408,12 @@ def retrain() -> dict | None:
         if report.get("saved"):
             with laya_lock():
                 laya.reload_head()
+            tried = {"headless_tried": None}
         _write_state({"trained_at": started, "trained_rows": n_rows, "trained_seq": seq, "last": report, **tried})
         prev = report.get("previous")
+        what = f"learned from {n_rows} of your requests" if own else "trained on the public data (learning is off)"
         print(
-            f"[reflex] learned from {n_rows} of your requests in {time.time() - t0:.0f}s: intent "
+            f"[reflex] {what} in {time.time() - t0:.0f}s: intent "
             f"{prev if prev is None else f'{prev:.3f}'} → {report['intent']:.3f}"
             + ("" if report.get("saved") else " (kept the old head)")
         )
@@ -393,6 +438,8 @@ def _write_state(state: dict) -> None:
         st.setdefault("seq", int(cur.get("seq", 0)))
         if cur.get("headless_tried"):
             st.setdefault("headless_tried", cur["headless_tried"])
+        if st.get("headless_tried") is None:  # None: a head was installed, the record goes
+            st.pop("headless_tried", None)
         if "trained_at" in st:
             st.setdefault("trained_seq", st["seq"])
         st.setdefault("daily", cur.get("daily", {}))
@@ -459,6 +506,12 @@ async def learn_loop(is_idle) -> None:
         tidy()
     except Exception as e:  # noqa: BLE001
         print(f"[reflex] couldn't tidy the learning file: {str(e)[:80]}")
+    try:
+        from neo.reflex.finetune import sweep_temporaries
+
+        sweep_temporaries(max_age_s=600)  # what a quit mid-retrain cut off (never a write going on)
+    except Exception as e:  # noqa: BLE001
+        print(f"[reflex] couldn't remove a cut-off head file: {str(e)[:80]}")
     if enabled() and (line := summary()):
         print(line)
     idle_since: float | None = None
@@ -476,7 +529,8 @@ async def learn_loop(is_idle) -> None:
             idle_since = idle_since or time.time()
             if enabled():
                 memory.rebuild_soon(is_idle)
-            if enabled() and time.time() - idle_since >= _IDLE_S and due():
+            # due() with learning off: only a reflex without a head, retrained on public rows
+            if time.time() - idle_since >= _IDLE_S and due():
                 done = asyncio.get_running_loop().create_future()
 
                 def run(done: asyncio.Future = done) -> None:

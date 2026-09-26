@@ -72,6 +72,9 @@ QUICK: list[tuple[str, str, str, bool]] = [
     ("{app} band karo", "quit_app", "other", False),
     ("{app} band kar do", "quit_app", "other", False),
     ("{app} close karo", "quit_app", "other", False),
+    ("isse band karo", "quit_app", "other", False),
+    ("ise band kar do", "quit_app", "other", False),
+    ("ye app band karo", "quit_app", "other", False),
     ("awaaz badhao", "volume", "other", False),
     ("awaaz thodi kam karo", "volume", "other", False),
     ("volume badha do", "volume", "other", False),
@@ -110,6 +113,8 @@ QUICK: list[tuple[str, str, str, bool]] = [
     ("{label} pe click karo", "click_text", "other", False),
     ("enter dabao", "hotkey", "other", False),
     ("agla gaana chalao", "", "other", False),
+    ("gaana skip karo", "", "other", False),
+    ("next karo", "", "other", False),
     ("gaana pause karo", "", "other", False),
     ("kaun kaun se apps khule hain", "apps_running", "other", True),
 ]

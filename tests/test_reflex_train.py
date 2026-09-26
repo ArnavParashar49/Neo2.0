@@ -87,7 +87,8 @@ def test_training_saves_an_ensemble_head_for_this_encoder_and_a_base_head(monkey
     # nothing earlier compares: the absolute floors, and the head is its own anchor
     assert any("floor" in line for line in report["gate"]) and report["previous"] is None
     assert 0 <= h["ece"] < 1 and h["anchor"]["base"] == pytest.approx(report["intent"])
-    assert set(h["anchor"]) == {"base", "reply", "tool", "kind", "data"} and h["split"] == "hash5-v2"
+    assert set(h["anchor"]) == {*finetune._ANCHORED, *finetune._PAIRED, "data"} and h["split"] == "hash5-v2"
+    assert h["anchor"]["stop fa"] == 0 and h["anchor"]["destructive"] == pytest.approx(h["held_out"]["destructive"])
     base = json.loads(finetune.base_head_path().read_text())
     assert base["rows"] == len(_rows()) and base["mu"] != h["mu"]  # fit without the user's rows
     assert base["held_out"]["user"] is None  # nothing in its file is measured on your requests
@@ -183,13 +184,21 @@ def test_eval_rows_never_train_and_your_verdict_replaces_other_sources(monkeypat
     assert cal == ["what time is it"] and not (sl["train"] & sl["cal"]).any()
 
 
+_FA = ("destructive fa", "destructive fa chat", "stop fa", "needs_screen fa", "needs_screen fa chat")
+
+
 def _m(**kw) -> dict:
-    """A head's score: 100 of your requests, 100 positives for each thing NEO acts on."""
+    """A head's score: 100 of your requests, 100 positives for each thing NEO acts on, and 200 rows
+    each could go off on by mistake (it does on 2)."""
     m = {"base": 0.90, "user": 0.8, "user_ok": np.array([True] * 80 + [False] * 20), "ece": 0.03, "reply": 0.9, "tool": 0.85, "kind": 0.88}
     for c in ("chat", "quick_action", "agent_task", "stop"):
         m[f"recall {c}"] = 0.9
     for name in ("destructive", "stop", "needs_screen"):
         m[name], m[f"{name}_ok"] = 0.98, np.array([True] * 98 + [False] * 2)
+    for name in _FA:
+        m[name], m[f"{name}_ok"] = 0.01, np.array([True] * 198 + [False] * 2)
+    for name in ("latin-undecided", "devanagari"):
+        m[name], m[f"{name}_ok"] = 0.9, np.array([True] * 180 + [False] * 20)
     return {**m, **kw}
 
 
@@ -233,11 +242,11 @@ def test_one_more_missed_row_is_noise_a_lost_head_is_not():
     three = np.array([True] * 95 + [False] * 5)
     ok, lines = finetune._gate(_m(stop=0.95, stop_ok=three), _m(), _ANCHOR)
     assert not ok and any("FAIL stop" in line for line in lines)
-    # few positives: one row is allowed, two aren't
+    # few positives: two rows are noise (McNemar can't tell them from luck), three aren't
     cur = _m(destructive=1.0, destructive_ok=np.array([True] * 20))
-    ok, _ = finetune._gate(_m(destructive=0.95, destructive_ok=np.array([True] * 19 + [False])), cur, _ANCHOR)
-    assert ok
     ok, _ = finetune._gate(_m(destructive=0.9, destructive_ok=np.array([True] * 18 + [False] * 2)), cur, _ANCHOR)
+    assert ok
+    ok, _ = finetune._gate(_m(destructive=0.85, destructive_ok=np.array([True] * 17 + [False] * 3)), cur, _ANCHOR)
     assert not ok
     # within 2 pt on many rows, but only ever losing rows: McNemar says it is worse
     cur = _m(needs_screen=1.0, needs_screen_ok=np.array([True] * 400))
@@ -458,6 +467,7 @@ def test_decide_averages_members_and_names_the_kind_of_an_action(monkeypatch):
     monkeypatch.setattr(lr.features, "embed", lambda agent, texts: np.array([vec[t] for t in texts], np.float32))
     chat = r.decide("hmm what")
     assert chat.intent == "chat" and chat.kind == "" and chat.source == "laya+head"
+    assert r.last_kind[0] == "other"  # kept aside: a remembered correction may make it an action
     assert r.last_embedding.dtype == np.float32 and r.center.shape == r.last_embedding.shape
     act = r.decide("organize my files")
     assert act.intent == "agent_task" and act.kind == "other" and act.kind_p > 0.8
@@ -586,6 +596,7 @@ def test_evaluate_reports_a_head_on_the_benchmark_and_held_out_rows(monkeypatch,
     out = capsys.readouterr().out
     assert "acc bench lang=hinglish" in out and "recall stop" in out and "tool acc" in out and "ECE intent" in out
     assert "neo_data/reflex_head.json (multilingual)" in out and "stop cancels (short)" in out
+    assert "stop false cancels (short)" in out and "destructive false alarms on chat (+rule)" in out
     assert "benchmark: 3 rows (1 left out: the training data has them too)" in out
     # no head there: a clear word, not a traceback
     monkeypatch.setattr(sys, "argv", ["evaluate", "--head", str(settings().data_dir / "nope.json")])
@@ -657,7 +668,7 @@ def test_the_head_without_your_requests_never_sees_your_labels_through_the_datas
             (r["text"], r["intent"], r.get("tool", ""), r["source"], int(lab["destructive"][i]), str(lab["kind"][i]))
             for i, r in enumerate(rows) if keep[i]
         )  # fmt: skip
-        return kept, finetune._fingerprint(rows, sl["base"]), sl
+        return kept, finetune._fingerprint(rows, finetune.anchor_rows(sl)), sl
 
     rows = finetune.training_rows(40)
     before, fp, sl = public(rows)
@@ -731,3 +742,371 @@ def test_your_requests_choose_a_heads_loss_only_when_they_give_more_than_one_ans
     y[:10] = 1
     assert list(finetune._chooser(y, user, cal)) == list(user)
     assert list(finetune._chooser(y, user[:40], cal)) == list(cal)  # too few rows
+
+
+# ---- review 2: false alarms, noise, anchored safety signals, labels the rules didn't write ------------
+def test_a_head_that_goes_off_more_often_is_not_an_improvement():
+    """Recall alone rewards a head that says yes to everything: what it sets off by mistake counts."""
+    ten = np.array([True] * 190 + [False] * 10)  # 8 more false alarms than the current head's 2
+    # stop: more stops caught, but 8 more short commands cancel every running job
+    ok, lines = finetune._gate(_m(stop=1.0, stop_ok=np.ones(100, bool), **{"stop fa": 0.05, "stop fa_ok": ten}), _m(), _ANCHOR)
+    assert not ok and any(line.startswith("  FAIL stop fa") for line in lines), lines
+    # the screen head saying yes to conversation (which then goes to the vision agent)
+    ok, lines = finetune._gate(_m(**{"needs_screen fa chat": 0.05, "needs_screen fa chat_ok": ten}), _m(), _ANCHOR)
+    assert not ok and any("FAIL needs_screen fa chat" in line for line in lines)
+    ok, lines = finetune._gate(_m(**{"destructive fa": 0.05, "destructive fa_ok": ten}), _m(), _ANCHOR)
+    assert not ok and any("FAIL destructive fa" in line for line in lines)
+    # one more false alarm is noise
+    ok, _ = finetune._gate(_m(**{"stop fa": 0.015, "stop fa_ok": np.array([True] * 197 + [False] * 3)}), _m(), _ANCHOR)
+    assert ok
+    # the first head: ceilings, like the floors under the recalls
+    ok, lines = finetune._gate(_m(**{"stop fa": 0.05, "stop fa_ok": ten}), None, {})
+    assert not ok and any("FAIL stop fa" in line and "ceiling" in line for line in lines)
+    ok, lines = finetune._gate(_m(**{"needs_screen fa chat": 0.05, "needs_screen fa chat_ok": ten}), None, {})
+    assert not ok and any("FAIL needs_screen fa chat" in line for line in lines)
+    ok, _ = finetune._gate(_m(), None, {})
+    assert ok
+
+
+def test_scores_count_what_a_head_sets_off_by_mistake_and_ece_on_rows_that_fit_nothing(monkeypatch):
+    import copy
+
+    from neo.config import settings
+
+    _setup(monkeypatch, _rows())
+    finetune.train(_args(), agent=_Agent())
+    rows = finetune.training_rows(640)
+    lab, sl, rules = finetune.labels(rows), finetune.slices(rows), finetune.rule_signals(rows)
+    X = np.hstack([np.vstack([_vec(r["text"]) for r in rows]), np.ones((len(rows), 1), np.float32)]).astype(np.float32)
+    h = finetune.parse_head(json.loads((settings().data_dir / "reflex_head.json").read_text()))
+    cur = finetune.score(h, X, lab, sl, rules)
+    assert cur["stop fa"] == 0 and cur["n"]["stop fa"] > 0 and cur["destructive fa"] == 0 and cur["n"]["destructive fa"] > 0
+    # calibration is judged where no temperature or loss was chosen: the base slice
+    assert cur["n"]["ece"] == cur["n"]["base"]
+    loud = copy.deepcopy(h)  # the stop and destructive outputs pushed up: louder, not better
+    for m in loud["intent"]["members"]:
+        m[-1] = (m[-1][0], m[-1][1] + 50.0 * np.eye(4, dtype=np.float32)[finetune._STOP])
+    for m in loud["destructive"]["members"]:
+        m[-1] = (m[-1][0], m[-1][1] + np.array([0.0, 50.0], np.float32))
+    new = finetune.score(loud, X, lab, sl, rules)
+    assert new["stop"] >= cur["stop"] and new["destructive"] >= cur["destructive"]
+    assert new["stop fa"] > 0.5 and new["destructive fa"] > 0.5 and new["destructive fa chat"] > 0.5
+    ok, lines = finetune._gate(new, cur, {k: cur[k] for k in finetune._ANCHORED})
+    assert not ok and any("FAIL stop fa" in line for line in lines) and any("FAIL destructive fa" in line for line in lines)
+
+
+def test_one_request_more_or_less_on_your_slice_is_noise():
+    u = np.array([True] * 104 + [False] * 8)  # 112 of your requests
+    cur = _m(user_ok=u, user=float(u.mean()))
+
+    def gate(changed):
+        return finetune._gate(_m(user_ok=changed, user=float(changed.mean())), cur, _ANCHOR)
+
+    one = u.copy()
+    one[0] = False  # one right row turned wrong, nothing else changed
+    assert gate(one)[0]
+    net_one = u.copy()
+    net_one[:2], net_one[-1] = False, True  # two lost, one gained
+    assert gate(net_one)[0]
+    worse = u.copy()
+    worse[:6] = False  # six lost, none gained: McNemar p = 0.016
+    ok, lines = gate(worse)
+    assert not ok and any("FAIL user slice" in line for line in lines)
+
+
+def test_what_neo_acts_on_cannot_slide_one_accepted_retrain_at_a_time():
+    """Each retrain loses one stop and a net 12 destructive rows: each step is noise, the slide isn't."""
+    rng = np.random.default_rng(0)
+    d = np.zeros(1430, bool)
+    d[:1228] = True  # 0.859
+    s = np.zeros(74, bool)
+    s[:56] = True  # 0.757
+    first = _m(destructive=float(d.mean()), destructive_ok=d, stop=float(s.mean()), stop_ok=s)
+    anchor = {**_ANCHOR, **{k: first[k] for k in ("destructive", "stop", "needs_screen", *_FA)}}
+    cur, accepted = first, 0
+    for _ in range(15):
+        d, s = cur["destructive_ok"].copy(), cur["stop_ok"].copy()
+        d[rng.choice(np.where(d)[0], 60, replace=False)] = False
+        d[rng.choice(np.where(~d)[0], 48, replace=False)] = True
+        s[np.where(s)[0][0]] = False
+        new = _m(destructive=float(d.mean()), destructive_ok=d, stop=float(s.mean()), stop_ok=s)
+        ok, lines = finetune._gate(new, cur, anchor)
+        if not ok:
+            assert any("anchor" in line for line in lines if "FAIL" in line), lines
+            break
+        cur, accepted = new, accepted + 1
+    assert 1 <= accepted < 15
+    assert cur["destructive"] >= first["destructive"] - 0.02 - 1e-9 and cur["stop"] >= first["stop"] - 2 / 74 - 1e-9
+    # the floors hold on every retrain, not only the first
+    ok, lines = finetune._gate(_m(stop=0.55), _m(stop=0.56), _ANCHOR)
+    assert not ok and any("FAIL stop" in line and "floor" in line for line in lines)
+
+
+def test_screen_and_destructive_recall_count_only_labels_the_rules_did_not_write(monkeypatch):
+    rows = _rows()
+    for i in range(40):  # the screen rule labels these itself: every one a "hit" for head OR rule
+        rows.append({"text": f"research thing{i} on this page", "intent": "agent_task", "tool": "", "source": "template", "destructive": False})
+        rows.append({"text": f"organize thing{i} here", "intent": "agent_task", "tool": "", "source": "reflex_hf.jsonl", "hf_intent": "",
+                     "destructive": False, "screen": True, "lang": "en"})  # fmt: skip
+    _setup(monkeypatch, rows)
+    got = finetune.training_rows(640)
+    lab = finetune.labels(got)
+    derived = np.array(["this page" in r["text"] for r in got])
+    given = np.array([r.get("screen") is True for r in got])
+    assert (lab["needs_screen"][derived] == 1).all() and not lab["needs_screen_labelled"][derived].any()
+    assert lab["needs_screen_labelled"][given].all() and given.sum() == 40
+    report = finetune.train(_args(), agent=_Agent())
+    sl = finetune.slices(got)
+    held = (sl["base"] | sl["cal"]) & ~sl["shadowed"]
+    from neo.config import settings
+
+    h = json.loads((settings().data_dir / "reflex_head.json").read_text())
+    assert h["held_out"]["needs_screen"] is not None and report["saved"]
+    X = np.hstack([np.vstack([_vec(r["text"]) for r in got]), np.ones((len(got), 1), np.float32)]).astype(np.float32)
+    m = finetune.score(finetune.parse_head(h), X, lab, sl, finetune.rule_signals(got))
+    assert m["n"]["needs_screen"] == int((held & given).sum()) > 0
+
+
+def test_row_labels_say_which_labels_are_the_rows_own(monkeypatch):
+    import laya.lang
+
+    monkeypatch.setattr(laya.lang, "analyse", lambda t: {"script": "latin", "language_undecided": False, "language": "en"})
+    rows = [
+        {"text": "email the landlord now", "intent": "agent_task", "source": "reflex_hf.jsonl", "destructive": True, "screen": False, "lang": "en"},
+        {"text": "what's the capital of peru", "intent": "chat", "source": "reflex_hf.jsonl", "destructive": False, "lang": "en"},
+        {"text": "delete the report", "intent": "agent_task", "source": "template", "destructive": True},  # a hint word
+        {"text": "ye file hata do", "intent": "agent_task", "source": "template", "destructive": True, "screen": False, "lang": "hinglish"},
+        {"text": "send it to mom", "intent": "agent_task", "source": finetune.OWN, "destructive": False, "verified": True},
+        {"text": "what does this error mean", "intent": "chat", "source": "reflex_hf.jsonl", "destructive": False, "lang": "en"},
+    ]  # fmt: skip
+    lab = finetune.labels(rows)
+    assert list(lab["destructive_labelled"]) == [True, True, False, True, False, True]
+    assert list(lab["needs_screen_labelled"]) == [True, False, False, True, False, False]
+
+
+def test_the_destructive_rule_reads_hinglish_nouns_with_kar_and_orders_and_recharges():
+    from neo.reflex.schema import sounds_destructive
+
+    for t in ("payment kar do", "payment karo", "mail kar do", "whatsapp kar do", "order kar do", "recharge kar do",
+              "transfer kar dijiye", "msg kar dena", "pizza order karo", "ऑर्डर कर दो", "ऑर्डर करो", "रिचार्ज कर दो",
+              "बिल भरो", "बिल भर दो", "bill bhar do", "fees bharo", "order a pizza", "order me some food",
+              "place an order for two coffees", "recharge my phone", "recharge mom's mobile"):  # fmt: skip
+        assert sounds_destructive(t), t
+    for t in ("where is my order", "order status", "what's my recharge plan", "sort these in ascending order",
+              "in order of date", "toilet paper order karne ke liye yaad dilao", "mera order kab aayega",
+              "recharge plans dikhao", "mera bill kitna hai", "बिल कितना है", "ऑर्डर कहाँ है", "payment ki date kya hai"):  # fmt: skip
+        assert not sounds_destructive(t), t
+
+
+def test_the_screen_rule_leaves_device_commands_and_this_one_alone():
+    from neo.reflex.schema import refers_to_screen
+
+    for t in ("lock my screen", "dim my screen", "make my screen brighter", "turn off the screen", "record my screen",
+              "close this tab", "refresh the page", "zoom in on the page", "I like this one", "who wrote the article",
+              "skip this one", "play more songs like this one", "reserve the table for two", "the form I need for taxes",
+              "wash the windows"):  # fmt: skip
+        assert not refers_to_screen(t), t
+    for t in ("what does this error mean", "summarize this page", "read this article", "what's on my screen",
+              "what am I looking at", "fix the error on this page", "explain this table", "fill in this form",
+              "click the button on the screen", "what does this window say", "read the article that's open",
+              "look at this error and tell me how to fix it", "scan my screen for the open Zoom meeting"):  # fmt: skip
+        assert refers_to_screen(t), t
+    # A row with no screen label of its own takes a broader one (one noisy row among thousands, not a
+    # certain yes at run time) — but never a command that only works the screen.
+    from neo.reflex.schema import screen_label
+
+    assert screen_label("fill in the form with my details") and not refers_to_screen("fill in the form with my details")
+    assert screen_label("copy the tables into a sheet") and screen_label("what does this error mean")
+    assert not screen_label("dim the screen") and not screen_label("close this tab") and not screen_label("skip this one")
+
+
+def test_short_close_and_skip_commands_are_taught_and_a_fixed_set_of_them_judged(monkeypatch):
+    from neo.reflex import dataset
+
+    rows = dataset.build(640)
+    by = {r["text"]: r for r in rows}
+    for t in ("close it", "close the app", "skip", "next"):
+        assert by[t]["intent"] == "quick_action" and by[t].get("split") is None, t
+    assert any("isse band karo" in r["text"] and r["intent"] == "quick_action" for r in rows)
+    probes = [r for r in rows if r["source"] == "template" and r.get("split") == "validation"]
+    assert len(probes) >= 10 and {r["text"] for r in probes}.isdisjoint(r["text"] for r in rows if r.get("split") is None)
+    from neo.reflex import is_bare_stop
+
+    assert all(r["intent"] == "quick_action" and len(r["text"].split()) <= 2 and not is_bare_stop(r["text"]) for r in probes)
+    got = finetune.training_rows(40)
+    sl = finetune.slices(got)
+    at = [i for i, r in enumerate(got) if r["source"] == "template" and r.get("split") == "validation"]
+    assert at and sl["cal"][at].all() and not sl["train"][at].any()  # never trained on: judged as short commands
+
+
+def test_an_erase_removes_head_and_feature_files_a_cut_off_write_left():
+    import asyncio
+
+    from neo import privacy
+    from neo.config import settings
+
+    d = settings().data_dir
+    d.mkdir(parents=True, exist_ok=True)
+    stale = [d / "reflex_head.json.4242.123.tmp", d / "reflex_head.base.json.4242.9.tmp", d / "reflex_head.prev.json.1.2.tmp"]
+    for p in stale:
+        p.write_text('{"fit on": "your requests"}')
+    assert not finetune.reset_to_base()
+    assert not any(p.exists() for p in stale)
+    cache_tmp = finetune.feature_cache().with_name(finetune.feature_cache().name + ".tmp")
+    cache_tmp.write_bytes(b"texts and embeddings")
+    (d / "reflex_head.json.4242.1.tmp").write_text("{}")
+    asyncio.run(privacy.forget_everything())
+    assert not cache_tmp.exists() and not list(d.glob("reflex_head*.tmp"))
+
+
+def test_the_core_sweeps_head_files_a_quit_cut_off_but_not_a_write_in_progress():
+    import os
+    import time
+
+    from neo.config import settings
+
+    d = settings().data_dir
+    d.mkdir(parents=True, exist_ok=True)
+    old, fresh = d / "reflex_head.json.1.2.tmp", d / "reflex_head.json.3.4.tmp"
+    for p in (old, fresh):
+        p.write_text("{}")
+    os.utime(old, (time.time() - 3600, time.time() - 3600))
+    assert finetune.sweep_temporaries(max_age_s=600) == 1
+    assert not old.exists() and fresh.exists()
+
+
+def test_with_learning_off_a_reflex_without_a_head_still_gets_one_from_public_rows_only(monkeypatch):
+    import neo.reflex as reflex_mod
+    from neo.config import settings
+    from neo.reflex import learn
+
+    class Laya:
+        has_head = False
+        encoder = "multilingual"
+        _agent = None
+
+        def reload_head(self):
+            pass
+
+    laya = Laya()
+    monkeypatch.setattr(reflex_mod, "_laya", laya)
+    monkeypatch.setattr(reflex_mod, "get_laya", lambda: laya)
+    (settings().data_dir / "reflex_extra.jsonl").write_text(
+        json.dumps({"text": "open my notes", "intent": "quick_action", "source": "live", "ts": 1e12, "verified": True}) + "\n"
+    )
+    monkeypatch.setenv("NEO_LEARN", "off")
+    from neo import config
+
+    monkeypatch.setattr(config, "_settings", None)
+    assert not learn.enabled() and learn.due()
+    calls = []
+    monkeypatch.setattr(finetune, "train", lambda args, **kw: calls.append(kw) or {"saved": True, "intent": 0.9, "previous": None})
+    assert learn.retrain() is not None and calls and calls[0]["own"] is False
+    # and none of your rows reach the data it trains on
+    from neo.reflex import dataset
+
+    assert "open my notes" in {r["text"] for r in dataset.build(20)}
+    assert "open my notes" not in {r["text"] for r in dataset.build(20, own=False)}  # not even read
+    assert "open my notes" not in {r["text"] for r in finetune.training_rows(20, own=False)}
+
+
+def test_the_learn_loop_retrains_a_headless_reflex_with_learning_off(monkeypatch):
+    import asyncio
+
+    from neo.reflex import learn
+
+    runs = []
+    monkeypatch.setattr(learn, "enabled", lambda: False)
+    monkeypatch.setattr(learn, "_headless", lambda: "rev:multilingual")
+    monkeypatch.setattr(learn, "retrain", lambda: runs.append(1))
+    monkeypatch.setattr(learn, "_IDLE_S", 0.0)
+    ticks = {"n": 0}
+
+    async def fast_sleep(_):
+        ticks["n"] += 1
+        if ticks["n"] > 3:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(learn.asyncio, "sleep", fast_sleep)
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(learn.learn_loop(lambda: True))
+    assert runs  # zero-shot for good is no way to respect "don't learn from me"
+
+
+def test_a_head_lost_again_after_a_successful_headless_retrain_gets_another(monkeypatch):
+    import neo.reflex as reflex_mod
+    from neo.reflex import learn
+
+    class Laya:
+        has_head = False
+        encoder = "multilingual"
+        _agent = None
+
+        def reload_head(self):
+            Laya.has_head = True
+
+    laya = Laya()
+    monkeypatch.setattr(reflex_mod, "_laya", laya)
+    monkeypatch.setattr(reflex_mod, "get_laya", lambda: laya)
+    monkeypatch.setattr(finetune, "train", lambda *a, **kw: {"saved": True, "intent": 0.9, "previous": None})
+    assert learn.due() and learn.retrain()["saved"]
+    assert "headless_tried" not in learn._state()
+    Laya.has_head = False  # e.g. a command-line retrain for the other encoder overwrote the file
+    assert learn.due()
+
+
+def test_a_fallback_reflex_never_overwrites_the_head_of_the_encoder_it_stands_in_for(monkeypatch):
+    import neo.reflex as reflex_mod
+    from neo import models
+    from neo.config import settings
+    from neo.reflex import learn
+
+    class Laya:  # the multilingual files are missing offline: this run is on the English checkpoint
+        has_head = False
+        encoder = "english"
+        _agent = None
+
+        def reload_head(self):
+            pass
+
+    laya = Laya()
+    monkeypatch.setattr(reflex_mod, "_laya", laya)
+    monkeypatch.setattr(reflex_mod, "get_laya", lambda: laya)
+    assert settings().reflex_encoder == "multilingual"
+    head = settings().data_dir / "reflex_head.json"
+    head.write_text(json.dumps({"version": 2, "encoder": models.LAYA_REVISION, "subfolder": "multilingual", "mu": [0.0]}))
+    assert not learn.due()
+    head.write_text(json.dumps({"version": 2, "encoder": models.LAYA_REVISION, "subfolder": "", "mu": [0.0]}))
+    assert learn.due()  # an English head (or none): retraining it for this run loses nothing
+
+
+def test_hinglish_and_devanagari_are_judged_on_their_own():
+    """A few hundred Devanagari rows can get much worse while the base slice (~9k rows) barely moves."""
+    worse = np.array([True] * 160 + [False] * 40)
+    ok, lines = finetune._gate(_m(devanagari=0.8, devanagari_ok=worse), _m(), _ANCHOR)
+    assert not ok and any("FAIL devanagari" in line for line in lines)
+    ok, _ = finetune._gate(_m(**{"latin-undecided": 0.895, "latin-undecided_ok": np.array([True] * 179 + [False] * 21)}), _m(), _ANCHOR)
+    assert ok  # a row is noise
+    ok, lines = finetune._gate(_m(devanagari=0.86), _m(), {**_ANCHOR, "devanagari": 0.9})
+    assert not ok and any("FAIL devanagari" in line and "anchor" in line for line in lines)
+
+
+def test_your_slice_leaves_out_requests_the_current_head_may_have_trained_on_as_public_rows(monkeypatch):
+    """"what's the weather" is a template too: the current head trained on that copy before you said
+    it, the new one holds yours out (and the copy is shadowed) — comparing them there favours the
+    current head. Only your own phrasings judge whether it learned them."""
+    import laya.lang
+
+    monkeypatch.setattr(laya.lang, "analyse", lambda t: {"script": "latin", "language_undecided": False, "language": "en"})
+    rows = _rows(own=60)
+    rows += [{**r, "source": "reflex_hf.jsonl", "lang": "en", "hf_intent": ""} for r in rows if r["source"] == finetune.OWN][:30]
+    sl = finetune.slices(rows)
+    assert sl["echo"].sum() == 30 and not (sl["echo"] & ~sl["own"]).any()
+    X = np.hstack([np.vstack([_vec(r["text"]) for r in rows]), np.ones((len(rows), 1), np.float32)])
+    W = np.zeros((4, _DIM + 1), np.float32)
+    h = {"mu": np.zeros(_DIM + 1, np.float32), "sd": np.ones(_DIM + 1, np.float32),
+         "intent": {"members": [[(W, np.zeros(4, np.float32))]], "T": 1.0, "classes": []},
+         **dict.fromkeys(("destructive", "needs_screen", "reply", "tool", "kind"))}  # fmt: skip
+    m = finetune.score(h, X, finetune.labels(rows), sl, finetune.rule_signals(rows))
+    judged = sl["user"] & ~sl["echo"]
+    assert m["n"]["user"] == len(m["user_ok"]) == int(judged.sum()) < int(sl["user"].sum())

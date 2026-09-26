@@ -125,6 +125,13 @@ QUICK = [
     ("go to {site}", True),
     ("close {app}", True),
     ("quit {app}", True),
+    # short ones too: a sure "stop" of two words cancels every running job ("close it" was one)
+    ("close it", False),
+    ("close the app", True),
+    ("close this app", True),
+    ("close the window", True),
+    ("close this window", True),
+    ("quit the app", True),
     ("switch to {app}", True),
     ("bring up {app}", True),
     ("turn the volume up", True),
@@ -148,6 +155,12 @@ QUICK = [
     ("pause the music", True),
     ("next song", False),
     ("skip this track", True),
+    ("next", False),
+    ("next one", False),
+    ("skip", False),
+    ("skip it", False),
+    ("previous song", False),
+    ("go to the previous track", True),
     ("what's the weather", False),
     ("is it going to rain today", False),
     ("how cold is it outside", False),
@@ -319,6 +332,14 @@ STOP = [
     ("okay stop", False),
 ]
 
+# Short commands that aren't a stop, never trained on (split "validation": the calibration slice, which
+# the gate judges on): the false cancels it counts include these every time. The held-out data had
+# three short close/quit rows, and the multilingual head was sure "close it" meant stop.
+STOP_LOOKALIKES = [
+    "close this", "close that", "close window", "close WhatsApp", "quit Photos", "next track", "next please",
+    "skip this", "skip song", "previous track", "hide it", "minimise it", "agla gaana", "gaana badlo",
+]  # fmt: skip
+
 DESTRUCTIVE_HINTS = (
     "delete",
     "remove",
@@ -421,10 +442,11 @@ def _fill(t: str, rnd: random.Random) -> str:
     )
 
 
-def build(n_per_class: int = 320, seed: int = 7, *, override: bool = True) -> list[dict]:
+def build(n_per_class: int = 320, seed: int = 7, *, override: bool = True, own: bool = True) -> list[dict]:
     """Every labelled row. `override` False leaves other sources' rows with your words as they are
     (see _own_outcomes_win): finetune keeps those out of the head itself, and fits the head it falls
-    back to after an erase on them, so that head never learns your labels."""
+    back to after an erase on them, so that head never learns your labels. `own` False: your
+    requests (reflex_extra.jsonl) aren't even read — learning is off."""
     rnd = random.Random(seed)
     rows: list[dict] = []
     seen: set[str] = set()
@@ -462,6 +484,8 @@ def build(n_per_class: int = 320, seed: int = 7, *, override: bool = True) -> li
     # LLM-generated + real-world extras + mapped Hugging Face rows live outside the repo
     # (see generate.py, hf_data.py, README). reflex_eval.jsonl is the benchmark: never trained on.
     for name in ("reflex_generated.jsonl", "reflex_extra.jsonl", "reflex_hf.jsonl"):
+        if name == "reflex_extra.jsonl" and not own:
+            continue
         extra = settings().data_dir / name
         if extra.exists():
             if name == "reflex_extra.jsonl":  # the user's own requests: deduped, within retention
@@ -491,7 +515,13 @@ def build(n_per_class: int = 320, seed: int = 7, *, override: bool = True) -> li
                 if hf or gen:
                     out.update({k: r[k] for k in _HF_LABELS if k in r})
                 rows.append(out)
-    rows = _own_outcomes_win(rows, override)
+    rows = _own_outcomes_win(rows, override) if own else rows
+    said = {r["text"].lower() for r in rows}  # judged only as sentences nothing trains on
+    rows += [
+        {"text": t, "intent": "quick_action", "source": "template", "destructive": False, "tool": tool_for(t), "split": "validation"}
+        for t in STOP_LOOKALIKES
+        if t.lower() not in said
+    ]
     rnd.shuffle(rows)
     return rows
 

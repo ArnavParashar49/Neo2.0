@@ -37,6 +37,7 @@ async def forget_everything() -> dict[str, int]:
     memory.forget()  # the corrections' embeddings (RAM only)
     finetune.feature_cache().unlink(missing_ok=True)  # rebuilt from the public datasets on the next retrain
     finetune.reset_to_base()  # the heads fit on your requests go; the one trained without them stays (never raises)
+    finetune.sweep_temporaries()  # and what a cut-off write of either left behind
     from neo.decide import engine as decide
     from neo.decide import eventkit, learned, media, run, sites
 
@@ -78,3 +79,4 @@ async def _unlink_cache_after_retrain(limit_s: float = 1800.0) -> None:
         waited += 2.0
     finetune.feature_cache().unlink(missing_ok=True)
     finetune.reset_to_base()
+    finetune.sweep_temporaries()

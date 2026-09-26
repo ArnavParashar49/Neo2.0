@@ -345,7 +345,9 @@ class Session:
         only: list[str] | None = None,
         done_note: str = "",
     ) -> Reply:
-        needs_screen = bool(images or (d and d.needs_screen))
+        # The single-tool lane ("dim my screen", "click Send") runs one tool, which looks for itself
+        # if it must: the reflex's screen signal alone doesn't buy it the vision chain.
+        needs_screen = bool(images or (d and d.needs_screen and not only))
         if needs_screen:
             purpose = "vision"
         elif only or (d and d.intent == "quick_action"):

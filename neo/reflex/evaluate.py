@@ -1,5 +1,6 @@
 """How good is a reflex head? Intent accuracy by language and by source, per-class recall, what
-NEO acts on for destructive and stop, tool and kind accuracy, calibration, and decision latency.
+NEO acts on for destructive, stop and the screen (and how often each goes off by mistake), tool and
+kind accuracy, calibration, and decision latency.
 
     python -m neo.reflex.evaluate                                # the current head
     python -m neo.reflex.evaluate --head old.json --head new.json   # side by side (before / after)
@@ -105,26 +106,35 @@ def _metrics(h: dict, X: np.ndarray, lab: dict, groups: dict, rules: dict) -> di
             m[f"recall {c}"] = float(ok[y == i].mean())
     m["ECE intent"] = ece(P, y)
     stop = y == _STOP
+    fired = cancels(P, rules)
+    can = rules["stop"] | rules["short"]  # the rows the session could cancel on at all
     if stop.any():
         m["stop recall (head)"] = float((pred[stop] == _STOP).mean())
         m["stop recall (+rule)"] = float(((pred == _STOP) | rules["stop"])[stop].mean())
-        short = stop & (rules["stop"] | rules["short"])  # the stops the session can cancel on at all
-        if short.any():
-            m["stop cancels (short)"] = float(cancels(P, rules)[short].mean())
-            m["stop cancels n"] = float(short.sum())
-        m["stop false alarms"] = float(cancels(P, rules)[~stop].mean()) if (~stop).any() else float("nan")
+        if (stop & can).any():
+            m["stop cancels (short)"] = float(fired[stop & can].mean())
+            m["stop cancels n"] = float((stop & can).sum())
+    if (~stop & can).any():  # a short command that isn't a stop, cancelling every running job
+        m["stop false cancels (short)"] = float(fired[~stop & can].mean())
+        m["stop false cancels n"] = float((~stop & can).sum())
+    # Only rows whose destructive / screen label is their own: on a row the rule labelled, head or
+    # rule is a hit by construction.
+    chat = y == _INTENTS.index("chat")
     for name in ("destructive", "needs_screen"):
-        trusted = lab[f"{name}_trusted"]
-        if h[name] is None or not trusted.any():
+        if h[name] is None:
             continue
-        p = head_probs(h[name], Xs[trusted])[:, 1]
-        both = np.maximum(p, rules[name][trusted])
-        pos, neg = lab[name][trusted] == 1, lab[name][trusted] == 0
+        p = head_probs(h[name], Xs)[:, 1]
+        both = np.maximum(p, rules[name]) >= 0.5
+        own, yes = lab[f"{name}_labelled"], lab[name]
+        pos, neg = own & (yes == 1), own & (yes == 0)
         if pos.any():
             m[f"{name} recall (head)"] = float((p[pos] >= 0.5).mean())
-            m[f"{name} recall (+rule)"] = float((both[pos] >= 0.5).mean())
+            m[f"{name} recall (+rule)"] = float(both[pos].mean())
+            m[f"{name} recall n"] = float(pos.sum())
         if neg.any():
-            m[f"{name} false alarms (+rule)"] = float((both[neg] >= 0.5).mean())
+            m[f"{name} false alarms (+rule)"] = float(both[neg].mean())
+        if (chat & (yes == 0)).any():
+            m[f"{name} false alarms on chat (+rule)"] = float(both[chat & (yes == 0)].mean())
     have = lab["reply"] >= 0
     if h["reply"] is not None and have.any():
         m["reply acc"] = float((head_probs(h["reply"], Xs[have]).argmax(1) == lab["reply"][have]).mean())

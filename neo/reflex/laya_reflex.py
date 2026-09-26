@@ -50,6 +50,9 @@ class LayaReflex:
         # otherwise all sit at cosine ~0.83 of each other.
         self.last_embedding: np.ndarray | None = None
         self.center: np.ndarray | None = None
+        # ...and the kind head's (kind, p) for it whatever the intent: a remembered correction that
+        # makes it an action takes this (memory.recall). None without a kind head.
+        self.last_kind: tuple[str, float] | None = None
         self._head: dict[str, Any] | None = None
         self.reload_head()
         self.decide("warm up")  # first MPS call is ~2 s; take it now
@@ -117,11 +120,13 @@ class LayaReflex:
             j = int(tp.argmax())
             if h["tool"]["classes"][j] != "none":
                 tool, tool_p = h["tool"]["classes"][j], float(tp[j])
-        kind, kind_p = "", 0.0
-        if intent in _ACTIONS and h["kind"] is not None:
+        kind, kind_p, self.last_kind = "", 0.0, None
+        if h["kind"] is not None:
             kp = head_probs(h["kind"], xs)
             j = int(kp.argmax())
-            kind, kind_p = h["kind"]["classes"][j], float(kp[j])
+            self.last_kind = (h["kind"]["classes"][j], float(kp[j]))
+            if intent in _ACTIONS:
+                kind, kind_p = self.last_kind
         return Decision(
             intent=intent,  # type: ignore[arg-type]
             intent_confidence=float(probs.max()),
@@ -145,7 +150,7 @@ class LayaReflex:
         asked about the screen: it says yes to ~1 in 5 chat requests (measured), and a yes sends
         conversation to the vision agent."""
         t0 = time.perf_counter()
-        self.last_embedding = self.center = None
+        self.last_embedding = self.center = self.last_kind = None
         q = QUESTIONS if self.encoder == "english" else {k: QUESTIONS[k] for k in ("intent", "destructive")}
         ans = self._agent.system_one({"text": text}, q)["answers"]
         probs = _choice_probs(ans["intent"])
