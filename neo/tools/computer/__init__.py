@@ -168,7 +168,7 @@ async def ax_press(a: dict, c: ToolContext) -> str:
     # The app that owns the element, not whatever is in front: clicking NEO's own card to
     # approve brings NEO forward, and the question must stay the same.
     owner = ax.app_of(e.ref) if e else ""
-    if _protected(owner):
+    if e and await _protected_at(owner, *e.center):
         return _refuse_protected()
     if e and (gate := _ask_before_click("ax_press", a, e.title or e.value, owner)):
         return gate
@@ -184,7 +184,7 @@ async def ax_press(a: dict, c: ToolContext) -> str:
 )
 async def ax_set_value(a: dict, c: ToolContext) -> str:
     e = ax.get(a["id"])
-    if e and _protected(ax.app_of(e.ref)):
+    if e and await _protected_at(ax.app_of(e.ref), *e.center):
         return _refuse_protected()
     return await asyncio.to_thread(ax.set_value, a["id"], a["value"])
 
@@ -215,7 +215,7 @@ async def click(a: dict, c: ToolContext) -> str:
         x, y = a["x"], a["y"]
         label = await asyncio.to_thread(ax.label_at, x, y)
         owner = await asyncio.to_thread(ax.app_at, x, y)
-    if _protected(owner):
+    if await _protected_at(owner, x, y):
         return _refuse_protected()
     if gate := _ask_before_click("click", a, label, owner):
         return gate
@@ -239,7 +239,7 @@ async def click(a: dict, c: ToolContext) -> str:
 )
 async def drag(a: dict, c: ToolContext) -> str:
     for x, y in ((a["x1"], a["y1"]), (a["x2"], a["y2"])):  # where it's picked up and where it lands
-        if _protected(await asyncio.to_thread(ax.app_at, x, y)):
+        if await _protected_at(await asyncio.to_thread(ax.app_at, x, y), x, y):
             return _refuse_protected()
     return inp.drag(a["x1"], a["y1"], a["x2"], a["y2"])
 
@@ -264,7 +264,7 @@ async def scroll(a: dict, c: ToolContext) -> str:
     x, y = a.get("x"), a.get("y")
     if a.get("at_pointer") or x is None or y is None:
         x, y = inp.mouse_position()  # "scroll down": wherever the pointer is
-    if _protected(await asyncio.to_thread(ax.app_at, x, y)):
+    if await _protected_at(await asyncio.to_thread(ax.app_at, x, y), x, y):
         return _refuse_protected()
     return inp.scroll(x, y, int(a.get("dy", -5)), int(a.get("dx", 0)))
 
@@ -464,19 +464,35 @@ _INPUT_TOOLS = ("type_text", "dictate", "hotkey", "click_text", "ax_set_value")
 _UNDO_WINDOW_S = 120.0
 
 
-_NEVER_TYPE_INTO = {"neo-ui", "neo"}  # NEO's own overlay
+_NEVER_TYPE_INTO = {"neo-ui", "neo", "com.arnav.neo"}  # NEO's own overlay: its names and bundle id
 
 
-def _protected(owner: str) -> bool:
+def _protected(owner: str, pid: int = 0) -> bool:
     """An app NEO's input tools never touch: NEO's own overlay (its card's "Yes, do it" is the
     user's to press, never NEO's), and any app in the `protected_apps` setting — a host's own
-    approval dialog, for one."""
+    approval dialog, for one. Matched on the app's name, bundle id or executable's name (`pid`:
+    the app's process, when that's what is known)."""
     name = (owner or "").strip().lower()
-    if not name:
-        return False
     if name in _NEVER_TYPE_INTO:
         return True
-    return name in {str(p).strip().lower() for p in settings().protected_apps}
+    listed = {str(p).strip().lower() for p in settings().protected_apps}
+    if not pid and not (name and listed):
+        return False
+    names = {name} | {n.lower() for n in (ax.app_names(pid) if pid else ax.names_of_app(owner))}
+    return bool((names - {""}) & (_NEVER_TYPE_INTO | listed))
+
+
+async def _protected_at(owner: str, x: float, y: float) -> bool:
+    """Is the target at (x, y) — `owner`'s, as accessibility named it — one NEO never touches?
+    When accessibility can't name the owner, the window server says whose window is there; when
+    neither can, the answer is yes: nothing is touched that might be NEO's card."""
+    if owner:
+        return _protected(owner)
+    hit = await asyncio.to_thread(ax.window_owner_at, x, y)
+    if hit is None:
+        return True
+    name, pid = hit
+    return bool(name or pid) and _protected(name, pid)
 
 
 def _refuse_protected() -> str:
@@ -492,6 +508,8 @@ async def _guard_front(want: str = "") -> str | None:
     brought forward if needed. If macOS won't, nothing is sent and the user is told, instead of
     typing into whatever they happen to be using."""
     goal = want or apps.target()
+    if goal and _protected(goal):  # never brought forward, even to refuse it afterwards
+        return _refuse_protected()
     front = apps.front_name()
     if goal and front.lower() != goal.lower():
         ok, real = await apps.bring_front(goal, wait=0.3)
@@ -745,6 +763,8 @@ async def click_text(a: dict, c: ToolContext) -> str:
     )
     e = hits[0]
     name = (e.title or e.value)[:40]
+    if not app and await _protected_at("", *e.center):  # a window accessibility couldn't name
+        return _refuse_protected()
     if gate := _ask_before_click("click_text", a, e.title or e.value, app, els):
         return gate
     if "AXPress" in e.actions and not (await asyncio.to_thread(ax.press_element, e)).startswith("Error"):

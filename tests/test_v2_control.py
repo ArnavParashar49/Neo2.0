@@ -112,7 +112,9 @@ def test_click_text_asks_when_ambiguous(monkeypatch):
 
 def test_scroll_fast_path_uses_the_pointer(monkeypatch):
     from neo.tools import computer as comp
+    from neo.tools.computer import ax
 
+    monkeypatch.setattr(ax, "app_at", lambda x, y: "Safari")  # never this machine's real screen
     monkeypatch.setattr(comp.inp, "mouse_position", lambda: (640.0, 400.0))
     seen = {}
     monkeypatch.setattr(comp.inp, "scroll", lambda x, y, dy, dx: seen.update(x=x, y=y, dy=dy) or "ok")

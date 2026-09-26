@@ -464,3 +464,55 @@ def app_at(x: float, y: float) -> str:
     except Exception:  # noqa: BLE001
         return ""
     return "" if err or el is None else app_of(el)
+
+
+def window_owner_at(x: float, y: float) -> tuple[str, int] | None:
+    """(name, pid) of the app owning the frontmost on-screen window under a screen point, from
+    the window server — which knows every window, accessible or not. ("", 0): no window there;
+    None: it couldn't say."""
+    try:
+        import Quartz as Q
+
+        wins = Q.CGWindowListCopyWindowInfo(
+            Q.kCGWindowListOptionOnScreenOnly | Q.kCGWindowListExcludeDesktopElements, Q.kCGNullWindowID
+        )
+    except Exception:  # noqa: BLE001
+        return None
+    if wins is None:
+        return None
+    for w in wins:  # front to back
+        b = w.get("kCGWindowBounds") or {}
+        wx, wy, ww, wh = (float(b.get(k, 0) or 0) for k in ("X", "Y", "Width", "Height"))
+        if ww <= 0 or wh <= 0 or float(w.get("kCGWindowAlpha", 1) or 0) <= 0:
+            continue
+        if wx <= x < wx + ww and wy <= y < wy + wh:
+            return str(w.get("kCGWindowOwnerName", "") or ""), int(w.get("kCGWindowOwnerPID", 0) or 0)
+    return "", 0
+
+
+def app_names(pid: int) -> set[str]:
+    """Every name the app with this pid goes by: its own, its bundle id, its executable's."""
+    try:
+        from AppKit import NSRunningApplication
+
+        app = NSRunningApplication.runningApplicationWithProcessIdentifier_(int(pid))
+        if app is None:
+            return set()
+        url = app.executableURL()
+        names = (app.localizedName(), app.bundleIdentifier(), url.lastPathComponent() if url is not None else "")
+    except Exception:  # noqa: BLE001
+        return set()
+    return {str(n) for n in names if n}
+
+
+def names_of_app(name: str) -> set[str]:
+    """Every name the running apps called `name` go by (their bundle ids and executables)."""
+    want = (name or "").strip().lower()
+    out: set[str] = set()
+    try:
+        for app in NSWorkspace.sharedWorkspace().runningApplications():
+            if str(app.localizedName() or "").strip().lower() == want:
+                out |= app_names(int(app.processIdentifier()))
+    except Exception:  # noqa: BLE001
+        pass
+    return out
