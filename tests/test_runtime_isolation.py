@@ -252,3 +252,58 @@ async def test_one_task_asking_two_agents_carries_nothing_between_them(tmp_path)
         from neo.agent.session import _with_conversation
 
         assert _with_conversation("x") == "x"
+
+
+async def test_a_request_leaves_nothing_behind_in_its_callers_task(tmp_path):
+    """handle() used to leave its extras and taint set in the calling task: approving a card of
+    agent B that B's session didn't adopt (a direct call staged it), right after serving agent A
+    from the same task, ran B's action with A's extras."""
+    from neo.agent import session as sess_mod
+    from neo.agent.registry import ToolContext, registry
+
+    seen: list[dict] = []
+
+    def wire(args, c):
+        g = confirm.gated("zz_wire", args, "wire 900 to mallory")
+        if isinstance(g, str):
+            return g
+        seen.append(dict(c.extras))
+        return "wired"
+
+    a, b = make_runtime(tmp_path / "a", "a"), make_runtime(tmp_path / "b", "b")
+    for rt in (a, b):
+        rt.registry.register(RegisteredTool("zz_wire", "wire", _OBJ, wire, risk="destructive"))
+        rt.registry.register(RegisteredTool("zz_ping", "ping", _OBJ, lambda x, c: "pong", fast_path=[(r"^\s*ping\s*$", {})]))
+        rt.brains = BrainPool(overrides={"agent": [ScriptedBrain([])]})
+    session_b = Session()
+    with runtime.bind(b.scope()):  # B's card, staged by a direct call (not adopted by B's session)
+        aid = (await registry().invoke("zz_wire", {"amount": 900}, ToolContext(extras={"tenant": "B"}))).staged
+    with runtime.bind(a.scope()):  # then the host serves A, in the same task
+        await Session().handle("ping", taint=("web_fetch",), extras={"tenant": "A"})
+    assert dict(sess_mod._request_extras.get()) == {} and sess_mod._request_taint.get() == ()
+    assert sess_mod._conversation.get() == ""
+    with runtime.bind(b.scope()):
+        await session_b.answer(True, action_id=aid)
+    assert seen == [{}]  # never A's
+
+
+async def test_a_typed_yes_still_carries_its_own_requests_extras(tmp_path):
+    """Inside a request (a typed "yes" answering a card no session adopted), the answering
+    request's own extras still reach the approved call, as before."""
+    from neo.agent.registry import ToolContext, registry
+
+    seen: list[dict] = []
+
+    def wire(args, c):
+        g = confirm.gated("zz_wire", args, "wire 5")
+        if isinstance(g, str):
+            return g
+        seen.append(dict(c.extras))
+        return "wired"
+
+    rt = make_runtime(tmp_path / "a", "a")
+    rt.registry.register(RegisteredTool("zz_wire", "wire", _OBJ, wire, risk="destructive"))
+    with runtime.bind(rt.scope()):
+        await registry().invoke("zz_wire", {"amount": 5}, ToolContext())
+        await Session().handle("yes", from_user=True, extras={"tenant": "A"})
+    assert seen == [{"tenant": "A"}]

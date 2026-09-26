@@ -173,3 +173,21 @@ def test_more_tools_in_a_run_enables_nothing_outside_the_agent(web_agent):
         res = asyncio.run(run_agent("x", provider=brain, system="", ev=EventBus(), verify=False, tools=[]))
     assert set(brain.tools_seen[1]) <= set(WEB)
     assert res.steps[1].result == "Unknown tool: shell"
+
+
+def test_an_agent_gets_the_as_registered_surface_whatever_the_app_runs(decide_modes, tmp_path):
+    """NEO.app's loader rewrites catalog entries for kinds that are "on" (descriptions, parameters,
+    hidden): an agent, whose kinds run their legacy scripts, gets the tools as registered."""
+    from neo_lib import make_runtime
+
+    from neo.tools import tasks
+
+    decide_modes(web_search="on", add_event="on", read_calendar="on")
+    names = ["page_read", "safari_read", "search_site", "calendar_add", "calendar_today"]
+    assert catalog().get("page_read").hidden is False and catalog().get("safari_read").hidden  # the app's "on"
+    rt = make_runtime(tmp_path / "a", "a", names, library=False)
+    for name in names:
+        mine = rt.registry.get(name)
+        for k, v in tasks._AS_REGISTERED[name].items():
+            assert getattr(mine, k) == v, (name, k)
+    assert rt.registry.get("page_read").hidden and not rt.registry.get("safari_read").hidden

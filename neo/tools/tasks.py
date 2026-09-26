@@ -16,7 +16,7 @@ import functools
 from collections.abc import Callable
 from typing import Any
 
-from neo.agent.registry import ToolContext, catalog
+from neo.agent.registry import AS_REGISTERED, ToolContext, catalog
 from neo.agent.registry import tool as _register
 from neo.config import DecideMode, decide_mode
 from neo.decide import shadow
@@ -122,7 +122,7 @@ _WHEN_ON: dict[str, tuple[str, dict[str, Any]]] = {
     "page_read": ("web_search", {"hidden": False}),
     "safari_read": ("web_search", {"hidden": True}),
 }
-_AS_REGISTERED: dict[str, dict[str, Any]] = {}
+_AS_REGISTERED = AS_REGISTERED  # what apply_modes changed, as registered (agents copy these)
 
 
 def apply_modes() -> None:

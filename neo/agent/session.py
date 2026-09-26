@@ -155,12 +155,25 @@ class Session:
         the user's own sentence, which it hands over without `from_user`). `extras`: handed to
         every tool this request calls (ToolContext.extras)."""
         origin = origin or ("user" if from_user else "live")
-        # An embedded agent's request carries only its own context: its host may ask another
-        # agent from the same task next, and what this one was told must not ride along.
-        if conversation or runtime.library_bound():
-            _conversation.set(conversation)
-        _request_taint.set(tuple(taint))
-        _request_extras.set(dict(extras or {}))
+        # This request's taint and extras hold while it runs and are put back when it returns: the
+        # caller's next call from the same task (approving another agent's card, say) never gets
+        # them. An embedded agent's request carries only its own context too, for the same reason.
+        own = runtime.library_bound()
+        reset: list[tuple[contextvars.ContextVar[Any], contextvars.Token[Any]]] = [
+            (_request_taint, _request_taint.set(tuple(taint))),
+            (_request_extras, _request_extras.set(dict(extras or {}))),
+        ]
+        if conversation or own:
+            token = _conversation.set(conversation)
+            if own:
+                reset.append((_conversation, token))
+        try:
+            return await self._handle(text, images=images, from_user=from_user, origin=origin)
+        finally:
+            for var, tok in reversed(reset):
+                var.reset(tok)
+
+    async def _handle(self, text: str, *, images: list[ImagePart] | None, from_user: bool, origin: Origin) -> Reply:
         _mark_job()
         text = _WAKE_PREFIX.sub("", text.strip(), count=1).strip() or text.strip()
         if not text:

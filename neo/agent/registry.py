@@ -147,7 +147,8 @@ class Registry:
         out = Registry(strict=True)
         for t in self._tools.values():
             if t.name in want:
-                out._tools[t.name] = dataclasses.replace(t, fast_path=list(t.fast_path))
+                # as registered: never the surface NEO.app's task modes gave the catalog entry
+                out._tools[t.name] = dataclasses.replace(t, fast_path=list(t.fast_path), **AS_REGISTERED.get(t.name, {}))
         return out
 
     def get(self, name: str) -> RegisteredTool | None:
@@ -221,6 +222,9 @@ class Registry:
 
 
 _registry: Registry | None = None
+# The fields NEO.app's task modes rewrote on a catalog entry (neo.tools.tasks.apply_modes), as the
+# tool registered them: an agent's copy always gets these (its task kinds run their legacy scripts).
+AS_REGISTERED: dict[str, dict[str, Any]] = {}
 
 
 def catalog() -> Registry:
