@@ -214,3 +214,19 @@ def test_web_area_pid_and_sign_in_come_from_medias_primitives(monkeypatch):
     assert axkit.needs_sign_in(win) and not axkit.needs_sign_in(area)
     monkeypatch.setattr(media, "_pid_of", lambda bid: 55 if bid == "test.webby" else None)
     assert axkit.pid_of("test.webby") == 55 and axkit.pid_of("test.nope") is None
+
+
+def test_in_web_tells_web_content_from_the_apps_own_controls(monkeypatch):
+    page_field = El("AXTextField")
+    area = El("AXWebArea", [El("AXGroup", [page_field])])
+    bar = El("AXTextField")
+    win = El("AXWindow", [El("AXToolbar", [bar]), area])
+    FakeAX(monkeypatch, El("AXApplication", [win]))
+    for parent in (win, *win.children, *area.children):  # the parent links the fake tree implies
+        for child in parent.children:
+            child.attrs["AXParent"] = parent
+    assert axkit.in_web(page_field) and axkit.in_web(area)
+    assert not axkit.in_web(bar) and not axkit.in_web(None)
+    deep = El("AXTextField")
+    deep.attrs["AXParent"] = deep  # a parent loop: can't tell, so treated as web content
+    assert axkit.in_web(deep)

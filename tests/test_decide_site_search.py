@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import dataclass
+from pathlib import Path
 from urllib.parse import quote_plus
 
 import httpx
@@ -50,9 +51,9 @@ class Browser:
     then shows; ``results`` maps (the field, its words) to the address after Return."""
 
     def __init__(
-        self, monkeypatch, *, trusted=True, box=True, bar=True, sign_in=False, lands=None, results=None
+        self, monkeypatch, *, trusted=True, box=True, bar=True, sign_in=False, lands=None, results=None, front=True
     ):
-        self.url, self.value, self.focus = "", "", None
+        self.url, self.value, self.focus, self.front, self.lag = "", "", None, front, 0
         self.opened, self.typed, self.returns, self.pressed, self.tree, self.fronted = [], [], 0, [], [], []
         self.box, self.bar, self.sign_in = box, bar, sign_in
         self.lands = lands or (lambda url: url)
@@ -117,7 +118,7 @@ class Browser:
 
     async def _bring_front(self, name, wait=1.5):
         self.fronted.append(name)
-        return True, name
+        return self.front, name
 
     async def _run(self, cmd, timeout=30):
         raise AssertionError(f"nothing is launched here: {cmd}")
@@ -134,15 +135,26 @@ class Browser:
     def _perform(self, el, action):
         self.pressed.append((el, action))
         if el == "open-location":
-            self.focus = "address"
+            self.moved = "address"  # the focus gets there after ``lag`` more reads
         return True
+
+    # the page's own text field sits in the web content; the address and find fields are the browser's
+    _TREE = {  # noqa: RUF012
+        "address": {"AXRole": "AXTextField"},
+        "findbar": {"AXRole": "AXTextField"},
+        "pagefield": {"AXRole": "AXTextField", "AXParent": "form"},
+        "form": {"AXRole": "AXGroup", "AXParent": "webarea"},
+        "webarea": {"AXRole": "AXWebArea", "AXParent": "window"},
+    }
 
     def _attr(self, el, name, default=None):
         if el == "app" and name == "AXFocusedUIElement":
+            if getattr(self, "moved", None):
+                if self.lag <= 0:
+                    self.focus, self.moved = self.moved, None
+                self.lag -= 1
             return self.focus
-        if el == "address" and name == "AXRole":
-            return "AXTextField"
-        return default
+        return self._TREE.get(el, {}).get(name, default)
 
 
 class FakeSearch:
@@ -183,7 +195,7 @@ def test_first_use_resolves_discovers_lands_and_learns(monkeypatch):
     r = search("Shopkart", "2tb ssd")
     assert r.ok and r.say is True and r.text == f"Searching {HOST} for “2tb ssd”."
     assert b.opened == [(f"https://{HOST}/s?kw=2tb+ssd", "test.webby")] and b.typed == []
-    assert learned.get("sites", "shopkart|in") == {"host": HOST, "prefix": ""}
+    assert learned.get("sites", "shopkart|in") == {"host": HOST, "prefix": "", "via": "search"}
     assert learned.get("templates", HOST)["url"] == f"https://{HOST}/s?kw={{searchTerms}}"
     assert b.tree == ["on", "off"]
     assert engine.proven("web_search", HOST)
@@ -385,7 +397,11 @@ def test_the_taint_gate_sees_a_search_that_carries_data():
 
 
 @pytest.fixture
-def evidence(monkeypatch):
+def evidence(monkeypatch, tmp_path):
+    words = tmp_path / "words"
+    words.write_text("notebook\nrecipe\ndinner\ncheap\nflight\napple\ndeal\nShopkart\n")
+    monkeypatch.setattr(inventory, "_WORDS_FILE", str(words))
+    monkeypatch.setattr(sites, "_lower_known", {})
     monkeypatch.setattr(inventory, "snapshot", lambda: list(APPS))
     monkeypatch.setattr(
         inventory,
@@ -426,8 +442,10 @@ def test_search_site_claims_only_sites_it_knows(evidence, site, claims):
         ("articles on climate change", False),
         ("2tb ssd on shopkart", False),
         ("articles on the history of the roman empire", True),  # a topic, not a place
-        ("recipes for dinner", True),
-        ("cheap flights for tomorrow", True),
+        ("recipes for dinner", False),  # one word before "for" may be a site's name
+        ("cheap flights for tomorrow", True),  # a phrase of everyday words: a topic
+        ("shopkart deals for 2tb ssd", False),
+        ("tomorrow for flights", True),
         ("youtube for cats", False),  # "<site> for X": the site's search, a model decides
         ("shopkart for 2tb ssd", False),
         ("notebook for milk", False),
@@ -496,3 +514,114 @@ def test_the_engine_gets_these_drivers_methods(monkeypatch):
     assert [c.key for c in cands] == ["web"]  # an app that isn't a browser is no website
     cands = asyncio.run(engine.choose("open_app", "open notebook", APPS))
     assert [(c.key, c.methods) for c in cands][0] == ("test.notebook", ("open",))
+
+
+# ---- review fixes ---------------------------------------------------------------------------------------
+
+ZENTRIX = App(bundle_id="test.zentrix", name="Zentrix", path="/Applications/Zentrix.app")
+SECTION = "https://www.shopkart.com/maps/search?q={searchTerms}"
+
+
+def test_a_sites_sections_keep_their_own_templates(monkeypatch):
+    b = Browser(monkeypatch)
+    monkeypatch.setattr(
+        sites, "_search", FakeSearch(["https://www.shopkart.com/maps/place/x", "https://www.shopkart.com/"])
+    )
+    serve(
+        monkeypatch,
+        {
+            "https://www.shopkart.com/maps/": '<form role="search" action="search"><input name="q"></form>',
+            "https://www.shopkart.com/": '<form role="search" action="/s"><input name="k"></form>',
+        },
+    )
+    r = search("shopkart maps", "pizza")
+    assert r.ok and r.text == "Searching www.shopkart.com/maps for “pizza”."
+    assert b.opened[-1][0] == "https://www.shopkart.com/maps/search?q=pizza"
+    assert engine.proven("web_search", "www.shopkart.com/maps")
+    r = search("shopkart", "weather")  # the whole site: its own search, not the section's
+    assert r.ok and b.opened[-1][0] == "https://www.shopkart.com/s?k=weather"
+    assert learned.get("templates", "www.shopkart.com")["url"] == "https://www.shopkart.com/s?k={searchTerms}"
+    assert learned.get("templates", "www.shopkart.com/maps")["url"] == SECTION
+
+
+def test_a_sections_search_that_lands_outside_it_is_no_landing(monkeypatch):
+    b = Browser(monkeypatch, lands=lambda url: "https://www.shopkart.com/search?q=pizza", box=False, bar=False)
+    sites.learn_landing("shopkart maps", "www.shopkart.com", SECTION, "/maps")
+    serve(monkeypatch, {})
+    r = search("shopkart maps", "pizza")
+    assert not r.ok and b.typed == []
+    # the tab left the section: the section's own page is opened for its search box
+    assert [u for u, _ in b.opened] == ["https://www.shopkart.com/maps/search?q=pizza", "https://www.shopkart.com/maps"]
+    assert learned.get("templates", "www.shopkart.com/maps")["fails"] == 1
+
+
+def test_a_learned_template_opens_without_reading_the_site_first(monkeypatch):
+    b = Browser(monkeypatch)
+    sites.learn_landing("shopkart", HOST, f"https://{HOST}/s?k={{searchTerms}}")
+    fetched = []
+
+    def handler(request):
+        fetched.append(str(request.url))
+        return httpx.Response(404)
+
+    monkeypatch.setattr(sites, "_transport", httpx.MockTransport(handler))
+    assert search("shopkart", "2tb ssd").ok and b.opened[-1][0] == f"https://{HOST}/s?k=2tb+ssd"
+    assert asyncio.run(web.shadow("shopkart"))["method"] == "learned_template"
+    assert fetched == []
+
+
+def test_a_domain_that_only_contains_an_apps_name_is_a_website(monkeypatch):
+    b = Browser(monkeypatch)
+    monkeypatch.setattr(inventory, "inventory", lambda refresh=False: [*APPS, ZENTRIX])
+    monkeypatch.setattr(inventory, "snapshot", lambda: [*APPS, ZENTRIX])
+    serve(monkeypatch, {"https://zentrix.so/": FORM_HOME.replace("/s", "https://zentrix.so/s")})
+    assert web.claims_search_site({"site": "zentrix.so"})
+    r = search("zentrix.so", "roadmap")
+    assert r.ok and b.opened == [("https://zentrix.so/s?kw=roadmap", "test.webby")]
+    assert asyncio.run(web.shadow("zentrix.so"))["how"] == "domain"
+    assert search("zentrix", "roadmap").text == "Error: zentrix is an app on this Mac, not a website"
+
+
+def test_the_address_bar_types_nothing_while_the_browser_is_behind(monkeypatch):
+    b = Browser(monkeypatch, front=False)
+    r = search("surfer", "cat videos")
+    assert r.ok and r.text.startswith("NEEDS_USER") and "click Surfer" in r.text
+    assert b.pressed == [] and b.typed == [] and b.returns == 0
+
+
+@pytest.mark.parametrize("focused", ["pagefield", "findbar"])
+def test_the_address_bar_is_the_field_its_command_focuses(monkeypatch, focused):
+    engine_page = lambda field, words: f"https://engine.example/?q={quote_plus(words)}"  # noqa: E731
+    b = Browser(monkeypatch, results=engine_page)
+    b.focus, b.lag = focused, 1  # the command's focus change lands a read later
+    assert search("surfer", "cat videos").ok
+    assert b.typed == [("address", "cat videos")] and b.returns == 1
+
+
+def test_web_content_is_never_taken_for_the_address_bar(monkeypatch):
+    b = Browser(monkeypatch, bar=True)
+    monkeypatch.setattr(web, "BAR_S", 0.3)
+    b.focus, b.lag = "pagefield", 10**6  # the command never moves the focus
+    r = search("surfer", "cat videos")
+    assert not r.ok and "address bar didn't open" in r.text
+    assert b.typed == [] and b.returns == 0
+
+
+@pytest.mark.skipif(not Path(inventory._WORDS_FILE).exists(), reason="needs the system word list")
+@pytest.mark.parametrize(
+    "query, claims",
+    [
+        ("amazon for 2tb ssd", False),  # a name the word list knows only capitalised
+        ("amazon prime for movies", False),
+        ("twitter for elon musk", False),  # one word before "for": maybe a site, whatever the list says
+        ("target for tv stands", False),
+        ("cheap flights for tomorrow", True),
+        ("best shoes for running", True),
+        ("restaurants in delhi", True),
+    ],
+)
+def test_web_search_claims_with_the_real_word_list(monkeypatch, query, claims):
+    monkeypatch.setattr(inventory, "snapshot", lambda: list(APPS))
+    monkeypatch.setattr(sites, "_country", lambda: "in")
+    monkeypatch.setattr(sites, "_lower_known", {})
+    assert web.claims_web_search({"query": query}) is claims

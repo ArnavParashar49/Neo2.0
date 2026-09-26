@@ -1,17 +1,20 @@
 """search_site and page_read: a search on the website the user named, in their own browser, and
 the front browser tab read back.
 
-The site word becomes a host by evidence (:mod:`neo.decide.sites`: a domain as written, a site
-learned here, an installed web app's site, a region-aware web search). Its search comes from what
-the site itself publishes, best first by NEO's record with that host: a learned template, then
-OpenSearch, JSON-LD and a GET search form. One page is opened per request: when it isn't the
-search, the same tab falls back to the site's own search box (``site_box``) and last to the
-browser's address bar and the user's own search engine (``address_bar``). A site no evidence can
-name goes to the address bar with the site word among the search words.
+The site word becomes a host (and maybe a section, "<brand> maps" -> /maps) by evidence
+(:mod:`neo.decide.sites`: a domain as written, a site learned here, an installed web app's site, a
+region-aware web search). Its search is the template a landing there confirmed, else what the site
+itself publishes, best first by NEO's record with that site: OpenSearch, JSON-LD, a GET search
+form. One page is opened per request: when it isn't the search, the same tab falls back to the
+site's own search box (``site_box``) and last to the browser's address bar and the user's own
+search engine (``address_bar``). A site no evidence can name goes to the address bar with the site
+word among the search words.
 
-A landing is confirmed by the tab's address (Accessibility): on the site and holding the query's
-words. Only then are the site word and its template learned (the template keeps the terms slot
-alone; a query is never stored). Without Accessibility the page still opens and nothing is learned.
+A landing is confirmed by the tab's address (Accessibility): on the site (inside its section) and
+holding the query's words. Only then are the site word and its template learned (the template
+keeps the terms slot alone; a query is never stored). Without Accessibility the page still opens
+and nothing is learned. Words go into the address bar only when it is a field of the browser's
+own, never the page's.
 
 The fast-path checks (``claims_*``) read cached evidence only.
 """
@@ -19,7 +22,6 @@ The fast-path checks (``claims_*``) read cached evidence only.
 from __future__ import annotations
 
 import asyncio
-import re
 import threading
 import time
 from datetime import datetime
@@ -52,6 +54,7 @@ KIND = "web_search"
 LAND_S = 8.0  # a page NEO opened shows its address this soon
 READY_S = 8.0  # the site's page, with its search box, is there this soon
 BAR_S = 1.5  # the address field has the focus this soon after its menu command
+BAR_SETTLE_S = 0.5  # by then the command's focus change has landed: an unmoved focus is its field
 READ_S = 3.0  # page_read: a web tree just switched on has filled in by then
 STEP_S = 0.25
 _METHOD = {
@@ -122,15 +125,22 @@ async def _open(browser: App, url: str) -> tuple[int | None, str]:
 # ---- watching the tab (worker threads; each restores the web-content switch it turned on) ------------
 
 
-def _await_landing(pid: int, host: str, query: str, wait_s: float, stop: threading.Event) -> tuple[str, str]:
-    """(verdict, address) once the tab is on ``host``'s site (any site when '') holding the words of
-    ``query`` (any page when ''), or at the deadline: off_site, no_query or blank."""
+def _await_landing(
+    pid: int, host: str, prefix: str, query: str, wait_s: float, stop: threading.Event
+) -> tuple[str, str]:
+    """(verdict, address) once the tab is on ``host``'s site (any site when ''), inside its section
+    ``prefix``, holding the words of ``query`` (any page when ''), or at the deadline: off_site
+    (another site), no_query (the site, but not the search or not the section) or blank."""
     from neo.decide import axkit, sites
 
     deadline, url = time.monotonic() + wait_s, ""
     while True:
         url = axkit.web_url(pid) or url
-        if url and (not host or sites.on_site(url, host)) and (not query or sites.carries(url, query)):
+        if (
+            url
+            and (not host or sites.on_site(url, host, prefix))
+            and (not query or sites.carries(url, query))
+        ):
             return "done", url
         if stop.is_set() or time.monotonic() >= deadline:
             break
@@ -142,21 +152,28 @@ def _await_landing(pid: int, host: str, query: str, wait_s: float, stop: threadi
 
 @pooled
 def _watch(
-    pid: int, path: str, host: str, query: str, wait_s: float, stop: threading.Event
+    pid: int, path: str, host: str, prefix: str, query: str, wait_s: float, stop: threading.Event
 ) -> tuple[str, str]:
     from neo.decide import axkit
 
     app_el = axkit.app_el(pid)
     changed = axkit.enable_web_tree(app_el, axkit.runtime(path))
     try:
-        return _await_landing(pid, host, query, wait_s, stop)
+        return _await_landing(pid, host, prefix, query, wait_s, stop)
     finally:
         axkit.restore_web_tree(app_el, changed)
 
 
 @pooled
 def _box_flow(
-    pid: int, path: str, host: str, query: str, ready_s: float, land_s: float, stop: threading.Event
+    pid: int,
+    path: str,
+    host: str,
+    prefix: str,
+    query: str,
+    ready_s: float,
+    land_s: float,
+    stop: threading.Event,
 ) -> tuple[str, str]:
     """The site's own search box, on the page the tab shows: the words typed, then Return."""
     from neo.decide import axkit, sites
@@ -167,7 +184,7 @@ def _box_flow(
         deadline, url, field = time.monotonic() + ready_s, "", None
         while field is None:
             url = axkit.web_url(pid) or url
-            area = axkit.web_area(pid) if url and sites.on_site(url, host) else None
+            area = axkit.web_area(pid) if url and sites.on_site(url, host, prefix) else None
             if area is not None:
                 field = next((h.el for h in axkit.find_search(area) if h.kind == "field"), None)
             if field is not None:
@@ -183,7 +200,7 @@ def _box_flow(
         if not axkit.set_search(field, query):
             return "no_type", url
         axkit.post_return(pid)  # to that browser only
-        return _await_landing(pid, host, query, land_s, stop)
+        return _await_landing(pid, host, prefix, query, land_s, stop)
     finally:
         axkit.restore_web_tree(app_el, changed)
 
@@ -193,17 +210,27 @@ def _bar_flow(
     pid: int, path: str, text: str, query: str, land_s: float, stop: threading.Event
 ) -> tuple[str, str]:
     """The browser's address bar (its "open location" command, found by the ⌘L shortcut, not by a
-    title): ``text`` typed for the user's own search engine, then Return."""
+    title): ``text`` typed for the user's own search engine, then Return. The field must be the
+    browser's own (never the page's: Return there could submit a form) and the one the command
+    focused: the focus moved to it, or it has kept the focus since (the bar already had it)."""
     from neo.decide import axkit
 
     app_el = axkit.app_el(pid)
+    before = axkit.attr(app_el, "AXFocusedUIElement")
     hit = axkit.menu_item(pid, "l", 0)
     if hit is None or not axkit.perform(hit[0], "AXPress"):
         return "no_bar", ""
-    deadline, field = time.monotonic() + BAR_S, None
+    pressed = time.monotonic()
+    deadline, field = pressed + BAR_S, None
     while field is None:
         el = axkit.attr(app_el, "AXFocusedUIElement")
-        if el is not None and str(axkit.attr(el, "AXRole") or "") in _FIELD_ROLES:
+        moved = el != before or time.monotonic() - pressed >= BAR_SETTLE_S
+        if (
+            moved
+            and el is not None
+            and str(axkit.attr(el, "AXRole") or "") in _FIELD_ROLES
+            and not axkit.in_web(el)
+        ):
             field = el
         elif stop.is_set() or time.monotonic() >= deadline:
             return "no_bar", ""
@@ -214,7 +241,7 @@ def _bar_flow(
     axkit.post_return(pid)
     changed = axkit.enable_web_tree(app_el, axkit.runtime(path))  # only now: the focus stays put
     try:
-        return _await_landing(pid, "", query, land_s, stop)
+        return _await_landing(pid, "", "", query, land_s, stop)
     finally:
         axkit.restore_web_tree(app_el, changed)
 
@@ -228,15 +255,18 @@ async def _threaded(fn: Any, *args: Any) -> tuple[str, str]:
         stop.set()
 
 
-async def landing(pid: int, browser: App, host: str = "", query: str = "") -> tuple[str, str]:
+async def landing(
+    pid: int, browser: App, host: str = "", query: str = "", prefix: str = ""
+) -> tuple[str, str]:
     """How a page just opened in ``browser`` landed, read from its tab's address within LAND_S:
-    ('done', url) when on ``host``'s site holding ``query``'s words; else 'off_site', 'no_query',
-    'blank' (no address showed) or 'untrusted' (no Accessibility, so NEO can't tell)."""
+    ('done', url) when on ``host``'s site, inside its section ``prefix``, holding ``query``'s words;
+    else 'off_site', 'no_query', 'blank' (no address showed) or 'untrusted' (no Accessibility, so
+    NEO can't tell)."""
     from neo.decide import axkit
 
     if not await asyncio.to_thread(axkit.trusted):
         return "untrusted", ""
-    return await _threaded(_watch, pid, browser.path, host, query, LAND_S)
+    return await _threaded(_watch, pid, browser.path, host, prefix, query, LAND_S)
 
 
 def _verdict(verdict: str, url: str = "", pid: int | None = None) -> Outcome:
@@ -250,11 +280,11 @@ def _verdict(verdict: str, url: str = "", pid: int | None = None) -> Outcome:
 # ---- the methods ---------------------------------------------------------------------------------------
 
 
-async def _template(browser: App, url: str, host: str, query: str) -> Outcome:
+async def _template(browser: App, url: str, res: SiteRes, query: str) -> Outcome:
     pid, why = await _open(browser, url)
     if pid is None:
         return Outcome(False, why, reason="not_found")
-    return _verdict(*await landing(pid, browser, host, query), pid)
+    return _verdict(*await landing(pid, browser, res.host, query, res.prefix), pid)
 
 
 async def _site_box(browser: App, res: SiteRes, query: str, pid: int | None) -> Outcome:
@@ -267,7 +297,8 @@ async def _site_box(browser: App, res: SiteRes, query: str, pid: int | None) -> 
             return Outcome(False, why, reason="not_found")
     if not await asyncio.to_thread(axkit.trusted):
         return Outcome(False, "Accessibility is off, so I couldn't type the search", reason="unconfirmed")
-    return _verdict(*await _threaded(_box_flow, pid, browser.path, res.host, query, READY_S, LAND_S), pid)
+    flow = await _threaded(_box_flow, pid, browser.path, res.host, res.prefix, query, READY_S, LAND_S)
+    return _verdict(*flow, pid)
 
 
 async def _address_bar(browser: App, text: str, query: str) -> Outcome:
@@ -294,11 +325,22 @@ def _blamed(out: Outcome) -> bool:
     return not out.ok and out.reason not in engine.NO_BLAME
 
 
-def _ordered(host: str, templates: list[Template]) -> list[Template]:
-    """Best first by NEO's record with this host (the seeds give discovery's own order)."""
+def _ordered(key: str, templates: list[Template]) -> list[Template]:
+    """Best first by NEO's record with this site (the seeds give discovery's own order)."""
     from neo.decide import engine
 
-    return sorted(templates, key=lambda t: -engine.prior(KIND, host, _METHOD[t.how]))
+    return sorted(templates, key=lambda t: -engine.prior(KIND, key, _METHOD[t.how]))
+
+
+async def _first_template(res: SiteRes) -> Template | None:
+    """The template to try: the one a landing confirmed (no network), else the best the site
+    publishes (which costs reading its page)."""
+    from neo.decide import sites
+
+    if t := sites.learned_template(res.host, res.prefix):
+        return t
+    found = _ordered(res.key, await sites.discover(res.host, res.prefix))
+    return found[0] if found else None
 
 
 def _said(out: Outcome, where: str, query: str, browser: str, first: bool) -> Result:
@@ -316,29 +358,28 @@ def _said(out: Outcome, where: str, query: str, browser: str, first: bool) -> Re
 async def _on_site(site: str, res: SiteRes, query: str, browser: App) -> Result:
     from neo.decide import sites
 
-    where, first, pid = f"{res.host}{res.prefix}", res.how == "search", None
-    if templates := _ordered(res.host, await sites.discover(res.host, res.prefix)):
-        t = templates[0]
-        out = await _template(browser, sites.fill(t.url, query), res.host, query)
-        run.record(KIND, res.host, _METHOD[t.how], out)
+    where, first, pid = res.key, res.how == "search", None
+    if t := await _first_template(res):
+        out = await _template(browser, sites.fill(t.url, query), res, query)
+        run.record(KIND, res.key, _METHOD[t.how], out)
         if out.ok:
             sites.learn_landing(site, res.host, t.url, res.prefix)
             return _said(out, where, query, browser.name, first)
         if t.how == "learned" and _blamed(out):
-            sites.template_failed(res.host)
+            sites.template_failed(res.host, res.prefix)
         if not _blamed(out):
             return _said(out, where, query, browser.name, first)
-        if sites.on_site(out.receipt.get("url") or "", res.host):
+        if sites.on_site(out.receipt.get("url") or "", res.host, res.prefix):
             pid = out.receipt.get("pid")  # the tab is on the site: its own search box is right there
     out = await _site_box(browser, res, query, pid)
-    run.record(KIND, res.host, "site_box", out)
+    run.record(KIND, res.key, "site_box", out)
     if out.ok:
         sites.learn_landing(site, res.host, sites.sanitize(out.receipt["url"], query), res.prefix)
         return _said(out, where, query, browser.name, first)
     if not _blamed(out):
         return _said(out, where, query, browser.name, first)
     out = await _address_bar(browser, f"{query} site:{sites.registrable(res.host) or res.host}", query)
-    run.record(KIND, res.host, "address_bar", out)
+    run.record(KIND, res.key, "address_bar", out)
     if out.ok:
         return Result(f"Searched {where} for “{query}” through your search engine.", True, say=True)
     return _said(out, where, query, browser.name, first)
@@ -348,13 +389,15 @@ async def search(site: str, query: str, *, browser: str = "") -> Result:
     """Open a search for ``query`` on the website ``site`` names, in ``browser`` (the name the user
     said) or the default browser, and check it landed. The tool's gates ran before this."""
     from neo.decide import engine, inventory, sites
+    from neo.decide.kinds import launch
 
     run.begin_request()
     s, q = " ".join(str(site or "").split()), " ".join(str(query or "").split())
     if not s or not q:
         return Result("Error: search for what, on which website?", False)
     apps = await asyncio.to_thread(inventory.inventory)
-    named = await asyncio.to_thread(inventory.named_in, s, apps)
+    # open_app's rule: "<app>.<tld>" is the website, "<app>" the app
+    named = await asyncio.to_thread(launch._named, s, apps)
     if named is not None and not named.web_start_url:  # a web app's name is its site's
         if not _is_browser(named):
             return Result(f"Error: {s} is an app on this Mac, not a website", False)
@@ -461,20 +504,20 @@ def _place(words: str) -> str | None:
     return None
 
 
-def _ordinary(words: str) -> bool:
-    """Only dictionary words ("recipes", "cheap flights"): no brand or site name among them."""
-    from neo.decide import inventory
+def _topic(words: str) -> bool:
+    """A phrase of everyday words ("cheap flights"), which names no site. One word alone may be a
+    site's name that is also an everyday word, which only a model can tell."""
+    from neo.decide import sites
 
-    ws = set(re.findall(r"[a-z]+", words.casefold()))
-    return bool(ws) and all(inventory._common_words(ws).values())
+    return len(words.split()) >= 2 and sites.everyday(words)
 
 
 def claims_web_search(filled: dict) -> bool:
     """web_search's fast path, on cached evidence only. A query ending in "in <W>" is a web search
     unless W is a site or a place on this Mac ("restaurants in Delhi" is; "X in notes" isn't);
     one ending in "on/at <W>" only when W is a time ("the weather on monday"; "news on apple" and
-    "2tb ssd on <site>" go to a model). "<W> for X" ("<site> for cats") only when W is ordinary
-    words or a time. Anything else is claimed."""
+    "2tb ssd on <site>" go to a model). "<W> for X" ("<site> for cats") only when W is a time or a
+    phrase of everyday words ("cheap flights for tomorrow"). Anything else is claimed."""
     words = " ".join(str(filled.get("query") or "").split()).rstrip(" ?.!").split()
     for i in range(len(words) - 2, 0, -1):  # the last "in/on/at", with words on both sides
         if words[i].casefold() in _PREPS:
@@ -487,7 +530,7 @@ def claims_web_search(filled: dict) -> bool:
     if lead is not None:
         w = " ".join(words[:lead])
         place = _place(w)
-        return place == "time" or (place is None and _ordinary(w))
+        return place == "time" or (place is None and _topic(w))
     return True
 
 
@@ -500,10 +543,11 @@ async def shadow(site: str, legacy_url: str = "") -> dict[str, str | bool]:
     'browser', 'unresolved', or how sites.resolve found it), its host, the first method, and
     whether legacy's search page ``legacy_url`` is on the same site. Never the query."""
     from neo.decide import inventory, sites
+    from neo.decide.kinds import launch
 
     s = " ".join(str(site or "").split())
     apps = await asyncio.to_thread(inventory.inventory)
-    named = await asyncio.to_thread(inventory.named_in, s, apps)
+    named = await asyncio.to_thread(launch._named, s, apps)
     if named is not None and not named.web_start_url:
         browser = _is_browser(named)
         how, method = ("browser", "address_bar") if browser else ("app", "")
@@ -511,10 +555,9 @@ async def shadow(site: str, legacy_url: str = "") -> dict[str, str | bool]:
     res = await sites.resolve(s)
     if res is None:
         return {"how": "unresolved", "key": "", "method": "address_bar", "agrees": False}
-    templates = _ordered(res.host, await sites.discover(res.host, res.prefix))
-    method = _METHOD[templates[0].how] if templates else "site_box"
-    agrees = bool(legacy_url) and sites.on_site(legacy_url, res.host)
-    return {"how": res.how, "key": res.host, "method": method, "agrees": agrees}
+    t = await _first_template(res)
+    agrees = bool(legacy_url) and sites.on_site(legacy_url, res.host, res.prefix)
+    return {"how": res.how, "key": res.key, "method": _METHOD[t.how] if t else "site_box", "agrees": agrees}
 
 
 async def shadow_page_read() -> dict[str, str | bool]:

@@ -2,23 +2,26 @@
 
 :func:`decide` picks, first rule that applies:
 
-1. a URL or a path: opened as given;
+1. a URL, a path or a network address (an IP, "localhost", "<host>:<port>"): opened as given;
 2. an installed app the words name (every name the inventory knows it by); a domain the words
    only partly name an app by ("<app>.com") is the website;
 3. an everyday noun for a kind of app ("my email", "the browser"): the app this user uses for
    that kind (the engine's top candidate that is used), or the default handler of those links;
 4. a website the word names (neo.decide.sites: a domain, a site learned here, an installed
-   web-app's site, a region-aware web search), opened in the default browser;
+   web-app's site, a region-aware web search), opened in the default browser; words with a ':'
+   or a '/' are no site's name and are never looked up;
 5. nothing, said honestly: there is no "www.<word>.com" guess.
 
 :func:`open_target` carries it out. An app counts as opened once it is frontmost, a website once
 the browser's tab shows that site (read through Accessibility); only then is the word learned as
-that site. :func:`shadow` reports what this path would open, opening nothing.
+that site (as one opened, which alone doesn't make "search X on <word>" that site's search).
+:func:`shadow` reports what this path would open, opening nothing.
 """
 
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import os
 import re
 import time
@@ -52,6 +55,7 @@ SETTLE_S = 0.6  # a file or a link's app has come to the front by then
 # "mailto:x", "x-help:y": a link in some scheme (but "host:8080" is no scheme)
 _SCHEME_URL = re.compile(r"^[a-z][a-z0-9+.-]*:(?!\d)\S*$", re.I)
 _URL_IN_TEXT = re.compile(r"https?://[^\s,;)]+", re.I)
+_HOST_PORT = re.compile(r"^([\w.-]+):\d+(?:/|$)")  # "localhost:3000", "<host>:8080/admin"
 
 
 @dataclass(frozen=True)
@@ -104,6 +108,20 @@ async def _used_app(kind: str, text: str, apps: list[App]) -> App | None:
     )
 
 
+def _address(t: str) -> str | None:
+    """The page for a network address ("192.168.1.1/admin", "localhost:3000", "<host>:8080"),
+    port and path kept; None for anything else (a time, "12:30", has no host)."""
+    head, slash, rest = t.partition("/")
+    m = _HOST_PORT.match(t)
+    if (m and not m.group(1).isdigit()) or head.casefold() == "localhost":
+        return f"https://{t}"
+    try:
+        ip = ipaddress.ip_address(head)
+    except ValueError:
+        return None
+    return f"https://{f'[{ip}]' if ip.version == 6 else ip}{slash}{rest}"
+
+
 def _named(t: str, apps: list[App]) -> App | None:
     """The app the words name, unless they are a domain that only contains one of its names."""
     from neo.decide import inventory, sites
@@ -124,6 +142,8 @@ async def decide(target: str, apps: list[App] | None = None) -> Choice:
     t = " ".join(str(target or "").split())
     if not t:
         return Choice("none", t)
+    if url := _address(t):  # before the scheme test: "fe80::1" isn't a link
+        return Choice("url", t, url=url)
     if "://" in t or _SCHEME_URL.match(t):
         return Choice("url", t, url=t)
     if t.startswith(("/", "~")):
@@ -139,6 +159,8 @@ async def decide(target: str, apps: list[App] | None = None) -> Choice:
         return Choice("noun", t, await _used_app(kind, t, apps), kind=kind)
     if scheme := kinds.HANDLER_NOUNS.get(re.sub(r"^(?:my|the)\s+", "", t.casefold())):
         return Choice("handler", t, await asyncio.to_thread(_handler_app, scheme, apps), kind=scheme)
+    if ":" in t or "/" in t:
+        return Choice("none", t)  # no site's name: never sent to a web search
     if sites.site_like(t) is not False and (res := await sites.resolve(t)) is not None:
         return Choice("site", t, url=f"https://{res.host}{res.prefix or '/'}", site=res)
     return Choice("none", t)
@@ -235,18 +257,18 @@ async def _open_site(word: str, url: str, res: SiteRes) -> Result:
     browser = await asyncio.to_thread(web.default_browser)
     text = await apps.open_url(url, browser.bundle_id if browser else "", browser.name if browser else "")
     if text.startswith("Error"):
-        run.record(KIND, res.host, "web", Outcome(False, text))
+        run.record(KIND, res.key, "web", Outcome(False, text))
         return Result(text, False)
     verdict = "untrusted"
     if browser is not None and (pid := await wait_pid(browser.bundle_id)):
-        verdict, _url = await web.landing(pid, browser, res.host)
+        verdict, _url = await web.landing(pid, browser, res.host, prefix=res.prefix)
     if verdict == "done":
-        run.record(KIND, res.host, "web", Outcome(True, "", effect=Effect.DONE))
+        run.record(KIND, res.key, "web", Outcome(True, "", effect=Effect.DONE))
         if res.how in ("search", "learned"):  # a domain or a web app's site needs no learning
-            sites.learn_landing(word, res.host, None, res.prefix)
+            sites.learn_landing(word, res.host, None, res.prefix, via="open")
     else:  # NEO couldn't see where it landed: nothing learned, nobody blamed
-        run.record(KIND, res.host, "web", Outcome(False, verdict, reason="unconfirmed"))
-    where, name = f"{res.host}{res.prefix}", browser.name if browser else "your browser"
+        run.record(KIND, res.key, "web", Outcome(False, verdict, reason="unconfirmed"))
+    where, name = res.key, browser.name if browser else "your browser"
     if verdict == "off_site":
         return Result(
             f"Opened {where} in {name}, but it shows another site (a sign-in or a check page?)",
@@ -282,7 +304,7 @@ def _agrees(ch: Choice, legacy: str) -> bool:
     url = _URL_IN_TEXT.search(legacy or "")
     failed = (legacy or "").startswith("Error")
     if ch.how == "site" and ch.site is not None:
-        return url is not None and sites.on_site(url.group(0), ch.site.host)
+        return url is not None and sites.on_site(url.group(0), ch.site.host, ch.site.prefix)
     if ch.how in ("app", "noun", "handler"):
         return (
             ch.app is not None and url is None and not failed and ch.app.name.casefold() in legacy.casefold()
@@ -296,5 +318,5 @@ async def shadow(target: str, legacy: str = "") -> dict[str, str | bool]:
     """What this path would open for ``target``, opening nothing: how it chose, the app's bundle
     id or the site's host, and whether legacy (its reply ``legacy``) opened the same thing."""
     ch = await decide(target)
-    key = ch.app.bundle_id if ch.app is not None else ch.site.host if ch.site is not None else ""
+    key = ch.app.bundle_id if ch.app is not None else ch.site.key if ch.site is not None else ""
     return {"how": ch.how, "key": key, "agrees": _agrees(ch, legacy)}

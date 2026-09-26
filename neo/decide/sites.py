@@ -1,22 +1,27 @@
 """Which website a word means, and how to search it: by evidence, never from a table of sites.
 
 * :func:`site_like` - from cached evidence only (fast-path checks): True for a domain, a site
-  word NEO learned here or an installed web-app wrapper's site; False for an installed app, a
-  time or "my <x>"; None when local evidence can't tell ("apple", "climate change").
+  word a search here landed on or an installed web-app wrapper's site; False for an installed
+  app, a time or "my <x>"; None when local evidence can't tell ("apple", "climate change", or a
+  word only ever opened: "search news on <it>" may be about it).
 * :func:`resolve` - the word as a host: a domain as given, a learned site, a web-app wrapper's
   site, else a web search for its website in this country: of the results whose own domain
   spells the word, the domain most of them agree on (this country's first), at its front host.
+* :func:`learned_template` - the search template a landing on this site (or section) confirmed.
 * :func:`discover` - the site's search URL template from what the site itself publishes: an
   OpenSearch description, a JSON-LD SearchAction, or a GET search form found by structure (a
   search role, a search input, the OS's own word for "Search"), with no list of parameter names.
+  A section's ("<brand> maps" -> /maps) templates are the ones inside it.
 * :func:`sanitize` - a search page's URL reduced to its terms slot (every other parameter, such
   as a session or tracking token, dropped).
 * :func:`fill`, :func:`on_site`, :func:`carries` - a template's search page for a query, and
-  whether a page a browser shows is on a site and holds a query (how a landing is confirmed).
+  whether a page a browser shows is on a site (inside its section) and holds a query (how a
+  landing is confirmed).
+* :func:`everyday` - whether words are everyday words, not a name (the system word list).
 
-A site or template is learned only after a confirmed landing (:func:`learn_landing`); a search
-query is never stored. The network is reached only through :func:`_fetch` (and the web search),
-whose transport tests replace.
+A site or template is learned only after a confirmed landing (:func:`learn_landing`), templates
+per site and section (:attr:`SiteRes.key`); a search query is never stored. The network is
+reached only through :func:`_fetch` (and the web search), whose transport tests replace.
 """
 
 from __future__ import annotations
@@ -24,6 +29,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -41,8 +47,8 @@ from urllib.parse import (
     urlunsplit,
 )
 
-__all__ = ["SiteRes", "Template", "site_like", "resolve", "discover", "sanitize", "fill", "registrable", "on_site",
-           "carries", "learn_landing", "template_failed", "forget"]  # fmt: skip
+__all__ = ["SiteRes", "Template", "site_like", "resolve", "learned_template", "discover", "sanitize", "fill",
+           "registrable", "on_site", "carries", "everyday", "learn_landing", "template_failed", "forget"]  # fmt: skip
 
 TERMS = "{searchTerms}"
 FETCH_S = 5.0
@@ -59,6 +65,11 @@ class SiteRes:
     how: str  # domain | learned | webapp | search
     country: str
     prefix: str = ""  # a path the site lives under ("<brand> maps" -> /maps)
+
+    @property
+    def key(self) -> str:
+        """The site as NEO keeps what it learns about it: a section apart from its whole site."""
+        return f"{self.host}{self.prefix}"
 
 
 @dataclass(frozen=True)
@@ -121,11 +132,22 @@ def _accept_language() -> str:
 
 
 def _words(word: str) -> list[str]:
-    return re.findall(r"[a-z0-9]+", (word or "").casefold())
+    """The word's letters and digits, in any script."""
+    return re.findall(r"[^\W_]+", (word or "").casefold())
 
 
 def _key(word: str, cc: str) -> str:
-    return f"{' '.join(_words(word))}|{cc}"
+    """Where a site word is learned for this country; '' for a word with no letters or digits,
+    which is never learned (every such word would share it)."""
+    words = _words(word)
+    return f"{' '.join(words)}|{cc}" if words else ""
+
+
+def _learned_site(word: str, cc: str) -> dict | None:
+    from neo.decide import learned
+
+    k = _key(word, cc)
+    return learned.get("sites", k) if k else None
 
 
 def _parts(url: str) -> Any:
@@ -193,7 +215,7 @@ def _webapp(word: str, apps: list) -> tuple[str, str] | None:
 
 def site_like(word: str) -> bool | None:
     """Is ``word`` a website? From cached evidence only (see the module docstring)."""
-    from neo.decide import inventory, learned, when
+    from neo.decide import inventory, when
 
     w = " ".join((word or "").split())
     if not w:
@@ -202,8 +224,9 @@ def site_like(word: str) -> bool | None:
     if low.startswith("my ") or low.endswith((" app", " application")):
         return False
     apps = inventory.snapshot() or []
+    searched = (_learned_site(w, _country()) or {}).get("via") == "search"
     # a site-specific browser is an app too, but the word names its site
-    if _domain(w) is not None or learned.get("sites", _key(w, _country())) is not None or _webapp(w, apps):
+    if _domain(w) is not None or searched or _webapp(w, apps):
         return True
     if inventory.named_in(w, apps) is not None or when.parse(w, datetime.now()) is not None:
         return False
@@ -221,8 +244,10 @@ _searched: dict[str, tuple[float, SiteRes | None]] = {}
 
 
 def forget() -> None:
-    """The privacy erase: the site words searched for lately (memory only) go too."""
+    """The privacy erase: the site words searched for lately and the words looked up in the word
+    list (memory only) go too."""
     _searched.clear()
+    _lower_known.clear()
 
 
 async def resolve(word: str) -> SiteRes | None:
@@ -230,16 +255,17 @@ async def resolve(word: str) -> SiteRes | None:
     here, an installed web-app wrapper's site, then a web search (cached 10 min). The search asks
     for the word's website in this country: a bare name mostly finds pages about the site (an
     encyclopedia, its blog) rather than the site, and a store has one site per country."""
-    from neo.decide import inventory, learned
+    from neo.decide import inventory
 
     cc = _country()
     if host := _domain(word):
         return SiteRes(host, "domain", cc)
-    if hit := learned.get("sites", _key(word, cc)):
+    if hit := _learned_site(word, cc):
         return SiteRes(str(hit.get("host", "")), "learned", cc, str(hit.get("prefix", "")))
     if m := _webapp(word, inventory.snapshot() or []):
         return SiteRes(m[0], "webapp", cc, m[1])
-    k = _key(word, cc)
+    if not (k := _key(word, cc)):
+        return None  # no letters or digits: no site's name
     if (seen := _searched.get(k)) and time.monotonic() - seen[0] < SEARCH_TTL_S:
         return seen[1]
     # the search engine's own vocabulary names Great Britain's region 'uk'
@@ -299,6 +325,18 @@ async def _fetch(url: str, limit: int = MAX_PAGE) -> _Page | None:
 def _same_site(url: str, host: str) -> bool:
     a, b = _parts(url), _parts(host)
     return a is not None and b is not None and urlsplit(url).scheme == "https" and a.fld == b.fld
+
+
+def _under(url: str, prefix: str) -> bool:
+    """Is ``url``'s path inside the section ``prefix`` ('' = the whole site)?"""
+    if not prefix:
+        return True
+    try:
+        path = urlsplit(url).path.casefold()
+    except ValueError:
+        return False
+    p = prefix.casefold().rstrip("/")
+    return path == p or path.startswith(p + "/")
 
 
 def _one_slot(t: str) -> bool:
@@ -403,15 +441,21 @@ def _search_form(page: _Page, doc: Any, host: str) -> str | None:
     return None
 
 
-async def discover(host: str, prefix: str = "") -> list[Template]:
-    """The site's search templates, best first: learned, OpenSearch, JSON-LD, a search form."""
-    from lxml import etree, html
-
+def learned_template(host: str, prefix: str = "") -> Template | None:
+    """The search template a landing on this site (or its section) confirmed; no network."""
     from neo.decide import learned
 
+    hit = learned.get("templates", f"{host}{prefix}")
+    url = str((hit or {}).get("url", ""))
+    return Template(url, "learned") if _one_slot(url) else None
+
+
+async def discover(host: str, prefix: str = "") -> list[Template]:
+    """What the site publishes about its search, best first: OpenSearch, JSON-LD, a search form
+    (for a section, only those inside it). Reads the site's page: :func:`learned_template` first."""
+    from lxml import etree, html
+
     out: list[Template] = []
-    if (hit := learned.get("templates", host)) and _one_slot(str(hit.get("url", ""))):
-        out.append(Template(str(hit["url"]), "learned"))
     page = await _fetch(f"https://{host}{prefix}/")
     if page is None or not page.text.strip():
         return out
@@ -440,7 +484,8 @@ async def discover(host: str, prefix: str = "") -> list[Template]:
         out.append(Template(t, "site_form"))
     unique: dict[str, Template] = {}
     for t in out:
-        unique.setdefault(t.url, t)  # the same URL again from a lesser source adds nothing
+        if _under(t.url, prefix):  # a section's page may offer the whole site's search
+            unique.setdefault(t.url, t)  # the same URL again from a lesser source adds nothing
     return list(unique.values())
 
 
@@ -483,10 +528,43 @@ def registrable(url_or_host: str) -> str:
     return str(r.fld).casefold() if r is not None else ""
 
 
-def on_site(url: str, host: str) -> bool:
-    """Is the page at ``url`` on the site ``host`` belongs to (the same registrable domain)?"""
+def on_site(url: str, host: str, prefix: str = "") -> bool:
+    """Is the page at ``url`` on the site ``host`` belongs to (the same registrable domain), and
+    inside its section ``prefix`` when it has one?"""
     mine = registrable(host)
-    return bool(mine) and registrable(url) == mine
+    return bool(mine) and registrable(url) == mine and _under(url, prefix)
+
+
+_lower_known: dict[str, bool] = {}
+_lower_lock = threading.Lock()
+
+
+def everyday(words: str) -> bool:
+    """Is every word of ``words`` an everyday word: in the system word list in lower case (plurals
+    included)? A name the list has only capitalised is none, and without the list nothing is."""
+    from neo.decide import inventory
+
+    ws = set(_words(words))
+    with _lower_lock:
+        known = {w: _lower_known[w] for w in ws if w in _lower_known}
+        if todo := ws - known.keys():
+            want: dict[str, set[str]] = {}
+            for w in todo:
+                for v in inventory._variants(w):
+                    want.setdefault(v, set()).add(w)
+            hit: set[str] = set()
+            try:  # one streaming pass, as inventory reads the list, but case kept
+                with open(inventory._WORDS_FILE, encoding="utf-8", errors="ignore") as f:
+                    for line in f:
+                        if owners := want.get(line.strip()):
+                            hit |= owners
+            except OSError:
+                pass
+            if len(_lower_known) > 4096:
+                _lower_known.clear()
+            _lower_known.update(found := {w: w in hit for w in todo})
+            known.update(found)
+    return bool(ws) and all(known.values())
 
 
 def carries(url: str, query: str) -> bool:
@@ -500,24 +578,32 @@ def carries(url: str, query: str) -> bool:
     return bool(words) and all(w in shown for w in words)
 
 
-def learn_landing(word: str, host: str, template: str | None, prefix: str = "") -> None:
-    """A search landed where it should: remember the site for this word here, and its template."""
+def learn_landing(word: str, host: str, template: str | None, prefix: str = "", via: str = "search") -> None:
+    """A page landed where it should: remember the site for this word here, how it got there
+    (``via`` 'search', or 'open' for the site's page alone, which a search later outranks), and
+    the site's (or section's) template."""
     from neo.decide import learned
 
-    learned.put("sites", _key(word, _country()), {"host": host, "prefix": prefix})
-    if template and _one_slot(template) and _same_site(template, host):
-        learned.put("templates", host, {"url": template, "fails": 0})
+    cc = _country()
+    if k := _key(word, cc):
+        old = _learned_site(word, cc) or {}
+        same = (old.get("host"), old.get("prefix", "")) == (host, prefix)
+        searched = via == "search" or (same and old.get("via") == "search")
+        learned.put("sites", k, {"host": host, "prefix": prefix, "via": "search" if searched else via})
+    if template and _one_slot(template) and _same_site(template, host) and _under(template, prefix):
+        learned.put("templates", f"{host}{prefix}", {"url": template, "fails": 0})
 
 
-def template_failed(host: str) -> None:
+def template_failed(host: str, prefix: str = "") -> None:
     """A learned template's search didn't land (the site changed): dropped after DROP_AFTER."""
     from neo.decide import learned
 
-    hit = learned.get("templates", host)
+    key = f"{host}{prefix}"
+    hit = learned.get("templates", key)
     if hit is None:
         return
     fails = int(hit.get("fails", 0)) + 1
     if fails >= DROP_AFTER:
-        learned.drop("templates", host)
+        learned.drop("templates", key)
     else:
-        learned.put("templates", host, {**hit, "fails": fails})
+        learned.put("templates", key, {**hit, "fails": fails})

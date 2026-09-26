@@ -46,6 +46,7 @@ __all__ = [
     "clear_text",
     "commit_button",
     "web_area",
+    "in_web",
     "web_url",
     "web_text",
     "dock_badge",
@@ -369,6 +370,18 @@ def web_area(pid: int) -> Any | None:
     if win is None:
         return None
     return next((el for el, _d, _p in _bfs(win, 3000, 40) if _s(attr(el, "AXRole")) == "AXWebArea"), None)
+
+
+def in_web(el: Any, max_depth: int = 60) -> bool:
+    """Is ``el`` web content (a page's own field, say) rather than one of the app's controls? A
+    chain of parents that doesn't end within ``max_depth`` can't be told, so it counts as web."""
+    for _ in range(max_depth):
+        if el is None:
+            return False
+        if _s(attr(el, "AXRole")) == "AXWebArea":
+            return True
+        el = attr(el, "AXParent")
+    return True
 
 
 def web_url(pid: int) -> str:

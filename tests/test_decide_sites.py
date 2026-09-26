@@ -250,12 +250,15 @@ def test_forms_that_are_not_a_search_here(monkeypatch, form):
     assert discover() == []
 
 
-def test_a_learned_template_comes_first_and_each_url_once(monkeypatch):
-    serve(monkeypatch, {f"https://{HOST}/": home(body='<form role="search" action="/find"><input name="q"></form>')})
+def test_a_learned_template_is_read_without_the_network_and_discovery_gives_each_url_once(monkeypatch):
+    seen = serve(monkeypatch, {})
     sites.learn_landing("shop", HOST, "https://shop.example.in/s?k={searchTerms}")
-    assert [t.how for t in discover()] == ["learned", "site_form"]
-    sites.learn_landing("shop", HOST, "https://shop.example.in/find?q={searchTerms}")  # what the form gives
-    assert discover() == [sites.Template("https://shop.example.in/find?q={searchTerms}", "learned")]
+    assert sites.learned_template(HOST) == sites.Template("https://shop.example.in/s?k={searchTerms}", "learned")
+    assert seen == []
+    ld = ('<script type="application/ld+json">{"@type": "SearchAction", "target": '
+          '"https://shop.example.in/find?q={s}", "query-input": "required name=s"}</script>')
+    serve(monkeypatch, {f"https://{HOST}/": home(ld, '<form role="search" action="/find"><input name="q"></form>')})
+    assert discover() == [sites.Template("https://shop.example.in/find?q={searchTerms}", "jsonld")]
 
 
 def test_private_hosts_and_redirects_there_are_never_fetched(monkeypatch):
@@ -273,8 +276,7 @@ def test_private_hosts_and_redirects_there_are_never_fetched(monkeypatch):
 )
 def test_a_page_the_parsers_choke_on_gives_what_was_found(monkeypatch, page):
     serve(monkeypatch, {f"https://{HOST}/": page})
-    sites.learn_landing("shop", HOST, "https://shop.example.in/s?k={searchTerms}")
-    assert [t.how for t in discover()] == ["learned"] + (["site_form"] if "<form" in page else [])
+    assert [t.how for t in discover()] == (["site_form"] if "<form" in page else [])
 
 
 def test_oversized_insecure_and_failed_pages(monkeypatch):
@@ -314,7 +316,7 @@ def test_sanitize_keeps_only_the_terms_slot(url, query, want):
 
 def test_learning_a_landing_and_dropping_a_failing_template():
     sites.learn_landing("shop", HOST, "https://shop.example.in/s?k={searchTerms}")
-    assert learned.get("sites", "shop|in") == {"host": HOST, "prefix": ""}
+    assert learned.get("sites", "shop|in") == {"host": HOST, "prefix": "", "via": "search"}
     assert learned.get("templates", HOST)["url"] == "https://shop.example.in/s?k={searchTerms}"
     sites.learn_landing("other", "other.example", "https://evil.example/s?q={searchTerms}")  # off-site: not kept
     assert learned.get("templates", "other.example") is None and learned.get("sites", "other|in") is not None
@@ -352,3 +354,77 @@ def test_a_landing_is_on_the_site_and_holds_the_query():
     assert not sites.carries("https://shop.example.in/", "2tb ssd")
     assert not sites.carries("https://shop.example.in/s?k=2tb", "2tb ssd")
     assert not sites.carries("https://shop.example.in/s?k=x", "  ")
+
+
+# ---- review fixes: a site's sections, words in any script, how a word was learned ---------------------
+
+MAPS = "https://www.shopkart.com/maps/search?q={searchTerms}"
+
+
+def test_a_sites_section_keeps_its_own_template():
+    sites.learn_landing("shopkart maps", "www.shopkart.com", MAPS, "/maps")
+    assert sites.learned_template("www.shopkart.com", "/maps") == sites.Template(MAPS, "learned")
+    assert sites.learned_template("www.shopkart.com") is None  # the whole site has none of its own
+    sites.template_failed("www.shopkart.com")
+    sites.template_failed("www.shopkart.com")
+    assert sites.learned_template("www.shopkart.com", "/maps") is not None  # nobody blamed it
+    sites.learn_landing("shopkart", "www.shopkart.com", MAPS)  # a section's search for the whole site
+    assert sites.learned_template("www.shopkart.com") == sites.Template(MAPS, "learned")
+    sites.learn_landing("shopkart maps", "www.shopkart.com", "https://www.shopkart.com/s?k={searchTerms}", "/maps")
+    assert sites.learned_template("www.shopkart.com", "/maps").url == MAPS  # outside the section: not kept
+
+
+def test_a_landing_on_a_section_must_be_inside_it():
+    assert sites.on_site("https://m.shopkart.com/maps/search/pizza", "www.shopkart.com", "/maps")
+    assert sites.on_site("https://www.shopkart.com/Maps", "www.shopkart.com", "/maps")
+    assert not sites.on_site("https://www.shopkart.com/search?q=pizza", "www.shopkart.com", "/maps")
+    assert not sites.on_site("https://www.shopkart.com/mapsearch", "www.shopkart.com", "/maps")
+    assert sites.on_site("https://www.shopkart.com/search?q=pizza", "www.shopkart.com")
+
+
+def test_a_sections_search_is_one_inside_it(monkeypatch):
+    seen = serve(monkeypatch, {
+        "https://www.shopkart.com/maps/": home(body='<form role="search" action="/s"><input name="k"></form>'),
+    })
+    assert asyncio.run(sites.discover("www.shopkart.com", "/maps")) == []  # the whole site's search
+    assert seen == ["https://www.shopkart.com/maps/"]
+    serve(monkeypatch, {
+        "https://www.shopkart.com/maps/": home(body='<form role="search" action="search"><input name="q"></form>'),
+    })
+    assert asyncio.run(sites.discover("www.shopkart.com", "/maps")) == [sites.Template(MAPS, "site_form")]
+
+
+def test_words_in_any_script_are_their_own_site_words(monkeypatch):
+    search = FakeSearch([])
+    monkeypatch.setattr(sites, "_search", search)
+    assert sites._key("यूट्यूब", "in") != sites._key("फ्लिपकार्ट", "in")
+    sites.learn_landing("यूट्यूब", "www.vidzone.tv", None)
+    assert sites.site_like("यूट्यूब") is True
+    assert sites.site_like("फ्लिपकार्ट") is None  # not the one word learned for every such word
+    sites.learn_landing("?!", "www.shopkart.in", None)  # no letters or digits: nothing to learn
+    assert sites.site_like("…") is None and asyncio.run(sites.resolve("…")) is None
+    assert search.calls == [] and learned.get("sites", "") is None
+
+
+def test_a_word_opened_as_a_site_is_no_claim_on_searches(monkeypatch):
+    monkeypatch.setattr(sites, "_search", FakeSearch([]))
+    sites.learn_landing("shopkart", "www.shopkart.in", None, via="open")
+    assert sites.site_like("shopkart") is None  # "search news on <word>": a model decides
+    assert asyncio.run(sites.resolve("shopkart")) == sites.SiteRes("www.shopkart.in", "learned", "in")
+    sites.learn_landing("shopkart", "www.shopkart.in", None)  # a confirmed search on it
+    assert sites.site_like("shopkart") is True
+    sites.learn_landing("shopkart", "www.shopkart.in", None, via="open")  # opening it again keeps that
+    assert sites.site_like("shopkart") is True
+
+
+def test_everyday_words_are_the_ones_the_word_list_has_in_lower_case(monkeypatch, tmp_path):
+    words = tmp_path / "words"
+    words.write_text("cheap\nflight\nShopkart\nrecipe\n")
+    monkeypatch.setattr(inventory, "_WORDS_FILE", str(words))
+    monkeypatch.setattr(sites, "_lower_known", {})
+    assert sites.everyday("cheap flights") and sites.everyday("Recipes")
+    assert not sites.everyday("shopkart") and not sites.everyday("cheap shopkart")  # a name, capitalised
+    assert not sites.everyday("") and not sites.everyday("2tb")
+    sites.forget()
+    monkeypatch.setattr(inventory, "_WORDS_FILE", str(tmp_path / "missing"))
+    assert not sites.everyday("cheap")  # no word list: nothing is known to be an everyday word

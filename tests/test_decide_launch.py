@@ -148,10 +148,19 @@ def test_a_site_word_is_resolved_opened_confirmed_and_then_learned(monkeypatch):
     assert r.ok and r.say is True and r.text == "Opened www.shopkart.in in Webby"
     assert mac.opened == [("https://www.shopkart.in/", "test.webby")]
     assert mac.tree == ["on", "off"]  # the web tree was switched back
-    assert learned.get("sites", "shopkart|in") == {"host": "www.shopkart.in", "prefix": ""}
-    assert sites.site_like("shopkart") is True
+    assert learned.get("sites", "shopkart|in") == {"host": "www.shopkart.in", "prefix": "", "via": "open"}
     r = go("shopkart")  # learned: no search, said no more
     assert r.ok and r.say is None and len(search.calls) == 1
+
+
+def test_a_word_opened_as_a_site_is_no_claim_on_searches(monkeypatch):
+    Mac(monkeypatch)
+    monkeypatch.setattr(sites, "_search", FakeSearch(["https://www.shopkart.in/"]))
+    assert go("shopkart").ok
+    # "search news on <word>" may be about it: only a search that landed there makes it the site's
+    assert sites.site_like("shopkart") is None
+    assert not web.claims_search_site({"site": "shopkart", "query": "news"})
+    assert not web.claims_web_search({"query": "news on shopkart"})
 
 
 def test_a_landing_nobody_could_see_teaches_nothing(monkeypatch):
@@ -201,6 +210,36 @@ def test_urls_and_paths_open_as_given(monkeypatch, target, how, url):
     assert (ch.how, ch.url) == (how, url)
     assert go(target).ok
     assert mac.opened == [(url, "")] if url.startswith("https") else mac.runs == [["open", url]]
+
+
+@pytest.mark.parametrize(
+    "target, url",
+    [
+        ("192.168.1.1", "https://192.168.1.1"),
+        ("192.168.1.1/admin", "https://192.168.1.1/admin"),
+        ("127.0.0.1:8000", "https://127.0.0.1:8000"),
+        ("localhost:3000/app", "https://localhost:3000/app"),
+        ("localhost", "https://localhost"),
+        ("docs.example.org:8443", "https://docs.example.org:8443"),  # the port kept
+        ("docs.example.org:8443/guide", "https://docs.example.org:8443/guide"),
+        ("::1", "https://[::1]"),
+    ],
+)
+def test_a_network_address_opens_as_given_and_is_never_looked_up(monkeypatch, target, url):
+    mac = Mac(monkeypatch)
+    search = FakeSearch(["https://www.shopkart.in/"])
+    monkeypatch.setattr(sites, "_search", search)
+    ch = asyncio.run(launch.decide(target))
+    assert (ch.how, ch.url) == ("url", url)
+    assert go(target).ok and mac.opened == [(url, "")] and search.calls == []
+
+
+def test_words_with_a_colon_or_a_slash_are_no_site_word(monkeypatch):
+    Mac(monkeypatch)
+    search = FakeSearch(["https://www.shopkart.in/"])
+    monkeypatch.setattr(sites, "_search", search)
+    assert asyncio.run(launch.decide("shopkart/deals")).how == "none" and search.calls == []
+    assert asyncio.run(launch.decide("12:30")).how == "none" and search.calls == []  # a time, no host
 
 
 def test_a_home_path_is_expanded(monkeypatch):
