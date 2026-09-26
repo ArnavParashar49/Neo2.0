@@ -41,7 +41,7 @@ dependencies = [
   # core
   "numpy",
   "pydantic>=2",
-  "pydantic-settings>=2",
+  "pydantic-settings>=2.7",  # NoDecode (config.py)
   "python-dotenv",
   "websockets>=13",
 ]
