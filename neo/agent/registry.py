@@ -1,4 +1,11 @@
-"""Tool registry — the single catalog every brain, the reflex layer and the UI read from.
+"""Tool registry — the catalog every brain, the reflex layer and the UI read from.
+
+Every tool module registers into one process-wide *catalog* (:func:`catalog`). NEO.app uses it
+as is: with no agent bound, :func:`registry` *is* the catalog. An agent embedded in another app
+(neo.runtime) gets its own strict registry — a copy of just the catalog tools it was given, plus
+its host's tools — and :func:`registry` returns that one while the agent is bound. So a tool
+module imported in the middle of a run (the web tools import the policy lazily) grows the
+catalog, never an agent's tool set.
 
 Register with the :func:`tool` decorator::
 
@@ -17,13 +24,18 @@ have images to attach, e.g. screenshots).
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import inspect
+import logging
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from neo import runtime
 from neo.providers.base import ImagePart, ToolSpec
+
+log = logging.getLogger(__name__)
 
 Risk = Literal["safe", "reversible", "destructive"]
 
@@ -101,21 +113,42 @@ class RegisteredTool:
     # doing it twice in a row gives nothing more (opening the same page or app): a repeat of the
     # same call moments later is a model retry, not the user's intent — unlike a keystroke
     idempotent: bool = False
+    requires: frozenset[str] = frozenset()  # what it needs to run: "macos", "playwright"
+    origin: Literal["builtin", "host"] = "builtin"  # NEO's own tool, or an embedding host's
+    read_only: bool | None = None  # changes nothing (None: not declared; parallel_safe hints it)
 
     def spec(self) -> ToolSpec:
         return ToolSpec(self.name, self.description, self.parameters)
 
 
 class Registry:
-    def __init__(self) -> None:
+    def __init__(self, *, strict: bool = False) -> None:
         self.last: tuple[str, float, bool] | None = None  # (tool, when, ok) of the latest invoke
         self._tools: dict[str, RegisteredTool] = {}
+        # An agent's registry: a second tool under a name never silently replaces the first
+        # (a host tool called "shell" must not stand in for NEO's gated shell).
+        self.strict = strict
 
-    def register(self, t: RegisteredTool) -> RegisteredTool:
+    def register(self, t: RegisteredTool, *, replace: bool = False) -> RegisteredTool:
         if t.name in self._tools:
+            if self.strict and not replace:
+                raise ValueError(f"a tool named {t.name!r} is already registered")
             print(f"[registry] replacing tool {t.name}")
         self._tools[t.name] = t
         return t
+
+    def remove(self, name: str) -> RegisteredTool | None:
+        return self._tools.pop(name, None)
+
+    def subset(self, names: Iterable[str]) -> Registry:
+        """A strict registry holding copies of just these tools (in this registry's order; a name
+        it doesn't have is skipped). A copy, so later changes to either side never reach the other."""
+        want = set(names)
+        out = Registry(strict=True)
+        for t in self._tools.values():
+            if t.name in want:
+                out._tools[t.name] = dataclasses.replace(t, fast_path=list(t.fast_path))
+        return out
 
     def get(self, name: str) -> RegisteredTool | None:
         return self._tools.get(name)
@@ -190,11 +223,21 @@ class Registry:
 _registry: Registry | None = None
 
 
-def registry() -> Registry:
+def catalog() -> Registry:
+    """Every tool any module registered, process-wide. NEO.app's registry."""
     global _registry
     if _registry is None:
         _registry = Registry()
     return _registry
+
+
+def registry() -> Registry:
+    """The tools of whoever is asking: the bound agent's own registry, else the catalog."""
+    rt = runtime.current_runtime()
+    if rt is not None:
+        return rt.registry
+    runtime.check_unbound("registry()")
+    return catalog()
 
 
 def tool(
@@ -215,9 +258,12 @@ def tool(
     timeout: float = 120.0,
     untrusted: bool = False,
     idempotent: bool = False,
+    requires: Iterable[str] = (),
+    read_only: bool | None = None,
 ) -> Callable[[Handler], Handler]:
     def deco(fn: Handler) -> Handler:
-        registry().register(
+        # Always the process catalog — even when a module is imported while an agent is bound.
+        catalog().register(
             RegisteredTool(
                 name=name,
                 description=description,
@@ -236,6 +282,8 @@ def tool(
                 timeout=timeout,
                 untrusted=untrusted,
                 idempotent=idempotent,
+                requires=frozenset(requires),
+                read_only=read_only,
             )
         )
         return fn

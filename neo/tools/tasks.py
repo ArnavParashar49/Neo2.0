@@ -15,7 +15,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
-from neo.agent.registry import ToolContext, registry, tool
+from neo.agent.registry import ToolContext, catalog, tool
 from neo.config import DecideMode, decide_mode
 from neo.decide import shadow
 from neo.tools.computer import legacy
@@ -123,7 +123,7 @@ _AS_REGISTERED: dict[str, dict[str, Any]] = {}
 def apply_modes() -> None:
     """Show each tool as its kind's mode wants. The modes are read once, at start (load_all)."""
     for name, (kind, on) in _WHEN_ON.items():
-        t = registry().get(name)
+        t = catalog().get(name)  # NEO.app's tools; an embedded agent's copies keep what they were given
         if t is None:
             continue
         registered = _AS_REGISTERED.setdefault(name, {k: getattr(t, k) for k in on})
