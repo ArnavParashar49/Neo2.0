@@ -133,25 +133,63 @@ def _distinctive(text: str) -> tuple[set[str], set[str]]:
     return strong, weak
 
 
-def _command_steps(text: str) -> list[tuple[str, dict]] | None:
+_TARGETED = re.compile(r"\b(?:in|into|on|at|inside)\s+(?:the|a|an|my|this|that)\b", re.I)
+_TRAILING_JOIN = re.compile(r"(?:\b(?:and|then|also|plus)|,)\s*$", re.I)
+
+
+def _command_steps(text: str, *, settled: bool = False) -> list[tuple[str, dict]] | None:
     """The fast-path plan for a sentence that is purely actions ("open notes and type hello",
-    "search cat videos on youtube"), or None: a question, an answer tool, or a reference like
-    "it" that only the conversation can resolve."""
+    "search cat videos on youtube"), or None: a question, an answer tool, a reference like "it"
+    only the conversation can resolve — or a plan that might be wrong:
+
+    * a typed payload that swallowed a later instruction ("type see you soon and send");
+    * typing aimed at a place the plan can't click first ("type hello in the search bar");
+    * `settled`: the transcript was never marked finished, so a payload may still be growing
+      and a sentence ending in "and" isn't over."""
     from neo.agent import fastpath
 
-    steps = fastpath.plan(" ".join(text.split()))
+    text = " ".join(text.split())
+    if not text or _TRAILING_JOIN.search(text):
+        return None
+    steps = fastpath.plan(text)
     if not steps:
         return None
     for tool, args in steps:
         t = registry().get(tool)
         if t is None or not t.quiet or any(_vague(v) for v in args.values()):
             return None
+        if t.payload:
+            if settled:
+                return None
+            if any(isinstance(v, str) and fastpath.SPLIT.search(v) for v in args.values()):
+                return None
+            if tool in ("type_text", "dictate") and _TARGETED.search(text):
+                return None
     return steps
+
+
+# Question cues beyond English question words: Hindi / Hinglish, the way the user speaks.
+_HI_ASKS = re.compile(
+    r"\b(?:kya|kyaa|kaise|kaisa|kaisi|kitne|kitna|kitni|kab|kahan|kahaan|kaun|kaunsa|kyun|kyon|"
+    r"batao|bataiye|bata\s+do|bolo|samjhao)\b"
+    r"|क्या|कैसे|कैसा|कैसी|कितने|कितना|कितनी|कब|कहाँ|कहां|कौन|क्यों|बताओ|बताइए|बताइये",
+    re.I,
+)
 
 
 def _asks(text: str) -> bool:
     """Does the user want to hear something back? ("search cats on youtube" opens a page: no.)"""
-    return asks_something(text) and _command_steps(text) is None
+    return (asks_something(text) or bool(_HI_ASKS.search(text))) and _command_steps(text) is None
+
+
+def _is_action_call(fc) -> bool:
+    """A call that only does something (nothing to report when it works)."""
+    t = registry().get(fc.name)
+    if fc.name == "agent_task":
+        return True  # its result decides whether there's anything to say
+    if fc.name == "memory":
+        return (fc.args or {}).get("action") in ("remember", "forget")
+    return bool(t and t.quiet)
 
 
 def _failure_kind(e: BaseException) -> str:
@@ -232,11 +270,15 @@ class LiveVoice:
     _last_heard_at = 0.0  # the user's latest transcribed words
     _last_response_at = 0.0  # NEO's latest tool result the model will respond to
     _result_speech = False  # may that response be spoken?
-    # command lane (see _maybe_command_lane)
-    _lane_text = ""
+    _result_pending = False  # a non-silent result went back and the model hasn't replied to it yet
+    _pending_note: str | None = None  # an inform() held back while the user was mid-sentence
+    _last_answer_silent = False
+    # command lane (see _maybe_command_lane) — tied to sentences by number, never by their text
+    _utt_id = 0  # bumps with every new sentence (spoken or typed)
+    _calls_this_turn = 0  # model tool calls since the last turn_complete
+    _lane_tried_utt = -1  # the sentence the lane last looked at
+    _lane_utt = -1  # the sentence the lane is doing
     _lane_at = 0.0
-    _lane_checked = ""
-    _model_acted = False
     # voice confirmations (see _voiced)
     _asked: tuple[str, str, float] | None = None  # (action_id, question text handed to the model, when)
     _voiced_action: tuple[str, str, float] | None = None  # (action_id, what the model then said, when)
@@ -347,9 +389,14 @@ class LiveVoice:
         """Something happened outside the conversation (the user answered NEO's question on the
         overlay): let the model know so it can say how it went."""
         if not self._live:
+            await bus().say(text[:600], final=True)  # the session has closed: at least show it
+            return
+        if self._utterance and self._turn_open:
+            self._pending_note = text  # never talk over a sentence in progress: after it
             return
         try:
-            self._result_speech, self._last_response_at = True, time.time()  # this reply is meant to be heard
+            self._result_pending = self._result_speech = True  # this reply is meant to be heard
+            self._last_response_at = time.time()
             self._note_question(text)
             await self._live.send_client_content(
                 turns=gt.Content(
@@ -377,14 +424,16 @@ class LiveVoice:
         await self._live.send_client_content(
             turns=gt.Content(role="user", parts=[gt.Part.from_text(text=text)])
         )
-        self._last_activity = self._last_user_speech = time.time()  # typed = said
+        self._last_activity = self._last_user_speech = self._last_heard_at = time.time()  # typed = said
         self._new_question()
+        self._new_sentence()
+        self._calls_this_turn = 0
         self._utterance = text
-        self._utt_started = time.time()
         self._remember_line("user", text)
         self._file_label()
         self._label = {"text": " ".join(text.split()), "tools": [], "spoke": False, "open": False}
         self._turn_open = True
+        self._maybe_command_lane(text, settled=False)  # a typed command runs at once too
 
     # ---- state machine -----------------------------------------------------------------
     async def _refresh_state(self) -> None:
@@ -464,6 +513,9 @@ class LiveVoice:
     async def _close_session(self) -> None:
         self._file_label()
         self._new_question()
+        self._gate, self._held = None, []
+        self._result_pending = self._result_speech = False
+        self._lane_utt = -1
         if self._closing:  # the conversation is over (not a dropped socket): forget its context
             self._dialog.clear()
         cm, self._live_cm, self._live = self._live_cm, None, None
@@ -623,6 +675,7 @@ class LiveVoice:
                 self._speaking = False
                 model_buf.clear()
                 self._gate, self._held = None, []
+                self._result_pending = self._result_speech = False
                 self._new_question()
                 await self._refresh_state()
             if sc.input_transcription and sc.input_transcription.text:
@@ -632,8 +685,7 @@ class LiveVoice:
                     self._file_label()  # the previous request is over: its label is final
                     self._label = {"text": "", "tools": [], "spoke": False, "open": True}
                 if not user_buf:
-                    self._utt_started = time.time()
-                    self._model_acted = False  # a new sentence: the model hasn't called anything for it
+                    self._new_sentence()
                 self._last_heard_at = time.time()
                 user_buf.append(sc.input_transcription.text)
                 self._utterance = "".join(user_buf)
@@ -641,7 +693,7 @@ class LiveVoice:
                 await bus().say(self._utterance, role="user", final=False)
                 early().feed(self._utterance)  # the 150 ms ticker acts on it — never inline here
                 if getattr(sc.input_transcription, "finished", False):
-                    self._maybe_command_lane(self._utterance)  # the sentence is over
+                    self._maybe_command_lane(self._utterance, settled=False)  # the sentence is over
             interim = getattr(sc, "interim_input_transcription", None)
             if interim and interim.text:  # words as they're being said, before they're committed
                 self._turn_open = True
@@ -686,6 +738,10 @@ class LiveVoice:
                         self._label["open"] = False
                     user_buf.clear()
                 self._utterance = ""  # a later tool call without new words isn't about this sentence
+                self._calls_this_turn = 0
+                if self._pending_note is not None:
+                    note, self._pending_note = self._pending_note, None
+                    asyncio.create_task(self.inform(note))
                 # The model heard the whole sentence and calls the tools itself; the early actor
                 # only ever acts mid-sentence here (its runs answer the model's matching calls).
                 early().new_utterance()
@@ -703,18 +759,22 @@ class LiveVoice:
                 asyncio.create_task(self._after_playback())
         if msg.tool_call:
             asked = self._utterance or "".join(user_buf) or (self._label or {}).get("text", "")
+            calls = list(msg.tool_call.function_calls or [])
             if self._lane_owns(asked):
                 # NEO is already doing this sentence itself: the model's calls for it are redundant.
-                for fc in msg.tool_call.function_calls or []:
+                for fc in calls:
                     asyncio.create_task(self._skip_call(live, fc))
-                self._gate, self._held = "mute", []
+                if self._gate in (None, "hold"):
+                    self._gate, self._held = "mute", []
                 return
-            if self._utterance:
-                self._model_acted = True  # the model got there first: the command lane stays out
+            self._calls_this_turn += 1  # the model got there first: the command lane stays out
             if self._turn_gate(user_buf) == "hold":
-                # A command: whatever the model was saying around the call ("Sure, opening
-                # Google…") is dropped, and the rest of this turn stays quiet.
-                self._gate, self._held = "mute", []
+                # Decided by what the model does, not by how the sentence was phrased: only
+                # actions ("open notes") keep the turn quiet; an answer tool ("weather in Delhi",
+                # "kitne baje hain") means the answer that follows is spoken. Either way the
+                # preamble before the call ("Sure, let me…") is dropped.
+                self._gate = "mute" if all(_is_action_call(fc) for fc in calls) else "open"
+                self._held = []
             if self._label is None and asked:
                 self._label = {"text": " ".join(asked.split()), "tools": [], "spoke": False, "open": False}
             for fc in msg.tool_call.function_calls or []:
@@ -739,46 +799,59 @@ class LiveVoice:
     # local path typed commands take — instead of waiting for Gemini to decide on a tool call.
     # The model's own calls for that sentence are then skipped and its speech muted. Questions,
     # and anything the fast paths can't cover whole, go to the model as before.
-    def _maybe_command_lane(self, text: str) -> None:
+    def _new_sentence(self) -> None:
+        """The user started a new sentence (spoken or typed)."""
+        self._utt_id += 1
+        self._utt_started = time.time()
+
+    def _maybe_command_lane(self, text: str, *, settled: bool) -> None:
+        """Look at a finished sentence once; run it here if it's purely a command NEO covers."""
         text = " ".join((text or "").split())
-        if not text or text == self._lane_checked or not settings().live_command_lane:
+        if not text or self._lane_tried_utt == self._utt_id or not settings().live_command_lane:
             return
-        self._lane_checked = text
-        if self._model_acted or confirm.peek() is not None:
-            return
-        steps = _command_steps(text)
+        self._lane_tried_utt = self._utt_id
+        if self._calls_this_turn or confirm.peek() is not None:
+            return  # the model already acted on it, or the user is answering a question
+        steps = _command_steps(text, settled=settled)
         if not steps:
             return  # a question, or something only the model can work out
-        self._lane_text, self._lane_at = text, time.time()
-        if self._gate in (None, "hold") and self._last_response_at <= self._last_heard_at:
+        from neo.agent.early import key as early_key
+
+        # The early actor must not run any of these again from the same transcript.
+        early()._ran_keys.update(early_key(t, a) for t, a in steps)
+        self._lane_utt, self._lane_at = self._utt_id, time.time()
+        if self._gate in (None, "hold") and not (self._result_pending and self._result_speech):
             self._gate, self._held = "mute", []  # whatever the model was about to say about it
         if self._label is not None:
             self._label["tools"].extend(t for t, _ in steps)  # Laya learns from what ran
-        asyncio.create_task(self._command_lane(text, steps))
+        key = f"lane:{self._utt_id}"
+        self._tool_tasks[key] = asyncio.create_task(self._command_lane(text, steps, key))
 
     async def _lane_when_settled(self) -> None:
         """The model started answering before the transcript was marked finished: give trailing
-        words a moment to arrive, then act only if the sentence is really over."""
+        words a moment to arrive, then act only if the sentence is really over (and never on a
+        typed payload that might still be growing)."""
+        utt = self._utt_id
         await asyncio.sleep(_SETTLE_S)
-        if time.time() - self._last_heard_at >= _SETTLE_S and not self._model_acted and self._utterance:
-            self._maybe_command_lane(self._utterance)
+        if self._utt_id == utt and time.time() - self._last_heard_at >= _SETTLE_S and self._utterance:
+            self._maybe_command_lane(self._utterance, settled=True)
 
-    def _lane_owns(self, asked: str) -> bool:
-        return bool(
-            self._lane_text
-            and time.time() - self._lane_at < _LANE_S
-            and _canon(" ".join((asked or "").split())) == _canon(self._lane_text)
-        )
+    def _lane_owns(self, asked: str = "") -> bool:
+        """Is the current sentence one NEO is doing itself? (By sentence number: saying the same
+        command again is a new sentence, and it runs again.)"""
+        return self._lane_utt == self._utt_id and time.time() - self._lane_at < _LANE_S
 
-    async def _command_lane(self, text: str, steps) -> None:
+    async def _command_lane(self, text: str, steps, key: str) -> None:
         print(f"  ⚡ command lane: {len(steps)} step(s)")
         try:
             reply = await self._agent_session.command(text, steps)
-        except Exception as e:  # noqa: BLE001
-            reply = None
-            why = str(e)[:160]
-        else:
             why = ""
+        except asyncio.CancelledError:
+            return  # the user said stop
+        except Exception as e:  # noqa: BLE001
+            reply, why = None, str(e)[:160]
+        finally:
+            self._tool_tasks.pop(key, None)
         self._last_activity = time.time()
         if reply is None or not reply.silent:
             # It failed (and the agent couldn't fix it) or it needs the user: that is worth hearing.
@@ -804,16 +877,20 @@ class LiveVoice:
     # held back and dropped once the turn turns out to be an action.
     def _turn_gate(self, user_buf: list[str]) -> str:
         if self._gate is None:
-            if self._last_response_at > self._last_heard_at:
-                # The model is responding to a tool result NEO sent back, not to the user.
-                allow, self._result_speech = self._result_speech, False
-                self._gate = "open" if allow else "mute"
+            said = self._utterance or "".join(user_buf)
+            if self._result_pending and (self._result_speech or self._last_response_at > self._last_heard_at):
+                # The model is replying to a result NEO sent back (an answer is owed even if the
+                # user has since said something quick like "volume down").
+                self._gate = "open" if self._result_speech else "mute"
+                self._result_pending = self._result_speech = False
+            elif self._lane_owns():
+                self._gate = "mute"  # NEO is doing it already: nothing to say
+            elif said.strip() and _asks(said):
+                self._gate = "open"  # a question: no need to wait and see
             else:
-                said = self._utterance or "".join(user_buf)
-                if self._lane_owns(said):
-                    self._gate = "mute"  # NEO is doing it already: nothing to say
-                else:
-                    self._gate = "open" if not said.strip() or _asks(said) else "hold"
+                # A command, small talk, or words not transcribed yet: hold the audio until the
+                # turn shows what it is (a tool call decides; no call within _HOLD_S = a reply).
+                self._gate = "hold"
             self._held = []
         return self._gate
 
@@ -874,9 +951,10 @@ class LiveVoice:
                 reply = await self._agent_session.answer(heard, text=asked)
                 if reply is not None:
                     self._last_answer = (time.time(), reply.text)
-                    result = reply.text
+                    self._last_answer_silent = reply.silent
+                    result, silent = reply.text, reply.silent  # done as approved: nothing to say
                 elif time.time() - self._last_answer[0] < 20:
-                    result = self._last_answer[1]  # answered a moment ago (by voice or on screen)
+                    result, silent = self._last_answer[1], self._last_answer_silent  # answered a moment ago
                 else:
                     result = "Nothing is waiting for an answer any more."
             elif fc.name == "agent_task":
@@ -973,10 +1051,19 @@ class LiveVoice:
         )
         if self._live is live:
             try:
-                if scheduling is not gt.FunctionResponseScheduling.SILENT:
-                    # The model will respond to this result: may that response be spoken? Yes for
-                    # answers, failures and questions back; no for "step done, carry on".
-                    self._result_speech = self._result_speech or not sequencing
+                failed_or_asks = result.startswith(("Error", "NEEDS_", "(content) NEEDS_")) or "didn't work" in result[:40]
+                if scheduling is None:
+                    # Blocking: the model answers in this same turn. An answer, a failure or a
+                    # question is heard; a memory write ("Remembered.") isn't.
+                    wrote = fc.name == "memory" and args.get("action") in ("remember", "forget")
+                    self._gate = "open" if failed_or_asks or not wrote else "mute"
+                    self._held = []
+                    self._note_question(result)
+                elif scheduling is not gt.FunctionResponseScheduling.SILENT:
+                    # The model will respond to this result in a later turn: may that be spoken?
+                    # Yes for answers, failures and questions back; no for "step done, carry on".
+                    self._result_pending = True
+                    self._result_speech = self._result_speech or not sequencing or failed_or_asks
                     self._last_response_at = time.time()
                     self._note_question(result)
                 await live.send_tool_response(function_responses=[resp])

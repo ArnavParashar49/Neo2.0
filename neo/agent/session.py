@@ -184,7 +184,10 @@ class Session:
         to the agent, exactly like a typed command."""
         job = f"j{next(_job_ids)}"
         _mark_job()
-        return await self._quick(text, None, steps, job=job)
+        # A command, by construction: if the agent has to rescue it and succeeds, there's still
+        # nothing to say.
+        d = Decision("agent_task", 1.0, False, 0.0, False, 0.0, source="lane", reply=False, reply_p=0.0)
+        return await self._quick(text, d, steps, job=job)
 
     async def cancel_all(self) -> int:
         """Stop every running job (the user said stop) and drop any unanswered question."""
@@ -242,8 +245,10 @@ class Session:
         spoken: list[str] = []
         texts: list[str] = []
         prev = ""
-        for tool, args in steps:
+        for i, (tool, args) in enumerate(steps):
             t = registry().get(tool)
+            async with early()._lock:  # an early run still in flight finishes — and leaves its claim — first
+                pass
             done = early().claim(tool, args)
             if done is not None:
                 out_text, ok = done, True  # the early actor already did this while the user was speaking
@@ -256,7 +261,9 @@ class Session:
                 out_text, ok = out.text, out.ok
                 if not ok:  # e.g. weather for "the forecast for Q3 sales": the agent can do better
                     print(f"  ~ {tool} failed; handing to the agent")
-                    return await self._agent(text, d, None, job)
+                    ran = "; ".join(f"{tl}({', '.join(f'{k}={v!r}' for k, v in a.items())})" for tl, a in steps[:i])
+                    note = f"\n[ALREADY DONE] These steps of the request already ran — don't repeat them: {ran}" if ran else ""
+                    return await self._agent(text, d, None, job, done_note=note)
             prev = tool
             texts.append(out_text)
             needs_user = out_text.startswith(("NEEDS_", "Error"))
@@ -283,6 +290,7 @@ class Session:
         job: str,
         *,
         only: list[str] | None = None,
+        done_note: str = "",
     ) -> Reply:
         needs_screen = bool(images or (d and d.needs_screen))
         if needs_screen:
@@ -309,7 +317,7 @@ class Session:
                 res = await run_agent(
                     _with_conversation(text),
                     provider=chain,
-                    system=self._system(playbook_ctx + _already_done_note()),
+                    system=self._system(playbook_ctx + _already_done_note() + done_note),
                     tools=tools,
                     history=snapshot,
                     ctx=ctx,
@@ -620,6 +628,11 @@ def _learn_from(text: str, d: Decision | None, res: AgentResult) -> None:
         pass
 
 
+# Tools whose result is information for the user: a run that used one has something to say,
+# however the request was phrased ("John ki unread emails mein kya likha hai").
+_INFO_TOOLS = {"web_search", "web_fetch", "weather", "clock", "calendar_today", "mail_unread", "safari_read"}
+
+
 def _quietly(d: Decision | None, res: AgentResult) -> bool:
     """Was this a command that simply got done? Then there's nothing to say.
 
@@ -628,6 +641,8 @@ def _quietly(d: Decision | None, res: AgentResult) -> bool:
     if d is None or d.reply or res.stopped != "done" or res.question:
         return False
     if not res.steps or not all(st.ok for st in res.steps):
+        return False
+    if any(st.tool in _INFO_TOOLS or (st.tool == "memory" and st.args.get("action") == "recall") for st in res.steps):
         return False
     low = res.text.lower()
     return not any(w in low for w in ("?", "couldn't", "could not", "can't", "cannot", "unable", "error", "failed"))

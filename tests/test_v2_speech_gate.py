@@ -194,3 +194,104 @@ def test_multi_step_progress_is_never_narrated(voice, monkeypatch):
 
     asyncio.run(run())
     assert [n for n, _ in voice.ran] == ["type_text", "hotkey"] and voice.spk.played == []
+
+
+# ---- review of 66b1288 ----------------------------------------------------------------------------
+
+
+def test_a_command_said_twice_runs_twice(voice):
+    async def run():
+        await feed(voice, heard("scroll down"), audio(), call("scroll", {"direction": "down"}, "m1"), DONE)
+        await feed(voice, heard("scroll down"), audio(), call("scroll", {"direction": "down"}, "m2"), DONE)
+
+    asyncio.run(run())
+    assert [t for t, _ in voice.lane] == ["scroll down", "scroll down"] and voice.ran == []
+
+
+def test_a_payload_that_swallowed_an_instruction_goes_to_the_model(voice):
+    asyncio.run(feed(voice, heard("type see you soon and send"), call("type_text", {"text": "see you soon"}, "m1"),
+                     call("hotkey", {"keys": "return"}, "m2"), DONE, settle=0.2))
+    assert voice.lane == [] and [n for n, _ in voice.ran] == ["type_text", "hotkey"]
+
+
+def test_answers_are_spoken_however_the_question_is_phrased(voice):
+    for said_text in ("weather in delhi tomorrow", "kal delhi ka mausam kaisa rahega", "time in tokyo"):
+        voice.spk.played.clear()
+        asyncio.run(feed(voice, heard(said_text), said("Let me check"), audio(), call("weather", {"place": "Delhi"}),
+                         settle=0.2))
+        # the blocking result is back: the model answers in the same turn
+        asyncio.run(feed(voice, said("It'll be 31 degrees and sunny."), audio(2), DONE))
+        # The answer is heard (a sentence recognised as a question also keeps its "let me check").
+        assert len(voice.spk.played) >= 2, said_text
+
+
+def test_remembering_something_stays_quiet(voice):
+    asyncio.run(feed(voice, heard("remember that my car is on level 3"), call("memory", {"action": "remember", "text": "car on level 3"}), settle=0.2))
+    asyncio.run(feed(voice, said("Got it, I'll remember that."), audio(), DONE))
+    assert voice.spk.played == []
+
+
+def test_a_model_call_before_the_transcript_keeps_the_lane_out(voice):
+    asyncio.run(feed(voice, call("open_app", {"target": "Notes"}, "m1"), heard("open notes"), DONE, settle=0.2))
+    assert voice.lane == [] and [n for n, _ in voice.ran] == ["open_app"]  # once, by the model
+
+
+def test_the_lane_is_tracked_so_stop_can_cancel_it(voice):
+    started = asyncio.Event()
+
+    async def slow(text, steps):
+        started.set()
+        await asyncio.sleep(10)
+
+    voice._agent_session.command = slow
+
+    async def run():
+        await feed(voice, heard("open notes"))
+        await started.wait()
+        assert any(k.startswith("lane:") for k in voice._tool_tasks)
+        await voice.interrupt()
+        await asyncio.sleep(0.05)
+        assert not any(k.startswith("lane:") for k in voice._tool_tasks)
+
+    asyncio.run(run())
+
+
+def test_a_typed_question_after_a_quiet_step_is_answered(voice, monkeypatch):
+    from neo import config
+
+    monkeypatch.setenv("NEO_LIVE_COMMAND_LANE", "false")
+    monkeypatch.setattr(config, "_settings", None)
+
+    async def run():
+        await feed(voice, heard("type github.com and press enter"), call("type_text", {"text": "github.com"}), DONE, settle=0.2)
+        await feed(voice, said("typed it"), audio(), DONE)  # the sequencing reply: muted
+        await voice.send_text("what's the capital of France?")
+        await feed(voice, said("Paris."), audio(), DONE)
+
+    asyncio.run(run())
+    assert len(voice.spk.played) == 1  # only "Paris."
+
+
+def test_an_approved_action_via_the_models_call_stays_quiet(voice):
+    from neo.agent import confirm
+    from neo.agent.session import Reply
+
+    async def answer(yes, **kw):
+        confirm.cancel("t")
+        return Reply("Clicked 'Send'", "confirm", silent=True)
+
+    voice._agent_session.answer = answer
+
+    async def run():
+        confirm.stage("click_text", {"label": "Send"}, "click “Send” in Mail")
+        p = confirm.peek()
+        voice._note_question("NEEDS_CONFIRM: click “Send” in Mail — Should I go ahead?")
+        voice._voiced_action = (p.action_id, "Should I click Send in Mail?", time.time())
+        await asyncio.sleep(0.01)
+        await feed(voice, heard("yes"), call("click_text", {"label": "Send"}, "m9"), settle=0.2)
+        await feed(voice, said("Done, I clicked Send."), audio(), DONE)
+
+    import time
+
+    asyncio.run(run())
+    assert voice.spk.played == []
