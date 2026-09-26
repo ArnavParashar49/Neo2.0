@@ -395,3 +395,27 @@ def dock_badge(app_name: str) -> str | None:
         if _s(attr(el, "AXSubrole")) == "AXApplicationDockItem" and _s(attr(el, "AXTitle")).strip().casefold() == want:
             return _s(attr(el, "AXStatusLabel")) or None
     return None
+
+
+# ---- a new note or document through the window (write_note) ------------------------------------------
+
+__all__ += ["window_pid", "value", "is_empty", "multiline"]
+
+
+async def window_pid(app: Any, ready_s: float) -> int | None:
+    """The app's pid once it shows a window, opening it first when it has none (media's launch)."""
+    return await _media()._launch(app, ready_s)
+
+
+def value(el: Any) -> str:
+    """The text an input holds now."""
+    return _s(attr(el, "AXValue"))
+
+
+def is_empty(el: Any) -> bool:
+    return not _norm(value(el))
+
+
+def multiline(el: Any) -> bool:
+    """A text area or a web editable: a line break is text there, not a submit."""
+    return _s(attr(el, "AXRole")) == "AXTextArea" or attr(el, "AXEditableAncestor") is not None
