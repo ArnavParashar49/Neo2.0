@@ -1,14 +1,15 @@
 """The Mac's shared calendar and reminder stores (EventKit): every calendar app here shows them.
 
 NEO saves and reads through the store itself, so an event lands in the user's default calendar
-whichever app they look at it in, and recurring events come back expanded. This module never
-asks for access: :func:`status` only reads what the user already decided, and every read or write
-below refuses to run unless access was granted (so none of them can put up macOS's question).
-Calendar and list titles are never logged.
+whichever app they look at it in, and recurring events come back expanded. :func:`status` only
+reads what the user already decided, and every read or write below refuses to run unless access
+was granted (so none of them can put up macOS's question). Only :func:`request` asks, once, and
+only when NEO's app declares why it wants the store. Calendar and list titles are never logged.
 """
 
 from __future__ import annotations
 
+import asyncio
 import threading
 import time
 from dataclasses import dataclass
@@ -29,13 +30,16 @@ __all__ = [
     "available",
     "usage_declared",
     "status",
+    "request",
     "calendars",
+    "titles",
     "default_calendar",
     "save_event",
     "save_reminder",
     "fetch",
     "events_between",
     "find_event",
+    "find_reminder",
     "counts",
     "forget",
 ]
@@ -55,6 +59,7 @@ _USAGE = {
 _NOUN = {"event": "calendar", "reminder": "reminders"}
 COUNTS_TTL_S = 600.0
 MAX_RANGE_DAYS = 31
+ASK_S = 60.0  # how long NEO waits for the user to answer macOS's question
 
 
 class NoAccess(PermissionError):
@@ -152,17 +157,49 @@ _store_obj: Any = None
 _store_lock = threading.Lock()
 
 
+def _the_store() -> Any:
+    global _store_obj
+    with _store_lock:
+        if _store_obj is None:
+            _store_obj = _ek().EKEventStore.alloc().init()
+        return _store_obj
+
+
 def _store(entity: Entity, *, write: bool = False) -> Any:
     """The process's one store, only once access to ``entity`` was granted (full, or write-only
     for a write)."""
     st = status(entity)
     if st != "full" and not (write and st == "write_only"):
         raise NoAccess(f"no {_NOUN[entity]} access ({st})")
-    global _store_obj
-    with _store_lock:
-        if _store_obj is None:
-            _store_obj = _ek().EKEventStore.alloc().init()
-        return _store_obj
+    return _the_store()
+
+
+async def request(entity: Entity) -> Status:
+    """Ask the user (macOS's own question) for full access to this store, and wait up to ASK_S
+    for the answer; the status afterwards. Nothing is asked when NEO's app doesn't declare the
+    usage (asking without it may end the process) or when the user already decided: then this is
+    just :func:`status`. Only ever called for a kind the user switched on."""
+    if available(entity) or status(entity) != "not_determined":
+        return status(entity)
+    return await asyncio.to_thread(_ask, entity)
+
+
+@pooled
+def _ask(entity: Entity) -> Status:
+    s = _the_store()
+    done = threading.Event()
+
+    def answered(_granted: Any, _error: Any = None) -> None:
+        done.set()
+
+    full = "requestFullAccessToEventsWithCompletion:" if entity == "event" else "requestFullAccessToRemindersWithCompletion:"
+    if s.respondsToSelector_(full):  # macOS 14+: full access only (a write-only grant is the user's choice)
+        getattr(s, full.replace(":", "_"))(answered)
+    else:
+        s.requestAccessToEntityType_completion_(_ENTITY[entity], answered)
+    done.wait(ASK_S)
+    _counts.pop(entity, None)
+    return status(entity)
 
 
 def _nsdate(dt: datetime) -> Any:
@@ -185,11 +222,21 @@ def _cal(c: Any) -> Cal:
     )
 
 
+_titles: dict[str, tuple[str, ...]] = {}  # entity -> writable calendar / list titles (memory only)
+
+
 @pooled
 def calendars(entity: Entity, *, writable: bool = True) -> list[Cal]:
     """The user's calendars (or reminder lists), only those NEO could add to by default."""
     out = [_cal(c) for c in _store(entity).calendarsForEntityType_(_ENTITY[entity]) or []]
+    _titles[entity] = tuple(c.title for c in out if c.writable)
     return [c for c in out if c.writable or not writable]
+
+
+def titles(entity: Entity) -> tuple[str, ...] | None:
+    """The writable calendars' (or lists') titles as last read from the store, never reading it:
+    for checks that must answer at once. None until NEO has read them."""
+    return _titles.get(entity)
 
 
 @pooled
@@ -338,17 +385,26 @@ def find_event(title: str, start: datetime, tol_s: float = 60) -> str | None:
     return None
 
 
+@pooled
+def find_reminder(title: str, since: datetime) -> str | None:
+    """The id of a reminder with this title created since ``since`` (one an app just added)."""
+    want = " ".join(title.split()).casefold()
+    hit = next((i for c, t, i in _reminders_created(_store("reminder"), since) if t == want), None)
+    return hit or None
+
+
 _counts: dict[str, tuple[float, Counts]] = {}
 
 
-def _reminders_created(s: Any, since: datetime) -> list[datetime]:
-    """Creation times of reminders made since ``since`` (EventKit answers on its own queue)."""
+def _reminders_created(s: Any, since: datetime) -> list[tuple[datetime, str, str]]:
+    """(created, folded title, id) of reminders made since ``since`` (EventKit answers on its
+    own queue)."""
     done, got = threading.Event(), []
 
     def handler(items: Any) -> None:
         for r in items or []:
             if (c := _py(r.creationDate())) is not None and c >= since:
-                got.append(c)
+                got.append((c, " ".join(str(r.title() or "").split()).casefold(), str(r.calendarItemIdentifier() or "")))
         done.set()
 
     s.fetchRemindersMatchingPredicate_completion_(s.predicateForRemindersInCalendars_(None), handler)
@@ -369,8 +425,9 @@ def counts(entity: Entity) -> Counts:
     if entity == "event":
         stamps = [r.start for r in events_between(since, now)]
     else:
-        stamps = _reminders_created(s, since)
+        stamps = [c for c, _t, _i in _reminders_created(s, since)]
     days = {d.date() for d in stamps}
+    _titles[entity] = tuple(str(c.title() or "") for c in cals if c.allowsContentModifications())
     c = Counts(
         sources=len({str(c.source().sourceIdentifier()) for c in cals if c.source() is not None}),
         writable=sum(1 for c in cals if c.allowsContentModifications()),
@@ -382,5 +439,6 @@ def counts(entity: Entity) -> Counts:
 
 
 def forget() -> None:
-    """The privacy erase: the cached counts go (nothing else is kept)."""
+    """The privacy erase: the cached counts and titles go (nothing else is kept)."""
     _counts.clear()
+    _titles.clear()

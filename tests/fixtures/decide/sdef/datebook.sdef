@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE dictionary SYSTEM "file://localhost/System/Library/DTDs/sdef.dtd">
+<!-- Test fixture: a calendar app shaped like the one macOS ships - calendars hold events, and
+     there is no default-calendar property, so a new event needs a calendar chosen. -->
+<dictionary title="Datebook Terminology">
+	<suite name="Standard Suite" code="core" description="Common terms">
+		<command name="make" code="corecrel" hidden="yes" description="Make a new object">
+			<parameter name="new" code="kocl" type="type" description="The class of the new object."/>
+			<parameter name="at" code="insh" type="location specifier" optional="yes" description="Where."/>
+			<parameter name="with properties" code="prdt" type="record" optional="yes" description="Initial values."/>
+			<result type="specifier"/>
+		</command>
+	</suite>
+	<suite name="Datebook Suite" code="wrbt" description="Calendar terms">
+		<command name="view calendar" code="wrbtaec9" description="Show the calendar on a date">
+			<parameter name="at" code="wtdt" type="date" description="the date to be displayed"/>
+		</command>
+		<class-extension extends="application">
+			<element type="calendar"/>
+		</class-extension>
+		<class name="calendar" code="wres" description="A calendar.">
+			<element type="event"/>
+			<property name="name" code="pnam" type="text" description="This is the calendar title."/>
+			<property name="calendarIdentifier" code="ID  " access="r" type="text" description="A unique calendar key"/>
+			<property name="writable" code="wr05" access="r" type="boolean" description="If this calendar is writable"/>
+			<property name="description" code="wr12" type="text" description="This is the calendar description."/>
+		</class>
+		<class name="attendee" code="wrea" description="An attendee.">
+			<property name="display name" code="wra1" access="r" type="text"/>
+			<property name="participation status" code="wra3" access="r" type="text"/>
+		</class>
+		<class name="event" code="wrev" description="An event.">
+			<element type="attendee"/>
+			<property name="description" code="wr12" type="text" description="The events notes."/>
+			<property name="start date" code="wr1s" type="date" description="The event start date."/>
+			<property name="end date" code="wr5s" type="date" description="The event end date."/>
+			<property name="allday event" code="wrad" type="boolean" description="True if the event is an all-day event"/>
+			<property name="recurrence" code="wr15" type="text" description="The iCalendar (RFC 2445) string describing the event recurrence, if defined"/>
+			<property name="stamp date" code="wr4s" type="date" description="The event modification date."/>
+			<property name="excluded dates" code="wr2s" description="The exception dates.">
+				<type type="date" list="yes"/>
+			</property>
+			<property name="summary" code="wr11" type="text" description="This is the event summary."/>
+			<property name="location" code="wr14" type="text" description="This is the event location."/>
+			<property name="uid" code="ID  " access="r" type="text" description="A unique event key."/>
+		</class>
+	</suite>
+</dictionary>
