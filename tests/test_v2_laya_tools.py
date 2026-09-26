@@ -71,8 +71,8 @@ def test_v2_head_decides_from_the_embedding_alone(tmp_path):
         assert a.intent == "quick_action" and a.tool == "clock" and a.tool_p > 0.9 and a.source == "laya+head"
         b = r.decide("tell me a joke")
         assert b.intent == "chat" and b.tool == "" and calls == []  # confident: zero-shot never ran
-        c = r.decide("hmm")  # unsure → zero-shot consulted and blended
-        assert c.source == "laya+zs" and calls == ["hmm"] and c.intent == "agent_task"
+        c = r.decide("hmm")  # unsure: the head's pick stands, marked unsure; no zero-shot call
+        assert c.source == "laya+unsure" and calls == [] and c.intent == "chat"
     finally:
         feats.embed = orig
 

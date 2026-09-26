@@ -85,9 +85,9 @@ class Reflex:
             return Decision("agent_task", 0.0, False, 0.0, False, 0.0, source="rules")
         if s.reflex == "laya":
             d = await asyncio.to_thread(self._laya_decide, text)
-            # A v2 head already escalated locally (zero-shot blend) when unsure — that beats a
-            # second-long cloud round trip. Only the old head hands low-confidence calls to lite.
-            if d is not None and (d.source == "laya+zs" or d.intent_confidence >= s.reflex_confidence_floor):
+            # A v2 head's pick stands even when unsure — it beats a second-long cloud round trip
+            # (and what runs teaches it). Only the old head hands low-confidence calls to lite.
+            if d is not None and (d.source == "laya+unsure" or d.intent_confidence >= s.reflex_confidence_floor):
                 return d
         lite = self._get_lite()
         if lite:
@@ -103,7 +103,7 @@ def _with_reply(d: Decision, text: str) -> Decision:
     """Conversation always gets an answer; commands only when the head/regex says they ask for one."""
     if d.intent in ("chat", "stop"):
         d.reply, d.reply_p = True, 1.0
-    elif d.source not in ("laya+head", "laya+zs") or d.reply_p == 1.0:  # no reply head: fall back
+    elif d.source not in ("laya+head", "laya+unsure") or d.reply_p == 1.0:  # no reply head: fall back
         d.reply = wants_reply(text)
         d.reply_p = 0.5
     return d

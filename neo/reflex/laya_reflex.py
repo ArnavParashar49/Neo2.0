@@ -73,7 +73,7 @@ class LayaReflex:
         )
 
 
-    # ---- v2: everything from one encoder pass; zero-shot only when the head is unsure ----------
+    # ---- v2: everything from one encoder pass -------------------------------------------------
     def _decide_v2(self, text: str) -> Decision:
         t0 = time.perf_counter()
         h = self._head
@@ -82,23 +82,18 @@ class LayaReflex:
         x = np.append(embed(self._agent, [text])[0], 1.0).astype(np.float32)
         xs = (x - h["mu"]) / h["sd"]
         probs = _softmax(_forward(h["intent"], xs) / h["T"]["intent"])
-        source = "laya+head"
-        ans = None
-        if float(probs.max()) < h["zs_below"]:  # not sure: ask Laya properly and blend
-            ans = self._agent.system_one({"text": text}, QUESTIONS)["answers"]
-            zs = np.array([_choice_probs(ans["intent"])[k] for k in _INTENTS], np.float32)
-            probs = 0.5 * probs + 0.5 * zs
-            source = "laya+zs"
+        # Not sure: the head's pick still stands. Blending in zero-shot intent was measured worse
+        # (0.80 vs 0.81 on real phrasings; zero-shot alone 0.37) and cost ~230 ms each time. What
+        # actually runs for an unsure request becomes its training label (neo/reflex/learn.py).
+        source = "laya+unsure" if float(probs.max()) < h["zs_below"] else "laya+head"
         intent = _INTENTS[int(probs.argmax())]
         d_p = float(_softmax(_forward(h["destructive"], xs) / h["T"]["destructive"])[1])
         s_p = float(_softmax(_forward(h["needs_screen"], xs) / h["T"]["needs_screen"])[1])
-        if intent == "agent_task" and ans is None and s_p < 0.5:
-            # The distilled head under-detects "look at my screen"; for agent tasks (where it
-            # picks the vision brain) the zero-shot question is worth its ~45 ms.
+        if intent == "agent_task" and 0.3 <= s_p < 0.5:
+            # The distilled head under-detects "look at my screen"; when it is on the fence for an
+            # agent task (where it picks the vision brain) the zero-shot question is worth ~90 ms.
             q = {"needs_screen": QUESTIONS["needs_screen"]}
             s_p = max(s_p, float(self._agent.system_one({"text": text}, q)["answers"]["needs_screen"].get("noul", 0.0)))
-        elif ans is not None:
-            s_p = max(s_p, float(ans.get("needs_screen", {}).get("noul", 0.0)))
         reply, reply_p = True, 1.0
         if h.get("reply") is not None and intent not in ("chat", "stop"):
             reply_p = min(float(_softmax(_forward(h["reply"], xs) / h["T"]["reply"])[1]), 0.9999)

@@ -25,6 +25,15 @@ def test_record_keeps_real_requests_and_skips_noise():
     assert [r["text"] for r in _rows()] == ["open notes and type hello"]
 
 
+def test_a_message_keeps_only_its_command_and_content_tools_keep_nothing():
+    assert learn.record("text Priya that I'm running late tonight", "agent_task", "", "live")
+    assert learn.record("tell mom I'll be home at six", "agent_task", "", "live")
+    assert not learn.record("remind me to call the bank at 5", "quick_action", "reminder_add", "live")
+    assert not learn.record("run ls in my downloads", "agent_task", "", "agent", tools=("shell",))
+    texts = [r["text"] for r in _rows()]
+    assert texts == ["text Priya", "tell mom"]  # never the words of the message
+
+
 def test_latest_verdict_wins_for_the_same_sentence():
     learn.record("Check my email", "agent_task", "", "live")
     learn.record("check my  email", "quick_action", "mail_unread", "live")

@@ -269,9 +269,9 @@ def test_forget_also_clears_cached_features(monkeypatch):
 
     from neo.reflex import finetune, learn
 
-    learn.record("remind me about the dentist", "quick_action", "reminder_add")
+    learn.record("how windy is it in Paris", "quick_action", "weather")
     finetune.save_cache(
-        {"remind me about the dentist": np.ones(4, np.float32), "what time is it": np.ones(4, np.float32)}, {}
+        {"how windy is it in Paris": np.ones(4, np.float32), "what time is it": np.ones(4, np.float32)}, {}
     )
     learn.forget_examples()
     emb, _ = finetune.load_cache()

@@ -40,7 +40,18 @@ _erase_gen = 0  # bumped by forget_examples(): a retrain that started before it 
 _KEEP_ROWS = 2000
 _KEEP_DAYS = 180
 # The request's *text* is the content here — not something to keep.
-_CONTENT_TOOLS = {"type_text", "dictate", "memory", "notes_create", "mail_send", "write_file", "edit_file"}
+_CONTENT_TOOLS = {
+    "type_text", "dictate", "memory", "notes_create", "mail_send", "write_file", "edit_file",
+    "reminder_add", "calendar_add", "ax_set_value", "browser_type", "shell", "applescript",
+}  # fmt: skip
+# "text Priya that I'm running late" → "text Priya": the words after that/saying/: (or straight
+# after "tell <someone>") are a message.
+_PAYLOAD = re.compile(
+    r"^(?P<cmd>.{0,60}?\b(?:text|message|msg|tell|reply|email|mail|write\s+to|ping|dm|whatsapp|send)\b.{0,40}?)"
+    r"(?:\s+(?:that|saying|to\s+say|and\s+say)|\s*:)\s+\S+(?:\s+\S+)+.*$"
+    r"|^(?P<cmd2>(?:text|message|msg|tell|whatsapp|dm|ping)\s+(?!(?:me|us|a|an|the|about)\b)\S+)\s+\S+(?:\s+\S+){2,}$",
+    re.I,
+)
 _SECRET = re.compile(
     r"\b(?:password|passcode|pass\s*word|pin|otp|one[-\s]?time\s+code|cvv|api\s*key|token|secret|ssn)\b"
     r"|\d[\d\s-]{5,}\d",  # long digit runs: codes, card and phone numbers
@@ -66,6 +77,10 @@ def record(text: str, intent: str, tool: str = "", source: str = "", tools: tupl
         return False
     if _CONTENT_TOOLS & ({tool} | set(tools)):
         return False
+    if m := _PAYLOAD.match(text):
+        text = (m.group("cmd") or m.group("cmd2")).strip(" ,")
+        if len(text.split()) < 2:
+            return False
     row = {"text": text, "intent": intent, "tool": tool if intent == "quick_action" else "", "source": source, "ts": time.time()}
     with _lock:
         path = _path(EXTRA)
