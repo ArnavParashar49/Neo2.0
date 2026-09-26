@@ -118,6 +118,8 @@ def test_never_types_into_a_password_field(monkeypatch):
     from neo.tools import computer as comp
 
     typed = []
+    monkeypatch.setattr(comp.apps, "_target", None)
+    monkeypatch.setattr(comp.apps, "front_name", lambda: "Safari")
     monkeypatch.setattr(comp.ax, "focused_is_secure", lambda: True)
     monkeypatch.setattr(comp.inp, "type_text", lambda s, **kw: typed.append(s) or "ok")
     out = asyncio.run(registry().invoke("type_text", {"text": "hunter2"}, ToolContext(user_text="")))

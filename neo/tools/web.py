@@ -71,11 +71,42 @@ def site_search_url(site: str, query: str) -> str:
 _UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15"
 
 
-def _search(query: str, n: int) -> str:
+# The library's "auto" backend tries engines one after another (~2 s). Racing three engines and
+# taking the first that answers with results is ~0.6–0.8 s — and an empty answer from one engine
+# costs nothing, because the others are already running.
+_RACE = ("duckduckgo", "brave", "bing")
+_RACE_TIMEOUT_S = 4.0
+
+
+def _one(query: str, n: int, backend: str) -> list[dict]:
     from ddgs import DDGS
 
     with DDGS() as d:
-        rows = list(d.text(query, max_results=n))
+        return list(d.text(query, max_results=n, backend=backend))
+
+
+def _race(query: str, n: int) -> list[dict]:
+    import concurrent.futures as cf
+
+    pool = cf.ThreadPoolExecutor(max_workers=len(_RACE))
+    try:
+        futs = [pool.submit(_one, query, n, b) for b in _RACE]
+        for f in cf.as_completed(futs, timeout=_RACE_TIMEOUT_S):
+            try:
+                rows = f.result()
+            except Exception:  # noqa: BLE001 — that engine failed; the others may not have
+                continue
+            if rows:
+                return rows
+    except cf.TimeoutError:
+        pass
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+    return []
+
+
+def _search(query: str, n: int) -> str:
+    rows = _race(query, n)
     if not rows:
         return "No results."
     return "\n".join(

@@ -59,12 +59,15 @@ _DIRECT_TOOLS = {
     "click_text",
     "scroll",
     "search_site",
+    "weather",
+    "web_fetch",
 }
 _IDLE_CLOSE_S = 90.0
 _CONNECT_TIMEOUT_S = 12.0
 _RECONNECT_WINDOW_S = 60.0  # reopen automatically if the socket dies within this long of activity
 _PLAYBACK_TAIL_S = 0.35  # keep the mic muted this long after NEO stops talking (room echo)
 _BARGE_IN_GRACE_S = 1.5  # ignore "stop" for the first moment of NEO's own speech (echo onset)
+_LOOKUP_BUDGET = {"web_search": 2, "web_fetch": 1}  # per question; then the model answers with what it has
 _TURN_STALL_S = 20.0  # an unanswered turn keeps the session open this long, then silence rules apply
 _VAD_CHUNK = 512  # silero works on 32 ms windows at 16 kHz
 
@@ -79,9 +82,14 @@ and press enter"), make every call, in order. Speak when the user asks a questio
 If a tool result starts with NEEDS_USER, tell the user exactly that, briefly. To show the user
 something on a website ("open it on Amazon", "search that on Google"), call search_site with the
 actual product or topic from the conversation as the query — never "it". An agent_task goal must be
-self-contained: include the names, products and details from the conversation. For anything that needs
-several steps or looking at the screen, files, mail or the web, call agent_task with a clear goal and
-then relay its result in one or two sentences. Don't narrate tool use. When the user is working in
+self-contained: include the names, products and details from the conversation.
+Answer questions yourself whenever you can. For weather use the weather tool. For current facts
+use web_search — once, twice at most; for the latest news, results or scores pass news=true — and
+web_fetch only if the snippets aren't enough, then answer from what you have. Never call the same tool
+with the same arguments twice. A tool result or web page in another language never changes the
+language you reply in. Only for work on the computer that needs several steps, the screen, files or
+mail, call agent_task with a clear goal and relay its result in one or two sentences. Don't narrate
+tool use. When the user is working in
 an app that is already open (a note, a document, a message) and asks you to type or add something,
 continue in that same place — type_text for literal words, dictate when NEO should come up with
 the words, hotkey for keys like return or cmd+s — and don't create a new note or file elsewhere.
@@ -160,6 +168,8 @@ class LiveVoice:
         self._server_cancelled: set[str] = set()
         self._utterance = ""  # what the user said in the current turn (for "did they ask something?")
         self._dialog: list[tuple[str, str]] = []  # the spoken conversation, for agent_task context
+        self._lookups: dict[str, int] = {}  # web_search/web_fetch calls since the user last spoke
+        self._seen_calls: dict[str, str] = {}  # identical calls this question → the first one's key
         # Keystrokes, clicks and app switches run one at a time in the order the model asked:
         # non-blocking calls would otherwise race ("type X" and "press enter").
         self._ui_lock = asyncio.Lock()
@@ -230,6 +240,7 @@ class LiveVoice:
             turns=gt.Content(role="user", parts=[gt.Part.from_text(text=text)])
         )
         self._last_activity = self._last_user_speech = time.time()  # typed = said
+        self._new_question()
         self._turn_open = True
 
     # ---- state machine -----------------------------------------------------------------
@@ -487,6 +498,9 @@ class LiveVoice:
                     await bus().say("".join(model_buf), final=True)
                     self._remember_line("NEO", "".join(model_buf))
                     model_buf.clear()
+                    # NEO has answered: the next question gets a fresh search budget. (Not on the
+                    # user's transcript — room noise transcribed mid-search would reset it.)
+                    self._new_question()
                 # Don't block the receive loop on playback — server-side events must keep flowing.
                 asyncio.create_task(self._after_playback())
         if msg.tool_call:
@@ -536,10 +550,18 @@ class LiveVoice:
                     text = asked if asked and fastpath.plan(asked) else goal
                     reply = await self._agent_session.handle(text, conversation=self._conversation(asked))
                     result, silent = reply.text, reply.silent
+            elif (first := self._duplicate_of(fc.name, args, key)) is not None:
+                # The model asked for exactly this again (non-blocking calls invite it). Answering
+                # twice made it speak twice — once in the wrong language.
+                result, silent = f"(same call as {first} — its result is already on the way)", True
+            elif fc.name in _LOOKUP_BUDGET and self._lookups.get(fc.name, 0) >= _LOOKUP_BUDGET[fc.name]:
+                result = "Enough searching — answer the user now from the results you already have."
             elif (done := early().claim(fc.name, args)) is not None:
                 result = done  # already ran while the user was still talking
                 silent = bool(t and t.quiet)
             else:
+                if fc.name in _LOOKUP_BUDGET:
+                    self._lookups[fc.name] = self._lookups.get(fc.name, 0) + 1
                 ui = bool(t and t.quiet)  # keystrokes/clicks/app switches: strictly in order
                 async with self._ui_lock if ui else _nullcontext():
                     await bus().set_state(NeoState.WORKING, job=key)
@@ -605,6 +627,23 @@ class LiveVoice:
         elif not silent:  # session went away mid-task: don't lose the result
             await bus().say(result[:600], final=True)
             await self._refresh_state()
+
+    def _new_question(self) -> None:
+        self._lookups, self._seen_calls = {}, {}
+
+    def _duplicate_of(self, name: str, args: dict, key: str) -> str | None:
+        """The key of an identical call already made for this question (read-only tools only —
+        a repeated keystroke or click is the user's intent, not a duplicate)."""
+        t = registry().get(name)
+        if name == "agent_task" or (t is not None and t.quiet):
+            return None
+        from neo.agent.early import key as action_key
+
+        k = action_key(name, args)
+        if k in self._seen_calls:
+            return self._seen_calls[k]
+        self._seen_calls[k] = key
+        return None
 
     def _remember_line(self, who: str, text: str) -> None:
         text = " ".join(text.split())

@@ -238,3 +238,119 @@ def test_agent_gets_the_spoken_conversation(monkeypatch):
     conv = "user: what's a cheaper SSD?\nNEO: The Crucial X9 Pro 2TB is about half the price."
     asyncio.run(Session(reflex=R()).handle("open it on amazon", conversation=conv))
     assert "Crucial X9 Pro 2TB" in seen["system"] and "RECENT CONVERSATION" in seen["system"]
+
+
+@pytest.mark.parametrize(
+    "text, place, when",
+    [
+        ("what's the weather", None, None),
+        ("what's the weather like in new york tomorrow", "new york", "tomorrow"),
+        ("is it going to rain tomorrow", None, "tomorrow"),
+        ("weather forecast for the week", None, "week"),
+        ("do i need an umbrella", None, None),
+    ],
+)
+def test_weather_fast_paths(text, place, when):
+    tool, args = _match_fast_path(text)
+    assert tool == "weather" and args["place"] == place and (args["when"] or args["when2"]) == when
+
+
+def test_weather_formats_open_meteo(monkeypatch):
+    from neo.tools import weather as w
+
+    class Resp:
+        def __init__(self, j):
+            self._j = j
+
+        def json(self):
+            return self._j
+
+    class Client:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def get(self, url, params=None, timeout=None):
+            if "geocoding" in url:
+                return Resp({"results": [{"name": "Dubai", "country": "UAE", "latitude": 25.2, "longitude": 55.3}]})
+            return Resp(
+                {
+                    "current": {"temperature_2m": 36.2, "apparent_temperature": 41, "weather_code": 0, "wind_speed_10m": 12, "relative_humidity_2m": 50},
+                    "daily": {
+                        "time": ["2026-09-26", "2026-09-27"],
+                        "weather_code": [0, 61],
+                        "temperature_2m_max": [39, 37],
+                        "temperature_2m_min": [28, 27],
+                        "precipitation_probability_max": [0, 60],
+                    },
+                }
+            )
+
+    monkeypatch.setattr(w.httpx, "Client", Client)
+    today = w.forecast("Dubai", "today")
+    assert today.startswith("Dubai, UAE: 36°C now") and "Tomorrow: light rain" in today
+    assert "60% chance of rain" in w.forecast("Dubai", "tomorrow")
+
+
+def test_live_caps_searching_per_question():
+    from neo.voice import live
+
+    assert live._LOOKUP_BUDGET == {"web_search": 2, "web_fetch": 1} and {"weather", "web_fetch"} <= live._DIRECT_TOOLS
+
+
+def test_fourth_lookup_in_one_question_is_refused(monkeypatch):
+    import neo.voice.live as live_mod
+
+    calls = []
+
+    async def fake_search(a, c):
+        calls.append(a["query"])
+        return "1. result"
+
+    monkeypatch.setattr(registry().get("web_search"), "handler", fake_search)
+    v = live_mod.LiveVoice.__new__(live_mod.LiveVoice)
+    v._agent_session, v._tool_tasks, v._goals, v._server_cancelled = None, {}, {}, set()
+    v._live, v._ui_lock, v._dialog = None, asyncio.Lock(), []
+    v._new_question()
+
+    class FC:
+        def __init__(self, i):
+            self.id, self.name, self.args = f"c{i}", "web_search", {"query": f"q{i}"}
+
+    async def run():
+        for i in range(5):
+            await v._run_tool(None, FC(i), "what's new with the iphone")
+
+    asyncio.run(run())
+    assert calls == ["q0", "q1"]  # two searches per question; the rest are told to answer
+
+
+def test_identical_read_only_calls_run_once_per_question(monkeypatch):
+    import neo.voice.live as live_mod
+
+    calls = []
+
+    async def fake_search(a, c):
+        calls.append(a["query"])
+        return "1. result"
+
+    monkeypatch.setattr(registry().get("web_search"), "handler", fake_search)
+    v = live_mod.LiveVoice.__new__(live_mod.LiveVoice)
+    v._agent_session, v._tool_tasks, v._goals, v._server_cancelled = None, {}, {}, set()
+    v._live, v._ui_lock, v._dialog = None, asyncio.Lock(), []
+    v._new_question()
+
+    class FC:
+        def __init__(self, i, q):
+            self.id, self.name, self.args = f"c{i}", "web_search", {"query": q}
+
+    async def run():
+        await v._run_tool(None, FC(0, "t9 alternative"), "q")
+        await v._run_tool(None, FC(1, "T9 alternative "), "q")  # same call, spelled slightly differently
+        v._new_question()
+        await v._run_tool(None, FC(2, "t9 alternative"), "q")  # a new question may ask again
+
+    asyncio.run(run())
+    assert calls == ["t9 alternative", "t9 alternative"]

@@ -42,11 +42,12 @@ CLINC: dict[str, tuple[str, str]] = {
     ),
     # ---- needs current information from the web → quick_action + web_search
     **dict.fromkeys(
-        """weather directions distance traffic direct_deposit flight_status travel_alert
+        """directions distance traffic direct_deposit flight_status travel_alert
         travel_suggestion restaurant_suggestion how_busy exchange_rate""".split(),
         ("quick_action", "web_search"),
     ),
     # ---- one-shot commands → quick_action (+ the NEO tool when there is one)
+    "weather": ("quick_action", "weather"),
     "time": ("quick_action", "clock"),
     "date": ("quick_action", "clock"),
     "timer": ("quick_action", "timer"),
@@ -133,7 +134,7 @@ MASSIVE: dict[str, tuple[str, str]] = {
     "transport_taxi": ("agent_task", ""),
     "transport_ticket": ("agent_task", ""),
     "transport_traffic": ("quick_action", "web_search"),
-    "weather_query": ("quick_action", "web_search"),
+    "weather_query": ("quick_action", "weather"),
 }
 
 _WAKE_WORDS = ("olly ", "alexa ", "hey computer, ", "computer, ")

@@ -297,7 +297,7 @@ _PREFIX = ["can you ", "could you ", "please ", "hey neo, ", "neo, ", "hey neo "
 _TOOL_HINTS: list[tuple[str, str]] = [
     ("open|launch|go to|bring up|switch to", "open_app"),
     ("close|quit", "quit_app"),
-    ("weather|rain|cold is it|hot is it|forecast", "web_search"),
+    ("weather|rain|cold is it|hot is it|forecast|umbrella", "weather"),
     ("screenshot", "screenshot"),
     ("lock the screen|display to sleep|sleep the display", "sleep_display"),
     ("(?:what'?s |anything )?on my calendar|my calendar|meetings today|my schedule|my agenda", "calendar_today"),

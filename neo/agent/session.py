@@ -117,7 +117,9 @@ class Session:
         if d.intent == "quick_action" and d.tool and d.tool_p >= settings().reflex_tool_floor:
             if (t := registry().get(d.tool)) is not None and not t.hidden:
                 print(f"  ~ laya picked {d.tool} ({d.tool_p:.2f})")
-                bare = not t.parameters.get("required") and not t.parameters.get("properties")
+                # "any rain later?" → weather with its defaults: fine for a read-only tool built for
+                # direct use (it has fast paths) when nothing in the request needs an argument.
+                bare = not t.parameters.get("required") and (t.fast_path or not t.parameters.get("properties"))
                 if bare and not t.quiet and not _QUALIFIER.search(text):
                     return await self._quick(text, d, [(d.tool, {})], job=job)
                 return await self._agent(text, d, images, job, only=[d.tool])

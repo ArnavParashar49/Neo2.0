@@ -130,7 +130,7 @@ def test_laya_tool_with_arguments_gets_a_single_tool_light_call(monkeypatch):
         return "28°C and sunny"
 
     monkeypatch.setattr(registry().get("web_search"), "handler", fake_search)
-    r = asyncio.run(Session(reflex=_reflex("quick_action", "web_search", 0.93)).handle("how's the weather in mumbai"))
+    r = asyncio.run(Session(reflex=_reflex("quick_action", "web_search", 0.93)).handle("any idea what the skies look like over mumbai"))
     assert r.route == "agent" and r.text == "Sunny."
     assert seen["tools"] == ["web_search", "more_tools"] and purposes == ["light"]
 
@@ -159,7 +159,7 @@ def test_dataset_tool_labels():
     from neo.reflex.dataset import tool_for
 
     assert tool_for("open Safari") == "open_app"
-    assert tool_for("is it going to rain today") == "web_search"
+    assert tool_for("is it going to rain today") == "weather"
     assert tool_for("type hello world") == "type_text"
     assert tool_for("remember that I park on level 3") == "memory"
     assert tool_for("play some jazz") == ""

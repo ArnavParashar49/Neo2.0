@@ -51,6 +51,7 @@ class Settings(BaseSettings):
     laya_device: str = "mps"
     reflex_confidence_floor: float = 0.55  # below this, escalate to the lite model
     reflex_tool_floor: float = 0.85  # Laya may pick the tool itself above this confidence
+    home_location: str = ""  # e.g. "Dubai" — where "the weather" means, if not remembered
 
     # ---- voice -----------------------------------------------------------------------
     voice: VoiceBackend = "auto"  # auto = Live if key + quota, else local cascade
