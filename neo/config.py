@@ -6,6 +6,8 @@ environment or a ``.env`` file in the project root; nothing is written to Git.
 
 from __future__ import annotations
 
+import os
+import sys
 from pathlib import Path
 from typing import Literal
 
@@ -138,6 +140,19 @@ _settings: Settings | None = None
 def settings() -> Settings:
     global _settings
     if _settings is None:
-        _settings = Settings()
-        _settings.ensure_dirs()
+        s = Settings()
+        _refuse_real_data_under_tests(s.data_dir)
+        s.ensure_dirs()
+        _settings = s
     return _settings
+
+
+def _refuse_real_data_under_tests(data_dir: Path) -> None:
+    """A test (or a scratch harness borrowing the suite's fixtures) that isn't isolated must fail
+    loudly, never read, train on or erase the user's real memory. This happened once: a scratch
+    conftest skipped the isolation fixture and an erase test wiped the real ~/.neo."""
+    if "pytest" not in sys.modules and "PYTEST_CURRENT_TEST" not in os.environ:
+        return
+    real = (Path.home() / ".neo").resolve()
+    if data_dir.resolve() == real or real in data_dir.resolve().parents:
+        raise RuntimeError(f"refusing to use the real {real} under pytest: set NEO_DATA_DIR to a temporary directory")
