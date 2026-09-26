@@ -33,11 +33,11 @@ dependencies = [
   "pillow",
   "httpx",
   "ddgs",
+  "tld",                   # a site's registrable domain (neo.decide.sites)
+  "lxml",                  # a site's own search form / OpenSearch description
   "trafilatura",
   "pypdf",
   "python-dateutil",       # recurring events (RRULE) when a calendar is read by script
-  "tld",                   # a site's registered domain
-  "lxml",                  # a site's own search form and metadata
   # core
   "numpy",
   "pydantic>=2",

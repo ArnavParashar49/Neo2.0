@@ -13,7 +13,9 @@ For a request NEO works out, from evidence only (no app names anywhere in this f
    * the apps this user actually uses, ordered by Laya ("which app should do this?", each option
      described by its evidence, on the zero-shot checkpoint of :mod:`neo.reflex.zeroshot`)
      combined with the bandit prior (``score = laya_p**LAYA_EXP * prior**PRIOR_EXP``); when Laya
-     is unsure or unavailable, by the prior alone;
+     is unsure or unavailable, by the prior alone. A destination that is no app (the Mac's shared
+     calendar or reminders store, :mod:`neo.decide.routes`) is weighed like one, and for kinds
+     with preferences the user's corrections and per-person choices scale the prior;
    * the task's fallback (the web, through the default browser);
    * used apps that are less likely to work than the fallback (see WEB_AFF), installed-but-unused
      apps, then apps that keep failing (still tried, so they can recover).
@@ -60,20 +62,34 @@ if TYPE_CHECKING:
 class Task:
     """One kind of request.
 
-    ``description`` is what Laya reads (it shares a ~250-token budget with the other kinds, so
-    keep it short). ``wants`` are capability tags (:func:`neo.decide.sdef.caps`) that make an app a
-    candidate; ``signals`` are other generic evidence that does too:
+    ``description`` is what Laya reads (it shares a ~190-token budget with the other kinds, so
+    keep it short and contrastive). ``wants`` are capability tags (:func:`neo.decide.sdef.caps`,
+    :func:`neo.decide.sdef.read_caps`) that make an app a candidate; ``signals`` are other generic
+    evidence that does too:
 
     * ``media`` - the inventory found media evidence for the app;
     * ``category:<x>`` - its App Store category's last segment is exactly ``x``;
     * ``handles:<scheme>`` - it is the default handler for that standard URL scheme;
     * ``scheme:<scheme>`` - it declares that URL scheme;
-    * ``type:<uti or extension>`` - it opens or edits that content type.
+    * ``type:<uti or extension>`` - it opens or edits that content type;
+    * ``intent:<INIntent>`` - one of its extensions handles that SiriKit intent;
+    * ``protocol:<P>`` / ``schema:<domain.Name>`` - it ships that App Intents protocol / schema;
+    * ``share:text`` - a share extension of it accepts text;
+    * ``library_text_editor`` - it edits plain text or Markdown, keeps no documents of its own
+      and is filed under productivity (or nothing): a notes library, not a document editor.
+
+    A trailing ``~`` makes a signal WEAK: it counts only for an app this user uses (or that has
+    done the task before) that is not the default handler of a call scheme (see :func:`fits_kind`).
 
     A kind with neither (open an app, search the web, anything else) only takes the app the user
     named. ``fallback`` is tried after the fitting apps (``'web'`` = the default browser); it is
     also the key the fallback's outcomes are recorded under. ``methods`` are the generic ways to
     drive an app when no driver module is registered for the kind (see :data:`DRIVERS`).
+    ``routes`` are destinations that are no app (the OS's shared calendar and reminder stores:
+    'eventkit.events', 'eventkit.reminders'). Laya orders the candidates once ``laya_min_used``
+    used ones fit (at 1, capable apps not used yet join the question too). ``proven_fit``: an app
+    that has done this kind for NEO before is a candidate without declared evidence. ``prefs``:
+    the user's corrections and per-person choices weigh in (:func:`record_pref`).
     """
 
     description: str
@@ -81,8 +97,14 @@ class Task:
     fallback: str | None = None
     signals: tuple[str, ...] = ()
     methods: tuple[str, ...] = ("script", "url", "ax")
+    routes: tuple[str, ...] = ()
+    laya_min_used: int = 2
+    proven_fit: bool = False
+    prefs: bool = False
 
 
+# The drivers of these kinds arrive phase by phase; until a kind's driver lands, its Task keeps the
+# candidates it had (add_event its .ics types, no routes or file/.ics fallbacks yet).
 TASKS: dict[str, Task] = {
     "play_media": Task(
         "play a song, album, artist, playlist, podcast, video or show",
@@ -91,20 +113,56 @@ TASKS: dict[str, Task] = {
         signals=("media",),  # the inventory weighs category, frameworks, types (editors aren't players)
     ),
     "send_message": Task(
-        "send a text or chat message to someone",
+        "text or chat message to a person, not email",
         wants=("message.send",),
-        signals=("handles:sms", "category:social-networking"),
+        # a social app counts only when used and not a call handler (calls aren't messages)
+        signals=("handles:sms", "intent:INSendMessageIntent", "category:social-networking~"),
+        laya_min_used=1,
+        proven_fit=True,
+        prefs=True,
     ),
-    "send_email": Task("write or send an email", wants=("mail.compose",), signals=("handles:mailto",)),
-    "write_note": Task("write down or save a note", wants=("note.make",)),
-    "add_reminder": Task("remind me later or add a to-do", wants=("reminder.make",)),
+    "send_email": Task(
+        "write or send an email",
+        wants=("mail.compose",),
+        signals=("handles:mailto", "protocol:SendMail", "schema:mail.CreateDraftIntent"),
+        laya_min_used=1,
+        proven_fit=True,
+        prefs=True,
+    ),
+    "read_mail": Task(
+        "check or read my email inbox",
+        wants=("mail.read", "mail.unread_count"),
+        signals=("handles:mailto",),
+        laya_min_used=1,
+        proven_fit=True,
+    ),
+    "write_note": Task(
+        "write down, jot or save a note",
+        wants=("note.make",),
+        signals=("intent:INCreateNoteIntent", "intent:INAppendToNoteIntent", "library_text_editor~"),
+        laya_min_used=1,
+        proven_fit=True,
+        prefs=True,
+    ),
+    "add_reminder": Task(
+        "remind me later, or add a to-do or list item",
+        wants=("reminder.make",),
+        signals=("intent:INAddTasksIntent",),
+        laya_min_used=1,
+        proven_fit=True,
+        prefs=True,
+    ),
     "add_event": Task(
-        "put a meeting or event on the calendar",
+        "put a meeting or appointment on my calendar",
         wants=("event.make",),
         signals=("type:ics", "type:public.calendar-event"),
+        laya_min_used=1,
+        proven_fit=True,
+        prefs=True,
     ),
+    "read_calendar": Task("what's on my calendar or schedule", wants=("event.read",), laya_min_used=1),
     "open_app": Task("open, launch or switch to an app", fallback="web", methods=("open",)),
-    "web_search": Task("search the web or look something up online", fallback="web", methods=("url", "ax")),
+    "web_search": Task("search the web or a website", fallback="web", methods=("url", "ax")),
     "other": Task("anything else", methods=("ax",)),
 }
 
@@ -143,8 +201,14 @@ WEB_AFF = 0.5  # a used app goes before the fallback when its prior beats the fa
 # weighted like an app of this affinity (so an app opened once, weeks ago, goes after it)
 # not the arm's fault: nothing is learned from these ('unconfirmed' = it may well have worked, but
 # NEO couldn't hear it start)
-NO_BLAME = frozenset({"permission", "login", "offline", "not_found", "unconfirmed"})
-KEEP_ARMS_S = 365 * 86400  # arms untouched this long are dropped from decide.json
+# ('ambiguous' = NEO asked who, 'declined' = the user said no to a card, 'needs_user' = NEO asked)
+NO_BLAME = frozenset(
+    {"permission", "login", "offline", "not_found", "unconfirmed", "ambiguous", "declined", "needs_user"}
+)
+ROUTE_BAD = "route_bad"  # the app's dictionary route itself is wrong: demoted at once, not after 3
+KEEP_ARMS_S = 365 * 86400  # arms (and preferences) untouched this long are dropped from decide.json
+WEAK_AFF = 0.3  # a weak signal counts for an app used at least this much (or one that did the task)
+CALL_SCHEMES = ("tel", "facetime", "facetime-audio")  # their default handler places calls
 
 # (successes, failures) seeds before any evidence on this Mac, per method; unknown methods: even.
 METHOD_PRIOR: dict[str, tuple[float, float]] = {
@@ -157,6 +221,25 @@ METHOD_PRIOR: dict[str, tuple[float, float]] = {
     "ax_search_play": (2.0, 2.0),  # search field + play button through the AX tree
     "ax": (2.0, 2.0),
     WEB: (2.0, 2.0),
+    "eventkit": (5.0, 1.0),  # the OS store itself: saved and fetched back
+    "script_make": (3.0, 1.0),
+    "script_read": (3.0, 1.0),
+    "script_send": (3.0, 1.0),
+    "script_draft": (3.0, 1.0),
+    "mailto": (3.0, 1.5),
+    "mailto_ax": (2.0, 2.0),
+    "handler_url": (2.5, 2.0),
+    "ax_chat": (2.0, 2.0),
+    "ax_new": (2.0, 2.0),
+    "badge": (2.0, 2.0),
+    "file": (4.0, 1.0),
+    "ics": (1.5, 2.0),
+    "learned_template": (4.0, 1.0),
+    "opensearch": (3.0, 1.0),
+    "jsonld": (3.0, 1.0),
+    "site_form": (2.5, 1.5),
+    "site_box": (2.0, 2.0),
+    "address_bar": (3.0, 1.5),
 }
 DEFAULT_PRIOR = (2.0, 2.0)
 
@@ -296,7 +379,32 @@ def _sure(probs: dict[str, float], top_p: float = LAYA_SURE_P, margin: float = L
     return top[0] >= top_p and top[0] - top[1] >= margin
 
 
-async def decide_kind(text: str, decision: Any = None) -> Kind:
+# "open <app>" once the app's name is masked ("an app"): which kind needs no model. The verbs are a
+# language table (English, Hinglish, Hindi), never app names.
+_OPEN_AN_APP = re.compile(
+    r"^(?:please\s+)?(?:open|launch|start|switch\s+to|bring\s+up|show)\s+an\s+app[.!?]*$"
+    r"|^an\s+app\s+(?:kholo|khol\s+do|chalu\s+karo|खोलो|खोल\s+दो)[.!?]*$",
+    re.I,
+)
+
+
+def mask_apps(text: str, apps: list[App]) -> str:
+    """``text`` with every installed app's name the user said replaced by "an app", so the kind
+    is read from what they asked, not from which app they named ("message john on an app")."""
+    try:
+        from neo.decide.inventory import named_span
+    except ImportError:
+        return text
+    for _ in range(4):  # a request names an app or two, not more
+        hit = named_span(text, apps)
+        if hit is None:
+            break
+        _app, a, b = hit
+        text = f"{text[:a]}an app{text[b:]}"
+    return text
+
+
+async def decide_kind(text: str, decision: Any = None, *, apps: list[App] | None = None) -> Kind:
     """The task kind of ``text`` and its probability, all within LAYA_TIMEOUT_S.
 
     The reflex's trained kind head decides when it has one: ``decision`` is the reflex's Decision
@@ -305,10 +413,17 @@ async def decide_kind(text: str, decision: Any = None) -> Kind:
     exist then, so nothing is guessed. Only without a kind head does Laya answer zero-shot, and
     that counts only when it is very sure (:data:`ZS_KIND_P`) and only as advice
     (``advisory=True``): even then it was wrong too often to route a request by.
+
+    With ``apps``, the names of those apps in ``text`` are masked first (:func:`mask_apps`); what
+    is then just "open an app" is ``open_app`` without asking anyone.
     """
     if not text or not text.strip():
         return _OTHER
     text = text.strip()
+    if apps is not None:
+        text = mask_apps(text, apps)
+        if _OPEN_AN_APP.match(text):
+            return Kind("open_app", 1.0)
     kind = getattr(decision, "kind", None)
     if kind in TASKS:
         return Kind(kind, float(getattr(decision, "kind_p", 0.0) or 0.0))
@@ -345,13 +460,16 @@ def _path() -> Path:
 
 
 def _fresh() -> dict:
-    return {"version": 1, "arms": {}}
+    return {"version": 2, "arms": {}, "prefs": {}}
 
 
 def forget() -> int:
-    """Erase what NEO learned about this user's apps (the privacy erase). Returns arms dropped."""
+    """Erase what NEO learned about this user's apps and preferences (the privacy erase).
+    Returns how many arms and preferences were dropped."""
     with _lock:
-        n = sum(len(m) for per_app in _load()["arms"].values() for m in per_app.values())
+        data = _load()
+        n = sum(len(m) for per_app in data["arms"].values() for m in per_app.values())
+        n += sum(len(per_key) for per_key in data["prefs"].values())
         _cache.clear()
         for p in _path().parent.glob(f"{_path().name}*"):  # the store and any set-aside copy
             p.unlink(missing_ok=True)
@@ -388,6 +506,24 @@ def _clean(raw: Any) -> dict:
                     }
                 except (KeyError, TypeError, ValueError, AttributeError):
                     continue
+    prefs = raw.get("prefs")  # version 1 files have none
+    for scope, per_key in (prefs.items() if isinstance(prefs, dict) else ()):
+        if not isinstance(per_key, dict):
+            continue
+        for key, pref in per_key.items():
+            try:
+                a, b = float(pref["a"]), float(pref["b"])
+                if not (0 < a < 1e6 and 0 < b < 1e6):
+                    continue
+                out["prefs"].setdefault(str(scope), {})[str(key)] = {
+                    "a": a,
+                    "b": b,
+                    "t": float(pref.get("t", 0.0)),
+                    "up": int(pref.get("up", 0)),
+                    "down": int(pref.get("down", 0)),
+                }
+            except (KeyError, TypeError, ValueError, AttributeError):
+                continue
     return out
 
 
@@ -478,17 +614,11 @@ def record(kind: str, app_key: str, method: str, ok: bool, reason: str = "") -> 
                 arm["b"] += 1.0
                 arm["fails"] += 1
                 arm["last_fail"] = now
+                if reason == ROUTE_BAD:  # the route itself is wrong for this app: stop trying it now
+                    arm["fails"] = max(arm["fails"], DEMOTE_AFTER)
         per_method[method] = arm
         _prune(data, now)
-        try:
-            _save(data)
-        except OSError as e:
-            print(f"[decide] couldn't save what was learned ({str(e)[:80]})")
-            try:  # still learn for this session: keep it until the file itself changes
-                mtime = _path().stat().st_mtime_ns
-            except OSError:
-                mtime = -1
-            _cache[str(_path())] = (mtime, data)
+        _persist(data)
     if ok or reason not in NO_BLAME:
         _tell_ledger(kind, app_key, ok)
 
@@ -537,12 +667,105 @@ def _prune(data: dict, now: float) -> None:
                 del per_app[key]
         if not per_app:
             del data["arms"][kind]
+    for scope in list(data["prefs"]):
+        per_key = data["prefs"][scope]
+        for key in [k for k, v in per_key.items() if now - v["t"] > KEEP_ARMS_S]:
+            del per_key[key]
+        if not per_key:
+            del data["prefs"][scope]
+
+
+def _persist(data: dict) -> None:
+    try:
+        _save(data)
+    except OSError as e:
+        print(f"[decide] couldn't save what was learned ({str(e)[:80]})")
+        try:  # still learn for this session: keep it until the file itself changes
+            mtime = _path().stat().st_mtime_ns
+        except OSError:
+            mtime = -1
+        _cache[str(_path())] = (mtime, data)
 
 
 def prior(kind: str, app_key: str, method: str) -> float:
     """Posterior mean of the (kind, app, method) arm: how often this way of doing it works here."""
     with _lock:
         return _mean(_arm(_load(), kind, app_key, method))
+
+
+def proven(kind: str, key: str) -> bool:
+    """Whether this app (or route) has done this kind of task for NEO before."""
+    with _lock:
+        return _succeeded(_load(), kind, key)
+
+
+def habitual(kind: str, key: str) -> bool:
+    """Whether the last success of this kind was with this app (or route): no need to say where."""
+    with _lock:
+        per_app = _load()["arms"].get(kind, {})
+    last = {k: max((a["last_ok"] for a in arms.values()), default=0.0) for k, arms in per_app.items()}
+    best = max(last, key=lambda k: last[k], default=None)
+    return best == key and last[key] > 0
+
+
+# ---- preferences (kinds with Task.prefs) ---------------------------------------------------------
+# Kept apart from reliability: an app that worked can still be the wrong choice for this user (or
+# for this person). Only a correction and an approved send move them, never a plain success.
+
+
+def _scope(kind: str, about: str) -> str:
+    return f"{kind}@{about}" if about else kind
+
+
+def _pref_mean(data: dict, scope: str, key: str) -> float:
+    p = data["prefs"].get(scope, {}).get(key)
+    return p["a"] / (p["a"] + p["b"]) if p else 0.5  # Beta(1, 1): no opinion
+
+
+def pref_factor(kind: str, key: str, about: str = "", data: dict | None = None) -> float:
+    """(0.5 + kind preference) x (0.5 + this person's): exactly 1.0 with no evidence either way."""
+    if data is None:
+        with _lock:
+            data = _load()
+    person = _pref_mean(data, _scope(kind, about), key) if about else 0.5
+    return (0.5 + _pref_mean(data, kind, key)) * (0.5 + person)
+
+
+def record_pref(kind: str, key: str, liked: bool, *, about: str = "") -> None:
+    """The user chose (``liked``) or turned down this app for this kind, for one person when
+    ``about`` (a hashed contact id) is given. Nothing is kept once the user erased NEO's memory
+    since the request began."""
+    from neo.decide import run
+
+    if run.erased():
+        return
+    now = _now()
+    with _lock:
+        data = copy.deepcopy(_load())
+        per_key = data["prefs"].setdefault(_scope(kind, about), {})
+        p = per_key.get(key) or {"a": 1.0, "b": 1.0, "t": 0.0, "up": 0, "down": 0}
+        p["a"], p["b"] = p["a"] * GAMMA, p["b"] * GAMMA
+        p["a" if liked else "b"] += 1.0
+        p["up" if liked else "down"] += 1
+        p["t"] = now
+        per_key[key] = p
+        _prune(data, now)
+        _persist(data)
+
+
+def correct(kind: str, wrong_key: str, *, about: str = "") -> None:
+    """The user redirected a finished task elsewhere ("no, in <app>"): the choice was wrong, the
+    app didn't fail, so this moves preference only."""
+    record_pref(kind, wrong_key, False, about=about)
+
+
+def _pref_words(data: dict, kind: str, key: str, about: str) -> str:
+    parts = []
+    if about and (p := data["prefs"].get(_scope(kind, about), {}).get(key)) and p["up"] + p["down"]:
+        parts.append(f"used for this person {p['up']} of {p['up'] + p['down']} times")
+    if (p := data["prefs"].get(kind, {}).get(key)) and p["down"]:
+        parts.append("you corrected this once" if p["down"] == 1 else f"you corrected this {p['down']} times")
+    return "; ".join(parts)
 
 
 # ---- evidence ---------------------------------------------------------------------------------
@@ -604,11 +827,13 @@ def _app_caps(app: App) -> frozenset[str]:
     if getattr(app, "script", None) is None:
         return frozenset()
     try:
-        from neo.decide.sdef import caps
+        from neo.decide.sdef import caps, read_caps
 
-        return frozenset(caps(app.script))
+        out = frozenset(caps(app.script) | read_caps(app.script))
     except Exception:  # noqa: BLE001
         return frozenset()
+    # a text search in a player or a photo library is no web search: only a browser's counts
+    return out if "web.search" not in out or _is_browser(app) else out - {"web.search"}
 
 
 def _last_segment(category: str) -> str:
@@ -625,6 +850,17 @@ def _has_type(app: App, t: str) -> bool:
 
 
 _NOT_PLAYERS = frozenset({"audio/video editor"})  # media evidence, but they record/edit, not play
+# Content types (type vocabulary, not app names) a notes library edits.
+_TEXT_TYPES = ("public.plain-text", "net.daringfireball.markdown")
+
+
+def _library_text_editor(app: App) -> bool:
+    edits = {str(t).lower() for t in app.editor_types}
+    return (
+        any(t in edits for t in _TEXT_TYPES)
+        and not app.doc_based
+        and _last_segment(app.category) in ("", "productivity")
+    )
 
 
 def _signal(app: App, sig: str) -> bool:
@@ -639,6 +875,14 @@ def _signal(app: App, sig: str) -> bool:
         return arg in app.schemes
     if name == "type":
         return _has_type(app, arg)
+    if name == "intent":
+        return arg in app.intents
+    if name in ("protocol", "schema"):
+        return sig in app.ai_schemas
+    if name == "share":
+        return arg == "text" and app.share_text
+    if name == "library_text_editor":
+        return _library_text_editor(app)
     return False
 
 
@@ -654,8 +898,37 @@ def _is_browser(app: App) -> bool:
     )
 
 
-def _fits(task: Task, app: App, caps: frozenset[str]) -> bool:
-    return bool(caps.intersection(task.wants)) or any(_signal(app, s) for s in task.signals)
+def _succeeded(data: dict, kind: str, key: str) -> bool:
+    return any(a["ok"] for a in data["arms"].get(kind, {}).get(key, {}).values())
+
+
+def _fits(kind: str, task: Task, app: App, caps: frozenset[str], data: dict, now: float) -> bool:
+    """Declared evidence, a weak signal this user backs by use, or (``proven_fit``) a track record."""
+    if caps.intersection(task.wants):
+        return True
+    done_before = _succeeded(data, kind, app.bundle_id)
+    for sig in task.signals:
+        weak = sig.endswith("~")
+        if not _signal(app, sig.rstrip("~")):
+            continue
+        # e.g. a social app that is really the default call handler, or one this user never opens
+        if not weak or (
+            not set(CALL_SCHEMES).intersection(app.handles) and (done_before or _affinity(app, now) >= WEAK_AFF)
+        ):
+            return True
+    return task.proven_fit and done_before
+
+
+def fits_kind(kind: str, app: App) -> bool:
+    """Whether the app can do this kind of task, from its evidence, this user's use of it (weak
+    signals) and NEO's record with it: no routes, no Laya, no disk scan (fast enough for a key
+    press gate)."""
+    task = TASKS.get(kind)
+    if task is None or app.kind != "app":
+        return False
+    with _lock:
+        data = _load()  # replaced, never changed in place, by a later write: safe to read unlocked
+    return _fits(kind, task, app, _app_caps(app), data, _now())
 
 
 _SITE_RX = re.compile(
@@ -724,6 +997,8 @@ def _methods(kind: str, task: Task, app: App, caps: frozenset[str]) -> tuple[str
                 return tuple(fn(app))
             except Exception:  # noqa: BLE001 - a driver bug must not sink the whole decision
                 return ()
+    if app.kind == "route":  # 'route:<framework>.<store>' is driven through that framework
+        return (app.bundle_id.removeprefix("route:").split(".", 1)[0],)
     out = []
     for m in task.methods:
         if m == "script" and not caps.intersection(task.wants):
@@ -754,22 +1029,6 @@ def _record_words(data: dict, kind: str, key: str) -> str:
     return f"worked {sum(a['ok'] for a in arms)} of {n} tries"
 
 
-def _describe(task: Task, app: App, caps: frozenset[str], rec: str, now: float, short: bool) -> str:
-    """What Laya reads about one candidate: all of it evidence, none of it a name list."""
-    parts = []
-    if cat := _last_segment(app.category).replace("-", " "):
-        parts.append(cat)
-    can = [t.split(".", 1)[-1].replace("_", " ") for t in task.wants if t in caps]
-    if can and not short:
-        parts.append("can " + ", ".join(can))
-    parts.append(_usage_words(app, now))
-    if app.running and not short:
-        parts.append("open now")
-    if rec != "not tried yet" or not short:
-        parts.append(rec)
-    return "; ".join(parts)
-
-
 @dataclass
 class _Info:
     app: App
@@ -783,9 +1042,41 @@ class _Info:
     mean: float = 0.0  # its best method's posterior mean
     proven: bool = False  # it has done this kind of task for NEO before
     label: str = ""
+    pref: str = ""  # the user's own choices, in words ("you corrected this once")
 
 
-def _info(kind: str, task: Task, app: App, caps: frozenset[str], data: dict, now: float) -> _Info | None:
+def _describe(task: Task, i: _Info, now: float, short: bool) -> str:
+    """What Laya reads about one candidate: all of it evidence, none of it a name list."""
+    app = i.app
+    if app.kind == "route":  # a store, told by counts only (never its calendars' or items' titles)
+        parts = [app.note]
+    else:
+        parts = [cat] if (cat := _last_segment(app.category).replace("-", " ")) else []
+        can = [t.split(".", 1)[-1].replace("_", " ") for t in task.wants if t in i.caps]
+        if can and not short:
+            parts.append("can " + ", ".join(can))
+        parts.append(_usage_words(app, now))
+        if app.running and not short:
+            parts.append("open now")
+    if i.rec != "not tried yet" or not short:
+        parts.append(i.rec)
+    parts.append(i.pref)
+    return "; ".join(p for p in parts if p)
+
+
+def _info(
+    kind: str,
+    task: Task,
+    app: App,
+    caps: frozenset[str],
+    data: dict,
+    now: float,
+    *,
+    aff: float | None = None,
+    used: bool = False,
+) -> _Info | None:
+    """``aff`` stands in for the app's own affinity and ``used`` counts it as used (a route whose
+    store NEO hasn't been allowed to read yet)."""
     methods = _methods(kind, task, app, caps)
     if not methods:
         return None
@@ -800,10 +1091,11 @@ def _info(kind: str, task: Task, app: App, caps: frozenset[str], data: dict, now
     tried = [m for m in methods if arms[m]["n"] > 0]
     basis = [m for m in live if arms[m]["n"] > 0] if tried else live
     best = max((_mean(arms[m]) for m in basis), default=0.0)
-    aff = _affinity(app, now)
-    succeeded = any(a["ok"] for a in data["arms"].get(kind, {}).get(key, {}).values())
+    aff = _affinity(app, now) if aff is None else aff
+    succeeded = _succeeded(data, kind, key)
     used = bool(
-        app.running
+        used
+        or app.running
         or app.days_used_30
         or (app.last_used and now - app.last_used < USED_WITHIN_S)
         or succeeded
@@ -824,7 +1116,7 @@ def _info(kind: str, task: Task, app: App, caps: frozenset[str], data: dict, now
 
 def _evidence(task: Task, i: _Info, now: float, named: bool = False) -> str:
     parts = ["named by the user"] if named else []
-    parts.append(_describe(task, i.app, i.caps, i.rec, now, short=False))
+    parts.append(_describe(task, i, now, short=False))
     parts.extend(str(e) for e in i.app.media_evidence[:3])
     return "; ".join(p for p in parts if p)
 
@@ -873,7 +1165,7 @@ def _shortlist(task: Task, text: str, infos: list[_Info], now: float, stale: thr
 
     if stale.is_set():
         return []
-    opts = [f"{i.label}: {_describe(task, i.app, i.caps, i.rec, now, short=True)}" for i in infos]
+    opts = [f"{i.label}: {_describe(task, i, now, short=True)}" for i in infos]
     try:
         vecs = embed.embed_texts([text, *opts])
     except Exception as e:  # noqa: BLE001 - a shortlist is an optimisation, never a failure
@@ -886,16 +1178,22 @@ def _shortlist(task: Task, text: str, infos: list[_Info], now: float, stale: thr
     return [i for j, i in enumerate(infos) if j in keep]
 
 
-async def _laya_order(task: Task, text: str, used: list[_Info], now: float) -> list[tuple[_Info, float, float]]:
-    """(info, score, laya_p), best first. Laya's pick counts only when it is sure."""
+async def _laya_order(
+    task: Task, text: str, used: list[_Info], unused: list[_Info], now: float
+) -> tuple[list[tuple[_Info, float, float]], list[_Info]]:
+    """((info, score, laya_p) best first, the unused candidates left for the tail). Laya's pick
+    counts only when it is sure; at ``laya_min_used`` 1 capable unused apps join its question, and
+    one it is sure about leaves the tail."""
     by_prior = sorted(used, key=lambda i: -i.prior)
-    if len(used) < 2 or not _zero_shot_can_answer():  # nothing to choose between, or nobody to ask
-        return [(i, i.prior, 0.0) for i in by_prior]
-    _labels(by_prior)
-    pool = by_prior[:LAYA_POOL]
+    extra = sorted(unused, key=lambda i: -i.prior) if task.laya_min_used < 2 else []
+    cands = by_prior + extra
+    if len(used) < max(1, task.laya_min_used) or len(cands) < 2 or not _zero_shot_can_answer():
+        return [(i, i.prior, 0.0) for i in by_prior], unused  # nothing to choose between, or nobody to ask
+    _labels(cands)
+    pool = cands[:LAYA_POOL]
     end = time.monotonic() + LAYA_TIMEOUT_S  # the shortlist and the question share one budget
-    if len(by_prior) > SHORTLIST_ABOVE and _embedder_ready():
-        pool = await _off_loop(_shortlist, task, text, by_prior, now, timeout=end - time.monotonic()) or pool
+    if len(cands) > SHORTLIST_ABOVE and _embedder_ready():
+        pool = await _off_loop(_shortlist, task, text, cands, now, timeout=end - time.monotonic()) or pool
     # The request is the whole state; each option is its app's short evidence. Restating every
     # candidate's evidence in the state (as JSON) was worse and costlier on decide's own questions:
     # Laya's pick right 0.59 vs 0.85, 277 vs 82 tokens, 82 vs 35 ms a question.
@@ -903,25 +1201,62 @@ async def _laya_order(task: Task, text: str, used: list[_Info], now: float) -> l
         "app": {
             "type": "choice",
             "instructions": "Which app on this Mac should do the request?",
-            "criteria": {i.label: _describe(task, i.app, i.caps, i.rec, now, short=True) for i in pool},
+            "criteria": {i.label: _describe(task, i, now, short=True) for i in pool},
         }
     }
     probs = _choice(await _ask_laya({"request": text}, q, end - time.monotonic()), "app")
     if not _sure(probs):  # unsure or unavailable: the prior orders them
-        return [(i, i.prior, probs.get(i.label, 0.0)) for i in by_prior]
+        return [(i, i.prior, probs.get(i.label, 0.0)) for i in by_prior], unused
     scored = []
     for i in pool:
         p = probs.get(i.label, 0.0)
         scored.append((i, (max(p, 1e-3) ** LAYA_EXP) * (max(i.prior, 1e-6) ** PRIOR_EXP), p))
     scored.sort(key=lambda t: -t[1])
     in_pool = {id(i) for i in pool}
-    return scored + [(i, i.prior, 0.0) for i in by_prior if id(i) not in in_pool]
+    rest = [(i, i.prior, 0.0) for i in by_prior if id(i) not in in_pool]
+    return scored + rest, [i for i in unused if id(i) not in in_pool]
 
 
-async def choose(kind: str, text: str, apps: list[App] | None = None, *, said: str = "") -> list[Candidate]:
+def _routes(kind: str, task: Task, exclude: frozenset[str]) -> list[tuple[App, bool]]:
+    """(route candidate, whether its use is still unknown) for each usable route of the kind
+    (see neo.decide.routes; counting a store's items can take a moment: called off the loop)."""
+    from neo.decide import routes
+
+    out = []
+    for route in task.routes:
+        try:
+            app = routes.route_app(kind, route)
+            if app is not None and app.bundle_id not in exclude:
+                out.append((app, routes.pending(app)))
+        except Exception as e:  # noqa: BLE001 - an unusable store is simply no candidate
+            print(f"[decide] route {route} unavailable ({str(e)[:60]})")
+    return out
+
+
+def _store_view(kind: str, key: str) -> bool:
+    """The app is known to write into a route's store (its items showed up there)."""
+    try:
+        from neo.decide import learned
+
+        return learned.get("store_views", f"{kind}:{key}") is not None
+    except Exception:  # noqa: BLE001
+        return False
+
+
+async def choose(
+    kind: str,
+    text: str,
+    apps: list[App] | None = None,
+    *,
+    said: str = "",
+    about: str = "",
+    exclude: frozenset[str] = frozenset(),
+) -> list[Candidate]:
     """Ordered attempts for this request on this Mac (see the module docstring). ``text`` is what
     the decision reads (the user's words, or the query when they aren't known); ``said`` is the
-    user's own words when the caller has them - the only text the outcome ledger is ever told."""
+    user's own words when the caller has them - the only text the outcome ledger is ever told.
+    ``about`` (a hashed contact id) brings in this person's preferences; ``exclude`` drops the
+    apps (keys) already tried for this request."""
     _asked.set(None)  # a choose() that fails leaves nothing for a later outcome to be filed under
     task = TASKS.get(kind) or TASKS["other"]
     now = _now()
@@ -932,20 +1267,22 @@ async def choose(kind: str, text: str, apps: list[App] | None = None, *, said: s
             print(f"[decide] app inventory failed ({str(e)[:80]})")
             apps = []
     me = _self_ids()
-    apps = _dedupe([a for a in apps if a.bundle_id.lower() not in me])
+    apps = _dedupe([a for a in apps if a.bundle_id.lower() not in me and a.bundle_id not in exclude])
     with _lock:
         data = copy.deepcopy(_load())
     named = _named(text, apps)
     site = site_hint(text, apps) if task.fallback == WEB and named is None else ""
+    routes = await asyncio.to_thread(_routes, kind, task, exclude) if task.routes else []
 
     first: list[Candidate] = []
     used: list[_Info] = []
     unused: list[_Info] = []
     weak: list[_Info] = []
+    fitting: list[_Info] = []
     for app in apps:
         caps = _app_caps(app)
         is_named = named is not None and app.bundle_id == named.bundle_id
-        fits = _fits(task, app, caps)
+        fits = _fits(kind, task, app, caps, data, now)
         if is_named:
             if (fits or _open_ended(task) or _explicit(text, app)) and (
                 i := _info(kind, task, app, caps, data, now)
@@ -959,11 +1296,25 @@ async def choose(kind: str, text: str, apps: list[App] | None = None, *, said: s
         i = _info(kind, task, app, caps, data, now)
         if i is None:
             continue
+        fitting.append(i)
+        if routes and _store_view(kind, app.bundle_id):
+            continue  # what it writes lands in the route's store: the route is the way there
         (weak if i.weak else used if i.used else unused).append(i)
+    for r, pending in routes:
+        # Before NEO may read the store its use is unknown: it counts as much as the most-used app
+        # that fits (every app of this kind here shows that same store).
+        aff = max((i.aff for i in fitting), default=0.0) if pending else None
+        i = _info(kind, task, r, frozenset(), data, now, aff=aff, used=pending and any(f.used for f in fitting))
+        if i is not None:
+            (weak if i.weak else used if i.used else unused).append(i)
+    if task.prefs:
+        for i in (*used, *unused, *weak):
+            i.prior *= pref_factor(kind, i.app.bundle_id, about, data)
+            i.pref = _pref_words(data, kind, i.app.bundle_id, about)
 
     fallback: list[Candidate] = []
     fb_mean = 0.0
-    if task.fallback:
+    if task.fallback and task.fallback not in exclude:
         fb = task.fallback
         fb_mean = _mean(_arm(data, kind, fb, fb))
         on = f" ({site})" if site else ""
@@ -976,7 +1327,8 @@ async def choose(kind: str, text: str, apps: list[App] | None = None, *, said: s
     bar = fb_mean * (AFF_FLOOR + (1 - AFF_FLOOR) * WEB_AFF)
     before: list[Candidate] = []
     after: list[Candidate] = []
-    for n, (i, s, p) in enumerate(await _laya_order(task, text, used, now)):
+    ordered, unused = await _laya_order(task, text, used, unused, now)
+    for n, (i, s, p) in enumerate(ordered):
         keep = (
             not fallback
             or i.prior >= bar
@@ -1006,10 +1358,17 @@ __all__ = [
     "Kind",
     "app_key",
     "decide_kind",
+    "mask_apps",
     "choose",
     "site_hint",
     "warm",
     "record",
     "prior",
+    "proven",
+    "habitual",
+    "fits_kind",
+    "pref_factor",
+    "record_pref",
+    "correct",
     "forget",
 ]

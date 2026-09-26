@@ -950,3 +950,256 @@ def test_no_ledger_or_a_broken_one_never_breaks_learning(monkeypatch):
     monkeypatch.setattr(neo.reflex, "outcomes", types.SimpleNamespace(), raising=False)  # no decided()
     asyncio.run(request())
     assert engine.prior("play_media", "test.tunewave", "ax") > 0.5
+
+
+# ---- every kind chosen by evidence: signals, routes, Laya's pool, preferences ----------------------
+
+_REAL_APP_CAPS = engine._app_caps  # the fixture above stubs it per test
+SOCIAL = "public.app-category.social-networking"
+UNUSED = {"last_used": None, "use_count": 0, "days_used_30": 0}
+
+
+def test_the_new_kinds_are_tasks():
+    assert {"read_mail", "read_calendar"} <= set(engine.TASKS)
+    assert engine.TASKS["send_message"].laya_min_used == 1 and engine.TASKS["send_message"].prefs
+    assert engine.TASKS["play_media"].laya_min_used == 2 and not engine.TASKS["play_media"].prefs
+    assert engine.TASKS["read_calendar"].wants == ("event.read",) and not engine.TASKS["read_calendar"].proven_fit
+    assert {"ambiguous", "declined", "needs_user"} <= engine.NO_BLAME
+
+
+def test_a_weak_social_signal_needs_use_and_no_call_handler():
+    caller = mk("Ringer", "test.ringer", category=SOCIAL, handles=("facetime", "facetime-audio"), **HEAVY)
+    chat = mk("Chatwave", "test.chatwave", category=SOCIAL, **HEAVY)
+    idle = mk("Idlechat", "test.idle", category=SOCIAL, **UNUSED)
+    apps = [*APPS, caller, chat, idle]
+    assert order(choose("send_message", "text mom i'm late", apps)) == ["Chatwave"]
+    assert engine.fits_kind("send_message", chat) and not engine.fits_kind("send_message", caller)
+    engine.record("send_message", "test.idle", "ax", True)  # it did the job before: that counts as use
+    assert "Idlechat" in order(choose("send_message", "text mom", apps))
+
+
+def test_intents_app_intents_and_share_evidence_make_candidates():
+    intents = mk("Pigeon", "test.pigeon", intents=("INSendMessageIntent",), **UNUSED)
+    mailer = mk("Letterly", "test.letterly", ai_schemas=("protocol:SendMail",), **LIGHT)
+    drafts = mk("Drafter", "test.drafter", ai_schemas=("schema:mail.CreateDraftIntent",), **LIGHT)
+    sharer = mk("Sharer", "test.sharer", share_text=True, **LIGHT)
+    apps = [intents, mailer, drafts, sharer]
+    assert order(choose("send_message", "text mom", apps)) == ["Pigeon"]  # declared: no use needed
+    assert set(order(choose("send_email", "email sam", apps))) == {"Letterly", "Drafter"}
+    assert engine._signal(sharer, "share:text") and not engine._signal(mailer, "share:text")
+
+
+def test_a_notes_library_is_a_weak_note_candidate_and_a_document_editor_is_not():
+    library = mk("Jotter", "test.jotter", editor_types=("net.daringfireball.markdown",),
+                 category="public.app-category.productivity", **HEAVY)
+    editor = mk("Pageset", "test.pageset", editor_types=("public.plain-text",), doc_based=True, **HEAVY)
+    unused = mk("Jotter2", "test.jotter2", editor_types=("public.plain-text",), **UNUSED)
+    ide = mk("Codebox", "test.codebox", editor_types=("public.plain-text",), category="public.app-category.developer-tools", **HEAVY)
+    got = order(choose("write_note", "note: buy milk", [library, editor, unused, ide, NOTEPADLY]))
+    assert set(got) == {"Jotter", "Notepadly"}
+
+
+def test_the_web_search_tag_counts_only_for_a_browser():
+    from neo.decide.sdef import Command, Dictionary
+
+    d = Dictionary(commands={"search the web": Command("search the web", "sfrisrch", "", (("for", "qury", "text"),))},
+                   classes={}, properties={}, enums={})
+    browser = mk("Browsa2", "test.browsa2", handles=("https",), script=d)
+    library = mk("Photobox", "test.photobox", script=d)
+    assert "web.search" in _REAL_APP_CAPS(browser) and "web.search" not in _REAL_APP_CAPS(library)
+
+
+def test_an_app_that_did_the_kind_before_is_a_candidate_without_declared_evidence():
+    quiet = mk("Quietnote", "test.quiet", **LIGHT)
+    assert "Quietnote" not in order(choose("write_note", "note: x", [quiet]))
+    engine.record("write_note", "test.quiet", "ax", True)
+    assert order(choose("write_note", "note: x", [quiet])) == ["Quietnote"]
+    assert engine.proven("write_note", "test.quiet") and not engine.proven("write_note", "test.other")
+    engine.record("read_calendar", "test.quiet", "ax", True)  # read_calendar takes declared evidence only
+    assert order(choose("read_calendar", "what's on today", [quiet])) == []
+
+
+# ---- routes ------------------------------------------------------------------------------------------
+
+DATEBOOK = mk("Datebook", "test.datebook", **LIGHT)
+CAPS["test.datebook"] = frozenset({"event.make"})
+EVENTS = engine.Task("put a meeting on my calendar", wants=("event.make",), routes=("eventkit.events",),
+                     fallback="ics", laya_min_used=1, proven_fit=True, prefs=True)
+
+
+def store(**kw):
+    from neo.decide.inventory import App
+
+    return App(bundle_id="route:eventkit.events", name="your Mac's calendar store", path="", kind="route",
+               note="your Mac's calendar store (every calendar app here shows it): 2 writable calendars", **kw)
+
+
+@pytest.fixture
+def events(monkeypatch):
+    monkeypatch.setitem(engine.TASKS, "add_event", EVENTS)
+    got: list = []
+    monkeypatch.setattr(engine, "_routes", lambda kind, task, exclude: [r for r in got if r[0].bundle_id not in exclude])
+    return got
+
+
+def test_a_store_not_read_yet_counts_as_much_as_the_most_used_app(events):
+    events.append((store(), True))
+    c = choose("add_event", "lunch friday at 1", [DATEBOOK, *APPS])
+    assert order(c) == ["your Mac's calendar store", "Datebook", "ics"]
+    route, app = c[0], c[1]
+    assert route.methods == ("eventkit",) and route.key == "route:eventkit.events"
+    assert route.score == pytest.approx(5 / 6 * (engine.AFF_FLOOR + (1 - engine.AFF_FLOOR) * engine._affinity(DATEBOOK, NOW)), rel=1e-3)
+    assert app.score < route.score and "2 writable calendars" in route.evidence
+
+
+def test_a_store_with_access_counts_the_users_own_use(events):
+    events.append((store(days_used_30=0, last_used=None), False))  # granted, but empty
+    assert order(choose("add_event", "lunch", [DATEBOOK]))[:2] == ["Datebook", "ics"]  # unused store: the tail
+    events[0] = (store(days_used_30=12, last_used=NOW - 3600), False)
+    assert order(choose("add_event", "lunch", [DATEBOOK]))[0] == "your Mac's calendar store"
+
+
+def test_apps_that_write_into_the_store_step_aside_unless_named(events):
+    from neo.decide import learned
+
+    events.append((store(), True))
+    learned.put("store_views", "add_event:test.datebook", {"seen": True})
+    assert order(choose("add_event", "lunch", [DATEBOOK])) == ["your Mac's calendar store", "ics"]
+    assert order(choose("add_event", "lunch in Datebook", [DATEBOOK]))[0] == "Datebook"
+    events.clear()  # the store can't be used: the app is back
+    assert order(choose("add_event", "lunch", [DATEBOOK])) == ["Datebook", "ics"]
+
+
+def test_excluded_candidates_stay_out(events):
+    events.append((store(), True))
+    got = order(asyncio.run(engine.choose("add_event", "lunch", [DATEBOOK], exclude=frozenset({"route:eventkit.events", "ics"}))))
+    assert got == ["Datebook"]
+
+
+def test_routes_are_asked_off_the_loop_and_a_broken_one_is_no_candidate(monkeypatch):
+    from neo.decide import routes
+
+    seen = []
+
+    def route_app(kind, route):
+        seen.append(threading.current_thread() is threading.main_thread())
+        if route == "eventkit.reminders":
+            raise RuntimeError("store fell over")
+        return store()
+
+    monkeypatch.setattr(routes, "route_app", route_app)
+    monkeypatch.setattr(routes, "pending", lambda app: True)
+    task = dataclasses.replace(EVENTS, routes=("eventkit.events", "eventkit.reminders"))
+    monkeypatch.setitem(engine.TASKS, "add_event", task)
+    assert order(choose("add_event", "lunch", [DATEBOOK]))[0] == "your Mac's calendar store"
+    assert seen == [False, False]
+    assert engine._routes("add_event", task, frozenset({"route:eventkit.events"})) == []
+
+
+def test_fits_kind_never_takes_a_route():
+    assert not engine.fits_kind("add_event", store()) and not engine.fits_kind("no_such_kind", DATEBOOK)
+
+
+# ---- Laya's pool ---------------------------------------------------------------------------------------
+
+
+def test_laya_weighs_a_capable_unused_app_when_one_used_one_fits(monkeypatch):
+    used = mk("Chatwave", "test.chatwave", category=SOCIAL, **HEAVY)
+    unused = mk("Pigeon", "test.pigeon", intents=("INSendMessageIntent",), **UNUSED)
+    fake = use_laya(monkeypatch, prefer("Pigeon", 0.9))
+    c = choose("send_message", "message john on the pigeon thing", [used, unused])
+    assert order(c) == ["Pigeon", "Chatwave"] and c[0].laya_p == pytest.approx(0.9)
+    assert set(fake.calls[-1][1]["app"]["criteria"]) == {"Chatwave", "Pigeon"}
+    use_laya(monkeypatch, lambda s, labels: {k: 0.5 for k in labels})  # unsure: the prior, unused last
+    assert order(choose("send_message", "message john", [used, unused])) == ["Chatwave", "Pigeon"]
+    fake = use_laya(monkeypatch, prefer("Podnest", 0.9))  # play_media still needs two used apps
+    choose("play_media", "play a podcast", [TUNEWAVE, PODNEST])
+    assert not fake.calls
+
+
+# ---- preferences -----------------------------------------------------------------------------------------
+
+A = mk("Chatwave", "test.chatwave", category=SOCIAL, **HEAVY)
+B = mk("Talkie", "test.talkie", category=SOCIAL, **HEAVY)
+
+
+def test_preferences_are_neutral_until_the_user_says_otherwise():
+    assert engine.pref_factor("send_message", "test.chatwave") == 1.0
+    assert engine.pref_factor("send_message", "test.chatwave", "h1") == 1.0
+    before = [c.score for c in choose("send_message", "text mom", [A, B])]
+    engine.record("send_message", "test.chatwave", "ax", True)  # reliability moves the prior...
+    engine.record("send_message", "test.chatwave", "ax", False, "timeout")
+    assert engine.pref_factor("send_message", "test.chatwave") == 1.0  # ...never the preference
+    assert before[0] == pytest.approx(before[1])
+
+
+def test_a_correction_moves_preference_not_reliability():
+    engine.record("send_message", "test.chatwave", "ax", True)
+    arm = engine.prior("send_message", "test.chatwave", "ax")
+    assert order(choose("send_message", "text mom", [A, B]))[0] == "Chatwave"
+    engine.correct("send_message", "test.chatwave")
+    assert engine.prior("send_message", "test.chatwave", "ax") == arm
+    c = choose("send_message", "text mom", [A, B])
+    assert order(c)[0] == "Talkie" and "you corrected this once" in c[1].evidence
+
+
+def test_a_per_person_choice_reorders_for_that_person_only():
+    engine.record_pref("send_message", "test.talkie", True, about="h-priya")
+    c = asyncio.run(engine.choose("send_message", "text priya", [A, B], about="h-priya"))
+    assert order(c)[0] == "Talkie" and "used for this person 1 of 1 times" in c[0].evidence
+    other = asyncio.run(engine.choose("send_message", "text sam", [A, B], about="h-sam"))
+    assert other[0].score == pytest.approx(other[1].score)
+    notes = choose("play_media", "play", [TUNEWAVE])  # a kind without preferences never reads them
+    assert "person" not in notes[0].evidence
+
+
+def test_version_1_files_load_and_are_saved_as_version_2():
+    from neo.config import settings
+
+    p = settings().data_dir / "decide.json"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    arm = {"a": 5, "b": 1, "t": time.time()}
+    p.write_text(json.dumps({"version": 1, "arms": {"send_message": {"test.chatwave": {"ax": arm}}}}))
+    assert engine.prior("send_message", "test.chatwave", "ax") == pytest.approx(5 / 6)
+    assert engine.pref_factor("send_message", "test.chatwave") == 1.0
+    engine.correct("send_message", "test.chatwave")
+    data = json.loads(p.read_text())
+    assert data["version"] == 2 and data["prefs"]["send_message"]["test.chatwave"]["down"] == 1
+    assert data["arms"]["send_message"]["test.chatwave"]["ax"]["a"] == 5
+    p.write_text(json.dumps({"arms": {}, "prefs": {"k": {"x": {"a": "bad"}}, "j": []}}))
+    engine._cache.clear()
+    assert engine.pref_factor("k", "x") == 1.0
+
+
+def test_habitual_is_where_this_kind_last_went(monkeypatch):
+    t = iter([100.0, 200.0, 300.0])
+    monkeypatch.setattr(engine, "_now", lambda: next(t))
+    assert not engine.habitual("write_note", "test.a")
+    engine.record("write_note", "test.a", "script_make", True)
+    engine.record("write_note", "test.b", "ax_new", True)
+    assert engine.habitual("write_note", "test.b") and not engine.habitual("write_note", "test.a")
+    engine.record("write_note", "test.b", "ax_new", False, "timeout")
+    assert engine.habitual("write_note", "test.b")  # a later failure doesn't move where it last went
+
+
+def test_a_wrong_route_is_demoted_at_once():
+    from neo.config import settings
+
+    engine.record("write_note", "test.a", "script_make", False, "route_bad")
+    arm = json.loads((settings().data_dir / "decide.json").read_text())["arms"]["write_note"]["test.a"]["script_make"]
+    assert arm["fails"] == engine.DEMOTE_AFTER and arm["n"] == 1
+
+
+# ---- the kind, with app names masked -------------------------------------------------------------------
+
+
+def test_decide_kind_reads_the_request_with_app_names_masked(monkeypatch, zs_asked):
+    chat = mk("Chatwhiz", "test.chatwhiz", **HEAVY)
+    reflex = use_reflex(monkeypatch, "open_app", 0.9)
+    for text in ("open Chatwhiz", "chatwhiz kholo", "please switch to chatwhiz"):
+        assert asyncio.run(engine.decide_kind(text, apps=[chat])) == ("open_app", 1.0, False), text
+    assert reflex.texts == [] and not zs_asked  # no model needed
+    reflex = use_reflex(monkeypatch, "send_message", 0.8)
+    assert asyncio.run(engine.decide_kind("message john on Chatwhiz", apps=[chat])).kind == "send_message"
+    assert reflex.texts == ["message john on an app"]
+    assert engine.mask_apps("open chatwhiz and chatwhiz", [chat]) == "open an app and an app"
