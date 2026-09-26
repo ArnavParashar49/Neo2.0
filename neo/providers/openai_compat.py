@@ -91,19 +91,22 @@ class OpenAICompatProvider:
         self,
         *,
         name: str,
-        base_url: str,
-        api_key: str,
         model: str,
+        base_url: str = "",
+        api_key: str = "",
         supports_vision: bool = False,
         reasoning_effort: bool = False,
+        client: AsyncOpenAI | None = None,
     ) -> None:
+        """`client`: the host's own configured AsyncOpenAI (its base URL, key, retries…)."""
         self.name = name
         self.model = model
         self.supports_vision = supports_vision
         self._reasoning = reasoning_effort
-        self._base_url = base_url
-        self._is_local = "127.0.0.1" in base_url or "localhost" in base_url
-        self._client = AsyncOpenAI(
+        self._base_url = base_url or str(getattr(client, "base_url", "") or "")
+        # NEO's own local server (mlx-lm): checked before each call. A host's client is theirs.
+        self._is_local = client is None and ("127.0.0.1" in base_url or "localhost" in base_url)
+        self._client = client or AsyncOpenAI(
             base_url=base_url,
             api_key=api_key or "none",
             timeout=180.0 if self._is_local else 60.0,

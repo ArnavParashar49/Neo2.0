@@ -14,7 +14,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from typing import Literal
 
 from google import genai
@@ -31,9 +31,6 @@ from neo.providers.base import (
     Turn,
     Usage,
 )
-
-# The SDK nags about automatic function calling on the async path even though we never use it.
-logging.getLogger("google_genai.models").setLevel(logging.ERROR)
 
 _LEVEL = {"low": gt.ThinkingLevel.LOW, "medium": gt.ThinkingLevel.MEDIUM, "high": gt.ThinkingLevel.HIGH}
 _SKIP_SIGNATURE = b"skip_thought_signature_validator"
@@ -125,22 +122,37 @@ class GeminiProvider:
     supports_vision = True
     supports_tools = True
 
-    def __init__(self, model: str | None = None, api_key: str | None = None) -> None:
-        s = settings()
-        key = api_key or s.gemini_api_key
-        if not key:
+    def __init__(
+        self,
+        model: str | None = None,
+        api_key: str | None = None,
+        *,
+        keys: Sequence[str] | None = None,
+        fallback_models: Sequence[str] | None = None,
+    ) -> None:
+        """`keys`: every key, in priority order (quota is per key). Settings are read only for
+        what isn't passed: given a model, keys and fallbacks, this never reads them."""
+        # The SDK nags about automatic function calling on the async path even though we never use it.
+        logging.getLogger("google_genai.models").setLevel(logging.ERROR)
+        s = settings() if model is None or fallback_models is None or (keys is None and not api_key) else None
+        if keys is not None:
+            key_list = list(dict.fromkeys(k.strip() for k in keys if k and k.strip()))
+        elif api_key:
+            key_list = [api_key]
+        else:
+            assert s is not None
+            key_list = s.gemini_keys if s.gemini_api_key else []
+        if not key_list:
             raise ProviderError("GEMINI_API_KEY is not set")
-        self.model = model or s.gemini_model
+        self.model = model or s.gemini_model  # type: ignore[union-attr]
         lite = "lite" in self.model
-        self.models = [self.model] + (
-            [] if lite else [m for m in s.gemini_fallback_models if m != self.model]
-        )
-        keys = [key] if api_key else s.gemini_keys
+        fallbacks = list(fallback_models) if fallback_models is not None else s.gemini_fallback_models  # type: ignore[union-attr]
+        self.models = [self.model] + ([] if lite else [m for m in fallbacks if m != self.model])
         http = gt.HttpOptions(timeout=_REQUEST_TIMEOUT_MS)
-        self._clients = [genai.Client(api_key=k, http_options=http) for k in keys]
+        self._clients = [genai.Client(api_key=k, http_options=http) for k in key_list]
         self._client = self._clients[0]
         self._exhausted: dict[tuple[str, int], float] = {}  # (model, key index) → retry-after timestamp
-        self._load_cooldowns()
+        self._cooldowns_loaded = False  # on the first call: the data dir is the agent's that calls
 
     # ---- cooldown persistence -------------------------------------------------------------
     # Learning that nine (model, key) pairs are out of quota costs nine round trips; a restart
@@ -179,6 +191,9 @@ class GeminiProvider:
         last: Exception | None = None
         import time as _time
 
+        if not self._cooldowns_loaded:
+            self._cooldowns_loaded = True
+            self._load_cooldowns()
         for model in self.models:
             overloaded = False
             if self._exhausted.get((model, -1), 0.0) > _time.time():

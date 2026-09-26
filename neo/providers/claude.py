@@ -76,12 +76,17 @@ class ClaudeProvider:
     supports_vision = True
     supports_tools = True
 
-    def __init__(self, model: str | None = None) -> None:
-        s = settings()
-        if not s.anthropic_api_key:
+    def __init__(
+        self, model: str | None = None, *, api_key: str | None = None, client: anthropic.AsyncAnthropic | None = None
+    ) -> None:
+        """Settings are read only for what isn't passed (a model, and a key or a client)."""
+        key = api_key
+        if client is None and key is None:
+            key = settings().anthropic_api_key
+        if client is None and not key:
             raise ProviderError("ANTHROPIC_API_KEY is not set")
-        self.model = model or s.claude_model
-        self._client = anthropic.AsyncAnthropic(api_key=s.anthropic_api_key)
+        self.model = model or settings().claude_model
+        self._client = client or anthropic.AsyncAnthropic(api_key=key)
 
     async def complete(
         self,
