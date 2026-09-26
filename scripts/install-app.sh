@@ -25,6 +25,7 @@ mkdir -p "$RUNTIME"
 uv venv --quiet --allow-existing --python "$PYVER" "$RUNTIME/.venv"
 uv pip install --quiet --python "$RUNTIME/.venv/bin/python" -r "$ROOT/requirements.lock"
 uv pip install --quiet --python "$RUNTIME/.venv/bin/python" --no-deps --reinstall "$ROOT"
+rm -rf "$ROOT/build"  # setuptools' scratch copy of the package
 mkdir -p "$HOME/.neo" && chmod 700 "$HOME/.neo"
 if [ ! -f "$HOME/.neo/.env" ] && [ -f "$ROOT/.env" ]; then
   install -m 600 "$ROOT/.env" "$HOME/.neo/.env"
