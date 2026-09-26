@@ -14,6 +14,7 @@ Also here:
 from __future__ import annotations
 
 import json
+import os
 import re
 import sqlite3
 import threading
@@ -24,6 +25,7 @@ from typing import Any, Literal
 
 import numpy as np
 
+from neo import runtime
 from neo.config import settings
 from neo.memory import embed as _emb
 
@@ -117,6 +119,10 @@ def path_only(steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
+class MemoryDisabled(RuntimeError):
+    """This agent runs without long-term memory."""
+
+
 class Store:
     """Thread-safe: requests run concurrently (worker threads and the event loop), so every
     public method holds one lock for its SQL. Embeddings are computed before taking it — the
@@ -124,6 +130,8 @@ class Store:
 
     def __init__(self, path: Path | None = None) -> None:
         self.path = path or settings().memory_db
+        if not os.path.exists(self.path):  # private from the start, whatever the process umask
+            os.close(os.open(self.path, os.O_CREAT | os.O_WRONLY, 0o600))
         self._lock = threading.RLock()
         self._db = sqlite3.connect(self.path, check_same_thread=False, timeout=5)
         with self._lock:
@@ -404,6 +412,14 @@ _store: Store | None = None
 
 
 def store() -> Store:
+    """The bound agent's memory (neo.runtime), else NEO.app's. An agent without memory has none:
+    MemoryDisabled."""
+    rt = runtime.current_runtime()
+    if rt is not None:
+        if not rt.settings.memory_enabled:
+            raise MemoryDisabled(f"memory is off for the agent {rt.name!r}")
+        return rt.get_or_create("store", lambda: Store(rt.settings.memory_db))
+    runtime.check_unbound("store()")
     global _store
     if _store is None:
         _store = Store()

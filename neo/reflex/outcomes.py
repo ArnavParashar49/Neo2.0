@@ -38,6 +38,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
+from neo import runtime
 from neo.reflex import learn
 
 SETTLE_S = 20.0  # an episode nothing followed up on for this long is final
@@ -123,10 +124,14 @@ class Episode:
 
 
 def _safe(fn: Callable) -> Callable:
-    """Learning is best effort: a bug here must never break a request."""
+    """Learning is best effort: a bug here must never break a request. It is NEO.app's alone: the
+    ledger, its counters and what it trains are process-wide, so an embedded agent's requests
+    (neo.runtime) never reach it."""
 
     @functools.wraps(fn)
     def wrap(*a, **kw):
+        if runtime.library_bound():
+            return None
         try:
             return fn(*a, **kw)
         except Exception as e:  # noqa: BLE001

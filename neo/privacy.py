@@ -15,17 +15,27 @@ from __future__ import annotations
 import asyncio
 import shutil
 
+from neo import runtime
 from neo.config import settings
 
 _generation = 0  # bumped by every erase: work that started before it must not write afterwards
 
 
 def generation() -> int:
+    """The erase generation of the bound agent (neo.runtime), else NEO.app's."""
+    rt = runtime.current_runtime()
+    if rt is not None:
+        return rt.generation
+    runtime.check_unbound("privacy.generation()")
     return _generation
 
 
 async def forget_everything() -> dict[str, int]:
+    """NEO.app's erase. It clears process-wide state too (what Laya is still learning, the task
+    kinds' memory), so an embedded agent never calls it: its host erases that agent's data dir."""
     global _generation
+    if runtime.current_runtime() is not None:
+        raise RuntimeError("forget_everything is NEO.app's erase; an embedded agent erases its own data dir")
     from neo.memory.store import store
     from neo.reflex import finetune, learn, memory, outcomes
 

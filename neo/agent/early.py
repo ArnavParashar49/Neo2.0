@@ -24,6 +24,7 @@ import json
 import time
 from dataclasses import dataclass
 
+from neo import runtime
 from neo.agent import fastpath
 from neo.agent.registry import ToolContext, registry
 from neo.events import bus
@@ -202,6 +203,11 @@ _actor: EarlyActor | None = None
 
 
 def early() -> EarlyActor:
+    """The bound agent's early actor (neo.runtime), else NEO.app's."""
+    rt = runtime.current_runtime()
+    if rt is not None:
+        return rt.get_or_create("early", EarlyActor)
+    runtime.check_unbound("early()")
     global _actor
     if _actor is None:
         _actor = EarlyActor()

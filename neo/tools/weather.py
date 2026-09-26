@@ -43,6 +43,13 @@ def _home(client: httpx.Client) -> tuple[float, float, str] | None:
     for place in (_remembered_city(), settings().home_location):
         if place and (g := _geocode(place, client)):
             return g
+    from neo import runtime
+
+    if runtime.library_bound():
+        # Embedded in another app, "here" from the network is the server's location (the same
+        # for every user of that app), and a lookup the host never asked for: only a city the
+        # user told NEO, or the agent's home_location, count.
+        return None
     if _here and time.time() - _here[3] < 6 * 3600:
         return _here[0], _here[1], _here[2]
     try:

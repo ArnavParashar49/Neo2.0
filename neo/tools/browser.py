@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import re
 
+from neo import runtime
 from neo.agent.registry import ToolContext, ToolOutput, tool
 from neo.config import settings
 from neo.providers.base import ImagePart
@@ -30,11 +31,12 @@ class _Browser:
                 from playwright.async_api import async_playwright
 
                 self._pw = await async_playwright().start()
-                profile = settings().data_dir / "browser"
-                profile.mkdir(parents=True, exist_ok=True)
+                s = settings()
+                profile = s.data_dir / "browser"
+                profile.mkdir(mode=0o700, parents=True, exist_ok=True)
                 self._ctx = await self._pw.chromium.launch_persistent_context(
                     str(profile),
-                    headless=False,
+                    headless=s.browser_headless,
                     viewport={"width": 1280, "height": 860},
                     args=["--disable-blink-features=AutomationControlled"],
                 )
@@ -52,6 +54,15 @@ class _Browser:
 
 
 _b = _Browser()
+
+
+def _browser() -> _Browser:
+    """The bound agent's own browser (neo.runtime), else NEO.app's."""
+    rt = runtime.current_runtime()
+    if rt is not None:
+        return rt.get_or_create("browser", _Browser)
+    runtime.check_unbound("NEO's browser")
+    return _b
 
 
 def _norm_url(url: str) -> str:
@@ -130,7 +141,7 @@ async def browser_open(a: dict, c: ToolContext) -> str:
         gate = confirm.gated("browser_open", a, f"open {url[:80]} ({why}, after reading {c.tainted()})", detail=url)
         if isinstance(gate, str):
             return gate
-    page = await _b.page()
+    page = await _browser().page()
     await page.goto(url, wait_until="domcontentloaded")
     await asyncio.sleep(0.4)
     return await _snapshot(page, 9000)
@@ -145,7 +156,7 @@ async def browser_open(a: dict, c: ToolContext) -> str:
     untrusted=True,
 )
 async def browser_read(a: dict, c: ToolContext) -> str:
-    page = await _b.page()
+    page = await _browser().page()
     return await _snapshot(page, int(a.get("max_chars") or 9000))
 
 
@@ -161,7 +172,7 @@ async def browser_click(a: dict, c: ToolContext) -> str:
     from neo.agent import confirm
     from neo.tools.computer import policy
 
-    page = await _b.page()
+    page = await _browser().page()
     loc = _locator(page, a["target"], a.get("role", ""))
     own = await _label(loc)
     label = str(a["target"]) + " " + own
@@ -190,7 +201,7 @@ async def browser_click(a: dict, c: ToolContext) -> str:
 async def browser_type(a: dict, c: ToolContext) -> str:
     from neo.agent import confirm
 
-    page = await _b.page()
+    page = await _browser().page()
     loc = _locator(page, a["target"])
     if confirm.as_bool(a.get("submit")) and not await _is_search(loc):
         gate = confirm.gated(
@@ -218,7 +229,7 @@ async def browser_type(a: dict, c: ToolContext) -> str:
 async def browser_press(a: dict, c: ToolContext) -> str:
     from neo.agent import confirm
 
-    page = await _b.page()
+    page = await _browser().page()
     if str(a["key"]).split("+")[-1].lower() in ("enter", "return", "numpadenter"):
         focused = page.locator("*:focus").first
         if await focused.count() and not await _is_search(focused):
@@ -237,7 +248,7 @@ async def browser_press(a: dict, c: ToolContext) -> str:
     quiet=True,
 )
 async def browser_scroll(a: dict, c: ToolContext) -> str:
-    page = await _b.page()
+    page = await _browser().page()
     dy = int(a.get("amount") or 700) * (-1 if a.get("direction") == "up" else 1)
     await page.mouse.wheel(0, dy)
     await asyncio.sleep(0.3)
@@ -246,7 +257,7 @@ async def browser_scroll(a: dict, c: ToolContext) -> str:
 
 @tool("browser_back", "Go back one page in the browser.", _p({}), category="browser", quiet=True)
 async def browser_back(a: dict, c: ToolContext) -> str:
-    page = await _b.page()
+    page = await _browser().page()
     await page.go_back(wait_until="domcontentloaded")
     return f"Back at {page.url}"
 
@@ -260,19 +271,19 @@ async def browser_back(a: dict, c: ToolContext) -> str:
     untrusted=True,
 )
 async def browser_screenshot(a: dict, c: ToolContext) -> ToolOutput:
-    page = await _b.page()
+    page = await _browser().page()
     png = await page.screenshot(type="png")
     return ToolOutput(f"Browser screenshot of {page.url}", images=[ImagePart(png, "image/png")])
 
 
 @tool("browser_close", "Close NEO's browser window.", _p({}), category="browser", quiet=True)
 async def browser_close(a: dict, c: ToolContext) -> str:
-    await _b.close()
+    await _browser().close()
     return "Browser closed."
 
 
 async def shutdown() -> None:
-    await _b.close()
+    await _browser().close()
 
 
 def _host(url: str) -> str:

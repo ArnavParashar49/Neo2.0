@@ -2,6 +2,10 @@
 
 Everything lives under ``~/.neo`` (data dir) unless overridden. API keys come from the
 environment or a ``.env`` file in the project root; nothing is written to Git.
+
+An agent embedded in another app (neo.runtime) has :class:`LibrarySettings` instead: only what
+the host passes in — never the environment, ~/.neo/.env or ~/.neo itself — and
+:func:`settings` returns them while that agent is bound.
 """
 
 from __future__ import annotations
@@ -12,13 +16,23 @@ import sys
 from pathlib import Path
 from typing import Annotated, Literal, get_args
 
-from pydantic import Field, field_validator
-from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+from pydantic import Field, field_validator, model_validator
+from pydantic_settings import BaseSettings, NoDecode, PydanticBaseSettingsSource, SettingsConfigDict
+
+from neo import runtime
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 # Keys and settings: ~/.neo/.env (where NEO.app's installed runtime looks), and a checkout's own
-# .env on top when running from source.
+# .env on top when running from source (a checkout has a pyproject.toml; installed as a package,
+# PROJECT_ROOT is site-packages, whose .env is nobody's).
 USER_ENV = Path.home() / ".neo" / ".env"
+
+
+def _env_files(root: Path) -> tuple[Path, ...]:
+    return (USER_ENV, root / ".env") if (root / "pyproject.toml").exists() else (USER_ENV,)
+
+
+_ENV_FILES = _env_files(PROJECT_ROOT)
 
 BrainName = Literal["gemini", "gemini_lite", "groq", "local", "claude"]
 VoiceBackend = Literal["auto", "live", "local", "off"]
@@ -27,19 +41,20 @@ DecideMode = Literal["legacy", "shadow", "on", "off"]
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=(USER_ENV, PROJECT_ROOT / ".env"),  # later files win
+        env_file=_ENV_FILES,  # later files win
         env_file_encoding="utf-8",
         env_prefix="NEO_",
         extra="ignore",
     )
 
     # ---- keys (no prefix — read the conventional names) -------------------------------
-    gemini_api_key: str = Field(default="", validation_alias="GEMINI_API_KEY")
+    # repr=False: a logged or printed Settings never shows a key.
+    gemini_api_key: str = Field(default="", validation_alias="GEMINI_API_KEY", repr=False)
     gemini_api_keys: str = Field(
-        default="", validation_alias="GEMINI_API_KEYS"
+        default="", validation_alias="GEMINI_API_KEYS", repr=False
     )  # extra keys, comma-separated
-    groq_api_key: str = Field(default="", validation_alias="GROQ_API_KEY")
-    anthropic_api_key: str = Field(default="", validation_alias="ANTHROPIC_API_KEY")
+    groq_api_key: str = Field(default="", validation_alias="GROQ_API_KEY", repr=False)
+    anthropic_api_key: str = Field(default="", validation_alias="ANTHROPIC_API_KEY", repr=False)
 
     # ---- brains ----------------------------------------------------------------------
     brain: BrainName = "gemini"  # primary agentic brain
@@ -105,6 +120,17 @@ class Settings(BaseSettings):
     # Apps NEO's input tools never click, press, drag, scroll or type into (NEO's own overlay
     # never, always): a host's own approval dialog, for one. NEO_PROTECTED_APPS='["MyApp"]'
     protected_apps: list[str] = []
+    fast_paths: bool = True  # zero-LLM regex commands (neo.agent.fastpath)
+
+    # ---- memory & prompt ---------------------------------------------------------------
+    embeddings: Literal["local", "off"] = "local"  # off: keyword-only recall, no local model
+    memory_enabled: bool = True  # long-term memory (memory.sqlite3) at all
+    playbooks: bool = True  # recall and save the tool paths of past tasks (needs memory)
+    summaries: bool = True  # session summaries (needs memory)
+    persona: str | None = None  # replaces the identity paragraph of the prompt; the rules stay
+    instructions: str = ""  # appended to the system prompt
+    include_username: bool = True  # the macOS user name in the prompt's context line
+    browser_headless: bool = False  # NEO's own browser window (visible: the user can step in)
 
     # ---- task kinds (neo/decide) -------------------------------------------------------
     # How each kind runs (notes, reminders, calendar, mail…): "legacy" = today's scripts,
@@ -138,6 +164,8 @@ class Settings(BaseSettings):
 
     # ---- paths -----------------------------------------------------------------------
     data_dir: Path = Path.home() / ".neo"
+    models_path: Path | None = None  # downloaded models (default: data_dir/models)
+    extra_secret_paths: list[Path] = []  # never read or written by NEO's tools (data_dir never is)
 
     @property
     def gemini_keys(self) -> list[str]:
@@ -154,6 +182,16 @@ class Settings(BaseSettings):
     def _expand(cls, v):  # NEO_DATA_DIR=~/.neo must not create a literal "~" directory
         return Path(str(v)).expanduser().resolve()
 
+    @field_validator("models_path", mode="before")
+    @classmethod
+    def _expand_opt(cls, v):
+        return None if v in (None, "") else Path(str(v)).expanduser().resolve()
+
+    @field_validator("extra_secret_paths", mode="before")
+    @classmethod
+    def _expand_all(cls, v):
+        return [Path(str(p)).expanduser().resolve() for p in (v or [])]
+
     @property
     def audit_log(self) -> Path:
         return self.data_dir / "audit.log"
@@ -164,7 +202,7 @@ class Settings(BaseSettings):
 
     @property
     def models_dir(self) -> Path:
-        return self.data_dir / "models"
+        return self.models_path or self.data_dir / "models"
 
     def ensure_dirs(self) -> None:
         for p in (self.data_dir, self.models_dir):
@@ -176,10 +214,91 @@ class Settings(BaseSettings):
             pass
 
 
+class LibrarySettings(Settings):
+    """The settings of an agent embedded in another app (neo.runtime).
+
+    Only what the host passes in: never the environment, ~/.neo/.env or a .env next to the
+    package — a host process's NEO_CONFIRM_DESTRUCTIVE=false or its own keys must not reach an
+    agent it didn't give them to. `data_dir` is required and is never ~/.neo (or inside it).
+    Pinned whatever is passed: confirmation on; every task kind runs its legacy script (the
+    evidence-chosen drivers, their dry runs and their learning are process-wide, NEO.app's);
+    Laya's learning and its teacher off; notes that no notes app could take go under data_dir.
+    """
+
+    model_config = SettingsConfigDict(env_file=None, extra="forbid", populate_by_name=True)
+
+    data_dir: Path  # required: an embedded agent never defaults to ~/.neo
+    # Embedders get the quiet defaults: no local models, no memory, no voice, a headless browser.
+    reflex: Literal["lite", "off"] = "off"  # "laya" is one process-wide model: NEO.app's
+    embeddings: Literal["local", "off"] = "off"
+    memory_enabled: bool = False
+    learn: bool = False
+    voice: VoiceBackend = "off"
+    browser_headless: bool = True
+    include_username: bool = False
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        return (init_settings,)
+
+    @model_validator(mode="after")
+    def _pinned(self) -> LibrarySettings:
+        _refuse_neo_home(self.data_dir)
+        _refuse_real_data_under_tests(self.data_dir)
+        self.confirm_destructive = True
+        self.decide_modes = dict.fromkeys(sorted({*DECIDE_DEFAULTS, *self.decide_modes}), "legacy")
+        self.decide_kind_routing = False
+        self.learn = False
+        self.learn_teacher = "off"
+        self.notes_dir = self.data_dir / "notes"
+        if self.reflex == "lite" and not self.gemini_keys:
+            raise ValueError('reflex="lite" needs a Gemini key (it calls Gemini Flash-Lite itself)')
+        return self
+
+    def ensure_dirs(self) -> None:
+        """Create what's missing, private to this user. A folder the host already made keeps its
+        own permissions; the models folder only exists when local embeddings are on."""
+        _mkdirs_private(self.data_dir)
+        if self.embeddings == "local":
+            _mkdirs_private(self.models_dir)
+
+
+def _refuse_neo_home(data_dir: Path) -> None:
+    home = (Path.home() / ".neo").resolve()
+    d = Path(data_dir).expanduser().resolve()
+    if d == home or home in d.parents:
+        raise ValueError(f"an embedded agent never uses NEO.app's own data ({home}): pick another data_dir")
+
+
+def _mkdirs_private(path: Path) -> None:
+    missing: list[Path] = []
+    p = Path(path)
+    while not p.exists() and p != p.parent:
+        missing.append(p)
+        p = p.parent
+    for d in reversed(missing):
+        try:
+            d.mkdir(mode=0o700)
+        except FileExistsError:
+            pass
+
+
 _settings: Settings | None = None
 
 
 def settings() -> Settings:
+    """The bound agent's settings (neo.runtime), else NEO.app's — built on first use."""
+    rt = runtime.current_runtime()
+    if rt is not None:
+        return rt.settings
+    runtime.check_unbound("settings()")
     global _settings
     if _settings is None:
         s = Settings()

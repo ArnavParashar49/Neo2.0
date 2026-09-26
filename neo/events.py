@@ -15,6 +15,8 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
 
+from neo import runtime
+
 
 class NeoState(StrEnum):
     """Semantic states. The overlay maps each one to a thinking-orbs animation."""
@@ -131,6 +133,11 @@ _bus: EventBus | None = None
 
 
 def bus() -> EventBus:
+    """The bound conversation's own bus (neo.runtime), else NEO.app's."""
+    sc = runtime.current_scope()
+    if sc is not None:
+        return sc.get_or_create("bus", EventBus)
+    runtime.check_unbound("bus()")
     global _bus
     if _bus is None:
         _bus = EventBus()

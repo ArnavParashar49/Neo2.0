@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -19,13 +17,10 @@ WEB = ["web_search", "web_fetch", "weather", "clock"]
 
 
 @pytest.fixture
-def web_agent():
-    from neo.tools import load_all
+def web_agent(tmp_path):
+    from neo_lib import make_runtime
 
-    load_all()
-    s = SimpleNamespace(data_dir=Path("/nonexistent"), extra_secret_paths=[])
-    rt = runtime.Runtime("web", s, catalog().subset(WEB))  # type: ignore[arg-type]
-    return rt
+    return make_runtime(tmp_path / "web", "web", WEB, library=False)
 
 
 class _Brain:

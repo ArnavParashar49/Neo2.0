@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from neo import runtime
 from neo.agent.registry import RegisteredTool, Registry
 from neo.agent.registry import registry as default_registry
 from neo.providers.base import ToolSpec
@@ -177,6 +178,11 @@ _selector: ToolSelector | None = None
 
 
 def selector() -> ToolSelector:
+    """The bound agent's selector, over its own tools (neo.runtime), else NEO.app's."""
+    rt = runtime.current_runtime()
+    if rt is not None:
+        return rt.get_or_create("selector", lambda: ToolSelector(rt.registry))
+    runtime.check_unbound("selector()")
     global _selector
     if _selector is None:
         _selector = ToolSelector()
