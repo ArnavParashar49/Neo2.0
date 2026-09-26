@@ -256,10 +256,10 @@ def test_memory_recall_survives_apostrophes(tmp_path, monkeypatch):
     assert st.recall("???") == []
 
 
-def test_read_file_start_zero(tmp_path):
+def test_read_file_start_zero(tmp_path_factory):
     from neo.tools.computer.shell import read_file
 
-    f = tmp_path / "a.txt"
+    f = tmp_path_factory.mktemp("docs") / "a.txt"  # not in NEO's data dir (tmp_path here): that's secret
     f.write_text("one\ntwo\n")
     assert "one" in read_file(str(f), start=0, lines=10)
 

@@ -75,8 +75,30 @@ def _under(p: Path, root: Path) -> bool:
     return pp[: len(rp)] == rp
 
 
+def _extra_roots() -> list[Path]:
+    """NEO's data wherever else it lives: every embedded agent's data dir and extra secret paths,
+    and NEO.app's own data dir when NEO_DATA_DIR moved it (neo.runtime.secret_roots — which
+    never builds settings to find out)."""
+    from neo.runtime import secret_roots
+
+    out: list[Path] = []
+    for r in secret_roots():
+        for v in (r, _resolved(r)):
+            if v not in out:
+                out.append(v)
+    return out
+
+
+def _resolved(p: Path) -> Path:
+    try:
+        return p.resolve()
+    except (OSError, RuntimeError):
+        return p
+
+
 def is_secret(path: str | os.PathLike, base: str | os.PathLike | None = None) -> bool:
     """Keys, tokens, password stores, browser profiles, chat and mail stores, NEO's own data."""
+    roots: list[Path] | None = None
     for p in _variants(path, base):
         if _SECRET_NAME.match(p.name):
             return True
@@ -84,12 +106,19 @@ def is_secret(path: str | os.PathLike, base: str | os.PathLike | None = None) ->
             return True
         if _under(p, Path("/Library/Keychains")) or _under(p, Path("/private/var/db")):
             return True
+        roots = _extra_roots() if roots is None else roots
+        if any(_under(p, r) for r in roots):
+            return True
     return False
 
 
 def covers_secret(path: str | os.PathLike, base: str | os.PathLike | None = None) -> bool:
     """Would a recursive read of this directory reach a secret? (the home folder, ~/Library…)"""
-    return any(is_secret(p) or any(_under(HOME / d, p) for d in _SECRET_DIRS) for p in _variants(path, base))
+    roots = _extra_roots()
+    return any(
+        is_secret(p) or any(_under(HOME / d, p) for d in _SECRET_DIRS) or any(_under(r, p) for r in roots)
+        for p in _variants(path, base)
+    )
 
 
 # ---- file writes -----------------------------------------------------------------------------

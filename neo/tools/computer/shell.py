@@ -11,6 +11,10 @@ from neo.agent import confirm
 from neo.tools.computer import policy
 
 _SECRET_ENV = re.compile(r"KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|SESSION|COOKIE|AUTH", re.I)
+# Embedded in another app, NEO's commands get only these of the host process's environment: a
+# host's DATABASE_URL or SENTRY_DSN is none of a shell command's business (and slips past any
+# list of suspicious names).
+_HOST_ENV_OK = {"PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "TERM", "TMPDIR", "TZ"}
 
 
 def looks_destructive(cmd: str) -> bool:
@@ -19,8 +23,14 @@ def looks_destructive(cmd: str) -> bool:
 
 
 def _env() -> dict[str, str]:
-    """The user's environment minus anything that looks like a credential (NEO's API keys too)."""
-    env = {k: v for k, v in os.environ.items() if not _SECRET_ENV.search(k) and not k.startswith("GIT_CONFIG")}
+    """The user's environment minus anything that looks like a credential (NEO's API keys too).
+    For an embedded agent: only the basics (_HOST_ENV_OK and the locale)."""
+    from neo import runtime
+
+    if runtime.library_bound():
+        env = {k: v for k, v in os.environ.items() if k in _HOST_ENV_OK or k.startswith("LC_")}
+    else:
+        env = {k: v for k, v in os.environ.items() if not _SECRET_ENV.search(k) and not k.startswith("GIT_CONFIG")}
     env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:" + os.environ.get("PATH", "/usr/bin:/bin")
     env.update(policy.GIT_SAFE_ENV)
     return env
