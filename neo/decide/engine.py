@@ -2,24 +2,28 @@
 
 For a request NEO works out, from evidence only (no app names anywhere in this file):
 
-1. what kind of task it is (:func:`decide_kind`, a Laya zero-shot choice over :data:`TASKS`);
+1. what kind of task it is (:func:`decide_kind`: the reflex's trained kind head; without one,
+   Laya's zero-shot choice over :data:`TASKS` when it is very sure, marked as advice only);
 2. which installed apps can do that kind (their scripting dictionary's capabilities, the URL
    schemes and document types they declare, their category, media evidence), and in what order
    to try them (:func:`choose`):
 
    * an app the user named ("on <app>", "in <app>") that fits, or the website they named
      ("on <site>", :func:`site_hint`);
-   * the apps this user actually uses, ordered by Laya ("which app should do this?", asked with a
-     JSON state of each candidate's evidence) combined with the bandit prior
-     (``score = laya_p**LAYA_EXP * prior**PRIOR_EXP``); when Laya is unsure or unavailable, by the
-     prior alone;
+   * the apps this user actually uses, ordered by Laya ("which app should do this?", each option
+     described by its evidence, on the zero-shot checkpoint of :mod:`neo.reflex.zeroshot`)
+     combined with the bandit prior (``score = laya_p**LAYA_EXP * prior**PRIOR_EXP``); when Laya
+     is unsure or unavailable, by the prior alone;
    * the task's fallback (the web, through the default browser);
    * used apps that are less likely to work than the fallback (see WEB_AFF), installed-but-unused
      apps, then apps that keep failing (still tried, so they can recover).
 
 3. what worked (:func:`record`): a discounted Beta(a, b) per (kind, app, method) in
    ``<data_dir>/decide.json``. Three blamed failures in a row demote an arm; failures that are not
-   the arm's fault (permission, login, offline, not_found) never count against it.
+   the arm's fault (permission, login, offline, not_found) never count against it. Each settled
+   attempt of a chosen app also goes to the reflex's outcome ledger (the user's own words for the
+   request, when the caller has them; the kind, app key and whether it worked), which teaches
+   its kind head.
 
 The prior of a candidate = best method's posterior mean x how much this user uses the app
 (:func:`neo.decide.inventory.affinity`). The fall-through to the next candidate on failure *is*
@@ -38,9 +42,10 @@ import re
 import tempfile
 import threading
 import time
-from dataclasses import dataclass
+from contextvars import ContextVar
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from neo.config import settings
 
@@ -55,7 +60,7 @@ if TYPE_CHECKING:
 class Task:
     """One kind of request.
 
-    ``description`` is what Laya reads (it shares a ~190-token budget with the other kinds, so
+    ``description`` is what Laya reads (it shares a ~250-token budget with the other kinds, so
     keep it short). ``wants`` are capability tags (:func:`neo.decide.sdef.caps`) that make an app a
     candidate; ``signals`` are other generic evidence that does too:
 
@@ -113,14 +118,21 @@ WEB = "web"  # app key (and method) of the web fallback candidate
 # ---- tuning -----------------------------------------------------------------------------------
 
 MAX_CANDIDATES = 6  # attempts handed to a driver (it also caps total time)
-LAYA_POOL = 6  # at most this many apps in one Laya choice (options share ~190 tokens)
-SHORTLIST_ABOVE = 20  # more used apps than this: Laya's embedding shortlist picks the pool
+LAYA_POOL = 6  # at most this many apps in one Laya choice (options share one ~250-token budget)
+SHORTLIST_ABOVE = 20  # more used apps than this: an embedding shortlist picks the pool
 LAYA_SURE_P = 0.5  # Laya counts as sure when its top pick has at least this probability...
 LAYA_MARGIN = 0.15  # ...and leads the runner-up by at least this much
+# A zero-shot task kind needs far more, and is still only advice (Kind.advisory): on 390 mapped
+# real requests it was right 0.57 of the time. At 0.95 (so a margin of at least 0.9) 21 answers
+# count and 1 is wrong (95% upper bound 24%); 19 of them are events or emails, 1 is play_media.
+# A bar picked on half the requests and tested on the other half (200 random splits) was 0.95 or
+# 0.97 in 374 of 400 picks, and wrong for 9% of the answers it let through.
+ZS_KIND_P = 0.95
+ZS_KIND_MARGIN = 0.9
 LAYA_EXP = 1.0
 PRIOR_EXP = 1.0
 LAYA_LOCK_S = 1.5  # wait this long for the shared Laya lock (the reflex may be using it)
-LAYA_TIMEOUT_S = 3.0  # whole Laya call incl. a model still loading: past this, use the prior
+LAYA_TIMEOUT_S = 3.0  # a whole Laya step (a model still loading, the shortlist): past it, the prior
 GAMMA = 0.97  # discount per update: old evidence fades, a switch of apps shows in ~3-10 uses
 DEMOTE_AFTER = 3  # consecutive blamed failures that demote an arm
 DEMOTE_FOR_S = 12 * 3600  # a demotion lapses after this, so a quiet arm gets re-probed
@@ -175,22 +187,43 @@ def _now() -> float:
 # ---- Laya -------------------------------------------------------------------------------------
 
 
-def _embed_fn(agent: Any):
-    """Laya's own encoder as the shortlist embedder (cached per agent)."""
-    fn = getattr(agent, "_neo_embed_fn", None)
-    if fn is None:
-        from laya.shortlist import embed_fn_from_agent
+class Kind(NamedTuple):
+    """:func:`decide_kind`'s answer. ``advisory``: Laya's zero-shot guess while the reflex has no
+    kind head - a hint (to ask the user, or to order what they named), never a reason to hand the
+    request to that kind of app."""
 
-        fn = embed_fn_from_agent(agent, max_length=128)
-        with contextlib.suppress(Exception):
-            agent._neo_embed_fn = fn
-    return fn
+    kind: str
+    p: float
+    advisory: bool = False
 
 
-def _laya_call(
-    state: Any, questions: dict, shortlist_k: int | None = None, stale: threading.Event | None = None
-) -> dict | None:
-    """One Laya pass (in a worker thread), holding the shared lock; None if Laya can't answer."""
+_OTHER = Kind("other", 0.0)
+_NO_KIND_HEAD = object()  # _reflex_call: the reflex has no kind head (zero-shot may guess)
+
+
+def _laya_call(state: Any, questions: dict, stale: threading.Event) -> dict | None:
+    """One zero-shot pass on :mod:`neo.reflex.zeroshot` (in a worker thread); None if it can't answer."""
+    try:
+        from neo.reflex import zeroshot
+
+        return zeroshot.ask(state, questions, LAYA_LOCK_S, stale)
+    except Exception as e:  # noqa: BLE001 - Laya must never break a decision
+        print(f"[decide] Laya unavailable for this decision ({str(e)[:80]})")
+        return None
+
+
+def _has_kind_head(laya: Any) -> bool:
+    """Whether the loaded reflex has a trained kind head: its own flag, else its head's kind entry."""
+    flag = getattr(laya, "has_kind_head", None)
+    if flag is not None:
+        return bool(flag)
+    head = getattr(laya, "_head", None)
+    return isinstance(head, dict) and head.get("kind") is not None
+
+
+def _reflex_call(text: str, known: Any, stale: threading.Event) -> Any:
+    """In a worker thread: the reflex's Decision for ``text`` (``known`` when the caller has it)
+    if the reflex has a kind head; _NO_KIND_HEAD if it has none; None if it is busy or broken."""
     try:
         from neo.reflex import get_laya, laya_lock
 
@@ -198,41 +231,50 @@ def _laya_call(
         # get_laya() takes this same (non-reentrant) lock with no timeout, so only call it once the
         # lock is free: a busy Laya then costs LAYA_LOCK_S, not the whole LAYA_TIMEOUT_S.
         if not lock.acquire(timeout=LAYA_LOCK_S):
-            return None  # busy (retraining, loading, another decision): the prior decides this one
+            return None  # busy (retraining, loading, another decision)
         lock.release()
         laya = get_laya()
-        if laya is None:
-            return None
-        agent = getattr(laya, "_agent", None) or laya
-        if not callable(getattr(agent, "system_one", None)):
-            return None
+        if laya is None or not _has_kind_head(laya):
+            return _NO_KIND_HEAD
+        if known is not None:
+            return known
         if not lock.acquire(timeout=LAYA_LOCK_S):
             return None
         try:
-            if stale is not None and stale.is_set():
-                return None  # the caller gave up on this answer: don't hold Laya for nothing
-            if shortlist_k:
-                from laya.shortlist import predict_shortlist
-
-                return predict_shortlist(agent, state, questions, _embed_fn(agent), k=shortlist_k)
-            return agent.system_one(state, questions)
+            return None if stale.is_set() else laya.decide(text)
         finally:
             lock.release()
-    except Exception as e:  # noqa: BLE001 - Laya must never break a decision
-        print(f"[decide] Laya unavailable for this decision ({str(e)[:80]})")
+    except Exception as e:  # noqa: BLE001
+        print(f"[decide] the reflex couldn't tell the task kind ({str(e)[:80]})")
         return None
 
 
-async def _ask_laya(state: Any, questions: dict, shortlist_k: int | None = None) -> dict | None:
+async def _off_loop(fn: Any, *args: Any, timeout: float | None = None) -> Any:
+    """``fn(*args, stale)`` in a worker thread, None past ``timeout`` (default LAYA_TIMEOUT_S: a
+    model still loading, a busy GPU); a worker still waiting then skips its work."""
+    wait = LAYA_TIMEOUT_S if timeout is None else timeout
+    if wait <= 0:
+        return None  # the budget is spent: start nothing nobody will wait for
     stale = threading.Event()
     try:
-        return await asyncio.wait_for(
-            asyncio.to_thread(_laya_call, state, questions, shortlist_k, stale), LAYA_TIMEOUT_S
-        )
-    except Exception:  # noqa: BLE001 - timeout (model still loading) or anything else
+        return await asyncio.wait_for(asyncio.to_thread(fn, *args, stale), wait)
+    except Exception:  # noqa: BLE001 - timeout or anything else
         return None
     finally:
-        stale.set()  # a worker still waiting for the lock or the model skips the forward pass
+        stale.set()
+
+
+async def _ask_laya(state: Any, questions: dict, timeout: float | None = None) -> dict | None:
+    return await _off_loop(_laya_call, state, questions, timeout=timeout)
+
+
+def _zero_shot_can_answer() -> bool:
+    try:
+        from neo.reflex import zeroshot
+
+        return zeroshot.available()
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def _choice(res: dict | None, qid: str) -> dict[str, float]:
@@ -247,17 +289,36 @@ def _choice(res: dict | None, qid: str) -> dict[str, float]:
     return {k: v / z for k, v in probs.items()} if z > 0 else {}
 
 
-def _sure(probs: dict[str, float]) -> bool:
+def _sure(probs: dict[str, float], top_p: float = LAYA_SURE_P, margin: float = LAYA_MARGIN) -> bool:
     if not probs:
         return False
     top = sorted(probs.values(), reverse=True) + [0.0]
-    return top[0] >= LAYA_SURE_P and top[0] - top[1] >= LAYA_MARGIN
+    return top[0] >= top_p and top[0] - top[1] >= margin
 
 
-async def decide_kind(text: str) -> tuple[str, float]:
-    """Laya's zero-shot pick of the task kind for ``text``; ('other', 0.0) without Laya."""
+async def decide_kind(text: str, decision: Any = None) -> Kind:
+    """The task kind of ``text`` and its probability, all within LAYA_TIMEOUT_S.
+
+    The reflex's trained kind head decides when it has one: ``decision`` is the reflex's Decision
+    for this text if the caller has it, else the reflex is asked (one embedding pass). Its
+    abstaining (not an action), or being too busy to answer, gives ('other', 0.0): a head may well
+    exist then, so nothing is guessed. Only without a kind head does Laya answer zero-shot, and
+    that counts only when it is very sure (:data:`ZS_KIND_P`) and only as advice
+    (``advisory=True``): even then it was wrong too often to route a request by.
+    """
     if not text or not text.strip():
-        return "other", 0.0
+        return _OTHER
+    text = text.strip()
+    kind = getattr(decision, "kind", None)
+    if kind in TASKS:
+        return Kind(kind, float(getattr(decision, "kind_p", 0.0) or 0.0))
+    end = time.monotonic() + LAYA_TIMEOUT_S
+    decision = await _off_loop(_reflex_call, text, decision)
+    if decision is None:
+        return _OTHER
+    if decision is not _NO_KIND_HEAD:
+        kind = getattr(decision, "kind", None)
+        return Kind(kind, float(getattr(decision, "kind_p", 0.0) or 0.0)) if kind in TASKS else _OTHER
     q = {
         "kind": {
             "type": "choice",
@@ -265,12 +326,12 @@ async def decide_kind(text: str) -> tuple[str, float]:
             "criteria": {k: t.description for k, t in TASKS.items()},
         }
     }
-    probs = _choice(await _ask_laya({"text": text.strip()}, q), "kind")
-    probs = {k: p for k, p in probs.items() if k in TASKS}
-    if not probs:
-        return "other", 0.0
+    res = await _ask_laya({"text": text}, q, end - time.monotonic())
+    probs = {k: p for k, p in _choice(res, "kind").items() if k in TASKS}
+    if not _sure(probs, ZS_KIND_P, ZS_KIND_MARGIN):
+        return _OTHER
     kind = max(probs, key=lambda k: probs[k])
-    return kind, float(probs[kind])
+    return Kind(kind, float(probs[kind]), advisory=True)
 
 
 # ---- the learning store (decide.json) ---------------------------------------------------------
@@ -428,6 +489,41 @@ def record(kind: str, app_key: str, method: str, ok: bool, reason: str = "") -> 
             except OSError:
                 mtime = -1
             _cache[str(_path())] = (mtime, data)
+    if ok or reason not in NO_BLAME:
+        _tell_ledger(kind, app_key, ok)
+
+
+@dataclass
+class _Asked:
+    """The request :func:`choose` last ordered in this task: what its outcomes are reported as."""
+
+    kind: str
+    said: str
+    keys: frozenset[str]
+    told: set[tuple[str, bool]] = field(default_factory=set)
+
+
+_asked: ContextVar[_Asked | None] = ContextVar("neo_decide_asked", default=None)
+
+
+def _tell_ledger(kind: str, key: str, ok: bool) -> None:
+    """One settled attempt of a chosen app, to the reflex's outcome ledger when it has one: the
+    user's own words choose() was given (``said``), the kind, the app key and ok - never a query,
+    tool arguments or results. Each (app, outcome) once per request; an attempt outside a decision
+    (a per-site sub-arm, another task, a request without the user's words) is not reported."""
+    a = _asked.get()
+    if a is None or a.kind != kind or key not in a.keys or (key, ok) in a.told:
+        return
+    a.told.add((key, ok))
+    try:
+        from neo.reflex import outcomes
+
+        decided = getattr(outcomes, "decided", None)
+        if callable(decided):
+            decided(a.said, kind, key, ok)
+    except Exception as e:  # noqa: BLE001 - no ledger (yet), or a broken one: learning is optional
+        if not isinstance(e, ImportError):
+            print(f"[decide] couldn't report the outcome ({str(e)[:60]})")
 
 
 def _prune(data: dict, now: float) -> None:
@@ -459,8 +555,18 @@ def _inventory() -> list[App]:
 
 
 def warm() -> None:
-    """Scan the apps in the background now, so the first request doesn't wait for it."""
-    threading.Thread(target=lambda: _inventory() and None, name="neo-inventory-warm", daemon=True).start()
+    """Scan the apps in the background now, then make sure the zero-shot checkpoint is on this Mac
+    (downloaded, not loaded), so the first request waits for neither."""
+
+    def run() -> None:
+        try:
+            _inventory()
+        finally:
+            from neo.reflex import zeroshot
+
+            zeroshot.prefetch()
+
+    threading.Thread(target=run, name="neo-inventory-warm", daemon=True).start()
 
 
 def _self_ids() -> frozenset[str]:
@@ -746,58 +852,77 @@ def _labels(infos: list[_Info]) -> None:
         i.label = base if n == 1 else f"{base} ({n})"
 
 
+def _embedder_ready() -> bool:
+    """NEO's memory embedder is loaded: a decision never starts (or waits for) its load."""
+    try:
+        from neo.memory import embed
+
+        return embed.ready()
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _shortlist(task: Task, text: str, infos: list[_Info], now: float, stale: threading.Event) -> list[_Info]:
+    """The LAYA_POOL apps whose evidence reads most like the request, by NEO's pinned MiniLM (the
+    memory embedder, loaded at NEO's start: CPU, ~13 ms for 25 apps); [] when it isn't available.
+
+    Over 24 used apps (32 requests) the right one was among the 6 kept for 0.84 of requests;
+    Laya's own mean-pooled encoder (laya.shortlist.embed_fn_from_agent) managed 0.31, about
+    chance, in 150 ms of GPU time."""
+    from neo.memory import embed
+
+    if stale.is_set():
+        return []
+    opts = [f"{i.label}: {_describe(task, i.app, i.caps, i.rec, now, short=True)}" for i in infos]
+    try:
+        vecs = embed.embed_texts([text, *opts])
+    except Exception as e:  # noqa: BLE001 - a shortlist is an optimisation, never a failure
+        print(f"[decide] no shortlist ({str(e)[:60]})")
+        return []
+    if vecs is None or len(vecs) != len(opts) + 1:
+        return []
+    sims = vecs[1:] @ vecs[0]  # unit vectors: cosine
+    keep = set(sorted(range(len(infos)), key=lambda j: -float(sims[j]))[:LAYA_POOL])
+    return [i for j, i in enumerate(infos) if j in keep]
+
+
 async def _laya_order(task: Task, text: str, used: list[_Info], now: float) -> list[tuple[_Info, float, float]]:
     """(info, score, laya_p), best first. Laya's pick counts only when it is sure."""
-    if len(used) < 2:
-        return [(i, i.prior, 0.0) for i in used]
     by_prior = sorted(used, key=lambda i: -i.prior)
-    shortlist = len(by_prior) > SHORTLIST_ABOVE
-    pool = by_prior if shortlist else by_prior[:LAYA_POOL]
-    _labels(pool)
-    short = len(pool) > LAYA_POOL  # up to LAYA_POOL full descriptions fit Laya's option budget
-    if shortlist:  # the state doubles as the shortlist's embedding query: the request alone
-        state: dict[str, Any] = {"request": text}
-    else:
-        state = {
-            "request": text,
-            "candidates": [
-                {
-                    "label": i.label,
-                    "evidence": _describe(task, i.app, i.caps, i.rec, now, short=False)[:160],
-                    "affinity": round(i.aff, 2),
-                    "record": i.rec,
-                }
-                for i in pool
-            ],
-        }
+    if len(used) < 2 or not _zero_shot_can_answer():  # nothing to choose between, or nobody to ask
+        return [(i, i.prior, 0.0) for i in by_prior]
+    _labels(by_prior)
+    pool = by_prior[:LAYA_POOL]
+    end = time.monotonic() + LAYA_TIMEOUT_S  # the shortlist and the question share one budget
+    if len(by_prior) > SHORTLIST_ABOVE and _embedder_ready():
+        pool = await _off_loop(_shortlist, task, text, by_prior, now, timeout=end - time.monotonic()) or pool
+    # The request is the whole state; each option is its app's short evidence. Restating every
+    # candidate's evidence in the state (as JSON) was worse and costlier on decide's own questions:
+    # Laya's pick right 0.59 vs 0.85, 277 vs 82 tokens, 82 vs 35 ms a question.
     q = {
         "app": {
             "type": "choice",
             "instructions": "Which app on this Mac should do the request?",
-            "criteria": {i.label: _describe(task, i.app, i.caps, i.rec, now, short) for i in pool},
+            "criteria": {i.label: _describe(task, i.app, i.caps, i.rec, now, short=True) for i in pool},
         }
     }
-    res = await _ask_laya(state, q, LAYA_POOL if shortlist else None)
-    probs = _choice(res, "app")
-    if shortlist and isinstance(res, dict):  # Laya kept LAYA_POOL of them; those form the pool
-        kept = ((res.get("shortlist") or {}).get("app") or {}).get("labels") or list(probs)
-        pool = [i for i in pool if i.label in set(kept)] or by_prior[:LAYA_POOL]
-    elif shortlist:
-        pool = by_prior[:LAYA_POOL]
-    sure = _sure(probs)
+    probs = _choice(await _ask_laya({"request": text}, q, end - time.monotonic()), "app")
+    if not _sure(probs):  # unsure or unavailable: the prior orders them
+        return [(i, i.prior, probs.get(i.label, 0.0)) for i in by_prior]
     scored = []
     for i in pool:
         p = probs.get(i.label, 0.0)
-        s = (max(p, 1e-3) ** LAYA_EXP) * (max(i.prior, 1e-6) ** PRIOR_EXP) if sure else i.prior
-        scored.append((i, s, p))
+        scored.append((i, (max(p, 1e-3) ** LAYA_EXP) * (max(i.prior, 1e-6) ** PRIOR_EXP), p))
     scored.sort(key=lambda t: -t[1])
     in_pool = {id(i) for i in pool}
-    rest = [(i, i.prior, 0.0) for i in by_prior if id(i) not in in_pool]
-    return scored + rest
+    return scored + [(i, i.prior, 0.0) for i in by_prior if id(i) not in in_pool]
 
 
-async def choose(kind: str, text: str, apps: list[App] | None = None) -> list[Candidate]:
-    """Ordered attempts for this request on this Mac (see the module docstring)."""
+async def choose(kind: str, text: str, apps: list[App] | None = None, *, said: str = "") -> list[Candidate]:
+    """Ordered attempts for this request on this Mac (see the module docstring). ``text`` is what
+    the decision reads (the user's words, or the query when they aren't known); ``said`` is the
+    user's own words when the caller has them - the only text the outcome ledger is ever told."""
+    _asked.set(None)  # a choose() that fails leaves nothing for a later outcome to be filed under
     task = TASKS.get(kind) or TASKS["other"]
     now = _now()
     if apps is None:
@@ -867,6 +992,8 @@ async def choose(kind: str, text: str, apps: list[App] | None = None) -> list[Ca
     out = seq[:MAX_CANDIDATES]
     if fallback and not any(c is fallback[0] for c in out):  # the fallback always keeps a slot
         out = out[: MAX_CANDIDATES - 1] + fallback
+    if said.strip():
+        _asked.set(_Asked(kind, " ".join(said.split()), frozenset(c.key for c in out)))
     return out
 
 
@@ -876,6 +1003,7 @@ __all__ = [
     "WEB",
     "Task",
     "Candidate",
+    "Kind",
     "app_key",
     "decide_kind",
     "choose",

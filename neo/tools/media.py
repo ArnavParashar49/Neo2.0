@@ -40,4 +40,7 @@ async def play_music(a: dict, c: ToolContext) -> str:
         return "Error: play what? (a song, artist or video name)"
     from neo.decide.media import play_best
 
-    return await play_best(query, text=c.user_text or query)
+    # Gemini Live hands over its arguments as the text while the user's words are still on the
+    # way: those aren't what the user said, so play_best decides by the query and reports nothing.
+    said = c.user_text if c.user_text.strip() and c.user_text != str(a) else ""
+    return await play_best(query, text=said)

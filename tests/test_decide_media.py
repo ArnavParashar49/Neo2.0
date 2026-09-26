@@ -124,10 +124,10 @@ class FakeEngine:
         self.cands = list(cands)
         self.records: list[tuple] = []
         self.priors: dict[str, float] = {}
-        self.chosen_with: list[tuple[str, str]] = []
+        self.chosen_with: list[tuple[str, str, str]] = []  # (kind, text it reads, the user's words)
 
-    async def choose(self, kind, text, apps=None):
-        self.chosen_with.append((kind, text))
+    async def choose(self, kind, text, apps=None, *, said=""):
+        self.chosen_with.append((kind, text, said))
         return list(self.cands)
 
     def record(self, kind, key, method, ok, reason=""):
@@ -554,10 +554,44 @@ async def test_play_best_moves_to_the_next_source_when_the_library_has_nothing(m
     monkeypatch.setattr(media, "_video_search", lambda q, n=12: _rows())
     out = await media.play_best("505", text="neo play 505")
     assert out == "Playing 505 (Official Video) in Fixture Browser"
-    assert engine.chosen_with == [("play_media", "neo play 505")]
+    assert engine.chosen_with == [("play_media", "neo play 505", "neo play 505")]
     assert engine.records[0] == ("play_media", BID, "script_search_play", False, "empty")  # blamed: it learns
     assert [r[2] for r in engine.records if r[1] == BID] == ["script_search_play"]  # its search box: skipped
     assert target.pressed == 0
+
+
+async def test_only_the_users_own_words_go_on_as_theirs(monkeypatch):
+    from neo.agent.registry import ToolContext, registry
+    from neo.tools import media as _tool  # noqa: F401 - registers play_music
+
+    got = []
+
+    async def play_best(query, text=""):
+        got.append((query, text))
+        return "Playing"
+
+    monkeypatch.setattr(media, "play_best", play_best)
+    args = {"query": "bohemian rhapsody"}
+    # Gemini Live before the user's words arrive: its arguments stand in for them
+    await registry().invoke("play_music", args, ToolContext(user_text=str(args)))
+    await registry().invoke("play_music", args, ToolContext())
+    await registry().invoke("play_music", args, ToolContext(user_text="neo play bohemian rhapsody"))
+    assert got == [
+        ("bohemian rhapsody", ""),
+        ("bohemian rhapsody", ""),
+        ("bohemian rhapsody", "neo play bohemian rhapsody"),
+    ]
+
+
+async def test_play_best_decides_by_the_query_when_the_words_are_unknown(monkeypatch, audio, engine):
+    engine.cands = [Candidate(None, 0.5, 0.0, "fallback: web", ("web",))]
+
+    def down(q, n=12):
+        raise OSError("offline")
+
+    monkeypatch.setattr(media, "_video_search", down)
+    await media.play_best("505")
+    assert engine.chosen_with == [("play_media", "505", "")]  # the query decides; nobody said it
 
 
 async def test_play_best_searches_the_named_app_for_the_words_only(monkeypatch, audio, osa, engine):

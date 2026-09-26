@@ -1738,7 +1738,8 @@ def _late_start(tried: list[tuple[Any, str, str]], base: set[int]) -> tuple[Any,
 
 async def play_best(query: str, text: str = "") -> str:
     """'Neo, play <query>': try the chosen apps in order (overall ~25 s), learn from each attempt,
-    and say what happened."""
+    and say what happened. ``text`` is the user's own words when known (never the query or tool
+    arguments): the decision reads them, and only they are reported for the reflex's learning."""
     from neo import privacy
     from neo.agent.confirm import ask_user
 
@@ -1746,7 +1747,7 @@ async def play_best(query: str, text: str = "") -> str:
     t0 = time.monotonic()
     q = await asyncio.to_thread(_strip_named, " ".join(str(query or "").split()))  # may scan the apps
     try:
-        cands = list(await _engine().choose(KIND, text or query))
+        cands = list(await _engine().choose(KIND, text or query, said=text))
     except Exception as e:  # noqa: BLE001
         print(f"[media] choosing an app failed ({str(e)[:80]}); trying the web")
         cands = []
