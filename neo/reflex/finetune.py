@@ -276,18 +276,12 @@ def train(args: argparse.Namespace, *, agent=None, lock=None) -> dict:
     print(f"{len(rows)} rows: " + ", ".join(f"{k} {int((y_intent == i).sum())}" for i, k in enumerate(_INTENTS)))
 
     # Features are cached *per text*, so editing the data only costs the new rows.
-    cache = settings().data_dir / "reflex_features_v2.npz"
     emb_by: dict[str, np.ndarray] = {}
     teach_by: dict[str, tuple[np.ndarray, np.ndarray]] = {}  # text → (destructive/needs_screen, zs)
-    if cache.exists() and not args.refresh:
-        z = np.load(cache, allow_pickle=True)
-        emb_by = dict(zip(z["texts"].tolist(), z["emb"], strict=True))
-        if "teacher_texts" in z.files:
-            t_texts = z["teacher_texts"].tolist()
-        else:  # first-format cache: teacher rows were indexed into `texts`
-            t_texts = [z["texts"][i] for i in z["teacher_idx"]]
-        teach_by = {t: (d, s) for t, d, s in zip(t_texts, z["teacher"], z["zs"], strict=True)}
-        print(f"cache: {len(emb_by)} embeddings, {len(teach_by)} teacher rows", file=sys.stderr)
+    if not args.refresh:
+        emb_by, teach_by = load_cache()
+        if emb_by:
+            print(f"cache: {len(emb_by)} embeddings, {len(teach_by)} teacher rows", file=sys.stderr)
     # Teacher rows: those already labelled first, so new data doesn't reshuffle the sample and
     # force hundreds of fresh ~130 ms zero-shot calls; the rest topped up at random.
     rng = np.random.default_rng(0)
@@ -331,14 +325,14 @@ def train(args: argparse.Namespace, *, agent=None, lock=None) -> dict:
                 if n % 100 == 0 and not quiet:
                     print(f"\r  teacher {n}/{len(need_teach)}", end="", file=sys.stderr)
             print(f"\n  {len(need_teach)} teacher labels in {time.time() - t0:.0f}s", file=sys.stderr)
-        np.savez(
-            cache,
-            texts=np.array(list(emb_by), dtype=object),
-            emb=np.vstack([emb_by[t] for t in emb_by]),
-            teacher_texts=np.array(list(teach_by), dtype=object),
-            teacher=np.vstack([teach_by[t][0] for t in teach_by]) if teach_by else np.zeros((0, 2), np.float32),
-            zs=np.vstack([teach_by[t][1] for t in teach_by]) if teach_by else np.zeros((0, len(_INTENTS)), np.float32),
-        )
+    # Only what today's data needs: sentences dropped from the data (compaction, a forget) leave
+    # the cache too, so it can't grow without limit or keep what the user asked NEO to forget.
+    live = set(texts)
+    stale = len(emb_by) + len(teach_by)
+    emb_by = {t: e for t, e in emb_by.items() if t in live}
+    teach_by = {t: v for t, v in teach_by.items() if t in live}
+    if need_emb or need_teach or stale != len(emb_by) + len(teach_by):
+        save_cache(emb_by, teach_by)
     blocks = {
         "emb": np.vstack([emb_by[t] for t in texts]),
         "teacher_idx": tidx,
@@ -478,3 +472,59 @@ def train(args: argparse.Namespace, *, agent=None, lock=None) -> dict:
 
 if __name__ == "__main__":
     main()
+
+
+# ---- the per-text feature cache -------------------------------------------------------------------
+def feature_cache():
+    return settings().data_dir / "reflex_features_v2.npz"
+
+
+def load_cache() -> tuple[dict[str, np.ndarray], dict[str, tuple[np.ndarray, np.ndarray]]]:
+    """The cached embeddings and teacher labels; empty if there is none or it's unreadable (a
+    cut-off write from an old version): the features are simply computed again."""
+    cache = feature_cache()
+    if not cache.exists():
+        return {}, {}
+    try:
+        z = np.load(cache, allow_pickle=True)  # NEO's own file in ~/.neo (mode 700)
+        emb_by = dict(zip([str(t) for t in z["texts"].tolist()], z["emb"], strict=True))
+        if "teacher_texts" in z.files:
+            t_texts = [str(t) for t in z["teacher_texts"].tolist()]
+        else:  # first-format cache: teacher rows were indexed into `texts`
+            t_texts = [str(z["texts"][i]) for i in z["teacher_idx"]]
+        teach_by = {t: (d, s) for t, d, s in zip(t_texts, z["teacher"], z["zs"], strict=True)}
+        return emb_by, teach_by
+    except Exception as e:  # noqa: BLE001
+        print(f"[reflex] feature cache unreadable ({str(e)[:80]}) — rebuilding it", file=sys.stderr)
+        return {}, {}
+
+
+def save_cache(emb_by: dict[str, np.ndarray], teach_by: dict[str, tuple[np.ndarray, np.ndarray]]) -> None:
+    """Written to a temporary file and swapped in, so a crash mid-write never leaves a broken cache."""
+    import os
+
+    cache = feature_cache()
+    tmp = cache.with_name(cache.name + ".tmp")
+    dim = next(iter(emb_by.values())).shape[-1] if emb_by else 0
+    with open(tmp, "wb") as f:
+        np.savez(
+            f,
+            texts=np.array(list(emb_by), dtype=str),
+            emb=np.vstack([emb_by[t] for t in emb_by]) if emb_by else np.zeros((0, dim), np.float32),
+            teacher_texts=np.array(list(teach_by), dtype=str),
+            teacher=np.vstack([teach_by[t][0] for t in teach_by]) if teach_by else np.zeros((0, 2), np.float32),
+            zs=np.vstack([teach_by[t][1] for t in teach_by]) if teach_by else np.zeros((0, len(_INTENTS)), np.float32),
+        )
+    os.replace(tmp, cache)
+
+
+def drop_from_cache(texts: set[str]) -> int:
+    """Remove these sentences' features from the cache (for forget). Returns how many."""
+    emb_by, teach_by = load_cache()
+    if not emb_by and not teach_by:
+        return 0
+    before = len(emb_by)
+    emb_by = {t: e for t, e in emb_by.items() if t not in texts}
+    teach_by = {t: v for t, v in teach_by.items() if t not in texts}
+    save_cache(emb_by, teach_by)
+    return before - len(emb_by)

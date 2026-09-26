@@ -36,7 +36,9 @@ _YES = re.compile(
 _NO = re.compile(
     r"\b(?:no|nope|don'?t|do not|cancel|stop|never ?mind|leave it|not yet|wait|hold on|abort)\b", re.I
 )
-_MAX_HISTORY = 40  # messages kept verbatim; older ones are dropped (memory keeps the gist)
+_MAX_HISTORY = 40  # messages sent to the model; older ones are dropped (memory keeps the gist)
+_HISTORY_CAP = 160  # messages held in memory at all; beyond this the oldest are summarised and let go
+_CHECKPOINT_MIN_ASKS = 4  # a periodic summary needs at least this many new requests
 _WAKE_PREFIX = re.compile(r"^\s*(?:hey|hi|ok|okay)?[\s,]*neo[\s,:!.-]*", re.I)
 _MAX_AGENT_JOBS = 2
 # "what time is it in Tokyo", "what's on my calendar tomorrow": a qualifier the no-argument tool
@@ -86,6 +88,9 @@ class Session:
     _pending_action: str = ""
     _pending_taint: list = field(default_factory=list)
     _answer_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    _summarized: int = 0  # history[:_summarized] is already in a session summary
+    _chunk_started: float = field(default_factory=time.time)
+    _bg: set = field(default_factory=set)  # background summaries in flight
     _hist_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     _agent_slots: asyncio.Semaphore = field(default_factory=lambda: asyncio.Semaphore(_MAX_AGENT_JOBS))
     jobs: dict[str, asyncio.Task] = field(default_factory=dict)
@@ -465,7 +470,49 @@ class Session:
 
     async def _remember(self, *msgs: Message) -> None:
         async with self._hist_lock:
+            # Screenshots are only useful to the run that took them: drop the pixels of anything
+            # older, or a long-running core ends up holding hundreds of MB of dead PNGs.
+            for m in self.history:
+                m.images = []
+                for r in m.tool_results:
+                    r.images = []
             self.history.extend(msgs)
+            if len(self.history) > _HISTORY_CAP:
+                cut = len(self.history) - _MAX_HISTORY
+                while cut < len(self.history) and self.history[cut].role != "user":
+                    cut += 1  # keep whole turns: never start on a tool result
+                gone = self.history[self._summarized : cut]
+                if sum(1 for m in gone if m.role == "user") >= 1:
+                    self._spawn(self._summarize(gone, self._chunk_started))
+                    self._chunk_started = time.time()
+                self.history = self.history[cut:]
+                self._summarized = max(0, self._summarized - cut)
+
+    def _spawn(self, coro) -> None:
+        t = asyncio.create_task(coro)
+        self._bg.add(t)
+        t.add_done_callback(self._bg.discard)
+
+    @staticmethod
+    async def _summarize(msgs: list[Message], started: float, budget_s: float = 8.0) -> str:
+        from neo.memory.summarize import summarize_session
+
+        try:
+            return await summarize_session(msgs, started, budget_s=budget_s)
+        except Exception as e:  # noqa: BLE001 — a summary is a nicety, never a failure
+            print(f"[memory] summary skipped: {str(e)[:80]}")
+            return ""
+
+    async def checkpoint(self, *, final: bool = False, budget_s: float = 8.0) -> str:
+        """Summarise what happened since the last summary, so a crash or a power cut loses at
+        most the last stretch. Runs periodically while idle, and once at shutdown."""
+        async with self._hist_lock:
+            chunk = self.history[self._summarized :]
+            if sum(1 for m in chunk if m.role == "user") < (1 if final else _CHECKPOINT_MIN_ASKS):
+                return ""
+            self._summarized, started = len(self.history), self._chunk_started
+            self._chunk_started = time.time()
+        return await self._summarize(chunk, started, budget_s)
 
     def _trimmed(self) -> list[Message]:
         """Recent history for the model. Tool results older than the last two turns are stubbed —

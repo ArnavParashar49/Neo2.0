@@ -14,6 +14,7 @@ import os
 import re
 import shlex
 import socket
+import unicodedata
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -51,12 +52,14 @@ def _variants(path: str | os.PathLike) -> list[Path]:
     return out
 
 
+def _fold(part: str) -> str:
+    # APFS ignores case and Unicode normalisation: ~/.SSH is ~/.ssh.
+    return unicodedata.normalize("NFC", part).casefold()
+
+
 def _under(p: Path, root: Path) -> bool:
-    try:
-        p.relative_to(root)
-        return True
-    except ValueError:
-        return False
+    pp, rp = [_fold(x) for x in p.parts], [_fold(x) for x in root.parts]
+    return pp[: len(rp)] == rp
 
 
 def is_secret(path: str | os.PathLike) -> bool:
@@ -120,12 +123,25 @@ _READ_ONLY_CMDS = {
     "system_profiler", "sysctl", "lsof", "netstat", "vm_stat", "nl", "column", "true", "mkdir",
     "touch", "say", "sleep",
 }
+# For every shell command: git may not start programs from a repository's own config (a
+# downloaded folder can carry a .git/config that sets them).
+GIT_SAFE_ENV = {
+    "GIT_CONFIG_COUNT": "2",
+    "GIT_CONFIG_KEY_0": "core.fsmonitor",
+    "GIT_CONFIG_VALUE_0": "false",
+    "GIT_CONFIG_KEY_1": "core.hooksPath",
+    "GIT_CONFIG_VALUE_1": "/dev/null",
+    "GIT_PAGER": "cat",
+    "PAGER": "cat",
+    "GIT_TERMINAL_PROMPT": "0",
+}
 _SEPARATORS = {"|", "||", "&&", ";"}
 _FIND_ACTIONS = {"-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprint0", "-fprintf", "-fls"}
-_GIT_READ = {"status", "log", "diff", "show", "branch", "remote", "rev-parse", "ls-files", "blame", "describe", "shortlog", "tag"}
+# No diff/show/blame/log -p: they run a repo's configured diff drivers (textconv, external diff).
+_GIT_READ = {"status", "log", "branch", "remote", "rev-parse", "ls-files", "describe", "shortlog", "tag"}
+_GIT_DIFFING = {"-p", "-u", "--patch", "--stat", "--numstat", "--shortstat", "--word-diff", "--ext-diff", "--textconv", "--full-diff", "--dirstat", "--summary", "--raw", "--cc", "-m", "--graph"}
 _BREW_READ = {"list", "ls", "info", "search", "outdated", "deps", "leaves", "config", "--version", "-v"}
 _PIP_READ = {"list", "show", "freeze", "--version", "-V"}
-_DEFAULTS_READ = {"read", "read-type", "domains", "find"}
 
 
 def _words(cmd: str) -> list[str] | None:
@@ -163,9 +179,15 @@ def _simple_ok(argv: list[str]) -> bool:
         return _paths_ok(plain[:1], recursive=False, write=False)  # names only, never contents
     if name == "git":
         rest = list(args)
-        while rest and rest[0] in ("-C", "--no-pager", "-c"):
-            rest = rest[2:] if rest[0] in ("-C", "-c") else rest[1:]
-        if not rest or rest[0] not in _GIT_READ or any(a.startswith("--output") or a == "-o" for a in rest):
+        while rest and rest[0] in ("-C", "--no-pager"):
+            rest = rest[2:] if rest[0] == "-C" else rest[1:]
+        # -c sets config (diff.external, core.pager, core.fsmonitor… run programs); -p/--paginate
+        # starts the pager; --exec-path/--git-dir/--config-env point git at other code.
+        if not rest or rest[0].startswith("-"):
+            return False
+        if rest[0] not in _GIT_READ or any(a.startswith(("--output", "--exec", "--config", "--upload", "--receive")) or a == "-o" for a in rest):
+            return False
+        if any(a in _GIT_DIFFING or a.startswith(("--stat", "--word-diff", "--color-moved", "--ext-diff")) for a in rest):
             return False
         sub, extra = rest[0], [a for a in rest[1:] if not a.startswith("-")]
         if sub in ("branch", "tag", "remote") and (extra or {"-d", "-D", "-m", "-M", "--delete", "-f"} & set(rest)):
@@ -176,7 +198,11 @@ def _simple_ok(argv: list[str]) -> bool:
     if name in ("pip", "pip3"):
         return bool(args) and args[0] in _PIP_READ
     if name == "defaults":
-        return bool(args) and args[0] in _DEFAULTS_READ
+        # Apple's own preferences only: other apps keep tokens in theirs.
+        return (
+            len(args) >= 2 and args[0] in ("read", "read-type")
+            and (args[1].startswith("com.apple.") or args[1] in ("-g", "NSGlobalDomain"))
+        ) or args[:1] == ["domains"]
     if name == "pmset":
         return args[:1] == ["-g"]
     if name == "sysctl":
@@ -194,10 +220,15 @@ def _simple_ok(argv: list[str]) -> bool:
         for f in flags
     ):
         return False  # reads every file below, hidden ones (.env) included
-    if name == "rg" and any(f in ("--hidden", "--no-ignore", "-u", "-uu", "-uuu", "-.") for f in flags):
-        return _paths_ok(plain[1:] or ["."], recursive=True, write=False)
     if name == "rg":
-        return _paths_ok(plain[1:], recursive=False, write=False)
+        # rg walks directories (the home folder when given none) and reads every file it finds,
+        # keys and credentials included: only explicit files run without asking.
+        targets = plain[1:]
+        if not targets or any(os.path.isdir(os.path.expanduser(t)) for t in targets):
+            return False
+        return _paths_ok(targets, recursive=False, write=False)
+    if name == "diff" and any(f in ("-r", "--recursive") or (not f.startswith("--") and "r" in f) for f in flags):
+        return False  # compares (and prints) every file below two folders
     if name in ("grep", "egrep", "fgrep"):
         return _paths_ok(plain[1:], recursive=False, write=False)
     return _paths_ok(plain, recursive=False, write=False)
@@ -246,7 +277,10 @@ _SCRIPT_ACTS = re.compile(
     r"shut\s*down|log\s*out|sleep|play|pause|activate|launch|reveal|select|print|display|create|"
     r"import|export|convert|copy|put|write|read|mount|eject|update|forward|reply|redirect|mark|"
     r"keystroke|key\s+code|click|perform|tell\s+process|choose|beep|say|lock|install|reload|"
-    r"refresh|go|search|add|attach|sign|accept|decline|join|leave|post|submit|buy|move)\b",
+    r"refresh|go|search|add|attach|sign|accept|decline|join|leave|post|submit|buy|move|enable|"
+    r"disable|toggle|start|stop|resume|advance|increase|decrease|next|previous|skip|mute|unmute|"
+    r"rename|clean|restore|sync|backup|download|upload|share|log|run|launch|quit|hide|show|"
+    r"bring|zoom|minimi[sz]e|miniaturize|collapse|expand|check|uncheck|mount|unmount)\b",
     re.I,
 )
 
@@ -267,9 +301,21 @@ _COMMIT = re.compile(
 )
 
 
-def commits(label: str) -> bool:
-    """A button that sends, buys, deletes, grants or publishes something."""
-    return bool(_COMMIT.search(label or ""))
+_GENERIC_OK = re.compile(r"^\s*(?:ok(?:ay)?|yes|continue|proceed|apply|done|confirm|i\s+agree|got\s+it|allow)\s*[.!]?\s*$", re.I)
+_CONSEQUENCE = re.compile(
+    r"\b(?:delete|erase|remove|permanently|cannot\s+be\s+undone|can'?t\s+be\s+undone|overwrite|replace|"
+    r"discard|send|pay|purchase|buy|order|transfer|uninstall|reset|wipe|format|sign\s+out|log\s+out|"
+    r"unsubscribe|close\s+account|deactivate|publish|post|share|grant|allow|access)\b",
+    re.I,
+)
+
+
+def commits(label: str, context: str = "") -> bool:
+    """A button that sends, buys, deletes, grants or publishes something — or a plain "OK" /
+    "Continue" in a dialog whose text says it does."""
+    if _COMMIT.search(label or ""):
+        return True
+    return bool(_GENERIC_OK.match(label or "") and _CONSEQUENCE.search(context or ""))
 
 
 # ---- URLs ------------------------------------------------------------------------------------
@@ -306,12 +352,18 @@ def open_risk(target: str) -> str:
 
 
 def url_carries_data(url: str) -> bool:
-    """Long query strings or path segments: the shape of a URL that smuggles data out."""
+    """The shape of a URL that smuggles data out: a long query, fragment or path segment, or a
+    long or random-looking subdomain (data can ride in the hostname as well)."""
     try:
         u = urlsplit(url if "://" in url else "https://" + url)
     except ValueError:
         return True
-    return len(u.query) + len(u.fragment) > 120 or any(len(seg) > 80 for seg in u.path.split("/"))
+    if len(u.query) + len(u.fragment) > 48 or any(len(seg) > 48 for seg in u.path.split("/")):
+        return True
+    labels = (u.hostname or "").split(".")[:-2]  # everything left of the registrable domain
+    return any(
+        len(lb) > 24 or (len(lb) >= 12 and re.search(r"\d", lb) and re.search(r"[a-z]", lb)) for lb in labels
+    )
 
 
 def private_host(url: str) -> str:

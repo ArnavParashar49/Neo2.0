@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -85,17 +86,28 @@ class Playbook:
 
 
 class Store:
+    """Thread-safe: requests run concurrently (worker threads and the event loop), so every
+    public method holds one lock for its SQL. Embeddings are computed before taking it — the
+    lock is never held while a model runs."""
+
     def __init__(self, path: Path | None = None) -> None:
         self.path = path or settings().memory_db
-        self._db = sqlite3.connect(self.path, check_same_thread=False)
-        self._db.executescript(_SCHEMA)
+        self._lock = threading.RLock()
+        self._db = sqlite3.connect(self.path, check_same_thread=False, timeout=5)
+        with self._lock:
+            self._db.execute("PRAGMA journal_mode=WAL")
+            self._db.execute("PRAGMA busy_timeout=5000")
+            self._db.executescript(_SCHEMA)
 
     # ---- vectors ---------------------------------------------------------------------
-    def _put_vec(self, table: str, row_id: int, text: str) -> None:
+    @staticmethod
+    def _embed(text: str) -> np.ndarray | None:
         v = _emb.embed_texts([text])
-        if v is None:
-            return
-        self._db.execute(f"INSERT OR REPLACE INTO {table}(id, vec) VALUES (?, ?)", (row_id, v[0].tobytes()))
+        return None if v is None else v[0]
+
+    def _put_vec(self, table: str, row_id: int, vec: np.ndarray | None) -> None:
+        if vec is not None:
+            self._db.execute(f"INSERT OR REPLACE INTO {table}(id, vec) VALUES (?, ?)", (row_id, vec.tobytes()))
 
     def _load_vecs(self, table: str) -> tuple[list[int], np.ndarray]:
         rows = self._db.execute(f"SELECT id, vec FROM {table}").fetchall()
@@ -111,43 +123,60 @@ class Store:
             return [], np.zeros((0, _emb.DIM), dtype=np.float32)
         return ids, np.vstack(vecs)
 
-    def _semantic(self, table: str, query: str, k: int) -> list[tuple[int, float]]:
-        q = _emb.embed_texts([query])
+    def _semantic(self, table: str, q: np.ndarray | None, k: int) -> list[tuple[int, float]]:
         if q is None:
             return []
         ids, mat = self._load_vecs(table)
-        return [(ids[i], s) for i, s in _emb.cosine_top(q[0], mat, k)]
+        return [(ids[i], s) for i, s in _emb.cosine_top(q, mat, k)]
 
     # ---- write -----------------------------------------------------------------------
     def remember(self, text: str, kind: Kind = "note", key: str = "") -> int:
         now = time.time()
         text = text.strip()
-        if key:  # keyed facts upsert (e.g. profile.city)
-            row = self._db.execute("SELECT id FROM memory WHERE kind=? AND key=?", (kind, key)).fetchone()
-            if row:
-                self._db.execute("UPDATE memory SET text=?, updated=? WHERE id=?", (text, now, row[0]))
-                self._put_vec("memory_vec", int(row[0]), text)
-                self._db.commit()
-                return int(row[0])
-        dup = self._db.execute(
-            "SELECT id FROM memory WHERE kind=? AND lower(text)=lower(?)", (kind, text)
-        ).fetchone()
-        if dup:
-            return int(dup[0])
-        cur = self._db.execute(
-            "INSERT INTO memory(kind,key,text,created,updated) VALUES (?,?,?,?,?)",
-            (kind, key, text, now, now),
-        )
-        mid = int(cur.lastrowid or 0)
-        self._put_vec("memory_vec", mid, text)
-        self._db.commit()
-        return mid
+        vec = self._embed(text)
+        with self._lock:
+            if key:  # keyed facts upsert (e.g. profile.city)
+                row = self._db.execute("SELECT id FROM memory WHERE kind=? AND key=?", (kind, key)).fetchone()
+                if row:
+                    self._db.execute("UPDATE memory SET text=?, updated=? WHERE id=?", (text, now, row[0]))
+                    self._put_vec("memory_vec", int(row[0]), vec)
+                    self._db.commit()
+                    return int(row[0])
+            dup = self._db.execute(
+                "SELECT id FROM memory WHERE kind=? AND lower(text)=lower(?)", (kind, text)
+            ).fetchone()
+            if dup:
+                return int(dup[0])
+            cur = self._db.execute(
+                "INSERT INTO memory(kind,key,text,created,updated) VALUES (?,?,?,?,?)",
+                (kind, key, text, now, now),
+            )
+            mid = int(cur.lastrowid or 0)
+            self._put_vec("memory_vec", mid, vec)
+            self._db.commit()
+            return mid
 
     def forget(self, memory_id: int) -> bool:
-        n = self._db.execute("DELETE FROM memory WHERE id=?", (memory_id,)).rowcount
-        self._db.execute("DELETE FROM memory_vec WHERE id=?", (memory_id,))
-        self._db.commit()
-        return n > 0
+        with self._lock:
+            n = self._db.execute("DELETE FROM memory WHERE id=?", (memory_id,)).rowcount
+            self._db.execute("DELETE FROM memory_vec WHERE id=?", (memory_id,))
+            self._db.commit()
+            return n > 0
+
+    def forget_all(self) -> dict[str, int]:
+        """Delete every memory, playbook and session summary, and reclaim the space on disk."""
+        with self._lock:
+            counts = {
+                t: int(self._db.execute(f"SELECT count(*) FROM {t}").fetchone()[0])
+                for t in ("memory", "playbook", "sessions")
+            }
+            for t in ("memory", "memory_vec", "playbook", "playbook_vec", "sessions"):
+                self._db.execute(f"DELETE FROM {t}")
+            self._db.execute("INSERT INTO memory_fts(memory_fts) VALUES('rebuild')")
+            self._db.commit()
+            self._db.execute("VACUUM")
+            self._db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            return counts
 
     # ---- read ------------------------------------------------------------------------
     def _keyword(self, query: str, limit: int) -> list[int]:
@@ -166,68 +195,73 @@ class Store:
 
     def recall(self, query: str, limit: int = 8) -> list[Memory]:
         """Hybrid recall: keyword (BM25) and semantic ranks fused (reciprocal-rank fusion)."""
-        kw = self._keyword(query, limit * 2)
         # The semantic path only runs for real queries and only keeps clearly related rows.
-        sem = []
-        if len([t for t in _tokens(query) if len(t) > 2]) >= 2:
-            sem = [i for i, s in self._semantic("memory_vec", query, limit * 2) if s >= 0.4]
-        score: dict[int, float] = {}
-        for rank, mid in enumerate(kw):
-            score[mid] = score.get(mid, 0.0) + 1.0 / (10 + rank)
-        for rank, mid in enumerate(sem):
-            score[mid] = score.get(mid, 0.0) + 1.0 / (10 + rank)
-        ids = [mid for mid, _ in sorted(score.items(), key=lambda kv: -kv[1])[:limit]]
-        if not ids:
-            return []
-        marks = ",".join("?" * len(ids))
-        rows = self._db.execute(
-            f"SELECT id, kind, key, text, created FROM memory WHERE id IN ({marks})", ids
-        ).fetchall()
-        by_id = {int(r[0]): Memory(*r) for r in rows}
-        self._db.execute(f"UPDATE memory SET uses=uses+1 WHERE id IN ({marks})", ids)
-        self._db.commit()
-        return [by_id[i] for i in ids if i in by_id]
+        q = self._embed(query) if len([t for t in _tokens(query) if len(t) > 2]) >= 2 else None
+        with self._lock:
+            kw = self._keyword(query, limit * 2)
+            sem = [i for i, s in self._semantic("memory_vec", q, limit * 2) if s >= 0.4]
+            score: dict[int, float] = {}
+            for rank, mid in enumerate(kw):
+                score[mid] = score.get(mid, 0.0) + 1.0 / (10 + rank)
+            for rank, mid in enumerate(sem):
+                score[mid] = score.get(mid, 0.0) + 1.0 / (10 + rank)
+            ids = [mid for mid, _ in sorted(score.items(), key=lambda kv: -kv[1])[:limit]]
+            if not ids:
+                return []
+            marks = ",".join("?" * len(ids))
+            rows = self._db.execute(
+                f"SELECT id, kind, key, text, created FROM memory WHERE id IN ({marks})", ids
+            ).fetchall()
+            by_id = {int(r[0]): Memory(*r) for r in rows}
+            self._db.execute(f"UPDATE memory SET uses=uses+1 WHERE id IN ({marks})", ids)
+            self._db.commit()
+            return [by_id[i] for i in ids if i in by_id]
 
     def by_kind(self, kind: Kind, limit: int = 40) -> list[Memory]:
-        rows = self._db.execute(
-            "SELECT id, kind, key, text, created FROM memory WHERE kind=? ORDER BY updated DESC LIMIT ?",
-            (kind, limit),
-        ).fetchall()
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT id, kind, key, text, created FROM memory WHERE kind=? ORDER BY updated DESC LIMIT ?",
+                (kind, limit),
+            ).fetchall()
         return [Memory(*r) for r in rows]
 
     # ---- playbooks ---------------------------------------------------------------------
     def save_playbook(self, goal: str, steps: list[dict[str, Any]], answer: str) -> int:
         """Store the tool sequence of a successful task. Near-duplicate goals replace the old entry."""
         goal = goal.strip()
-        for pid, sim in self._semantic("playbook_vec", goal, 1):
-            if sim >= 0.92:
-                self._db.execute(
-                    "UPDATE playbook SET steps=?, answer=?, created=? WHERE id=?",
-                    (json.dumps(steps), answer[:500], time.time(), pid),
-                )
-                self._db.commit()
-                return pid
-        cur = self._db.execute(
-            "INSERT INTO playbook(goal, steps, answer, created) VALUES (?,?,?,?)",
-            (goal, json.dumps(steps), answer[:500], time.time()),
-        )
-        pid = int(cur.lastrowid or 0)
-        self._put_vec("playbook_vec", pid, goal)
-        self._db.commit()
-        return pid
+        vec = self._embed(goal)
+        with self._lock:
+            for pid, sim in self._semantic("playbook_vec", vec, 1):
+                if sim >= 0.92:
+                    self._db.execute(
+                        "UPDATE playbook SET steps=?, answer=?, created=? WHERE id=?",
+                        (json.dumps(steps), answer[:500], time.time(), pid),
+                    )
+                    self._db.commit()
+                    return pid
+            cur = self._db.execute(
+                "INSERT INTO playbook(goal, steps, answer, created) VALUES (?,?,?,?)",
+                (goal, json.dumps(steps), answer[:500], time.time()),
+            )
+            pid = int(cur.lastrowid or 0)
+            self._put_vec("playbook_vec", pid, vec)
+            self._db.commit()
+            return pid
 
     def similar_playbooks(self, goal: str, k: int = 2, min_sim: float = 0.6) -> list[Playbook]:
-        hits = [(pid, s) for pid, s in self._semantic("playbook_vec", goal, k) if s >= min_sim]
-        out = []
-        for pid, s in hits:
-            r = self._db.execute(
-                "SELECT id, goal, steps, answer, created FROM playbook WHERE id=?", (pid,)
-            ).fetchone()
-            if r:
-                out.append(Playbook(int(r[0]), r[1], json.loads(r[2]), r[3] or "", r[4], s))
-                self._db.execute("UPDATE playbook SET uses=uses+1 WHERE id=?", (pid,))
-        self._db.commit()
-        return out
+        q = self._embed(goal)
+        with self._lock:
+            hits = [(pid, s) for pid, s in self._semantic("playbook_vec", q, k) if s >= min_sim]
+            out = []
+            for pid, s in hits:
+                r = self._db.execute(
+                    "SELECT id, goal, steps, answer, created FROM playbook WHERE id=?", (pid,)
+                ).fetchone()
+                if r:
+                    out.append(Playbook(int(r[0]), r[1], json.loads(r[2]), r[3] or "", r[4], s))
+                    self._db.execute("UPDATE playbook SET uses=uses+1 WHERE id=?", (pid,))
+            self._db.commit()
+            return out
 
     def playbook_context(self, goal: str) -> str:
         pbs = self.similar_playbooks(goal)
@@ -243,17 +277,19 @@ class Store:
 
     # ---- sessions ----------------------------------------------------------------------
     def add_session_summary(self, summary: str, started: float, ended: float | None = None) -> int:
-        cur = self._db.execute(
-            "INSERT INTO sessions(started, ended, summary) VALUES (?,?,?)",
-            (started, ended or time.time(), summary.strip()),
-        )
-        self._db.commit()
-        return int(cur.lastrowid or 0)
+        with self._lock:
+            cur = self._db.execute(
+                "INSERT INTO sessions(started, ended, summary) VALUES (?,?,?)",
+                (started, ended or time.time(), summary.strip()),
+            )
+            self._db.commit()
+            return int(cur.lastrowid or 0)
 
     def recent_sessions(self, n: int = 3) -> list[tuple[float, str]]:
-        rows = self._db.execute(
-            "SELECT started, summary FROM sessions ORDER BY started DESC LIMIT ?", (n,)
-        ).fetchall()
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT started, summary FROM sessions ORDER BY started DESC LIMIT ?", (n,)
+            ).fetchall()
         return [(float(r[0]), r[1]) for r in rows if r[1]]
 
     # ---- prompt --------------------------------------------------------------------------
@@ -281,7 +317,8 @@ class Store:
         return "\n".join(parts)
 
     def count(self) -> int:
-        return int(self._db.execute("SELECT count(*) FROM memory").fetchone()[0])
+        with self._lock:
+            return int(self._db.execute("SELECT count(*) FROM memory").fetchone()[0])
 
 
 def _short_args(args: dict[str, Any]) -> str:

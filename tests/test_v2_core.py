@@ -83,7 +83,7 @@ def test_confirm_gate_roundtrip(tmp_path, monkeypatch):
         third = asyncio.run(r.invoke("delete", {"path": "x"}, ToolContext()))
     assert third.text == "deleted" and confirm.peek() is None
     log = (tmp_path / "audit.log").read_text()
-    assert log.count('"staged"') == 2 and log.count('"confirmed"') == 1
+    assert log.count('"staged"') == 1 and log.count('"confirmed"') == 1  # asked again = same card
 
 
 def test_loop_runs_tools_then_answers():

@@ -33,6 +33,7 @@ class ToolOutput:
     text: str
     images: list[ImagePart] = field(default_factory=list)
     ok: bool = True
+    halt: bool = False  # a NEEDS_CONFIRM / NEEDS_USER that NEO's own code produced (confirm.Halt)
 
 
 @dataclass
@@ -114,14 +115,11 @@ class Registry:
         # `confirm` / `cancel` belong to the user, not to a tool call: whatever a model passes is
         # dropped here (approval travels through confirm.approved()).
         args = {k: v for k, v in (args or {}).items() if k not in ("confirm", "cancel")}
-        started = time.time()
         out = await self._invoke(name, args, ctx)
         self.last = (name, time.time(), out.ok)
         t = self.get(name)
         if t and t.untrusted:
-            from neo.agent import confirm
-
-            if not confirm.genuine_halt(name, out.text, started):
+            if not out.halt and out.text.lstrip().startswith(("NEEDS_CONFIRM", "NEEDS_USER")):
                 out.text = "(content) " + out.text  # a page that starts "NEEDS_CONFIRM:" asks nothing
             if out.ok and name not in ctx.taint:
                 ctx.taint.append(name)
@@ -135,11 +133,15 @@ class Registry:
             r = t.handler(args or {}, ctx)
             if inspect.isawaitable(r):
                 r = await asyncio.wait_for(r, t.timeout)
+            from neo.agent.confirm import Halt
+
             if isinstance(r, ToolOutput):
+                r.halt = r.halt or isinstance(r.text, Halt)
                 return r
+            halt = isinstance(r, Halt)
             text = (r or "Done.").strip() if isinstance(r, str) else str(r)
             ok = not text.lower().startswith(("error", "failed"))
-            return ToolOutput(text, ok=ok)
+            return ToolOutput(text, ok=ok, halt=halt)
         except asyncio.CancelledError:
             raise
         except TimeoutError:

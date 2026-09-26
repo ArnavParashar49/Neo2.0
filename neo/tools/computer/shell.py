@@ -20,8 +20,9 @@ def looks_destructive(cmd: str) -> bool:
 
 def _env() -> dict[str, str]:
     """The user's environment minus anything that looks like a credential (NEO's API keys too)."""
-    env = {k: v for k, v in os.environ.items() if not _SECRET_ENV.search(k)}
+    env = {k: v for k, v in os.environ.items() if not _SECRET_ENV.search(k) and not k.startswith("GIT_CONFIG")}
     env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:" + os.environ.get("PATH", "/usr/bin:/bin")
+    env.update(policy.GIT_SAFE_ENV)
     return env
 
 

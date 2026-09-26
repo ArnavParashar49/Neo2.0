@@ -103,6 +103,42 @@ the words, hotkey for keys like return or cmd+s — and don't create a new note 
 agent_task is for things that need looking at the screen or several steps."""
 
 
+_COMMON = {
+    "should", "ahead", "about", "after", "reading", "which", "their", "there", "these", "those", "with",
+    "from", "that", "this", "what", "your", "into", "open", "press", "click", "command", "file", "files",
+    "write", "edit", "move", "send", "email", "message", "remember", "memory", "forget", "fetch", "link",
+    "carries", "data", "runs", "line", "hidden", "settings", "folder", "outside", "trash", "return",
+    "submit", "form", "page", "applescript", "script", "enter",
+}
+
+
+def _distinctive(text: str) -> tuple[set[str], set[str]]:
+    """Words that identify an action: strong ones (quoted labels, file names, addresses, paths,
+    numbers) and weaker ones (other uncommon words)."""
+    strong: set[str] = set()
+    for a, b in re.findall(r"“([^”]{2,60})”|\"([^\"]{2,60})\"", text):
+        strong.add((a or b).strip().lower())
+    weak: set[str] = set()
+    for w in re.findall(r"[\w.@/~+-]{4,}", text):
+        lw = w.lower().strip(".-")
+        if lw in _COMMON or lw.isdigit() or len(lw) < 4:
+            continue
+        (strong if re.search(r"[.@/~\d]", lw) else weak).add(lw)
+    return strong, weak
+
+
+def _failure_kind(e: BaseException) -> str:
+    """"quota" (the day's free Live minutes are gone), "network", or "other"."""
+    msg = str(e).lower()
+    if "429" in msg or "resource_exhausted" in msg or "quota" in msg or "rate limit" in msg:
+        return "quota"
+    if isinstance(e, (TimeoutError, OSError, ConnectionError)) or any(
+        k in msg for k in ("getaddrinfo", "connect", "network", "timed out", "unreachable", "ssl")
+    ):
+        return "network"
+    return "other"
+
+
 def _ago(now: float, t: float) -> str:
     return f"{now - t:.1f}s ago" if t else "never"
 
@@ -194,6 +230,11 @@ class LiveVoice:
         self._taint: list[str] = []
         self._utt_started = 0.0  # when the user began their current sentence
         self._last_answer: tuple[float, str] = (0.0, "")  # (when, result) of the latest yes/no
+        # Called with (kind, why) when Live keeps failing — "quota" or "network" — so the app can
+        # say so and switch to the on-device voice for a while.
+        self.on_down: Callable[[str, str], Awaitable[None]] | None = None
+        self._connect_failures = 0
+        self._down_reported = 0.0
         # Keystrokes, clicks and app switches run one at a time in the order the model asked:
         # non-blocking calls would otherwise race ("type X" and "press enter").
         self._ui_lock = asyncio.Lock()
@@ -339,9 +380,16 @@ class LiveVoice:
             except Exception as e:  # noqa: BLE001 — quota/network/throttle; stay usable, retry on next wake
                 why = "timed out" if isinstance(e, TimeoutError) else str(e)[:120]
                 print(f"[live] connect failed: {why}")
+                self._connect_failures += 1
+                kind = _failure_kind(e)
                 await bus().note(f"Voice session failed ({why[:60]}) — say “Hey Neo” to retry")
                 await bus().set_state(NeoState.IDLE)
+                if (kind == "quota" or self._connect_failures >= 2) and self.on_down is not None:
+                    if time.time() - self._down_reported > 300:
+                        self._down_reported = time.time()
+                        asyncio.create_task(self.on_down(kind, why))
                 return
+            self._connect_failures = 0
             self._live_cm, self._live = cm, live
             self._last_activity = self._session_open = self._last_user_speech = time.time()
             self._turn_open, self._utterance = False, ""
@@ -555,7 +603,8 @@ class LiveVoice:
                 said = "".join(user_buf)
                 p = confirm.peek()
                 if said and p is not None and self._utt_started > p.staged_at:
-                    if (ans := answer_of(said)) is not None:
+                    ans = answer_of(said)
+                    if ans is False or (ans is True and self._voiced(p)):
                         asyncio.create_task(self._answer_by_voice(ans, said))
                 if user_buf:
                     await bus().say("".join(user_buf), role="user", final=True)
@@ -616,7 +665,14 @@ class LiveVoice:
         p = confirm.peek()
         heard = answer_of(asked) if (p is not None and asked and self._utt_started > p.staged_at) else None
         try:
-            if heard is not None and fc.name in (p.tool, "agent_task"):
+            if heard is True and fc.name in (p.tool, "agent_task") and not self._voiced(p):
+                # A "yes" to something — but NEO never read this question out. It only counts once
+                # the user has heard what they're agreeing to.
+                result = (
+                    f"NEEDS_CONFIRM: the user hasn't heard this question yet. Ask them exactly this, in "
+                    f"their language, and wait for their answer: {p.summary} — should I go ahead?"
+                )
+            elif heard is not None and fc.name in (p.tool, "agent_task"):
                 # The user's own "yes"/"no" to the question on the table (the model re-asking for the
                 # action, or wrapping it in agent_task): answer it from their words.
                 reply = await self._agent_session.answer(heard, text=asked)
@@ -757,6 +813,17 @@ class LiveVoice:
             record(lab["text"], intent, tool, source="live")
         except Exception as e:  # noqa: BLE001
             print(f"[reflex] couldn't record an example: {str(e)[:80]}")
+
+    def _voiced(self, p) -> bool:
+        """Did NEO put this question to the user out loud after it was staged? A spoken "yes"
+        only answers a question the user actually heard — not whatever happens to be pending."""
+        said = " ".join(text for when, who, text in self._dialog if who == "NEO" and when >= p.staged_at).lower()
+        if not said:
+            return False
+        strong, weak = _distinctive(f"{p.summary} {p.detail}")
+        if strong:
+            return any(t in said for t in strong)
+        return not weak or any(t in said for t in weak)
 
     def _new_question(self) -> None:
         self._lookups, self._seen_calls = {}, {}

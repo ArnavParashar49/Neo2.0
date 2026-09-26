@@ -163,9 +163,10 @@ async def browser_click(a: dict, c: ToolContext) -> str:
 
     page = await _b.page()
     loc = _locator(page, a["target"], a.get("role", ""))
-    label = str(a["target"]) + " " + await _label(loc)
-    if policy.commits(label):
-        gate = confirm.gated("browser_click", a, f"click “{label.strip()[:60]}” on {_host(page.url)}")
+    own = await _label(loc)
+    label = str(a["target"]) + " " + own
+    if policy.commits(label) or policy.commits(own.strip() or str(a["target"]), await _surroundings(loc)):
+        gate = confirm.gated("browser_click", a, f"click “{label.strip()[:60]}” on {_host(page.url)}", detail=page.url)
         if isinstance(gate, str):
             return gate
     try:
@@ -193,7 +194,7 @@ async def browser_type(a: dict, c: ToolContext) -> str:
     loc = _locator(page, a["target"])
     if confirm.as_bool(a.get("submit")) and not await _is_search(loc):
         gate = confirm.gated(
-            "browser_type", a, f"submit the form on {_host(page.url)}", detail=f"{a['target']}: {a['text']}"
+            "browser_type", a, f"submit the form on {_host(page.url)}", detail=f"{page.url}\n{a['target']}: {a['text']}"
         )
         if isinstance(gate, str):
             return gate
@@ -221,7 +222,7 @@ async def browser_press(a: dict, c: ToolContext) -> str:
     if str(a["key"]).split("+")[-1].lower() in ("enter", "return", "numpadenter"):
         focused = page.locator("*:focus").first
         if await focused.count() and not await _is_search(focused):
-            gate = confirm.gated("browser_press", a, f"press Enter on {_host(page.url)} — it submits the form")
+            gate = confirm.gated("browser_press", a, f"press Enter on {_host(page.url)} — it submits the form", detail=page.url)
             if isinstance(gate, str):
                 return gate
     await page.keyboard.press(a["key"])
@@ -291,17 +292,32 @@ async def _label(loc) -> str:
         return ""
 
 
+async def _surroundings(loc) -> str:
+    """The text of the dialog or form a button sits in ("Delete this account? … OK")."""
+    try:
+        return await loc.first.evaluate(
+            "e => { const c = e.closest('dialog,[role=dialog],[role=alertdialog],form');"
+            " return c ? c.innerText.slice(0, 1500) : ''; }",
+            timeout=1500,
+        )
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 async def _is_search(loc) -> bool:
-    """A search box: submitting it only searches."""
+    """A search box: submitting it only searches. Judged by what the field says it is — not by
+    the form's method (every form without method="post" reports "get")."""
     try:
         return bool(
             await loc.first.evaluate(
                 """e => {
-                  const s = [e.type, e.getAttribute('role'), e.name, e.id, e.placeholder,
-                             e.getAttribute('aria-label'), e.form && e.form.getAttribute('role'),
-                             e.form && e.form.action].join(' ').toLowerCase();
-                  return /\\bsearch|\\bquery\\b|^\\s*q\\s|\\bq\\b|searchbox|combobox/.test(s)
-                         || (e.form && (e.form.method || 'get').toLowerCase() === 'get' && e.type !== 'password');
+                  if (e.type === 'password') return false;
+                  if (e.type === 'search' || ['search', 'searchbox'].includes(e.getAttribute('role'))) return true;
+                  if (e.form && e.form.getAttribute('role') === 'search') return true;
+                  const words = [e.name, e.id, e.placeholder, e.getAttribute('aria-label')].join(' ').toLowerCase();
+                  if (/\\bsearch\\b|\\bsearch[_-]|^q$|^query$/.test(words) || e.name === 'q' || e.name === 'query') return true;
+                  const action = e.form ? (e.form.getAttribute('action') || '') : '';
+                  return /\\/search\\b|[?&]q=/.test(action);
                 }""",
                 timeout=1500,
             )

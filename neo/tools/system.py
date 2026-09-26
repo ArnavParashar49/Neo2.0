@@ -4,10 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import datetime as _dt
+import json
+import os
 import re
+import threading
+import time
+import uuid
 
 from neo.agent.registry import ToolContext, tool
-from neo.tools.computer.apps import osascript
+from neo.tools.computer.apps import _q, osascript
 
 # Fast paths are whole-utterance commands: anchored, with an explicit object and direction, so an
 # ordinary sentence that merely mentions "volume" or "dim" never triggers them.
@@ -167,18 +172,76 @@ async def sleep_display(a: dict, c: ToolContext) -> str:
 )
 async def timer(a: dict, c: ToolContext) -> str:
     raw = a.get("minutes")
-    mins = 1.0 if raw in (None, "") else max(0.05, float(raw))
-    label = a.get("label") or "Timer"
+    mins = 1.0 if raw in (None, "") else max(0.05, min(float(raw), _MAX_TIMER_MIN))
+    label = " ".join(str(a.get("label") or "Timer").split())[:80] or "Timer"
+    t = {"id": uuid.uuid4().hex[:12], "label": label, "due": time.time() + mins * 60}
+    with _timers_lock:
+        _save_timers(_load_timers() + [t])
+    _start(t)
+    return f"Timer set for {mins:g} minute{'s' if mins != 1 else ''}."
 
-    async def fire() -> None:
-        await asyncio.sleep(mins * 60)
-        await osascript(f'display notification "{label} is done" with title "NEO" sound name "Glass"')
+
+# Timers count wall-clock time (asyncio's clock stops while the Mac sleeps) and are kept in
+# ~/.neo/timers.json, so a restart or a closed lid doesn't lose one.
+_MAX_TIMER_MIN = 24 * 60
+_STALE_S = 12 * 3600  # a timer that should have gone off this long ago isn't worth announcing
+_timers_lock = threading.Lock()
+_timer_tasks: dict[str, asyncio.Task] = {}
+
+
+def _timers_path():
+    from neo.config import settings
+
+    return settings().data_dir / "timers.json"
+
+
+def _load_timers() -> list[dict]:
+    try:
+        data = json.loads(_timers_path().read_text())
+        return [t for t in data if isinstance(t, dict) and {"id", "label", "due"} <= t.keys()]
+    except (OSError, ValueError):
+        return []
+
+
+def _save_timers(ts: list[dict]) -> None:
+    p = _timers_path()
+    tmp = p.with_suffix(".tmp")
+    tmp.write_text(json.dumps(ts))
+    os.replace(tmp, p)
+
+
+def _start(t: dict) -> None:
+    if t["id"] not in _timer_tasks:
+        _timer_tasks[t["id"]] = asyncio.get_running_loop().create_task(_run_timer(t))
+
+
+async def _run_timer(t: dict) -> None:
+    try:
+        while (left := t["due"] - time.time()) > 0:
+            await asyncio.sleep(min(left, 5.0))  # re-check the wall clock: wakes up on time after sleep
+        late = time.time() - t["due"] > 90
+        with _timers_lock:
+            _save_timers([x for x in _load_timers() if x["id"] != t["id"]])
+        note = f"{t['label']} is done" + (" (late — your Mac was asleep)" if late else "")
+        await osascript(f'display notification {_q(note)} with title "NEO" sound name "Glass"')
         from neo.events import bus
 
-        await bus().say(f"{label}: time's up.")
+        await bus().say(f"{t['label']}: time's up." + (" (A bit late — your Mac was asleep.)" if late else ""))
+    finally:
+        _timer_tasks.pop(t["id"], None)
 
-    asyncio.get_event_loop().create_task(fire())
-    return f"Timer set for {mins:g} minute{'s' if mins != 1 else ''}."
+
+def restore_timers() -> int:
+    """Re-arm the timers that were running before NEO restarted. Returns how many."""
+    now = time.time()
+    with _timers_lock:
+        ts = _load_timers()
+        keep = [t for t in ts if t["due"] > now - _STALE_S]
+        if len(keep) != len(ts):
+            _save_timers(keep)
+    for t in keep:
+        _start(t)
+    return len(keep)
 
 
 _ = re  # keep import for the regex constants above

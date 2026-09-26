@@ -139,6 +139,14 @@ async def run() -> None:
     s = settings()
     from neo.permissions import request_missing
 
+    # Signals first: quitting NEO during a first-run download must still shut down cleanly.
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, stop.set)
+    if os.environ.get("NEO_LAUNCHED_BY_APP"):
+        asyncio.create_task(_exit_with_parent(stop))
+
     if missing := request_missing():
         print(f"[neo] missing: {', '.join(missing)} — allow NEO in System Settings → Privacy & Security (NEO's menu has shortcuts)")
     load_all()
@@ -146,18 +154,16 @@ async def run() -> None:
     ui = UIServer(app.on_command)
     await ui.start()
     warmup(app.session.reflex)  # Laya, then the memory embedder, sequentially
+    from neo.tools.system import restore_timers
 
-    if s.voice != "off":
-        try:
-            from neo.voice.pipeline import make_voice
+    restore_timers()  # timers set before a restart still go off
 
-            app.voice = await make_voice(app.handle_text, app.session)
-        except Exception as e:  # noqa: BLE001 — text-only is still useful
-            print(f"[voice] unavailable: {e}")
-
+    # Text works from here on; voice comes up alongside (it may be downloading models).
     await bus().set_state(NeoState.IDLE)
     asyncio.create_task(_lag_monitor())
     asyncio.create_task(_cocoa_pump())
+    if s.voice != "off":
+        asyncio.create_task(_voice_supervisor(app, stop))
     from neo.reflex.learn import learn_loop
 
     def _idle() -> bool:
@@ -167,14 +173,9 @@ async def run() -> None:
         return not voice_busy and not bus().active_jobs and not app._tasks
 
     asyncio.create_task(learn_loop(_idle))
+    asyncio.create_task(_checkpoint_loop(app, _idle))
     bus().subscribe(_log_activity)
     print("NEO is running. Say 'Hey Neo', or type in the overlay.")
-    stop = asyncio.Event()
-    loop = asyncio.get_running_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, stop.set)
-    if os.environ.get("NEO_LAUNCHED_BY_APP"):
-        asyncio.create_task(_exit_with_parent(stop))
     await stop.wait()
     # Everything below must finish well inside NEO.app's grace period (it SIGKILLs after 12 s).
     if app.voice:
@@ -183,16 +184,126 @@ async def run() -> None:
         except Exception:  # noqa: BLE001
             pass
     try:
-        from neo.memory.summarize import summarize_session
         from neo.tools.browser import shutdown as close_browser
 
         await asyncio.wait_for(close_browser(), 2)
-        if s := await asyncio.wait_for(summarize_session(app.session.history, app.started), _SUMMARY_BUDGET_S):
+        if s := await asyncio.wait_for(app.session.checkpoint(final=True, budget_s=5.0), _SUMMARY_BUDGET_S):
             print(f"[memory] session saved: {s[:100]}")
     except TimeoutError:
         print("[memory] shutdown summary took too long — skipped")
     except Exception as e:  # noqa: BLE001
         print(f"[memory] shutdown summary skipped: {str(e)[:80]}")
+
+
+_CHECKPOINT_EVERY_S = 20 * 60
+
+
+async def _checkpoint_loop(app: App, is_idle) -> None:
+    """Summarise the conversation every so often while idle, so a crash or a power cut loses at
+    most the last stretch instead of the whole day."""
+    while True:
+        await asyncio.sleep(_CHECKPOINT_EVERY_S)
+        if is_idle():
+            try:
+                await app.session.checkpoint()
+            except Exception as e:  # noqa: BLE001
+                print(f"[memory] checkpoint skipped: {str(e)[:80]}")
+
+
+_VOICE_RETRY_S = 60.0
+_LIVE_RETRY_S = {"quota": 3600.0, "network": 180.0, "other": 600.0}
+
+
+def _say_aloud(text: str) -> None:
+    """Last-resort speech when no voice backend can talk (macOS's own voice)."""
+    import subprocess
+
+    try:
+        subprocess.Popen(["say", text], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+async def _voice_supervisor(app: App, stop: asyncio.Event) -> None:
+    """Bring voice up, and keep it up: retry if it can't start, and when Gemini Live keeps
+    failing (quota used up, network down) say so and switch to the on-device voice until Live
+    works again."""
+    from neo.voice import devices
+    from neo.voice.pipeline import local_ready, make_local, make_voice
+
+    if devices.mic_status() in (devices.DENIED, devices.RESTRICTED):
+        await bus().publish(
+            "error",
+            message="NEO can't use the microphone — allow it in System Settings → Privacy & Security → "
+            "Microphone, then restart NEO. You can still type.",
+        )
+    down: asyncio.Queue[tuple[str, str]] = asyncio.Queue()
+
+    async def on_down(kind: str, why: str) -> None:
+        await down.put((kind, why))
+
+    while not stop.is_set():
+        if app.voice is None:
+            try:
+                app.voice = await make_voice(app.handle_text, app.session)
+            except Exception as e:  # noqa: BLE001
+                print(f"[voice] unavailable: {str(e)[:160]}")
+                await bus().publish("error", message=f"Voice is off ({str(e)[:80]}) — you can type; retrying in a minute.")
+                await asyncio.sleep(_VOICE_RETRY_S)
+                continue
+            if hasattr(app.voice, "on_down"):
+                app.voice.on_down = on_down
+        kind, why = await down.get()
+        live = app.voice
+        reason = "today's free voice minutes are used up" if kind == "quota" else "it can't reach Google right now"
+        if local_ready():
+            print(f"[voice] Gemini Live is down ({why}); switching to the on-device voice")
+            try:
+                await asyncio.wait_for(live.close(), 3)
+            except Exception:  # noqa: BLE001
+                pass
+            app.voice = None
+            try:
+                app.voice = await make_local(app.handle_text)
+                await bus().publish("error", message=f"Gemini Live is unavailable ({reason}) — using the on-device voice for now.")
+                await app.voice.speak(f"Online voice is unavailable because {reason}. I'm using the on-device voice for now.")
+            except Exception as e:  # noqa: BLE001
+                print(f"[voice] on-device voice failed too: {str(e)[:120]}")
+                app.voice = None  # back to Live on the next pass: it may work on the next wake
+                _say_aloud(f"Voice is unavailable because {reason}. You can still type to me.")
+                continue
+            asyncio.create_task(_back_to_live(app, stop, kind, on_down))
+        else:
+            await bus().publish("error", message=f"Voice is unavailable: {reason}. You can still type; I'll keep trying.")
+            _say_aloud(f"Voice is unavailable because {reason}. You can still type to me.")
+
+
+async def _back_to_live(app: App, stop: asyncio.Event, kind: str, on_down) -> None:
+    """While on the on-device voice, check now and then whether Gemini Live works again."""
+    from neo.voice.live import LiveVoice
+
+    while not stop.is_set():
+        await asyncio.sleep(_LIVE_RETRY_S.get(kind, 600.0))
+        if app._tasks or bus().active_jobs:
+            continue  # never swap voices mid-request
+        v = LiveVoice(app.handle_text, app.session)
+        try:
+            await asyncio.wait_for(v.probe(), 15)
+        except Exception:  # noqa: BLE001
+            continue
+        local = app.voice
+        try:
+            if local is not None:
+                await asyncio.wait_for(local.close(), 3)
+            await v.start()
+            v.on_down = on_down
+            app.voice = v
+            print("[voice] Gemini Live is back")
+            await bus().note("Gemini Live voice is back.")
+        except Exception as e:  # noqa: BLE001
+            print(f"[voice] couldn't switch back to Live: {str(e)[:120]}")
+            app.voice = local
+        return
 
 
 _SUMMARY_BUDGET_S = 7.0  # the model gets 5 s inside; this covers the crude fallback + the write

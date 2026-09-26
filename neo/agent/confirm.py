@@ -8,8 +8,14 @@ full command / script / path on the overlay's card. Only the user can approve:
   words they typed or said, or the overlay's button for that action id;
 * a ``confirm`` argument from a model is ignored, so no model (and no web page or email steering
   one) can approve anything;
-* the approval covers exactly the staged parameters. The action id is a hash of all of them, so a
-  call that differs in any argument — a longer command, another mail body — asks again.
+* the approval covers exactly what the card showed: the staged parameters *and* the summary and
+  detail built from the screen at that moment. A call that differs in any of them — a longer
+  command, another mail body, an element id that now points at a different button — asks again;
+* every staging gets a fresh random action id, so a stale card can't approve a later one.
+
+Only NEO's own code can halt a run with a question: :func:`stage` and :func:`ask_user` return a
+:class:`Halt` string, which a web page or an email that happens to start with "NEEDS_CONFIRM"
+never is.
 """
 
 from __future__ import annotations
@@ -17,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import secrets
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -31,20 +38,26 @@ NEEDS_USER = "NEEDS_USER"
 _CONTROL_ARGS = ("confirm", "cancel")  # never part of an operation: models used to pass these
 
 
+class Halt(str):
+    """A NEEDS_CONFIRM / NEEDS_USER result produced by NEO's own code (see the module doc)."""
+
+
 @dataclass
 class Pending:
-    action_id: str
+    action_id: str  # random per staging: what the card's buttons send back
     tool: str
     params: dict[str, Any]
     summary: str
     detail: str = ""  # exactly what will run (command, script, path + content…), for the card
     staged_at: float = field(default_factory=time.time)
+    key: str = ""  # hash of tool + params + summary + detail: what an approval covers
 
 
 @dataclass
 class _Approval:
     action_id: str
     released: dict[str, Any] | None = None
+    key: str = ""
 
 
 _pending: Pending | None = None
@@ -57,9 +70,9 @@ def clean(params: dict[str, Any] | None) -> dict[str, Any]:
     return {k: v for k, v in (params or {}).items() if k not in _CONTROL_ARGS}
 
 
-def action_id(tool: str, params: dict[str, Any]) -> str:
-    blob = json.dumps(clean(params), sort_keys=True, default=str, ensure_ascii=False)
-    return f"{tool}:{hashlib.sha256(blob.encode()).hexdigest()[:16]}"
+def op_key(tool: str, params: dict[str, Any], summary: str = "", detail: str = "") -> str:
+    blob = json.dumps([tool, clean(params), summary, detail], sort_keys=True, default=str, ensure_ascii=False)
+    return hashlib.sha256(blob.encode()).hexdigest()
 
 
 def _redact(params: dict[str, Any]) -> dict[str, Any]:
@@ -116,21 +129,25 @@ def card(p: Pending | None) -> dict[str, Any] | None:
     return {"action_id": p.action_id, "tool": p.tool, "summary": p.summary, "detail": p.detail}
 
 
-def stage(tool: str, params: dict[str, Any], summary: str, detail: str = "") -> str:
+def stage(tool: str, params: dict[str, Any], summary: str, detail: str = "") -> Halt:
     """Stage an operation and return the halt sentinel + the question for the user."""
     global _pending
     params = clean(params)
-    aid = action_id(tool, params)
-    if _pending and _pending.action_id != aid:
+    key = op_key(tool, params, summary, detail)
+    if peek() is not None and _pending is not None and _pending.key == key:
+        return Halt(f"{NEEDS_CONFIRM}: {summary} — Should I go ahead?")  # asked again: same card, same id
+    if _pending:
         audit(_pending.action_id, _pending.tool, _pending.params, "superseded")
-    _pending = Pending(action_id=aid, tool=tool, params=dict(params), summary=summary, detail=detail)
+        _announce("confirm_done", action_id=_pending.action_id, outcome="superseded")
+    aid = f"{tool}:{secrets.token_hex(8)}"
+    _pending = Pending(action_id=aid, tool=tool, params=dict(params), summary=summary, detail=detail, key=key)
     audit(aid, tool, params, "staged")
     _announce("confirm", **card(_pending))  # type: ignore[arg-type]
     try:  # close the card when nobody answers, even if nothing else asks in the meantime
         asyncio.get_running_loop().call_later(_TTL_S + 1, peek)
     except RuntimeError:
         pass
-    return f"{NEEDS_CONFIRM}: {summary} — Should I go ahead?"
+    return Halt(f"{NEEDS_CONFIRM}: {summary} — Should I go ahead?")
 
 
 def peek() -> Pending | None:
@@ -167,14 +184,18 @@ def consume_now(aid: str) -> dict[str, Any] | None:
     return p.params
 
 
-def consume(aid: str) -> dict[str, Any] | None:
-    """Release the staged params — only inside :func:`approved` for this very action."""
+def consume(key: str) -> dict[str, Any] | None:
+    """Release the staged params — only inside :func:`approved` for the pending action, and only
+    when the call rebuilt exactly the operation the card showed (same `op_key`)."""
     approval = _approved.get()
-    if not aid or approval is None or approval.action_id != aid:
+    if approval is None:
         return None
     if approval.released is not None:
-        return approval.released  # a second gate on the same approved call
-    released = consume_now(aid)
+        return approval.released if approval.key == key else None  # a second gate on the same call
+    if not _pending or _pending.action_id != approval.action_id or _pending.key != key:
+        return None
+    approval.key = key
+    released = consume_now(approval.action_id)
     approval.released = released
     return released
 
@@ -197,29 +218,12 @@ def gated(tool: str, params: dict[str, Any], summary: str, detail: str = "") -> 
     params = clean(params)
     if not settings().confirm_destructive:
         return params
-    released = consume(action_id(tool, params))
+    released = consume(op_key(tool, params, summary, detail))
     if released is not None:
         return released
     return stage(tool, params, summary, detail)
 
 
-_own_question = ""
-
-
-def ask_user(msg: str) -> str:
+def ask_user(msg: str) -> Halt:
     """A NEEDS_USER question from NEO's own code (not from a page or a file it read)."""
-    global _own_question
-    _own_question = f"{NEEDS_USER}: {msg}"
-    return _own_question
-
-
-def genuine_halt(tool: str, text: str, since: float) -> bool:
-    """Did NEO's own code produce this NEEDS_* result during the call that started at `since`?
-    Content read from the web, mail or a file can begin with the same words; it must never be
-    able to halt a run or put a question to the user."""
-    t = text.lstrip()
-    if t.startswith(NEEDS_CONFIRM):
-        return _pending is not None and _pending.tool == tool and _pending.staged_at >= since
-    if t.startswith(NEEDS_USER):
-        return t == _own_question
-    return True
+    return Halt(f"{NEEDS_USER}: {msg}")

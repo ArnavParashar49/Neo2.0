@@ -272,6 +272,8 @@ async def run_agent(
                 from neo.agent.confirm import peek
 
                 p = peek()
+                if kind == "needs_confirm" and p is not None:
+                    question = f"{p.summary} — Should I go ahead?"  # the staged action's own words
                 return AgentResult(
                     question,
                     kind,

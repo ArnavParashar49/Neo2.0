@@ -90,11 +90,18 @@ def _compact(path: Path) -> None:
 
 
 def forget_examples() -> int:
-    """Delete every stored request (and the cached features of them). Returns how many."""
+    """Delete every stored request, and the cached features of them. Returns how many."""
     with _lock:
+        rows = _read_raw(_path(EXTRA))
         n = len(_read(_path(EXTRA)))
         for name in (EXTRA, STATE):
             _path(name).unlink(missing_ok=True)
+    try:
+        from neo.reflex.finetune import drop_from_cache
+
+        drop_from_cache({r["text"] for r in rows})
+    except Exception as e:  # noqa: BLE001
+        print(f"[reflex] couldn't clear the feature cache: {str(e)[:80]}")
     return n
 
 
@@ -130,8 +137,10 @@ def _state() -> dict:
 
 
 def pending() -> int:
-    """Examples recorded since the last retrain."""
-    return max(0, len(_read(_path(EXTRA))) - int(_state().get("trained_rows", 0)))
+    """Examples recorded since the last retrain (by time, so it keeps counting once the file is
+    at its size cap, and a corrected label for a known sentence counts too)."""
+    since = float(_state().get("trained_at", 0.0))
+    return sum(1 for r in _read(_path(EXTRA)) if float(r.get("ts", 0)) > since)
 
 
 def due(now: float | None = None) -> bool:
@@ -151,14 +160,22 @@ def retrain() -> dict | None:
     if laya is None or _training:
         return None
     _training = True
+    started = time.time()
     try:
         n_rows = len(_read(_path(EXTRA)))
         t0 = time.time()
-        report = finetune.train(finetune.defaults(), agent=laya._agent, lock=laya_lock())
+        try:
+            report = finetune.train(finetune.defaults(), agent=laya._agent, lock=laya_lock())
+        except Exception as e:  # noqa: BLE001
+            # Count it as a try: the next one waits the usual gap instead of re-running (and
+            # re-failing) every few idle minutes.
+            _write_state({"trained_at": started, "trained_rows": n_rows, "last_error": str(e)[:300]})
+            print(f"[reflex] retrain failed: {str(e)[:160]}")
+            return None
         if report.get("saved"):
             with laya_lock():
                 laya.reload_head()
-        _path(STATE).write_text(json.dumps({"trained_at": time.time(), "trained_rows": n_rows, "last": report}))
+        _write_state({"trained_at": started, "trained_rows": n_rows, "last": report})
         prev = report.get("previous")
         print(
             f"[reflex] learned from {n_rows} of your requests in {time.time() - t0:.0f}s: intent "
@@ -170,8 +187,21 @@ def retrain() -> dict | None:
         _training = False
 
 
+def _write_state(state: dict) -> None:
+    p = _path(STATE)
+    tmp = p.with_suffix(".tmp")
+    tmp.write_text(json.dumps(state, default=str))
+    tmp.replace(p)
+
+
 async def learn_loop(is_idle) -> None:
     """Background task in the core: retrain when there's enough new data and NEO is idle."""
+    try:  # the retention limits hold on disk too, not just in what training reads
+        with _lock:
+            if _path(EXTRA).exists():
+                _compact(_path(EXTRA))
+    except Exception as e:  # noqa: BLE001
+        print(f"[reflex] couldn't tidy the learning file: {str(e)[:80]}")
     idle_since: float | None = None
     while True:
         await asyncio.sleep(60)

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from neo.agent.registry import ToolContext, tool
 from neo.memory.store import store
 
@@ -55,17 +57,19 @@ async def memory(a: dict, c: ToolContext) -> str:
         gate = confirm.gated("memory", a, f"{what} (after reading {c.tainted()})", detail=str(a.get("text", "")))
         if isinstance(gate, str):
             return gate
+    # Off the event loop: an embedding and a database write can take a moment.
     if act == "remember":
         if not a.get("text"):
             return "Error: text required"
-        mid = st.remember(a["text"], a.get("kind", "note"), a.get("key", ""))
+        mid = await asyncio.to_thread(st.remember, a["text"], a.get("kind", "note"), a.get("key", ""))
         return f"Remembered (#{mid})."
     if act == "recall":
-        hits = st.recall(a.get("query") or c.user_text, 8)
+        hits = await asyncio.to_thread(st.recall, a.get("query") or c.user_text, 8)
         return (
             "\n".join(f"#{m.id} [{m.kind}{'/' + m.key if m.key else ''}] {m.text}" for m in hits)
             or "Nothing relevant in memory."
         )
     if act == "forget":
-        return "Forgotten." if st.forget(int(a.get("id") or 0)) else "Error: no such memory."
+        gone = await asyncio.to_thread(st.forget, int(a.get("id") or 0))
+        return "Forgotten." if gone else "Error: no such memory."
     return "Error: unknown action"

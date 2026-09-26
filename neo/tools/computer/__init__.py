@@ -18,9 +18,21 @@ def _p(props: dict, required: list[str] | None = None) -> dict:
     return {"type": "object", "properties": props, "required": required or []}
 
 
-def _ask_before_click(tool_name: str, a: dict, label: str, app: str = "") -> str | None:
-    """A button that sends, buys, deletes, grants or publishes is the user's call."""
-    if not policy.commits(label):
+def _dialog_text(els=None) -> str:
+    """The words in the front window (a sheet or alert says what its "OK" does)."""
+    if els is None:
+        try:
+            _, _, els = ax.window_elements()
+        except Exception:  # noqa: BLE001
+            return ""
+    return " ".join((e.value or e.title) for e in els if e.role in ("AXStaticText", "AXTextArea"))[:2000]
+
+
+def _ask_before_click(tool_name: str, a: dict, label: str, app: str = "", els=None) -> str | None:
+    """A button that sends, buys, deletes, grants or publishes is the user's call — and so is a
+    plain "OK" / "Continue" in a dialog that says it deletes or sends something."""
+    context = _dialog_text(els) if policy._GENERIC_OK.match(label or "") else ""
+    if not policy.commits(label, context):
         return None
     where = f" in {app}" if app else ""
     gate = confirm.gated(tool_name, a, f"click “{label.strip()[:60]}”{where}")
@@ -566,9 +578,13 @@ async def _ask_before_keys(a: dict, keys: str, app: str, c: ToolContext) -> str 
     if submit and low in _SHELL_APPS:
         text = await asyncio.to_thread(ax.focused_element_text)
         line = next((ln for ln in reversed(text.splitlines()) if ln.strip()), "")
-        what, detail = f"press Return in {app} — it runs the command on its line", line[-400:]
+        if len(line) > 2000:
+            line = "…" + line[-2000:] + "\n(the start of this line is cut off here)"
+        what, detail = f"press Return in {app} — it runs the command on its line", line or "(couldn't read the line)"
     elif low == "mail" and ch == {"cmd", "shift", "d"}:
         what = "send the message that's open in Mail"
+        _, win = await asyncio.to_thread(ax.focused_window, app)
+        detail = f"Window: {ax._str(ax._attr(win, 'AXTitle', ''))}" if win is not None else ""
     elif submit and low in _CHAT_APPS and c.tainted():
         what = f"press Return in {app} — it sends the message"
     if not what:
@@ -621,7 +637,7 @@ async def click_text(a: dict, c: ToolContext) -> str:
     )
     e = hits[0]
     name = (e.title or e.value)[:40]
-    if gate := _ask_before_click("click_text", a, e.title or e.value, app):
+    if gate := _ask_before_click("click_text", a, e.title or e.value, app, els):
         return gate
     if "AXPress" in e.actions and not (await asyncio.to_thread(ax.press_element, e)).startswith("Error"):
         return f"Clicked '{name}' ({e.role.removeprefix('AX')})"

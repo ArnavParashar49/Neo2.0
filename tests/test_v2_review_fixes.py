@@ -91,7 +91,7 @@ def test_second_destructive_call_never_runs_before_confirmation():
     )
     res = asyncio.run(run_agent("trash both", provider=brain, system="s", reg=reg, ev=EventBus()))
     assert res.stopped == "needs_confirm" and "a.txt" in res.question
-    assert res.pending_action == confirm.action_id("trash", {"path": "a.txt"})  # question and staged action agree
+    assert res.pending_action == confirm.peek().action_id  # question and staged action agree
     assert confirm.peek().params["path"] == "a.txt"
     assert executed == []
     # every tool_call has a result, the second one marked skipped
@@ -295,7 +295,7 @@ def test_session_stale_confirmation_is_refused(monkeypatch):
 
     s = Session(reflex=R())
     s._pending_tool, s._pending_args = "trash", {"path": "a"}
-    s._pending_action = confirm.action_id("trash", {"path": "a"})
+    s._pending_action = "trash:0123456789abcdef"  # the question the user heard (since replaced)
     confirm.stage("trash", {"path": "b"}, "move b")  # something else got staged meanwhile
     monkeypatch.setattr(sess_mod, "brain", lambda purpose="agent": Brain([Turn(text="never")]))
     r = asyncio.run(s.handle("yes", from_user=True))

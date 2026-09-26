@@ -6,6 +6,7 @@ import asyncio
 import queue
 import threading
 import time
+import weakref
 
 import numpy as np
 import sounddevice as sd
@@ -16,34 +17,56 @@ FRAME = 320  # 20 ms at 16 kHz
 
 
 class Mic:
-    """Continuously captures int16 PCM frames into an asyncio-friendly queue."""
+    """Continuously captures int16 PCM frames into an asyncio-friendly queue. Follows the default
+    input device (AirPods in or out) and reopens itself if the stream goes silent."""
 
     def __init__(self, rate: int = MIC_RATE) -> None:
         self.rate = rate
         self.q: queue.Queue[bytes | None] = queue.Queue(maxsize=400)
         self._stream: sd.RawInputStream | None = None
         self._closed = False
+        self.last_frame = 0.0  # monotonic time of the latest callback
 
     def _cb(self, indata, frames, time_info, status) -> None:  # noqa: ANN001
+        self.last_frame = time.monotonic()
         try:
             self.q.put_nowait(bytes(indata))
         except queue.Full:
             pass
 
-    def start(self) -> None:
-        if self._stream:
-            return
+    @property
+    def active(self) -> bool:
+        return self._stream is not None and not self._closed
+
+    def stalled(self) -> bool:
+        return self.active and time.monotonic() - self.last_frame > _STALL_S
+
+    def _open_stream(self) -> None:
         self._stream = sd.RawInputStream(
             samplerate=self.rate, channels=1, dtype="int16", blocksize=FRAME, callback=self._cb
         )
+        self.last_frame = time.monotonic()
         self._stream.start()
+
+    def _close_stream(self) -> None:
+        st, self._stream = self._stream, None
+        if st is not None:
+            try:
+                st.abort()
+                st.close()
+            except Exception:  # noqa: BLE001 — the device may already be gone
+                pass
+
+    def start(self) -> None:
+        if self._stream:
+            return
+        self._closed = False
+        self._open_stream()
+        _register(self)
 
     def stop(self) -> None:
         self._closed = True
-        if self._stream:
-            self._stream.stop()
-            self._stream.close()
-            self._stream = None
+        self._close_stream()
         try:
             self.q.put_nowait(None)  # wake any reader so no executor thread is left blocked at exit
         except queue.Full:
@@ -72,24 +95,52 @@ class Mic:
 
 
 class Speaker:
-    """Plays float32/int16 chunks in order; `interrupt()` drops what's queued."""
+    """Plays float32/int16 chunks in order; `interrupt()` drops what's queued. Follows the default
+    output device."""
 
     def __init__(self, rate: int = OUT_RATE) -> None:
         self.rate = rate
         self._q: queue.Queue[np.ndarray | None] = queue.Queue()
         self._stream: sd.OutputStream | None = None
+        self._io = threading.Lock()  # the writer thread vs. a device switch
         self._thread: threading.Thread | None = None
         self._gen = 0
+        self._closed = False
         self.playing = threading.Event()
         self.last_stop = 0.0  # when playback last went quiet (for a half-duplex mic tail)
+
+    @property
+    def active(self) -> bool:
+        return self._thread is not None and not self._closed
+
+    def _open_stream(self) -> None:
+        with self._io:
+            self._stream = sd.OutputStream(samplerate=self.rate, channels=1, dtype="float32", blocksize=1024)
+            self._stream.start()
+
+    def _close_stream(self) -> None:
+        st = self._stream
+        if st is not None:
+            try:
+                st.abort()  # unblocks a write stuck on a device that went away
+            except Exception:  # noqa: BLE001
+                pass
+        with self._io:
+            st, self._stream = self._stream, None
+            if st is not None:
+                try:
+                    st.close()
+                except Exception:  # noqa: BLE001
+                    pass
 
     def start(self) -> None:
         if self._thread:
             return
-        self._stream = sd.OutputStream(samplerate=self.rate, channels=1, dtype="float32", blocksize=1024)
-        self._stream.start()
+        self._closed = False
+        self._open_stream()
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
+        _register(self)
 
     def _run(self) -> None:
         # `playing` stays set across the small gaps between streamed chunks; it only clears after
@@ -100,8 +151,10 @@ class Speaker:
             if gen == self._gen:
                 self.playing.set()
                 try:
-                    self._stream.write(chunk)  # type: ignore[union-attr]
-                except Exception:
+                    with self._io:
+                        if self._stream is not None:
+                            self._stream.write(chunk)
+                except Exception:  # noqa: BLE001 — a device switch mid-write: drop the chunk
                     pass
             try:
                 item = self._q.get(timeout=0.5)  # tolerate network jitter between streamed chunks
@@ -109,6 +162,7 @@ class Speaker:
                 self.playing.clear()
                 self.last_stop = time.time()
                 item = self._q.get()
+        self.playing.clear()
 
     def play(self, chunk: np.ndarray) -> None:
         if chunk.dtype == np.int16:
@@ -125,12 +179,18 @@ class Speaker:
                 self._q.get_nowait()
             except queue.Empty:
                 break
-        if self._stream:
+        st = self._stream
+        if st is not None:
             try:
-                self._stream.abort()
-                self._stream.start()
-            except Exception:
+                st.abort()  # stop the sound now (a write in progress returns)
+            except Exception:  # noqa: BLE001
                 pass
+            with self._io:
+                try:
+                    if self._stream is st:
+                        st.start()
+                except Exception:  # noqa: BLE001
+                    pass
         self.playing.clear()
         self.last_stop = time.time()
 
@@ -139,10 +199,75 @@ class Speaker:
             await asyncio.sleep(0.05)
 
     def close(self) -> None:
+        self._closed = True
         self._q.put(None)
-        if self._stream:
-            self._stream.stop()
-            self._stream.close()
+        self._close_stream()
+
+
+# ---- following the devices ---------------------------------------------------------------------
+_STALL_S = 3.0  # a running input stream delivers a frame every 20 ms; this long without one = dead
+_STALL_RETRY_S = 30.0  # don't reopen for a stall more often than this (a broken device stays broken)
+_streams: weakref.WeakSet = weakref.WeakSet()
+_reopen_lock = threading.Lock()
+_watcher: threading.Thread | None = None
+
+
+def _register(obj: Mic | Speaker) -> None:
+    global _watcher
+    _streams.add(obj)
+    if _watcher is None or not _watcher.is_alive():
+        _watcher = threading.Thread(target=_watch, daemon=True, name="neo-audio-devices")
+        _watcher.start()
+
+
+def reopen_all(reason: str) -> None:
+    """Close every open stream, have PortAudio re-read the device list, and reopen on the
+    current defaults."""
+    with _reopen_lock:
+        objs = [o for o in list(_streams) if o.active]
+        if not objs:
+            return
+        for o in objs:
+            o._close_stream()
+        try:
+            sd._terminate()
+            sd._initialize()
+        except Exception as e:  # noqa: BLE001
+            print(f"[audio] couldn't refresh the device list: {e}")
+        for o in objs:
+            try:
+                o._open_stream()
+            except Exception as e:  # noqa: BLE001
+                print(f"[audio] couldn't reopen the {'microphone' if isinstance(o, Mic) else 'speaker'}: {e}")
+        print(f"[audio] {reason} — reopened on the current devices")
+
+
+def _watch() -> None:
+    from neo.voice import devices
+
+    last = (devices.default_input(), devices.default_output())
+    last_stall_fix = 0.0
+    while True:
+        time.sleep(1.0)
+        try:
+            if not any(o.active for o in list(_streams)):
+                continue
+            now_dev = (devices.default_input(), devices.default_output())
+            reason = ""
+            if now_dev[0] != last[0]:
+                reason = "the input device changed"
+            elif now_dev[1] != last[1]:
+                reason = "the output device changed"
+            elif any(isinstance(o, Mic) and o.stalled() for o in list(_streams)):
+                if time.monotonic() - last_stall_fix > _STALL_RETRY_S:
+                    reason, last_stall_fix = "the microphone stopped delivering audio", time.monotonic()
+            last = now_dev
+            if reason:
+                time.sleep(0.4)  # let macOS finish switching (AirPods announce themselves in steps)
+                reopen_all(reason)
+                last = (devices.default_input(), devices.default_output())
+        except Exception as e:  # noqa: BLE001 — the watcher must outlive any one bad poll
+            print(f"[audio] device watch hiccup: {e}")
 
 
 def rms(frame: bytes) -> float:
