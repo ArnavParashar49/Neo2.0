@@ -69,7 +69,14 @@ class Reflex:
         if laya is None:
             return None
         with _lock:
-            return laya.decide(text)
+            d = laya.decide(text)
+            emb, center = getattr(laya, "last_embedding", None), getattr(laya, "center", None)
+        if emb is None or center is None:
+            return d
+        from neo.reflex import memory
+
+        # A request the user corrected a moment ago gets the fix now, not after the next retrain.
+        return memory.recall(d, text, emb, center)
 
     def _get_lite(self):
         if self._lite is None and settings().gemini_api_key:
@@ -107,7 +114,7 @@ def _with_reply(d: Decision, text: str) -> Decision:
     """Conversation always gets an answer; commands only when the head/regex says they ask for one."""
     if d.intent in ("chat", "stop"):
         d.reply, d.reply_p = True, 1.0
-    elif d.source not in ("laya+head", "laya+unsure") or d.reply_p == 1.0:  # no reply head: fall back
+    elif d.source not in ("laya+head", "laya+unsure", "laya+memory") or d.reply_p == 1.0:  # no reply head: fall back
         d.reply = wants_reply(text)
         d.reply_p = 0.5
     return d

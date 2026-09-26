@@ -124,7 +124,11 @@ class App:
             await bus().note("Erased: " + ", ".join(f"{n} {k}" for k, n in counts.items()))
         elif kind == "stop":
             if self.voice:
-                await self.voice.interrupt()
+                await self.voice.interrupt()  # tells Laya's outcome ledger, knowing how long NEO spoke
+            else:
+                from neo.reflex import outcomes
+
+                outcomes.stop()  # right after NEO answered, a stop says the answer was wrong
             if not self.cancel_current():
                 await bus().set_state(NeoState.IDLE)
         elif kind == "ptt":

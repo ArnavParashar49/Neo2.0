@@ -1,9 +1,9 @@
 """Erase everything NEO has kept about the user, in one step.
 
 What goes: memories (profile, lessons, notes), playbooks, session summaries, the requests Laya
-learned from and their cached features, which apps worked for what (and the songs/videos NEO
-learned to replay), the audit trail, the core's logs, and NEO's own browser profile (its cookies
-and logins). What stays: settings and keys (~/.neo/.env), timers that are still running, and
+learned from (on disk, still settling in RAM, and the correction memory) and their cached
+features, which apps worked for what (and the songs/videos NEO learned to replay), the audit
+trail, the core's logs, and NEO's own browser profile (its cookies and logins). What stays: settings and keys (~/.neo/.env), timers that are still running, and
 downloaded models — none of them is about the user.
 
 Reached only from the overlay (after its own confirmation) or `python -m neo --forget-all`: never
@@ -27,12 +27,14 @@ def generation() -> int:
 async def forget_everything() -> dict[str, int]:
     global _generation
     from neo.memory.store import store
-    from neo.reflex import finetune, learn
+    from neo.reflex import finetune, learn, memory, outcomes
 
     _generation += 1
     s = settings()
     counts = store().forget_all()
+    outcomes.forget()  # requests still settling in RAM: nothing more is learned from them
     counts["learned requests"] = learn.forget_examples()
+    memory.forget()  # the corrections' embeddings (RAM only)
     finetune.feature_cache().unlink(missing_ok=True)  # rebuilt from the public datasets on the next retrain
     from neo.decide import engine as decide
     from neo.decide import media

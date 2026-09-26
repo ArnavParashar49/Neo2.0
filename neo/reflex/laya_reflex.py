@@ -46,8 +46,12 @@ class LayaReflex:
         return self._head is not None
 
     def decide(self, text: str) -> Decision:
+        """The decision for `text`. With a v2 head it also leaves ``last_embedding`` (the text's
+        L2-normalised embedding) and ``center`` (the head's mean embedding) for the correction
+        memory (neo/reflex/memory.py); otherwise both are None."""
         if self._head and self._head.get("version") == 2:
             return self._decide_v2(text)
+        self.last_embedding = self.center = None
         t0 = time.perf_counter()
         ans = self._agent.system_one({"text": text}, self._questions)["answers"]
         if self._head:
@@ -61,6 +65,7 @@ class LayaReflex:
         intent = max(probs, key=probs.get)
         d_p = float(ans["destructive"].get("noul", 0.0))
         s_p = float(ans["needs_screen"].get("noul", 0.0))
+        top = sorted(probs.values())
         return Decision(
             intent=intent,  # type: ignore[arg-type]
             intent_confidence=float(probs[intent]),
@@ -70,6 +75,7 @@ class LayaReflex:
             needs_screen_p=s_p,
             source="laya+head" if self._head else "laya",
             latency_ms=(time.perf_counter() - t0) * 1000,
+            margin=float(top[-1] - top[-2]),
         )
 
 
@@ -80,8 +86,10 @@ class LayaReflex:
         from neo.reflex.features import embed
 
         x = np.append(embed(self._agent, [text])[0], 1.0).astype(np.float32)
+        self.last_embedding, self.center = x[:-1], h["mu"][:-1]
         xs = (x - h["mu"]) / h["sd"]
         probs = _softmax(_forward(h["intent"], xs) / h["T"]["intent"])
+        top = np.sort(probs)
         # Not sure: the head's pick still stands. Blending in zero-shot intent was measured worse
         # (0.80 vs 0.81 on real phrasings; zero-shot alone 0.37) and cost ~230 ms each time. What
         # actually runs for an unsure request becomes its training label (neo/reflex/learn.py).
@@ -117,6 +125,7 @@ class LayaReflex:
             tool_p=tool_p,
             reply=reply,
             reply_p=reply_p,
+            margin=float(top[-1] - top[-2]),
         )
 
 

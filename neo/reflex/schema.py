@@ -86,6 +86,7 @@ class Decision:
     tool_p: float = 0.0
     reply: bool = True  # does the user want an answer, or just the thing done (silently)?
     reply_p: float = 1.0
+    margin: float | None = None  # top intent probability minus the runner-up (Laya only)
 
     @property
     def confident(self) -> bool:

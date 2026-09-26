@@ -35,6 +35,7 @@ from neo.agent.registry import ToolContext, fence, registry
 from neo.agent.session import answer_of
 from neo.config import settings
 from neo.events import NeoState, bus
+from neo.reflex import outcomes
 from neo.reflex.schema import asks_something
 from neo.voice.audio import Mic, Speaker, rms
 from neo.voice.wake import WakeSpotter
@@ -382,6 +383,9 @@ class LiveVoice:
 
     async def interrupt(self) -> None:
         """Stop playback and cancel any agent task the model kicked off."""
+        speaking = self._speaking or self.spk.playing.is_set()
+        early = time.time() - self._speaking_since <= outcomes.EARLY_S if speaking else None
+        outcomes.stop((self._label or {}).get("id", ""), early=early)
         self.spk.interrupt()
         self._speaking = False
         for t in list(self._tool_tasks.values()):
@@ -438,7 +442,7 @@ class LiveVoice:
         self._utterance = text
         self._remember_line("user", text)
         self._file_label()
-        self._label = {"text": " ".join(text.split()), "tools": [], "spoke": False, "open": False}
+        self._label = self._new_label(text)
         self._turn_open = True
         self._maybe_command_lane(text, settled=False)  # a typed command runs at once too
 
@@ -678,6 +682,8 @@ class LiveVoice:
         if sc:
             if sc.interrupted:
                 print("[live] server-side interruption")
+                talked_over = self._speaking and time.time() - self._speaking_since <= outcomes.EARLY_S
+                outcomes.barge_in((self._label or {}).get("id", ""), early=talked_over)
                 self.spk.interrupt()
                 self._speaking = False
                 model_buf.clear()
@@ -690,7 +696,7 @@ class LiveVoice:
                 self._last_user_speech = time.time()  # the server heard you, whatever the local VAD thinks
                 if self._label is None or not self._label.get("open"):
                     self._file_label()  # the previous request is over: its label is final
-                    self._label = {"text": "", "tools": [], "spoke": False, "open": True}
+                    self._label = self._new_label(open_=True)
                 if not user_buf:
                     self._new_sentence()
                 self._last_heard_at = time.time()
@@ -758,6 +764,7 @@ class LiveVoice:
                         self._remember_line("NEO", "".join(model_buf))  # only what the user heard
                         if self._label is not None:
                             self._label["spoke"] = True
+                            outcomes.touch(self._label.get("id", ""))
                     model_buf.clear()
                     # NEO has answered: the next question gets a fresh search budget. (Not on the
                     # user's transcript — room noise transcribed mid-search would reset it.)
@@ -783,7 +790,7 @@ class LiveVoice:
                 self._gate = "mute" if all(_is_action_call(fc) for fc in calls) else "open"
                 self._held = []
             if self._label is None and asked:
-                self._label = {"text": " ".join(asked.split()), "tools": [], "spoke": False, "open": False}
+                self._label = self._new_label(asked)
             for fc in msg.tool_call.function_calls or []:
                 if self._label is not None:
                     self._label["tools"].append(fc.name)
@@ -832,7 +839,8 @@ class LiveVoice:
         if self._label is not None:
             self._label["tools"].extend(t for t, _ in steps)  # Laya learns from what ran
         key = f"lane:{self._utt_id}"
-        self._tool_tasks[key] = asyncio.create_task(self._command_lane(text, steps, key))
+        lab = (self._label or {}).get("id", "")
+        self._tool_tasks[key] = asyncio.create_task(self._command_lane(text, steps, key, lab))
 
     async def _lane_when_settled(self) -> None:
         """The model started answering before the transcript was marked finished: give trailing
@@ -848,17 +856,20 @@ class LiveVoice:
         command again is a new sentence, and it runs again.)"""
         return self._lane_utt == self._utt_id and time.time() - self._lane_at < _LANE_S
 
-    async def _command_lane(self, text: str, steps, key: str) -> None:
+    async def _command_lane(self, text: str, steps, key: str, lab: str = "") -> None:
         print(f"  ⚡ command lane: {len(steps)} step(s)")
+        outcomes.call_started(lab)  # the steps NEO runs report to this sentence's episode
         try:
             reply = await self._agent_session.command(text, steps)
             why = ""
         except asyncio.CancelledError:
+            outcomes.cancelled()
             return  # the user said stop
         except Exception as e:  # noqa: BLE001
             reply, why = None, str(e)[:160]
         finally:
             self._tool_tasks.pop(key, None)
+            outcomes.call_done(lab)
         self._last_activity = time.time()
         if reply is None or not reply.silent:
             # It failed (and the agent couldn't fix it) or it needs the user: that is worth hearing.
@@ -939,6 +950,8 @@ class LiveVoice:
         args = dict(fc.args or {})
         key = fc.id or fc.name
         t = registry().get(fc.name)
+        # This call — and a session run it hands the request to — reports to the sentence's episode.
+        ep = outcomes.call_started((self._call_labels.get(key) or {}).get("id", ""))
         # Quiet = an action that just gets done. Its result goes back SILENT (no narration) unless
         # it failed, needs the user, or the user also asked something in the same breath.
         silent = False
@@ -997,6 +1010,7 @@ class LiveVoice:
             elif (done := early().claim(fc.name, args)) is not None:
                 result = done  # already ran while the user was still talking
                 silent = bool(t and t.quiet)
+                outcomes.step("", fc.name, True)
             else:
                 if fc.name in _LOOKUP_BUDGET:
                     self._lookups[fc.name] = self._lookups.get(fc.name, 0) + 1
@@ -1009,6 +1023,7 @@ class LiveVoice:
                         fc.name, args, ToolContext(user_text=asked or str(args), taint=self._taint)
                     )
                     await bus().tool_end(fc.name, out.ok, out.text, job=key)
+                outcomes.step("", fc.name, out.ok, halt=getattr(out, "halt", False))
                 result = out.text
                 if t and t.untrusted and out.ok and not result.startswith("NEEDS_"):
                     result = fence(fc.name, result)  # a page or an email is data, never orders
@@ -1017,16 +1032,20 @@ class LiveVoice:
                     self._forget_call(fc.name, args)  # a failed call may be tried again
         except asyncio.CancelledError:
             if key in self._server_cancelled:  # withdrawn by the server: it expects no response
+                outcomes.cancelled()  # the user cut in: not a label for the sentence
                 self._server_cancelled.discard(key)
                 self._tool_tasks.pop(key, None)
                 self._goals.pop(key, None)
                 await bus().end_job(key)
                 return
             result, silent = "cancelled by the user", True
+            outcomes.cancelled()
             self._forget_call(fc.name, args)
         except Exception as e:  # noqa: BLE001 — the model must always get a response back
             result = f"Error: {e}"
+            outcomes.step("", fc.name, False)
         finally:
+            outcomes.call_done(ep)
             # Activity first: the silence watch must not see "no tools, long quiet" in the gap
             # between this tool leaving the running set and its result reaching the model.
             self._last_activity = self._last_turn_end = time.time()
@@ -1092,25 +1111,18 @@ class LiveVoice:
             await bus().say(result[:600], final=True)
             await self._refresh_state()
 
-    def _file_label(self) -> None:
-        lab, self._label = self._label, None
-        if not lab or not lab["text"]:
-            return
-        tools = [t for t in lab["tools"] if t != "more_tools"]
-        if not tools and not lab["spoke"]:
-            return  # nothing came of it: probably room noise, not a request
-        if "agent_task" in tools:
-            intent, tool = "agent_task", ""
-        elif tools:
-            intent, tool = "quick_action", (tools[0] if len(set(tools)) == 1 else "")
-        else:
-            intent, tool = "chat", ""
-        try:
-            from neo.reflex.learn import record
+    def _new_label(self, text: str = "", *, open_: bool = False) -> dict:
+        """A new sentence: what the model does with it, and how that goes, becomes a label for
+        Laya once it settles (neo/reflex/outcomes.py)."""
+        eid = outcomes.begin("", text, source="live", final=False, bind=False)
+        return {"text": " ".join(text.split()), "tools": [], "spoke": False, "open": open_, "id": eid or ""}
 
-            record(lab["text"], intent, tool, source="live")
-        except Exception as e:  # noqa: BLE001
-            print(f"[reflex] couldn't record an example: {str(e)[:80]}")
+    def _file_label(self) -> None:
+        """The sentence is over: its final words and what the model did go to the outcome
+        ledger, which labels it once the next moments show whether it went right."""
+        lab, self._label = self._label, None
+        if lab:
+            outcomes.file_live(lab)
 
     def _voiced(self, p) -> bool:
         """Did NEO read *this* question out? A spoken "yes" only answers the question the user
