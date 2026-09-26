@@ -360,7 +360,11 @@ class Session:
 
             if not any((t := _reg().get(s.tool)) and not t.parallel_safe for s in ok_steps):
                 return
-            store().save_playbook(goal, [{"tool": s.tool, "args": s.args} for s in ok_steps], res.text)
+            # The path, not the content: no message bodies, typed text, commands or queries (they
+            # would be sent back to the cloud model on some unrelated later day).
+            from neo.memory.store import path_only
+
+            store().save_playbook(goal, path_only([{"tool": s.tool, "args": s.args} for s in ok_steps]), "")
         except Exception as e:  # noqa: BLE001
             print(f"[playbook] save failed: {str(e)[:80]}")
 

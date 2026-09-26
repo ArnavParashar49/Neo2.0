@@ -85,6 +85,23 @@ class Playbook:
     similarity: float = 0.0
 
 
+_KEEP_PLAYBOOKS = 300
+_KEEP_SESSIONS_DAYS = 90
+# What a playbook may remember of a step: the tool and its settings, never content.
+CONTENT_TOOLS = {"type_text", "dictate", "memory", "notes_create", "mail_send", "write_file", "edit_file", "shell", "applescript", "ax_set_value", "browser_type"}
+CONTENT_ARGS = {"text", "body", "content", "subject", "to", "new_string", "old_string", "command", "script", "query", "value", "brief", "goal"}
+
+
+def path_only(steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "tool": s.get("tool", ""),
+            "args": {} if s.get("tool") in CONTENT_TOOLS else {k: v for k, v in (s.get("args") or {}).items() if k not in CONTENT_ARGS},
+        }
+        for s in steps
+    ]
+
+
 class Store:
     """Thread-safe: requests run concurrently (worker threads and the event loop), so every
     public method holds one lock for its SQL. Embeddings are computed before taking it — the
@@ -98,6 +115,18 @@ class Store:
             self._db.execute("PRAGMA journal_mode=WAL")
             self._db.execute("PRAGMA busy_timeout=5000")
             self._db.executescript(_SCHEMA)
+            # Retention: what happened day to day is kept for a few months, not forever.
+            self._db.execute("DELETE FROM sessions WHERE started < ?", (time.time() - _KEEP_SESSIONS_DAYS * 86400,))
+            if int(self._db.execute("PRAGMA user_version").fetchone()[0]) < 1:
+                # Playbooks saved by older versions kept message bodies, typed text and commands.
+                for pid, steps in self._db.execute("SELECT id, steps FROM playbook").fetchall():
+                    try:
+                        clean = path_only(json.loads(steps))
+                    except (ValueError, TypeError, AttributeError):
+                        clean = []
+                    self._db.execute("UPDATE playbook SET steps=?, answer='' WHERE id=?", (json.dumps(clean), pid))
+                self._db.execute("PRAGMA user_version=1")
+            self._db.commit()
 
     # ---- vectors ---------------------------------------------------------------------
     @staticmethod
@@ -245,6 +274,10 @@ class Store:
             )
             pid = int(cur.lastrowid or 0)
             self._put_vec("playbook_vec", pid, vec)
+            # Keep the newest few hundred: old paths go stale anyway.
+            stale = "SELECT id FROM playbook ORDER BY created DESC LIMIT -1 OFFSET ?"
+            self._db.execute(f"DELETE FROM playbook_vec WHERE id IN ({stale})", (_KEEP_PLAYBOOKS,))
+            self._db.execute(f"DELETE FROM playbook WHERE id IN ({stale})", (_KEEP_PLAYBOOKS,))
             self._db.commit()
             return pid
 
@@ -294,13 +327,21 @@ class Store:
 
     # ---- prompt --------------------------------------------------------------------------
     def prompt_context(self, query: str = "") -> str:
-        """Profile + lessons always; recent sessions; relevant notes when a query is given."""
+        """Profile + lessons always; recent sessions; relevant notes when a query is given.
+
+        This goes to the cloud models with each request, so NEO_CLOUD_MEMORY limits it:
+        "profile" sends only stable facts, "off" sends nothing."""
+        level = settings().cloud_memory
+        if level == "off":
+            return ""
         parts: list[str] = []
         prof = self.by_kind("profile")
         if prof:
             parts.append(
                 "About the user: " + "; ".join((f"{m.key}: " if m.key else "") + m.text for m in prof)
             )
+        if level == "profile":
+            return "\n".join(parts)
         les = self.by_kind("lesson", 15)
         if les:
             parts.append("Lessons: " + " | ".join(m.text for m in les))

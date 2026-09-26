@@ -122,6 +122,9 @@ kbd { font: 11px/1 -apple-system, system-ui; opacity: 0.7; margin-left: 6px; }
 /* ---- confirm ------------------------------------------------------------------------- */
 .confirm { padding: 12px 14px 14px; border-top: 1px solid var(--edge); background: rgba(158, 203, 255, 0.05); animation: fade 160ms ease-out; }
 .confirm-q { color: var(--fg); margin-bottom: 10px; }
+.confirm-btns .primary.danger-fill { background: #ff6b6b; color: #1a0606; }
+.confirm-btns .primary.danger-fill:hover { background: #ff8787; }
+.msg.system.problem { align-self: stretch; color: var(--fg); text-align: left; border-left: 2px solid #ffb347; padding-left: 10px; line-height: 1.4; }
 .confirm-detail {
   margin: 0 0 10px; padding: 8px 10px; max-height: 150px; overflow: auto;
   background: rgba(0, 0, 0, 0.28); border: 1px solid var(--edge); border-radius: 8px;

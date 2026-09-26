@@ -39,7 +39,9 @@ export function useNeo() {
   const [error, setError] = useState<string>("");
   const [note, setNote] = useState<string>("");
   const [ask, setAsk] = useState<ConfirmCard | null>(null);
+  const [problems, setProblems] = useState<string[]>([]);
   const sock = useRef<WebSocket | null>(null);
+  const noteTimer = useRef<number | undefined>(undefined);
 
   useEffect(() => {
     let alive = true;
@@ -52,6 +54,13 @@ export function useNeo() {
           setItems([]);
           for (const r of ev.data.recent ?? []) apply(r);
           setAsk(ev.data.confirm ?? null);
+          setProblems(ev.data.problems ?? []);
+          break;
+        case "problems":
+          setProblems(ev.data.items ?? []);
+          break;
+        case "erased":
+          setItems([]);
           break;
         case "confirm":
           setAsk(ev.data as ConfirmCard);
@@ -61,10 +70,13 @@ export function useNeo() {
           break;
         case "state":
           setState(ev.data.state);
-          if (["breathing", "listening", "shaping"].includes(ev.data.state)) setNote("");
           break;
         case "note":
+          // A short-lived line under the title (timeouts, quiet results, fallbacks): shown whatever
+          // NEO is doing, gone after a few seconds so it never shows up stale later.
           setNote(String(ev.data.text ?? ""));
+          if (noteTimer.current) clearTimeout(noteTimer.current);
+          noteTimer.current = window.setTimeout(() => setNote(""), 8000);
           break;
         case "transcript": {
           const { role, text, final, job } = ev.data;
@@ -167,5 +179,5 @@ export function useNeo() {
 
   const clear = useCallback(() => setItems([]), []);
 
-  return { connected, state, items, error, note, ask, send, clear };
+  return { connected, state, items, error, note, ask, problems, send, clear };
 }

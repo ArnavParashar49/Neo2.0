@@ -389,6 +389,10 @@ class LiveVoice:
                         self._down_reported = time.time()
                         asyncio.create_task(self.on_down(kind, why))
                 return
+            if self._connect_failures:
+                from neo import health
+
+                health.report("voice", None)  # it works again
             self._connect_failures = 0
             self._live_cm, self._live = cm, live
             self._last_activity = self._session_open = self._last_user_speech = time.time()

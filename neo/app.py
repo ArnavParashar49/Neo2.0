@@ -7,6 +7,7 @@ import os
 import signal
 from typing import Any
 
+from neo import health
 from neo.agent import confirm
 from neo.agent.session import Session, answer_of
 from neo.config import settings
@@ -82,6 +83,20 @@ class App:
                 await bus().note("Couldn't tell which question that answer was for — nothing was done.")
                 return
             await self.answer(bool(cmd.get("yes")), action_id=action_id)
+        elif kind == "forget_all":
+            # From the overlay's own "Erase everything?" confirmation (never a model's tool).
+            from neo.privacy import forget_everything
+
+            await self.session.cancel_all()
+            self.session.history.clear()
+            self.session._summarized = 0
+            self.session.memory_context = ""
+            if self.voice is not None and hasattr(self.voice, "_dialog"):
+                self.voice._dialog.clear()  # the spoken conversation it keeps for context
+            counts = await forget_everything()
+            print("[privacy] erased everything NEO kept about the user")
+            await bus().publish("erased", counts=counts)
+            await bus().note("Erased: " + ", ".join(f"{n} {k}" for k, n in counts.items()))
         elif kind == "stop":
             if self.voice:
                 await self.voice.interrupt()
@@ -95,13 +110,38 @@ class App:
                 await self.voice.wake("ui")
 
 
+# Argument values safe to keep in a log file people share for troubleshooting: app names, keys,
+# settings — never typed text, message bodies, commands, queries or file contents.
+_LOGGABLE = {"name", "app", "site", "direction", "level", "keys", "minutes", "action", "kind", "news", "button", "count", "id", "role", "new_tab", "send", "submit"}
+
+
+def _safe_args(args: dict) -> str:
+    from urllib.parse import urlsplit
+
+    out = []
+    for k, v in (args or {}).items():
+        s = str(v)
+        if k == "url" or (k == "target" and "://" in s):
+            out.append(f"{k}=<{urlsplit(s).hostname or 'link'}>")
+        elif k == "path" or (k == "target" and s.startswith(("/", "~"))):
+            out.append(f"{k}=<file>")
+        elif k in _LOGGABLE or k == "target":
+            out.append(f"{k}={s[:40]!r}")
+        else:
+            out.append(f"{k}=<{len(s)} chars>")
+    return " ".join(out)
+
+
 def _log_activity(ev) -> None:
-    """One line per tool call / route decision in the core log (what the REPL's -v shows)."""
+    """One line per tool call / route decision in the core log — what ran and whether it worked,
+    never what was typed, read or sent."""
     d = ev.data
     if ev.type == "tool_start":
-        print(f"  ▶ {d['name']} {str(d.get('args', {}))[:120]}")
+        print(f"  ▶ {d['name']} {_safe_args(d.get('args', {}))}")
     elif ev.type == "tool_end":
-        print(f"  ◀ {d['name']} {'ok' if d['ok'] else 'FAIL'}: {str(d.get('summary', ''))[:140]}")
+        summary = str(d.get("summary", ""))
+        detail = f": {summary[:80]}" if not d["ok"] else f" ({len(summary)} chars)"
+        print(f"  ◀ {d['name']} {'ok' if d['ok'] else 'FAIL'}{detail}")
     elif ev.type == "reflex":
         print(f"  ~ {d['intent']} ({d['intent_confidence']:.2f}) via {d['source']} {d['latency_ms']:.0f}ms")
     elif ev.type == "turn":
@@ -231,12 +271,10 @@ async def _voice_supervisor(app: App, stop: asyncio.Event) -> None:
     from neo.voice import devices
     from neo.voice.pipeline import local_ready, make_local, make_voice
 
+    from neo import health
+
     if devices.mic_status() in (devices.DENIED, devices.RESTRICTED):
-        await bus().publish(
-            "error",
-            message="NEO can't use the microphone — allow it in System Settings → Privacy & Security → "
-            "Microphone, then restart NEO. You can still type.",
-        )
+        print("[voice] microphone access is off for NEO")
     down: asyncio.Queue[tuple[str, str]] = asyncio.Queue()
 
     async def on_down(kind: str, why: str) -> None:
@@ -246,9 +284,10 @@ async def _voice_supervisor(app: App, stop: asyncio.Event) -> None:
         if app.voice is None:
             try:
                 app.voice = await make_voice(app.handle_text, app.session)
+                health.report("voice", None)
             except Exception as e:  # noqa: BLE001
                 print(f"[voice] unavailable: {str(e)[:160]}")
-                await bus().publish("error", message=f"Voice is off ({str(e)[:80]}) — you can type; retrying in a minute.")
+                health.report("voice", f"Voice is off ({str(e)[:80]}). You can type; NEO keeps trying.")
                 await asyncio.sleep(_VOICE_RETRY_S)
                 continue
             if hasattr(app.voice, "on_down"):
@@ -265,7 +304,7 @@ async def _voice_supervisor(app: App, stop: asyncio.Event) -> None:
             app.voice = None
             try:
                 app.voice = await make_local(app.handle_text)
-                await bus().publish("error", message=f"Gemini Live is unavailable ({reason}) — using the on-device voice for now.")
+                health.report("voice", f"Gemini Live is unavailable ({reason}) — using the on-device voice for now.")
                 await app.voice.speak(f"Online voice is unavailable because {reason}. I'm using the on-device voice for now.")
             except Exception as e:  # noqa: BLE001
                 print(f"[voice] on-device voice failed too: {str(e)[:120]}")
@@ -274,7 +313,7 @@ async def _voice_supervisor(app: App, stop: asyncio.Event) -> None:
                 continue
             asyncio.create_task(_back_to_live(app, stop, kind, on_down))
         else:
-            await bus().publish("error", message=f"Voice is unavailable: {reason}. You can still type; I'll keep trying.")
+            health.report("voice", f"Voice is unavailable: {reason}. You can still type; NEO keeps trying.")
             _say_aloud(f"Voice is unavailable because {reason}. You can still type to me.")
 
 
@@ -299,6 +338,7 @@ async def _back_to_live(app: App, stop: asyncio.Event, kind: str, on_down) -> No
             v.on_down = on_down
             app.voice = v
             print("[voice] Gemini Live is back")
+            health.report("voice", None)
             await bus().note("Gemini Live voice is back.")
         except Exception as e:  # noqa: BLE001
             print(f"[voice] couldn't switch back to Live: {str(e)[:120]}")

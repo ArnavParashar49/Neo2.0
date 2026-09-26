@@ -28,6 +28,7 @@ from urllib.parse import parse_qs, urlparse
 import websockets
 from websockets.asyncio.server import ServerConnection, serve
 
+from neo import health
 from neo.agent import confirm
 from neo.config import settings
 from neo.events import bus
@@ -98,6 +99,8 @@ class UIServer:
 
     def _relay(self, ev) -> None:
         msg = ev.to_dict()
+        if ev.type == "erased":
+            self._recent.clear()  # late-joining overlays must not get the old transcript back
         if ev.type in ("transcript", "state", "tool_start", "tool_end", "turn"):
             last = self._recent[-1] if self._recent else None
             if (
@@ -143,6 +146,7 @@ class UIServer:
                             "state": bus().state.value,
                             "recent": self._recent,
                             "confirm": confirm.card(confirm.peek()),  # a question still waiting
+                            "problems": health.problems(),  # missing key, blocked mic, voice down…
                         },
                     },
                     default=str,

@@ -153,6 +153,7 @@ export default function App() {
   const orb = ORB[shown];
   const [text, setText] = useState("");
   const [hover, setHover] = useState(false);
+  const [erasing, setErasing] = useState(false); // "Erase NEO's Memory…" from the menu bar
   const inputRef = useRef<HTMLInputElement>(null);
   const logRef = useRef<HTMLDivElement>(null);
   const stickToBottom = useRef(true);
@@ -193,9 +194,23 @@ export default function App() {
   // A confirmation request always surfaces the card.
   useEffect(() => { if (confirming) expand(); }, [confirming, expand]);
 
+  useEffect(() => {
+    if (!erasing) return;
+    const h = (e: KeyboardEvent) => { if (e.key === "Escape") { e.preventDefault(); setErasing(false); } };
+    window.addEventListener("keydown", h);
+    return () => window.removeEventListener("keydown", h);
+  }, [erasing]);
+
+  // Menu bar → Erase NEO's Memory…: the overlay asks before anything is deleted.
+  useEffect(() => {
+    if (!inTauri) return;
+    const un = listen("neo://erase", () => { expand(); setErasing(true); });
+    return () => { un.then((f) => f()).catch(() => {}); };
+  }, [expand]);
+
   // Auto-collapse after a quiet stretch unless pinned, hovered, or being typed into.
   useEffect(() => {
-    if (!expanded || pinned || hover || neo.state !== "idle" || confirming) return;
+    if (!expanded || pinned || hover || neo.state !== "idle" || confirming || erasing) return;
     const t = window.setTimeout(() => {
       if (document.activeElement === inputRef.current && text) return;
       setExpanded(false);
@@ -263,8 +278,10 @@ export default function App() {
         <div className="orb" data-tauri-drag-region><ThinkingOrb state={orb} size={64} theme="dark" speed={ORB_SPEED} gravity {...({ "data-tauri-drag-region": true } as object)} /></div>
         <div className="head-text" data-tauri-drag-region>
           <div className="title" data-tauri-drag-region>NEO</div>
-          <div className={"status" + (neo.connected ? "" : " off")} data-tauri-drag-region aria-live="polite">{neo.connected ? LABEL[shown] : "core offline — run  python -m neo"}</div>
-          {neo.note && busy && <div className="note" data-tauri-drag-region>{neo.note}</div>}
+          <div className={"status" + (neo.connected ? "" : " off")} data-tauri-drag-region aria-live="polite">
+            {neo.connected ? LABEL[shown] : inTauri ? "Core not running — menu bar → Restart NEO" : "core offline — run  python -m neo"}
+          </div>
+          {neo.note && <div className="note" data-tauri-drag-region aria-live="polite">{neo.note}</div>}
         </div>
         <div className="head-actions">
           <button className={"icon" + (pinned ? " on" : "")} title={pinned ? "Unpin (auto-hide when idle)" : "Pin open"} onClick={() => setPinned((p) => !p)}>{Icon.pin}</button>
@@ -273,7 +290,8 @@ export default function App() {
         </div>
       </header>
 
-      <div className="log" ref={logRef} onScroll={onScroll}>
+      <div className="log" ref={logRef} onScroll={onScroll} role="log" aria-live="polite">
+        {neo.connected && neo.problems.map((p) => <div key={p} className="msg system problem" role="alert">{p}</div>)}
         {neo.items.length === 0 && (
           <div className="empty">
             <div className="empty-hint">Say <b>“Hey Neo”</b>, or try one of these</div>
@@ -298,7 +316,16 @@ export default function App() {
         {neo.error && <div className="msg system">{neo.error}</div>}
       </div>
 
-      {neo.ask ? (
+      {erasing && !neo.ask ? (
+        <div className="confirm" role="alertdialog" aria-labelledby="erase-q">
+          <div className="confirm-q" id="erase-q">Erase everything NEO remembers about you?</div>
+          <div className="confirm-detail">Memories and preferences, past-session summaries, learned requests, the activity log, and logins in NEO's own browser. Your settings and API keys stay. This can't be undone.</div>
+          <div className="confirm-btns">
+            <button className="primary danger-fill" onClick={() => { neo.send({ cmd: "forget_all" }); setErasing(false); }}>Erase everything</button>
+            <button onClick={() => setErasing(false)}>Cancel <kbd>esc</kbd></button>
+          </div>
+        </div>
+      ) : neo.ask ? (
         <div className="confirm" role="alertdialog" aria-labelledby="confirm-q" aria-describedby="confirm-detail">
           <div className="confirm-q" id="confirm-q">NEO wants to {neo.ask.summary}.</div>
           {neo.ask.detail && <pre className="confirm-detail" id="confirm-detail">{neo.ask.detail}</pre>}

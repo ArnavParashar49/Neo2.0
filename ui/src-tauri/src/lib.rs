@@ -98,6 +98,8 @@ pub fn run() {
                 show_item.set_text("Show NEO   ⌥⌘")?;
             }
             let restart_item = MenuItem::with_id(app, "restart", "Restart NEO", true, None::<&str>)?;
+            let keys_item = MenuItem::with_id(app, "keys", "Settings & API Keys…", true, None::<&str>)?;
+            let erase_item = MenuItem::with_id(app, "erase", "Erase NEO's Memory…", true, None::<&str>)?;
             let logs_item = MenuItem::with_id(app, "logs", "Open Logs", true, None::<&str>)?;
             let login_item =
                 CheckMenuItem::with_id(app, "login", "Open at Login", true, core::launch_at_login(), None::<&str>)?;
@@ -106,7 +108,10 @@ pub fn run() {
             let sep2 = PredefinedMenuItem::separator(app)?;
             let menu = Menu::with_items(
                 app,
-                &[&status_item, &ax_item, &sc_item, &show_item, &sep, &restart_item, &logs_item, &login_item, &sep2, &quit_item],
+                &[
+                    &status_item, &ax_item, &sc_item, &show_item, &sep, &keys_item, &restart_item, &logs_item,
+                    &erase_item, &login_item, &sep2, &quit_item,
+                ],
             )?;
             let login_check = login_item.clone();
             TrayIconBuilder::with_id("neo")
@@ -127,6 +132,17 @@ pub fn run() {
                     }
                     "logs" => {
                         let _ = std::process::Command::new("open").arg(core::logs_dir()).spawn();
+                    }
+                    "keys" => {
+                        // TextEdit on ~/.neo/.env (created with every setting explained, mode 600).
+                        if let Ok(path) = core::ensure_env_file() {
+                            let _ = std::process::Command::new("open").arg("-e").arg(path).spawn();
+                        }
+                    }
+                    "erase" => {
+                        // The overlay asks "Erase everything?" before anything is deleted.
+                        show(app);
+                        let _ = app.emit("neo://erase", ());
                     }
                     "login" => {
                         let on = !core::launch_at_login();

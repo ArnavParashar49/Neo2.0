@@ -75,18 +75,29 @@ def op_key(tool: str, params: dict[str, Any], summary: str = "", detail: str = "
     return hashlib.sha256(blob.encode()).hexdigest()
 
 
+_CONTENT_KEYS = {"body", "content", "text", "new_string", "old_string", "brief", "value"}
+
+
 def _redact(params: dict[str, Any]) -> dict[str, Any]:
+    """The audit trail records what was done (the command, the recipient, the file) — not the
+    words of a message or a file."""
     out: dict[str, Any] = {}
     for k, v in clean(params).items():
         if any(s in k.lower() for s in _SECRET_KEYS):
             v = "***"
+        elif k in _CONTENT_KEYS:
+            v = f"<{len(str(v))} chars>"
         s = str(v)
         out[k] = s if len(s) <= 120 else s[:117] + "..."
     return out
 
 
+_AUDIT_MAX_BYTES = 1_000_000
+_AUDIT_KEEP_S = 180 * 86400
+
+
 def audit(action_id: str, tool: str, params: dict[str, Any], status: str) -> None:
-    """Best-effort append; never raises."""
+    """Best-effort append; never raises. Kept to ~1 MB plus one older file, at most 180 days."""
     try:
         line = json.dumps(
             {
@@ -97,7 +108,16 @@ def audit(action_id: str, tool: str, params: dict[str, Any], status: str) -> Non
                 "params": _redact(params),
             }
         )
-        with open(settings().audit_log, "a", encoding="utf-8") as f:
+        path = settings().audit_log
+        old = path.with_name(path.name + ".1")
+        try:
+            if path.stat().st_size > _AUDIT_MAX_BYTES:
+                path.replace(old)
+            if old.exists() and time.time() - old.stat().st_mtime > _AUDIT_KEEP_S:
+                old.unlink()
+        except FileNotFoundError:
+            pass
+        with open(path, "a", encoding="utf-8") as f:
             f.write(line + "\n")
     except Exception:
         pass

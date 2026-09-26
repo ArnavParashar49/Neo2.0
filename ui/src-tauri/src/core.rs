@@ -70,6 +70,40 @@ pub fn ws_token() -> String {
     token
 }
 
+/// ~/.neo/.env, where NEO's keys and settings live — created (readable only by this user) with
+/// every setting explained if it doesn't exist yet. Never overwritten.
+pub fn ensure_env_file() -> std::io::Result<PathBuf> {
+    let path = home().join(".neo").join(".env");
+    if path.exists() {
+        return Ok(path);
+    }
+    fs::create_dir_all(path.parent().unwrap())?;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut f = OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path)?;
+    f.write_all(ENV_TEMPLATE.as_bytes())?;
+    Ok(path)
+}
+
+const ENV_TEMPLATE: &str = "\
+# NEO settings. Save this file, then choose Restart NEO from the menu-bar icon.
+
+# Required: a free Gemini API key from https://aistudio.google.com/apikey
+GEMINI_API_KEY=
+
+# Optional: a free Groq key (https://console.groq.com/keys) makes quick answers faster.
+GROQ_API_KEY=
+
+# Where \"the weather\" means when you haven't told NEO your city, e.g. Dubai.
+NEO_HOME_LOCATION=
+
+# How much of what NEO remembers about you goes to the cloud models with each request:
+# full (profile, lessons, recent sessions, relevant notes) | profile (only stable facts) | off
+NEO_CLOUD_MEMORY=full
+
+# on | off — whether Laya (the on-device reflex) learns from the requests you make.
+NEO_LEARN=on
+";
+
 /// NEO's installed runtime (scripts/install-app.sh puts a Python environment with the core here).
 /// Outside ~/Documents on purpose: macOS guards that folder, and a background app reading it
 /// blocks on a "NEO would like to access your Documents" prompt before Python even starts.

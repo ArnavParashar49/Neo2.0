@@ -123,9 +123,19 @@ def main() -> None:
         "--local", action="store_true", help="download + serve the offline model (Gemma 4 12B, ~6.7 GB)"
     )
     ap.add_argument("-v", "--verbose", action="store_true")
+    ap.add_argument("--forget-all", action="store_true", help="erase everything NEO has kept about you")
     args = ap.parse_args()
     if args.doctor:
         sys.exit(doctor())
+    if args.forget_all:
+        from neo.privacy import forget_everything
+
+        if input("Erase NEO's memories, playbooks, history, learned requests, logs and browser logins? [y/N] ").strip().lower() != "y":
+            print("Nothing erased.")
+            return
+        counts = asyncio.run(forget_everything())
+        print("Erased: " + ", ".join(f"{n} {k}" for k, n in counts.items()))
+        return
     if args.local:
         from neo.providers.local_server import ensure_running
 
