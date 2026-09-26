@@ -6,6 +6,7 @@ fail the test unless a test lets the fake answer them."""
 
 from __future__ import annotations
 
+import asyncio
 import itertools
 import os
 import re
@@ -268,6 +269,9 @@ class FakeApp:
         self.make: tuple[int, str, str] | None = None
         self.listing: tuple[int, str, str] | None = None
         self.on_make = None
+        self.default = "home"  # the container an item goes to when none is given
+        self.no_id = False  # the new item's id can't be read after the make
+        self.made_then: tuple[int, str, str] | None = None  # made it, then answered this
 
     def kinds(self, script: str) -> list[str]:
         return [k for k, mark in (("make", "make new"), ("readback", "set oid to item 3 of argv"),
@@ -293,7 +297,10 @@ class FakeApp:
             self.items[oid] = {"_cid": cid, **dict(zip(re.findall(r"«property (.{4})»:\(", script), argv[2:], strict=False))}
             if self.on_make:
                 self.on_make(self.items[oid])
-            return 0, f"OK{US}{oid}", ""
+            if self.made_then is not None:
+                return self.made_then
+            name = next((n for i, n, _w in self.containers if i == (cid or self.default)), "")
+            return 0, f"OK{US}{'' if self.no_id else oid}{US}{name}", ""
         if kind == "readback":
             item = self.items.get(argv[2])
             if item is None:
@@ -366,6 +373,13 @@ def world(monkeypatch):
     run.forget()
     eventkit.forget()
     run._gen.reset(token)
+
+
+@pytest.fixture
+def switched_on(monkeypatch):
+    """The schedule kinds switched on (a fast path's captures count only then)."""
+    for kind in schedule.KINDS:
+        monkeypatch.setitem(settings().decide_modes, kind, "on")
 
 
 async def add_event(title="Lunch with Sam", start=None, text="", **kw):
@@ -447,6 +461,19 @@ async def test_the_same_add_twice_is_added_once(world):
     assert first.ok and again.ok and again.text == "Already added a moment ago." and len(world.ek.saved) == 1
 
 
+async def test_a_repeat_is_told_by_its_words_and_its_list(world):
+    early, late = datetime(2026, 9, 26, 10, 0, 55), datetime(2026, 9, 26, 10, 1, 2)  # 7 s apart, across a minute
+    a = schedule.parse_args("add_reminder", {"title": "check the oven", "due": "in 20 minutes"}, early)
+    b = schedule.parse_args("add_reminder", {"title": "check the oven", "due": "in 20 minutes"}, late)
+    assert a.sig == b.sig and a.start == b.start == datetime(2026, 9, 26, 10, 21)  # to the nearest minute
+    await schedule.carry_out("add_reminder", {"title": "tea", "due": "in 20 minutes"})
+    again = await schedule.carry_out("add_reminder", {"title": "tea", "due": "in 20 minutes"})
+    assert again.text == "Already added a moment ago." and len(world.ek.saved) == 1
+    await schedule.carry_out("add_reminder", {"title": "milk", "list": "Inbox"})
+    other = await schedule.carry_out("add_reminder", {"title": "milk", "list": "Errands"})
+    assert other.ok and "to Errands" in other.text and len(world.ek.saved) == 3  # another list: another reminder
+
+
 async def test_a_bad_time_or_title_asks_and_touches_nothing(world):
     for args, want in (({"title": "x", "start": "whenever you like"}, "couldn't tell when"),
                        ({"title": "", "start": "2026-10-01T10:00"}, "What should it be called?"),
@@ -474,8 +501,8 @@ async def test_the_store_is_asked_for_only_by_a_kind_switched_on(world):
 
 async def test_naming_an_app_or_a_missing_usage_key_asks_nothing(world, monkeypatch):
     world.ek.status = {0: NOT_ASKED, 1: NOT_ASKED}
-    res = await schedule.carry_out("add_event", {"title": "Gym", "start": at(4, 7).isoformat(), "calendar": "home"},
-                                   "add gym in datebook", ask_access=True)  # fmt: skip
+    res = await schedule.carry_out("add_event", {"title": "Gym", "start": at(4, 7).isoformat(), "calendar": "home",
+                                                 "app": "Datebook"}, "add gym in datebook", ask_access=True)  # fmt: skip
     assert world.ek.asks == [] and res.ok and "Home in Datebook" in res.text
     monkeypatch.setattr(evidence, "responsible_usage", lambda: frozenset())
     res = await schedule.carry_out("add_reminder", {"title": "call mom"}, ask_access=True)
@@ -484,6 +511,23 @@ async def test_naming_an_app_or_a_missing_usage_key_asks_nothing(world, monkeypa
     world.apps = []
     res = await schedule.carry_out("add_reminder", {"title": "call dad"}, ask_access=True)
     assert not res.ok and "store can't be used: NEO's app doesn't declare reminders access" in res.text
+
+
+async def test_only_the_tools_app_names_an_app_never_the_kinds_own_noun(world):
+    """'show my calendar', 'put it in calendar': a calendar app is often called by the kind's own
+    noun, so the words alone never pick an app over the store (nor keep the store from being
+    asked); the tool's `app` does (the model heard the user name one)."""
+    world.ek.add_event("Standup", at(1, 9), cal="work")
+    res = await schedule.carry_out("read_calendar", {"day": "tomorrow"}, "show my datebook for tomorrow")
+    assert res.ok and "Standup" in res.text and world.osa.calls == []
+    res = await add_event("Gym", at(4, 7), text="put it in datebook")
+    assert res.ok and world.ek.saved[-1].v["title"] == "Gym" and world.osa.calls == []
+    res = await add_event("Swim", at(4, 8), text="put swim in datebook", calendar="home", app="Datebook")
+    assert res.ok and "Home in Datebook" in res.text and world.ek.saved[-1].v["title"] == "Gym"
+    world.ek.status = {0: NOT_ASKED, 1: NOT_ASKED}
+    world.ek.answer = FULL
+    res = await schedule.carry_out("read_calendar", {"day": "tomorrow"}, "show my datebook for tomorrow", ask_access=True)
+    assert world.ek.asks == [0] and res.ok and "Standup" in res.text
 
 
 async def test_a_store_the_user_turned_down_is_named_when_nothing_else_works(world):
@@ -511,7 +555,48 @@ async def test_denied_store_goes_to_the_app_which_asks_once_which_calendar(world
     world.osa.calls.clear()
     res = await add_event("Standup", at(6, 9))  # remembered: no question, no listing
     assert res.ok and [world.osa.kinds(s)[0] for s, _a in world.osa.calls] == ["make", "readback"]
+    assert "“Standup” to Work in Datebook" in res.text  # where it went, by the calendar's own name
     assert world.osa.items["obj2"]["_cid"] == "work" and world.ek.saved == []
+
+
+async def test_only_the_answer_to_which_calendar_is_remembered(world):
+    world.ek.status[0] = DENIED
+    res = await add_event("Mum's birthday dinner", at(5, 19), calendar="home")
+    assert res.ok and "to Home in Datebook" in res.text
+    assert learned.get("containers", "add_event:test.datebook") is None  # named for this one event only
+    res = await add_event("Sprint review", at(6, 10))
+    assert isinstance(res.text, Halt) and "Which calendar should I use" in res.text  # so still asked
+    res = await add_event("Sprint review", at(6, 10), calendar="work")  # the answer
+    assert res.ok and learned.get("containers", "add_event:test.datebook") == {"id": "work"}
+    res = await add_event("Retro", at(7, 10))
+    assert res.ok and "“Retro” to Work in Datebook" in res.text and world.osa.items["obj3"]["_cid"] == "work"
+
+
+async def test_an_id_the_app_couldnt_give_back_is_searched_for_never_made_twice(world):
+    world.ek.status[0] = DENIED
+    world.osa.no_id = True  # made, but reading its id failed
+    res = await add_event(calendar="work")
+    assert res.ok and "to Work in Datebook" in res.text
+    assert [world.osa.kinds(s)[0] for s, _a in world.osa.calls] == ["containers", "make", "search", "readback"]
+    assert len(world.osa.items) == 1 and world.opened == []
+    world.osa.no_id = False
+    world.osa.made_then = (1, "", "execution error: Can't get object. (-1728)")  # made, then an object went missing
+    res = await add_event("Dentist", at(6, 9), calendar="work")
+    assert res.ok and len(world.osa.items) == 2 and world.opened == []
+    world.osa.made_then = None
+    world.osa.make = (1, "", "execution error: Can't get calendar. (-1728)")  # nothing made
+    res = await add_event("Physio", at(7, 9), calendar="work")
+    assert res.ok and len(world.osa.items) == 2 and len(world.opened) == 1  # so the next way: the file
+
+
+async def test_a_missing_list_by_script_names_the_list_it_went_to(world):
+    world.ek.status[1] = DENIED
+    world.osa.containers = [("inbox", "Inbox", True), ("errands", "Errands", True)]
+    world.osa.default = "inbox"
+    res = await schedule.carry_out("add_reminder", {"title": "bread", "list": "shopping"})
+    assert res.ok and res.say is True and world.osa.items["obj1"]["_cid"] == ""
+    assert res.text.startswith("Added “bread” to Inbox in Tasklist.")
+    assert "There's no list called shopping, so I put it in Inbox." in res.text
 
 
 async def test_a_make_that_timed_out_is_found_again_or_never_made_twice(world):
@@ -531,7 +616,7 @@ async def test_a_make_that_timed_out_is_found_again_or_never_made_twice(world):
 
 async def test_an_app_that_writes_into_the_store_steps_aside_afterwards(world):
     world.osa.on_make = lambda item: world.ek.add_event(item["wr11"], datetime.fromisoformat(item["wr1s"]))
-    res = await add_event(calendar="home", text="lunch in datebook")
+    res = await add_event(calendar="home", text="lunch in datebook", app="Datebook")
     assert res.ok and "Datebook" in res.text and world.ek.saved == []
     assert learned.get("store_views", "add_event:test.datebook") == {"view": True}
     cands = await engine.choose("add_event", "lunch")
@@ -542,14 +627,14 @@ async def test_a_reminder_by_script_gets_its_due_time_as_its_alert(world):
     world.ek.status[1] = DENIED
     due = at(1, 17)
     res = await schedule.carry_out("add_reminder", {"title": "call mom", "due": due.isoformat(), "notes": "about Sunday"})
-    assert res.ok and "“call mom” to Tasklist" in res.text
+    assert res.ok and "“call mom” to Home in Tasklist" in res.text  # the list the app put it in
     item = world.osa.items["obj1"]
     assert item["dued"] == item["rmdt"] == due.isoformat() and item["body"] == "about Sunday" and item["_cid"] == ""
     await schedule.carry_out("add_reminder", {"title": "pay rent", "due": at(3, 0).date().isoformat()})
     item = world.osa.items["obj2"]
     assert "adue" in item and "dued" not in item and "rmdt" not in item  # a day: no alert
     res = await schedule.carry_out("add_reminder", {"title": "milk", "list": "errands"})
-    assert "There's no list called errands there, so I used Tasklist" in res.text  # this app's lists: none named so
+    assert "There's no list called errands, so I put it in Home." in res.text  # this app's lists: none named so
 
 
 # ---- reminders through the store --------------------------------------------------------------------------
@@ -714,6 +799,44 @@ async def test_the_file_is_handed_over_only_when_nothing_else_can(world):
     assert await schedule.fallback(run.Req("add_event", {}, ""), "ics") is None
 
 
+async def test_a_handed_over_file_goes_after_a_while_and_with_the_erase(world, monkeypatch):
+    world.ek.status[0] = DENIED
+    world.apps = []
+    monkeypatch.setattr(schedule, "ICS_KEEP_S", 0.05)
+    res = await add_event("Therapy session", notes="private notes")
+    path = Path(world.opened[-1][1])
+    assert res.ok and path.exists()
+    await asyncio.sleep(0.3)
+    assert not path.exists()
+    monkeypatch.setattr(schedule, "ICS_KEEP_S", 600.0)
+    await add_event("Therapy session 2", at(6, 9))
+    path = Path(world.opened[-1][1])
+    assert path.exists()
+    await privacy.forget_everything()
+    assert not path.exists() and not list((settings().data_dir / "tmp").glob("neo-*.ics"))
+
+
+async def test_stale_files_go_at_start_and_a_file_that_didnt_open_goes_at_once(world, monkeypatch):
+    tmp = settings().data_dir / "tmp"
+    tmp.mkdir(parents=True)
+    stale, fresh = tmp / "neo-old.ics", tmp / "neo-new.ics"
+    for p in (stale, fresh):
+        p.write_text("x")
+    os.utime(stale, (time.time() - 1200, time.time() - 1200))
+    schedule.prune()
+    assert not stale.exists() and fresh.exists()
+    world.ek.status[0] = DENIED
+    world.apps = []
+
+    async def fails(bid, path):
+        world.opened.append((bid, path))
+        return False
+
+    monkeypatch.setattr(schedule, "_open_with", fails)
+    res = await add_event()
+    assert not res.ok and not Path(world.opened[-1][1]).exists()
+
+
 # ---- nothing learned after an erase ----------------------------------------------------------------------------
 
 
@@ -768,7 +891,7 @@ async def test_shadow_never_breaks_the_real_request(world, monkeypatch):
 # ---- the fast paths' test ---------------------------------------------------------------------------------------
 
 
-def test_fast_path_check_uses_cached_data_only(world):
+def test_fast_path_check_uses_cached_data_only(world, switched_on):
     assert schedule.check("add_reminder", {"title": "call mom", "due": "kal 5 baje"})
     assert schedule.check("add_reminder", {"title": "call mom"})
     assert not schedule.check("add_reminder", {"title": "it", "due": "at 5"})
@@ -784,6 +907,26 @@ def test_fast_path_check_uses_cached_data_only(world):
     assert not schedule.check("read_calendar", {"day": "someday"}) and not schedule.check("open_app", {})
     eventkit.forget()
     assert eventkit.titles("reminder") is None
+
+
+def test_a_fast_path_time_that_starts_with_the_titles_own_word_goes_to_the_model(world, switched_on):
+    """'remind me to put the kettle on at 5': a lazy title stops at 'on', and 'on at 5' still
+    reads as a time - the model splits it instead."""
+    for due in ("on at 5", "on tomorrow at 7", "in at 5", "this at 5", "in on friday", "on in 10 minutes"):
+        assert not schedule.check("add_reminder", {"title": "put the kettle", "due": due}), due
+        assert not schedule.check("add_event", {"title": "put the kettle", "start": due}), due
+    for due in ("at 5", "on friday", "in 20 minutes", "by tomorrow", "on this friday", "at around 5", "tomorrow at 7"):
+        assert schedule.check("add_reminder", {"title": "call mom", "due": due}), due
+
+
+def test_fast_path_captures_count_only_for_a_kind_switched_on(world, monkeypatch):
+    """Legacy and shadow run today's scripts, which take ISO times only: the words a fast path
+    captured go to the model instead."""
+    monkeypatch.setitem(settings().decide_modes, "add_reminder", "shadow")
+    assert not schedule.check("add_reminder", {"title": "call mom", "due": "kal 5 baje"})
+    assert not schedule.check("read_calendar", {"day": "kal"}) and schedule.check("read_calendar", {})
+    monkeypatch.setitem(settings().decide_modes, "add_reminder", "on")
+    assert schedule.check("add_reminder", {"title": "call mom", "due": "kal 5 baje"})
 
 
 # ---- parts -----------------------------------------------------------------------------------------------------------
@@ -823,14 +966,61 @@ def test_parse_args():
     assert schedule.parse_args("read_calendar", {"day": "someday"}, now) == "I couldn't tell which day “someday” is."
     assert schedule.parse_args("add_event", {"title": "x"}, now) == "When is it?"
     assert schedule.parse_args("add_event", {"title": "x", "start": "2026-10-01T10:00", "app": "Datebook"}, now).app == "Datebook"
-    assert schedule.parse_args("add_event", {"title": "x", "start": "2026-10-01T10:00"}, now).sig == ("x", "2026-10-01T10:00:00")
+    assert schedule.parse_args("add_event", {"title": "x", "start": "2026-10-01T10:00"}, now).sig == ("x", "", "2026-10-01T10:00:00")
 
 
-def test_an_app_named_through_the_tool_reaches_the_engine():
+def test_an_all_day_end_at_midnight_ends_the_day_before():
+    """A date alone is the last day (as for a read's end); a midnight is the moment the last day
+    ends (iCalendar's exclusive end)."""
+    now = datetime(2026, 9, 26, 10, 0)
+    for args in ({"start": "2026-10-03T00:00", "end": "2026-10-04T00:00", "all_day": True},
+                 {"start": "2026-10-03", "end": "2026-10-04T00:00"}, {"start": "2026-10-03", "end": "2026-10-03"},
+                 {"start": "2026-10-03T00:00", "end": "2026-10-03T00:00", "all_day": True}):  # fmt: skip
+        ev = schedule.parse_args("add_event", {"title": "Offsite", **args}, now)
+        assert (ev.start, ev.end) == (datetime(2026, 10, 3), datetime(2026, 10, 4)), args
+        assert schedule._when_words(ev, now) == "all day Saturday 3 October"
+    two = schedule.parse_args("add_event", {"title": "Offsite", "start": "2026-10-03", "end": "2026-10-04"}, now)
+    assert two.end == datetime(2026, 10, 5) and schedule._when_words(two, now) == "all day Saturday 3 October to Sunday 4 October"
+
+
+async def test_an_all_day_event_ending_at_midnight_is_one_day_in_the_store(world):
+    d = at(9, 0)
+    res = await schedule.carry_out("add_event", {"title": "Offsite", "start": d.isoformat(timespec="minutes"),
+                                                 "end": (d + timedelta(days=1)).isoformat(timespec="minutes"), "all_day": True})  # fmt: skip
+    ev = world.ek.saved[-1]
+    assert res.ok and py(ev.v["startDate"]) == py(ev.v["endDate"]) == d
+    assert res.text.endswith(f", all day {schedule._day(d.date(), datetime.now())}.")  # one day, no range
+    fair = await schedule.carry_out("add_event", {"title": "Fair", "start": (d + timedelta(days=3)).date().isoformat()})
+    assert fair.ok and fair.say is False  # one day, where events always go: nothing to say
+    last = d + timedelta(days=5)
+    trip = await schedule.carry_out("add_event", {"title": "Trip", "start": (d + timedelta(days=4)).date().isoformat(),
+                                                  "end": last.date().isoformat()})  # fmt: skip
+    assert trip.ok and trip.say is True and trip.text.endswith(f" to {schedule._day(last.date(), datetime.now())}.")
+
+
+def test_a_week_is_read_as_that_week(monkeypatch):
+    now = datetime(2026, 9, 26, 10, 0)  # a Saturday
+    monkeypatch.setattr(schedule, "_first_weekday", lambda: 0)  # weeks start on Monday
+    for day in ("next week", "agle hafte", "अगले हफ्ते में", "for next week"):
+        read = schedule.parse_args("read_calendar", {"day": day}, now)
+        assert (read.start, read.end) == (datetime(2026, 9, 28), datetime(2026, 10, 5)), day
+    read = schedule.parse_args("read_calendar", {"day": "this week"}, now)
+    assert (read.start, read.end) == (datetime(2026, 9, 26), datetime(2026, 9, 28))  # what's left of it
+    monkeypatch.setattr(schedule, "_first_weekday", lambda: 6)  # on Sunday
+    read = schedule.parse_args("read_calendar", {"day": "is hafte"}, now)
+    assert (read.start, read.end) == (datetime(2026, 9, 26), datetime(2026, 9, 27))
+    read = schedule.parse_args("read_calendar", {"day": "next week"}, now)
+    assert (read.start, read.end) == (datetime(2026, 9, 27), datetime(2026, 10, 4))
+    assert isinstance(schedule.parse_args("read_calendar", {"day": "some week"}, now), str)
+
+
+async def test_an_app_named_through_the_tool_reaches_the_engine(world):
     spec = schedule.parse_args("add_event", {"title": "x", "start": "2026-10-01T10:00", "app": "Datebook"})
-    assert schedule._req(spec, "lunch friday").text == "lunch friday in Datebook"
-    assert schedule._req(spec, "lunch in datebook").text == "lunch in datebook"
-    assert schedule._req(spec, "").text == "x in Datebook"
+    assert (await schedule._request(spec, "lunch friday")).text == "lunch friday in Datebook"
+    assert (await schedule._request(spec, "lunch in datebook")).text == "lunch in datebook"
+    assert (await schedule._request(spec, "")).text == "x in Datebook"
+    unnamed = schedule.parse_args("add_event", {"title": "x", "start": "2026-10-01T10:00"})
+    assert (await schedule._request(unnamed, "put lunch in datebook")).text == "put lunch in an app"
 
 
 async def test_an_app_with_no_calendars_reads_as_empty(world):

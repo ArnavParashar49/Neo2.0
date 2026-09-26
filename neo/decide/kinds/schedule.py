@@ -13,7 +13,8 @@ Hindi: :mod:`neo.decide.when`); a time NEO had to infer is said back.
 * :func:`would_choose` - only say what would be done (a kind in shadow): nothing is asked of
   macOS, opened, scripted or learned, and no title leaves this module;
 * :func:`check` - the fast paths' test, on cached data only;
-* :func:`parse_args` - the tool's arguments as times and names, for any mode.
+* :func:`parse_args` - the tool's arguments as times and names, for any mode;
+* :func:`prune` / :func:`forget` - the calendar files NEO handed over go (at start / the erase).
 """
 
 from __future__ import annotations
@@ -26,6 +27,7 @@ import unicodedata
 import uuid
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, date, datetime, timedelta
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from neo.decide import aescript, eventkit, routes, when
@@ -50,6 +52,8 @@ __all__ = [
     "would_choose",
     "check",
     "ics_text",
+    "prune",
+    "forget",
 ]
 
 KINDS = ("add_event", "add_reminder", "read_calendar")
@@ -90,21 +94,37 @@ class Spec:
     location: str = ""
     notes: str = ""
     container: str = ""  # the calendar or list the user named
-    app: str = ""  # the app the user named
+    app: str = ""  # the app the user named (the tool's `app`: the words alone never name one)
+    phrase: str = ""  # the time in the user's own words, normalised ('' for an ISO one)
 
     @property
     def sig(self) -> tuple:
-        """What makes two adds the same one (a retried request adds nothing new)."""
+        """What makes two adds the same one (a retried request adds nothing new): the title, the
+        calendar or list named, and the time as said ("in 20 minutes" moves with the clock), else
+        the ISO time."""
         if self.kind == "read_calendar":
             return ()
-        return (_norm(self.title), aescript.iso(self.start) if self.start else "")
+        at = self.phrase or (aescript.iso(self.start) if self.start else "")
+        return (_norm(self.title), _norm(self.container), at)
+
+    @property
+    def said_back(self) -> bool:
+        """Something about when it is that the user should hear: a time NEO inferred, or an
+        all-day event over several days (a range read one day off is heard)."""
+        days = self.date_only and self.start and self.end and self.end - self.start > timedelta(days=1)
+        return bool(self.inferred or (self.kind == "add_event" and days))
 
 
 _ISO_DAY = re.compile(r"\d{4}-\d{2}-\d{2}")
 
 
+def _minute(dt: datetime) -> datetime:
+    return (dt + timedelta(seconds=30)).replace(second=0, microsecond=0)
+
+
 def _time(value: Any, now: datetime, *, future: bool) -> when.When | None:
-    """An ISO date or time (a model's), else the user's own words; None when unsure."""
+    """An ISO date or time (a model's), else the user's own words (to the nearest minute: "in 20
+    minutes" is counted from now); None when unsure."""
     v = " ".join(str(value or "").split())
     if not v:
         return None
@@ -116,10 +136,23 @@ def _time(value: Any, now: datetime, *, future: bool) -> when.When | None:
     try:
         dt = datetime.fromisoformat(v)
     except ValueError:
-        return when.parse(v, now, future=future)
+        got = when.parse(v, now, future=future)
+        if got is None or got.start is None:
+            return got
+        return replace(got, start=_minute(got.start), end=_minute(got.end) if got.end else None)
     if dt.tzinfo is not None:
         dt = dt.astimezone().replace(tzinfo=None)
     return when.When(dt.replace(second=0, microsecond=0), None, False, "")
+
+
+def _phrase(value: Any) -> str:
+    """A time in the user's own words, normalised; '' for an ISO date or time."""
+    v = " ".join(str(value or "").split())
+    try:
+        datetime.fromisoformat(v)
+    except ValueError:
+        return _norm(v)
+    return ""
 
 
 def _text(args: dict, key: str) -> str:
@@ -151,20 +184,25 @@ def parse_args(kind: str, args: dict, now: datetime | None = None) -> Spec | str
             inferred=due.inferred if due else "",
             notes=str(args.get("notes") or "").strip(),
             container=_text(args, "list"),
+            phrase=_phrase(args.get("due")) if due else "",
         )
     start = _time(args.get("start"), now, future=True)
     if start is None or start.start is None:
         return f"I couldn't tell when “{_text(args, 'start')}” is." if _text(args, "start") else "When is it?"
     all_day = start.date_only or _flag(args.get("all_day"))
     first = datetime.combine(start.start.date(), datetime.min.time()) if all_day else start.start
-    end = start.end
+    end, end_day = start.end, False
     if _text(args, "end"):
         got = _time(args["end"], start.start, future=True)
         if got is None or got.start is None:
             return f"I couldn't tell when “{_text(args, 'end')}” is."
-        end = got.start
+        end, end_day = got.start, got.date_only
     if all_day:
+        # a date alone is the last day (as a read's end is); a midnight is the moment the last
+        # day ends (iCalendar's exclusive end), so it is the day before
         last = (end or first).date()
+        if end is not None and not end_day and end.time() == datetime.min.time() and end > first:
+            last -= timedelta(days=1)
         end = datetime.combine(max(last, first.date()) + timedelta(days=1), datetime.min.time())
     elif end is None:
         end = first + EVENT_LEN
@@ -180,6 +218,7 @@ def parse_args(kind: str, args: dict, now: datetime | None = None) -> Spec | str
         location=_text(args, "location"),
         notes=str(args.get("notes") or "").strip(),
         container=_text(args, "calendar"),
+        phrase=_phrase(args.get("start")),
     )
 
 
@@ -197,6 +236,8 @@ def _window(base: Spec, args: dict, now: datetime) -> Spec | str:
                 return f"I couldn't tell when “{_text(args, 'end')}” is."
             t1 = end.start + (timedelta(days=1) if end.date_only else timedelta(0))
         t1 = t1 or datetime.combine(t0.date() + timedelta(days=1), datetime.min.time())
+    elif span := _week(_text(args, "day"), now):
+        t0, t1 = span
     else:
         day = now.date()
         if _text(args, "day"):
@@ -212,15 +253,56 @@ def _window(base: Spec, args: dict, now: datetime) -> Spec | str:
     return replace(base, start=t0, end=t1, date_only=True)
 
 
+# "next week", "agle hafte", "this week": a week, not the one day a week from now
+_WEEK = frozenset(
+    unicodedata.normalize("NFKC", w) for w in ("week", "hafte", "hafta", "हफ्ते", "हफ़्ते", "हफ्ता", "सप्ताह")
+)
+_NEXT = frozenset({"next", "agle", "agla", "अगले", "अगला"})
+_THIS = frozenset({"this", "is", "iss", "इस"})
+_AROUND = frozenset({"for", "the", "in", "mein", "me", "में"})  # "for next week", "agle hafte mein"
+
+
+def _first_weekday() -> int:
+    """The first day of the user's week (0 = Monday), from their own calendar settings."""
+    try:
+        from Foundation import NSCalendar
+
+        return (int(NSCalendar.currentCalendar().firstWeekday()) + 5) % 7  # 1 = Sunday ... 7 = Saturday
+    except Exception:  # noqa: BLE001 - no Foundation: the ISO week
+        return 0
+
+
+def _week(phrase: str, now: datetime) -> tuple[datetime, datetime] | None:
+    """Next week, or what is left of this one, for a phrase that says so; else None."""
+    words = [w for w in re.findall(r"[\wऀ-ॿ]+", _norm(phrase)) if w not in _AROUND]
+    if len(words) != 2 or words[1] not in _WEEK or words[0] not in _NEXT | _THIS:
+        return None
+    today = datetime.combine(now.date(), datetime.min.time())
+    begun = today - timedelta(days=(today.weekday() - _first_weekday()) % 7)
+    if words[0] in _NEXT:
+        return begun + timedelta(days=7), begun + timedelta(days=14)
+    return today, begun + timedelta(days=7)
+
+
 def _spec(req: Req) -> Spec:
     return Spec(**req.fields)
 
 
-def _req(spec: Spec, text: str) -> Req:
-    """What the engine reads: the user's words (the app they named through the tool included)."""
+async def _request(spec: Spec, text: str) -> Req:
+    """What the engine reads: the user's words, where only the tool's `app` names an app. A
+    calendar or to-do app is often called by the kind's own noun ("show my calendar", "put it in
+    calendar"), so any app the words seem to name is masked unless the model passed it."""
     said = " ".join((text or "").split()) or spec.title or spec.kind.replace("_", " ")
-    if spec.app and spec.app.casefold() not in said.casefold():
-        said = f"{said} in {spec.app}"
+    if spec.app:
+        if spec.app.casefold() not in said.casefold():
+            said = f"{said} in {spec.app}"
+    else:
+        from neo.decide import engine, inventory
+
+        try:
+            said = engine.mask_apps(said, await asyncio.to_thread(inventory.inventory))
+        except Exception:  # noqa: BLE001 - no inventory: the engine finds no app named either
+            pass
     return Req(spec.kind, asdict(spec), said, named=spec.app, sig=spec.sig)
 
 
@@ -318,7 +400,10 @@ def _when_words(spec: Spec, now: datetime) -> str:
         return ""
     day = _day(spec.start.date(), now)
     if spec.date_only:
-        return f"all day {day}" if spec.kind == "add_event" else day
+        if spec.kind != "add_event":
+            return day
+        last = (spec.end - timedelta(days=1)).date() if spec.end else spec.start.date()
+        return f"all day {day}" if last <= spec.start.date() else f"all day {day} to {_day(last, now)}"
     if spec.end is not None and spec.end.date() == spec.start.date():
         return f"{_clock(spec.start)} to {_clock(spec.end)} {day}"
     return f"{_clock(spec.start)} {day}"
@@ -478,7 +563,7 @@ async def _store_add(spec: Spec, req: Req) -> Outcome:
     text = _added(spec, where, now) + note + clash
     if st == "write_only":
         text += " (I can't double-check with the access I have.)"
-    say = True if (note or clash or spec.inferred or not got.verified) else None
+    say = True if (note or clash or spec.said_back or not got.verified) else None
     return Outcome(True, text, effect=Effect.DONE, receipt=receipt, say=say)
 
 
@@ -628,6 +713,18 @@ async def _search_back(r: aescript.CreateRoute, app: App, spec: Spec, since: dat
     return rows[0][0] if status == "OK" and rows and rows[0] else ""
 
 
+# "<kind>:<bundle id>" -> when NEO asked which calendar or list to use for new items there: only
+# the answer to that question is remembered for later adds that name none
+_ASKED: dict[str, float] = {}
+
+
+def _answering(key: str) -> bool:
+    """This request names a calendar or list soon after NEO asked which one to use there."""
+    from neo.decide import run
+
+    return time.monotonic() - _ASKED.get(key, float("-inf")) <= run.RECENT_S
+
+
 async def _script_make(spec: Spec, req: Req, app: App) -> Outcome:
     from neo.decide import learned, run
 
@@ -638,17 +735,17 @@ async def _script_make(spec: Spec, req: Req, app: App) -> Outcome:
         return Outcome(False, f"{app.name} can't add that", reason="route_bad")
     key = f"{spec.kind}:{app.bundle_id}"
     now = datetime.now()
-    cid, where, remember = "", app.name, False
+    cid, where, remember, tied = "", app.name, False, False
     listed: list[tuple[str, str, bool]] | None = None
     if spec.container and r.listable:
         got = await _listing(r, app)
         if isinstance(got, Outcome):
             return got
         listed = got
-        pick, _tied = await _pick(spec.container, [(i, n) for i, n, w in listed if w], req.text)
+        pick, tied = await _pick(spec.container, [(i, n) for i, n, w in listed if w], req.text)
         if pick is not None:
             cid, where = pick[0], f"{pick[1]} in {app.name}"
-            remember = not r.default  # the answer to "which one?": asked only once
+            remember = not r.default and _answering(key)
     missing = bool(spec.container) and not cid
     if not cid and not r.default and r.container:
         # no default of its own: the one NEO was told before, the only one, or ask once
@@ -669,19 +766,22 @@ async def _script_make(spec: Spec, req: Req, app: App) -> Outcome:
 
                 names = [n for _i, n in open_][:6]
                 ask = f"Which {one} should I use for new {_NOUN[item][2]} in {app.name}: {_one_of(names)}?"
+                _ASKED[key] = time.monotonic()
                 return Outcome(False, confirm.ask_user(ask), reason="needs_user")
             cid, where = open_[0][0], f"{open_[0][1]} in {app.name}"
-    note = f" There's no {one} called {spec.container} there, so I used {where}." if missing else ""
     script, argv = aescript.render_create(r, app.bundle_id, _values(r, spec), cid)
     since = datetime.now() - timedelta(seconds=2)
     code, out, err = await run.commit(aescript.run(script, argv, MAKE_S))
     status, rows = aescript.rows(out) if code == 0 else ("", [])
-    oid = ""
+    oid, name = "", ""
     if code != 0:
         failed = aescript.fail(app.name, code, err, committed=True)
-        if failed.effect is not Effect.UNKNOWN:
+        # a make cut short may have made it after all, and an object the app couldn't resolve may
+        # have been one it made (never a second copy): look before trying anything else
+        if failed.effect is Effect.UNKNOWN or failed.reason == "not_found":
+            oid = await _search_back(r, app, spec, since, cid)
+        if not oid and failed.effect is not Effect.UNKNOWN:
             return failed
-        oid = await _search_back(r, app, spec, since, cid)  # it may have been made after all
         if not oid:
             return Outcome(
                 False,
@@ -697,7 +797,12 @@ async def _script_make(spec: Spec, req: Req, app: App) -> Outcome:
     elif status != "OK":
         return Outcome(False, f"{app.name} gave an answer NEO didn't understand", reason="route_bad")
     else:
-        oid = rows[0][0] if rows and rows[0] else ""
+        oid, name = (rows[0] + ["", ""])[:2] if rows else ("", "")
+        if not oid and r.id_code:  # made, but its id didn't come back: find it rather than guess
+            oid = await _search_back(r, app, spec, since, cid)
+    if name:  # the calendar or list the app put it in, by its own name
+        where = f"{name} in {app.name}"
+    note = _missed(one, spec.container, tied, name or where) if missing else ""
     ok = await _check(r, app, spec, oid, cid) if oid else None
     if ok is not True:
         return Outcome(
@@ -709,10 +814,11 @@ async def _script_make(spec: Spec, req: Req, app: App) -> Outcome:
         )
     if remember:
         learned.put("containers", key, {"id": cid})
+        _ASKED.pop(key, None)
     await _note_store_view(spec, app, since)
     receipt = {"id": oid, "where": app.bundle_id, "container": cid, "verified": True}
     return Outcome(True, _added(spec, where, now) + note, effect=Effect.DONE, receipt=receipt,
-                   say=True if (note or spec.inferred) else None)
+                   say=True if (note or spec.said_back) else None)
 
 
 async def _note_store_view(spec: Spec, app: App, since: datetime) -> None:
@@ -898,19 +1004,48 @@ def _tzid() -> str:
         return ""
 
 
-def _write_ics(spec: Spec) -> str:
-    """The event's file in NEO's own tmp folder (0600); files older than ICS_KEEP_S go first."""
+def _tmp() -> Path:
     from neo.config import settings
 
-    d = settings().data_dir / "tmp"
-    d.mkdir(parents=True, exist_ok=True)
-    os.chmod(d, 0o700)
-    for old in d.glob("neo-*.ics"):
+    return settings().data_dir / "tmp"
+
+
+def _drop_files(older_than_s: float | None) -> None:
+    """Delete the calendar files NEO wrote (only those older than ``older_than_s``, if given)."""
+    for f in _tmp().glob("neo-*.ics"):
         try:
-            if time.time() - old.stat().st_mtime > ICS_KEEP_S:
-                old.unlink()
+            if older_than_s is None or time.time() - f.stat().st_mtime > older_than_s:
+                f.unlink()
         except OSError:
             continue
+
+
+def _drop_file(path: str) -> None:
+    try:
+        Path(path).unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def prune() -> None:
+    """Delete the calendar files handed over more than ICS_KEEP_S ago. For NEO's start: the
+    timers of the run that wrote them are gone."""
+    _drop_files(ICS_KEEP_S)
+
+
+def forget() -> None:
+    """The privacy erase: every calendar file NEO wrote (an event's title, place and notes), and
+    any "which calendar?" still waiting for its answer."""
+    _drop_files(None)
+    _ASKED.clear()
+
+
+def _write_ics(spec: Spec) -> str:
+    """The event's file in NEO's own tmp folder (0600); files older than ICS_KEEP_S go first."""
+    d = _tmp()
+    d.mkdir(parents=True, exist_ok=True)
+    os.chmod(d, 0o700)
+    _drop_files(ICS_KEEP_S)
     uid = f"{uuid.uuid4()}@neo.local"
     path = d / f"neo-{uuid.uuid4().hex}.ics"
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -940,7 +1075,10 @@ async def fallback(req: Req, key: str) -> Outcome | None:
         return Outcome(False, "Nothing on this Mac opens calendar files", reason="not_found")
     path = await asyncio.to_thread(_write_ics, spec)
     if not await run.commit(_open_with(bid, path)):
+        _drop_file(path)
         return Outcome(False, "The calendar file didn't open")
+    # the app has it open for the user to add; the file itself holds the event's words
+    asyncio.get_running_loop().call_later(ICS_KEEP_S, _drop_file, path)
     app = inventory.app_for_bundle(bid)
     name = app.name if app is not None else "your calendar app"
     receipt = {"where": "ics", "handoff": True, "verified": False}
@@ -948,18 +1086,6 @@ async def fallback(req: Req, key: str) -> Outcome | None:
 
 
 # ---- entry points ---------------------------------------------------------------------------------
-
-
-async def _nothing_named(spec: Spec, text: str) -> bool:
-    if spec.app:
-        return False
-    from neo.decide import inventory
-
-    try:
-        apps = await asyncio.to_thread(inventory.inventory)
-        return inventory.named_in(text, apps) is None
-    except Exception:  # noqa: BLE001 - can't tell: as if nothing was named
-        return True
 
 
 async def _ask_store(entity: eventkit.Entity) -> None:
@@ -978,9 +1104,9 @@ async def _ask_store(entity: eventkit.Entity) -> None:
 
 async def carry_out(kind: str, args: dict, text: str = "", *, ask_access: bool = False) -> Result:
     """Do one request of a schedule kind (the kind is switched on). ``ask_access``: macOS may be
-    asked, once, for the store - only when the user named no app for it; never in shadow or
-    tests. When nothing worked, a store NEO couldn't use says why (the setting the user turned
-    off, or the app NEO runs in not declaring it)."""
+    asked, once, for the store - only when no app was named for it (the tool's `app`); never in
+    shadow or tests. When nothing worked, a store NEO couldn't use says why (the setting the user
+    turned off, or the app NEO runs in not declaring it)."""
     from neo.agent.confirm import Halt
     from neo.decide import run
 
@@ -988,9 +1114,9 @@ async def carry_out(kind: str, args: dict, text: str = "", *, ask_access: bool =
     if isinstance(spec, str):
         return Result(spec, False, say=True)
     entity = _ENTITY[kind]
-    req = _req(spec, text)
+    req = await _request(spec, text)
     unasked = not eventkit.available(entity) and eventkit.status(entity) == "not_determined"
-    if ask_access and unasked and await _nothing_named(spec, req.text):
+    if ask_access and unasked and not spec.app:
         await _ask_store(entity)
     res = await run.run_best(_DRIVERS[kind], req)
     if res.ok or isinstance(res.text, Halt):
@@ -1027,7 +1153,7 @@ async def would_choose(kind: str, args: dict, text: str = "") -> dict[str, str |
         from neo.decide import engine
 
         # its own task: whatever the engine notes for this request stays out of the caller's
-        cands = await asyncio.create_task(engine.choose(kind, _req(spec, text).text))
+        cands = await asyncio.create_task(engine.choose(kind, (await _request(spec, text)).text))
         facts["candidates"] = ",".join(c.key for c in cands)
         first = cands[0] if cands else None
         facts["first"] = first.key if first else ""
@@ -1050,24 +1176,51 @@ async def would_choose(kind: str, args: dict, text: str = "") -> dict[str, str |
     return facts
 
 
+# A time a fast path captured after a lazy title can start with the title's own last word ("put the
+# kettle | on at 5", "turn the oven | on tomorrow at 7", "finish | this at 5"): a time opens with
+# one of these words at most, bar a few pairs, and never "on/in/at" a day that takes none.
+_OPENERS = frozenset({"at", "on", "in", "by", "around", "about", "this", "from", "for", "is"})
+_OPEN_PAIRS = frozenset(
+    {("at", "around"), ("at", "about"), ("in", "about"), ("in", "around"), ("on", "this"), ("by", "this")}
+)
+_BARE_DAYS = frozenset({"today", "tonight", "tomorrow", "tmrw", "tmr", "aaj", "kal", "parso", "parson"})
+
+
+def _cut_title(phrase: str) -> bool:
+    w = _norm(phrase).split()
+    if len(w) < 2 or w[0] not in _OPENERS:
+        return False
+    if w[1] in _OPENERS:
+        return (w[0], w[1]) not in _OPEN_PAIRS
+    return w[0] in ("on", "in", "at", "this") and w[1] in _BARE_DAYS
+
+
 def check(kind: str, filled: dict) -> bool:
     """A fast path's test, on cached data only: a title that isn't a pronoun, a time
-    :mod:`neo.decide.when` reads (an event needs a clock time), and a named list NEO has already
-    seen in the store. False hands the words to the model."""
+    :mod:`neo.decide.when` reads (an event needs a clock time) that doesn't begin with the title's
+    own last word, and a named list NEO has already seen in the store. Captured words count only
+    for a kind the user switched on: legacy and shadow run today's scripts, which take ISO times.
+    False hands the words to the model."""
+    from neo.config import settings
+
+    if any(_text(filled, k) for k in filled) and settings().decide_modes.get(kind) != "on":
+        return False
     now = datetime.now()
     title = _norm(_text(filled, "title"))
     if kind in _ITEM and (not title or title in _PRONOUNS):
         return False
     if kind == "add_event":
         got = _time(filled.get("start"), now, future=True)
-        return got is not None and got.start is not None and not got.date_only
+        timed = got is not None and got.start is not None and not got.date_only
+        return timed and not _cut_title(_text(filled, "start"))
     if kind == "add_reminder":
-        if _text(filled, "due") and _time(filled["due"], now, future=True) is None:
+        due = _text(filled, "due")
+        if due and (_time(due, now, future=True) is None or _cut_title(due)):
             return False
         if _text(filled, "list"):
             known = eventkit.titles("reminder")
             return bool(known) and _match(_text(filled, "list"), [(t, t) for t in known])[0] is not None
         return True
     if kind == "read_calendar":
-        return not _text(filled, "day") or _time(filled["day"], now, future=False) is not None
+        return not _text(filled, "day") or not isinstance(parse_args(kind, {"day": filled["day"]}, now), str)
     return False

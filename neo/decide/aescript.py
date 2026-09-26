@@ -399,7 +399,9 @@ def _arg(kind: str, v: Any) -> str:
 def render_create(r: CreateRoute, bid: str, values: dict[str, Any], container_id: str = "") -> tuple[str, list[str]]:
     """(script, argv) making the item with ``values`` (slot -> value; the slots the route can
     set) in the container whose id is ``container_id`` ('' = the default). A body that holds
-    HTML gets the text escaped, line by line. Answers OK + the new item's id."""
+    HTML gets the text escaped, line by line. Answers OK + the new item's id + the container's
+    name, each '' when it can't be read: reading them never fails the script, so an error it
+    gives is the make's own."""
     argv = [bid, container_id]
     fields = []
     for slot, code, kind in r.sets:
@@ -410,11 +412,15 @@ def render_create(r: CreateRoute, bid: str, values: dict[str, Any], container_id
             v = "".join(f"<div>{html.escape(line) or '<br>'}</div>" for line in str(v).split("\n"))
         argv.append(_arg(kind, v))
         fields.append(f"{_prop(code)}:{_value(kind, len(argv))}")
-    ident = f'(my neoText(get {_prop(r.id_code)} of o, "text"))' if r.id_code else '""'
+    after = '\t\tset newId to ""\n\t\tset cName to ""\n'
+    reads = [("newId", r.id_code, "o"), ("cName", r.container_name if r.container else "", "c")]
+    for var, code, of in reads:
+        if code:
+            after += f'\t\ttry\n\t\t\tset {var} to my neoText(get {_prop(code)} of {of}, "text")\n\t\tend try\n'
     script = (
         f"{_HEAD}\ttell application id bid\n{_container(r)}"
         f"\t\ttell c\n\t\t\tset o to make new {_cls(r.code)} with properties {{{', '.join(fields)}}}\n\t\tend tell\n"
-        f'\t\treturn "OK" & US & {ident}\n\tend tell\nend run\n{_DATE_HANDLER}'
+        f'{after}\t\treturn "OK" & US & newId & US & cName\n\tend tell\nend run\n{_DATE_HANDLER}'
     )
     return script, argv
 

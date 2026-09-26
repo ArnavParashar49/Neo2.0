@@ -188,6 +188,20 @@ def test_values_travel_only_in_argv():
     assert '(every «class wres» whose «property ID  » is cid)' in script and "NO_CONTAINER" in script
 
 
+def test_after_the_make_nothing_can_fail_the_script():
+    """The id and the container's name are read back in `try`: an error the make script gives
+    is the make's own (nothing made), never a made item whose id couldn't be read."""
+    ev = aescript.create_route(DATEBOOK, "event", EVENT)
+    script, _argv = aescript.render_create(ev, "b", {"title": "x"}, "c")
+    after = script[script.index("make new") : script.index("end run")].split("\n")[1:]
+    reads = [n for n, line in enumerate(after) if "(get «property" in line]
+    assert len(reads) == 2 and all(after[n - 1].strip() == "try" and after[n + 1].strip() == "end try" for n in reads)
+    assert 'return "OK" & US & newId & US & cName' in script and "of c," in after[reads[1]]
+    flat = parse('<command name="make" code="corecrel"/><class-extension extends="application"><element type="note"/></class-extension>' + NOTE)
+    no_holder = aescript.create_route(flat, "note", ("title",))
+    assert "cName to my" not in aescript.render_create(no_holder, "b", {"title": "t"})[0]  # the app itself holds it
+
+
 def test_an_html_body_is_escaped_line_by_line():
     note = aescript.create_route(NOTEBOOK, "note", ("title", "body"))
     _s, argv = aescript.render_create(note, "b", {"title": "t", "body": "a < b\n\nfish & chips"})
