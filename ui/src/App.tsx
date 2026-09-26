@@ -243,7 +243,7 @@ export default function App() {
 
   if (!expanded) {
     return (
-      <div className="pill" data-tauri-drag-region title={neo.connected ? "Click to open · drag to move · ⌘⇧Space" : "NEO core is offline"} onMouseDown={onOrbDown} onClick={onOrbClick}>
+      <div className="pill" data-tauri-drag-region title={neo.connected ? "Click to open · drag to move · ⌥⌘" : "NEO core is offline"} onMouseDown={onOrbDown} onClick={onOrbClick}>
         {/* Tauri only starts a window drag from the element that carries the attribute, so it goes on the canvas too. */}
         <ThinkingOrb state={orb} size={64} theme="dark" speed={ORB_SPEED} {...({ "data-tauri-drag-region": true } as object)} />
         {!neo.connected && <span className="offline-dot" />}

@@ -2,9 +2,13 @@
 //! hotkey (⌘⇧Space) that summons NEO. All conversation logic lives in the Python core;
 //! the window talks to it over a local websocket.
 
-use tauri::menu::{Menu, MenuItem};
+mod chord;
+mod core;
+
+use tauri::image::Image;
+use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter, Manager, RunEvent};
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
 fn show(app: &AppHandle) {
@@ -47,25 +51,55 @@ pub fn run() {
                 .build(),
         )
         .invoke_handler(tauri::generate_handler![hide_window])
+        .manage(core::Core::default())
         .setup(|app| {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
+            // The brain: start NEO's Python core (or connect to one that's already running).
+            app.state::<core::Core>().start();
+            core::default_launch_at_login();
+
+            // ⌥⌘ (pressed together and released) summons NEO. It needs Accessibility; until that's
+            // granted, ⌘⇧Space still works.
+            let handle = app.handle().clone();
+            let chord_ok = chord::watch(move || {
+                let h = handle.clone();
+                let _ = handle.run_on_main_thread(move || toggle(&h));
+            });
             let summon = Shortcut::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::Space);
             app.global_shortcut().register(summon)?;
 
-            let show_item = MenuItem::with_id(app, "show", "Show NEO   ⌘⇧Space", true, None::<&str>)?;
+            let label = if chord_ok { "Show NEO   ⌥⌘" } else { "Show NEO   ⌘⇧Space" };
+            let show_item = MenuItem::with_id(app, "show", label, true, None::<&str>)?;
+            let restart_item = MenuItem::with_id(app, "restart", "Restart NEO", true, None::<&str>)?;
+            let logs_item = MenuItem::with_id(app, "logs", "Open Logs", true, None::<&str>)?;
+            let login_item =
+                CheckMenuItem::with_id(app, "login", "Open at Login", true, core::launch_at_login(), None::<&str>)?;
             let quit_item = MenuItem::with_id(app, "quit", "Quit NEO", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show_item, &quit_item])?;
+            let sep = PredefinedMenuItem::separator(app)?;
+            let sep2 = PredefinedMenuItem::separator(app)?;
+            let menu = Menu::with_items(app, &[&show_item, &sep, &restart_item, &logs_item, &login_item, &sep2, &quit_item])?;
+            let login_check = login_item.clone();
             TrayIconBuilder::with_id("neo")
-                .icon(app.default_window_icon().unwrap().clone())
+                .icon(Image::from_bytes(include_bytes!("../icons/tray.png"))?)
                 .icon_as_template(true)
                 .tooltip("NEO")
                 .menu(&menu)
                 .show_menu_on_left_click(false)
-                .on_menu_event(|app, e| match e.id.as_ref() {
+                .on_menu_event(move |app, e| match e.id.as_ref() {
                     "quit" => app.exit(0),
                     "show" => show(app),
+                    "restart" => app.state::<core::Core>().restart(),
+                    "logs" => {
+                        let _ = std::process::Command::new("open").arg(core::logs_dir()).spawn();
+                    }
+                    "login" => {
+                        let on = !core::launch_at_login();
+                        let _ = core::set_launch_at_login(on);
+                        core::remember_login_choice();
+                        let _ = login_check.set_checked(core::launch_at_login());
+                    }
                     _ => {}
                 })
                 .on_tray_icon_event(|tray, event| {
@@ -77,6 +111,11 @@ pub fn run() {
                 .build(app)?;
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running NEO");
+        .build(tauri::generate_context!())
+        .expect("error while building NEO")
+        .run(|app, event| {
+            if let RunEvent::Exit = event {
+                app.state::<core::Core>().stop(); // the core leaves with the app
+            }
+        });
 }

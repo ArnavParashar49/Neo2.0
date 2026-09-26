@@ -114,6 +114,10 @@ async def _cocoa_pump() -> None:
 
 async def run() -> None:
     s = settings()
+    from neo.permissions import request_missing
+
+    if missing := request_missing():
+        print(f"[neo] asked macOS for: {', '.join(missing)} — allow NEO in System Settings → Privacy & Security")
     load_all()
     app = App()
     ui = UIServer(app.on_command)

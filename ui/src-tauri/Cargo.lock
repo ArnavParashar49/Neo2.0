@@ -2174,6 +2174,9 @@ dependencies = [
 name = "neo-ui"
 version = "2.0.0"
 dependencies = [
+ "core-foundation",
+ "core-graphics",
+ "libc",
  "serde",
  "serde_json",
  "tauri",

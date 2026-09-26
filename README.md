@@ -2,7 +2,7 @@
 
 **An AI agent for your Mac that does what you'd do — sees the screen, clicks, types, runs commands, handles mail. Voice-first. Runs on free tiers or fully local.**
 
-Say *"Hey Neo"* (or press **⌘⇧Space**), ask for something, and NEO works your Mac the way a person would: reads the Accessibility tree, clicks and types, opens apps, runs shell commands, edits files, browses, sends mail, sets reminders — and asks before doing anything it can't undo.
+Say *"Hey Neo"* (or press **⌥⌘**), ask for something, and NEO works your Mac the way a person would: reads the Accessibility tree, clicks and types, opens apps, runs shell commands, edits files, browses, sends mail, sets reminders — and asks before doing anything it can't undo.
 
 There is no subscription. The brains are Gemini and Groq free tiers, or Gemma 4 running on your own GPU; the decision layer, wake word, speech-to-text and text-to-speech all run on-device.
 
@@ -93,7 +93,9 @@ cp .env.example .env        # paste your keys (both free, no card)
 
 The browser tools need Chromium once: `.venv/bin/python -m playwright install chromium`.
 
-Grant **Accessibility** and **Screen Recording** to the app you launch NEO from (Terminal, or NEO.app) in *System Settings → Privacy & Security*. macOS asks for the **Microphone** on the first voice run. Models (Laya, Parakeet, Kokoro, Vosk) download on first run into `~/.neo`.
+**NEO.app** (recommended): `cd ui && npm run tauri build`, then copy `ui/src-tauri/target/release/bundle/macos/NEO.app` to `/Applications` and open it. It lives in the menu bar (the dotted orb): it starts NEO's Python core from this checkout, restarts it if it crashes, stops it on quit, and opens at login (menu → *Open at Login* to turn that off). **⌥⌘** — press Option and Command together and let go — shows NEO; ⌘⇧Space works too. The first launch asks for **Accessibility** and **Screen Recording** for NEO (and the microphone when you first talk to it); allow them in *System Settings → Privacy & Security*. Logs: menu → *Open Logs* (`~/.neo/logs`). NEO.app is ad-hoc signed, so macOS may ask again after you rebuild it; changes to the Python code don't need a rebuild — menu → *Restart NEO*.
+
+Without the app: grant **Accessibility** and **Screen Recording** to the terminal you run `python -m neo` from to the app you launch NEO from (Terminal, or NEO.app) in *System Settings → Privacy & Security*. macOS asks for the **Microphone** on the first voice run. Models (Laya, Parakeet, Kokoro, Vosk) download on first run into `~/.neo`.
 
 ## Run
 
@@ -104,7 +106,7 @@ cd ui && npm install && npm run tauri dev   # the overlay (npm run tauri build �
 ```
 
 The overlay lives in the bottom-right corner as a small pill (orb + status + last reply) and expands into a card on
-**⌘⇧Space**, a click, or whenever NEO needs a confirmation; it folds back to the pill after a quiet stretch unless you
+**⌥⌘** (press both, let go), a click, or whenever NEO needs a confirmation; it folds back to the pill after a quiet stretch unless you
 pin it. The card shows the conversation as a timeline — your messages, the tools NEO ran (as chips), rendered
 markdown replies, and under each reply which brain answered and how long it took (*Groq gpt-oss-120b · 1.4 s*,
 *quick action · no model*). Destructive actions surface a confirm card you can answer with ⏎ / Esc. While a turn is in

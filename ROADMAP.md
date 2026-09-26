@@ -58,7 +58,7 @@ mic ─► wake word (local) ─► voice backend
 - [x] **1. Core** — `neo/` package: providers (Gemini / Groq / local MLX / Claude), agent loop, registry, confirm gate, Laya reflex + synthetic dataset + local head training
 - [x] **2. Computer control** — AX tree observation, CGEvent input, screenshot fallback, AppleScript app tools, shell/files
 - [x] **3. Voice** — wake word (Vosk) → Parakeet → brain → Kokoro with barge-in; Gemini Live backend with `agent_task` delegation
-- [x] **4. UI** — Tauri 2 + React overlay with thinking-orbs, transcript, confirm buttons, tray, ⌘⇧Space
+- [x] **4. UI** — Tauri 2 + React overlay with thinking-orbs, transcript, confirm buttons, tray, ⌥⌘ (⌘⇧Space fallback)
 - [x] **5. Memory** — SQLite FTS5 store (profile / lesson / note), memory tool, prompt context
 - [x] **6. Purge** — v1 code removed, README rewritten, tests green
 
@@ -153,9 +153,15 @@ Two adversarial reviews (≈235 agents) confirmed 44 defects in the silent-comma
 - Laya learns from use (`neo/reflex/learn.py`): what actually happened labels each request — Live's tool choice (none → chat, one tool → quick action, agent_task), or the agent needing no tool / one fast tool. Rows in `~/.neo/reflex_extra.jsonl` (weighted 3×, always trained on); after ≥30 new rows and 3 idle minutes the heads retrain in-process on the loaded Laya and hot-swap — only if they score at least as well on a fixed hash-based held-out set.
 - Tests are isolated from the real `~/.neo` (a leaked row and earlier test artefacts in memory were removed; backup kept).
 
+### NEO.app (2026-09-26)
+
+- `/Applications/NEO.app` (ad-hoc signed, menu-bar only): starts the Python core from the checkout as its child (so macOS attributes permissions to NEO), supervises it (restart with backoff, gives up after 5 crashes in 5 min), SIGTERMs it on quit; connects to an already-running core instead of starting a second. Menu: Show NEO, Restart NEO, Open Logs, Open at Login (LaunchAgent, on by default), Quit. Logs in `~/.neo/logs/{app,core}.log`.
+- ⌥⌘ summons NEO (listen-only event tap: press both and release with nothing in between; real ⌥⌘ shortcuts and ⌥⌘-click don't count; re-enables itself after secure input). ⌘⇧Space stays as the fallback.
+- The core asks for Accessibility and Screen Recording at startup when missing; Info.plist carries the microphone and Apple Events usage strings. New orb icon.
+
 ### Next
 
-- `npm run tauri build` → signed NEO.app that spawns the Python core itself.
+- Developer ID signing + notarization, so permissions survive rebuilds and the app can be shared.
 - Skills: a small curated set loaded on demand, replacing the v1 271-folder dump.
 
 ## Removed from v1 (and why)

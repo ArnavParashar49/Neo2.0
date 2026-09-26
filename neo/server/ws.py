@@ -15,6 +15,11 @@ overlay once stalled the Gemini Live receive loop long enough to kill the voice 
 
 from __future__ import annotations
 
+import logging
+
+# A port probe or a half-open socket isn't a websocket client; don't dump a traceback for it.
+logging.getLogger("websockets.server").setLevel(logging.CRITICAL)
+
 import asyncio
 import json
 from collections.abc import Awaitable, Callable

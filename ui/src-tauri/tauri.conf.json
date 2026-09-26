@@ -36,8 +36,7 @@
   "bundle": {
     "active": true,
     "targets": [
-      "app",
-      "dmg"
+      "app"
     ],
     "icon": [
       "icons/32x32.png",
@@ -45,6 +44,13 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "category": "Productivity",
+    "shortDescription": "An AI agent for your Mac",
+    "copyright": "\u00a9 2026 Arnav Parashar",
+    "macOS": {
+      "minimumSystemVersion": "13.0",
+      "signingIdentity": "-"
+    }
   }
 }
