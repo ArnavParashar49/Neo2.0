@@ -16,6 +16,8 @@ Targeted runs write at most 300 rows at one boundary the heads get wrong, both s
 
 The generators see the two classes and the *shape* of utterances that fell between them (every
 word that isn't common in the public data replaced by a placeholder), never a request as said.
+Targeted rows carry what they were made for (``tool``, ``kind``, ``destructive`` — None on a task
+nobody judged — and ``lang``); a head learns those only where dataset.build passes them through.
 """
 
 from __future__ import annotations
@@ -35,6 +37,7 @@ from pathlib import Path
 from neo.config import settings
 from neo.providers.base import Message
 from neo.reflex.dataset import build as build_templates
+from neo.reflex.learn import EXTRA
 from neo.reflex.schema import INTENT_CRITERIA
 
 _INTENTS = list(INTENT_CRITERIA)
@@ -242,14 +245,23 @@ def _class_of(row: dict, like: Target) -> str:
     if not head:
         return row.get("intent", "")
     if head == "destructive":
-        return f"destructive:{'yes' if row['destructive'] else 'no'}" if "destructive" in row else ""
+        return f"destructive:{'yes' if row['destructive'] else 'no'}" if row.get("destructive") is not None else ""
     return f"{head}:{row[head]}" if row.get(head) else ""
 
 
+def _wrong_keys(label: str) -> set[str]:
+    """Every class a ``wrong`` label names: the outcome ledger writes "intent" or "intent:tool",
+    and "quick_action:play_music" was both the quick_action route and tool:play_music."""
+    head, _, name = label.partition(":")
+    return {label, head, f"tool:{name}"} if head in INTENT_CRITERIA and name else {label}
+
+
 def add_corrections(pairs: list[Pair], rows: list[dict]) -> None:
-    """Requests the user corrected (a non-empty ``wrong``) are examples of the pair they fell between."""
+    """Requests the user corrected (a non-empty ``wrong``) are examples of the pair they fell
+    between. Only route and tool pairs get any: a correction never says which task kind or
+    destructiveness was wrong."""
     for r in rows:
-        wrong = {str(w) for w in r.get("wrong") or []}
+        wrong = set().union(*(_wrong_keys(str(w)) for w in r.get("wrong") or []))
         for p in pairs:
             for t, o in ((p.a, p.b), (p.b, p.a)):
                 if wrong & {o.key, o.key.split(":", 1)[-1]} and _class_of(r, t) == t.key:
@@ -257,21 +269,30 @@ def add_corrections(pairs: list[Pair], rows: list[dict]) -> None:
 
 
 _WORD = re.compile(r"[^\W\d_]+(?:'[^\W\d_]+)*|\d+")
+# 0.5% of the ~14k public rows the share was measured on: fewer rows can't make a word common.
+_MIN_ROWS = 72
 
 
 def public_vocab(rows: list[dict], private: set[str], min_share: float = 0.005) -> set[str]:
-    """The only words a prompt may show: those in at least `min_share` of the rows (and 3) that
-    aren't the user's own (`private`: their lowercased texts).
+    """The only words a prompt may show: those in at least `min_share` of the public rows, and in
+    at least _MIN_ROWS of them.
 
-    Common is not enough — NEO's templates repeat names and places. At 0.5% of the public rows,
-    what survives of the people, places, titles and message slots of TOPv2 utterances (outside
-    the vocabulary's data) is pronouns and words like "work" or "tomorrow"; at 3 rows, 54% of
-    those values reached the prompt whole."""
-    public = [r["text"].lower() for r in rows if r["text"].lower() not in private]
+    Public rows are dataset and generated ones: not the user's own (their source, or `private`:
+    their lowercased texts), and not NEO's templates, which repeat their own names and places by
+    design ("call alex at 5"), so a template word being frequent says nothing. Common is still not
+    enough: at 0.5% of the public rows what survives of the people, places, titles and message
+    slots of TOPv2 utterances (outside the vocabulary's data) is pronouns and words like "work" or
+    "tomorrow"; at 3 rows, 54% of those values reached the prompt whole. With too little public
+    data nothing is common, and no shape is shown at all."""
+    public = [
+        r["text"].lower()
+        for r in rows
+        if r.get("source") not in ("template", EXTRA) and r["text"].lower() not in private
+    ]
     n: Counter = Counter()
     for t in public:
         n.update(set(_WORD.findall(t)))
-    floor = max(3, math.ceil(min_share * len(public)))
+    floor = max(_MIN_ROWS, math.ceil(min_share * len(public)))
     return {w for w, c in n.items() if c >= floor}
 
 
@@ -286,15 +307,47 @@ def abstract(text: str, vocab: set[str]) -> str:
 
 
 def patterns(texts: list[str], vocab: set[str], limit: int = 12) -> list[str]:
-    """Distinct shapes, most frequent first. A shape with no placeholder is the request itself, and
-    one that is mostly placeholders says nothing: neither is used."""
+    """Distinct shapes, most frequent first. A shape with no word hidden ({x}) is the request
+    itself, at most its numbers masked, and one that is mostly placeholders says nothing: neither
+    is used."""
     n: Counter = Counter()
     for t in texts:
         shape = abstract(t, vocab)
         words = [w for w in shape.split() if w[0] != "{"]
-        if "{" in shape and len(words) >= 2 and 2 * len(words) >= len(shape.split()):
+        if "{x}" in shape and len(words) >= 2 and 2 * len(words) >= len(shape.split()):
             n[shape] += 1
     return [s for s, _ in n.most_common(limit)]
+
+
+def _norm(text: str) -> str:
+    return " ".join(text.lower().split())
+
+
+def benchmark() -> set[str]:
+    """The benchmark's sentences (``reflex_eval.jsonl``, hf_data.py), normalised: never trained on."""
+    path = settings().data_dir / "reflex_eval.jsonl"
+    out: set[str] = set()
+    if path.exists():
+        for line in path.read_text(encoding="utf-8").splitlines():
+            try:
+                r = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(r, dict) and isinstance(r.get("text"), str):
+                out.add(_norm(r["text"]))
+    return out
+
+
+def drop_judged(pairs: list[Pair], bench: set[str]) -> None:
+    """Keep only examples training sees. Rows written at a benchmark sentence's boundary in its
+    shape, or at one finetune holds out to judge a retrain, would flatter that judge."""
+    from neo.reflex.finetune import _held_out
+
+    def seen_in_training(t: str) -> bool:
+        return _norm(t) not in bench and not _held_out(t)
+
+    for p in pairs:
+        p.examples = {k: [t for t in v if seen_in_training(t)] for k, v in p.examples.items()}
 
 
 def _routes() -> str:
@@ -419,8 +472,8 @@ async def focus(
             await sleep(gen_wait)
             fresh = []
             for text, route in items:
-                if 2 <= len(text) <= 160 and text.lower() not in seen:
-                    seen.add(text.lower())
+                if 2 <= len(text) <= 160 and _norm(text) not in seen:
+                    seen.add(_norm(text))
                     fresh.append((text, route))
             if not fresh:
                 continue
@@ -433,7 +486,9 @@ async def focus(
             for (text, gen_route), label in zip(fresh, labels, strict=False):  # [] = none
                 route = agreed(t, gen_route, label)
                 if route and got < need:
-                    row = {"text": text, "intent": route, **t.fields, "source": f"{gen_name}>{lab_name}",
+                    # a task nobody judged for harm is unknown, not harmless (only tasks change things)
+                    unjudged = {"destructive": None} if route == "agent_task" else {}
+                    row = {"text": text, "intent": route, **unjudged, **t.fields, "source": f"{gen_name}>{lab_name}",
                            "focus": f"{p.a.key}|{p.b.key}", "lang": lang}  # fmt: skip
                     kept.append(row)
                     got += 1
@@ -492,7 +547,7 @@ async def main() -> None:
 
 
 async def _focused(args: argparse.Namespace) -> None:
-    from neo.reflex.learn import EXTRA, _path, _read
+    from neo.reflex.learn import _path, _read
 
     if args.focus:
         pairs = [parse_focus(args.focus)]
@@ -505,7 +560,9 @@ async def _focused(args: argparse.Namespace) -> None:
         return
     rows = build_templates()
     own = _read(_path(EXTRA))
-    add_corrections(pairs, own)
+    bench = benchmark()
+    drop_judged(pairs, bench)
+    add_corrections(pairs, own)  # the user's own rows: finetune always trains on them
     out_path = settings().data_dir / "reflex_generated.jsonl"
     with open(out_path, "a", encoding="utf-8") as f:
 
@@ -515,7 +572,7 @@ async def _focused(args: argparse.Namespace) -> None:
 
         kept = await focus(
             pairs, _models(), public_vocab(rows, {r["text"].lower() for r in own}), cap=args.max_rows, lang=args.lang, seed=args.seed,
-            seen={r["text"].lower() for r in rows}, write=write,
+            seen={_norm(r["text"]) for r in rows} | bench, write=write,
         )  # fmt: skip
     print(f"kept {len(kept)} agreed items → {out_path}")
 
@@ -523,13 +580,13 @@ async def _focused(args: argparse.Namespace) -> None:
 async def _broad(args: argparse.Namespace) -> None:
     models = _models()
     rnd = random.Random(args.seed)
-    existing = {r["text"].lower() for r in build_templates()}
+    existing = {_norm(r["text"]) for r in build_templates()} | benchmark()
     out_path = settings().data_dir / "reflex_generated.jsonl"
     seen: set[str] = set()
     if out_path.exists():
         for line in out_path.read_text().splitlines():
             if line.strip():
-                seen.add(json.loads(line)["text"].lower())
+                seen.add(_norm(json.loads(line)["text"]))
 
     # ---- generate ------------------------------------------------------------------------
     cands: list[tuple[str, str, str]] = []  # (text, intent, generator)
@@ -547,9 +604,9 @@ async def _broad(args: argparse.Namespace) -> None:
         except Exception as e:  # noqa: BLE001 — free tiers hiccup; keep going
             print(f"  gen {gen_name}/{intent} failed: {safe_error(e)}", file=sys.stderr)
             items = []
-        fresh = [t for t in items if t.lower() not in existing and t.lower() not in seen]
+        fresh = [t for t in items if _norm(t) not in existing and _norm(t) not in seen]
         for t in fresh:
-            seen.add(t.lower())
+            seen.add(_norm(t))
             cands.append((t, intent, gen_name))
         print(f"  [{k + 1}/{len(jobs)}] {gen_name:6s} {intent:12s} +{len(fresh)}", file=sys.stderr)
         await asyncio.sleep(wait)

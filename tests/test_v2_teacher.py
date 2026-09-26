@@ -105,13 +105,20 @@ def test_fifty_a_day(monkeypatch):
     assert set(state) == {"day", "sent"}  # counts only, never text
 
 
-async def test_agreement_keeps_a_row_and_disagreement_drops_it():
-    rows = [_row("tell me a joke", "chat"), _row("open the docs", "quick_action"), _row("hmm", "agent_task")]
-    local = Labeller({"tell me a joke": "chat", "open the docs": "agent_task", "hmm": "not-a-class"})
+async def test_agreement_keeps_a_row_as_it_was_and_disagreement_drops_it():
+    rows = [
+        _row("tell me a joke", "chat", w=0.5, verified=False),  # a guess nobody checked
+        _row("what's the time", "chat"),
+        _row("open the docs", "quick_action", w=0.5, verified=False),
+        _row("hmm", "agent_task"),
+    ]
+    local = Labeller({"tell me a joke": "chat", "what's the time": "chat", "open the docs": "agent_task", "hmm": "not-a-class"})
     got = await teacher.verdicts(rows, "local", provider=_providers(local=local))
     by = {r["text"]: v for r, v in got}
-    assert set(by) == {"tell me a joke", "open the docs"}  # no usable answer: no verdict
-    assert by["tell me a joke"]["w"] == 1.0 and by["tell me a joke"]["agreed"] is True
+    assert set(by) == {"tell me a joke", "what's the time", "open the docs"}  # no usable answer: no verdict
+    # agreeing checks nothing a real outcome would: the weight stays a guess's
+    assert by["tell me a joke"]["w"] == 0.5 and by["tell me a joke"]["agreed"] is True
+    assert "w" not in by["what's the time"] and by["what's the time"]["agreed"] is True
     assert by["open the docs"]["w"] == 0.0 and by["open the docs"]["agreed"] is False
     assert by["open the docs"]["intent"] == "quick_action"  # a label is never changed
     assert all(v["teacher"] == "local" for v in by.values())
@@ -153,6 +160,15 @@ def test_a_verdict_never_outlives_an_erase_or_overrides_a_newer_label():
     assert not learn._path(learn.EXTRA).exists()  # nothing written back after an erase
 
 
+def test_a_verdict_takes_its_rows_place_so_it_never_outlives_newer_rows(monkeypatch):
+    rows = [_row("oldest and unsure"), _row("recorded later"), _row("recorded last")]
+    _write(rows)
+    assert teacher.store([(rows[0], {**rows[0], "teacher": "local", "agreed": True})], learn._erase_gen) == 1
+    monkeypatch.setattr(learn, "_KEEP_ROWS", 2)  # the file is full: the oldest row goes first
+    assert [r["text"] for r in learn._read(learn._path(learn.EXTRA))] == ["recorded later", "recorded last"]
+    assert len(learn._path(learn.EXTRA).read_text().splitlines()) == 3
+
+
 async def test_a_round_labels_within_the_budget_and_stores_the_verdicts(teach, monkeypatch):
     teach("local")
     _write([_row(f"request number {i}", "chat", margin=i / 100) for i in range(60)])
@@ -163,7 +179,8 @@ async def test_a_round_labels_within_the_budget_and_stores_the_verdicts(teach, m
     assert got == {"labelled": 50, "agreed": 25, "stored": 50}
     assert local.seen == [f"request number {i}" for i in range(50)]  # the 50 least sure
     rows = _stored()
-    assert sum(r.get("w") == 1.0 for r in rows.values()) == 25 and sum(r.get("w") == 0.0 for r in rows.values()) == 25
+    assert sum(r.get("agreed") is True and "w" not in r for r in rows.values()) == 25
+    assert sum(r.get("w") == 0.0 for r in rows.values()) == 25
     assert learn.pending() == 0  # nothing counts as new: verdicts keep the rows' own times
     assert await teacher.run_once() == {"labelled": 0, "agreed": 0, "stored": 0}  # today's budget is spent
     assert len(local.seen) == 50

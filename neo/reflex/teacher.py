@@ -3,9 +3,11 @@
 A request that no outcome settled carries only the handling model's guess. While NEO is idle, the
 unsettled rows with the smallest margin (least-margin picks beat random ones by 1-4 points for the
 same number of labels, research_learning 6) are labelled again, blind, with generate.py's labeller.
-As in generate.py only rows both models agree on are kept: a row the labeller confirms stays at
-full weight, one it disputes is dropped from training (w 0). No label is ever changed. At most 50
-rows a day.
+As in generate.py only rows both models agree on are kept: a row the labeller disputes is stored
+with ``w`` 0, which drops it wherever training weights learned rows by ``w`` (until training does,
+a verdict changes nothing). One it confirms keeps its weight: the labeller may be the very
+provider whose decision made the label, so its agreement verifies nothing. No label is ever
+changed. At most 50 rows a day.
 
 Who may read a request's text — never anyone who hadn't already:
 
@@ -31,7 +33,7 @@ STATE = "reflex_teacher.json"  # {"day", "sent"}: counts only, never text
 DAILY_MAX = 50
 _CHUNK = 25
 _GAP_S = 3600.0  # at most one round an hour: new unsure rows arrive through the day
-_AGREED_W, _DISPUTED_W = 1.0, 0.0
+_DISPUTED_W = 0.0
 _BRAINS = ("gemini", "gemini_lite", "groq", "claude", "local")
 
 
@@ -107,8 +109,8 @@ async def _provider(name: str):
 
 
 async def verdicts(rows: list[dict], how: str, *, provider=None) -> list[tuple[dict, dict]]:
-    """(row, what to store for it) for every row a labeller answered: the row with ``w`` 1 where
-    the labeller agrees with its label, 0 where it doesn't, and who labelled it."""
+    """(row, what to store for it) for every row a labeller answered: the row with who labelled it
+    and whether they agreed, and ``w`` 0 where they didn't."""
     provider = provider or _provider
     groups: dict[str, list[dict]] = {}
     for r in rows:
@@ -134,25 +136,48 @@ async def verdicts(rows: list[dict], how: str, *, provider=None) -> list[tuple[d
                 continue
             for r, lab in zip(chunk, labels, strict=True):
                 if lab in INTENT_CRITERIA:
-                    ok = lab == r["intent"]
-                    out.append((r, {**r, "w": _AGREED_W if ok else _DISPUTED_W, "teacher": name, "agreed": ok}))
+                    v = {**r, "teacher": name, "agreed": lab == r["intent"]}
+                    if not v["agreed"]:
+                        v["w"] = _DISPUTED_W
+                    out.append((r, v))
     return out
 
 
+def _key(text: str) -> str:
+    return " ".join(text.lower().split())
+
+
 def store(pairs: list[tuple[dict, dict]], erase_gen: int) -> int:
-    """Append each verdict to the learning file if its row is still the latest word on that
-    sentence — nothing newer recorded, nothing erased since it was read. Keeps the row's own
-    timestamp, so its retention clock doesn't restart. Returns how many were written."""
+    """Write each verdict over its row in the learning file if that row is still the latest word
+    on its sentence — nothing newer recorded, nothing erased since it was read. In its place, with
+    the row's own timestamp: rows are kept newest by position and by time, so a verdict mustn't
+    look newer than the rows recorded after it. Returns how many were written."""
     path = learn._path(learn.EXTRA)
     with learn._lock:
-        if learn._erase_gen != erase_gen:
+        if learn._erase_gen != erase_gen or not path.exists():
             return 0
-        latest = {r["text"].lower(): r for r in learn._read(path)}
-        new = [v for r, v in pairs if latest.get(r["text"].lower()) == r]
-        if new:
-            with path.open("a", encoding="utf-8") as f:
-                f.writelines(json.dumps(v, ensure_ascii=False) + "\n" for v in new)
-    return len(new)
+        lines = path.read_text(encoding="utf-8").splitlines()
+        rows: dict[int, dict] = {}
+        last: dict[str, int] = {}  # sentence → the line with its latest word
+        for i, line in enumerate(lines):
+            try:
+                r = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(r, dict) and isinstance(r.get("text"), str):
+                rows[i] = r
+                last[_key(r["text"])] = i
+        n = 0
+        for r, v in pairs:
+            i = last.get(_key(r["text"]))
+            if i is not None and rows[i] == r:
+                lines[i] = json.dumps(v, ensure_ascii=False)
+                n += 1
+        if n:
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text("".join(line + "\n" for line in lines), encoding="utf-8")
+            tmp.replace(path)
+    return n
 
 
 async def run_once() -> dict:

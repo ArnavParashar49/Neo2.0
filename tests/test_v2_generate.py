@@ -100,14 +100,27 @@ def test_corrected_requests_become_examples_of_the_pair_they_fell_between(monkey
     assert tools.examples == {"tool:open_app": ["open the wiki"]}
 
 
+def test_corrections_in_the_ledgers_intent_tool_form_find_their_pair(monkeypatch):
+    monkeypatch.setattr(g, "_tool_description", lambda name: f"does {name}")
+    chat_qa, tools = g.parse_focus("chat:quick_action"), g.parse_focus("tool:open_app:web_search")
+    g.add_corrections([chat_qa, tools], [
+        {"text": "what song is this", "intent": "chat", "tool": "", "wrong": ["quick_action:play_music"]},
+        {"text": "open the wiki", "intent": "quick_action", "tool": "open_app", "wrong": ["quick_action:web_search"]},
+        {"text": "search the wiki", "intent": "quick_action", "tool": "web_search", "wrong": ["agent_task"]},
+    ])  # fmt: skip
+    assert chat_qa.examples == {"chat": ["what song is this"]}
+    assert tools.examples == {"tool:open_app": ["open the wiki"]}  # a tool swap isn't a chat:quick_action case
+
+
 def test_a_prompt_shows_only_the_shape_of_a_request_never_its_words():
-    public = [{"text": t} for t in (
+    public = [{"text": t, "source": "reflex_hf.jsonl"} for t in (
         "remind me what the plan said", "what did the email say about lunch", "remind me what the doctor said",
         "tell me what she said about the trip", "remind me about the meeting", "what about the report",
-    )]  # fmt: skip
+    ) for _ in range(30)]  # fmt: skip
     mine = "remind me what Zanzibarella said about the 4417 invoice"
-    vocab = g.public_vocab([*public, {"text": mine}, {"text": mine}, {"text": mine}], {mine.lower()})
+    vocab = g.public_vocab([*public, *({"text": mine} for _ in range(90))], {mine.lower()})
     assert "zanzibarella" not in vocab and "invoice" not in vocab and "remind" in vocab
+    assert "doctor" not in vocab  # in 30 public rows: under the floor
     assert g.abstract(mine, vocab) == "remind me what {x} said about the {n} {x}"
     assert g.patterns([mine, mine, "zanzibarella invoice 4417 now", "remind me about the"], vocab) == [
         "remind me what {x} said about the {n} {x}"
@@ -116,6 +129,14 @@ def test_a_prompt_shows_only_the_shape_of_a_request_never_its_words():
     assert "remind" in g.public_vocab(many, set()) and "thing7" not in g.public_vocab(many, set())
     assert g.public_vocab([*many, *({"text": "call alex"} for _ in range(4))], set()) >= {"remind", "about"}
     assert "alex" not in g.public_vocab([*many, *({"text": "call alex"} for _ in range(4))], set())  # 4 of 1004 < 0.5%
+
+
+def test_neos_templates_and_a_small_public_set_never_make_a_name_public():
+    templates = [{"text": f"call {p} at {i}", "source": "template"} for p in ("alex", "mom") for i in range(200)]
+    few = [{"text": "text priya on whatsapp", "source": "reflex_hf.jsonl"} for _ in range(60)]
+    vocab = g.public_vocab([*templates, *few], set())
+    assert not vocab & {"alex", "mom", "priya", "whatsapp"}  # templates repeat their names; 60 rows are too few
+    assert g.patterns(["call mom at 5"], {"call", "mom", "at"}) == []  # only its digits hidden: the request itself
 
 
 # ---- the cycle ------------------------------------------------------------------------------------
@@ -189,6 +210,22 @@ async def test_task_kinds_keep_a_row_only_when_both_models_give_the_same_route()
     assert label_sys and "[class, route]" in label_sys[0]
 
 
+async def test_a_task_nobody_judged_for_harm_is_unknown_not_harmless(monkeypatch):
+    def gen(key, n):
+        return [[f"{key} #1", "agent_task"], [f"{key} #2", "quick_action"]] if key.startswith("kind:") else [f"{key} #1"]
+
+    def label(text):
+        if text.startswith("kind:"):
+            return [_by_prefix(text), "agent_task" if text.endswith("#1") else "quick_action"]
+        return _by_prefix(text)
+
+    a = Model(gen, label)
+    pairs = [g.parse_focus("kind:send_message:send_email"), g.parse_focus("chat:agent_task")]
+    by = {r["text"]: r for r in await g.focus(pairs, _models(a, a), set(), cap=12, sleep=_no_sleep)}
+    assert by["kind:send_email #1"]["destructive"] is None and by["agent_task #1"]["destructive"] is None
+    assert "destructive" not in by["kind:send_email #2"] and "destructive" not in by["chat #1"]
+
+
 async def test_hinglish_destructive_tasks():
     def label(text):
         return [_by_prefix(text), "quick_action" if text.endswith("#9") else "agent_task"]
@@ -236,10 +273,10 @@ async def test_cli_focus_run_writes_tagged_rows_and_keeps_user_words_private(mon
     from neo.config import settings
     from neo.reflex import learn
 
-    public = [{"text": t, "intent": "chat", "source": "template"} for t in (
+    public = [{"text": t, "intent": "chat", "source": "reflex_hf.jsonl"} for t in (
         "what did you say about it", "what did the plan say", "did you say that", "what about it",
         "tell me about it", "is it about the plan",
-    )]  # fmt: skip
+    ) for _ in range(25)]  # fmt: skip
     learn._path(learn.EXTRA).write_text(
         json.dumps({"text": "what did Zanzibarella say about it", "intent": "chat", "wrong": ["quick_action"], "ts": 9e9}) + "\n"
     )
@@ -253,6 +290,75 @@ async def test_cli_focus_run_writes_tagged_rows_and_keeps_user_words_private(mon
     assert len(rows) == 6 and {r["focus"] for r in rows} == {"chat|quick_action"}
     assert any("what did {x} say about it" in p for p in a.prompts + b.prompts)
     assert not any("zanzibarella" in p.lower() for p in a.prompts + b.prompts)
+
+
+async def test_with_only_neos_templates_no_word_of_a_correction_reaches_a_model(monkeypatch):
+    from neo.reflex import learn
+
+    learn._path(learn.EXTRA).write_text(
+        json.dumps({"text": "remind me to call alex at 7", "intent": "agent_task", "wrong": ["quick_action"], "ts": 9e9}) + "\n"
+    )
+    gen = _counter()
+    a, b = Model(gen, _by_prefix), Model(gen, _by_prefix)
+    monkeypatch.setattr(g, "_models", lambda: _models(a, b))
+    monkeypatch.setattr("sys.argv", ["generate", "--focus", "agent_task:quick_action", "--max-rows", "4"])
+    await g.main()  # the real templates: the only data on a fresh Mac
+    assert a.prompts and not any("alex" in p.lower() or "shaped like this" in p for p in a.prompts + b.prompts)
+
+
+async def test_benchmark_and_held_out_sentences_never_shape_a_prompt_or_become_rows(monkeypatch):
+    from neo.config import settings
+    from neo.reflex.finetune import _held_out
+
+    words = ("mute", "pause", "dim", "hide", "zip", "sort", "copy", "move", "lock", "fold", "tag", "pin")
+    held = next(f"please {w} it now" for w in words if _held_out(f"please {w} it now"))
+    ok = next(f"turn off the {w} now" for w in words if not _held_out(f"turn off the {w} now"))
+    bench = "could you mute everything for a bit"
+    public = [{"text": t, "intent": "chat", "source": "reflex_hf.jsonl"} for t in (
+        "please turn it off now", "could you turn off the light for a bit", "turn off the fan now please",
+        "could you do it for a bit",
+    ) for _ in range(40)]  # fmt: skip
+    d = settings().data_dir
+    (d / "reflex_eval.jsonl").write_text(json.dumps({"text": bench.capitalize(), "intent": "quick_action"}) + "\n")
+    (d / "confusion.json").write_text(json.dumps({"pairs": [["quick_action", "chat", 40, [bench, held, ok]]]}))
+
+    def gen(key, n):
+        return [bench, f"{key} #1", f"{key} #2"]
+
+    def label(text):
+        return "quick_action" if text == bench else _by_prefix(text)
+
+    a, b = Model(gen, label), Model(gen, label)
+    monkeypatch.setattr(g, "_models", lambda: _models(a, b))
+    monkeypatch.setattr(g, "build_templates", lambda: public)
+    monkeypatch.setattr("sys.argv", ["generate", "--from-confusion", str(d / "confusion.json"), "--max-rows", "4"])
+    await g.main()
+    rows = [json.loads(line) for line in (d / "reflex_generated.jsonl").read_text().splitlines()]
+    assert rows and bench not in {r["text"] for r in rows}  # the benchmark is never trained on
+    prompts = "\n".join(a.prompts + b.prompts)
+    assert "turn off the {x} now" in prompts  # a sentence training sees still shapes the prompt
+    assert "please {x} it now" not in prompts and "could you {x} for a bit" not in prompts
+
+
+async def test_a_broad_run_never_writes_a_benchmark_sentence(monkeypatch):
+    from neo.config import settings
+
+    bench = "could you mute everything for a bit"
+    d = settings().data_dir
+    (d / "reflex_eval.jsonl").write_text(json.dumps({"text": bench.capitalize(), "intent": "quick_action"}) + "\n")
+
+    def gen(key, n):
+        return ([bench] if key == "quick_action" else []) + [f"{key} #1"]
+
+    def label(text):
+        return "quick_action" if text == bench else _by_prefix(text)
+
+    a, b = Model(gen, label), Model(gen, label)
+    monkeypatch.setattr(g, "_models", lambda: _models(a, b))
+    monkeypatch.setattr("sys.argv", ["generate", "--per-style", "2", "--styles", "1"])
+    await g.main()
+    texts = {json.loads(line)["text"] for line in (d / "reflex_generated.jsonl").read_text().splitlines()}
+    assert "quick_action #1" in texts and bench not in texts
 
 
 def test_errors_never_show_an_api_key(monkeypatch):
