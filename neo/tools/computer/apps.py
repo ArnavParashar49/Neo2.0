@@ -63,59 +63,62 @@ def target() -> str | None:
 
 
 def front_name() -> str:
-    app = NSWorkspace.sharedWorkspace().frontmostApplication()
-    return (app.localizedName() or "") if app else ""
+    from neo.tools.computer.focus import front_app
+
+    return front_app()[0]
 
 
 def _running(name: str):
+    """The running app called `name` — asked fresh (NSWorkspace's cached list can't see apps
+    launched after NEO started unless the Cocoa run loop is pumped)."""
+    from AppKit import NSRunningApplication
+
+    from neo.tools.computer.focus import pid_running
+
     want = name.lower().removesuffix(".app")
-    apps_ = [a for a in NSWorkspace.sharedWorkspace().runningApplications() if a.localizedName()]
-    return next((a for a in apps_ if a.localizedName().lower() == want), None) or next(
-        (a for a in apps_ if a.activationPolicy() == 0 and want in a.localizedName().lower()), None
-    )
+    for real, pid in pid_running(want):
+        a = NSRunningApplication.runningApplicationWithProcessIdentifier_(pid)
+        if a is not None and (real.lower() == want or a.activationPolicy() == 0):
+            return a
+    return None
 
 
 async def _wait_front(pid: int, seconds: float) -> bool:
-    ws = NSWorkspace.sharedWorkspace()
-    for _ in range(int(seconds / 0.05)):
-        front = ws.frontmostApplication()
-        if front and front.processIdentifier() == pid:
+    from neo.tools.computer.focus import front_app
+
+    for _ in range(max(1, int(seconds / 0.05))):
+        if await asyncio.to_thread(lambda: front_app()[1]) == pid:
             return True
         await asyncio.sleep(0.05)
     return False
 
 
 async def bring_front(name: str, *, wait: float = 1.5) -> tuple[bool, str]:
-    """Make the app frontmost, escalating: NSRunningApplication → AppleScript activate →
-    System Events (works for a background process with Accessibility). Returns
-    (is_front, localized name)."""
+    """Make the app frontmost and confirm it. First the WindowServer switch window managers
+    use (works from a background process while the user is busy elsewhere), then the public
+    APIs. Returns (is_front, the app's real name)."""
+    from neo.tools.computer.focus import force_front
+
     a = None
-    for _ in range(int(wait / 0.1) or 1):  # a just-launched app takes a moment to register
-        a = _running(name)
+    for _ in range(max(1, int(wait / 0.1))):  # a just-launched app takes a moment to register
+        a = await asyncio.to_thread(_running, name)
         if a is not None:
             break
         await asyncio.sleep(0.1)
     if a is None:
         return False, name
     real, pid = a.localizedName(), int(a.processIdentifier())
-    if await _wait_front(pid, 0.1):
+    if await _wait_front(pid, 0.05):
         return True, real
+    for attempt in range(3):  # the app may still be opening its first window
+        await asyncio.to_thread(force_front, pid)
+        if await _wait_front(pid, 0.4):
+            return True, real
     a.activateWithOptions_(1 << 1)  # NSApplicationActivateIgnoringOtherApps
-    if await _wait_front(pid, 0.5):
-        return True, real
-    try:  # Accessibility (NEO has it): what Hammerspoon-style tools use to switch apps
-        import ApplicationServices as AS
-
-        AS.AXUIElementSetAttributeValue(AS.AXUIElementCreateApplication(pid), "AXFrontmost", True)
-    except Exception:  # noqa: BLE001
-        pass
-    if await _wait_front(pid, 0.5):
+    if await _wait_front(pid, 0.4):
         return True, real
     await osascript(f"tell application {_q(real)} to activate")
-    if await _wait_front(pid, 0.5):
-        return True, real
-    await osascript(f'tell application "System Events" to set frontmost of (first process whose unix id is {pid}) to true')
-    return await _wait_front(pid, 1.0), real  # macOS sometimes grants it late
+    return await _wait_front(pid, 0.8), real
 
 
 async def open_app(name: str) -> str:

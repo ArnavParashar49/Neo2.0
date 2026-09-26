@@ -303,3 +303,30 @@ def test_live_multi_step_commands_are_not_silent():
     assert _multi_step("type github.com and press enter")
     assert not _multi_step("type salt and pepper")
     assert not _multi_step("open notes")
+
+
+def test_live_agent_task_uses_the_users_words_when_fast_paths_cover_them(monkeypatch):
+    import neo.voice.live as live_mod
+
+    seen = []
+
+    class S:
+        async def handle(self, text):
+            from neo.agent.session import Reply
+
+            seen.append(text)
+            return Reply("ok", "quick", silent=True)
+
+    v = live_mod.LiveVoice.__new__(live_mod.LiveVoice)
+    v._agent_session, v._tool_tasks, v._goals, v._server_cancelled = S(), {}, {}, set()
+    v._live, v._ui_lock = None, asyncio.Lock()
+
+    class FC:
+        id, name, args = "c1", "agent_task", {"goal": "Create a new note in the Notes app"}
+
+    async def run():
+        await v._run_tool(None, FC(), "new note")
+        await v._run_tool(None, FC(), "put the highlights of my emails in a note")
+
+    asyncio.run(run())
+    assert seen == ["new note", "Create a new note in the Notes app"]

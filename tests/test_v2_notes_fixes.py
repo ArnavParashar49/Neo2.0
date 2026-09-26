@@ -69,6 +69,9 @@ def test_pid_for_app_prefers_the_real_app_over_a_helper(monkeypatch):
             return apps
 
     monkeypatch.setattr(ax, "NSWorkspace", WS)  # the objc class itself can't be patched
+    from neo.tools.computer import focus
+
+    monkeypatch.setattr(focus, "pid_running", lambda name: [])  # use the stubbed workspace list
     assert ax.pid_for_app("Notes") == 2
     assert ax.pid_for_app("notes helper".replace(" ", "")) == 3
     assert ax.pid_for_app("Safari") is None
@@ -217,3 +220,15 @@ def test_older_observations_are_stubbed_before_each_model_call():
     assert msgs[4].tool_results[0].images == [] and "trimmed" in msgs[4].tool_results[0].content
     assert msgs[5].tool_results[0].content == big  # newest ax_tree verbatim
     assert msgs[6].tool_results[0].images  # newest screenshot keeps its image
+
+
+def test_fresh_app_lookup_prefers_the_real_app(monkeypatch):
+    from neo.tools.computer import focus
+
+    monkeypatch.setattr(
+        focus,
+        "running",
+        lambda: [("LinkedNotesUIService", 1, "UIElement"), ("Notes Helper", 3, "Foreground"), ("Notes", 2, "Foreground")],
+    )
+    assert focus.pid_running("notes")[0] == ("Notes", 2)
+    assert focus.pid_running("Safari") == []

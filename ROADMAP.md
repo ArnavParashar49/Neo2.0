@@ -140,6 +140,12 @@ Two adversarial reviews (≈235 agents) confirmed 44 defects in the silent-comma
 - Live: keystrokes run in the order asked; a question in the same breath as a command is answered; server-cancelled calls get no response; no stale turn across sessions.
 - Session: confirmation crash fixed; only a bare "stop" cancels everything; Laya's no-arg lane only for read-only tools without qualifiers; tool head trained with a real "none" class.
 
+### App focus (2026-09-26)
+
+- Root causes of "typed into Claude": NEO didn't check which app was in front; macOS cooperative activation blocks a background process's `activate`/`open -a` while the user is busy elsewhere; and NSWorkspace's `frontmostApplication` / `runningApplications` never refresh without a Cocoa run loop (stale front app, blind to apps launched after start).
+- Fixes: WindowServer focus switch (`neo/tools/computer/focus.py`, the SkyLight calls AltTab/yabai use) — 0.15–0.2 s from the background, verified while the user was in Claude; front app and running apps read fresh from LaunchServices (`lsappinfo`); a Cocoa run-loop pump in the core; every keystroke/typing/click goes only to NEO's target app, confirmed in front, else NEEDS_USER and nothing is sent.
+- Live: a plain command the model wraps in agent_task runs through the fast paths on the user's own words.
+
 ### Next
 
 - `npm run tauri build` → signed NEO.app that spawns the Python core itself.

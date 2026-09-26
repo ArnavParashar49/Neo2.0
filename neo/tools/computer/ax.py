@@ -136,20 +136,26 @@ def frontmost_app() -> tuple[str, int]:
     """The app the user is working in. A passing notification that happens to be frontmost is
     skipped for the menu-bar app — but a system dialog the user is actually in (it has a
     focused window) is kept."""
-    ws = NSWorkspace.sharedWorkspace()
-    app = ws.frontmostApplication()
-    if app is None or (app.localizedName() or "") in _TRANSIENT:
-        has_window = False
-        if app is not None:
-            root = AS.AXUIElementCreateApplication(int(app.processIdentifier()))
-            has_window = _attr(root, AS.kAXFocusedWindowAttribute) is not None
+    from neo.tools.computer.focus import front_app
+
+    name, pid = front_app()  # always current, unlike NSWorkspace.frontmostApplication
+    if name in _TRANSIENT or not pid:
+        has_window = bool(pid) and _attr(AS.AXUIElementCreateApplication(pid), AS.kAXFocusedWindowAttribute) is not None
         if not has_window:
-            app = ws.menuBarOwningApplication() or app
-    return (app.localizedName() or "", int(app.processIdentifier())) if app else ("", 0)
+            app = NSWorkspace.sharedWorkspace().menuBarOwningApplication()
+            if app is not None:
+                return app.localizedName() or "", int(app.processIdentifier())
+    return name, pid
 
 
 def running_apps() -> list[str]:
-    out = []
+    """Normal windowed apps, asked fresh from LaunchServices."""
+    from neo.tools.computer.focus import running
+
+    names = sorted({n for n, _, t in running() if t == "Foreground" and n})
+    if names:
+        return names
+    out: list[str] = []
     for a in NSWorkspace.sharedWorkspace().runningApplications():
         if a.activationPolicy() == 0 and a.localizedName():  # regular (has a UI)
             out.append(a.localizedName())
@@ -159,10 +165,16 @@ def running_apps() -> list[str]:
 def pid_for_app(name: str) -> int | None:
     """The app's pid. An exact name wins over a substring match, and a real app (menu bar,
     windows) wins over a helper process that shares the name — "Notes" must not resolve to
-    "LinkedNotesUIService", whose AX tree is empty."""
+    "LinkedNotesUIService", whose AX tree is empty. Asked fresh, so apps launched after NEO
+    started are found too."""
+    from AppKit import NSRunningApplication
+
+    from neo.tools.computer.focus import pid_running
+
     name_l = name.lower()
     best: tuple[int, int] | None = None  # (rank, pid) — lower rank is better
-    for a in NSWorkspace.sharedWorkspace().runningApplications():
+    fresh = [NSRunningApplication.runningApplicationWithProcessIdentifier_(pid) for _, pid in pid_running(name_l)]
+    for a in [x for x in fresh if x is not None] or NSWorkspace.sharedWorkspace().runningApplications():
         n = (a.localizedName() or "").lower()
         if not n or (n != name_l and name_l not in n):
             continue

@@ -80,6 +80,10 @@ the words, hotkey for keys like return or cmd+s — and don't create a new note 
 agent_task is for things that need looking at the screen or several steps."""
 
 
+def _ago(now: float, t: float) -> str:
+    return f"{now - t:.1f}s ago" if t else "never"
+
+
 def _multi_step(text: str) -> bool:
     """Does the utterance ask for more than one thing?"""
     from neo.agent import fastpath
@@ -338,8 +342,8 @@ class LiveVoice:
                 now = time.time()
                 print(
                     f"[live] no speech for {timeout:.0f}s; closing session "
-                    f"(you {now - self._last_user_speech:.1f}s, me {now - self.spk.last_stop:.1f}s, "
-                    f"turn {now - self._last_turn_end:.1f}s, open {now - self._session_open:.1f}s ago)"
+                    f"(you {_ago(now, self._last_user_speech)}, me {_ago(now, self.spk.last_stop)}, "
+                    f"turn {_ago(now, self._last_turn_end)}, open {_ago(now, self._session_open)})"
                 )
                 self._closing = True
                 await self._close_session()
@@ -513,7 +517,13 @@ class LiveVoice:
                     result, silent = "(already running — its result will follow)", True
                 else:
                     self._goals[key] = goal
-                    reply = await self._agent_session.handle(goal)
+                    # The model often wraps a plain command ("new note") in agent_task. If the
+                    # user's own words are fully covered by fast paths, run those (≈1 s) instead
+                    # of the model's paraphrase through the agent loop (seconds to a minute).
+                    from neo.agent import fastpath
+
+                    text = asked if asked and fastpath.plan(asked) else goal
+                    reply = await self._agent_session.handle(text)
                     result, silent = reply.text, reply.silent
             elif (done := early().claim(fc.name, args)) is not None:
                 result = done  # already ran while the user was still talking

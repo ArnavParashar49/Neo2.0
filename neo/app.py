@@ -99,6 +99,19 @@ async def _lag_monitor() -> None:
             print(f"[loop] stalled for {lag:.1f}s — something blocked the event loop")
 
 
+async def _cocoa_pump() -> None:
+    """Let Cocoa deliver its notifications. NSWorkspace's running-app list and frontmost app are
+    only refreshed by the main thread's run loop, which an asyncio process never runs — without
+    this NEO can't see apps launched after it started, or which one is in front."""
+    try:
+        from AppKit import NSDate, NSRunLoop
+    except ImportError:  # not macOS
+        return
+    while True:
+        NSRunLoop.currentRunLoop().runUntilDate_(NSDate.dateWithTimeIntervalSinceNow_(0.002))
+        await asyncio.sleep(0.2)
+
+
 async def run() -> None:
     s = settings()
     load_all()
@@ -117,6 +130,7 @@ async def run() -> None:
 
     await bus().set_state(NeoState.IDLE)
     asyncio.create_task(_lag_monitor())
+    asyncio.create_task(_cocoa_pump())
     bus().subscribe(_log_activity)
     print("NEO is running. Say 'Hey Neo', or type in the overlay.")
     stop = asyncio.Event()
