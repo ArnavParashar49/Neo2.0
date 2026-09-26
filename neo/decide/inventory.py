@@ -30,7 +30,7 @@ import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime
-from functools import cached_property
+from functools import cached_property, lru_cache
 
 from neo.decide import sdef
 from neo.decide._objc import pooled
@@ -581,6 +581,27 @@ _LIBPROC = None
 _MAIN_EXE = re.compile(r"Contents/MacOS/[^/]+|Wrapper/[^/]+\.app/[^/]+|WrappedBundle/[^/]+")
 
 
+@lru_cache(maxsize=2048)
+def _declared_exe(bundle: str) -> str | None:
+    """The bundle's own CFBundleExecutable (None if unreadable): a background helper that also
+    lives in Contents/MacOS/ runs without the app being open."""
+    try:
+        with open(os.path.join(bundle, "Contents", "Info.plist"), "rb") as f:
+            exe = plistlib.load(f).get("CFBundleExecutable")
+        return str(exe) if exe else None
+    except (OSError, plistlib.InvalidFileException, ValueError, AttributeError):
+        return None
+
+
+def _is_main_exe(bundle: str, rest: str) -> bool:
+    if not _MAIN_EXE.fullmatch(rest):
+        return False
+    if rest.startswith("Contents/MacOS/"):
+        declared = _declared_exe(bundle)
+        return declared is None or rest == f"Contents/MacOS/{declared}"
+    return True
+
+
 @pooled
 def _running_reals() -> set[str]:
     """Real paths of app bundles with a live process - read fresh from the process table (NSWorkspace's
@@ -605,7 +626,7 @@ def _running_reals() -> set[str]:
             j = exe.find(".app/")
             # Only the app's own main executable: a widget/extension or helper living inside the
             # bundle (PlugIns/*.appex, Frameworks/*Helper.app) runs without the app being open.
-            if j > 0 and _MAIN_EXE.fullmatch(exe[j + 5 :]):
+            if j > 0 and _is_main_exe(exe[: j + 4], exe[j + 5 :]):
                 out.add(exe[: j + 4])
         return out
     except (OSError, AttributeError):

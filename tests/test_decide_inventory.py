@@ -718,3 +718,18 @@ def test_cocoa_entry_points_drain_an_autorelease_pool(monkeypatch):
     # the thread entry points (called via asyncio.to_thread) are the wrapped ones
     for fn in (inventory.inventory, inventory.default_for, media._pid_of, media._ax_flow, media._default_browser):
         assert hasattr(fn, "__wrapped__"), fn
+
+
+def test_only_the_declared_main_executable_counts_as_the_app_running(tmp_path):
+    import plistlib
+
+    from neo.decide import inventory
+
+    app = tmp_path / "Player.app"
+    (app / "Contents" / "MacOS").mkdir(parents=True)
+    (app / "Contents" / "Info.plist").write_bytes(plistlib.dumps({"CFBundleExecutable": "Player"}))
+    inventory._declared_exe.cache_clear()
+    assert inventory._is_main_exe(str(app), "Contents/MacOS/Player")
+    assert not inventory._is_main_exe(str(app), "Contents/MacOS/Player Update Agent")  # a background helper
+    assert not inventory._is_main_exe(str(app), "Contents/PlugIns/Widget.appex/Contents/MacOS/Widget")
+    assert inventory._is_main_exe(str(tmp_path / "Unreadable.app"), "Contents/MacOS/Anything")  # no plist: as before
