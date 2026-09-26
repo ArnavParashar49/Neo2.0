@@ -67,6 +67,7 @@ class Memory:
         self._recent: OrderedDict[str, np.ndarray] = OrderedDict()
         self._stale = True  # the stored corrections aren't all in RAM yet (e.g. after a restart)
         self._gen = 0  # bumped by forget(): a rebuild that started before it throws its work away
+        self._missed = 0  # corrections learned with no embedding at hand: a rebuild must add them
         self._rebuilding = False
 
     # ---- what the reflex sees -----------------------------------------------------------------
@@ -114,6 +115,7 @@ class Memory:
             emb = self._recent.get(_key(text))
             if emb is None:
                 self._stale = True
+                self._missed += 1
                 return False
             self._put(_key(text), emb, intent, tool, learn.script(text))
             return True
@@ -148,11 +150,12 @@ class Memory:
         """Re-embed stored corrections not in RAM yet (the newest CAP) and drop ones no longer
         stored. Stops early — staying stale — when keep_going() turns False. Returns how many
         were added."""
+        with self._lock:  # before reading the file: an erase from here on voids this rebuild
+            gen, missed, have = self._gen, self._missed, {it.key for it in self._items}
         rows = learn.corrections()[-CAP:]
-        with self._lock:
-            gen, have = self._gen, {it.key for it in self._items}
         wanted = {_key(r["text"]): r for r in rows}
         new: list[tuple[str, np.ndarray, dict]] = []
+        complete = True
         for k, r in wanted.items():
             if k in have:
                 continue
@@ -160,18 +163,24 @@ class Memory:
                 return 0
             e = embed(r["text"])
             if e is None:
-                break  # this reflex exposes no embedding: nothing to remember with
+                complete = False  # this reflex exposes no embedding: nothing to remember with
+                break
             new.append((k, e, r))
         with self._lock:
             if gen != self._gen:
-                return 0  # erased while embedding
-            keep = [i for i, it in enumerate(self._items) if it.key in wanted]
+                return 0  # erased while reading or embedding
+            # Drop what is no longer stored — of what was here when this began: a correction
+            # learned meanwhile isn't in `rows` yet, and stays.
+            keep = [i for i, it in enumerate(self._items) if it.key in wanted or it.key not in have]
             self._items = [self._items[i] for i in keep]
             self._vecs = [self._vecs[i] for i in keep]
             self._mat = None
+            now = {it.key for it in self._items}
             for k, e, r in new:
-                self._put(k, e, r["intent"], r.get("tool", ""), r.get("script") or learn.script(r["text"]))
-            self._stale = False
+                if k not in now:  # learned meanwhile: that one is at least as recent
+                    self._put(k, e, r["intent"], r.get("tool", ""), r.get("script") or learn.script(r["text"]))
+            # Still behind: one learned meanwhile without an embedding, or some couldn't be embedded.
+            self._stale = self._missed != missed or not complete
         return len(new)
 
 
@@ -224,6 +233,8 @@ def rebuild_soon(is_idle: Callable[[], bool]) -> bool:
     laya = reflex._laya
     if laya is None or not _memory.stale or _memory._rebuilding or not learn.enabled():
         return False
+    if getattr(laya, "center", None) is None:
+        return False  # this reflex exposes no embeddings: a decide would only be wasted
 
     def embed(text: str) -> np.ndarray | None:
         with reflex.laya_lock():

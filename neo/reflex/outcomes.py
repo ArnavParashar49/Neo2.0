@@ -8,15 +8,20 @@ event, or as soon as the next, unrelated request starts; only then does it becom
 ``learn.record`` — or none:
 
 * it ran, every step worked (or a failure was recovered by a later step), nothing contradicted
-  it → what ran: no tool = chat, one fast tool = quick_action + that tool, more (or a slow one)
-  = agent_task; verified, w=1.0.
+  it → what ran: no tool = chat; one call of a tool that isn't slow = quick_action + that tool;
+  several tools = quick_action with no single tool when NEO's fast paths cover the whole
+  sentence (and the agent wasn't needed), else agent_task; a slow tool = agent_task. Verified,
+  w=1.0.
 * only the teacher's choice is known (Live's calls whose results never came back, Live
   answering in words) → that choice, w=0.5.
-* the next request within 20 s corrects it ("no, I meant…", "galat…", or mostly the same words)
-  and *that* one is verified → this request's words get its label, with the original in
-  ``wrong`` (a hard negative); verified, w=1.0.
+* the next request within 20 s corrects it ("no, I meant…", "galat…") and *that* one is
+  verified → this request's words get its label, with the original in ``wrong`` (a hard
+  negative); verified, w=1.0. Mostly the same words again only counts as a fix of a request that
+  didn't visibly work; after one that did, it is a request of its own ("turn the volume up" →
+  "turn the brightness up too"), and so is a whole new command after a "no" ("no wait, open
+  Safari"). A yes or no to a question NEO itself asked is an answer, not a correction.
 * a failure nothing recovered, a cancel, "no" at a confirmation → nothing.
-* stopped or talked over within 3 s (and no rephrase) → nothing; counted as a defect.
+* stopped or talked over within 3 s of NEO answering (and no rephrase) → nothing; a defect.
 
 Nothing here touches disk: only settled rows (via learn.record, skeleton text only) and daily
 counters without any text. NEO_LEARN=off turns it off; neo.privacy's erase forgets it.
@@ -56,6 +61,27 @@ _UNABLE = re.compile(
     re.I,
 )
 _ASKED_BACK = re.compile(r"\?\s*$|\b(?:could\s+you|which\s+one|do\s+you\s+want)\b", re.I)
+_SENTENCE = re.compile(r"(?<=[.!?])\s+")
+# The user answering a question NEO asked ("Want me to do Downloads too?" → "no, that's all").
+_REPLY = re.compile(
+    r"^\s*(?:(?:hey\s+)?neo[\s,]+)?(?:yes|yeah|yep|yup|sure|ok(?:ay)?|no|nope|nah|nahi|nahin|haan|han|"
+    r"thanks?|thank\s+you|not\s+now)\b",
+    re.I,
+)
+# A bare "no" (and "wait", "actually"…) can be a change of mind rather than "you got it wrong"…
+_SOFT_NO = re.compile(
+    r"^\s*(?:(?:hey\s+)?neo[\s,]+)?(?:arre\s+nahi|no|nope|nahi|nahin)\b"
+    r"(?:[\s,.!:;-]*(?:wait|actually|sorry|hold\s+on|hang\s+on|yaar|arre)\b)*[\s,.!:;-]*",
+    re.I,
+)
+# …these words never are.
+_EXPLICIT = re.compile(
+    r"(?:i\s+meant|i\s+said|not\s+that|wrong|galat|mera\s+matlab|matlab|uska\s+nahi|dusra|doosra)\b", re.I
+)
+_FUNCTION_WORDS = {
+    "the", "a", "an", "it", "to", "my", "me", "please", "and", "of", "in", "on", "for", "that", "this",
+    "is", "i", "you", "your", "now", "just", "can", "could", "would", "will",
+}  # fmt: skip
 
 # The episode a relayed request belongs to: Gemini Live's tool call (or its command lane) binds
 # its sentence here, so a session run it hands over reports its steps to that sentence.
@@ -80,6 +106,7 @@ class Episode:
     calls: int = 0  # Live tool calls still running
     stopped: str = ""  # how an agent run ended (AgentResult.stopped)
     answer: str = ""  # NEO's own reply, judged: "real" | "unable" | "asked_back" (never kept)
+    asked: bool = False  # NEO's last reply asked the user something ("…Want me to do Downloads too?")
     unable: bool = False  # an agent run with steps that says it didn't manage
     cancelled: bool = False
     early_stop: bool = False  # stopped / talked over within EARLY_S
@@ -90,6 +117,7 @@ class Episode:
     kind_ok: bool = False  # …and whether carrying it out worked
     fix: Episode | None = None  # the next request, which corrected or rephrased this one
     resolved: tuple[str, str] | None = None  # the verified label this episode ended up with
+    resolved_tools: tuple[str, ...] = ()  # every tool behind that label, along the chain of fixes
     settled: bool = False
 
 
@@ -119,23 +147,66 @@ def _answers(text: str) -> bool:
 
 
 def _fast(tool: str) -> bool:
+    """A registered tool that answers or acts in one quick call: not slow, not the agent itself."""
+    if tool == "agent_task":
+        return False
     try:
         from neo.agent.registry import registry
 
         t = registry().get(tool)
     except Exception:  # noqa: BLE001
         return False
-    return bool(t and t.fast_path)
+    return t is not None and not t.slow
 
 
-def _label_for(tools: list[str]) -> tuple[str, str]:
-    """No tool → chat; one fast tool → quick_action + that tool; anything more → agent_task."""
+def _covered(text: str) -> set[str]:
+    """The tools NEO's fast paths run for this whole sentence without any model (empty: none)."""
+    try:
+        from neo.agent import fastpath
+
+        return {t for t, _ in fastpath.plan(text) or []}
+    except Exception:  # noqa: BLE001
+        return set()
+
+
+def _label_for(tools: list[str], text: str = "", *, agent: bool = False) -> tuple[str, str]:
+    """No tool → chat; one tool that isn't slow → quick_action + that tool; several that the
+    fast paths cover for these words (without the agent's help) → quick_action with no single
+    tool; anything else → agent_task."""
     distinct = list(dict.fromkeys(t for t in tools if t not in _IGNORE))
     if not distinct:
         return "chat", ""
-    if len(distinct) == 1 and _fast(distinct[0]):
-        return "quick_action", distinct[0]
+    if len(distinct) == 1:
+        return ("quick_action", distinct[0]) if _fast(distinct[0]) else ("agent_task", "")
+    if not agent and "agent_task" not in distinct and set(distinct) <= _covered(text):
+        return "quick_action", ""
     return "agent_task", ""
+
+
+def _judge(text: str) -> str:
+    """A chat reply: "" (nothing said), "unable", "asked_back" (nothing but a question back —
+    "Which file do you mean?") or "real" (an answer, even one ending in a follow-up question)."""
+    if not text:
+        return ""
+    if _UNABLE.search(text):
+        return "unable"
+    if not any(s.strip() and not _ASKED_BACK.search(s) for s in _SENTENCE.split(text)):
+        return "asked_back"
+    return "real"
+
+
+def _new_command(before: str, text: str) -> bool:
+    """ "no wait, open Safari" after something unrelated: a whole command of its own after a bare
+    no, sharing nothing with the request before it — a change of mind, not a correction."""
+    m = _SOFT_NO.match(text)
+    if m is None:
+        return False  # "I meant…", "galat…": that says the last one was wrong
+    rest = text[m.end() :].strip()
+    if not rest or _EXPLICIT.match(rest) or len(rest.split()) < 2:
+        return False  # "no, I meant the volume", "no, weather": the fix itself
+    if (_tokens(rest) & _tokens(before)) - _FUNCTION_WORDS:
+        return False  # "no, turn the VOLUME down" after "turn it down": about the same thing
+    return bool(_covered(rest))
 
 
 def _fmt(label: tuple[str, str]) -> str:
@@ -155,13 +226,13 @@ def _outcome(ep: Episode) -> tuple[tuple[str, str], bool] | None:
             return None  # it failed and nothing after that worked
         if ep.unable:
             return None
-        return _label_for([t for t, ok in steps if ok]), True
+        return _label_for([t for t, ok in steps if ok], ep.text, agent=ep.route == "agent"), True
     if ep.answer == "real":
         return ("chat", ""), True  # NEO answered, with nothing to run
     if ep.answer:
         return None  # it couldn't, or asked back: the request was unclear
     if ep.teacher:
-        return _label_for(ep.teacher), False  # Live chose these; no result says how it went
+        return _label_for(ep.teacher, ep.text), False  # Live chose these; no result says how it went
     if ep.spoke:
         return ("chat", ""), False  # Live answered in words we never see
     return None
@@ -170,9 +241,9 @@ def _outcome(ep: Episode) -> tuple[tuple[str, str], bool] | None:
 def _attempted(ep: Episode) -> str:
     """What this episode was taken to be — the label a correction says it was *not*."""
     if tools := [t for t, _ in ep.steps if t not in _IGNORE]:
-        return _fmt(_label_for(tools))
+        return _fmt(_label_for(tools, ep.text, agent=ep.route == "agent"))
     if ep.teacher:
-        return _fmt(_label_for(ep.teacher))
+        return _fmt(_label_for(ep.teacher, ep.text))
     d = ep.decision or {}
     if d.get("intent") in _INTENTS:
         return _fmt((d["intent"], d.get("tool", "") if d["intent"] == "quick_action" else ""))
@@ -218,6 +289,7 @@ class Ledger:
             key = key or f"u{next(self._ids)}"
             if key in self._eps:
                 return key
+            self._tick(now)  # whatever was due settles first: a late sentence can't reopen it
             ep = Episode(key, " ".join(str(text).split()), source, now, now, filed=final, running=final)
             if decision is not None:
                 laya = str(getattr(decision, "source", "")).startswith("laya")
@@ -241,10 +313,11 @@ class Ledger:
             return key
 
     def route(self, key: str, route: str) -> None:
+        """NEO's route for it starts (NEO hasn't answered yet: an early stop counts from later)."""
         with self._lock:
             if ep := self._get(key):
                 ep.route = route
-                self._touch(ep, self._clock())
+                self._touch(ep, self._clock(), responded=False)
 
     def step(self, key: str, tool: str, ok: bool, *, halt: bool = False) -> None:
         """One tool ran. `halt`: it stopped to ask the user (NEEDS_CONFIRM) — not done yet."""
@@ -260,17 +333,22 @@ class Ledger:
         """NEO's chat route answered (the words are judged, never kept)."""
         with self._lock:
             if ep := self._get(key):
-                ep.answer = "unable" if _UNABLE.search(text or "") else "real"
+                text = (text or "").strip()
+                ep.answer = _judge(text)
+                ep.asked = bool(text and _ASKED_BACK.search(text))
                 self._end(ep, key)
 
     def agent_done(self, key: str, steps: list[tuple[str, bool]], *, stopped: str, answer: str, question: bool = False) -> None:
+        """An agent run for this request ended — its first, or the one that finished the job
+        after the user said yes to a question (then it may stop at another question)."""
         with self._lock:
             if ep := self._get(key):
                 ep.steps += [(t, bool(ok)) for t, ok in steps]
                 ep.stopped = stopped
                 ep.awaiting = ep.awaiting or stopped == "needs_confirm"
                 text = (answer or "").strip()
-                if not [t for t, _ in steps if t not in _IGNORE]:
+                ep.asked = question or bool(text and _ASKED_BACK.search(text))
+                if not [t for t, _ in ep.steps if t not in _IGNORE]:
                     real = len(text) > 40 and not _ASKED_BACK.search(text) and not _UNABLE.search(text)
                     ep.answer = "real" if real and not question else "asked_back"
                 else:
@@ -286,14 +364,14 @@ class Ledger:
         with self._lock:
             if ep := self._get(key):
                 ep.cancelled = True
-                self._end(ep, key)
+                self._end(ep, key, responded=False)
 
-    def _end(self, ep: Episode, key: str) -> None:
+    def _end(self, ep: Episode, key: str, *, responded: bool = True) -> None:
         """NEO's route for its own request is over (a relayed run's end isn't its sentence's)."""
         now = self._clock()
         if key == ep.key:
             ep.running = False
-        self._touch(ep, now)
+        self._touch(ep, now, responded=responded)
         self._tick(now)
 
     def call_started(self, key: str) -> str:
@@ -323,14 +401,18 @@ class Ledger:
         """The user said stop / pressed stop. `early` is known when the caller can tell how long
         NEO had been speaking; otherwise it's measured from when NEO responded."""
         with self._lock:
+            now = self._clock()
+            self._tick(now)  # never a verdict on a request that should have settled already
             if ep := (self._eps.get(key) if key else None) or self._latest():
-                self._interrupt(ep, self._clock(), early, stop=True)
+                self._interrupt(ep, now, early, stop=True)
 
     def barge_in(self, key: str = "", *, early: bool) -> None:
         """The user talked over NEO. Only right at the start is that a verdict on the answer."""
         with self._lock:
+            now = self._clock()
+            self._tick(now)
             if early and (ep := (self._eps.get(key) if key else None) or self._latest()):
-                self._interrupt(ep, self._clock(), True, stop=False)
+                self._interrupt(ep, now, True, stop=False)
 
     def _interrupt(self, ep: Episode, now: float, early: bool | None, *, stop: bool) -> None:
         if early is None:
@@ -340,19 +422,26 @@ class Ledger:
         if early and not ep.early_stop:
             ep.early_stop = True
             learn.count("barge_ins")
-        self._touch(ep, now, responded=False)
+        if early or ep.running or ep.calls:
+            self._touch(ep, now, responded=False)  # a stop long after says nothing: no new window
 
-    def confirm(self, yes: bool, tool: str = "", ok: bool = True) -> None:
-        """The user answered the pending confirmation; a yes ran `tool`."""
+    def confirm(self, yes: bool, tool: str = "", ok: bool = True, *, more: bool = False) -> str:
+        """The user answered the pending confirmation; a yes ran `tool`. `more`: an agent run now
+        finishes the job — the request stays open until it reports (agent_done with the key
+        returned here)."""
         with self._lock:
+            now = self._clock()
+            self._tick(now)  # a question that lapsed has settled: a late answer isn't its outcome
             if ep := self._latest(lambda e: e.awaiting):
                 ep.awaiting, ep.confirm = False, bool(yes)
                 if yes and tool:
                     ep.steps.append((tool, bool(ok)))
                     ep.stopped = "done" if ep.stopped == "needs_confirm" else ep.stopped
-                now = self._clock()
+                ep.running = ep.running or (bool(yes) and more)
                 self._touch(ep, now)
                 self._tick(now)
+                return ep.key
+            return ""
 
     def decided(self, utt_or_text: str, kind: str, app_key: str = "", ok: bool = True) -> bool:
         """neo/decide carried out a task kind for this request (by episode key, the bound
@@ -397,8 +486,8 @@ class Ledger:
             if prev is not None:
                 self._interrupt(prev, ep.started, None, stop=True)
             self._drop(ep)
-        elif prev is not None and (prev.awaiting or prev.confirm is not None) and _answers(ep.text):
-            self._drop(ep)  # "yes, go ahead" answered NEO's question: not a request
+        elif prev is not None and (prev.awaiting or prev.confirm is not None or prev.asked) and _answers(ep.text):
+            self._drop(ep)  # "yes, go ahead" / "no, that's all" answered NEO's question: not a request
         elif learn._SKIP.match(ep.text):
             # A bare "no" right after a request (not at a question): that one was wrong.
             if (
@@ -406,6 +495,7 @@ class Ledger:
                 and _CORRECTION.match(ep.text)
                 and prev.confirm is None
                 and not prev.awaiting
+                and not prev.asked
                 and ep.started - prev.last <= WINDOW_S
             ):
                 prev.corrected = True
@@ -472,28 +562,37 @@ class Ledger:
         """Is `b` the user correcting or rephrasing `a`?"""
         if a.confirm is not None or a.awaiting or b.started - a.last > WINDOW_S:
             return False  # a "no" that answered a question isn't about the request
+        if a.asked and _REPLY.match(b.text):
+            return False  # "no thanks, that's all" answered what NEO asked at the end
         if _CORRECTION.match(b.text):
+            if _new_command(a.text, b.text):
+                return False
             a.corrected = True
             return True
-        ta, tb = _tokens(a.text), _tokens(b.text)
-        if not ta or not tb or len(ta & tb) / len(ta | tb) < JACCARD:
-            return False
-        # More words on a request that worked is a follow-up ("…on YouTube"), not a fix of it.
         out = _outcome(a)
-        return not (ta < tb and out is not None and out[1] and not (a.corrected or a.early_stop))
+        if out is not None and out[1] and not (a.corrected or a.early_stop):
+            # It worked: only saying so makes it wrong. Similar words are a request of their own
+            # ("turn the volume up" → "turn the brightness up too", "…on YouTube").
+            return False
+        ta, tb = _tokens(a.text), _tokens(b.text)
+        return bool(ta and tb and len(ta & tb) / len(ta | tb) >= JACCARD)
 
     def _settle(self, ep: Episode, fix: Episode | None = None) -> None:
         ep.settled = True
         self._eps.pop(ep.key, None)
         learn.count("requests")
         # `resolved` carries a verified label back along a chain of fixes ("open spotfy" → "no,
-        # spotify" → "I said Spotify"), even when a row itself isn't kept (too short, content…).
+        # spotify" → "I said Spotify"), even when a row itself isn't kept (too short, content…),
+        # and `resolved_tools` every tool behind it: a content tool two fixes on still means the
+        # first request's words were content.
+        ep.resolved_tools = tuple(ep.teacher) + tuple(t for t, _ in ep.steps)
         if fix is not None and fix.resolved is not None:
             before = _attempted(ep)
             wrong = [before] if before and before != _fmt(fix.resolved) else []
             ep.corrected = ep.corrected or bool(wrong)
             ep.resolved = fix.resolved
-            self._emit(ep, fix.resolved, True, wrong=wrong, also=[t for t, _ in fix.steps] + fix.teacher)
+            ep.resolved_tools += fix.resolved_tools
+            self._emit(ep, fix.resolved, True, wrong=wrong, also=fix.resolved_tools)
         elif fix is None and not (ep.early_stop or ep.corrected) and (out := _outcome(ep)) is not None:
             label, verified = out
             ep.resolved = label if verified else None

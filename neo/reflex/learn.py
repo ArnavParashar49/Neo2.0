@@ -73,6 +73,7 @@ _SKIP = re.compile(r"^\s*(?:(?:hey\s+)?neo|stop|cancel|never\s*mind|ok(?:ay)?|ye
 _DEVANAGARI = re.compile("[ऀ-ॿ]")
 _KIND = re.compile(r"[a-z_]{1,32}")
 _counts: dict[str, int] = {}  # today's counters, not yet in the state file
+_tidied_day: int | None = None  # the day the file on disk was last held to the retention limits
 
 
 def _path(name: str) -> Path:
@@ -205,6 +206,20 @@ def _compact(path: Path) -> None:
     tmp = path.with_suffix(".tmp")
     tmp.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in keep), encoding="utf-8")
     tmp.replace(path)
+
+
+def tidy(now: float | None = None) -> bool:
+    """Hold the file on disk to the retention limits once a day — not only at start-up or when
+    it outgrows _COMPACT_BYTES: a menu-bar app runs for weeks. Returns whether it ran."""
+    global _tidied_day
+    day = _day(time.time() if now is None else now)
+    if _tidied_day == day:
+        return False
+    with _lock:
+        if _path(EXTRA).exists():
+            _compact(_path(EXTRA))
+    _tidied_day = day
+    return True
 
 
 def forget_examples() -> int:
@@ -411,9 +426,7 @@ async def learn_loop(is_idle) -> None:
     """Background task in the core: settle requests, keep the counters, rebuild the correction
     memory and retrain — the heavy parts only when NEO is idle."""
     try:  # the retention limits hold on disk too, not just in what training reads
-        with _lock:
-            if _path(EXTRA).exists():
-                _compact(_path(EXTRA))
+        tidy()
     except Exception as e:  # noqa: BLE001
         print(f"[reflex] couldn't tidy the learning file: {str(e)[:80]}")
     if enabled() and (line := summary()):
@@ -426,6 +439,7 @@ async def learn_loop(is_idle) -> None:
 
             outcomes.tick()  # requests nothing followed up on settle by time, not only by the next one
             flush_counts()
+            await asyncio.to_thread(tidy)  # rewrites the file only when the day has changed
             if not is_idle():
                 idle_since = None
                 continue

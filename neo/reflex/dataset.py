@@ -483,7 +483,10 @@ _OWN_FIELDS = ("w", "verified", "wrong", "conf", "margin", "script", "kind")
 def _own_outcomes_win(rows: list[dict]) -> list[dict]:
     """What actually happened beats a guess: a sentence the user said and verified overrides every
     other row with the same words (case and spacing aside) from any source. Their rows also carry
-    the ledger's weight and flags through (w, verified, wrong…) so training can weight them."""
+    the ledger's weight and flags through (w, verified, wrong…) so training can weight them.
+
+    A template row isn't dropped but takes the user's intent and tool: templates carry the only
+    explicit destructive / needs_screen labels, and "delete this folder" must stay destructive."""
     extra = settings().data_dir / "reflex_extra.jsonl"
     if not extra.exists():
         return rows
@@ -498,7 +501,9 @@ def _own_outcomes_win(rows: list[dict]) -> list[dict]:
         if r.get("source") == "reflex_extra.jsonl":
             r.update({f: own[k][f] for f in _OWN_FIELDS if k in own and f in own[k]})
         elif k in verified:
-            continue
+            if r.get("source") != "template":
+                continue
+            r = {**r, "intent": own[k]["intent"], "tool": own[k].get("tool", "")}
         out.append(r)
     return out
 

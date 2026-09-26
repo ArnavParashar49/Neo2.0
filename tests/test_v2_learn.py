@@ -109,22 +109,27 @@ def _live():
     return v
 
 
+_PARIS = "what's it like in Paris tomorrow"
+
+
 @pytest.mark.parametrize(
-    "tools, spoke, expected",
+    "text, tools, spoke, expected",
     [
-        ([], True, ("chat", "")),
-        (["weather"], True, ("quick_action", "weather")),
-        (["hotkey", "open_app"], False, ("agent_task", "")),  # two different tools: more than one action
-        (["agent_task"], True, ("agent_task", "")),
-        ([], False, None),  # nothing came of it: room noise, not recorded
+        (_PARIS, [], True, ("chat", "")),
+        (_PARIS, ["weather"], True, ("quick_action", "weather")),
+        # Two different tools the fast paths run for this very sentence: still a quick action.
+        ("open safari and turn the volume up", ["open_app", "volume"], False, ("quick_action", "")),
+        (_PARIS, ["hotkey", "open_app"], False, ("agent_task", "")),  # two tools no fast path covers
+        (_PARIS, ["agent_task"], True, ("agent_task", "")),
+        (_PARIS, [], False, None),  # nothing came of it: room noise, not recorded
     ],
 )
-def test_live_labels_each_sentence_by_what_the_model_did(tools, spoke, expected):
+def test_live_labels_each_sentence_by_what_the_model_did(text, tools, spoke, expected):
     from neo.tools import load_all
 
     load_all()
     v = _live()
-    v._label = {"text": "what's it like in Paris tomorrow", "tools": list(tools), "spoke": spoke, "open": False}
+    v._label = {"text": text, "tools": list(tools), "spoke": spoke, "open": False}
     v._file_label()
     assert _rows() == []  # nothing is written until the request has settled
     _settle()

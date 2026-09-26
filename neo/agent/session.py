@@ -222,6 +222,9 @@ class Session:
                     first = False
                 out.append(chunk)
                 await bus().say("".join(out), final=False, job=job)
+        except asyncio.CancelledError:
+            outcomes.cancelled(job)  # stopped mid-answer: not what they wanted
+            raise
         except Exception:  # noqa: BLE001 — fall back to the agent loop, which has its own failover
             return await self._agent(text, d, None, job)
         reply = "".join(out).strip()
@@ -247,6 +250,13 @@ class Session:
         outcomes.route(job, "quick")
         await bus().set_state(NeoState.WORKING, job=job)
         t0 = time.time()
+        try:
+            return await self._quick_steps(text, d, steps, job=job, t0=t0)
+        except asyncio.CancelledError:
+            outcomes.cancelled(job)  # stopped part-way: not what they wanted
+            raise
+
+    async def _quick_steps(self, text: str, d: Decision, steps: list[tuple[str, dict]], *, job: str, t0: float) -> Reply:
         from neo.agent.early import _APP_TOOLS, _SETTLE_AFTER_APP_S, early
 
         spoken: list[str] = []
@@ -474,7 +484,8 @@ class Session:
             with confirm.approved(aid):
                 out = await registry().invoke(tool, args, ToolContext(user_text=text or "yes", taint=list(taint)))
             await bus().tool_end(tool, out.ok, out.text, job=job)
-            outcomes.confirm(True, tool, out.ok)
+            # The request that asked (if still open) now waits for the run that finishes the job.
+            episode = outcomes.confirm(True, tool, out.ok, more=ours)
         if not ours:
             # Asked by a direct voice command: there's no agent run to hand the result back to.
             msg = out.text if out.ok else f"That didn't work: {out.text}"
@@ -488,10 +499,17 @@ class Session:
         follow = f"[User confirmed. {tool} result: {result}] Continue and finish the task, or report the result."
         snapshot = self._trimmed()
         ctx = ToolContext(user_text=text or "yes", taint=taint)
-        res = await run_agent(
-            follow, provider=brain("agent"), system=self._system(), history=snapshot, ctx=ctx, effort="medium", job=job
-        )
+        try:
+            res = await run_agent(
+                follow, provider=brain("agent"), system=self._system(), history=snapshot, ctx=ctx, effort="medium", job=job
+            )
+        except asyncio.CancelledError:
+            if episode:
+                outcomes.cancelled(episode)  # stopped before it finished: not what they wanted
+            raise
         await self._remember(*res.messages[len(snapshot) :])
+        if episode:  # how the job the user said yes to actually ended (maybe at another question)
+            _learn_from(episode, res)
         if res.stopped == "needs_confirm" and self._stage_pending(res, ctx.taint):
             await bus().say(res.question, final=True, job=job)
             return Reply(res.question, "confirm", None, res, job=job)

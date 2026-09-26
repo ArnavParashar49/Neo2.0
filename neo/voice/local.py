@@ -47,6 +47,7 @@ class LocalVoice:
         self._ptt = False
         self._armed = asyncio.Event()
         self._speaking = False
+        self._speaking_since = 0.0
         self._capturing = False
         self._followup_until = 0.0
         self._vad = None
@@ -112,6 +113,11 @@ class LocalVoice:
 
     async def interrupt(self) -> None:
         """Stop speaking and abandon the in-flight request (barge-in / stop button)."""
+        from neo.reflex import outcomes
+
+        # Cut off right as NEO started speaking: its answer was wrong (Laya learns from that).
+        early = time.time() - self._speaking_since <= outcomes.EARLY_S if self._speaking else None
+        outcomes.stop(early=early)
         self.spk.interrupt()
         self._speaking = False
         if self._handler and not self._handler.done():
@@ -121,6 +127,7 @@ class LocalVoice:
         if not text.strip() or self._tts is None or getattr(self.spk, "_closed", False):
             return  # a closed voice (being replaced) must never leave a reply waiting forever
         self._speaking = True
+        self._speaking_since = time.time()
         await bus().set_state(NeoState.SPEAKING)
         try:
             for sent in _SENT_RE.split(text.strip()):

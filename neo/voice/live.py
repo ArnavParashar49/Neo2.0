@@ -1032,6 +1032,7 @@ class LiveVoice:
                     self._forget_call(fc.name, args)  # a failed call may be tried again
         except asyncio.CancelledError:
             if key in self._server_cancelled:  # withdrawn by the server: it expects no response
+                outcomes.cancelled()  # the user cut in: not a label for the sentence
                 self._server_cancelled.discard(key)
                 self._tool_tasks.pop(key, None)
                 self._goals.pop(key, None)
