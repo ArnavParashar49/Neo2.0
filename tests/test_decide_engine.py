@@ -1,7 +1,8 @@
 """The decision engine: which installed app should do a request, Laya deciding, outcomes learned.
 
-Laya is faked (a stub whose system_one returns probabilities); apps are built directly. Nothing
-here launches, scripts or inspects a real app.
+Laya is faked (a stub whose system_one returns probabilities, installed as the zero-shot model;
+the reflex is a stub with a kind head); apps are built directly. Nothing here loads a model, or
+launches, scripts or inspects a real app.
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ import numpy as np
 import pytest
 
 from neo.decide import engine
+from neo.reflex import zeroshot
 
 try:
     from neo.decide.inventory import App
@@ -138,15 +140,37 @@ def _hermetic(monkeypatch):
     monkeypatch.setattr(engine, "DRIVERS", {})  # generic methods: script / url / ax
     monkeypatch.setattr(engine, "_app_caps", lambda app: CAPS.get(app.bundle_id, frozenset()))
     monkeypatch.setattr(neo.reflex, "get_laya", lambda: None)
+    monkeypatch.setattr(zeroshot, "_agent", None)  # Laya is off in tests: nothing ever loads
     engine._cache.clear()
     yield
     engine._cache.clear()
 
 
 def use_laya(monkeypatch, pick) -> FakeLaya:
+    """Install a fake as the zero-shot model (loaded, so no load is attempted)."""
+    fake = FakeLaya(pick)
+    monkeypatch.setattr(zeroshot, "_agent", fake)
+    return fake
+
+
+class FakeReflex:
+    """The reflex with trained heads: its Decision carries the kind head's answer."""
+
+    has_head = True
+
+    def __init__(self, kind: str | None, p: float = 0.0):
+        self.kind, self.p = kind, p
+        self.texts: list[str] = []
+
+    def decide(self, text):
+        self.texts.append(text)
+        return types.SimpleNamespace(intent="quick_action", kind=self.kind, kind_p=self.p)
+
+
+def use_reflex(monkeypatch, kind: str | None, p: float = 0.0) -> FakeReflex:
     import neo.reflex
 
-    fake = FakeLaya(pick)
+    fake = FakeReflex(kind, p)
     monkeypatch.setattr(neo.reflex, "get_laya", lambda: fake)
     return fake
 
@@ -202,15 +226,15 @@ def test_laya_orders_the_used_apps_when_it_is_sure(monkeypatch):
     assert c[0].score > c[1].score
 
     state, q = fake.calls[-1]
-    assert state["request"] == "play the trailer"
-    assert {x["label"] for x in state["candidates"]} == {"Tunewave", "Cliptide"}
-    assert all({"label", "evidence", "affinity", "record"} <= set(x) for x in state["candidates"])
+    assert state == {"request": "play the trailer"}  # evidence lives in the options, once
     crit = q["app"]["criteria"]
     assert set(crit) == {"Tunewave", "Cliptide"}  # only used, fitting apps; no named/unused/web
-    # each option is described from evidence: category, what it can do, usage, NEO's record
-    assert "music" in crit["Tunewave"] and "search play" in crit["Tunewave"]
-    assert "used 28 of last 30 days" in crit["Tunewave"] and "not tried yet" in crit["Tunewave"]
-    assert "video" in crit["Cliptide"]
+    # each option is its app's short evidence: category, usage, NEO's record once there is one
+    assert crit["Tunewave"] == "music; used 28 of last 30 days"
+    assert crit["Cliptide"] == "video; used 1 of last 30 days"
+    engine.record("play_media", "test.cliptide", "ax", True)
+    choose("play_media", "play the trailer", APPS)
+    assert fake.calls[-1][1]["app"]["criteria"]["Cliptide"].endswith("worked 1 of 1 tries")
 
 
 def test_prior_orders_when_laya_is_unsure(monkeypatch):
@@ -231,7 +255,7 @@ def test_prior_orders_when_laya_is_unavailable_broken_or_busy(monkeypatch):
         def system_one(self, state, questions):
             raise RuntimeError("MPS fell over")
 
-    monkeypatch.setattr(neo.reflex, "get_laya", lambda: Broken())
+    monkeypatch.setattr(zeroshot, "_agent", Broken())
     assert order(choose("play_media", "play something", APPS))[:3] == ["Tunewave", "web", "Cliptide"]
 
     use_laya(monkeypatch, prefer("Cliptide", 0.99))
@@ -249,11 +273,12 @@ def test_a_busy_laya_costs_the_lock_wait_not_the_whole_timeout(monkeypatch):
     # the real get_laya() takes the shared lock itself (no timeout): the engine must not block in it
     import neo.reflex
 
-    fake = FakeLaya(prefer("Cliptide", 0.99))
+    fake = use_laya(monkeypatch, prefer("Cliptide", 0.99))
+    reflex = FakeReflex("play_media", 0.9)
 
     def get_laya_taking_the_lock():
         with neo.reflex.laya_lock():
-            return fake
+            return reflex
 
     monkeypatch.setattr(neo.reflex, "get_laya", get_laya_taking_the_lock)
     monkeypatch.setattr(engine, "LAYA_LOCK_S", 0.05)
@@ -271,19 +296,22 @@ def test_a_busy_laya_costs_the_lock_wait_not_the_whole_timeout(monkeypatch):
     try:
         t = time.perf_counter()
         c = choose("play_media", "play something", APPS)
+        kind = asyncio.run(engine.decide_kind("play jazz"))
         dt = time.perf_counter() - t
     finally:
         done.set()
         holder.join()
     assert dt < 1.0
     assert order(c)[:3] == ["Tunewave", "web", "Cliptide"] and not fake.calls
+    assert kind == ("other", 0.0) and not reflex.texts
     assert order(choose("play_media", "play something", APPS))[0] == "Cliptide"
+    assert asyncio.run(engine.decide_kind("play jazz")) == ("play_media", pytest.approx(0.9))
 
 
 def test_an_answer_that_came_too_late_is_never_computed(monkeypatch):
     import neo.reflex
 
-    fake = FakeLaya(prefer("play_media", 0.9))
+    fake = FakeReflex("play_media", 0.9)
     gate = threading.Event()
 
     def slow_load():  # the model is still loading when the caller gives up
@@ -300,7 +328,7 @@ def test_an_answer_that_came_too_late_is_never_computed(monkeypatch):
         return r
 
     assert asyncio.run(run()) == ("other", 0.0)
-    assert not fake.calls
+    assert not fake.texts
 
 
 def test_web_fallback_after_the_apps_used_most_and_rarely_used_and_unused_apps_after_it():
@@ -368,15 +396,32 @@ def test_many_used_apps_go_through_laya_shortlist(monkeypatch):
     film = mk("Reelio", "test.reelio", category="public.app-category.video", media_evidence=MEDIA, **LIGHT)
     apps.insert(17, film)
 
-    def embed(texts):  # "video" texts point one way, everything else the other
+    from neo.memory import embed
+
+    seen = []
+
+    def minilm(texts):  # NEO's memory embedder, faked: "video" texts point one way, the rest the other
+        seen.append(list(texts))
         return np.array([[1.0, 0.0] if "video" in t or "film" in t else [0.0, 1.0] for t in texts])
 
-    monkeypatch.setattr(engine, "_embed_fn", lambda agent: embed)
+    monkeypatch.setattr(embed, "embed_texts", minilm)
     fake = use_laya(monkeypatch, lambda s, labels: {k: (0.9 if k == "Reelio" else 0.1 / (len(labels) - 1)) for k in labels})
     c = asyncio.run(engine.choose("play_media", "play a film", apps))
     assert order(c)[:2] == ["Reelio", "web"]  # Laya's sure pick, then the web: the rest were opened once
-    assert len(fake.calls[-1][1]["app"]["criteria"]) <= engine.LAYA_POOL
+    assert seen[0][0] == "play a film" and len(seen[0]) == 1 + len(apps)  # the request, then each app
+    crit = fake.calls[-1][1]["app"]["criteria"]
+    assert "Reelio" in crit and len(crit) == engine.LAYA_POOL  # the shortlist, not the most-used six
     assert len(c) == engine.MAX_CANDIDATES
+
+
+def test_without_the_embedder_the_most_used_apps_go_to_laya(monkeypatch):
+    music = {"category": "public.app-category.music", "media_evidence": MEDIA}
+    apps = [mk(f"Player{i:02d}", f"test.p{i}", **music, **LIGHT) for i in range(24)]
+    fave = mk("Reelio", "test.reelio", category="public.app-category.video", media_evidence=MEDIA, **HEAVY)
+    fake = use_laya(monkeypatch, prefer("Reelio", 0.9))
+    c = asyncio.run(engine.choose("play_media", "play a film", [*apps, fave]))  # embed_texts -> None
+    assert len(fake.calls[-1][1]["app"]["criteria"]) == engine.LAYA_POOL
+    assert order(c)[0] == "Reelio"
 
 
 # ---- learning ------------------------------------------------------------------------------------
@@ -537,15 +582,35 @@ def test_concurrent_records_are_not_lost():
 # ---- the task kind ------------------------------------------------------------------------------
 
 
-def test_decide_kind_asks_laya_over_the_task_descriptions(monkeypatch):
-    fake = use_laya(monkeypatch, prefer("play_media", 0.9))
-    kind, p = asyncio.run(engine.decide_kind("put on some jazz"))
-    assert (kind, p) == ("play_media", pytest.approx(0.9))
+def test_decide_kind_comes_from_the_reflex_kind_head(monkeypatch):
+    fake = use_laya(monkeypatch, prefer("send_message", 0.99))
+    reflex = use_reflex(monkeypatch, "play_media", 0.62)
+    assert asyncio.run(engine.decide_kind(" put on some jazz ")) == ("play_media", pytest.approx(0.62))
+    assert reflex.texts == ["put on some jazz"] and not fake.calls  # no zero-shot question at all
+    # the caller's own Decision for the text is used as is: the reflex isn't asked again
+    d = types.SimpleNamespace(kind="add_event", kind_p=0.7)
+    assert asyncio.run(engine.decide_kind("lunch friday", d)) == ("add_event", pytest.approx(0.7))
+    assert reflex.texts == ["put on some jazz"] and not fake.calls
+
+
+def test_zero_shot_kind_counts_only_when_very_sure(monkeypatch):
+    use_reflex(monkeypatch, None)  # trained heads, but no kind head yet
+    fake = use_laya(monkeypatch, prefer("play_media", 0.97))
+    assert asyncio.run(engine.decide_kind("put on some jazz")) == ("play_media", pytest.approx(0.97))
     state, q = fake.calls[-1]
     assert state == {"text": "put on some jazz"}
     assert set(q["kind"]["criteria"]) == set(engine.TASKS)
     assert {"play_media", "send_message", "write_note", "add_reminder", "add_event", "send_email",
             "open_app", "web_search", "other"} <= set(engine.TASKS)
+    # sure enough to order apps, not to pick the kind: zero-shot was measured 23% sure-and-wrong there
+    for p in (0.9, 0.6):
+        use_laya(monkeypatch, prefer("send_message", p))
+        assert asyncio.run(engine.decide_kind("remind me to call mom")) == ("other", 0.0)
+    # a Decision without a kind (the lite reflex, rules) falls back the same way, and so does a
+    # label the engine has no task for
+    use_laya(monkeypatch, prefer("add_reminder", 0.99))
+    for d in (types.SimpleNamespace(intent="quick_action"), types.SimpleNamespace(kind="dance", kind_p=1.0)):
+        assert asyncio.run(engine.decide_kind("remind me to call mom", d)) == ("add_reminder", pytest.approx(0.99))
 
 
 def test_decide_kind_without_laya_is_other():
@@ -653,3 +718,72 @@ def test_the_privacy_erase_forgets_what_was_learned_about_apps():
     assert engine.forget() == 1
     assert not list(settings().data_dir.glob("decide.json*"))
     assert engine.prior("play_media", "test.tunewave", "ax") == pytest.approx(0.5)
+
+
+# ---- outcomes for the reflex's learning ----------------------------------------------------------
+
+
+@pytest.fixture
+def ledger(monkeypatch):
+    """A stand-in for neo.reflex.outcomes: what the engine reports."""
+    import neo.reflex
+
+    got = []
+    mod = types.SimpleNamespace(decided=lambda text, kind, key, ok: got.append((text, kind, key, ok)))
+    monkeypatch.setitem(sys.modules, "neo.reflex.outcomes", mod)
+    monkeypatch.setattr(neo.reflex, "outcomes", mod, raising=False)
+    return got
+
+
+def test_settled_attempts_of_a_decision_are_reported_once_each(ledger):
+    async def request():
+        await engine.choose("play_media", "play a song", APPS)
+        engine.record("play_media", "test.tunewave", "script", False)  # blamed: reported
+        engine.record("play_media", "test.tunewave", "ax", False)  # same app, same outcome: once
+        engine.record("play_media", "test.cliptide", "ax", False, "permission")  # not its fault
+        engine.record("play_media", "web:clips.example", "web", True)  # a per-site sub-arm, not a candidate
+        engine.record("play_media", "web", "web", True)
+
+    asyncio.run(request())
+    assert ledger == [
+        ("play a song", "play_media", "test.tunewave", False),
+        ("play a song", "play_media", "web", True),
+    ]
+    assert engine.prior("play_media", "test.tunewave", "ax") < 0.5  # the store still learned all of it
+
+
+def test_attempts_outside_a_decision_are_not_reported(ledger):
+    engine.record("play_media", "test.tunewave", "ax", True)  # no choose() in this task
+
+    async def other_kind():
+        await engine.choose("play_media", "play a song", APPS)
+        engine.record("send_email", "test.tunewave", "ax", True)
+
+    asyncio.run(other_kind())
+
+    async def elsewhere():  # a decision in one task says nothing about another task's attempts
+        await engine.choose("play_media", "play a song", APPS)
+
+    asyncio.run(elsewhere())
+    engine.record("play_media", "test.tunewave", "ax", True)
+    assert ledger == []
+
+
+def test_no_ledger_or_a_broken_one_never_breaks_learning(monkeypatch):
+    import neo.reflex
+
+    monkeypatch.setitem(sys.modules, "neo.reflex.outcomes", None)  # not there: ImportError
+    monkeypatch.delattr(neo.reflex, "outcomes", raising=False)
+
+    async def request():
+        await engine.choose("play_media", "play a song", APPS)
+        engine.record("play_media", "test.tunewave", "ax", True)
+
+    asyncio.run(request())
+    broken = types.SimpleNamespace(decided=lambda *a: 1 / 0)
+    monkeypatch.setitem(sys.modules, "neo.reflex.outcomes", broken)
+    monkeypatch.setattr(neo.reflex, "outcomes", broken, raising=False)
+    asyncio.run(request())
+    monkeypatch.setattr(neo.reflex, "outcomes", types.SimpleNamespace(), raising=False)  # no decided()
+    asyncio.run(request())
+    assert engine.prior("play_media", "test.tunewave", "ax") > 0.5
