@@ -8,7 +8,7 @@ import time
 
 from neo.agent import confirm
 from neo.agent.registry import ToolContext, ToolOutput, tool
-from neo.config import decide_mode
+from neo.config import decide_mode, settings
 from neo.tools.computer import apps, ax, legacy, policy, screen, shell
 from neo.tools.computer import input as inp
 
@@ -157,7 +157,10 @@ async def ax_press(a: dict, c: ToolContext) -> str:
     e = ax.get(a["id"])
     # The app that owns the element, not whatever is in front: clicking NEO's own card to
     # approve brings NEO forward, and the question must stay the same.
-    if e and (gate := _ask_before_click("ax_press", a, e.title or e.value, ax.app_of(e.ref))):
+    owner = ax.app_of(e.ref) if e else ""
+    if _protected(owner):
+        return _refuse_protected()
+    if e and (gate := _ask_before_click("ax_press", a, e.title or e.value, owner)):
         return gate
     return await asyncio.to_thread(ax.press, a["id"])
 
@@ -170,6 +173,9 @@ async def ax_press(a: dict, c: ToolContext) -> str:
     quiet=True,
 )
 async def ax_set_value(a: dict, c: ToolContext) -> str:
+    e = ax.get(a["id"])
+    if e and _protected(ax.app_of(e.ref)):
+        return _refuse_protected()
     return await asyncio.to_thread(ax.set_value, a["id"], a["value"])
 
 
@@ -199,6 +205,8 @@ async def click(a: dict, c: ToolContext) -> str:
         x, y = a["x"], a["y"]
         label = await asyncio.to_thread(ax.label_at, x, y)
         owner = await asyncio.to_thread(ax.app_at, x, y)
+    if _protected(owner):
+        return _refuse_protected()
     if gate := _ask_before_click("click", a, label, owner):
         return gate
     return inp.click(x, y, button=a.get("button", "left"), count=int(a.get("count", 1)))
@@ -220,6 +228,9 @@ async def click(a: dict, c: ToolContext) -> str:
     quiet=True,
 )
 async def drag(a: dict, c: ToolContext) -> str:
+    for x, y in ((a["x1"], a["y1"]), (a["x2"], a["y2"])):  # where it's picked up and where it lands
+        if _protected(await asyncio.to_thread(ax.app_at, x, y)):
+            return _refuse_protected()
     return inp.drag(a["x1"], a["y1"], a["x2"], a["y2"])
 
 
@@ -243,6 +254,8 @@ async def scroll(a: dict, c: ToolContext) -> str:
     x, y = a.get("x"), a.get("y")
     if a.get("at_pointer") or x is None or y is None:
         x, y = inp.mouse_position()  # "scroll down": wherever the pointer is
+    if _protected(await asyncio.to_thread(ax.app_at, x, y)):
+        return _refuse_protected()
     return inp.scroll(x, y, int(a.get("dy", -5)), int(a.get("dx", 0)))
 
 
@@ -444,6 +457,24 @@ _UNDO_WINDOW_S = 120.0
 _NEVER_TYPE_INTO = {"neo-ui", "neo"}  # NEO's own overlay
 
 
+def _protected(owner: str) -> bool:
+    """An app NEO's input tools never touch: NEO's own overlay (its card's "Yes, do it" is the
+    user's to press, never NEO's), and any app in the `protected_apps` setting — a host's own
+    approval dialog, for one."""
+    name = (owner or "").strip().lower()
+    if not name:
+        return False
+    if name in _NEVER_TYPE_INTO:
+        return True
+    return name in {str(p).strip().lower() for p in settings().protected_apps}
+
+
+def _refuse_protected() -> str:
+    return confirm.ask_user(
+        "that's NEO's own window (or an app I'm not allowed to touch) — I won't click or type there."
+    )
+
+
 async def _guard_front(want: str = "") -> str | None:
     """Keystrokes only ever go to the app NEO is working in.
 
@@ -460,7 +491,7 @@ async def _guard_front(want: str = "") -> str | None:
                 f"so I didn't type or press anything — click {real} and say it again."
             )
         front = real
-    if front.lower() in _NEVER_TYPE_INTO:
+    if _protected(front):
         return confirm.ask_user("click where you want me to type first.")
     return None
 
@@ -678,6 +709,8 @@ async def click_text(a: dict, c: ToolContext) -> str:
     if err := await _guard_front():
         return err
     app, frame, els = await asyncio.to_thread(ax.window_elements)
+    if _protected(app):
+        return _refuse_protected()
     if frame is None:
         return f"Error: {app or 'the front app'} has no window in front."
     fx, fy, fw, fh = frame

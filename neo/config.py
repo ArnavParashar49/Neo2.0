@@ -102,6 +102,9 @@ class Settings(BaseSettings):
     max_seconds: float = 180.0  # wall-clock budget for one agent run
     max_tool_result_chars: int = 6000
     confirm_destructive: bool = True
+    # Apps NEO's input tools never click, press, drag, scroll or type into (NEO's own overlay
+    # never, always): a host's own approval dialog, for one. NEO_PROTECTED_APPS='["MyApp"]'
+    protected_apps: list[str] = []
 
     # ---- task kinds (neo/decide) -------------------------------------------------------
     # How each kind runs (notes, reminders, calendar, mail…): "legacy" = today's scripts,
