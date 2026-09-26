@@ -32,14 +32,18 @@ from dataclasses import dataclass
 from datetime import datetime
 from functools import cached_property, lru_cache
 
-from neo.decide import sdef
+from neo.decide import evidence, sdef
 from neo.decide._objc import pooled
 
 __all__ = [
     "App",
     "inventory",
+    "snapshot",
     "app_by_id",
+    "app_for_bundle",
+    "app_for_pid",
     "named_in",
+    "named_span",
     "default_for",
     "affinity",
     "own_schemes",
@@ -110,6 +114,15 @@ class App:
     running: bool = False
     in_dock: bool = False
     aliases: tuple[str, ...] = ()  # extra: other names it goes by (bundle name, Finder name)
+    # declared by the bundle beyond its dictionary (see neo.decide.evidence)
+    intents: tuple[str, ...] = ()  # SiriKit intents its extensions handle
+    ai_schemas: tuple[str, ...] = ()  # App Intents: 'schema:<domain>.<Name>', 'protocol:<Name>'
+    share_text: bool = False  # a share extension that accepts text
+    services: tuple[tuple[str, tuple[str, ...]], ...] = ()  # Services menu: (title, send types)
+    usage: frozenset[str] = frozenset()  # NS...UsageDescription keys it declares
+    doc_based: bool = False  # its document types name a document class
+    kind: str = "app"  # "route": a synthetic destination (an OS store), not an installed app
+    note: str = ""  # a route's evidence (counts only)
 
     @cached_property
     def caps(self) -> frozenset[str]:
@@ -334,6 +347,7 @@ class _Static:
     tags: frozenset[str]
     web_start_url: str
     signals: frozenset[str]
+    ev: evidence.Evidence = evidence.NONE
 
 
 def _plist_key(app: str) -> tuple | None:
@@ -408,6 +422,7 @@ def _build_static(app: str, key: tuple, need_category: bool = False) -> _Static 
         tags=sdef.caps(script),
         web_start_url=_web_start_url(info),
         signals=frozenset(signals),
+        ev=evidence.read(where, info),
     )
 
 
@@ -799,6 +814,12 @@ def _assemble(
         running=s.real in running,
         in_dock=s.bundle_id in dock,
         aliases=tuple(dict.fromkeys(a for a in (name, *s.aliases) if a)),
+        intents=s.ev.intents,
+        ai_schemas=s.ev.ai_schemas,
+        share_text=s.ev.share_text,
+        services=s.ev.services,
+        usage=s.ev.usage,
+        doc_based=s.ev.doc_based,
     )
 
 
@@ -818,6 +839,7 @@ class _Cache:
         self.ctx_at = 0.0
         self.apps: list[App] = []
         self.by_real: dict[str, App] = {}
+        self.scanned = False  # a scan has completed (snapshot() has something to give)
 
 
 _cache = _Cache()
@@ -915,7 +937,31 @@ def _inventory(
     apps = [_assemble(s, (c.usage.get(s.path) or (0, None))[1], running, c.dock, c.defaults) for s in live]
     apps.sort(key=lambda a: (a.name.casefold(), a.bundle_id))
     c.apps, c.by_real = apps, {os.path.realpath(a.path): a for a in apps}
+    c.scanned = True
     return list(apps)
+
+
+def snapshot() -> list[App] | None:
+    """The apps as of the last completed scan, without waiting for (or starting) one: for checks
+    that must answer in milliseconds. None before the first scan."""
+    c = _cache
+    return list(c.apps) if c.scanned else None
+
+
+def app_for_bundle(bundle_id: str) -> App | None:
+    """The app with this bundle id in the last completed scan (never waits for one)."""
+    want = (bundle_id or "").strip().lower()
+    return next((a for a in snapshot() or () if want and a.bundle_id.lower() == want), None)
+
+
+def app_for_pid(pid: int) -> App | None:
+    """The scanned app a process belongs to (the app macOS holds responsible for it)."""
+    from neo.decide import media
+
+    try:
+        return app_for_bundle(media._bundle_id_of_pid(media.responsible_pid(pid)) or media._bundle_id_of_pid(pid))
+    except Exception:  # noqa: BLE001 - no AppKit: nothing to tell
+        return None
 
 
 @pooled
@@ -1160,16 +1206,35 @@ def named_in(text: str, apps: list[App] | None = None) -> App | None:
     t = re.sub(r"\s+", " ", (text or "").lower().replace("’", "'")).strip()
     if not t.strip(" .!?"):
         return None
-    apps = inventory() if apps is None else apps
+    hit = _scan(t, inventory() if apps is None else apps)
+    return hit[0] if hit else None
+
+
+def named_span(text: str, apps: list[App] | None = None) -> tuple[App, int, int] | None:
+    """:func:`named_in`'s app and where its name is in ``text`` (``text[start:end]``), so the name
+    can be masked before a model reads the request."""
+    # lower-cased and one space per whitespace character: positions stay those of ``text``
+    t = "".join(c.lower() if len(c.lower()) == 1 else c for c in (text or "")).replace("’", "'")
+    t = re.sub(r"\s", " ", t)
+    if not t.strip(" .!?"):
+        return None
+    return _scan(t, inventory() if apps is None else apps)
+
+
+def _scan(t: str, apps: list[App]) -> tuple[App, int, int] | None:
+    """The named app and its span in ``t`` (lower-case, spaces for whitespace)."""
     forms = {a.bundle_id or a.path: _forms_cached(a) for a in apps}
     voc = _VOCATIVE.match(t)
     words = {w for fs in forms.values() for f in fs for w in f.split() if w.isalpha()}
     if voc and voc.group("bare") and voc.group("bare").isalpha():
         words.add(voc.group("bare"))
     common = _common_words(words)
+    off = 0
     if voc:  # 'hey neo play ...' drops the name; 'ok play music' keeps 'play music'
         bare = voc.group("bare")
-        t = t[voc.end("greet") :] if bare and common.get(bare, True) else t[voc.end() :]
+        off = voc.end("greet") if bare and common.get(bare, True) else voc.end()
+    t = t[off:]
+    off += len(t) - len(t.lstrip(" .!?"))
     t = t.strip(" .!?")
     if not t:
         return None
@@ -1184,7 +1249,7 @@ def named_in(text: str, apps: list[App] | None = None) -> App | None:
             or any(v in _GENERIC_NOUNS for v in _variants(w))
         )
 
-    best: tuple[int, float, App] | None = None
+    best: tuple[int, float, App, int, int] | None = None
     for app in apps:
         for alias in forms[app.bundle_id or app.path]:
             rx = _rx_cache.get(alias)
@@ -1195,11 +1260,11 @@ def named_in(text: str, apps: list[App] | None = None) -> App | None:
             for m in rx.finditer(t):
                 if ordinary and not _names_app(t, m.start(), m.end()):
                     continue
-                cand = (len(alias), affinity(app), app)
+                cand = (len(alias), affinity(app), app, m.start(), m.end())
                 if best is None or cand[:2] > best[:2]:
                     best = cand
                 break
-    return best[2] if best else None
+    return (best[2], off + best[3], off + best[4]) if best else None
 
 
 def _names_app(t: str, start: int, end: int) -> bool:

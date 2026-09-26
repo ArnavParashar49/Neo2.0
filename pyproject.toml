@@ -26,10 +26,14 @@ dependencies = [
   "pyobjc-framework-Cocoa; sys_platform == 'darwin'",
   "pyobjc-framework-Quartz; sys_platform == 'darwin'",
   "pyobjc-framework-ApplicationServices; sys_platform == 'darwin'",
+  "pyobjc-framework-EventKit>=12.2,<13; sys_platform == 'darwin'",  # the calendar and reminder stores
+  "pyobjc-framework-Contacts>=12.2,<13; sys_platform == 'darwin'",  # who "Priya" is
   # tools
   "pillow",
   "httpx",
   "ddgs",
+  "tld",                   # a site's registrable domain (neo.decide.sites)
+  "lxml",                  # a site's own search form / OpenSearch description
   "trafilatura",
   "pypdf",
   # core

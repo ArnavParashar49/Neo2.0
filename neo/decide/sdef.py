@@ -25,7 +25,7 @@ import xml.etree.ElementTree as ET
 from collections import deque
 from dataclasses import dataclass, field
 
-__all__ = ["Command", "Dictionary", "load", "parse", "caps", "ALL_CAPS"]
+__all__ = ["Command", "Dictionary", "load", "parse", "caps", "read_caps", "ALL_CAPS", "READ_CAPS"]
 
 XI_TAGS = frozenset({"{http://www.w3.org/2001/XInclude}include", "{http://www.w3.org/2003/XInclude}include"})
 _MAX_BYTES = 8 << 20  # no real dictionary is anywhere near this
@@ -46,6 +46,18 @@ ALL_CAPS = frozenset(
         "reminder.make",
         "message.send",
         "mail.compose",
+    }
+)
+# What NEO can read or look up through the dictionary (:func:`read_caps`), kept apart from what it
+# can make the app do.
+READ_CAPS = frozenset(
+    {
+        "note.read",  # a note class with a readable text property
+        "reminder.read",  # a reminder/to-do class with a completed flag
+        "event.read",  # an event class with a start date, reachable from the application
+        "mail.read",  # a message class with a read status
+        "mail.unread_count",  # an unread count property
+        "web.search",  # a search for text as such (the engine counts it only for browsers)
     }
 )
 
@@ -90,6 +102,8 @@ class Dictionary:
     )  # class -> {prop: (code, type)}
     elements: dict[str, tuple[str, ...]] = field(default_factory=dict)  # class -> element class names
     inherits: dict[str, str] = field(default_factory=dict)  # class -> superclass
+    # class -> {prop: (access 'r' | 'w' | 'rw', description)}, inherited ones included
+    prop_meta: dict[str, dict[str, tuple[str, str]]] = field(default_factory=dict)
 
     def __hash__(self) -> int:  # dict fields: hash what identifies the dictionary
         return hash(
@@ -109,6 +123,16 @@ class Dictionary:
 
     def prop_type(self, klass: str, prop: str) -> str:
         return (self.class_props.get(klass, {}).get(prop) or ("", ""))[1]
+
+    def prop_access(self, klass: str, prop: str) -> str:
+        """'r', 'w' or 'rw' (the sdef default when a property doesn't say); '' if unknown."""
+        meta = self.prop_meta.get(klass, {}).get(prop)
+        if meta is not None:
+            return meta[0]
+        return "rw" if prop in self.class_props.get(klass, {}) else ""
+
+    def prop_desc(self, klass: str, prop: str) -> str:
+        return (self.prop_meta.get(klass, {}).get(prop) or ("", ""))[1]
 
     def container_path(self, target: str) -> list[str] | None:
         """Shortest element path application -> a class that is (or inherits from) ``target``;
@@ -289,7 +313,7 @@ def parse(root: ET.Element) -> Dictionary:
                 name = k.get("name") if tag == "class" else k.get("extends")
                 if not name:
                     continue
-                r = raw.setdefault(name, {"code": "", "inherits": "", "props": {}, "elements": []})
+                r = raw.setdefault(name, {"code": "", "inherits": "", "props": {}, "meta": {}, "elements": []})
                 if tag == "class":
                     r["code"] = r["code"] or k.get("code", "")
                     r["inherits"] = r["inherits"] or k.get("inherits", "")
@@ -297,9 +321,12 @@ def parse(root: ET.Element) -> Dictionary:
                     pname = p.get("name", "")
                     if pname and pname not in r["props"]:
                         r["props"][pname] = (p.get("code", ""), _type_of(p))
+                        r["meta"][pname] = _meta(p)
                 for cont in k.findall("contents"):  # a class's text/contents behaves like a property
                     pname = cont.get("name") or "contents"
-                    r["props"].setdefault(pname, (cont.get("code", ""), _type_of(cont)))
+                    if pname not in r["props"]:
+                        r["props"][pname] = (cont.get("code", ""), _type_of(cont))
+                        r["meta"][pname] = _meta(cont)
                 r["elements"] += [e.get("type", "") for e in k.findall("element") if e.get("type")]
         for e in suite.findall("enumeration"):
             ename = e.get("name", "")
@@ -309,12 +336,16 @@ def parse(root: ET.Element) -> Dictionary:
                 )
     inherits = {n: r["inherits"] for n, r in raw.items() if r["inherits"]}
     class_props: dict[str, dict[str, tuple[str, str]]] = {}
+    prop_meta: dict[str, dict[str, tuple[str, str]]] = {}
     for n in raw:
         flat: dict[str, tuple[str, str]] = {}
+        meta: dict[str, tuple[str, str]] = {}
         for c in _chain(inherits, n):
             for pname, v in raw.get(c, {}).get("props", {}).items():
                 flat.setdefault(pname, v)
+                meta.setdefault(pname, raw[c]["meta"][pname])
         class_props[n] = flat
+        prop_meta[n] = meta
     classes = {n: (r["code"], tuple(class_props[n])) for n, r in raw.items()}
     properties: dict[str, str] = {}
     for n in ["application", *[x for x in class_props if x != "application"]]:
@@ -328,7 +359,13 @@ def parse(root: ET.Element) -> Dictionary:
         class_props=class_props,
         elements={n: tuple(dict.fromkeys(r["elements"])) for n, r in raw.items() if r["elements"]},
         inherits=inherits,
+        prop_meta=prop_meta,
     )
+
+
+def _meta(el: ET.Element) -> tuple[str, str]:
+    access = (el.get("access") or "rw").strip().lower()
+    return (access if access in ("r", "w", "rw") else "rw"), el.get("description", "")
 
 
 # ------------------------------------------------------------------------------ loading from a bundle
@@ -580,6 +617,48 @@ def _comm_caps(d: Dictionary) -> set[str]:
     return out
 
 
+def _readable(d: Dictionary, klass: str, name_rx: str, codes: set[str] = frozenset()) -> bool:
+    """The class has a property matching ``name_rx`` (or one of ``codes``) that can be read."""
+    rx = re.compile(name_rx, re.I)
+    props = d.class_props.get(klass) or {
+        p: (d.properties.get(p, ""), "") for p in d.classes.get(klass, ("", ()))[1]
+    }
+    return any((rx.match(p) or code in codes) and d.prop_access(klass, p) != "w" for p, (code, _t) in props.items())
+
+
+def _read_caps(d: Dictionary) -> set[str]:
+    out: set[str] = set()
+    text_rx = r"^(body|plain\s*text|text|contents?)$"
+    if any(_readable(d, n, text_rx, {"body"}) for n in _class_like(d, r"^(\w+\s+)?notes?$", {"note"})):
+        out.add("note.read")
+    todo = _class_like(d, r"^(reminder|to\s?-?\s?do|todo)s?$", {"remi"})
+    if any(_readable(d, t, r"^completed$", {"comb"}) for t in todo):
+        out.add("reminder.read")
+    events = _class_like(d, r"^(calendar\s+)?(event|appointment)s?$", {"wrev"})
+    if any(_readable(d, e, r"^start(\s+date|\s+time)?$", {"wr1s"}) and d.container_path(e) for e in events):
+        out.add("event.read")  # reachable through at least one container (a calendar), not only by id
+    messages = _class_like(d, r"^(e-?mail\s+)?messages?$", {"mssg"})
+    if any(_readable(d, m, r"^read(\s+status)?$", {"isrd"}) for m in messages):
+        out.add("mail.read")
+    if any(
+        re.match(r"^unread\s+count$", p, re.I) or code == "mbuc"
+        for props in d.class_props.values()
+        for p, (code, _t) in props.items()
+    ) or "mbuc" in d.properties.values():
+        out.add("mail.unread_count")
+    for c in d.commands.values():
+        # Searches for text as such: no library/playlist object to search in (a player's search
+        # takes one), and nothing but text required.
+        term = _is_text(c.direct) or any(_is_text(t) for _n, _code, t in c.params)
+        scoped = (c.direct and not _is_text(c.direct) and not c.direct_optional) or any(
+            not _is_text(t) and n not in c.optional for n, _code, t in c.params
+        )
+        if _role(c) == "search" and term and not scoped:
+            out.add("web.search")
+            break
+    return out
+
+
 _CAPS_CACHE: dict[int, tuple[Dictionary, frozenset[str]]] = {}
 
 
@@ -594,4 +673,21 @@ def caps(d: Dictionary | None) -> frozenset[str]:
     if len(_CAPS_CACHE) > 1024:
         _CAPS_CACHE.clear()
     _CAPS_CACHE[id(d)] = (d, out)  # holds d, so its id can't be reused while cached
+    return out
+
+
+_READ_CACHE: dict[int, tuple[Dictionary, frozenset[str]]] = {}
+
+
+def read_caps(d: Dictionary | None) -> frozenset[str]:
+    """Read tags (see :data:`READ_CAPS`) the dictionary supports."""
+    if d is None:
+        return frozenset()
+    hit = _READ_CACHE.get(id(d))
+    if hit is not None and hit[0] is d:
+        return hit[1]
+    out = frozenset(_read_caps(d))
+    if len(_READ_CACHE) > 1024:
+        _READ_CACHE.clear()
+    _READ_CACHE[id(d)] = (d, out)
     return out
