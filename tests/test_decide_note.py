@@ -78,7 +78,13 @@ NOTEBOOK = App(
     bundle_id="test.notebook", name="Notebook", path="/Applications/Notebook.app", script=D,
     days_used_30=9, last_used=time.time(),
 )
-JOTTER = App(bundle_id="test.jotter", name="Jotter", path="/Applications/Jotter.app")
+# edits rich text: its New makes a document to type into (no dictionary, never used)
+JOTTER = App(bundle_id="test.jotter", name="Jotter", path="/Applications/Jotter.app", editor_types=("public.rtf",))
+# used every day, and its New makes an event: no evidence of notes or documents
+PLANNER = App(
+    bundle_id="test.planner", name="Planner", path="/Applications/Planner.app",
+    days_used_30=20, last_used=time.time(), running=True,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -306,6 +312,24 @@ def test_a_missing_folder_goes_to_the_default_and_is_said(world):
     assert r.text == "There's no folder called “garden” in Notebook, so I put it in “Notes”."
 
 
+@pytest.mark.parametrize("listing", [(124, "", "timed out after 4s"), (1, "", "Connection is invalid. (-609)"), (0, "", "")])
+def test_folders_that_could_not_be_listed_are_no_missing_folder(world, listing):
+    # e.g. the app just launched and still loading its accounts: the folder may well exist
+    world.chosen.append(cand(NOTEBOOK, "script_make"))
+    world.osa.answers.update(folders=listing, make=made(where="Notes"))
+    r = write(folder="Work")
+    assert len(world.osa.of("make")[0]) == 3 and (r.ok, r.say) == (True, True)
+    assert r.text == "I couldn't look up your folders in Notebook, so I put it in “Notes”."
+
+
+def test_a_folder_in_an_app_without_folders_is_said(world):
+    world.chosen.append(cand(dataclasses.replace(NOTEBOOK, script=parse(FLAT)), "script_make"))
+    world.osa.answers["make"] = made(where="")
+    r = write(folder="Work")
+    assert world.osa.of("folders") == [] and len(world.osa.of("make")[0]) == 3
+    assert r.text == "Notebook doesn't keep notes in folders, so I put it in its default folder."
+
+
 @pytest.mark.parametrize("probs, fid", [({"Goa Trip": 0.9, "Trip Photos": 0.1}, "f3"), ({"Goa Trip": 0.5, "Trip Photos": 0.5}, None)])
 def test_a_folder_tie_is_laya_s_only_when_sure(world, monkeypatch, probs, fid):
     world.chosen.append(cand(NOTEBOOK, "script_make"))
@@ -317,10 +341,12 @@ def test_a_folder_tie_is_laya_s_only_when_sure(world, monkeypatch, probs, fid):
         return {"answers": {"folder": {"probabilities": probs}}}
 
     monkeypatch.setattr(engine, "_ask_laya", laya)
-    write(folder="trip")
+    r = write(folder="trip")
     assert asked == [["Goa Trip", "Trip Photos"]]  # only the tied folders, by their own titles
     argv = world.osa.of("make")[0]
     assert (argv[3] if len(argv) > 3 else None) == fid
+    if fid is None:  # a tie is no "there's no folder called trip"
+        assert r.text == "I wasn't sure whether you meant “Goa Trip” or “Trip Photos”, so I put it in “x”."
 
 
 # ---- ax_new ---------------------------------------------------------------------------------------------
@@ -413,6 +439,34 @@ def test_no_empty_editor_is_partial_and_the_next_way_is_tried(world, monkeypatch
     assert editor is None or editor.attrs["AXValue"] == before  # nothing typed into it
 
 
+def test_the_editor_is_asked_off_the_loop(world, monkeypatch):
+    import threading
+
+    from neo.decide import axkit
+
+    world.chosen.append(cand(JOTTER, "ax_new"))
+    FakeUI(monkeypatch, El("AXTextArea", AXValue=""))
+    on_loop = []
+
+    def multiline(el):  # an app that hangs would stall NEO's voice on the loop
+        on_loop.append(threading.current_thread() is threading.main_thread())
+        return True
+
+    monkeypatch.setattr(axkit, "multiline", multiline)
+    assert write(title="Shopping").ok and on_loop == [False]
+
+
+def test_a_folder_the_window_cannot_choose_is_said(world, monkeypatch):
+    world.chosen.append(cand(JOTTER, "ax_new"))
+    FakeUI(monkeypatch, El("AXTextArea", AXValue=""))
+    r = write(folder="Work")
+    assert (r.ok, r.say) == (True, True)
+    assert r.text == "Wrote it in Jotter, but not in “Work”: I can't choose a folder that way."
+    world.chosen[:] = [cand(None, "file")]
+    r = write(folder="Work", body="call the plumber")
+    assert r.say is True and r.text.endswith(", but not in “Work”: I can't choose a folder that way.")
+
+
 def test_text_that_went_in_but_reads_back_wrong_is_unknown(world, monkeypatch):
     world.chosen += [cand(JOTTER, "ax_new"), cand(None, "file")]
     box = El("AXTextArea", AXValue="")
@@ -471,12 +525,61 @@ def test_a_folder_notes_may_not_go_to_is_refused(world, monkeypatch, tmp_path):
     assert not r.ok and "hidden" in r.text and not (tmp_path / ".hidden").exists()
 
 
+def test_a_file_that_ran_out_of_time_before_its_write_is_never_written_later(world, monkeypatch):
+    from neo.tools.computer import policy
+
+    world.chosen.append(cand(None, "file"))
+    monkeypatch.setitem(note.BUDGET_S, "file", 0.1)
+    real = policy.write_risk
+
+    def slow(p, base=None):  # e.g. macOS asking about the Documents folder until the user answers
+        time.sleep(0.4)
+        return real(p, base)
+
+    monkeypatch.setattr(policy, "write_risk", slow)
+    r = write()  # asyncio.run returns once the worker thread has finished too
+    assert (r.ok, r.text) == (False, "file took too long")
+    folder = config.settings().notes_dir
+    assert not folder.exists() or list(folder.iterdir()) == []  # told it failed, and it did
+
+
+def test_a_file_write_under_way_when_time_ran_out_is_unknown_and_never_repeated(world, monkeypatch):
+    world.chosen.append(cand(None, "file"))
+    monkeypatch.setitem(note.BUDGET_S, "file", 0.1)
+    real = note._write_new
+
+    def slow(path, content):
+        time.sleep(0.4)
+        return real(path, content)
+
+    monkeypatch.setattr(note, "_write_new", slow)
+    r = write()
+    assert not r.ok and r.say is True and "may have" in r.text
+    again = write()  # the model retrying a tool that "failed": the same answer, no second file
+    assert (again.ok, again.text) == (False, r.text)
+    assert len(list(config.settings().notes_dir.iterdir())) == 1
+
+
+def test_line_breaks_of_any_kind_are_newlines(world, monkeypatch):
+    assert note._req({"body": "a\r\nb\rc\u2028d"}, "").fields["body"] == "a\nb\nc\nd"
+    world.chosen.append(cand(None, "file"))
+    r = asyncio.run(note.write({"body": "line one\r\nline two"}, "note that"))
+    made_ = config.settings().notes_dir / f"{date.today().isoformat()} line one line two.md"
+    assert r.ok and made_.read_bytes() == b"line one\nline two\n"
+    # a carriage return is never typed into a one-line field (it is a Return there)
+    world.chosen[:] = [cand(JOTTER, "ax_new")]
+    field = El("AXTextField", AXValue="")
+    FakeUI(monkeypatch, field)
+    assert not asyncio.run(note.write({"body": "one\rtwo"}, "note")).ok and field.attrs["AXValue"] == ""
+
+
 # ---- choosing -------------------------------------------------------------------------------------------
 
 
 def test_methods_come_from_evidence():
     assert note.methods_for(NOTEBOOK) == ("script_make", "ax_new")
     assert note.methods_for(JOTTER) == ("ax_new",)
+    assert note.methods_for(PLANNER) == ()  # ⌘N there makes something else: never typed into
     browser = dataclasses.replace(JOTTER, bundle_id="test.browser", handles=("https",))
     chat = dataclasses.replace(JOTTER, bundle_id="test.chat", handles=("sms",))
     assert note.methods_for(browser) == () and note.methods_for(chat) == ()  # a line there could be sent
@@ -490,13 +593,14 @@ def test_methods_come_from_evidence():
         (dataclasses.replace(JOTTER, editor_types=("public.plain-text",)), True),
         (dataclasses.replace(JOTTER, editor_types=("net.daringfireball.markdown",)), True),
         (dataclasses.replace(JOTTER, editor_types=("org.example.rtfd",)), True),
-        (dataclasses.replace(JOTTER, ai_schemas=("schema:wordProcessor.CreateWordProcessorDocumentIntent",)), True),
-        (dataclasses.replace(JOTTER, ai_schemas=("schema:whiteboard.CreateCanvasBoardIntent",)), True),
-        (dataclasses.replace(JOTTER, ai_schemas=("schema:journal.CreateJournalEntryIntent",)), False),
-        (dataclasses.replace(JOTTER, editor_types=("public.png", "com.adobe.pdf")), False),
-        (dataclasses.replace(JOTTER, viewer_types=("public.plain-text",)), False),  # only opens text
+        (dataclasses.replace(PLANNER, ai_schemas=("schema:wordProcessor.CreateWordProcessorDocumentIntent",)), True),
+        (dataclasses.replace(PLANNER, ai_schemas=("schema:whiteboard.CreateCanvasBoardIntent",)), True),
+        (dataclasses.replace(PLANNER, ai_schemas=("schema:journal.CreateJournalEntryIntent",)), False),
+        (dataclasses.replace(PLANNER, editor_types=("public.png", "com.adobe.pdf")), False),
+        (dataclasses.replace(PLANNER, viewer_types=("public.plain-text",)), False),  # only opens text
         (NOTEBOOK, True),  # makes notes
-        (JOTTER, False),
+        (JOTTER, True),
+        (PLANNER, False),
         (dataclasses.replace(NOTEBOOK, kind="route"), False),
     ],
 )
@@ -531,6 +635,68 @@ def test_an_app_the_user_named_that_isnt_here_is_said(world, monkeypatch):
     world.osa.answers["make"] = made(text="bread")
     r = asyncio.run(note.write({"body": "bread", "app": "Notebook"}, "note bread in notebook"))
     assert r.text == "Saved in Notebook." and world.asked[-1] == ("write_note", "note in notebook")
+
+
+def test_an_installed_app_the_user_named_that_did_not_take_it_is_said(world, monkeypatch):
+    surfer = App(bundle_id="test.surfer", name="Surfer", path="/Applications/Surfer.app", handles=("https", "http"))
+    monkeypatch.setattr(inventory, "snapshot", lambda: [NOTEBOOK, JOTTER, surfer])
+    world.chosen.append(cand(NOTEBOOK, "script_make"))  # the browser has no way to make a note
+    world.osa.answers["make"] = made()
+    r = asyncio.run(note.write({"body": "buy milk and eggs", "app": "Surfer"}, "save a note in surfer"))
+    assert (r.ok, r.say, r.text) == (True, True, "Surfer can't take notes. Saved in Notebook.")
+    world.chosen[:] = [cand(JOTTER, "ax_new"), cand(NOTEBOOK, "script_make")]
+    FakeUI(monkeypatch, None)  # its New command gives nothing to write in
+    world.osa.answers["make"] = made(text="bread")
+    r = asyncio.run(note.write({"body": "bread", "app": "Jotter"}, "note bread in jotter"))
+    assert (r.ok, r.say, r.text) == (True, True, "I couldn't save it in Jotter. Saved in Notebook.")
+
+
+def test_an_app_named_only_inside_the_note_is_not_where_it_goes(monkeypatch):
+    monkeypatch.setitem(engine.TASKS, "write_note", dataclasses.replace(engine.TASKS["write_note"], fallback="file"))
+    monkeypatch.setitem(engine.DRIVERS, "write_note", "neo.decide.kinds.note")
+    monkeypatch.setattr(engine, "_zero_shot_can_answer", lambda: False)
+    monkeypatch.setattr(engine, "_inventory", lambda: [NOTEBOOK, PLANNER])
+
+    async def allowed(app):
+        return None
+
+    monkeypatch.setattr(media, "_control_gate", allowed)
+    osa = FakeOsa(make=made(text="Dentist appointment is in Planner."))
+    monkeypatch.setattr(media, "_osascript", osa)
+    ui = FakeUI(monkeypatch, El("AXTextField", AXValue=""))  # what the planner's ⌘N would open
+    said = "note that the dentist appointment is in planner"
+    # the model re-cases and re-punctuates the note, or rewords it
+    assert note._req({"body": "Dentist appointment is in Planner."}, said).text == "note that the"
+    assert note._req({"body": "Dentist appt in Planner"}, said).text == "note that the dentist appointment is"
+    assert note._req({"body": "Buy milk\nand eggs", "title": "Shopping"}, "note buy milk and eggs").text == "note"
+    assert asyncio.run(note.preview({"body": "Dentist appt in Planner"}, said))["keys"] == "test.notebook,file"
+    r = asyncio.run(note.write({"body": "Dentist appointment is in Planner."}, said))
+    assert (r.ok, r.text) == (True, "Saved in Notebook.")
+    assert ui.launched == [] and ui.pressed == [] and osa.of("make")[0][0] == "test.notebook"
+    assert not engine.proven("write_note", "test.planner") and not note.doc_like(PLANNER)
+
+
+def test_a_notes_app_used_now_and_then_comes_before_the_file(monkeypatch):
+    monkeypatch.setitem(engine.TASKS, "write_note", dataclasses.replace(engine.TASKS["write_note"], fallback="file"))
+    monkeypatch.setitem(engine.DRIVERS, "write_note", "neo.decide.kinds.note")
+    monkeypatch.setattr(engine, "_zero_shot_can_answer", lambda: False)
+    now = time.time()
+    for days, ago in [(2, 10), (1, 40), (0, 80)]:
+        app = dataclasses.replace(NOTEBOOK, days_used_30=days, last_used=now - ago * 86400, use_count=days * 3)
+        monkeypatch.setattr(engine, "_inventory", lambda app=app: [app])
+        assert [c.key for c in asyncio.run(engine.choose("write_note", "make a note"))] == ["test.notebook", "file"]
+
+
+def test_a_note_that_may_have_been_made_is_not_made_again(world):
+    world.chosen += [cand(NOTEBOOK, "script_make"), cand(None, "file")]
+    world.osa.answers.update(make=(124, "", "timed out after 8s"), search=(0, "OK", ""))
+    first = write(title="Shopping")
+    assert not first.ok and "may have saved it in Notebook" in first.text
+    again = write(title="Shopping")  # the model retrying a tool that "failed"
+    assert (again.ok, again.say, again.text) == (False, True, first.text)
+    assert len(world.osa.of("make")) == 1 and not config.settings().notes_dir.exists()
+    assert write(title="Shopping", body="bread").ok is False  # another note is no retry
+    assert len(world.osa.of("make")) == 2
 
 
 def test_a_shadow_preview_touches_no_app(world):

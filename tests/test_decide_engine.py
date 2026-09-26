@@ -352,6 +352,16 @@ def test_attempts_are_capped_and_the_fallback_keeps_its_slot():
     assert c[-1].app is None
 
 
+def test_a_local_fallback_comes_after_every_used_app(monkeypatch):
+    # a file is what's left when the apps fail, never a rival to an app this user opens now and then
+    notes = engine.Task("save a note", wants=("note.make",), fallback="file", laya_min_used=1)
+    monkeypatch.setitem(engine.TASKS, "write_note", notes)
+    rare = mk("Notepadly", "test.notepadly", last_used=NOW - 80 * DAY, use_count=1)  # opened once, long ago
+    assert order(choose("write_note", "make a note", [rare])) == ["Notepadly", "file"]
+    monkeypatch.setitem(engine.TASKS, "write_note", dataclasses.replace(notes, fallback="web"))
+    assert order(choose("write_note", "make a note", [rare])) == ["web", "Notepadly"]  # the web's bar stays
+
+
 def test_every_browser_is_left_to_the_web_fallback_unless_named():
     # not the default browser, but it claims http(s) and opens HTML: the web fallback covers it
     other = mk(

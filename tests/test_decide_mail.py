@@ -192,6 +192,20 @@ def test_permission_is_named_and_the_badge_is_only_a_hint(world, monkeypatch):
     assert not r.ok and r.text == "Postbox needs your OK before NEO can control it"
 
 
+@pytest.mark.parametrize(
+    "failed, said",
+    [((124, "", "timed out after 25s"), "Postbox didn't answer in time"),
+     ((1, "", "Postbox got an error. (-2700)"), "Postbox's scripting failed (-2700)")],
+)
+def test_no_dock_count_after_a_failed_read_leaves_the_reads_reason(world, failed, said):
+    # no count there is no "no unread mail" (badges may be off): the read's failure is what's said
+    world.chosen.append(cand(POSTBOX, "script_read", "badge"))
+    world.answers.append(failed)
+    r = read()
+    assert (r.ok, r.text) == (False, said)
+    assert engine._load()["arms"].get("read_mail", {}).get("test.postbox", {}).get("badge") is None  # no attempt
+
+
 @pytest.mark.parametrize("label, ok", [("3", True), ("99+", True), ("!", False), (None, False), ("", False)])
 def test_badge_labels(world, label, ok):
     world.chosen.append(cand(PIGEON, "badge"))

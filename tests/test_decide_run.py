@@ -233,6 +233,17 @@ def test_the_same_add_twice_within_the_window_is_one_add(cands):
     assert run.idempotent("write_note", sig) is None and run.last("write_note") is None
 
 
+def test_an_add_that_may_have_happened_is_not_tried_again_within_the_window(cands):
+    chosen, asked = cands
+    chosen += [cand(NOTEBOOK, "script_make"), cand(JOTTER, "ax_new")]
+    unknown = Outcome(False, "I may have saved it in Notebook but couldn't check.", effect=Effect.UNKNOWN)
+    drv = FakeDriver({("test.notebook", "script_make"): unknown, ("test.jotter", "ax_new"): OK})
+    first = asyncio.run(run.run_best(drv, req(sig=("milk",))))
+    again = asyncio.run(run.run_best(drv, req(sig=("milk",))))  # the model retrying a "failed" tool
+    assert (again.text, again.ok, again.say) == (first.text, False, True)
+    assert drv.calls == [("test.notebook", "script_make")] and len(asked) == 1
+
+
 def test_nothing_is_learned_from_a_request_that_began_before_an_erase(cands, monkeypatch):
     chosen, _ = cands
     chosen.append(cand(NOTEBOOK, "script_make"))

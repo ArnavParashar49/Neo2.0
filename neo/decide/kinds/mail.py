@@ -8,7 +8,8 @@ order. Per app, best first:
 * ``script_read`` - its dictionary: the inbox's unread count, then the newest messages by index,
   keeping the unread ones (sender, subject, date received). Never a ``whose`` filter (it drops
   the connection on a big inbox) and never a property set, so nothing is marked read;
-* ``badge`` - the count on its Dock icon: a hint when the messages themselves can't be read.
+* ``badge`` - the count on its Dock icon: a hint when the messages themselves can't be read (no
+  count there is no answer: badges can be off, and the read's own failure is what gets said).
 
 What is read is third-party text: the tool hands it to the model fenced as untrusted. NEO never
 reads the mail store on disk.
@@ -86,9 +87,13 @@ async def _read(app: App, limit: int, timeout: float, *, only_running: bool = Fa
     return Outcome(True, text, effect=Effect.DONE, receipt=receipt, data=text)
 
 
-async def _badge(app: App) -> Outcome:
+async def _badge(app: App) -> Outcome | None:
+    """The Dock count. Without one, after a read by script it is no attempt at all (None): what
+    the user hears is why the read failed, not a line that sounds like "no unread mail"."""
     label = (await asyncio.to_thread(axkit.dock_badge, app.name) or "").strip()
     if not _BADGE.match(label):
+        if aescript.unread_route(app.script) is not None:
+            return None
         return Outcome(False, f"{app.name}'s Dock icon shows no unread count", reason="not_found")
     text = f"{app.name} shows {label} unread (the count on its Dock icon; I couldn't read the messages)."
     return Outcome(True, text, effect=Effect.DONE, receipt={"where": app.name, "unread": label}, data=text)
@@ -120,7 +125,7 @@ class _Read:
         how = {"script_read": "reads its inbox by script", "badge": "shows an unread count on its Dock icon"}
         return "; ".join(how[m] for m in self.methods_for(app))
 
-    async def attempt(self, req: Req, cand: Candidate, method: str) -> Outcome:
+    async def attempt(self, req: Req, cand: Candidate, method: str) -> Outcome | None:
         app = cand.app
         if app is None:
             return Outcome(False, "no mail app to read", reason="route_bad")

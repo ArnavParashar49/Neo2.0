@@ -7,8 +7,9 @@ app, best first:
 * ``script_make`` - its own dictionary makes the note (in the folder the user named, else the
   app's default one) and reads it back through the id the app gave it. A make that timed out is
   looked for, never repeated: found is done, not found is "have a look there";
-* ``ax_new`` - its New command (found by the ⌘N shortcut, not by a title) and the new, empty
-  editor that takes the focus, filled and read back;
+* ``ax_new`` - for an app that makes notes or documents (:func:`doc_like`): its New command (found
+  by the ⌘N shortcut, not by a title) and the new, empty editor that takes the focus, filled and
+  read back;
 * ``file`` (the fallback) - a Markdown file in ``settings().notes_dir``, never over another file.
 
 Nothing here keeps a note's text: the only memory is the engine's record of which way worked.
@@ -50,7 +51,8 @@ __all__ = [
 
 KIND = "write_note"
 OVERALL_S = 30.0  # every app and the file, gates' questions excluded
-BUDGET_S = {"script_make": 17.0, "ax_new": 10.0, "file": 3.0}
+# the file's first touch of its folder may wait on macOS asking about Documents
+BUDGET_S = {"script_make": 17.0, "ax_new": 10.0, "file": 10.0}
 LIST_S, MAKE_S, SEARCH_S = 4.0, 8.0, 4.0  # folders listed; made and read back; looked for again
 OPEN_S, NEW_S = 5.0, 3.0  # the app showing a window; its new editor taking the focus
 CHECK = 40  # this many characters of the body must read back
@@ -64,17 +66,34 @@ def _one_line(s: object) -> str:
     return " ".join(str(s or "").split())
 
 
+def _key(word: str) -> str:
+    """A word as compared with the note's: case, accents' encoding and punctuation don't count."""
+    return re.sub(r"\W+", "", unicodedata.normalize("NFC", word).casefold())
+
+
+def _without(said: str, *parts: str) -> str:
+    """The user's command without the note's own words: every run of two or more words it shares
+    with the note (a note of one word wherever it stands). The model re-cases and re-punctuates
+    what it passes, so "... is in calendar" said is "... is in Calendar." in the body."""
+    words = [(w, k) for w in said.split() if (k := _key(w))]
+    keys = [k for _w, k in words]
+    drop: set[int] = set()
+    for part in parts:
+        pk = [k for k in map(_key, part.split()) if k]
+        if len(pk) == 1:
+            drop.update(i for i, k in enumerate(keys) if k == pk[0])
+        pairs = set(zip(pk, pk[1:], strict=False))
+        drop.update(j for i in range(len(keys) - 1) if (keys[i], keys[i + 1]) in pairs for j in (i, i + 1))
+    return " ".join(w for i, (w, _k) in enumerate(words) if i not in drop)
+
+
 def _req(fields: dict, said: str) -> Req:
-    """The note as the tool got it. What the engine and Laya read is the user's command without
-    the note itself (an app's name inside a note is not where to put it)."""
+    """The note as the tool got it, every line break a plain newline (a carriage return typed into
+    a window is a Return). What the engine and Laya read is the user's command without the note
+    itself (an app's name inside a note is not where to put it)."""
     title, folder, named = (_one_line(fields.get(k)) for k in ("title", "folder", "app"))
-    body = str(fields.get("body") or "").strip()
-    text = _one_line(said)
-    for part in (body, title):
-        if part and part in text:
-            head, _sep, tail = text.rpartition(part)
-            text = _one_line(f"{head} {tail}")
-    text = text or "save a note"
+    body = "\n".join(str(fields.get("body") or "").strip().splitlines())
+    text = _without(said, body, title) or "save a note"
     if named and named.casefold() not in text.casefold():
         text = f"{text} in {named}"
     digest = hashlib.sha256("\0".join((title, body, folder, named)).encode()).hexdigest()[:16]
@@ -111,13 +130,14 @@ def _pad(row: list[str], n: int) -> list[str]:
 
 
 def methods_for(app: App, kind: str | None = None) -> tuple[str, ...]:
-    """Its dictionary's make when it has one; its New command for any app with a window, except a
-    browser or a chat app (a line typed there could be sent)."""
+    """Its dictionary's make when it has one; its New command for an app whose New makes a note or
+    document (:func:`doc_like`: in any other app ⌘N makes an event, an album or a mail), never a
+    browser's or a chat app's (a line typed there could be sent)."""
     out = []
     if aescript.note_route(app.script) is not None:
         out.append("script_make")
     chat = engine.fits_kind("send_message", app)
-    if app.path and app.kind == "app" and not engine._is_browser(app) and not chat:
+    if app.path and doc_like(app) and not engine._is_browser(app) and not chat:
         out.append("ax_new")
     return tuple(out)
 
@@ -143,7 +163,23 @@ async def attempt(req: Req, cand: Candidate, method: str) -> Outcome:
 
 
 async def fallback(req: Req, key: str) -> Outcome | None:
-    return await asyncio.to_thread(_to_file, req) if key == "file" else None
+    """The file: the free name found and checked first (the folder's first touch may wait on
+    macOS, and running out of time there leaves nothing behind), then the write itself as the
+    commit point (from there a timeout is "may have saved it", never a clean failure)."""
+    if key != "file":
+        return None
+    title, body, titled = _parts(req)
+    folder = settings().notes_dir
+    stem = f"{date.today().isoformat()} {_slug(title)}"
+    content = f"# {title}\n\n{body}\n" if titled and body != title else f"{body}\n"
+    for _race in range(3):  # another file may take the free name between the look and the write
+        path = await asyncio.to_thread(_free_path, folder, stem)
+        if isinstance(path, Outcome):
+            return path
+        out = await run.commit(asyncio.to_thread(_write_new, path, content))
+        if out is not None:
+            return _not_in_folder(req, out)
+    return Outcome(False, "Other files kept taking that name")
 
 
 # ---- script_make ----------------------------------------------------------------------------------------
@@ -157,27 +193,29 @@ def _unsure(app: App, what: str = "") -> Outcome:
     )
 
 
-def _saved(app: App, req: Req, oid: str, where: str, folder_id: str) -> Outcome:
+def _saved(app: App, req: Req, oid: str, where: str, folder_id: str, missed: str) -> Outcome:
+    """Made and read back. ``missed``: why the folder the user named wasn't used."""
     folder = req.fields.get("folder", "")
     receipt = {"id": oid, "where": app.name, "container": where, "verified": True}
     if folder and not folder_id:
         into = f"“{where}”" if where else "its default folder"
-        text = f"There's no folder called “{folder}” in {app.name}, so I put it in {into}."
+        text = f"{missed}, so I put it in {into}."
         return Outcome(True, text, effect=Effect.DONE, receipt=receipt, say=True)
     text = f"Saved in {app.name} (“{where}”)." if folder and where else f"Saved in {app.name}."
     return Outcome(True, text, effect=Effect.DONE, receipt=receipt)
 
 
-async def _pick_folder(named: str, options: list[tuple[str, str]], said: str) -> str:
-    """The id of the folder the user named: the same name, else the one folder holding every word
-    of it; between several such, only Laya's sure choice. '' when none."""
+async def _pick_folder(named: str, options: list[tuple[str, str]], said: str) -> tuple[str, list[str]]:
+    """(id, []) of the folder the user named: the same name, else the one folder holding every
+    word of it; between several such, only Laya's sure choice. ('', the tied names) when Laya
+    isn't sure, ('', []) when none fits."""
     want = _norm(named)
     if hit := next((fid for name, fid in options if _norm(name) == want), ""):
-        return hit
+        return hit, []
     words = set(want.split())
     some = {name: fid for name, fid in options if words and words <= set(_norm(name).split())}
     if len(some) <= 1:
-        return next(iter(some.values()), "")
+        return next(iter(some.values()), ""), []
     q = {
         "folder": {
             "type": "choice",
@@ -187,22 +225,40 @@ async def _pick_folder(named: str, options: list[tuple[str, str]], said: str) ->
     }
     probs = engine._choice(await engine._ask_laya({"request": said}, q), "folder")
     if not engine._sure(probs):
-        return ""
-    return some.get(max(probs, key=lambda k: probs[k]), "")
+        return "", sorted(some)
+    return some.get(max(probs, key=lambda k: probs[k]), ""), []
 
 
-async def _folder_id(req: Req, app: App, r: aescript.NoteRoute, folder: str) -> str:
-    rendered = aescript.render_folders(r, app.bundle_id)
-    if rendered is None:
-        return ""
-    code, out, _err = await aescript.run(*rendered, LIST_S)
-    if code != 0:
-        return ""  # the make that follows says why, if it's anything but this listing
-    rows = [_pad(row, 2) for row in aescript.rows(out)[1]]
-    return await _pick_folder(folder, [(n, i) for n, i in rows if n and i], req.text)
+def _either(names: list[str]) -> str:
+    q = [f"“{n}”" for n in names]
+    return f"{', '.join(q[:-1])} or {q[-1]}"
 
 
-async def _search_back(req: Req, app: App, r: aescript.NoteRoute, since: datetime, folder_id: str) -> Outcome:
+async def _folder_id(req: Req, app: App, r: aescript.NoteRoute, folder: str) -> tuple[str, str]:
+    """(id, '') of the folder the user named, or ('', why it isn't known): no folders to list,
+    a listing that failed (the app may still be loading: that is no "there's no such folder"),
+    a tie, or really none of that name."""
+    if not r.folder:
+        return "", f"{app.name} doesn't keep notes in folders"
+    rows = None
+    if rendered := aescript.render_folders(r, app.bundle_id):
+        code, out, _err = await aescript.run(*rendered, LIST_S)
+        status, got = aescript.rows(out)
+        rows = got if code == 0 and status == "OK" else None
+    if rows is None:
+        return "", f"I couldn't look up your folders in {app.name}"
+    options = [(n, i) for n, i in (_pad(row, 2) for row in rows) if n and i]
+    fid, tied = await _pick_folder(folder, options, req.text)
+    if fid:
+        return fid, ""
+    if tied:
+        return "", f"I wasn't sure whether you meant {_either(tied)}"
+    return "", f"There's no folder called “{folder}” in {app.name}"
+
+
+async def _search_back(
+    req: Req, app: App, r: aescript.NoteRoute, since: datetime, folder_id: str, missed: str
+) -> Outcome:
     """A make that may have happened: the note it would have made, found again, is done."""
     title, body, _titled = _parts(req)
     rendered = aescript.render_note_search(r, app.bundle_id, since, title, folder_id)
@@ -211,7 +267,7 @@ async def _search_back(req: Req, app: App, r: aescript.NoteRoute, since: datetim
         for row in aescript.rows(out)[1] if code == 0 else ():
             oid, name, text = _pad(row, 3)
             if _holds(r, name, text, title, body):
-                return _saved(app, req, oid, "", folder_id)
+                return _saved(app, req, oid, "", folder_id, missed)
     return _unsure(app)
 
 
@@ -221,22 +277,22 @@ async def _script_make(req: Req, app: App) -> Outcome:
         return Outcome(False, f"{app.name} can't make notes by script", reason="route_bad")
     title, body, _titled = _parts(req)
     folder = req.fields.get("folder", "")
-    folder_id = await _folder_id(req, app, r, folder) if folder else ""
+    folder_id, missed = await _folder_id(req, app, r, folder) if folder else ("", "")
     since = datetime.now() - timedelta(seconds=2)
     script, argv = aescript.render_note(r, app.bundle_id, title, body, folder_id)
     code, out, err = await run.commit(aescript.run(script, argv, MAKE_S))
     if code != 0:
         failed = aescript.fail(app.name, code, err, committed=True)
         return (
-            await _search_back(req, app, r, since, folder_id) if failed.effect is Effect.UNKNOWN else failed
+            await _search_back(req, app, r, since, folder_id, missed) if failed.effect is Effect.UNKNOWN else failed
         )
     status, rows = aescript.rows(out)
     oid, name, text, where = _pad(rows[0] if rows else [], 4)
     if status != "OK" or not oid:  # made, but not read back: look for it rather than make another
-        return await _search_back(req, app, r, since, folder_id)
+        return await _search_back(req, app, r, since, folder_id, missed)
     if not _holds(r, name, text, title, body):
         return _unsure(app, f"I saved it in {app.name} but couldn't check what it says")
-    return _saved(app, req, oid, where, folder_id)
+    return _saved(app, req, oid, where, folder_id, missed)
 
 
 # ---- ax_new ----------------------------------------------------------------------------------------------
@@ -268,12 +324,12 @@ async def _ax_new(req: Req, app: App) -> Outcome:
         return Outcome(False, f"{app.name} didn't give me an empty note to write in", effect=Effect.PARTIAL)
     title, body, titled = _parts(req)
     text = f"{title}\n{body}" if titled and not _norm(body).startswith(_norm(title)) else body
-    if "\n" in text and not axkit.multiline(el):
+    if "\n" in text and not await asyncio.to_thread(axkit.multiline, el):
         return Outcome(False, f"{app.name}'s new note has a one-line field", effect=Effect.PARTIAL)
     # a line break goes in as shift+return: never a key that could send or submit something
     if await run.commit(asyncio.to_thread(axkit.set_text, el, text, newline="shift+return")):
         receipt = {"where": app.name, "verified": True}
-        return Outcome(True, f"Wrote it in {app.name}.", effect=Effect.DONE, receipt=receipt)
+        return _not_in_folder(req, Outcome(True, f"Wrote it in {app.name}.", effect=Effect.DONE, receipt=receipt))
     if await asyncio.to_thread(axkit.is_empty, el):
         return Outcome(False, f"{app.name} didn't take the text", effect=Effect.PARTIAL)
     return _unsure(app, f"I may have written it in {app.name} but couldn't check")
@@ -297,14 +353,11 @@ def _shown(folder: Path) -> str:
         return str(folder)
 
 
-def _to_file(req: Req) -> Outcome:
+def _free_path(folder: Path, stem: str) -> Path | Outcome:
+    """The first name no file has yet ("-2", "-3", ... after the first), when NEO may write there
+    (its folder made when missing); else why not."""
     from neo.tools.computer import policy
 
-    title, body, titled = _parts(req)
-    folder = settings().notes_dir
-    stem = f"{date.today().isoformat()} {_slug(title)}"
-    content = f"# {title}\n\n{body}\n" if titled and body != title else f"{body}\n"
-    path = None
     for n in range(1, 100):
         p = folder / (f"{stem}.md" if n == 1 else f"{stem}-{n}.md")
         if p.exists():
@@ -313,25 +366,38 @@ def _to_file(req: Req) -> Outcome:
             return Outcome(False, f"I couldn't save it as a file: {why}", reason="permission")
         try:
             folder.mkdir(parents=True, exist_ok=True)
-            with open(p, "x", encoding="utf-8") as f:  # "x": never over a file that appeared meanwhile
-                f.write(content)
-        except FileExistsError:
-            continue
         except OSError as e:
             return Outcome(False, f"I couldn't save it as a file ({e.strerror or e})")
-        path = p
-        break
-    if path is None:
-        return Outcome(False, "There are too many notes with that name today")
+        return p
+    return Outcome(False, "There are too many notes with that name today")
+
+
+def _write_new(path: Path, content: str) -> Outcome | None:
+    """The file written and read back; None when another file took the name meanwhile."""
+    try:
+        with open(path, "x", encoding="utf-8") as f:  # "x": never over a file that appeared meanwhile
+            f.write(content)
+    except FileExistsError:
+        return None
+    except OSError as e:
+        return Outcome(False, f"I couldn't save it as a file ({e.strerror or e})")
     try:
         back = path.read_text(encoding="utf-8")
     except OSError:
         back = None
     if back != content:
-        return _unsure_file(folder)
-    where = _shown(folder)
+        return _unsure_file(path.parent)
     receipt = {"where": "file", "path": str(path), "verified": True}
-    return Outcome(True, f"Saved it as a file in {where}.", effect=Effect.DONE, receipt=receipt)
+    return Outcome(True, f"Saved it as a file in {_shown(path.parent)}.", effect=Effect.DONE, receipt=receipt)
+
+
+def _not_in_folder(req: Req, out: Outcome) -> Outcome:
+    """A note that went where this way of writing puts it, not in the folder the user named: said."""
+    folder = req.fields.get("folder", "")
+    if not (out.ok and folder):
+        return out
+    text = f"{out.text.rstrip('.')}, but not in “{folder}”: I can't choose a folder that way."
+    return Outcome(True, text, effect=out.effect, receipt=out.receipt, say=True)
 
 
 def _unsure_file(folder: Path) -> Outcome:
@@ -342,12 +408,21 @@ def _unsure_file(folder: Path) -> Outcome:
 # ---- entry points --------------------------------------------------------------------------------------
 
 
-def _installed(named: str) -> bool | None:
-    """Whether an app goes by that name here (None before the first app scan)."""
+def _elsewhere(named: str) -> str:
+    """Why a note the user asked for in the app they named went to another place ('' when it
+    went there, or before the first app scan)."""
     from neo.decide import inventory
 
     apps = inventory.snapshot()
-    return None if apps is None else inventory.named_in(named, apps) is not None
+    if apps is None:
+        return ""
+    app = inventory.named_in(named, apps)
+    if app is None:
+        return f"{named} isn't on this Mac."
+    went = run.last(KIND)
+    if went is None or went[0] == app.bundle_id:
+        return ""
+    return f"I couldn't save it in {app.name}." if methods_for(app) else f"{app.name} can't take notes."
 
 
 async def write(fields: dict, said: str = "") -> Result:
@@ -357,8 +432,8 @@ async def write(fields: dict, said: str = "") -> Result:
     if not req.fields["body"] and not req.fields["title"]:
         return Result("Error: there's nothing to write in the note.", False)
     got = await run.run_best(sys.modules[__name__], req)
-    if req.named and got.ok and _installed(req.named) is False:
-        return Result(f"{req.named} isn't on this Mac. {got.text}", True, say=True)
+    if req.named and got.ok and (why := _elsewhere(req.named)):
+        return Result(f"{why} {got.text}", True, say=True)
     return got
 
 
