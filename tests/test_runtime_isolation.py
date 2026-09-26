@@ -190,3 +190,35 @@ async def test_neo_app_is_unaffected_by_an_agent_that_existed_earlier(tmp_path, 
     s = config.settings()
     assert s.data_dir == Path(os.environ["NEO_DATA_DIR"]).resolve()
     assert confirm.current_gate() is confirm._default_gate
+
+
+async def test_task_kind_tools_run_their_legacy_scripts_with_no_dry_run(tmp_path, monkeypatch, decide_modes):
+    """NEO.app ships these kinds in shadow (the legacy script, then a dry run of the new driver,
+    logged to decide_shadow.log). An embedded agent runs the legacy script only."""
+    from neo.agent.registry import ToolContext, registry
+    from neo.decide import shadow
+    from neo.tools import web
+    from neo.tools.computer import apps
+
+    decide_modes(web_search="shadow", open_app="shadow")  # what NEO.app would do
+    opened: list[str] = []
+
+    async def open_app(target):
+        opened.append(target)
+        return f"Opened {target}"
+
+    dry_runs: list[str] = []
+    monkeypatch.setattr(apps, "open_app", open_app)
+    monkeypatch.setattr(web, "_country", lambda: "")
+    monkeypatch.setattr(shadow, "later", lambda kind, facts, **kw: dry_runs.append(kind) or facts.close())
+    rt = make_runtime(tmp_path / "mac", "mac", ["search_site", "open_app"])
+    with runtime.bind(rt.scope()):
+        out1 = await registry().invoke("search_site", {"site": "amazon", "query": "2tb ssd"}, ToolContext())
+        out2 = await registry().invoke("open_app", {"target": "Safari"}, ToolContext())
+    assert out1.ok and out2.ok, (out1.text, out2.text)
+    assert opened == ["https://www.amazon.com/s?k=2tb+ssd", "Safari"]
+    assert dry_runs == []
+    assert not {p.name for p in rt.settings.data_dir.iterdir()} & {"decide_shadow.log", "decide.json", "decide_learned"}
+    runtime.set_library_mode(False)  # the same tool in NEO.app, whose kinds are in shadow here
+    out = await registry().invoke("open_app", {"target": "Notes"}, ToolContext())
+    assert out.ok and dry_runs == ["open_app"]
