@@ -290,3 +290,13 @@ async def test_the_expiry_check_closes_the_card_in_its_own_conversation(agents):
     assert b.scope().gate.pending is not None
     with runtime.bind(b.scope()):
         confirm.cancel("test")
+
+
+def test_an_odd_via_value_never_costs_the_audit_line(agents):
+    import datetime
+
+    a, _, _ = agents
+    aid = _invoke(a.scope(), A_WIRE).staged
+    _invoke(a.scope(), A_WIRE, approve=aid, via={"channel": "web-ui", "at": datetime.date(2026, 9, 27)})
+    last = json.loads(a.settings.audit_log.read_text().splitlines()[-1])
+    assert last["status"] == "confirmed" and last["via"] == {"channel": "web-ui", "at": "2026-09-27"}

@@ -223,7 +223,7 @@ def audit(
             rec["agent"] = g.agent
         if via is not None:
             rec["via"] = via
-        line = json.dumps(rec)
+        line = json.dumps(rec, default=str)  # a host's odd `via` value never costs the line
         if g.audit_sink is not None:
             try:
                 g.audit_sink(json.loads(line))  # a copy: the host can't change what was logged

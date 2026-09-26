@@ -93,7 +93,8 @@ REFUSED: dict[str, str] = {
 def resolve(
     selection: str | Sequence[str], exclude: Iterable[str] = (), platform: str | None = None
 ) -> list[str]:
-    """The tool names a selection means, in catalog order.
+    """The tool names a selection means, in the "all" preset's order (an agent's registry keeps
+    the catalog's order whatever this is).
 
     `selection`: presets, fnmatch globs and exact names, mixed (a string is one of them). A glob
     matches within the "all" preset. `exclude`: names or globs to leave out. Asking for a macOS
