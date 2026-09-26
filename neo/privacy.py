@@ -45,6 +45,9 @@ async def forget_everything() -> dict[str, int]:
     run.forget()  # receipts and last actions (memory only)
     eventkit.forget()
     sites.forget()  # site words searched for lately (memory only)
+    from neo.decide.kinds import schedule
+
+    schedule.forget()  # calendar files handed to a calendar app (an event's title and notes)
     for p in (s.audit_log, s.audit_log.with_name(s.audit_log.name + ".1")):
         p.unlink(missing_ok=True)
     logs = s.data_dir / "logs"
