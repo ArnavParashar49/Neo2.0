@@ -115,6 +115,7 @@ class Episode:
     confirm: bool | None = None
     kind: str = ""  # neo/decide's task kind…
     kind_ok: bool = False  # …and whether carrying it out worked
+    brain: str = ""  # the provider that read it (chat / agent routes): the teacher's only allowed one
     fix: Episode | None = None  # the next request, which corrected or rephrased this one
     resolved: tuple[str, str] | None = None  # the verified label this episode ended up with
     resolved_tools: tuple[str, ...] = ()  # every tool behind that label, along the chain of fixes
@@ -318,6 +319,12 @@ class Ledger:
             if ep := self._get(key):
                 ep.route = route
                 self._touch(ep, self._clock(), responded=False)
+
+    def brain(self, key: str, name: str) -> None:
+        """Which provider read this request (the chain's last_used, after it answered)."""
+        with self._lock:
+            if name and (ep := self._get(key)):
+                ep.brain = name
 
     def step(self, key: str, tool: str, ok: bool, *, halt: bool = False) -> None:
         """One tool ran. `halt`: it stopped to ask the user (NEEDS_CONFIRM) — not done yet."""
@@ -615,6 +622,7 @@ class Ledger:
             conf=d.get("conf"),
             margin=d.get("margin"),
             kind=ep.kind if (ep.kind_ok and not ep.corrected and not wrong) else "",
+            brain=ep.brain,
         )
         if ok and wrong:
             from neo.reflex import memory
@@ -643,6 +651,7 @@ def ledger() -> Ledger:
 # Module-level hooks: what session.py and live.py call. All best effort.
 begin = _safe(lambda *a, **kw: _ledger.begin(*a, **kw))
 route = _safe(lambda *a, **kw: _ledger.route(*a, **kw))
+brain = _safe(lambda *a, **kw: _ledger.brain(*a, **kw))
 step = _safe(lambda *a, **kw: _ledger.step(*a, **kw))
 reply = _safe(lambda *a, **kw: _ledger.reply(*a, **kw))
 agent_done = _safe(lambda *a, **kw: _ledger.agent_done(*a, **kw))

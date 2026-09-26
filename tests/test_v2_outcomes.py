@@ -1316,3 +1316,20 @@ def test_a_bare_live_stop_long_after_does_not_reopen_the_window(clock):
     quick(b, ("volume", True))
     clock.advance(30)
     assert by_text()["turn it down"].get("wrong") is None
+
+
+def test_the_row_remembers_which_brain_read_the_request(clock):
+    from neo.reflex import teacher
+
+    k = ask("tell me a fun fact about octopuses", intent="chat")
+    outcomes.route(k, "chat")
+    outcomes.brain(k, "groq")
+    outcomes.reply(k, "Octopuses have three hearts.")
+    clock.advance(25)
+    row = by_text()["tell me a fun fact about octopuses"]
+    assert row["brain"] == "groq" and teacher.provider_of(row) == "groq"
+    k = ask("what's the capital of peru", intent="chat")
+    outcomes.route(k, "chat")
+    outcomes.reply(k, "Lima.")  # no brain reported: the teacher may not show it to anyone
+    clock.advance(25)
+    assert "brain" not in by_text()["what's the capital of peru"]

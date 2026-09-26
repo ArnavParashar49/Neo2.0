@@ -228,6 +228,7 @@ class Session:
         except Exception:  # noqa: BLE001 — fall back to the agent loop, which has its own failover
             return await self._agent(text, d, None, job)
         reply = "".join(out).strip()
+        outcomes.brain(job, getattr(chain, "last_used", ""))
         outcomes.reply(job, reply)
         await self._remember(Message.user(text), Message.assistant(reply))
         await bus().say(reply, final=True, job=job)
@@ -346,6 +347,7 @@ class Session:
                     images=images,
                     job=job,
                 )
+                outcomes.brain(job, getattr(chain, "last_used", ""))
         except asyncio.CancelledError:
             outcomes.cancelled(job)
             await bus().say("Stopped.", final=True, job=job)

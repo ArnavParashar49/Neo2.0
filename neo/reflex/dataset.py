@@ -468,19 +468,21 @@ def build(n_per_class: int = 320, seed: int = 7) -> list[dict]:
                 if not r or (name == "reflex_hf.jsonl" and r.get("split", "train") != "train"):
                     continue
                 hf = name == "reflex_hf.jsonl"
+                gen = name == "reflex_generated.jsonl"  # focused generation labels kind/destructive too
                 label = r.get("hf_intent") or r.get("source", "").split(":", 1)[-1]
                 out = {
                     "text": r["text"],
                     "intent": r["intent"],
                     "source": name,
                     "hf_intent": label if hf else "",
-                    # a public row without the label doesn't know (None); NEO's own default to False
-                    "destructive": r.get("destructive") if hf else r.get("destructive", False),
+                    # a public or generated row without the label doesn't know (None); the user's
+                    # own rows default to False
+                    "destructive": r.get("destructive") if hf or gen else r.get("destructive", False),
                     "tool": r.get("tool") or _HF_TOOLS.get(label, "")
                     if hf
                     else r.get("tool", tool_for(r["text"]) if r["intent"] == "quick_action" else ""),
                 }
-                if hf:
+                if hf or gen:
                     out.update({k: r[k] for k in _HF_LABELS if k in r})
                 rows.append(out)
     rows = _own_outcomes_win(rows)

@@ -625,3 +625,21 @@ def test_dataset_build_includes_the_hinglish_templates():
     assert Counter(r["intent"] for r in hi).keys() == {"chat", "quick_action", "agent_task", "stop"}
     assert any(r["destructive"] and "bhejo" in r["text"] for r in hi)
     assert any(r["text"] == "bas karo" and r["intent"] == "stop" for r in hi)
+
+
+def test_generated_rows_keep_their_explicit_labels_and_unknown_stays_unknown():
+    import json
+
+    from neo.config import settings
+    from neo.reflex import dataset
+
+    rows = [
+        {"text": "Priya ko mail bhej do ki kal milte hain", "intent": "agent_task", "kind": "send_email",
+         "destructive": True, "lang": "hinglish", "source": "gemini>groq", "focus": "destructive:yes|no"},
+        {"text": "what's a good name for a cat", "intent": "chat", "source": "gemini>groq"},
+    ]
+    (settings().data_dir / "reflex_generated.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+    got = {r["text"]: r for r in dataset.build(8) if r["source"] == "reflex_generated.jsonl"}
+    a = got["Priya ko mail bhej do ki kal milte hain"]
+    assert a["destructive"] is True and a["kind"] == "send_email" and a["lang"] == "hinglish"
+    assert got["what's a good name for a cat"]["destructive"] is None  # not labelled: unknown, not "safe"

@@ -125,11 +125,14 @@ def record(
     conf: float | None = None,
     margin: float | None = None,
     kind: str = "",
+    brain: str = "",
 ) -> bool:
     """Remember what this request turned out to be. Returns whether it was kept.
 
     ``wrong`` holds labels ("intent" or "intent:tool") it was *not*; ``kind`` is neo/decide's task
-    kind, only ever given for a request that decide carried out successfully."""
+    kind, only ever given for a request that decide carried out successfully. ``brain``: the
+    provider that already read this request (neo/providers name) — the only one the teacher may
+    ever show it to again (neo/reflex/teacher.py)."""
     if not enabled() or intent not in ("chat", "quick_action", "agent_task"):
         return False
     if _CONTENT_TOOLS & ({tool} | set(tools) | {str(x).partition(":")[2] for x in wrong}):
@@ -151,6 +154,8 @@ def record(
         row["margin"] = round(float(margin), 3)
     if kind and _KIND.fullmatch(kind):
         row["kind"] = kind
+    if brain and _KIND.fullmatch(brain):
+        row["brain"] = brain
     with _lock:
         # A counter, not the time, tells what's new since the last retrain.
         st = _state()
