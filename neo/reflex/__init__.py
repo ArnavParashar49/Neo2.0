@@ -12,7 +12,7 @@ import re
 import threading
 
 from neo.config import settings
-from neo.reflex.schema import Decision, Intent
+from neo.reflex.schema import Decision, Intent, wants_reply
 
 _STOP_RE = re.compile(r"^\s*(stop|cancel|never ?mind|shut ?up|be quiet|go to sleep|quit|exit)\b", re.I)
 
@@ -65,6 +65,9 @@ class Reflex:
         return self._lite
 
     async def decide(self, text: str) -> Decision:
+        return _with_reply(await self._decide(text), text)
+
+    async def _decide(self, text: str) -> Decision:
         if d := _rules(text):
             return d
         s = settings()
@@ -72,7 +75,9 @@ class Reflex:
             return Decision("agent_task", 0.0, False, 0.0, False, 0.0, source="rules")
         if s.reflex == "laya":
             d = await asyncio.to_thread(self._laya_decide, text)
-            if d is not None and d.intent_confidence >= s.reflex_confidence_floor:
+            # A v2 head already escalated locally (zero-shot blend) when unsure — that beats a
+            # second-long cloud round trip. Only the old head hands low-confidence calls to lite.
+            if d is not None and (d.source == "laya+zs" or d.intent_confidence >= s.reflex_confidence_floor):
                 return d
         lite = self._get_lite()
         if lite:
@@ -82,6 +87,16 @@ class Reflex:
                 print(f"[reflex] lite failed: {e}")
         # Nothing available — be safe: treat as an agent task, confirm anything risky.
         return Decision("agent_task", 0.0, True, 0.5, False, 0.0, source="rules")
+
+
+def _with_reply(d: Decision, text: str) -> Decision:
+    """Conversation always gets an answer; commands only when the head/regex says they ask for one."""
+    if d.intent in ("chat", "stop"):
+        d.reply, d.reply_p = True, 1.0
+    elif d.source not in ("laya+head", "laya+zs") or d.reply_p == 1.0:  # no reply head: fall back
+        d.reply = wants_reply(text)
+        d.reply_p = 0.5
+    return d
 
 
 def warmup(reflex: Reflex | None = None) -> None:

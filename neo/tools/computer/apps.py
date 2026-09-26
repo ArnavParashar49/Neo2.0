@@ -74,11 +74,14 @@ async def activate(name: str) -> str:
     for a in ws.runningApplications():
         if (a.localizedName() or "").lower() == name.lower():
             a.activateWithOptions_(1 << 1)  # NSApplicationActivateIgnoringOtherApps
-            for _ in range(20):  # up to ~1 s
-                front = ws.frontmostApplication()
-                if front and front.processIdentifier() == a.processIdentifier():
-                    return f"Activated {name} (frontmost)"
-                await asyncio.sleep(0.05)
+            for attempt in range(2):
+                for _ in range(12):  # up to ~0.6 s
+                    front = ws.frontmostApplication()
+                    if front and front.processIdentifier() == a.processIdentifier():
+                        return f"Activated {name} (frontmost)"
+                    await asyncio.sleep(0.05)
+                if attempt == 0:  # a background process may not be allowed to steal focus; the app can
+                    await osascript(f"tell application {_q(a.localizedName())} to activate")
             return f"Activated {name}, but another app is still in front — check with ax_tree."
     return f"Error: {name} is not running"
 

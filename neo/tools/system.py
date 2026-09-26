@@ -67,6 +67,7 @@ _TIMER2_RE = _P + r"(?:set|start)\s+(?:a\s+)?(?P<minutes>\d+(?:\.\d+)?)\s*(?:min
         (_UP_RE, {"action": "up"}),
         (_DOWN_RE, {"action": "down"}),
     ],
+    quiet=True,
 )
 async def volume(a: dict, c: ToolContext) -> str:
     act = a.get("action", "set")
@@ -99,6 +100,7 @@ async def volume(a: dict, c: ToolContext) -> str:
     },
     category="system",
     fast_path=[(_BR_DOWN, {"direction": "down"}), (_BR_UP, {"direction": "up"})],
+    quiet=True,
 )
 async def brightness(a: dict, c: ToolContext) -> str:
     key = 144 if a.get("direction") == "up" else 145
@@ -124,6 +126,15 @@ async def clock(a: dict, c: ToolContext) -> str:
     "Put the display to sleep / lock the screen.",
     {"type": "object", "properties": {}},
     category="system",
+    quiet=True,
+    fast_path=[
+        (
+            r"^\s*(?:please\s+)?(?:lock\s+(?:the\s+|my\s+)?(?:screen|mac|computer|laptop)|"
+            r"(?:put\s+)?(?:the\s+)?(?:display|screen)\s+to\s+sleep|sleep\s+(?:the\s+)?(?:display|screen)|"
+            r"turn\s+(?:off|of)\s+the\s+(?:screen|display))\s*[.!]*\s*$",
+            {},
+        )
+    ],
 )
 async def sleep_display(a: dict, c: ToolContext) -> str:
     p = await asyncio.create_subprocess_exec("pmset", "displaysleepnow")
@@ -150,6 +161,7 @@ async def sleep_display(a: dict, c: ToolContext) -> str:
             {"minutes": "<minutes>"},
         ),
     ],
+    quiet=True,
 )
 async def timer(a: dict, c: ToolContext) -> str:
     raw = a.get("minutes")

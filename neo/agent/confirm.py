@@ -78,7 +78,12 @@ def stage(action_id: str, tool: str, params: dict[str, Any], summary: str) -> st
     return f"{NEEDS_CONFIRM}: {summary} — Should I go ahead?"
 
 
+_TTL_S = 120.0  # a question nobody answered: forget it rather than hijack the next request
+
+
 def peek() -> Pending | None:
+    if _pending and time.time() - _pending.staged_at > _TTL_S:
+        cancel("expired")
     return _pending
 
 

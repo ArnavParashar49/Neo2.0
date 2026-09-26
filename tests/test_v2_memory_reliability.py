@@ -173,9 +173,9 @@ def test_playbook_saved_after_successful_multistep_run(tmp_path, monkeypatch):
     for name in ("open_app", "notes_create", "apps_running"):
         registry().get(name).handler = ok  # type: ignore[union-attr]
     monkeypatch.setattr(sess_mod, "brain", lambda purpose="agent": brain)
-    r = asyncio.run(Session(reflex=R()).handle("make a note called t saying b"))
+    r = asyncio.run(Session(reflex=R()).handle("put the highlights of my last three emails in a note"))
     assert r.route == "agent"
-    pbs = store_mod.store().similar_playbooks("make a note called t saying b", min_sim=0.3)
+    pbs = store_mod.store().similar_playbooks("put the highlights of my last three emails in a note", min_sim=0.3)
     assert pbs and [s["tool"] for s in pbs[0].steps][:2] == ["open_app", "notes_create"]
     _ = comp
 

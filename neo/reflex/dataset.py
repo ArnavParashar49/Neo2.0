@@ -149,6 +149,65 @@ QUICK = [
     ("any new mail", False),
     ("empty the trash", True),
     ("show desktop", True),
+    # dictation and keys (zero-LLM fast paths — the tool head should know them too)
+    ("type {phrase}", True),
+    ("write {phrase} in the heading", False),
+    ("type {phrase} in the search bar", True),
+    ("write down {phrase}", True),
+    ("put {phrase} as the title", False),
+    ("type some points about {topic}", True),
+    ("write a short paragraph about {topic}", True),
+    ("write a few lines about {topic} in the note", False),
+    ("press enter", False),
+    ("new line", False),
+    ("select all", False),
+    ("undo that", False),
+    ("save it", False),
+    ("scratch that", False),
+    ("open a new tab", False),
+    ("take a screenshot of this", True),
+    ("screenshot the screen", True),
+    ("what apps are open", False),
+    ("which apps are running", False),
+    ("what's running right now", False),
+    ("list the open apps", True),
+    ("grab a screenshot", True),
+    ("screenshot this window", True),
+    ("press escape", False),
+    ("hit tab", False),
+    ("redo that", False),
+    ("paste it", False),
+    ("copy that", False),
+    ("new note", False),
+    ("save the file", True),
+    ("write a few bullet points about {topic}", True),
+    ("jot down some ideas about {topic}", True),
+    ("remember this: {fact}", False),
+    ("make a note that says {phrase}", True),
+    ("remember that {fact}", True),
+    ("note that {fact}", False),
+    ("make a note called {phrase}", True),
+    ("create a note saying {phrase}", True),
+]
+PHRASES = [
+    "hello world",
+    "meeting notes",
+    "Laptops",
+    "buy milk",
+    "call the dentist tomorrow",
+    "thanks for your help",
+    "project ideas",
+    "see you at five",
+    "Q3 planning",
+    "groceries",
+]
+FACTS = [
+    "my wifi password is on the fridge",
+    "Sam's birthday is in June",
+    "I park on level 3",
+    "the meeting moved to Thursday",
+    "I prefer dark mode",
+    "my flight is at 6 am on Friday",
 ]
 AGENT = [
     ("read {file} and summarize it", True),
@@ -234,6 +293,46 @@ DESTRUCTIVE_HINTS = (
 )
 _PREFIX = ["can you ", "could you ", "please ", "hey neo, ", "neo, ", "hey neo ", "neo "]
 
+# Which NEO tool a quick-action template means (the tool head learns these; "" = none/other).
+_TOOL_HINTS: list[tuple[str, str]] = [
+    ("weather|rain|cold is it|hot is it|forecast", "web_search"),
+    ("screenshot", "screenshot"),
+    ("lock the screen|display to sleep|sleep the display", "sleep_display"),
+    ("calendar|meetings today", "calendar_today"),
+    ("unread email|new mail|inbox|my email", "mail_unread"),
+    ("remind me|reminder", "reminder_add"),
+    ("what time|the time|what's the date|today's date", "clock"),
+    ("timer", "timer"),
+    ("volume|mute|unmute|turn it up|turn it down|louder|quieter", "volume"),
+    ("brightness|dimmer|brighter|dim the screen", "brightness"),
+    ("open|launch|go to|bring up|switch to", "open_app"),
+    ("close|quit", "quit_app"),
+    ("remember that|remember this|note that", "memory"),
+    ("note called|note saying|note that says|note titled", "notes_create"),
+    ("what apps are open|which apps are running", "apps_running"),
+]
+
+
+def tool_for(text: str) -> str:
+    """Best-effort tool label for a quick action: the exact regex fast paths first, then hints."""
+    import re
+
+    try:
+        from neo.agent.session import _match_fast_path
+        from neo.tools import load_all
+
+        load_all()
+        hit = _match_fast_path(text)
+        if hit:
+            return hit[0]
+    except Exception:  # noqa: BLE001 — tools unavailable in a bare training env
+        pass
+    low = text.lower()
+    for pat, tool in _TOOL_HINTS:
+        if re.search(rf"\b(?:{pat})\b", low):
+            return tool
+    return ""
+
 
 def _fill(t: str, rnd: random.Random) -> str:
     return t.format(
@@ -245,6 +344,8 @@ def _fill(t: str, rnd: random.Random) -> str:
         math=rnd.choice(MATH),
         write=rnd.choice(WRITE),
         n=rnd.choice([5, 10, 20, 30, 50, 75]),
+        phrase=rnd.choice(PHRASES),
+        fact=rnd.choice(FACTS),
     )
 
 
@@ -273,18 +374,29 @@ def build(n_per_class: int = 320, seed: int = 7) -> list[dict]:
                 {
                     "text": t,
                     "intent": intent,
+                    "source": "template",
                     "destructive": intent == "agent_task" and any(h in t for h in DESTRUCTIVE_HINTS),
                 }
             )
-    # LLM-generated + real-world extras live outside the repo (see generate.py / README).
-    for name in ("reflex_generated.jsonl", "reflex_extra.jsonl"):
+    for r in rows:
+        r.setdefault("tool", tool_for(r["text"]) if r["intent"] == "quick_action" else "")
+    # LLM-generated + real-world extras + mapped Hugging Face rows live outside the repo
+    # (see generate.py, hf_data.py, README).
+    for name in ("reflex_generated.jsonl", "reflex_extra.jsonl", "reflex_hf.jsonl"):
         extra = settings().data_dir / name
         if extra.exists():
             for line in extra.read_text().splitlines():
                 if line.strip():
                     r = json.loads(line)
                     rows.append(
-                        {"text": r["text"], "intent": r["intent"], "destructive": r.get("destructive", False)}
+                        {
+                            "text": r["text"],
+                            "intent": r["intent"],
+                            "source": name,
+                            "hf_intent": r.get("source", "").split(":", 1)[-1] if name == "reflex_hf.jsonl" else "",
+                            "destructive": r.get("destructive", False),
+                            "tool": r.get("tool", tool_for(r["text"]) if r["intent"] == "quick_action" else ""),
+                        }
                     )
     rnd.shuffle(rows)
     return rows

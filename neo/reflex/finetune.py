@@ -1,19 +1,24 @@
-"""Train the reflex head (multinomial logistic regression over Laya features).
+"""Train the reflex heads: small linear models over Laya's encoder embedding.
 
-One pass extracts every feature block and caches it in ``~/.neo/reflex_features.npz``; heads
-for several sub-question subsets are then fit offline in seconds and compared, so you can pick
-the accuracy/latency trade-off (each sub-question costs ~40 ms per decision on MPS). The winner
-is written to ``~/.neo/reflex_head.json`` together with the sub-question list it needs.
+v2 puts *everything* on the embedding (one ~20 ms encoder pass) instead of Laya's zero-shot
+question answering (three questions, ~126 ms): the intent head, the destructive and
+needs_screen heads — distilled from Laya's own zero-shot answers on a labelled subset — and
+a tool head that names the one NEO tool a quick action needs. Zero-shot stays as the slow
+path for utterances the intent head isn't sure about.
 
-    python -m neo.reflex.finetune             # extract (or reuse cache), compare variants, save best
+    python -m neo.reflex.finetune             # extract (or reuse cache), train, evaluate, save
     python -m neo.reflex.finetune --refresh   # ignore the feature cache
-    python -m neo.reflex.finetune --subq knowledge,device,multistep   # force one variant
+    python -m neo.reflex.finetune --teacher 3000   # how many rows get zero-shot teacher labels
+
+Data: templates (dataset.py) + ~/.neo/reflex_generated.jsonl (generate.py)
++ ~/.neo/reflex_hf.jsonl (hf_data.py) + ~/.neo/reflex_extra.jsonl (your own misroutes).
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import time
 
@@ -21,28 +26,23 @@ import numpy as np
 
 from neo.config import settings
 from neo.reflex.dataset import build
-from neo.reflex.features import ALL_SUBQ, assemble, dim_for, extract_all
+from neo.reflex.features import embed_only, questions_for
 from neo.reflex.schema import INTENT_CRITERIA
 
 _INTENTS = list(INTENT_CRITERIA)
-_MS_PER_SUBQ = 42  # measured on M3 Pro: 3 questions ≈ 143 ms, 11 ≈ 485 ms
-_MS_BASE = 165  # 3 base questions + embedding
-
-VARIANTS: dict[str, list[str]] = {
-    "none": [],
-    "core3": ["knowledge", "device", "multistep"],
-    "core4": ["knowledge", "app_switch", "device", "multistep"],
-    "core5": ["knowledge", "app_switch", "device", "workspace", "multistep"],
-    "all": ALL_SUBQ,
-}
+_SCREEN_RE = re.compile(
+    r"\b(?:this|that|the|my) (?:screen|window|page|form|error|tab|article|table|dialog|button)s?\b"
+    r"|\bwhat am i looking at|\bthat'?s open\b|\bon (?:my|the) screen\b|\bthis (?:one|thing)\b",
+    re.I,
+)
+_MIN_TOOL_ROWS = 12
 
 
 def train(
-    X: np.ndarray, y: np.ndarray, *, epochs: int = 2000, lr: float = 0.1, l2: float = 1e-4
+    X: np.ndarray, y: np.ndarray, k: int, *, epochs: int = 2000, lr: float = 0.1, l2: float = 1e-4
 ) -> np.ndarray:
     """Full-batch gradient descent with Nesterov momentum on standardised features."""
     n, d = X.shape
-    k = len(_INTENTS)
     W = np.zeros((k, d), dtype=np.float32)
     V = np.zeros_like(W)
     Y = np.eye(k, dtype=np.float32)[y]
@@ -58,10 +58,67 @@ def train(
     return W
 
 
+def train_mlp(
+    X: np.ndarray,
+    y: np.ndarray,
+    k: int,
+    *,
+    weights: np.ndarray | None = None,
+    hidden: int = 256,
+    epochs: int = 40,
+    lr: float = 2e-3,
+    wd: float = 1e-3,
+    dropout: float = 0.2,
+    seed: int = 0,
+) -> list[tuple[np.ndarray, np.ndarray]]:
+    """One hidden layer (ReLU) over the standardised embedding. Returns [(W1, b1), (W2, b2)].
+
+    The linear head tops out around 0.83 on real (crowd-sourced) phrasings; a small MLP buys
+    several points for ~0.1 ms of extra inference — still nothing next to the 20 ms encoder."""
+    import torch
+
+    torch.manual_seed(seed)
+    Xt = torch.tensor(X, dtype=torch.float32)
+    yt = torch.tensor(y, dtype=torch.long)
+    wt = torch.tensor(weights if weights is not None else np.ones(len(y)), dtype=torch.float32)
+    d = X.shape[1]
+    net = torch.nn.Sequential(
+        torch.nn.Linear(d, hidden), torch.nn.ReLU(), torch.nn.Dropout(dropout), torch.nn.Linear(hidden, k)
+    )
+    opt = torch.optim.AdamW(net.parameters(), lr=lr, weight_decay=wd)
+    n = len(y)
+    bs = 128
+    for _ in range(epochs):
+        net.train()
+        perm = torch.randperm(n)
+        for i in range(0, n, bs):
+            b = perm[i : i + bs]
+            loss = (torch.nn.functional.cross_entropy(net(Xt[b]), yt[b], reduction="none") * wt[b]).sum() / wt[b].sum()
+            opt.zero_grad()
+            loss.backward()
+            opt.step()
+    net.eval()
+    l1, l2 = net[0], net[3]
+    return [
+        (l1.weight.detach().numpy().astype(np.float32), l1.bias.detach().numpy().astype(np.float32)),
+        (l2.weight.detach().numpy().astype(np.float32), l2.bias.detach().numpy().astype(np.float32)),
+    ]
+
+
+def forward(layers: list[tuple[np.ndarray, np.ndarray]], X: np.ndarray) -> np.ndarray:
+    """Logits for a head saved as [(W, b), ...] — one pair is linear, two is the MLP."""
+    h = X
+    for i, (W, b) in enumerate(layers):
+        h = h @ W.T + b
+        if i < len(layers) - 1:
+            h = np.maximum(h, 0.0)
+    return h
+
+
 def standardise(X: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     mu = X.mean(0)
     sd = X.std(0) + 1e-6
-    mu[-1], sd[-1] = 0.0, 1.0  # keep the bias column
+    mu[-1], sd[-1] = 0.0, 1.0  # bias column stays 1
     return mu, sd
 
 
@@ -69,85 +126,246 @@ def apply(W: np.ndarray, mu: np.ndarray, sd: np.ndarray, X: np.ndarray) -> np.nd
     return ((X - mu) / sd) @ W.T
 
 
-def fit_and_score(blocks, y, subq, tr, te):
-    X = assemble(blocks, subq)
-    mu, sd = standardise(X[tr])
-    W = train((X[tr] - mu) / sd, y[tr])
-    pred = apply(W, mu, sd, X[te]).argmax(1)
-    acc = float((pred == y[te]).mean())
-    recall = {n: float((pred[y[te] == i] == i).mean()) for i, n in enumerate(_INTENTS) if (y[te] == i).any()}
-    return W, mu, sd, acc, recall, pred
+def calibrate(logits: np.ndarray, y: np.ndarray) -> float:
+    """Temperature that minimises held-out NLL: a 40-epoch MLP says 1.00 about everything, and
+    the session needs probabilities it can put a threshold on (tool lane, zero-shot fallback)."""
+    best_t, best_nll = 1.0, float("inf")
+    for t in np.concatenate([np.arange(0.5, 3.0, 0.1), np.arange(3.0, 12.0, 0.5)]):
+        z = logits / t
+        z -= z.max(1, keepdims=True)
+        p = np.exp(z)
+        p /= p.sum(1, keepdims=True)
+        nll = float(-np.log(p[np.arange(len(y)), y] + 1e-9).mean())
+        if nll < best_nll:
+            best_t, best_nll = float(t), nll
+    return best_t
+
+
+def _fit(X, y, k, tr, te, name: str, classes: list[str], *, weights=None, mlp=True):
+    """Train a head; returns (layers, held-out accuracy, held-out predictions, temperature)."""
+    if mlp:
+        layers = train_mlp(X[tr], y[tr], k, weights=None if weights is None else weights[tr])
+    else:
+        layers = [(train(X[tr], y[tr], k), np.zeros(k, np.float32))]
+    logits = forward(layers, X[te]) if len(te) else np.zeros((0, k), np.float32)
+    pred = logits.argmax(1) if len(te) else np.zeros(0, int)
+    acc = float((pred == y[te]).mean()) if len(te) else float("nan")
+    temp = calibrate(logits, y[te]) if len(te) > 20 else 1.0
+    z = logits / temp
+    z -= z.max(1, keepdims=True) if len(te) else 0
+    conf = (np.exp(z) / np.exp(z).sum(1, keepdims=True)).max(1) if len(te) else np.zeros(0)
+    sure = conf >= 0.9
+    per = {
+        c: float((pred[y[te] == i] == i).mean()) for i, c in enumerate(classes) if (y[te] == i).any()
+    }
+    print(
+        f"  {name:12s} held-out {acc:.3f} (n={len(te)})  T={temp:.1f}  "
+        f"≥0.9: {sure.mean():.0%} of rows at {float((pred[sure] == y[te][sure]).mean()) if sure.any() else float('nan'):.3f}  "
+        + "  ".join(f"{c[:8]} {v:.2f}" for c, v in per.items())
+    )
+    return layers, acc, pred, temp
+
+
+_ASKS = re.compile(
+    r"query|qa_|status|balance|what_|how_|when|where|who_|which|info|reviews|rate|_time|date|weather|"
+    r"traffic|directions|distance|calendar$|calendar_today|reminder$|todo_list$|shopping_list$|"
+    r"spending|transactions|expiration|routing|limit$|payday|income|taxes|due|used|pto_balance|"
+    r"meeting_schedule|flight_status|order_status|current_location|find_phone|what_song|"
+    r"suggestion|recommendation|definition|spelling|translate|calculator|conversion|fun_fact|"
+    r"joke|greeting|thank_you|repeat|oos|history|alerts?$|timezone|holiday|vaccines|visa|carry_on|"
+    r"plug_type|mpg|gas$|tire_pressure|jump_start|recipe|cook|ingredients|calories|nutrition|"
+    r"food_last|exchange_rate|credit_score|apr$|interest_rate|min_payment|international_fees|"
+    r"insurance$|w2|next_holiday|how_busy|accept_reservations|confirm_reservation|"
+    r"are_you|do_you|what_are|what_is|where_are|who_made|how_old|meaning_of_life|what_can"
+)
+
+
+def _reply_label(r: dict) -> int:
+    """1 = wants an answer, 0 = just do it, -1 = unknown (not used for training)."""
+    if r["intent"] == "chat":
+        return 1
+    if r["intent"] == "stop":
+        return -1
+    src = r.get("source", "")
+    if src.startswith("reflex_hf"):
+        name = r.get("hf_intent", "")
+        if not name:
+            return -1
+        return 1 if _ASKS.search(name) else 0
+    from neo.reflex.schema import wants_reply
+
+    return int(wants_reply(r["text"]))
+
+
+def _dump(layers: list[tuple[np.ndarray, np.ndarray]]) -> list[list]:
+    return [[W.tolist(), b.tolist()] for W, b in layers]
 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--refresh", action="store_true", help="re-extract features even if cached")
-    ap.add_argument("--subq", type=str, default="", help="comma-separated sub-questions to force")
-    ap.add_argument("--per-class", type=int, default=320)
-    ap.add_argument("--min-acc", type=float, default=0.94, help="pick the fastest variant at or above this")
+    ap.add_argument("--per-class", type=int, default=640)
+    ap.add_argument("--teacher", type=int, default=3000, help="rows to label with Laya's zero-shot answers")
+    ap.add_argument("--zs-below", type=float, default=0.6, help="intent confidence under which zero-shot is consulted")
+    ap.add_argument("--linear", action="store_true", help="linear heads instead of the small MLP")
+    ap.add_argument("--own-weight", type=float, default=3.0, help="loss weight of NEO's own rows vs Hugging Face rows")
     args = ap.parse_args()
 
-    cache = settings().data_dir / "reflex_features.npz"
     rows = build(args.per_class)
     texts = [r["text"] for r in rows]
-    y = np.array([_INTENTS.index(r["intent"]) for r in rows])
+    y_intent = np.array([_INTENTS.index(r["intent"]) for r in rows])
+    print(f"{len(rows)} rows: " + ", ".join(f"{k} {int((y_intent == i).sum())}" for i, k in enumerate(_INTENTS)))
 
+    # Features are cached *per text*, so editing the data only costs the new rows.
+    cache = settings().data_dir / "reflex_features_v2.npz"
+    emb_by: dict[str, np.ndarray] = {}
+    teach_by: dict[str, tuple[np.ndarray, np.ndarray]] = {}  # text → (destructive/needs_screen, zs)
     if cache.exists() and not args.refresh:
         z = np.load(cache, allow_pickle=True)
-        if list(z["texts"]) == texts:
-            blocks = {k: z[k] for k in ("emb", "sub", "zs")}
-            print(f"using cached features {cache}", file=sys.stderr)
-        else:
-            blocks = None
-    else:
-        blocks = None
-    if blocks is None:
+        emb_by = dict(zip(z["texts"].tolist(), z["emb"], strict=True))
+        if "teacher_texts" in z.files:
+            t_texts = z["teacher_texts"].tolist()
+        else:  # first-format cache: teacher rows were indexed into `texts`
+            t_texts = [z["texts"][i] for i in z["teacher_idx"]]
+        teach_by = {t: (d, s) for t, d, s in zip(t_texts, z["teacher"], z["zs"], strict=True)}
+        print(f"cache: {len(emb_by)} embeddings, {len(teach_by)} teacher rows", file=sys.stderr)
+    rng = np.random.default_rng(0)
+    per = max(1, args.teacher // len(_INTENTS))
+    tidx = np.concatenate([rng.permutation(np.where(y_intent == i)[0])[:per] for i in range(len(_INTENTS))])
+    need_emb = [t for t in dict.fromkeys(texts) if t not in emb_by]
+    need_teach = [texts[i] for i in tidx if texts[i] not in teach_by]
+    if need_emb or need_teach:
         import laya
 
         t0 = time.time()
         agent = laya.load("convaiinnovations/laya", device=settings().laya_device)
         print(f"laya loaded in {time.time() - t0:.1f}s", file=sys.stderr)
-        t0 = time.time()
-        blocks = extract_all(agent, texts, progress=True)
-        print(f"features in {time.time() - t0:.0f}s", file=sys.stderr)
-        np.savez(cache, texts=np.array(texts, dtype=object), **blocks)
+        if need_emb:
+            t0 = time.time()
+            for t, e in zip(need_emb, embed_only(agent, need_emb, progress=True), strict=True):
+                emb_by[t] = e
+            print(f"{len(need_emb)} embeddings in {time.time() - t0:.0f}s", file=sys.stderr)
+        if need_teach:
+            q = questions_for([])
+            t0 = time.time()
+            for n, t in enumerate(need_teach):
+                ans = agent.system_one({"text": t}, q)["answers"]
+                p = ans["intent"].get("probabilities", {})
+                teach_by[t] = (
+                    np.array([float(ans["destructive"].get("noul", 0.0)), float(ans["needs_screen"].get("noul", 0.0))], np.float32),
+                    np.array([float(p.get(k, 0.0)) for k in _INTENTS], np.float32),
+                )
+                if n % 100 == 0:
+                    print(f"\r  teacher {n}/{len(need_teach)}", end="", file=sys.stderr)
+            print(f"\n  {len(need_teach)} teacher labels in {time.time() - t0:.0f}s", file=sys.stderr)
+        np.savez(
+            cache,
+            texts=np.array(list(emb_by), dtype=object),
+            emb=np.vstack([emb_by[t] for t in emb_by]),
+            teacher_texts=np.array(list(teach_by), dtype=object),
+            teacher=np.vstack([teach_by[t][0] for t in teach_by]) if teach_by else np.zeros((0, 2), np.float32),
+            zs=np.vstack([teach_by[t][1] for t in teach_by]) if teach_by else np.zeros((0, len(_INTENTS)), np.float32),
+        )
+    blocks = {
+        "emb": np.vstack([emb_by[t] for t in texts]),
+        "teacher_idx": tidx,
+        "teacher": np.vstack([teach_by[texts[i]][0] for i in tidx]),
+        "zs": np.vstack([teach_by[texts[i]][1] for i in tidx]),
+    }
 
+    X = np.hstack([blocks["emb"], np.ones((len(texts), 1), np.float32)]).astype(np.float32)
+    mu, sd = standardise(X)
+    Xs = (X - mu) / sd
     rng = np.random.default_rng(0)
     idx = rng.permutation(len(rows))
     cut = int(len(rows) * 0.8)
     tr, te = idx[:cut], idx[cut:]
-    print(f"zero-shot accuracy: {(blocks['zs'][te].argmax(1) == y[te]).mean():.3f}   (n={len(te)})")
+    tr_set = set(tr.tolist())
 
-    variants = {"forced": [s for s in args.subq.split(",") if s]} if args.subq else VARIANTS
-    results = []
-    for name, subq in variants.items():
-        W, mu, sd, acc, recall, pred = fit_and_score(blocks, y, subq, tr, te)
-        ms = _MS_BASE + _MS_PER_SUBQ * len(subq)
-        results.append((name, subq, acc, ms, W, mu, sd, recall, pred))
-        print(
-            f"  {name:7s} subq={len(subq)}  ~{ms} ms  held-out {acc:.3f}  "
-            + "  ".join(f"{k[:5]} {v:.2f}" for k, v in recall.items())
-        )
+    # ---- intent --------------------------------------------------------------------------
+    # NEO's own rows (templates, generated, your misroutes) describe what NEO actually hears;
+    # the Hugging Face rows add robustness. Weight the loss accordingly.
+    weights = np.array([1.0 if r.get("source") == "reflex_hf.jsonl" else args.own_weight for r in rows], np.float32)
+    mlp = not args.linear
+    L_int, acc_int, pred_te, T_int = _fit(Xs, y_intent, len(_INTENTS), tr, te, "intent", _INTENTS, weights=weights, mlp=mlp)
+    by_src: dict[str, list[bool]] = {}
+    for k, j in enumerate(te):
+        by_src.setdefault(rows[j].get("source", "?"), []).append(bool(pred_te[k] == y_intent[j]))
+    print("    by source: " + "  ".join(f"{k} {np.mean(v):.3f} (n={len(v)})" for k, v in by_src.items()))
+    tidx = blocks["teacher_idx"]
+    te_t = [k for k, i in enumerate(tidx) if i not in tr_set]
+    if te_t:
+        zs_acc = float((blocks["zs"][te_t].argmax(1) == y_intent[tidx[te_t]]).mean())
+        head_acc = float((forward(L_int, Xs[tidx[te_t]]).argmax(1) == y_intent[tidx[te_t]]).mean())
+        print(f"  on the teacher subset: zero-shot {zs_acc:.3f} vs head {head_acc:.3f} (n={len(te_t)})")
 
-    ok = [r for r in results if r[2] >= args.min_acc] or [max(results, key=lambda r: r[2])]
-    best = min(ok, key=lambda r: r[3])
-    name, subq, acc, ms, W, mu, sd, recall, pred = best
+    # ---- destructive / needs_screen (explicit template labels + Laya's own answers) ---------
+    d_lab = np.full(len(rows), -1)
+    s_lab = np.full(len(rows), -1)
+    for i, r in enumerate(rows):
+        if r.get("source") == "template":
+            d_lab[i] = int(bool(r.get("destructive")))
+            if r["intent"] in ("agent_task", "quick_action"):
+                s_lab[i] = int(bool(_SCREEN_RE.search(r["text"])))
+    for k, i in enumerate(tidx):
+        if d_lab[i] < 0:
+            d_lab[i] = int(blocks["teacher"][k, 0] >= 0.5)
+        if s_lab[i] < 0:
+            s_lab[i] = int(blocks["teacher"][k, 1] >= 0.5)
+    heads = {}
+    for name, lab in (("destructive", d_lab), ("needs_screen", s_lab)):
+        have = np.where(lab >= 0)[0]
+        h_tr = np.array([i for i in have if i in tr_set])
+        h_te = np.array([i for i in have if i not in tr_set])
+        Lb, _, _, Tb = _fit(Xs, lab.clip(0), 2, h_tr, h_te, name, ["no", "yes"], weights=weights, mlp=mlp)
+        heads[name] = (Lb, Tb)
+
+    # ---- reply: does the utterance want an answer? ------------------------------------------
+    # chat → always; NEO's own rows → the regex fallback's verdict; Hugging Face rows → from the
+    # source intent's name (query/qa/status… vs set/send/open…). The head generalises past both.
+    r_lab = np.array([_reply_label(r) for r in rows])
+    have = np.where(r_lab >= 0)[0]
+    r_tr = np.array([i for i in have if i in tr_set])
+    r_te = np.array([i for i in have if i not in tr_set])
+    L_reply, acc_reply, _, T_reply = _fit(Xs, r_lab.clip(0), 2, r_tr, r_te, "reply", ["do it", "answer"], weights=weights, mlp=mlp)
+
+    # ---- tool (quick actions, plus any row that names a tool) -------------------------------
+    tool_rows = [i for i, r in enumerate(rows) if r["intent"] == "quick_action" or r.get("tool")]
+    counts: dict[str, int] = {}
+    for i in tool_rows:
+        counts[rows[i].get("tool") or "none"] = counts.get(rows[i].get("tool") or "none", 0) + 1
+    classes = sorted(c for c, n in counts.items() if n >= _MIN_TOOL_ROWS or c == "none")
+    print(f"  tool classes: {', '.join(f'{c}({counts[c]})' for c in classes)}")
+    t_rows = [i for i in tool_rows if (rows[i].get("tool") or "none") in classes]
+    y_tool = np.array([classes.index(rows[i].get("tool") or "none") for i in t_rows])
+    t_tr = np.array([k for k, i in enumerate(t_rows) if i in tr_set])
+    t_te = np.array([k for k, i in enumerate(t_rows) if i not in tr_set])
+    Xt = Xs[t_rows]
+    L_tool, acc_tool, _, T_tool = _fit(Xt, y_tool, len(classes), t_tr, t_te, "tool", classes, weights=weights[t_rows], mlp=mlp)
+
     head_path = settings().data_dir / "reflex_head.json"
     head_path.write_text(
         json.dumps(
             {
-                "W": W.tolist(),
+                "version": 2,
                 "mu": mu.tolist(),
                 "sd": sd.tolist(),
-                "intents": _INTENTS,
-                "subq": subq,
-                "dim": dim_for(subq),
+                "intent": {"layers": _dump(L_int), "classes": _INTENTS, "T": T_int},
+                "destructive": {"layers": _dump(heads["destructive"][0]), "T": heads["destructive"][1]},
+                "needs_screen": {"layers": _dump(heads["needs_screen"][0]), "T": heads["needs_screen"][1]},
+                "tool": {"layers": _dump(L_tool), "classes": classes, "T": T_tool},
+                "reply": {"layers": _dump(L_reply), "T": T_reply},
+                "kind": "mlp" if mlp else "linear",
+                "zs_below": args.zs_below,
+                "held_out": {"intent": acc_int, "tool": acc_tool, "reply": acc_reply},
+                "rows": len(rows),
             }
         )
     )
-    print(f"\nchose {name} (subq={subq}) → held-out {acc:.3f}, ~{ms} ms/decision → {head_path}")
-    bad = [(texts[j], _INTENTS[y[j]], _INTENTS[pred[k]]) for k, j in enumerate(te) if pred[k] != y[j]][:12]
-    for t, gold, got in bad:
+    print(f"\nsaved v2 head → {head_path}  (intent {acc_int:.3f}, tool {acc_tool:.3f}; ~20 ms/decision)")
+    pred = pred_te
+    bad = [(texts[j], _INTENTS[y_intent[j]], _INTENTS[pred[k]]) for k, j in enumerate(te) if pred[k] != y_intent[j]]
+    for t, gold, got in bad[:15]:
         print(f"  ✗ {t!r}: {gold} → {got}")
 
 

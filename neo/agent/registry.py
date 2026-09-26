@@ -59,6 +59,9 @@ class RegisteredTool:
     category: str = "general"
     slow: bool = False  # UI speaks a filler while it runs
     fast_path: list[tuple[str, dict[str, Any]]] = field(default_factory=list)  # (regex, args)
+    early: bool = True  # fast path may fire mid-sentence; False = wait for the utterance to end
+    chain: bool = True  # may run as a later clause ("open notes and type hi"); False = whole utterance only
+    quiet: bool = False  # an action: when it succeeds, NEO just does it — no spoken reply
     hidden: bool = False  # not exposed to the model (internal/UI-only)
     timeout: float = 120.0  # seconds; a hung tool returns an error instead of stalling the loop
 
@@ -136,6 +139,9 @@ def tool(
     category: str = "general",
     slow: bool = False,
     fast_path: list[tuple[str, dict[str, Any]]] | None = None,
+    early: bool = True,
+    chain: bool = True,
+    quiet: bool = False,
     hidden: bool = False,
     timeout: float = 120.0,
 ) -> Callable[[Handler], Handler]:
@@ -151,6 +157,9 @@ def tool(
                 category=category,
                 slow=slow,
                 fast_path=fast_path or [],
+                early=early,
+                chain=chain,
+                quiet=quiet,
                 hidden=hidden,
                 timeout=timeout,
             )

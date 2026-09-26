@@ -89,7 +89,7 @@ def extract_all(agent, texts: list[str], batch: int = 32, progress: bool = False
     sub-question subset can be fit offline without re-running the model."""
     import sys
 
-    embs, subs, zs = [], [], []
+    embs, subs, zs, base = [], [], [], []
     for i in range(0, len(texts), batch):
         chunk = texts[i : i + batch]
         embs.append(embed(agent, chunk))
@@ -98,11 +98,27 @@ def extract_all(agent, texts: list[str], batch: int = 32, progress: bool = False
             v = answers_to_vector(ans, ALL_SUBQ)
             subs.append(v[: len(ALL_SUBQ)])
             zs.append(v[len(ALL_SUBQ) :])
+            # Laya's zero-shot yes/no answers: the teacher for the fast (embedding-only) heads.
+            base.append([float(ans["destructive"].get("noul", 0.0)), float(ans["needs_screen"].get("noul", 0.0))])
         if progress:
             print(f"\r  features {min(i + batch, len(texts))}/{len(texts)}", end="", file=sys.stderr)
     if progress:
         print(file=sys.stderr)
-    return {"emb": np.vstack(embs), "sub": np.vstack(subs), "zs": np.vstack(zs)}
+    return {"emb": np.vstack(embs), "sub": np.vstack(subs), "zs": np.vstack(zs), "base": np.array(base, np.float32)}
+
+
+def embed_only(agent, texts: list[str], batch: int = 64, progress: bool = False) -> np.ndarray:
+    """Just the encoder embedding (~20 ms per text on MPS): all the fast heads need."""
+    import sys
+
+    out = []
+    for i in range(0, len(texts), batch):
+        out.append(embed(agent, texts[i : i + batch]))
+        if progress:
+            print(f"\r  embeddings {min(i + batch, len(texts))}/{len(texts)}", end="", file=sys.stderr)
+    if progress:
+        print(file=sys.stderr)
+    return np.vstack(out)
 
 
 def assemble(blocks: dict[str, np.ndarray], subq: list[str]) -> np.ndarray:

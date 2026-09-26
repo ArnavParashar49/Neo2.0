@@ -117,6 +117,19 @@ mic ─► wake word (local) ─► voice backend
 - Session runs requests as concurrent jobs (agent jobs capped at 2); history appended in complete blocks; per-job events; "stop" cancels all.
 - EventBus aggregates per-job states by priority so parallel work never flickers the orb.
 
+### Dictation lane + Laya v2 (2026-09-26)
+
+- Sequential test "open notes → type Laptops in the heading → type some points about laptops" over the Live session: 18 s end to end (was minutes / stalled). Fixes on the way: Live session kept alive by typed text and model turns, empty text areas visible to `ax_tree`, `ax_find` keeps ids, app resolution ignores helper processes, persisted Gemini cooldowns + no retry on slow 503s + sticky brain demotion, superseded screen dumps stubbed within a run, agent_task dedupe in Live, `activate_app` waits for focus (AppleScript fallback).
+- Dictation lane: `type_text` / `hotkey` / `dictate` fast paths (`neo/tools/computer/__init__.py`), early actor waits for the sentence end on dictation, fast paths win even when the reflex says agent_task, agent prompt lists what already ran.
+- Laya v2 (`neo/reflex/finetune.py`): every decision from one encoder pass (~20 ms vs ~126 ms) — intent, destructive, needs_screen (distilled from Laya's zero-shot answers) and a tool head; zero-shot consulted only under 0.6 confidence. Training data +12.3k real utterances from CLINC150 and MASSIVE mapped onto NEO's labels (`neo/reflex/hf_data.py`). The session acts on Laya's tool choice: no-arg tools run with no model at all; others get a single-tool light call.
+
+### Silent commands + control layer (2026-09-26)
+
+- Commands finish silently (Reply.silent, tool `quiet` flag, Live `SILENT` scheduling); questions, failures and confirmations are spoken. Measured: "open notes → type → dictate → what time is it" in 13 s over Live; Safari "open → new tab → type URL → enter → list apps → close tab" with ~1 s per control step.
+- Zero-LLM control layer: click by label (`click_text`), tab/window/zoom/scroll/screenshot keys, and command fast paths for mail/calendar/apps/search/memory/notes/lock. `chain=False` keeps context-bound commands ("… and search for X") out of the early actor; `remaining()` hands the whole utterance to the agent with a note of what already ran.
+- Listening window counts Gemini's own transcription as speech; session-close reasons are logged.
+- Laya v2: MLP heads with temperature calibration, reply head, HF data (`hf_data.py`), per-text feature cache; v2 decisions never escalate to the cloud lite model.
+
 ### Next
 
 - `npm run tauri build` → signed NEO.app that spawns the Python core itself.

@@ -51,6 +51,11 @@ _DIRECT_TOOLS = {
     "mail_unread",
     "notes_create",
     "safari_open",
+    "type_text",
+    "dictate",
+    "hotkey",
+    "click_text",
+    "scroll",
 }
 _IDLE_CLOSE_S = 90.0
 _CONNECT_TIMEOUT_S = 12.0
@@ -60,11 +65,15 @@ _BARGE_IN_GRACE_S = 1.5  # ignore "stop" for the first moment of NEO's own speec
 _TURN_STALL_S = 20.0  # an unanswered turn keeps the session open this long, then silence rules apply
 _VAD_CHUNK = 512  # silero works on 32 ms windows at 16 kHz
 
-_LIVE_EXTRA = """You are speaking aloud, so keep replies short and natural. For anything that needs
+_LIVE_EXTRA = """You are speaking aloud, so keep replies short and natural. When the user gives a command
+(open, type, set, play, remind…), just call the tool — don't announce it, confirm it, or say "done";
+stay quiet unless something went wrong. Speak when the user asks a question or wants information. For anything that needs
 several steps or looking at the screen, files, mail or the web, call agent_task with a clear goal and
 then relay its result in one or two sentences. Don't narrate tool use. When the user is working in
 an app that is already open (a note, a document, a message) and asks you to type or add something,
-continue in that same place via agent_task — don't create a new note or file elsewhere."""
+continue in that same place — type_text for literal words, dictate when NEO should come up with
+the words, hotkey for keys like return or cmd+s — and don't create a new note or file elsewhere.
+agent_task is for things that need looking at the screen or several steps."""
 
 
 def _canon(text: str) -> str:
@@ -81,8 +90,10 @@ def _declarations() -> list[gt.FunctionDeclaration]:
                     description=t.description,
                     parameters_json_schema=t.parameters,
                     # Slow tools don't block the conversation: the model acknowledges, keeps
-                    # listening, and gets the result later (scheduled WHEN_IDLE).
-                    behavior=gt.Behavior.NON_BLOCKING if t.slow else gt.Behavior.BLOCKING,
+                    # listening, and gets the result later (scheduled WHEN_IDLE). Quiet actions
+                    # are non-blocking too, so their result can be returned SILENT — done, no
+                    # narration.
+                    behavior=gt.Behavior.NON_BLOCKING if (t.slow or t.quiet) else gt.Behavior.BLOCKING,
                 )
             )
     decls.append(
@@ -303,7 +314,12 @@ class LiveVoice:
             if self._turn_open and time.time() - self._last_activity < _TURN_STALL_S:
                 continue  # the model is still composing its answer
             if time.time() - self._quiet_since() > timeout:
-                print(f"[live] no speech for {timeout:.0f}s; closing session")
+                now = time.time()
+                print(
+                    f"[live] no speech for {timeout:.0f}s; closing session "
+                    f"(you {now - self._last_user_speech:.1f}s, me {now - self.spk.last_stop:.1f}s, "
+                    f"turn {now - self._last_turn_end:.1f}s, open {now - self._session_open:.1f}s ago)"
+                )
                 self._closing = True
                 await self._close_session()
                 return
@@ -328,8 +344,11 @@ class LiveVoice:
             try:
                 import torch
 
-                if float(self._vad(torch.from_numpy(chunk.copy()), 16000).item()) > 0.6:
-                    self._last_user_speech = time.time()
+                if float(self._vad(torch.from_numpy(chunk.copy()), 16000).item()) > 0.5:
+                    now = time.time()
+                    if now - self._last_user_speech > 2.0:
+                        print("[live] hearing you")
+                    self._last_user_speech = now
             except Exception:  # noqa: BLE001
                 pass
 
@@ -399,12 +418,15 @@ class LiveVoice:
                 await self._refresh_state()
             if sc.input_transcription and sc.input_transcription.text:
                 self._turn_open = True
+                self._last_user_speech = time.time()  # the server heard you, whatever the local VAD thinks
                 user_buf.append(sc.input_transcription.text)
                 await bus().say("".join(user_buf), role="user", final=False)
                 early().feed("".join(user_buf))
                 await early().tick()
             interim = getattr(sc, "interim_input_transcription", None)
             if interim and interim.text:  # words as they're being said, before they're committed
+                self._turn_open = True
+                self._last_user_speech = time.time()
                 early().feed("".join(user_buf) + " " + interim.text)
                 await early().tick()
             if sc.output_transcription and sc.output_transcription.text:
@@ -454,6 +476,7 @@ class LiveVoice:
     async def _run_tool(self, live, fc) -> None:
         args = dict(fc.args or {})
         key = fc.id or fc.name
+        silent = False  # done quietly: the model gets the result but isn't prompted to speak
         try:
             if fc.name == "agent_task":
                 goal = str(args.get("goal", "")).strip()
@@ -464,15 +487,17 @@ class LiveVoice:
                 else:
                     self._goals[key] = goal
                     reply = await self._agent_session.handle(goal)
-                    result = reply.text
+                    result, silent = reply.text, reply.silent
             elif (done := early().recently_done(fc.name, args)) is not None:
                 result = done  # already ran while the user was still talking
+                silent = bool((t := registry().get(fc.name)) and t.quiet)
             else:
                 await bus().set_state(NeoState.WORKING, job=key)
                 await bus().tool_start(fc.name, args, job=key)
                 out = await registry().invoke(fc.name, args, ToolContext(user_text=str(args)))
                 await bus().tool_end(fc.name, out.ok, out.text, job=key)
                 result = out.text
+                silent = bool(out.ok and (t := registry().get(fc.name)) and t.quiet)
         except asyncio.CancelledError:
             result = "cancelled by the user"
         except Exception as e:  # noqa: BLE001 — the model must always get a response back
@@ -483,13 +508,18 @@ class LiveVoice:
             await bus().end_job(key)
         self._last_activity = time.time()
         t = registry().get(fc.name)
-        non_blocking = fc.name == "agent_task" or bool(t and t.slow)
+        non_blocking = fc.name == "agent_task" or bool(t and (t.slow or t.quiet))
+        if not non_blocking:
+            scheduling = None
+        elif silent:
+            scheduling = gt.FunctionResponseScheduling.SILENT  # into context, no narration
+        else:
+            scheduling = gt.FunctionResponseScheduling.WHEN_IDLE  # say it when the user isn't talking
         resp = gt.FunctionResponse(
             id=fc.id,
             name=fc.name,
             response={"result": result[:4000]},
-            # For non-blocking calls, say the result when the user isn't talking.
-            scheduling=gt.FunctionResponseScheduling.WHEN_IDLE if non_blocking else None,
+            scheduling=scheduling,
         )
         if self._live is live:
             try:
@@ -499,10 +529,15 @@ class LiveVoice:
             except Exception as e:  # noqa: BLE001
                 print(f"[live] tool response failed: {e}")
             # The model now composes its spoken reply: show "thinking" until audio arrives
-            # instead of blinking through "listening" for the half-second in between.
+            # instead of blinking through "listening" for the half-second in between. A silent
+            # result gets no reply at all — straight back to listening.
             if not any(not t.done() for t in self._tool_tasks.values()):
-                await bus().set_state(NeoState.THINKING)
-                asyncio.create_task(self._settle_if_quiet(2.5))
+                if silent:
+                    self._turn_open = False
+                    await self._refresh_state()
+                else:
+                    await bus().set_state(NeoState.THINKING)
+                    asyncio.create_task(self._settle_if_quiet(2.5))
         else:  # session went away mid-task: don't lose the result
             await bus().say(result[:600], final=True)
             await self._refresh_state()

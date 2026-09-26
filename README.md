@@ -18,7 +18,7 @@ Most assistants send every word to a large model and wait. NEO routes first.
  "reply to Sam's email…"      → Laya (local) → agent loop with 37 tools  ~150 ms + Gemini
 ```
 
-The router is **Laya**, a 421M-parameter local decision model, with a small head trained on ~3k NEO utterances. It answers three typed questions per utterance in ~150 ms on an M3 Pro: *what kind of request is this*, *is it destructive*, *does it need the screen*. Only then does a language model get involved — and only the one the task needs.
+The router is **Laya**, a 421M-parameter local decision model. One encoder pass (~20 ms on an M3 Pro) feeds five small calibrated heads trained on ~16k utterances — NEO's own templates plus 12k real crowd-sourced phrasings from CLINC150 and MASSIVE mapped onto NEO's labels: *what kind of request is this* (0.90 held-out on real phrasings, where Laya's zero-shot alone scores 0.44), *which single tool does it* (0.85), *does it want an answer or just doing*, *is it destructive*, *does it need the screen*. When the intent head is unsure it falls back to Laya's zero-shot answers, locally. Only then does a language model get involved — and only the one the task needs.
 
 ## What it can do
 
@@ -44,7 +44,7 @@ Every tool is a plain Python function registered with a decorator; adding one is
                                      └─ local cascade: silero VAD → Parakeet STT (live partials) → brain → Kokoro TTS
                                                │
                                                ▼
-                       Reflex — Laya + trained head (local, ~150 ms)
+                       Reflex — Laya + calibrated heads (local, ~20 ms)
                        intent: chat | quick_action | agent_task | stop · destructive? · needs screen?
                                                │
               ┌────────────────────────────────┼───────────────────────────────┐
@@ -63,6 +63,12 @@ Every tool is a plain Python function registered with a decorator; adding one is
 **Brains are pluggable and fail over.** Gemini walks 3.8 → 3.7 → 3.5 Flash across every API key you give it (free-tier quota is per key *and* per model), backs off on overload, and hands text-only turns to Groq's `gpt-oss-120b` at ~700 tokens/s. `python -m neo --local` serves Gemma 4 12B on-device for offline use. An Anthropic key turns on Claude as an optional brain.
 
 **It acts while you're still talking.** The voice layer feeds the live transcript — words as you say them — through Laya and the fast-path matcher every few hundred milliseconds. A quick command that has clearly finished ("open YouTube and…") runs *before the sentence ends*; what already ran is remembered so the model's own later call for it is a no-op. Slow tools and agent tasks are non-blocking in the Live session: NEO acknowledges, keeps listening, and reports when the result is in and you're not mid-sentence. Several requests can run at once — ask for the time while it's still reading your mail — and the orb shows the most important thing going on.
+
+**Commands are done quietly; questions get answers.** "open notes", "type Laptops", "set a timer" finish with no speech and no chat bubble — just the tool chip and the orb going back to listening (the spoken acknowledgement was ~2 s per step, with the mic muted). Anything whose result *is* the answer (time, mail, calendar, search, "what's on my screen") is spoken, as is every failure, confirmation and clarifying question. Over Gemini Live, action results go back with `SILENT` scheduling, so the model doesn't narrate them either.
+
+**Single-step control runs in about a second, with no model at all.** "click play", "close this tab", "next tab", "go back", "zoom in", "scroll down", "take a screenshot", "switch to Safari", "quit Spotify", "check my email", "what's on my calendar", "search for …", "remember that …", "lock the screen" are regex fast paths straight to the tool; Laya's tool head covers the phrasings the regexes miss. Multi-step tasks still need a model.
+
+**Typing never waits for a model.** "type Laptops in the heading", "new line", "select all", "press enter" are regex fast paths — the words *are* the payload, so they go straight to the keyboard (`type_text`, `hotkey`), with the caret put into the document's editor first (a fresh note if the app shows none). "type some points about laptops" is a *brief*: one small chat call writes the lines, then they're typed (`dictate`). None of it touches the agent loop, so it's the same speed on a bad Gemini day.
 
 **It checks its own work.** After any side-effect tool, the loop makes the model re-observe (Accessibility tree, file, page, inbox) and confirm the goal before it reports — one extra call, far fewer "done!" replies that weren't.
 

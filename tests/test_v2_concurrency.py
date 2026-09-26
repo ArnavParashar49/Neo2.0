@@ -84,8 +84,8 @@ def test_early_actor_runs_a_finished_clause_and_leaves_the_rest(_tools):
         assert res and calls == [("open_app", {"target": "youtube"})]
         ea.feed("open youtube and search for cat videos")
         ea._changed -= 1.0
-        assert await ea.tick(final=True) == []  # non-command remainder is left alone
-        assert ea.remaining() == "search for cat videos"
+        assert await ea.tick(final=True) == []  # the search belongs to YouTube: left for the agent…
+        assert ea.remaining() == "open youtube and search for cat videos"  # …with its context
         assert (
             ea.recently_done("open_app", {"target": "YouTube "}) == "Opened youtube"
         )  # case/space-insensitive
@@ -164,7 +164,7 @@ def test_two_jobs_run_concurrently_and_history_stays_clean(monkeypatch):
 
     async def run():
         t0 = time.time()
-        a, b = await asyncio.gather(s.handle("check my mail"), s.handle("what time is it"))
+        a, b = await asyncio.gather(s.handle("summarize my mail"), s.handle("plan my week"))
         return a, b, time.time() - t0
 
     a, b, elapsed = asyncio.run(run())
@@ -174,7 +174,7 @@ def test_two_jobs_run_concurrently_and_history_stays_clean(monkeypatch):
     )  # they overlapped instead of queuing (0.4 + 0.05 would be ≥ 0.45 serial… and we allow slack)
     roles = [m.role for m in s.history]
     assert roles == ["user", "assistant", "user", "assistant"]  # two complete blocks, no interleaving
-    assert s.history[0].text == "what time is it" or s.history[0].text == "check my mail"
+    assert s.history[0].text in ("plan my week", "summarize my mail")
 
 
 def test_stop_cancels_running_jobs(monkeypatch):

@@ -120,8 +120,16 @@ def _str(v) -> str:
     return ""
 
 
+# Transient system UI that can be "frontmost" for a moment without being what the user works in.
+_TRANSIENT = {"UserNotificationCenter", "NotificationCenter", "Control Center", "Spotlight", "loginwindow", "Dock"}
+
+
 def frontmost_app() -> tuple[str, int]:
-    app = NSWorkspace.sharedWorkspace().frontmostApplication()
+    """The app the user is working in: the one owning the menu bar, not a passing notification."""
+    ws = NSWorkspace.sharedWorkspace()
+    app = ws.frontmostApplication()
+    if app is None or (app.localizedName() or "") in _TRANSIENT:
+        app = ws.menuBarOwningApplication() or app
     return (app.localizedName() or "", int(app.processIdentifier())) if app else ("", 0)
 
 
@@ -264,6 +272,36 @@ def set_value(eid: str, value: str) -> str:
         if err == 0
         else f"Error: could not set value ({err}); try focusing it and typing."
     )
+
+
+_EDITABLE = {"AXTextArea", "AXTextField", "AXSearchField", "AXComboBox"}
+
+
+def focused_editable() -> bool:
+    """Is the keyboard focus in something you can type into?"""
+    sys_el = AS.AXUIElementCreateSystemWide()
+    el = _attr(sys_el, AS.kAXFocusedUIElementAttribute)
+    if el is None:
+        return False
+    role = _str(_attr(el, AS.kAXRoleAttribute))
+    if role in _EDITABLE:
+        return True
+    # Web editors (Notes' body is not one, but Gmail/Docs are) report AXWebArea + a text role
+    # via the focused element's parent chain; a settable AXValue is the practical test.
+    err, settable = AS.AXUIElementIsAttributeSettable(el, AS.kAXValueAttribute, None)
+    return err == 0 and bool(settable) and role not in ("AXSlider", "AXCheckBox", "AXRadioButton")
+
+
+def main_text_area(app: str | None = None) -> Element | None:
+    """The biggest text area of the frontmost (or named) app — the document body, not the
+    search box. None when the app shows no editor (e.g. Notes with no note selected)."""
+    pid = pid_for_app(app) if app else frontmost_app()[1]
+    if not pid:
+        return None
+    els: list[Element] = []
+    _walk(AS.AXUIElementCreateApplication(pid), 0, els, [0])
+    areas = [e for e in els if e.role == "AXTextArea" and e.enabled and e.w > 40 and e.h > 20]
+    return max(areas, key=lambda e: e.w * e.h) if areas else None
 
 
 def focused_element_text() -> str:

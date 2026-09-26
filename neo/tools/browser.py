@@ -107,6 +107,7 @@ def _p(props: dict, required: list[str] | None = None) -> dict:
     _p({"url": {"type": "string"}}, ["url"]),
     category="browser",
     slow=True,
+    quiet=True,
 )
 async def browser_open(a: dict, c: ToolContext) -> str:
     page = await _b.page()
@@ -133,6 +134,7 @@ async def browser_read(a: dict, c: ToolContext) -> str:
     "role (button, link, checkbox, tab…), or a CSS selector.",
     _p({"target": {"type": "string"}, "role": {"type": "string"}}, ["target"]),
     category="browser",
+    quiet=True,
 )
 async def browser_click(a: dict, c: ToolContext) -> str:
     page = await _b.page()
@@ -153,6 +155,7 @@ async def browser_click(a: dict, c: ToolContext) -> str:
         ["target", "text"],
     ),
     category="browser",
+    quiet=True,
 )
 async def browser_type(a: dict, c: ToolContext) -> str:
     page = await _b.page()
@@ -172,6 +175,7 @@ async def browser_type(a: dict, c: ToolContext) -> str:
     "Press a key in the browser (Enter, Tab, Escape, ArrowDown, Control+a…).",
     _p({"key": {"type": "string"}}, ["key"]),
     category="browser",
+    quiet=True,
 )
 async def browser_press(a: dict, c: ToolContext) -> str:
     page = await _b.page()
@@ -184,6 +188,7 @@ async def browser_press(a: dict, c: ToolContext) -> str:
     "Scroll the page. direction: down|up; amount in pixels (default 700).",
     _p({"direction": {"type": "string", "enum": ["down", "up"]}, "amount": {"type": "integer"}}),
     category="browser",
+    quiet=True,
 )
 async def browser_scroll(a: dict, c: ToolContext) -> str:
     page = await _b.page()
@@ -193,7 +198,7 @@ async def browser_scroll(a: dict, c: ToolContext) -> str:
     return f"Scrolled {a.get('direction', 'down')}."
 
 
-@tool("browser_back", "Go back one page in the browser.", _p({}), category="browser")
+@tool("browser_back", "Go back one page in the browser.", _p({}), category="browser", quiet=True)
 async def browser_back(a: dict, c: ToolContext) -> str:
     page = await _b.page()
     await page.go_back(wait_until="domcontentloaded")
@@ -213,7 +218,7 @@ async def browser_screenshot(a: dict, c: ToolContext) -> ToolOutput:
     return ToolOutput(f"Browser screenshot of {page.url}", images=[ImagePart(png, "image/png")])
 
 
-@tool("browser_close", "Close NEO's browser window.", _p({}), category="browser")
+@tool("browser_close", "Close NEO's browser window.", _p({}), category="browser", quiet=True)
 async def browser_close(a: dict, c: ToolContext) -> str:
     await _b.close()
     return "Browser closed."

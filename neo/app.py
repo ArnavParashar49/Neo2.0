@@ -32,7 +32,7 @@ class App:
             self._tasks.add(task)
         try:
             reply = await self.session.handle(text)
-            if speak and self.voice and reply.text:
+            if speak and self.voice and reply.text and not reply.silent:
                 await self.voice.speak(reply.text)
         except asyncio.CancelledError:
             await bus().say("Stopped.", final=True)

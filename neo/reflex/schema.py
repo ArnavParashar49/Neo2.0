@@ -5,6 +5,7 @@ Kept deliberately small: few options → Laya scores each well even zero-shot.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Literal
 
@@ -40,6 +41,23 @@ QUESTIONS: dict[str, dict] = {
 }
 
 
+# Questions and requests for information want an answer; commands just want doing. The reflex
+# head learns this from data; this is the fallback (and the labeller for NEO's own rows).
+_REPLY_RE = re.compile(
+    r"^\s*(?:hey\s+)?(?:neo[,!]?\s+)?(?:please\s+|can\s+you\s+|could\s+you\s+|would\s+you\s+|will\s+you\s+)?"
+    r"(?:what|what's|whats|when|where|who|whose|why|how|which|is|are|am|was|were|do|does|did|have|has|"
+    r"should|tell\s+me|show\s+me|let\s+me\s+know|check|read|summari[sz]e|find\s+out|look\s+up|"
+    r"search|google|any\b|list|give\s+me|explain|describe|compare|count|calculate|convert|translate|"
+    r"define|recommend|suggest|remind\s+me\s+what|do\s+i\b|did\s+i\b|am\s+i\b)\b",
+    re.I,
+)
+
+
+def wants_reply(text: str) -> bool:
+    t = text.strip()
+    return t.endswith("?") or bool(_REPLY_RE.match(t))
+
+
 @dataclass
 class Decision:
     intent: Intent
@@ -50,6 +68,10 @@ class Decision:
     needs_screen_p: float
     source: str = "laya"  # laya | lite | rules
     latency_ms: float = 0.0
+    tool: str = ""  # the one NEO tool that does this (quick actions), when the reflex is sure
+    tool_p: float = 0.0
+    reply: bool = True  # does the user want an answer, or just the thing done (silently)?
+    reply_p: float = 1.0
 
     @property
     def confident(self) -> bool:

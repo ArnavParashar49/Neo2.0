@@ -103,6 +103,11 @@ def _post(ev) -> None:
     Q.CGEventPost(Q.kCGHIDEventTap, ev)
 
 
+def mouse_position() -> tuple[float, float]:
+    loc = Q.CGEventGetLocation(Q.CGEventCreate(None))
+    return float(loc.x), float(loc.y)
+
+
 def move(x: float, y: float) -> None:
     _post(Q.CGEventCreateMouseEvent(None, Q.kCGEventMouseMoved, (x, y), Q.kCGMouseButtonLeft))
 

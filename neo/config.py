@@ -50,6 +50,7 @@ class Settings(BaseSettings):
     reflex: Literal["laya", "lite", "off"] = "laya"
     laya_device: str = "mps"
     reflex_confidence_floor: float = 0.55  # below this, escalate to the lite model
+    reflex_tool_floor: float = 0.85  # Laya may pick the tool itself above this confidence
 
     # ---- voice -----------------------------------------------------------------------
     voice: VoiceBackend = "auto"  # auto = Live if key + quota, else local cascade

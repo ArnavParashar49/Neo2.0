@@ -49,6 +49,17 @@ def _news(query: str, n: int) -> str:
     parallel_safe=True,
     category="web",
     slow=True,
+    chain=False,  # only as the whole utterance: a later clause means 'in that app'
+    fast_path=[
+        (
+            # "search for X", "google X", "look up X" — but not "search for X in Notes"
+            r"^\s*(?:please\s+)?(?:search(?:\s+the\s+(?:web|internet))?(?:\s+for)?|google|look\s+up|"
+            r"web\s+search(?:\s+for)?|find\s+(?:me\s+)?(?:info(?:rmation)?\s+(?:on|about)|out\s+about))\s+"
+            r"(?!.*\b(?:in|on)\s+(?:notes|spotify|finder|mail|messages|slack|my\s+\w+|the\s+\w+\s+app)\b)"
+            r"(?P<query>.{3,}?)\s*[?.!]*\s*$",
+            {"query": "<query>"},
+        )
+    ],
 )
 async def web_search(a: dict, c: ToolContext) -> str:
     n = int(a.get("n") or 6)

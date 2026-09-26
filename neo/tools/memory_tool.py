@@ -25,6 +25,18 @@ from neo.memory.store import store
     },
     parallel_safe=True,
     category="memory",
+    chain=False,  # only as the whole utterance: a later clause means 'in that app'
+    fast_path=[
+        (
+            r"^\s*(?:please\s+)?(?:remember|keep\s+in\s+mind|note)\s+(?!to\b)(?:that\s+|this:?\s+)?(?P<text>.{4,}?)\s*[.!]*\s*$",
+            {"action": "remember", "text": "<text>", "kind": "note"},
+        ),
+        (
+            r"^\s*(?:what\s+did\s+i\s+(?:say|tell\s+you)\s+about|do\s+you\s+remember(?:\s+anything\s+about)?|"
+            r"what\s+do\s+you\s+(?:know|remember)\s+about)\s+(?P<query>.{2,}?)\s*[?.!]*\s*$",
+            {"action": "recall", "query": "<query>"},
+        ),
+    ],
 )
 async def memory(a: dict, c: ToolContext) -> str:
     st = store()
