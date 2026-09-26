@@ -149,3 +149,26 @@ def test_library_mode_unbound_registry_fails_closed():
     with pytest.raises(runtime.NoRuntimeError):
         registry()
     catalog()  # the catalog itself is fine: registering tools is process-wide
+
+
+def test_more_tools_only_finds_the_agents_tools(web_agent):
+    from neo.agent.toolselect import selector
+
+    with runtime.bind(web_agent.scope()):
+        found = [t.name for t in selector().search("run a shell command, click a button, send an email", k=20)]
+        picked = selector().select("run a shell command and lock the screen").names
+    assert set(found) <= set(WEB) and set(picked) <= set(WEB)
+
+
+def test_more_tools_in_a_run_enables_nothing_outside_the_agent(web_agent):
+    brain = _Brain(
+        [
+            Turn(tool_calls=[ToolCall("1", "more_tools", {"query": "run a shell command"})]),
+            Turn(tool_calls=[ToolCall("2", "shell", {"command": "id"})]),
+            Turn(text="done"),
+        ]
+    )
+    with runtime.bind(web_agent.scope()):
+        res = asyncio.run(run_agent("x", provider=brain, system="", ev=EventBus(), verify=False, tools=[]))
+    assert set(brain.tools_seen[1]) <= set(WEB)
+    assert res.steps[1].result == "Unknown tool: shell"
