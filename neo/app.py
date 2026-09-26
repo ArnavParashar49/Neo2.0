@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import signal
+import time
 from typing import Any
 
 from neo import health
@@ -42,6 +43,37 @@ class App:
         finally:
             if task:
                 self._tasks.discard(task)
+
+    async def erase(self) -> dict[str, int]:
+        """Erase everything NEO kept about the user. Everything that could write a piece of the
+        conversation back afterwards is stopped first: requests in flight, summaries being
+        written, the open voice session and what it keeps for context and for Laya."""
+        from neo.agent.early import early
+        from neo.privacy import forget_everything
+
+        self.cancel_current()
+        await self.session.cancel_all()
+        for t in list(self.session._bg):
+            t.cancel()
+        v = self.voice
+        if v is not None:
+            await v.interrupt()  # cancels the agent tasks a voice session started
+            if hasattr(v, "_dialog"):  # Gemini Live
+                v._label, v._utterance = None, ""
+                v._call_labels.clear()
+                v._dialog.clear()
+                if v._live is not None:
+                    v._closing = True  # a fresh session: the server forgets the conversation too
+                    await v._close_session()
+        early().new_utterance()
+        early()._claims.clear()
+        counts = await forget_everything()  # bumps the erase generation before anything else
+        self.session.history.clear()
+        self.session._summarized = 0
+        self.session._chunk_started = time.time()
+        self.session.memory_context = ""
+        print("[privacy] erased everything NEO kept about the user")
+        return counts
 
     def cancel_current(self) -> bool:
         """Stop everything in flight (the stop button / "stop")."""
@@ -84,17 +116,9 @@ class App:
                 return
             await self.answer(bool(cmd.get("yes")), action_id=action_id)
         elif kind == "forget_all":
-            # From the overlay's own "Erase everything?" confirmation (never a model's tool).
-            from neo.privacy import forget_everything
-
-            await self.session.cancel_all()
-            self.session.history.clear()
-            self.session._summarized = 0
-            self.session.memory_context = ""
-            if self.voice is not None and hasattr(self.voice, "_dialog"):
-                self.voice._dialog.clear()  # the spoken conversation it keeps for context
-            counts = await forget_everything()
-            print("[privacy] erased everything NEO kept about the user")
+            # From the overlay's own "Erase everything?" confirmation, or `neo --forget-all`
+            # while NEO runs — never a model's tool.
+            counts = await self.erase()
             await bus().publish("erased", counts=counts)
             await bus().note("Erased: " + ", ".join(f"{n} {k}" for k, n in counts.items()))
         elif kind == "stop":
@@ -140,8 +164,8 @@ def _log_activity(ev) -> None:
         print(f"  ▶ {d['name']} {_safe_args(d.get('args', {}))}")
     elif ev.type == "tool_end":
         summary = str(d.get("summary", ""))
-        detail = f": {summary[:80]}" if not d["ok"] else f" ({len(summary)} chars)"
-        print(f"  ◀ {d['name']} {'ok' if d['ok'] else 'FAIL'}{detail}")
+        # Failures too: an error can quote a path, a URL with a token, or a file's first line.
+        print(f"  ◀ {d['name']} {'ok' if d['ok'] else 'FAIL'} ({len(summary)} chars)")
     elif ev.type == "reflex":
         print(f"  ~ {d['intent']} ({d['intent_confidence']:.2f}) via {d['source']} {d['latency_ms']:.0f}ms")
     elif ev.type == "turn":
@@ -202,6 +226,7 @@ async def run() -> None:
     await bus().set_state(NeoState.IDLE)
     asyncio.create_task(_lag_monitor())
     asyncio.create_task(_cocoa_pump())
+    asyncio.create_task(health.watch())
     if s.voice != "off":
         asyncio.create_task(_voice_supervisor(app, stop))
     from neo.reflex.learn import learn_loop
@@ -228,7 +253,7 @@ async def run() -> None:
 
         await asyncio.wait_for(close_browser(), 2)
         if s := await asyncio.wait_for(app.session.checkpoint(final=True, budget_s=5.0), _SUMMARY_BUDGET_S):
-            print(f"[memory] session saved: {s[:100]}")
+            print(f"[memory] session saved ({len(s)} chars)")  # not what was said: logs stay content-free
     except TimeoutError:
         print("[memory] shutdown summary took too long — skipped")
     except Exception as e:  # noqa: BLE001
@@ -296,25 +321,47 @@ async def _voice_supervisor(app: App, stop: asyncio.Event) -> None:
         live = app.voice
         reason = "today's free voice minutes are used up" if kind == "quota" else "it can't reach Google right now"
         if local_ready():
+            # Let whatever Live is doing finish first (an agent task mid-way through files, a reply
+            # being spoken): closing Live cancels it.
+            await _wait_idle(app, live, limit_s=120.0)
             print(f"[voice] Gemini Live is down ({why}); switching to the on-device voice")
+            try:
+                local = await make_local(app.handle_text)  # up before Live goes: never a gap
+            except Exception as e:  # noqa: BLE001
+                print(f"[voice] on-device voice failed too: {str(e)[:120]}")
+                health.report("voice", f"Voice is unavailable: {reason}. You can still type; NEO keeps trying.")
+                _say_aloud(f"Voice is unavailable because {reason}. You can still type to me.")
+                continue  # keep Live: it may connect on the next wake
+            app.voice = local
             try:
                 await asyncio.wait_for(live.close(), 3)
             except Exception:  # noqa: BLE001
                 pass
-            app.voice = None
-            try:
-                app.voice = await make_local(app.handle_text)
-                health.report("voice", f"Gemini Live is unavailable ({reason}) — using the on-device voice for now.")
-                await app.voice.speak(f"Online voice is unavailable because {reason}. I'm using the on-device voice for now.")
-            except Exception as e:  # noqa: BLE001
-                print(f"[voice] on-device voice failed too: {str(e)[:120]}")
-                app.voice = None  # back to Live on the next pass: it may work on the next wake
-                _say_aloud(f"Voice is unavailable because {reason}. You can still type to me.")
-                continue
+            health.report("voice", f"Gemini Live is unavailable ({reason}) — using the on-device voice for now.")
+            await local.speak(f"Online voice is unavailable because {reason}. I'm using the on-device voice for now.")
             asyncio.create_task(_back_to_live(app, stop, kind, on_down))
         else:
             health.report("voice", f"Voice is unavailable: {reason}. You can still type; NEO keeps trying.")
             _say_aloud(f"Voice is unavailable because {reason}. You can still type to me.")
+
+
+def _busy(app: App, voice) -> bool:
+    """Is a request in flight (typed, spoken, or an agent task the voice started)?"""
+    if any(not t.done() for t in app._tasks) or bus().active_jobs:
+        return True
+    if voice is None:
+        return False
+    if any(not t.done() for t in getattr(voice, "_tool_tasks", {}).values()):
+        return True
+    handler = getattr(voice, "_handler", None)
+    return bool(getattr(voice, "_capturing", False) or (handler is not None and not handler.done()))
+
+
+async def _wait_idle(app: App, voice, *, limit_s: float) -> bool:
+    deadline = time.monotonic() + limit_s
+    while _busy(app, voice) and time.monotonic() < deadline:
+        await asyncio.sleep(1.0)
+    return not _busy(app, voice)
 
 
 async def _back_to_live(app: App, stop: asyncio.Event, kind: str, on_down) -> None:
@@ -323,26 +370,35 @@ async def _back_to_live(app: App, stop: asyncio.Event, kind: str, on_down) -> No
 
     while not stop.is_set():
         await asyncio.sleep(_LIVE_RETRY_S.get(kind, 600.0))
-        if app._tasks or bus().active_jobs:
+        local = app.voice
+        if _busy(app, local):
             continue  # never swap voices mid-request
         v = LiveVoice(app.handle_text, app.session)
         try:
             await asyncio.wait_for(v.probe(), 15)
         except Exception:  # noqa: BLE001
             continue
-        local = app.voice
+        if _busy(app, local):
+            continue  # something started while the probe ran
         try:
-            if local is not None:
-                await asyncio.wait_for(local.close(), 3)
-            await v.start()
-            v.on_down = on_down
-            app.voice = v
-            print("[voice] Gemini Live is back")
-            health.report("voice", None)
-            await bus().note("Gemini Live voice is back.")
+            await v.start()  # Live first; the on-device voice stays in charge until this works
         except Exception as e:  # noqa: BLE001
             print(f"[voice] couldn't switch back to Live: {str(e)[:120]}")
-            app.voice = local
+            try:
+                await v.close()
+            except Exception:  # noqa: BLE001
+                pass
+            continue
+        v.on_down = on_down
+        app.voice = v
+        if local is not None:
+            try:
+                await asyncio.wait_for(local.close(), 3)
+            except Exception:  # noqa: BLE001
+                pass
+        print("[voice] Gemini Live is back")
+        health.report("voice", None)
+        await bus().note("Gemini Live voice is back.")
         return
 
 

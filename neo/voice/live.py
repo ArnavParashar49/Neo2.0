@@ -237,6 +237,9 @@ class LiveVoice:
     _lane_at = 0.0
     _lane_checked = ""
     _model_acted = False
+    # voice confirmations (see _voiced)
+    _asked: tuple[str, str, float] | None = None  # (action_id, question text handed to the model, when)
+    _voiced_action: tuple[str, str, float] | None = None  # (action_id, what the model then said, when)
 
     def __init__(self, on_text: TextHandler, session_for_agent) -> None:
         self._on_text = on_text
@@ -296,8 +299,13 @@ class LiveVoice:
             self._vad = await asyncio.to_thread(load_silero_vad)
         except Exception as e:  # noqa: BLE001 — fall back to the energy gate
             print(f"[live] silero VAD unavailable ({e}); using energy gate for the listen timeout")
-        self.mic.start()
-        self.spk.start()
+        try:
+            self.mic.start()
+            self.spk.start()
+        except Exception:
+            self.mic.stop()  # never leave the microphone open behind a voice that didn't start
+            self.spk.close()
+            raise
         self._tasks.append(asyncio.create_task(self._mic_loop()))
 
     async def probe(self) -> None:
@@ -342,6 +350,7 @@ class LiveVoice:
             return
         try:
             self._result_speech, self._last_response_at = True, time.time()  # this reply is meant to be heard
+            self._note_question(text)
             await self._live.send_client_content(
                 turns=gt.Content(
                     role="user",
@@ -655,6 +664,9 @@ class LiveVoice:
                     await self._open_gate(model_buf)
                 spoke = self._gate == "open"
                 self._gate, self._held = None, []
+                if spoke and model_buf and self._asked and self._last_response_at >= self._asked[2]:
+                    # The model's reply to the question NEO handed it: this is what the user heard.
+                    self._voiced_action = (self._asked[0], "".join(model_buf), time.time())
                 self._turn_open = False
                 self._last_turn_end = time.time()
                 said = "".join(user_buf)
@@ -963,6 +975,7 @@ class LiveVoice:
                     # answers, failures and questions back; no for "step done, carry on".
                     self._result_speech = self._result_speech or not sequencing
                     self._last_response_at = time.time()
+                    self._note_question(result)
                 await live.send_tool_response(function_responses=[resp])
                 self._last_turn_end = time.time()
                 if not silent:
@@ -1003,15 +1016,26 @@ class LiveVoice:
             print(f"[reflex] couldn't record an example: {str(e)[:80]}")
 
     def _voiced(self, p) -> bool:
-        """Did NEO put this question to the user out loud after it was staged? A spoken "yes"
-        only answers a question the user actually heard — not whatever happens to be pending."""
-        said = " ".join(text for when, who, text in self._dialog if who == "NEO" and when >= p.staged_at).lower()
-        if not said:
+        """Did NEO read *this* question out? A spoken "yes" only answers the question the user
+        heard: the one NEO handed the model for this very action (by action id), spoken in the
+        model's next turn — and that turn has to name what the question names (whole words), so
+        an unrelated question in between ("want the forecast?") doesn't count."""
+        v, asked = self._voiced_action, self._asked
+        if not v or v[0] != p.action_id or not asked or asked[0] != p.action_id:
             return False
-        strong, weak = _distinctive(f"{p.summary} {p.detail}")
-        if strong:
-            return any(t in said for t in strong)
-        return not weak or any(t in said for t in weak)
+        strong, weak = _distinctive(asked[1])
+        words = [t for t in strong | weak if len(t) >= 4]
+        said = v[1].lower()
+        return not words or any(re.search(rf"(?<!\w){re.escape(t)}(?!\w)", said) for t in words)
+
+    def _note_question(self, text: str) -> None:
+        """NEO is handing the model a question to read out (NEEDS_CONFIRM): remember which."""
+        p = confirm.peek()
+        if p is not None and "NEEDS_CONFIRM" in text:
+            # Its summary is the part every version of the question carries (a direct tool's
+            # result, an agent's reply, NEO's re-ask) — and all the model is ever told.
+            self._asked = (p.action_id, p.summary, time.time())
+            self._voiced_action = None
 
     def _new_question(self) -> None:
         self._lookups, self._seen_calls = {}, {}

@@ -36,6 +36,9 @@ def _transcript(history: list[Message], max_chars: int = 12000) -> str:
 async def summarize_session(history: list[Message], started: float, *, budget_s: float = 5.0) -> str:
     """Write a summary for this session into the store; returns it (empty if nothing to say).
     The model gets `budget_s`; slower than that (shutdown can't wait) → the crude summary."""
+    from neo import privacy
+
+    gen = privacy.generation()
     text = _transcript(history)
     if text.count("User:") < 1:
         return ""
@@ -48,6 +51,8 @@ async def summarize_session(history: list[Message], started: float, *, budget_s:
         firsts = [m.text for m in history if m.role == "user" and m.text][:4]
         summary = "Asked about: " + "; ".join(f[:60] for f in firsts) if firsts else ""
         print(f"[memory] summary fallback ({str(e)[:60]})")
+    if summary and privacy.generation() != gen:
+        return ""  # the user erased NEO's memory while this was being written: it must not come back
     if summary:
         store().add_session_summary(summary, started, time.time())
     return summary

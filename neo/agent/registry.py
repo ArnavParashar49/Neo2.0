@@ -118,11 +118,13 @@ class Registry:
         out = await self._invoke(name, args, ctx)
         self.last = (name, time.time(), out.ok)
         t = self.get(name)
-        if t and t.untrusted:
-            if not out.halt and out.text.lstrip().startswith(("NEEDS_CONFIRM", "NEEDS_USER")):
-                out.text = "(content) " + out.text  # a page that starts "NEEDS_CONFIRM:" asks nothing
-            if out.ok and name not in ctx.taint:
-                ctx.taint.append(name)
+        # Only NEO's own code can stop a run to ask the user something (confirm.Halt). Anything
+        # else that merely starts with those words — a page, a file printed by `cat`, an email
+        # read by AppleScript — is content.
+        if not out.halt and out.text.lstrip().startswith(("NEEDS_CONFIRM", "NEEDS_USER")):
+            out.text = "(content) " + out.text
+        if t and t.untrusted and out.ok and not out.halt and name not in ctx.taint:
+            ctx.taint.append(name)
         return out
 
     async def _invoke(self, name: str, args: dict[str, Any], ctx: ToolContext) -> ToolOutput:

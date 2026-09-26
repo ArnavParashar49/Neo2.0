@@ -75,7 +75,7 @@ def op_key(tool: str, params: dict[str, Any], summary: str = "", detail: str = "
     return hashlib.sha256(blob.encode()).hexdigest()
 
 
-_CONTENT_KEYS = {"body", "content", "text", "new_string", "old_string", "brief", "value"}
+_CONTENT_KEYS = {"body", "content", "text", "new_string", "old_string", "brief", "value", "subject"}
 
 
 def _redact(params: dict[str, Any]) -> dict[str, Any]:
@@ -113,14 +113,47 @@ def audit(action_id: str, tool: str, params: dict[str, Any], status: str) -> Non
         try:
             if path.stat().st_size > _AUDIT_MAX_BYTES:
                 path.replace(old)
-            if old.exists() and time.time() - old.stat().st_mtime > _AUDIT_KEEP_S:
-                old.unlink()
         except FileNotFoundError:
             pass
+        _prune_audit(path, old)
         with open(path, "a", encoding="utf-8") as f:
             f.write(line + "\n")
     except Exception:
         pass
+
+
+_last_prune = 0.0
+
+
+def _prune_audit(*paths) -> None:
+    """Drop lines older than 180 days (checked at most once a day): a light user's log never
+    reaches the size limit, so size-based rotation alone would keep everything forever."""
+    global _last_prune
+    if time.time() - _last_prune < 86400:
+        return
+    _last_prune = time.time()
+    cutoff = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(time.time() - _AUDIT_KEEP_S))
+    for p in paths:
+        try:
+            lines = p.read_text(encoding="utf-8").splitlines()
+        except FileNotFoundError:
+            continue
+        keep = [ln for ln in lines if _ts(ln) >= cutoff]
+        if len(keep) == len(lines):
+            continue
+        if not keep:
+            p.unlink(missing_ok=True)
+            continue
+        tmp = p.with_name(p.name + ".tmp")
+        tmp.write_text("\n".join(keep) + "\n", encoding="utf-8")
+        tmp.replace(p)
+
+
+def _ts(line: str) -> str:
+    try:
+        return str(json.loads(line).get("ts", ""))
+    except ValueError:
+        return ""
 
 
 def as_bool(value: Any, default: bool = False) -> bool:

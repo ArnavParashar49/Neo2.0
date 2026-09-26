@@ -10,6 +10,8 @@ import time
 
 from AppKit import NSWorkspace
 
+from neo.agent.confirm import ask_user
+
 
 async def _run(cmd: list[str], timeout: float = 30) -> tuple[int, str, str]:
     p = await asyncio.create_subprocess_exec(
@@ -147,8 +149,8 @@ async def open_app(name: str) -> str:
             ok, real = await bring_front(name)
             set_target(real)
             if not ok:
-                return (
-                    f"NEEDS_USER: {real} is open but macOS kept {front_name() or 'another app'} in front — "
+                return ask_user(
+                    f"{real} is open but macOS kept {front_name() or 'another app'} in front — "
                     f"click {real} (I won't type anywhere else)."
                 )
             return f"Opened {real}"
@@ -190,7 +192,7 @@ async def activate(name: str) -> str:
     set_target(real)
     if ok:
         return f"Activated {real} (frontmost)"
-    return f"NEEDS_USER: macOS kept {front_name() or 'another app'} in front instead of {real} — click {real}."
+    return ask_user(f"macOS kept {front_name() or 'another app'} in front instead of {real} — click {real}.")
 
 
 async def quit_app(name: str) -> str:

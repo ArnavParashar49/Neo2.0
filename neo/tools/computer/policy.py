@@ -38,17 +38,30 @@ _SECRET_NAME = re.compile(
 )
 
 
-def _variants(path: str | os.PathLike) -> list[Path]:
+_DATA_VOLUME = ("/", "System", "Volumes", "Data")  # the same files, reached through the data volume
+
+
+def absolute(path: str | os.PathLike, base: str | os.PathLike | None = None) -> Path:
+    """`path` as NEO's tools mean it: ~ expanded, and relative to `base` (the folder a command
+    runs in; the home folder by default) — never to wherever NEO's own process happens to be."""
     p = Path(os.path.expanduser(str(path)))
     if not p.is_absolute():
-        p = Path.cwd() / p
-    out = [Path(os.path.normpath(p))]
+        p = Path(os.path.expanduser(str(base))) / p if base else HOME / p
+    return Path(os.path.normpath(p))
+
+
+def _variants(path: str | os.PathLike, base: str | os.PathLike | None = None) -> list[Path]:
+    p = absolute(path, base)
+    out = [p]
     try:
         r = p.resolve()
-        if r != out[0]:
+        if r != p:
             out.append(r)
     except (OSError, RuntimeError):
         pass
+    for v in list(out):
+        if tuple(_fold(x) for x in v.parts[:4]) == tuple(_fold(x) for x in _DATA_VOLUME):
+            out.append(Path("/", *v.parts[4:]))
     return out
 
 
@@ -62,9 +75,9 @@ def _under(p: Path, root: Path) -> bool:
     return pp[: len(rp)] == rp
 
 
-def is_secret(path: str | os.PathLike) -> bool:
+def is_secret(path: str | os.PathLike, base: str | os.PathLike | None = None) -> bool:
     """Keys, tokens, password stores, browser profiles, chat and mail stores, NEO's own data."""
-    for p in _variants(path):
+    for p in _variants(path, base):
         if _SECRET_NAME.match(p.name):
             return True
         if any(_under(p, HOME / d) for d in _SECRET_DIRS):
@@ -74,9 +87,9 @@ def is_secret(path: str | os.PathLike) -> bool:
     return False
 
 
-def covers_secret(path: str | os.PathLike) -> bool:
+def covers_secret(path: str | os.PathLike, base: str | os.PathLike | None = None) -> bool:
     """Would a recursive read of this directory reach a secret? (the home folder, ~/Library…)"""
-    for p in _variants(path):
+    for p in _variants(path, base):
         if is_secret(p) or any(_under(HOME / d, p) for d in _SECRET_DIRS):
             return True
     return False
@@ -92,20 +105,19 @@ _RUNNABLE = re.compile(
 )
 
 
-def write_risk(path: str | os.PathLike) -> str:
+def write_risk(path: str | os.PathLike, base: str | os.PathLike | None = None) -> str:
     """Why writing this file needs the user's OK ("" = it doesn't)."""
-    vs = _variants(path)
+    vs = _variants(path, base)
     p = vs[-1]
-    if is_secret(path):
+    if is_secret(path, base):
         return "it holds secrets"
     if any(v.exists() for v in vs):
         return "it already exists and would be overwritten"
     tmp = [Path("/tmp"), Path("/private/tmp"), Path(os.environ.get("TMPDIR", "/tmp")).resolve()]
     for v in vs:
-        rel_home = v.relative_to(HOME) if _under(v, HOME) else None
-        if rel_home is not None and any(part.startswith(".") for part in rel_home.parts):
-            return "it's a hidden settings file or folder"
-        if rel_home is None and any(part.startswith(".") for part in v.parts[1:]):
+        # Compared case-insensitively (APFS), so take the parts below home by position.
+        below = v.parts[len(HOME.parts) :] if _under(v, HOME) else v.parts[1:]
+        if any(part.startswith(".") for part in below):
             return "it's a hidden settings file or folder"
     if _RUNNABLE.search(p.name) or any(_RUNNABLE.search(part) for part in p.parts):
         return "macOS can run or load that kind of file"
@@ -119,7 +131,7 @@ _READ_ONLY_CMDS = {
     "ls", "cat", "head", "tail", "wc", "pwd", "which", "whoami", "id", "date", "cal", "uptime",
     "echo", "grep", "egrep", "fgrep", "rg", "find", "du", "df", "file", "stat", "sw_vers", "uname",
     "hostname", "mdfind", "mdls", "sort", "uniq", "cut", "tr", "basename", "dirname", "realpath",
-    "readlink", "diff", "cmp", "tree", "ps", "git", "brew", "pip", "pip3", "defaults", "pmset",
+    "readlink", "diff", "cmp", "tree", "ps", "brew", "pip", "pip3", "defaults", "pmset",
     "system_profiler", "sysctl", "lsof", "netstat", "vm_stat", "nl", "column", "true", "mkdir",
     "touch", "say", "sleep",
 }
@@ -137,9 +149,6 @@ GIT_SAFE_ENV = {
 }
 _SEPARATORS = {"|", "||", "&&", ";"}
 _FIND_ACTIONS = {"-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprint0", "-fprintf", "-fls"}
-# No diff/show/blame/log -p: they run a repo's configured diff drivers (textconv, external diff).
-_GIT_READ = {"status", "log", "branch", "remote", "rev-parse", "ls-files", "describe", "shortlog", "tag"}
-_GIT_DIFFING = {"-p", "-u", "--patch", "--stat", "--numstat", "--shortstat", "--word-diff", "--ext-diff", "--textconv", "--full-diff", "--dirstat", "--summary", "--raw", "--cc", "-m", "--graph"}
 _BREW_READ = {"list", "ls", "info", "search", "outdated", "deps", "leaves", "config", "--version", "-v"}
 _PIP_READ = {"list", "show", "freeze", "--version", "-V"}
 
@@ -154,12 +163,13 @@ def _words(cmd: str) -> list[str] | None:
         return None
 
 
-def _paths_ok(args: list[str], *, recursive: bool, write: bool) -> bool:
+def _paths_ok(args: list[str], base: str | os.PathLike, *, recursive: bool, write: bool) -> bool:
     for a in args:
         if a.startswith("-"):
             continue
-        cands = glob.glob(os.path.expanduser(a)) if any(c in a for c in "*?[") else [a]
-        for c in cands or [a]:
+        whole = str(absolute(a, base))
+        cands = glob.glob(whole) if any(c in a for c in "*?[") else [whole]
+        for c in cands or [whole]:
             if is_secret(c) or (recursive and covers_secret(c)):
                 return False
             if write and write_risk(c) and write_risk(c) != "it already exists and would be overwritten":
@@ -167,32 +177,53 @@ def _paths_ok(args: list[str], *, recursive: bool, write: bool) -> bool:
     return True
 
 
-def _simple_ok(argv: list[str]) -> bool:
+# Long options that make an otherwise read-only command run a program or write a file.
+_RUNS_OR_WRITES = re.compile(r"^--(?:comp|out|exec|files0|pager|editor|use-comp|command|filter|tmp|temp)", re.I)
+_SORT_FLAGS = set("bdfghiMnRrsuVcCz")  # sort's short options that only change the ordering / checks
+_SORT_LONG = {
+    "--numeric-sort", "--reverse", "--unique", "--ignore-case", "--human-numeric-sort", "--version-sort",
+    "--stable", "--general-numeric-sort", "--month-sort", "--ignore-leading-blanks", "--dictionary-order",
+    "--random-sort", "--check", "--zero-terminated",
+}
+
+
+def _sort_ok(args: list[str]) -> bool:
+    it = iter(range(len(args)))
+    for i in it:
+        a = args[i]
+        if a == "--" or not a.startswith("-") or a == "-":
+            continue
+        if a.startswith("--"):
+            name = a.split("=", 1)[0]
+            if name in ("--key", "--field-separator", "--buffer-size"):
+                continue
+            if a not in _SORT_LONG:
+                return False  # --compress-program, --output, --files0-from, --temporary-directory…
+            continue
+        opts = a[1:]
+        if opts[0] in "ktS":  # -k 2 / -t , / -S 1K take a value
+            if len(opts) == 1:
+                next(it, None)
+            continue
+        if not set(opts) <= _SORT_FLAGS:
+            return False
+    return True
+
+
+def _simple_ok(argv: list[str], base: str | os.PathLike) -> bool:
     name, args = argv[0], argv[1:]
     if name not in _READ_ONLY_CMDS:
+        return False
+    if any(_RUNS_OR_WRITES.match(a) for a in args):
         return False
     flags = [a for a in args if a.startswith("-")]
     plain = [a for a in args if not a.startswith("-")]
     if name == "find":
         if _FIND_ACTIONS & set(args):
             return False
-        return _paths_ok(plain[:1], recursive=False, write=False)  # names only, never contents
-    if name == "git":
-        rest = list(args)
-        while rest and rest[0] in ("-C", "--no-pager"):
-            rest = rest[2:] if rest[0] == "-C" else rest[1:]
-        # -c sets config (diff.external, core.pager, core.fsmonitor… run programs); -p/--paginate
-        # starts the pager; --exec-path/--git-dir/--config-env point git at other code.
-        if not rest or rest[0].startswith("-"):
-            return False
-        if rest[0] not in _GIT_READ or any(a.startswith(("--output", "--exec", "--config", "--upload", "--receive")) or a == "-o" for a in rest):
-            return False
-        if any(a in _GIT_DIFFING or a.startswith(("--stat", "--word-diff", "--color-moved", "--ext-diff")) for a in rest):
-            return False
-        sub, extra = rest[0], [a for a in rest[1:] if not a.startswith("-")]
-        if sub in ("branch", "tag", "remote") and (extra or {"-d", "-D", "-m", "-M", "--delete", "-f"} & set(rest)):
-            return False
-        return True
+        return _paths_ok(plain[:1], base, recursive=False, write=False)  # names only, never contents
+    if name == "sort" and not _sort_ok(args):
+        return False
     if name == "brew":
         return bool(plain) and plain[0] in _BREW_READ or args[:1] in (["--version"], ["-v"])
     if name in ("pip", "pip3"):
@@ -214,7 +245,7 @@ def _simple_ok(argv: list[str]) -> bool:
     if name == "say" and any(f in ("-o", "--output-file", "-n", "--network-send") for f in flags):
         return False
     if name in ("mkdir", "touch"):
-        return _paths_ok(plain, recursive=False, write=True)
+        return _paths_ok(plain, base, recursive=False, write=True)
     if name in ("grep", "egrep", "fgrep") and any(
         f in ("--recursive", "--dereference-recursive") or (not f.startswith("--") and ("r" in f or "R" in f))
         for f in flags
@@ -224,17 +255,17 @@ def _simple_ok(argv: list[str]) -> bool:
         # rg walks directories (the home folder when given none) and reads every file it finds,
         # keys and credentials included: only explicit files run without asking.
         targets = plain[1:]
-        if not targets or any(os.path.isdir(os.path.expanduser(t)) for t in targets):
+        if not targets or any(absolute(t, base).is_dir() for t in targets):
             return False
-        return _paths_ok(targets, recursive=False, write=False)
+        return _paths_ok(targets, base, recursive=False, write=False)
     if name == "diff" and any(f in ("-r", "--recursive") or (not f.startswith("--") and "r" in f) for f in flags):
         return False  # compares (and prints) every file below two folders
     if name in ("grep", "egrep", "fgrep"):
-        return _paths_ok(plain[1:], recursive=False, write=False)
-    return _paths_ok(plain, recursive=False, write=False)
+        return _paths_ok(plain[1:], base, recursive=False, write=False)
+    return _paths_ok(plain, base, recursive=False, write=False)
 
 
-def shell_is_read_only(cmd: str) -> bool:
+def shell_is_read_only(cmd: str, cwd: str | os.PathLike | None = None) -> bool:
     """True only for commands that can't change anything: every simple command is on the
     read-only list (with its writing flags excluded), nothing is redirected or substituted, and
     no argument reaches a secret."""
@@ -266,7 +297,8 @@ def shell_is_read_only(cmd: str) -> bool:
         i += 1
     if segments and not segments[-1] and len(segments) > 1 and words[-1] == ";":
         segments.pop()  # a trailing ";"
-    return all(seg and _simple_ok(seg) for seg in segments)
+    base = cwd or HOME
+    return all(seg and _simple_ok(seg, base) for seg in segments)
 
 
 # ---- AppleScript -----------------------------------------------------------------------------
@@ -278,7 +310,7 @@ _SCRIPT_ACTS = re.compile(
     r"import|export|convert|copy|put|write|read|mount|eject|update|forward|reply|redirect|mark|"
     r"keystroke|key\s+code|click|perform|tell\s+process|choose|beep|say|lock|install|reload|"
     r"refresh|go|search|add|attach|sign|accept|decline|join|leave|post|submit|buy|move|enable|"
-    r"disable|toggle|start|stop|resume|advance|increase|decrease|next|previous|skip|mute|unmute|"
+    r"disable|toggle|stop|resume|advance|increase|decrease|next|previous|skip|mute|unmute|"
     r"rename|clean|restore|sync|backup|download|upload|share|log|run|launch|quit|hide|show|"
     r"bring|zoom|minimi[sz]e|miniaturize|collapse|expand|check|uncheck|mount|unmount)\b",
     re.I,

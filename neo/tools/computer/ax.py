@@ -441,3 +441,26 @@ def label_at(x: float, y: float) -> str:
         if el is None:
             break
     return " ".join(parts)[:200]
+
+
+def app_of(el) -> str:
+    """The name of the app an accessibility element belongs to."""
+    try:
+        err, pid = AS.AXUIElementGetPid(el, None)
+        if err or not pid:
+            return ""
+        from AppKit import NSRunningApplication
+
+        app = NSRunningApplication.runningApplicationWithProcessIdentifier_(pid)
+        return str(app.localizedName() or "") if app is not None else ""
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def app_at(x: float, y: float) -> str:
+    """The app whose element is under a screen point."""
+    try:
+        err, el = AS.AXUIElementCopyElementAtPosition(AS.AXUIElementCreateSystemWide(), float(x), float(y), None)
+    except Exception:  # noqa: BLE001
+        return ""
+    return "" if err or el is None else app_of(el)

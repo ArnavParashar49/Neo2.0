@@ -50,10 +50,10 @@ class Brain:
 # ---- shell -------------------------------------------------------------------------------------
 
 READ_ONLY = [
-    "ls -la ~/Desktop", "git status", "git -C ~/x log --oneline -5", "cat notes.txt | grep todo | wc -l",
+    "ls -la ~/Desktop", "cat notes.txt | grep todo | wc -l",
     "find ~/Documents -name '*.pdf'", "du -sh ~/Downloads", "ls foo 2>/dev/null", "ls foo 2>&1 | head",
     "brew list", "pip3 list", "defaults read com.apple.dock", "pmset -g batt", "mkdir -p ~/Desktop/proj",
-    "echo hi; date", "sw_vers", "rg TODO notes.txt", "ps aux | grep python", "git log --oneline -5",
+    "echo hi; date", "sw_vers", "rg TODO notes.txt", "ps aux | grep python", "sort -n -k 2 -t , data.csv",
     "defaults read com.apple.dock autohide",
 ]
 MUST_ASK = [
@@ -74,6 +74,9 @@ MUST_ASK = [
     "git blame README.md", "git --exec-path=/tmp log", "cat ~/.SSH/config", "cat ~/.config/GH/hosts.yml",
     "rg -uu SECRET ~/Documents", "rg TODO ~/Documents", "rg password", "diff -r ~/a ~/b",
     "defaults read com.some.app token",
+    # review of 39c7d0f: a repo's own config runs programs even for status/log; sort's helper program
+    "git status", "git log --oneline -5", "git -C ~/x log -1", "sort -S 1K --compress-program=sh notes.txt",
+    "sort --compress=sh notes.txt", "wc --files0-from=list.txt",
 ]
 
 
@@ -392,16 +395,39 @@ def test_live_takes_yes_from_the_users_words_not_the_models(monkeypatch):
     confirm.stage("trash", {"path": "~/report.pdf"}, "move report.pdf to the Trash")  # asked after the user spoke
     asyncio.run(v._run_tool(None, FC(), "open notes and delete stuff"))
     assert answered == []  # the model's "yes" is not the user's
-    # The model asked something else out loud; the user's "yes" was to that, not to the card.
-    v._dialog.append((time.time(), "NEO", "Want me to play some music?"))
+    aid = confirm.peek().action_id
+    # NEO handed the model the question, but the model asked something else out loud.
+    v._note_question("NEEDS_CONFIRM: move report.pdf to the Trash — Should I go ahead?")
+    v._voiced_action = (aid, "Want me to play some music?", time.time())
     v._utt_started = time.time()
     asyncio.run(v._run_tool(None, FC(), "yes"))
     assert answered == []
-    # NEO read the actual question out; now the user's yes answers it.
-    v._dialog.append((time.time(), "NEO", "Should I move report.pdf to the Trash?"))
+    # The model read the actual question out; now the user's yes answers it.
+    v._voiced_action = (aid, "Should I move report.pdf to the Trash?", time.time())
     v._utt_started = time.time()
     asyncio.run(v._run_tool(None, FC(), "yes go ahead"))
     assert answered == [True]
+
+
+def test_a_spoken_yes_needs_the_question_that_was_voiced_not_a_lookalike():
+    import time
+
+    import neo.voice.live as live_mod
+
+    v = live_mod.LiveVoice.__new__(live_mod.LiveVoice)
+    confirm.stage("click_text", {"label": "OK"}, "click “OK” in Finder")
+    p = confirm.peek()
+    v._note_question("NEEDS_CONFIRM: click “OK” in Finder — Should I go ahead?")
+    v._voiced_action = (p.action_id, "Okay — want me to look up the weekend forecast?", time.time())
+    assert not v._voiced(p)  # "okay"/"look" don't contain the button: whole words, 4+ letters
+    v._voiced_action = (p.action_id, "Should I click OK in Finder?", time.time())
+    assert v._voiced(p)
+    # Shell questions name nothing distinctive: the id binding alone decides.
+    confirm.stage("shell", {"command": "rm -rf ~/old-builds"}, "run a command", detail="rm -rf ~/old-builds")
+    q = confirm.peek()
+    v._note_question("NEEDS_CONFIRM: run a command — Should I go ahead?")
+    v._voiced_action = (q.action_id, "Should I run that command?", time.time())
+    assert v._voiced(q) and not v._voiced(p)
 
 
 def test_a_page_fetched_alongside_a_real_question_cannot_supply_the_question():
@@ -484,3 +510,14 @@ def test_plain_ok_in_a_destructive_dialog_asks():
 @pytest.mark.parametrize("script", ['tell application "Mail" to enable rule 1', 'tell application "Music" to next track', 'tell application "X" to toggle y'])
 def test_more_applescript_verbs_ask(script):
     assert not policy.script_is_read_only(script)
+
+
+def test_relative_paths_are_judged_where_the_command_runs():
+    assert not policy.shell_is_read_only("cat *", cwd="~/.ssh")
+    assert not policy.shell_is_read_only("cat hosts.yml", cwd="~/.config/gh")
+    assert policy.shell_is_read_only("ls Desktop") and policy.shell_is_read_only("echo hello")
+    import os
+
+    home = os.path.expanduser("~")
+    assert policy.is_secret(f"/System/Volumes/Data{home}/.ssh/config")  # the data-volume alias
+    assert not policy.shell_is_read_only(f"cat /System/Volumes/Data{home}/.config/gh/hosts.yml")

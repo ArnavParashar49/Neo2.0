@@ -59,7 +59,7 @@ def test_retrain_swaps_the_head_only_when_saved(monkeypatch):
 
     monkeypatch.setattr(reflex_mod, "get_laya", lambda: Laya())
     reports = iter([{"saved": True, "intent": 0.91, "previous": 0.90}, {"saved": False, "intent": 0.80, "previous": 0.90}])
-    monkeypatch.setattr(finetune, "train", lambda args, agent=None, lock=None: next(reports))
+    monkeypatch.setattr(finetune, "train", lambda args, agent=None, lock=None, cancelled=None: next(reports))
     learn.record("what's on my calendar today", "quick_action", "calendar_today")
     assert learn.retrain()["saved"] and swapped == [True]
     assert json.loads(learn._path(learn.STATE).read_text())["trained_rows"] == 1

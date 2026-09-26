@@ -27,7 +27,7 @@ def _env() -> dict[str, str]:
 
 
 async def run(cmd: str, *, cwd: str | None = None, timeout: float = 60, args: dict | None = None) -> str:
-    if not policy.shell_is_read_only(cmd):
+    if not policy.shell_is_read_only(cmd, cwd):
         where = f" (in {cwd})" if cwd else ""
         gate = confirm.gated(
             "shell", args if args is not None else {"command": cmd, "cwd": cwd}, f"run a command{where}",
@@ -64,7 +64,7 @@ def _secret_refusal(path: str) -> str:
 def read_file(path: str, *, start: int = 1, lines: int = 400) -> str:
     if policy.is_secret(path):
         return _secret_refusal(path)
-    p = Path(os.path.expanduser(path))
+    p = policy.absolute(path)  # relative = relative to the home folder, as the policy judged it
     if not p.exists():
         return f"Error: {path} does not exist"
     if p.is_dir():
@@ -97,7 +97,7 @@ def _preview(text: str, limit: int = 1500) -> str:
 
 
 def write_file(path: str, content: str, args: dict) -> str:
-    p = Path(os.path.expanduser(path))
+    p = policy.absolute(path)
     if why := policy.write_risk(path):
         if policy.is_secret(path):
             return f"Error: {p} holds keys or private app data — NEO doesn't write there."
@@ -114,7 +114,7 @@ def write_file(path: str, content: str, args: dict) -> str:
 def edit_file(path: str, old: str, new: str, args: dict) -> str:
     if policy.is_secret(path):
         return f"Error: {path} holds keys or private app data — NEO doesn't edit it."
-    p = Path(os.path.expanduser(path))
+    p = policy.absolute(path)
     if not p.exists():
         return f"Error: {path} does not exist"
     text = p.read_text()
@@ -133,7 +133,7 @@ def edit_file(path: str, old: str, new: str, args: dict) -> str:
 
 
 def trash(path: str, args: dict) -> str:
-    p = Path(os.path.expanduser(path))
+    p = policy.absolute(path)
     if not p.exists():
         return f"Error: {path} does not exist"
     gate = confirm.gated("trash", args, f"move {p.name} to the Trash", detail=str(p.resolve()))

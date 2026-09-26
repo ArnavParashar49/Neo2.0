@@ -153,7 +153,9 @@ export default function App() {
   const orb = ORB[shown];
   const [text, setText] = useState("");
   const [hover, setHover] = useState(false);
-  const [erasing, setErasing] = useState(false); // "Erase NEO's Memory…" from the menu bar
+  // "Erase NEO's Memory…" from the menu bar: "ask" shows the question, "sent" waits for the
+  // core to confirm (the dialog only closes once it has actually erased).
+  const [erasing, setErasing] = useState<false | "ask" | "sent">(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const logRef = useRef<HTMLDivElement>(null);
   const stickToBottom = useRef(true);
@@ -195,7 +197,7 @@ export default function App() {
   useEffect(() => { if (confirming) expand(); }, [confirming, expand]);
 
   useEffect(() => {
-    if (!erasing) return;
+    if (erasing !== "ask") return;
     const h = (e: KeyboardEvent) => { if (e.key === "Escape") { e.preventDefault(); setErasing(false); } };
     window.addEventListener("keydown", h);
     return () => window.removeEventListener("keydown", h);
@@ -204,9 +206,20 @@ export default function App() {
   // Menu bar → Erase NEO's Memory…: the overlay asks before anything is deleted.
   useEffect(() => {
     if (!inTauri) return;
-    const un = listen("neo://erase", () => { expand(); setErasing(true); });
+    const un = listen("neo://erase", () => { expand(); setErasing("ask"); });
     return () => { un.then((f) => f()).catch(() => {}); };
   }, [expand]);
+
+  // Erased: close the dialog, and forget the typed history too (↑ must not bring it back).
+  useEffect(() => {
+    if (!neo.erasedAt) return;
+    setErasing(false);
+    lastInput.current = "";
+    setText("");
+  }, [neo.erasedAt]);
+
+  // Dismissed without an answer (collapsed, hidden): the question doesn't linger for next time.
+  useEffect(() => { if (!expanded && erasing === "ask") setErasing(false); }, [expanded, erasing]);
 
   // Auto-collapse after a quiet stretch unless pinned, hovered, or being typed into.
   useEffect(() => {
@@ -216,7 +229,7 @@ export default function App() {
       setExpanded(false);
     }, IDLE_COLLAPSE_MS);
     return () => clearTimeout(t);
-  }, [expanded, pinned, hover, neo.state, neo.items, text]);
+  }, [expanded, pinned, hover, neo.state, neo.items, text, confirming, erasing]);
 
   // Follow new content only when the user hasn't scrolled up.
   useEffect(() => {
@@ -320,9 +333,16 @@ export default function App() {
         <div className="confirm" role="alertdialog" aria-labelledby="erase-q">
           <div className="confirm-q" id="erase-q">Erase everything NEO remembers about you?</div>
           <div className="confirm-detail">Memories and preferences, past-session summaries, learned requests, the activity log, and logins in NEO's own browser. Your settings and API keys stay. This can't be undone.</div>
+          {!neo.connected && <div className="note">NEO's core isn't running, so nothing can be erased right now — menu bar → Restart NEO, then try again.</div>}
           <div className="confirm-btns">
-            <button className="primary danger-fill" onClick={() => { neo.send({ cmd: "forget_all" }); setErasing(false); }}>Erase everything</button>
-            <button onClick={() => setErasing(false)}>Cancel <kbd>esc</kbd></button>
+            <button
+              className="primary danger-fill"
+              disabled={!neo.connected || erasing === "sent"}
+              onClick={() => { if (neo.send({ cmd: "forget_all" })) setErasing("sent"); }}
+            >
+              {erasing === "sent" ? "Erasing…" : "Erase everything"}
+            </button>
+            <button onClick={() => setErasing(false)} disabled={erasing === "sent"}>Cancel <kbd>esc</kbd></button>
           </div>
         </div>
       ) : neo.ask ? (

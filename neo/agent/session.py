@@ -55,6 +55,15 @@ _conversation: contextvars.ContextVar[str] = contextvars.ContextVar("conversatio
 # Untrusted sources the caller already read for this request (Gemini Live fetched a page, then
 # handed the task over): the agent run starts from there instead of from a clean slate.
 _request_taint: contextvars.ContextVar[tuple[str, ...]] = contextvars.ContextVar("request_taint", default=())
+# The erase generation a request started in (neo.privacy): one that began before "Erase NEO's
+# Memory" must not put its conversation back into the cleared history.
+_job_generation: contextvars.ContextVar[int | None] = contextvars.ContextVar("job_generation", default=None)
+
+
+def _mark_job() -> None:
+    from neo import privacy
+
+    _job_generation.set(privacy.generation())
 
 
 def answer_of(text: str) -> bool | None:
@@ -111,6 +120,7 @@ class Session:
         if conversation:
             _conversation.set(conversation)
         _request_taint.set(tuple(taint))
+        _mark_job()
         text = _WAKE_PREFIX.sub("", text.strip(), count=1).strip() or text.strip()
         if not text:
             return Reply("", "chat")
@@ -168,6 +178,7 @@ class Session:
         layer calls this the moment the user finishes a sentence). Anything that fails is handed
         to the agent, exactly like a typed command."""
         job = f"j{next(_job_ids)}"
+        _mark_job()
         return await self._quick(text, None, steps, job=job)
 
     async def cancel_all(self) -> int:
@@ -239,7 +250,7 @@ class Session:
                 await bus().tool_end(tool, out.ok, out.text, job=job)
                 out_text, ok = out.text, out.ok
                 if not ok:  # e.g. weather for "the forecast for Q3 sales": the agent can do better
-                    print(f"  ~ {tool} failed ({out_text[:60]}); handing to the agent")
+                    print(f"  ~ {tool} failed; handing to the agent")
                     return await self._agent(text, d, None, job)
             prev = tool
             texts.append(out_text)
@@ -405,6 +416,7 @@ class Session:
         overlay's button for `action_id`. Runs the staged action exactly as it was shown.
         Returns None when there is nothing (any more) to answer."""
         async with self._answer_lock:  # a spoken "yes" and a click on the card can't both run it
+            _mark_job()
             job = job or f"j{next(_job_ids)}"
             p = confirm.peek()
             if p is None or (action_id and p.action_id != action_id):
@@ -484,6 +496,11 @@ class Session:
         return build_prompt(self.memory_context, extra)
 
     async def _remember(self, *msgs: Message) -> None:
+        from neo import privacy
+
+        gen = _job_generation.get()
+        if gen is not None and gen != privacy.generation():
+            return  # started before the user erased NEO's memory: it stays erased
         async with self._hist_lock:
             # Screenshots are only useful to the run that took them: drop the pixels of anything
             # older, or a long-running core ends up holding hundreds of MB of dead PNGs.
@@ -496,6 +513,12 @@ class Session:
                 cut = len(self.history) - _MAX_HISTORY
                 while cut < len(self.history) and self.history[cut].role != "user":
                     cut += 1  # keep whole turns: never start on a tool result
+                if cut >= len(self.history):
+                    # One long turn (a 20-step agent run) fills the window: keep that whole turn
+                    # rather than cutting it — and everything with it — away.
+                    cut = next(
+                        (i for i in range(len(self.history) - 1, -1, -1) if self.history[i].role == "user"), 0
+                    )
                 gone = self.history[self._summarized : cut]
                 if sum(1 for m in gone if m.role == "user") >= 1:
                     self._spawn(self._summarize(gone, self._chunk_started))

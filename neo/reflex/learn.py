@@ -35,6 +35,7 @@ _BURST = 150  # …unless this many have piled up
 _IDLE_S = 180.0  # NEO must be idle this long before training starts
 _lock = threading.Lock()
 _training = False
+_erase_gen = 0  # bumped by forget_examples(): a retrain that started before it throws its work away
 
 _KEEP_ROWS = 2000
 _KEEP_DAYS = 180
@@ -91,7 +92,9 @@ def _compact(path: Path) -> None:
 
 def forget_examples() -> int:
     """Delete every stored request, and the cached features of them. Returns how many."""
+    global _erase_gen
     with _lock:
+        _erase_gen += 1
         rows = _read_raw(_path(EXTRA))
         n = len(_read(_path(EXTRA)))
         for name in (EXTRA, STATE):
@@ -161,16 +164,22 @@ def retrain() -> dict | None:
         return None
     _training = True
     started = time.time()
+    gen = _erase_gen
     try:
         n_rows = len(_read(_path(EXTRA)))
         t0 = time.time()
         try:
-            report = finetune.train(finetune.defaults(), agent=laya._agent, lock=laya_lock())
+            report = finetune.train(
+                finetune.defaults(), agent=laya._agent, lock=laya_lock(), cancelled=lambda: _erase_gen != gen
+            )
         except Exception as e:  # noqa: BLE001
             # Count it as a try: the next one waits the usual gap instead of re-running (and
             # re-failing) every few idle minutes.
             _write_state({"trained_at": started, "trained_rows": n_rows, "last_error": str(e)[:300]})
             print(f"[reflex] retrain failed: {str(e)[:160]}")
+            return None
+        if report.get("cancelled") or _erase_gen != gen:
+            print("[reflex] retrain discarded: NEO's memory was erased while it ran")
             return None
         if report.get("saved"):
             with laya_lock():

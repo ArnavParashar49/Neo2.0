@@ -25,6 +25,7 @@ class Mic:
         self.q: queue.Queue[bytes | None] = queue.Queue(maxsize=400)
         self._stream: sd.RawInputStream | None = None
         self._closed = False
+        self._wanted = False  # started and not stopped: it should be capturing, stream or not
         self.last_frame = 0.0  # monotonic time of the latest callback
 
     def _cb(self, indata, frames, time_info, status) -> None:  # noqa: ANN001
@@ -36,10 +37,11 @@ class Mic:
 
     @property
     def active(self) -> bool:
-        return self._stream is not None and not self._closed
+        return self._wanted and not self._closed
 
     def stalled(self) -> bool:
-        return self.active and time.monotonic() - self.last_frame > _STALL_S
+        # No stream at all (a reopen failed: the device vanished) counts too, so it's retried.
+        return self.active and (self._stream is None or time.monotonic() - self.last_frame > _STALL_S)
 
     def _open_stream(self) -> None:
         self._stream = sd.RawInputStream(
@@ -62,11 +64,13 @@ class Mic:
             return
         self._closed = False
         self._open_stream()
+        self._wanted = True
         _register(self)
 
     def stop(self) -> None:
-        self._closed = True
-        self._close_stream()
+        self._closed, self._wanted = True, False
+        with _reopen_lock:  # never while the device watcher is reopening it
+            self._close_stream()
         try:
             self.q.put_nowait(None)  # wake any reader so no executor thread is left blocked at exit
         except queue.Full:
@@ -201,7 +205,8 @@ class Speaker:
     def close(self) -> None:
         self._closed = True
         self._q.put(None)
-        self._close_stream()
+        with _reopen_lock:  # never while the device watcher is reopening it
+            self._close_stream()
 
 
 # ---- following the devices ---------------------------------------------------------------------
@@ -220,26 +225,38 @@ def _register(obj: Mic | Speaker) -> None:
         _watcher.start()
 
 
-def reopen_all(reason: str) -> None:
-    """Close every open stream, have PortAudio re-read the device list, and reopen on the
-    current defaults."""
+def reopen_all(reason: str) -> bool:
+    """Close every stream that should be running, have PortAudio re-read the device list, and
+    reopen on the current defaults. Returns whether everything came back."""
     with _reopen_lock:
         objs = [o for o in list(_streams) if o.active]
         if not objs:
-            return
+            return True
         for o in objs:
             o._close_stream()
+        # Separately: after a failed initialise, terminating raises "not initialized" and would
+        # keep PortAudio down for good.
+        if getattr(sd, "_initialized", 1) > 0:
+            try:
+                sd._terminate()
+            except Exception:  # noqa: BLE001
+                pass
         try:
-            sd._terminate()
             sd._initialize()
         except Exception as e:  # noqa: BLE001
             print(f"[audio] couldn't refresh the device list: {e}")
+            return False
+        ok = True
         for o in objs:
+            if not o.active:
+                continue  # stopped while we were busy: stays closed
             try:
                 o._open_stream()
             except Exception as e:  # noqa: BLE001
+                ok = False
                 print(f"[audio] couldn't reopen the {'microphone' if isinstance(o, Mic) else 'speaker'}: {e}")
-        print(f"[audio] {reason} — reopened on the current devices")
+        print(f"[audio] {reason} — reopened on the current devices" if ok else f"[audio] {reason} — will retry")
+        return ok
 
 
 def _watch() -> None:
@@ -247,6 +264,7 @@ def _watch() -> None:
 
     last = (devices.default_input(), devices.default_output())
     last_stall_fix = 0.0
+    broken = False  # the last reopen didn't bring everything back: keep trying
     while True:
         time.sleep(1.0)
         try:
@@ -258,13 +276,16 @@ def _watch() -> None:
                 reason = "the input device changed"
             elif now_dev[1] != last[1]:
                 reason = "the output device changed"
-            elif any(isinstance(o, Mic) and o.stalled() for o in list(_streams)):
-                if time.monotonic() - last_stall_fix > _STALL_RETRY_S:
-                    reason, last_stall_fix = "the microphone stopped delivering audio", time.monotonic()
+            elif broken or any(
+                (isinstance(o, Mic) and o.stalled()) or (isinstance(o, Speaker) and o.active and o._stream is None)
+                for o in list(_streams)
+            ):
+                if time.monotonic() - last_stall_fix > (_STALL_RETRY_S if not broken else 5.0):
+                    reason, last_stall_fix = "the audio stopped working", time.monotonic()
             last = now_dev
             if reason:
                 time.sleep(0.4)  # let macOS finish switching (AirPods announce themselves in steps)
-                reopen_all(reason)
+                broken = not reopen_all(reason)
                 last = (devices.default_input(), devices.default_output())
         except Exception as e:  # noqa: BLE001 — the watcher must outlive any one bad poll
             print(f"[audio] device watch hiccup: {e}")

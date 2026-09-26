@@ -64,7 +64,14 @@ async def memory(a: dict, c: ToolContext) -> str:
         mid = await asyncio.to_thread(st.remember, a["text"], a.get("kind", "note"), a.get("key", ""))
         return f"Remembered (#{mid})."
     if act == "recall":
+        from neo.config import settings
+
+        level = settings().cloud_memory  # recall results go straight to a cloud model
+        if level == "off":
+            return "Memory isn't shared with the online model (NEO_CLOUD_MEMORY=off)."
         hits = await asyncio.to_thread(st.recall, a.get("query") or c.user_text, 8)
+        if level == "profile":
+            hits = [m for m in hits if m.kind == "profile"]
         return (
             "\n".join(f"#{m.id} [{m.kind}{'/' + m.key if m.key else ''}] {m.text}" for m in hits)
             or "Nothing relevant in memory."

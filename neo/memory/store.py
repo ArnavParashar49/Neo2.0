@@ -87,19 +87,34 @@ class Playbook:
 
 _KEEP_PLAYBOOKS = 300
 _KEEP_SESSIONS_DAYS = 90
-# What a playbook may remember of a step: the tool and its settings, never content.
-CONTENT_TOOLS = {"type_text", "dictate", "memory", "notes_create", "mail_send", "write_file", "edit_file", "shell", "applescript", "ax_set_value", "browser_type"}
-CONTENT_ARGS = {"text", "body", "content", "subject", "to", "new_string", "old_string", "command", "script", "query", "value", "brief", "goal"}
+# What a playbook may remember of a step: the tool and its settings — an allowlist, so a new
+# tool's free-text argument (a title, a label, a place, a path) never slips through.
+SETTING_ARGS = {
+    "app", "name", "keys", "direction", "level", "minutes", "action", "kind", "button", "count",
+    "new_tab", "send", "submit", "site", "calendar", "role", "news", "limit", "max_chars", "start", "lines",
+}
+
+
+def _host_only(v: Any) -> Any:
+    from urllib.parse import urlsplit
+
+    s = str(v)
+    if "://" in s:
+        u = urlsplit(s)
+        return f"{u.scheme}://{u.hostname or ''}"
+    return v
 
 
 def path_only(steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return [
-        {
-            "tool": s.get("tool", ""),
-            "args": {} if s.get("tool") in CONTENT_TOOLS else {k: v for k, v in (s.get("args") or {}).items() if k not in CONTENT_ARGS},
-        }
-        for s in steps
-    ]
+    out = []
+    for s in steps:
+        args = s.get("args") or {}
+        keep = {k: v for k, v in args.items() if k in SETTING_ARGS}
+        for k in ("url", "target"):  # a link keeps its site, never its path or query
+            if k in args and "://" in str(args[k]):
+                keep[k] = _host_only(args[k])
+        out.append({"tool": s.get("tool", ""), "args": keep})
+    return out
 
 
 class Store:
@@ -114,18 +129,24 @@ class Store:
         with self._lock:
             self._db.execute("PRAGMA journal_mode=WAL")
             self._db.execute("PRAGMA busy_timeout=5000")
+            self._db.execute("PRAGMA secure_delete=ON")  # what's deleted is overwritten, not left in free pages
             self._db.executescript(_SCHEMA)
             # Retention: what happened day to day is kept for a few months, not forever.
             self._db.execute("DELETE FROM sessions WHERE started < ?", (time.time() - _KEEP_SESSIONS_DAYS * 86400,))
-            if int(self._db.execute("PRAGMA user_version").fetchone()[0]) < 1:
-                # Playbooks saved by older versions kept message bodies, typed text and commands.
+            if int(self._db.execute("PRAGMA user_version").fetchone()[0]) < 2:
+                # Playbooks saved by older versions kept message bodies, typed text, commands,
+                # titles and full links. Rewrite them, then VACUUM so the old bytes are gone from
+                # the file too (not just unreferenced).
                 for pid, steps in self._db.execute("SELECT id, steps FROM playbook").fetchall():
                     try:
                         clean = path_only(json.loads(steps))
                     except (ValueError, TypeError, AttributeError):
                         clean = []
                     self._db.execute("UPDATE playbook SET steps=?, answer='' WHERE id=?", (json.dumps(clean), pid))
-                self._db.execute("PRAGMA user_version=1")
+                self._db.execute("PRAGMA user_version=2")
+                self._db.commit()
+                self._db.execute("VACUUM")
+                self._db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
             self._db.commit()
 
     # ---- vectors ---------------------------------------------------------------------
@@ -297,6 +318,9 @@ class Store:
             return out
 
     def playbook_context(self, goal: str) -> str:
+        # Past requests are memory too: they go to the cloud model only with NEO_CLOUD_MEMORY=full.
+        if settings().cloud_memory != "full":
+            return ""
         pbs = self.similar_playbooks(goal)
         if not pbs:
             return ""

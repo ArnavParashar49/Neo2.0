@@ -11,15 +11,24 @@ a tool a model can call, so a web page or an email can't wipe anything.
 
 from __future__ import annotations
 
+import asyncio
 import shutil
 
 from neo.config import settings
 
+_generation = 0  # bumped by every erase: work that started before it must not write afterwards
+
+
+def generation() -> int:
+    return _generation
+
 
 async def forget_everything() -> dict[str, int]:
+    global _generation
     from neo.memory.store import store
     from neo.reflex import finetune, learn
 
+    _generation += 1
     s = settings()
     counts = store().forget_all()
     counts["learned requests"] = learn.forget_examples()
@@ -39,4 +48,18 @@ async def forget_everything() -> dict[str, int]:
     except Exception:  # noqa: BLE001 — not open
         pass
     shutil.rmtree(s.data_dir / "browser", ignore_errors=True)
+    if learn._training:
+        # A retrain in flight notices the erase before it saves anything; if it was already
+        # saving, remove what it wrote once it's done.
+        asyncio.get_running_loop().create_task(_unlink_cache_after_retrain())
     return counts
+
+
+async def _unlink_cache_after_retrain(limit_s: float = 1800.0) -> None:
+    from neo.reflex import finetune, learn
+
+    waited = 0.0
+    while learn._training and waited < limit_s:
+        await asyncio.sleep(2.0)
+        waited += 2.0
+    finetune.feature_cache().unlink(missing_ok=True)

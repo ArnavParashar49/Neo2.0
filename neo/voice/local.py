@@ -55,8 +55,13 @@ class LocalVoice:
     # ---- lifecycle -------------------------------------------------------------------
     async def start(self) -> None:
         await asyncio.to_thread(self._load_models)
-        self.mic.start()
-        self.spk.start()
+        try:
+            self.mic.start()
+            self.spk.start()
+        except Exception:
+            self.mic.stop()  # never leave the microphone open behind a voice that didn't start
+            self.spk.close()
+            raise
         self._loop_task = asyncio.create_task(self._loop())
 
     def _load_models(self) -> None:
@@ -111,8 +116,8 @@ class LocalVoice:
             self._handler.cancel()
 
     async def speak(self, text: str) -> None:
-        if not text.strip() or self._tts is None:
-            return
+        if not text.strip() or self._tts is None or getattr(self.spk, "_closed", False):
+            return  # a closed voice (being replaced) must never leave a reply waiting forever
         self._speaking = True
         await bus().set_state(NeoState.SPEAKING)
         try:

@@ -261,8 +261,11 @@ def defaults() -> argparse.Namespace:
     return _parser().parse_args([])
 
 
-def train(args: argparse.Namespace, *, agent=None, lock=None) -> dict:
+def train(args: argparse.Namespace, *, agent=None, lock=None, cancelled=None) -> dict:
     """Build the data, fill the feature cache, fit every head, save if it doesn't regress.
+
+    `cancelled()` true (the user erased NEO's memory while this ran): nothing is written — the
+    features and the head were computed from sentences that must no longer exist.
 
     `agent`/`lock`: reuse a Laya instance that is already loaded (the running core) instead of
     loading a second copy; every call into it holds `lock` (MPS is not thread-safe)."""
@@ -331,6 +334,8 @@ def train(args: argparse.Namespace, *, agent=None, lock=None) -> dict:
     stale = len(emb_by) + len(teach_by)
     emb_by = {t: e for t, e in emb_by.items() if t in live}
     teach_by = {t: v for t, v in teach_by.items() if t in live}
+    if cancelled and cancelled():
+        return {"saved": False, "cancelled": True, "intent": 0.0}
     if need_emb or need_teach or stale != len(emb_by) + len(teach_by):
         save_cache(emb_by, teach_by)
     blocks = {
@@ -440,6 +445,8 @@ def train(args: argparse.Namespace, *, agent=None, lock=None) -> dict:
         return report
     if head_path.exists():
         head_path.with_suffix(".prev.json").write_text(head_path.read_text())  # one step of undo
+    if cancelled and cancelled():
+        return {**report, "saved": False, "cancelled": True}
     report["saved"] = True
     tmp = head_path.with_suffix(".tmp")  # written whole, then swapped in: never a torn head
     tmp.write_text(
@@ -470,8 +477,6 @@ def train(args: argparse.Namespace, *, agent=None, lock=None) -> dict:
     return report
 
 
-if __name__ == "__main__":
-    main()
 
 
 # ---- the per-text feature cache -------------------------------------------------------------------
@@ -528,3 +533,7 @@ def drop_from_cache(texts: set[str]) -> int:
     teach_by = {t: v for t, v in teach_by.items() if t not in texts}
     save_cache(emb_by, teach_by)
     return before - len(emb_by)
+
+
+if __name__ == "__main__":
+    main()

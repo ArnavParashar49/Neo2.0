@@ -57,3 +57,20 @@ def report(key: str, message: str | None) -> None:
         asyncio.get_running_loop().create_task(bus().publish("problems", items=problems()))
     except RuntimeError:
         pass
+
+
+async def watch(every_s: float = 10.0) -> None:
+    """Re-check now and then: permissions granted in System Settings, a key added to the settings
+    file — the overlay's problem list follows without a restart."""
+    from neo.events import bus
+
+    last: list[str] | None = None
+    while True:
+        try:
+            items = await asyncio.to_thread(problems)
+            if last is not None and items != last:
+                await bus().publish("problems", items=items)
+            last = items
+        except Exception as e:  # noqa: BLE001
+            print(f"[health] check failed: {str(e)[:80]}")
+        await asyncio.sleep(every_s)

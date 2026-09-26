@@ -59,6 +59,18 @@ class Settings(BaseSettings):
     # How much of NEO's memory rides along to the cloud models: full | profile | off
     cloud_memory: Literal["full", "profile", "off"] = "full"
 
+    @field_validator("cloud_memory", mode="before")
+    @classmethod
+    def _cloud_memory(cls, v):
+        """Forgiving about how it's typed ("Off", "none", " profile "): a typo in the settings
+        file must never stop NEO from starting — and when unsure, share less."""
+        s = str(v or "full").strip().lower()
+        if s in ("full", "all", "on", "yes", "true"):
+            return "full"
+        if s in ("off", "none", "no", "false", "0", "nothing"):
+            return "off"
+        return "profile"
+
     # ---- voice -----------------------------------------------------------------------
     voice: VoiceBackend = "auto"  # auto = Live if key + quota, else local cascade
     wake_word: str = "hey neo"

@@ -18,11 +18,11 @@ def _p(props: dict, required: list[str] | None = None) -> dict:
     return {"type": "object", "properties": props, "required": required or []}
 
 
-def _dialog_text(els=None) -> str:
-    """The words in the front window (a sheet or alert says what its "OK" does)."""
+def _dialog_text(els=None, app: str = "") -> str:
+    """The words in the app's focused window (a sheet or alert says what its "OK" does)."""
     if els is None:
         try:
-            _, _, els = ax.window_elements()
+            _, _, els = ax.window_elements(app or None)
         except Exception:  # noqa: BLE001
             return ""
     return " ".join((e.value or e.title) for e in els if e.role in ("AXStaticText", "AXTextArea"))[:2000]
@@ -31,7 +31,7 @@ def _dialog_text(els=None) -> str:
 def _ask_before_click(tool_name: str, a: dict, label: str, app: str = "", els=None) -> str | None:
     """A button that sends, buys, deletes, grants or publishes is the user's call — and so is a
     plain "OK" / "Continue" in a dialog that says it deletes or sends something."""
-    context = _dialog_text(els) if policy._GENERIC_OK.match(label or "") else ""
+    context = _dialog_text(els, app) if policy._GENERIC_OK.match(label or "") else ""
     if not policy.commits(label, context):
         return None
     where = f" in {app}" if app else ""
@@ -154,7 +154,9 @@ async def apps_running(a: dict, c: ToolContext) -> str:
 )
 async def ax_press(a: dict, c: ToolContext) -> str:
     e = ax.get(a["id"])
-    if e and (gate := _ask_before_click("ax_press", a, e.title or e.value, ax.frontmost_app()[0])):
+    # The app that owns the element, not whatever is in front: clicking NEO's own card to
+    # approve brings NEO forward, and the question must stay the same.
+    if e and (gate := _ask_before_click("ax_press", a, e.title or e.value, ax.app_of(e.ref))):
         return gate
     return await asyncio.to_thread(ax.press, a["id"])
 
@@ -191,11 +193,12 @@ async def click(a: dict, c: ToolContext) -> str:
         if not e:
             return f"Error: unknown element {a['id']} — call ax_tree first."
         x, y = e.center
-        label = e.title or e.value
+        label, owner = e.title or e.value, ax.app_of(e.ref)
     else:
         x, y = a["x"], a["y"]
         label = await asyncio.to_thread(ax.label_at, x, y)
-    if gate := _ask_before_click("click", a, label, ax.frontmost_app()[0]):
+        owner = await asyncio.to_thread(ax.app_at, x, y)
+    if gate := _ask_before_click("click", a, label, owner):
         return gate
     return inp.click(x, y, button=a.get("button", "left"), count=int(a.get("count", 1)))
 
@@ -417,13 +420,13 @@ async def _guard_front(want: str = "") -> str | None:
     if goal and front.lower() != goal.lower():
         ok, real = await apps.bring_front(goal, wait=0.3)
         if not ok:
-            return (
-                f"NEEDS_USER: {real} isn't in front ({apps.front_name() or 'another app'} is), "
+            return confirm.ask_user(
+                f"{real} isn't in front ({apps.front_name() or 'another app'} is), "
                 f"so I didn't type or press anything — click {real} and say it again."
             )
         front = real
     if front.lower() in _NEVER_TYPE_INTO:
-        return "NEEDS_USER: click where you want me to type first."
+        return confirm.ask_user("click where you want me to type first.")
     return None
 
 
@@ -715,6 +718,7 @@ async def quit_app(a: dict, c: ToolContext) -> str:
     risk="destructive",
     category="apps",
     slow=True,
+    untrusted=True,  # file contents and app data it prints are content, never orders
 )
 async def applescript(a: dict, c: ToolContext) -> str:
     from neo.agent import confirm
@@ -928,6 +932,7 @@ async def finder_reveal(a: dict, c: ToolContext) -> str:
     risk="destructive",
     category="files",
     slow=True,
+    untrusted=True,  # file contents and app data it prints are content, never orders
 )
 async def shell_tool(a: dict, c: ToolContext) -> str:
     return await shell.run(a["command"], cwd=a.get("cwd"), timeout=float(a.get("timeout", 60)), args=a)

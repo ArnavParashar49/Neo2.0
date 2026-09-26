@@ -13,10 +13,20 @@ use tauri::{AppHandle, Emitter, Manager, RunEvent};
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
 fn show(app: &AppHandle) {
-    if let Some(w) = app.get_webview_window("main") {
-        let _ = w.show();
-        let _ = w.set_focus();
-        let _ = app.emit("neo://wake", ());
+    if reveal(app) {
+        let _ = app.emit("neo://wake", ()); // summoned: NEO starts listening
+    }
+}
+
+/// Just bring the window up — no listening (e.g. to show the Erase dialog).
+fn reveal(app: &AppHandle) -> bool {
+    match app.get_webview_window("main") {
+        Some(w) => {
+            let _ = w.show();
+            let _ = w.set_focus();
+            true
+        }
+        None => false,
     }
 }
 
@@ -140,8 +150,9 @@ pub fn run() {
                         }
                     }
                     "erase" => {
-                        // The overlay asks "Erase everything?" before anything is deleted.
-                        show(app);
+                        // The overlay asks "Erase everything?" before anything is deleted — without
+                        // opening the microphone while the user reads it.
+                        reveal(app);
                         let _ = app.emit("neo://erase", ());
                     }
                     "login" => {

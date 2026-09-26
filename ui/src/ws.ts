@@ -40,6 +40,7 @@ export function useNeo() {
   const [note, setNote] = useState<string>("");
   const [ask, setAsk] = useState<ConfirmCard | null>(null);
   const [problems, setProblems] = useState<string[]>([]);
+  const [erasedAt, setErasedAt] = useState(0); // bumps when the core confirms an erase
   const sock = useRef<WebSocket | null>(null);
   const noteTimer = useRef<number | undefined>(undefined);
 
@@ -61,6 +62,7 @@ export function useNeo() {
           break;
         case "erased":
           setItems([]);
+          setErasedAt(Date.now());
           break;
         case "confirm":
           setAsk(ev.data as ConfirmCard);
@@ -173,11 +175,14 @@ export function useNeo() {
     return () => { alive = false; if (timer) clearTimeout(timer); sock.current?.close(); };
   }, []);
 
-  const send = useCallback((cmd: Record<string, unknown>) => {
-    if (sock.current?.readyState === WebSocket.OPEN) sock.current.send(JSON.stringify(cmd));
+  /** Returns whether the command actually went out (the core may be restarting). */
+  const send = useCallback((cmd: Record<string, unknown>): boolean => {
+    if (sock.current?.readyState !== WebSocket.OPEN) return false;
+    sock.current.send(JSON.stringify(cmd));
+    return true;
   }, []);
 
   const clear = useCallback(() => setItems([]), []);
 
-  return { connected, state, items, error, note, ask, problems, send, clear };
+  return { connected, state, items, error, note, ask, problems, erasedAt, send, clear };
 }

@@ -114,6 +114,41 @@ def doctor() -> int:
     return 0 if ok else 1
 
 
+async def _erase_everything() -> dict:
+    """A running NEO keeps the conversation in memory and would write it back: ask it to erase
+    (over its token-protected socket). Only when none is running, wipe the files here."""
+    import json
+
+    import websockets
+
+    from neo.config import settings
+
+    s = settings()
+    token_file = s.data_dir / "ws-token"
+    token = token_file.read_text().strip() if token_file.exists() else ""
+    try:
+        async with websockets.connect(f"ws://{s.ws_host}:{s.ws_port}/?token={token}", open_timeout=3) as ws:
+            await ws.send(json.dumps({"cmd": "forget_all"}))
+            async with asyncio.timeout(60):
+                async for raw in ws:
+                    ev = json.loads(raw)
+                    if ev.get("type") == "erased":
+                        print("(NEO is running: it erased everything, including this session)")
+                        return ev.get("data", {}).get("counts", {})
+    except ConnectionRefusedError:
+        pass  # NEO isn't running: do it here
+    except (OSError, TimeoutError, websockets.exceptions.WebSocketException) as e:
+        # Something is listening but didn't erase: wiping the files underneath a running NEO
+        # would only have it write the conversation back.
+        raise SystemExit(
+            f"NEO is running but didn't confirm the erase ({str(e)[:80] or 'no answer'}). "
+            "Use the menu-bar icon → Erase NEO's Memory…, or quit NEO and run this again."
+        ) from e
+    from neo.privacy import forget_everything
+
+    return await forget_everything()
+
+
 def main() -> None:
     os.umask(0o077)  # everything NEO writes (memory, logs, learned examples) is private to this user
     ap = argparse.ArgumentParser(prog="neo")
@@ -128,12 +163,10 @@ def main() -> None:
     if args.doctor:
         sys.exit(doctor())
     if args.forget_all:
-        from neo.privacy import forget_everything
-
         if input("Erase NEO's memories, playbooks, history, learned requests, logs and browser logins? [y/N] ").strip().lower() != "y":
             print("Nothing erased.")
             return
-        counts = asyncio.run(forget_everything())
+        counts = asyncio.run(_erase_everything())
         print("Erased: " + ", ".join(f"{n} {k}" for k, n in counts.items()))
         return
     if args.local:
