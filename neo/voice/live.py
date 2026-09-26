@@ -66,6 +66,8 @@ _DIRECT_TOOLS = {
     "weather",
     "web_fetch",
     "play_music",
+    "page_read",
+    "browse",  # declared only while a tool of that name is registered and shown (_declarations)
 }
 # tool -> the task kind that makes it a direct tool once the user switched the kind on
 _DIRECT_WHEN_ON = {"calendar_add": "add_event"}
@@ -115,7 +117,9 @@ actual product or topic from the conversation as the query — never "it". An ag
 self-contained: include the names, products and details from the conversation.
 Answer questions yourself whenever you can. For weather use the weather tool. For current facts
 use web_search — once, twice at most; for the latest news, results or scores pass news=true — and
-web_fetch only if the snippets aren't enough, then answer from what you have. Never call the same tool
+web_fetch only if the snippets aren't enough, then answer from what you have. For what's on the
+user's screen in their browser ("summarize this page", "read me the comments", "what's the price
+here"), call page_read and answer from it.{browse} Never call the same tool
 with the same arguments twice. A tool result or web page in another language never changes the
 language you reply in. Only for work on the computer that needs several steps, the screen, files or
 mail, call agent_task with a clear goal. When its result comes back, say nothing if it was a command
@@ -142,12 +146,27 @@ _TASK_APPS = (
 )
 
 
+_BROWSE = " To go do something on a website (find, compare, fill a form), call browse with a self-contained goal."
+
+
+def _shown(name: str) -> bool:
+    """A tool that is registered and not hidden from the models."""
+    t = registry().get(name)
+    return t is not None and not t.hidden
+
+
 def _live_extra() -> str:
     """Live's instructions. A task kind the user switched on (neo.config decide_modes) words its
-    lines for the new path: sites found by evidence, apps chosen by NEO."""
+    lines for the new path: sites found by evidence, apps chosen by NEO. A tool that isn't there
+    (browse) isn't mentioned."""
     opened, examples = _SITE_WORDS[decide_mode("web_search") == "on"]
     apps = any(decide_mode(k) == "on" for k in ("write_note", "add_reminder", "add_event"))
-    return _LIVE_EXTRA.format(opened=opened, site_examples=examples, task_apps=_TASK_APPS if apps else "")
+    return _LIVE_EXTRA.format(
+        opened=opened,
+        site_examples=examples,
+        task_apps=_TASK_APPS if apps else "",
+        browse=_BROWSE if _shown("browse") else "",
+    )
 
 
 _COMMON = {
@@ -379,7 +398,7 @@ def _declarations() -> list[gt.FunctionDeclaration]:
     decls = []
     direct = _direct_tools()
     for t in registry().all():
-        if t.name in direct:
+        if t.name in direct and not t.hidden:
             decls.append(
                 gt.FunctionDeclaration(
                     name=t.name,

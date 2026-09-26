@@ -171,18 +171,125 @@ def test_clear_text_only_takes_back_neos_own_text(monkeypatch):
     assert axkit.clear_text(box, "running  late") and box.attrs["AXValue"] == ""
 
 
-def test_web_url_and_text_of_the_front_window(monkeypatch):
-    class Url:
-        def absoluteString(self):
-            return "https://example.test/search?q=x"
+class Url:
+    def absoluteString(self):
+        return "https://example.test/search?q=x"
 
-    area = El("AXWebArea", [El("AXStaticText", AXValue="Hello"), El("AXGroup", [El("AXStaticText", AXValue=" world ")])], AXURL=Url())
+
+def test_web_url_of_the_front_window(monkeypatch):
+    area = El("AXWebArea", [El("AXStaticText", AXValue="Hello")], AXURL=Url())
     win = El("AXWindow", [area])
     FakeAX(monkeypatch, El("AXApplication", [win], AXFocusedWindow=win))
     assert axkit.web_url(1) == "https://example.test/search?q=x"
-    assert axkit.web_text(1) == "Hello\nworld" and axkit.web_text(1, limit=3) == "Hel"
     FakeAX(monkeypatch, El("AXApplication", [El("AXWindow")], AXFocusedWindow=El("AXWindow")))
-    assert axkit.web_url(1) == "" and axkit.web_text(1) == ""
+    assert axkit.web_url(1) == "" and axkit.web_page(1) == ("", "", "")
+
+
+def T(text):
+    return El("AXStaticText", AXValue=text)
+
+
+def P(*kids, **attrs):
+    return El("AXGroup", list(kids), **attrs)
+
+
+STORY = "The river rose two metres overnight and the old bridge closed at dawn. " * 4
+
+
+def article_page():
+    banner = P(T("Daily Planet"), El("AXLink", [T("Sign in")]), AXSubrole="AXLandmarkBanner")
+    nav = P(El("AXLink", [T("World")]), El("AXLink", [T("Sport")]), AXSubrole="AXLandmarkNavigation")
+    cookie = P(T("We use cookies"), El("AXButton", [T("Accept")]), AXDOMClassList=["cookie-banner"])
+    main = P(
+        El("AXHeading", [T("Floods close the bridge")], AXValue=1),
+        P(T("By Lois Lane,"), T("reporting from the river")),
+        P(T("Read the"), El("AXLink", [T("full timeline")]), T(". Updated hourly.")),
+        P(T(STORY.strip())),
+        El("AXButton", [T("Share")]),
+        El("AXImage", AXDescription="The bridge at dawn"),
+        El("AXHeading", [T("Prices")], AXValue=2),
+        El("AXTable", [El("AXRow", [El("AXCell", [T("Sandbags")]), El("AXCell", [T("40 rupees")])])]),
+        P(T("Menu of the day: dal and rice"), AXDOMClassList=["menu", "nav"]),  # inside main: content
+        El("AXTextField", AXValue="search words"),
+        AXSubrole="AXLandmarkMain",
+    )
+    aside = P(T("Most read: a cat on a train"), AXSubrole="AXLandmarkComplementary")
+    after = P(El("AXHeading", [T("Comments (2)")], AXValue=2), P(T("Stay safe everyone")), P(T("The bridge was due for repair")))
+    footer = P(T("Copyright Daily Planet"), AXSubrole="AXLandmarkContentInfo")
+    return El("AXWebArea", [banner, nav, cookie, main, aside, after, footer], AXURL=Url(), AXTitle="Floods | Daily Planet")
+
+
+def page_app(monkeypatch, area):
+    win = El("AXWindow", [El("AXToolbar", [El("AXTextField", AXValue="example.test")]), area], AXTitle="Window title")
+    FakeAX(monkeypatch, El("AXApplication", [win], AXFocusedWindow=win))
+
+
+def test_a_page_is_read_main_content_first_without_the_sites_furniture(monkeypatch):
+    page_app(monkeypatch, article_page())
+    url, title, text = axkit.web_page(1)
+    assert url == "https://example.test/search?q=x" and title == "Floods | Daily Planet"
+    assert text == "\n".join([
+        "# Floods close the bridge",
+        "By Lois Lane, reporting from the river",  # a lower-case start carries the sentence on
+        "Read the full timeline. Updated hourly.",  # a link's words are part of their sentence
+        STORY.strip(),
+        "## Prices",
+        "Sandbags | 40 rupees",  # a table row's cells on one line
+        "Menu of the day: dal and rice",
+        "",
+        "[elsewhere on the page]",
+        "## Comments (2)",
+        "Stay safe everyone",
+        "The bridge was due for repair",
+        "Most read: a cat on a train",  # the sidebar last
+    ])
+    for gone in ("Daily Planet\n", "Sign in", "World", "cookies", "Accept", "Share", "search words", "Copyright", "bridge at dawn"):
+        assert gone not in text, gone
+
+
+def test_a_page_is_cut_at_a_line_and_a_page_without_landmarks_reads_in_order(monkeypatch):
+    page_app(monkeypatch, article_page())
+    text = axkit.web_page(1, limit=200)[2]
+    assert text.endswith("\n…") and len(text) <= 202 and text.startswith("# Floods close the bridge\nBy Lois Lane")
+    plain = El("AXWebArea", [
+        P(El("AXLink", [T("Home")]), El("AXLink", [T("About")]), AXDOMIdentifier="site-nav"),
+        El("AXHeading", [T("Recipes")]),  # no level: a second-level heading
+        P(T(STORY.strip())),
+        P(T("Sidebar words"), AXDOMClassList=["left-sidebar"]),
+    ])
+    page_app(monkeypatch, plain)
+    assert axkit.web_page(1)[1] == "Window title"  # the page has no title of its own
+    assert axkit.web_page(1)[2] == "## Recipes\n" + STORY.strip()
+
+
+def test_a_page_the_filters_would_empty_is_read_whole(monkeypatch):
+    """Everything sits in a container named like page furniture: the filters would leave nothing."""
+    area = El("AXWebArea", [P(P(T("Welcome to the tiny site of a village school, open since 1952.")), AXDOMClassList=["nav-wrap"])])
+    page_app(monkeypatch, area)
+    assert axkit.web_page(1)[2] == "Welcome to the tiny site of a village school, open since 1952."
+
+
+def test_a_web_editors_document_is_read_but_a_forms_field_is_not(monkeypatch):
+    doc = "Minutes of the meeting. We agreed to repaint the hall in June and to hire a new cook."
+    area = El("AXWebArea", [El("AXTextArea", AXValue=doc), El("AXTextArea", AXValue="my comment draft"),
+                            El("AXTextField", AXSubrole="AXSecureTextField", AXValue="hunter2")])
+    page_app(monkeypatch, area)
+    assert axkit.web_page(1)[2] == doc
+
+
+def test_reading_a_page_switches_a_chromium_apps_web_tree_on_and_back(monkeypatch):
+    app = El("AXApplication")
+    fake = FakeAX(monkeypatch, app)
+    assert axkit.enable_web_reading(app, "native") == [] and fake.sets == []
+    changed = axkit.enable_web_reading(app, "chromium")
+    assert changed == [("AXManualAccessibility", False), ("AXEnhancedUserInterface", False)]
+    axkit.restore_web_tree(app, changed)
+    assert app.attrs["AXManualAccessibility"] is False and app.attrs["AXEnhancedUserInterface"] is False
+    fake.sets.clear()
+    assert axkit.enable_web_reading(app, "electron") == [("AXManualAccessibility", False)]
+    app.attrs.update(AXManualAccessibility=False, AXEnhancedUserInterface=True)  # the user's VoiceOver
+    fake.sets.clear()
+    assert axkit.enable_web_reading(app, "chromium") == [] and fake.sets == []
 
 
 def test_dock_badge(monkeypatch):

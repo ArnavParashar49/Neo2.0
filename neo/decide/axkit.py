@@ -48,7 +48,6 @@ __all__ = [
     "web_area",
     "in_web",
     "web_url",
-    "web_text",
     "dock_badge",
 ]
 
@@ -386,7 +385,10 @@ def in_web(el: Any, max_depth: int = 60) -> bool:
 
 def web_url(pid: int) -> str:
     """The address of the page in the app's front window ('' if it shows none)."""
-    area = web_area(pid)
+    return _url_of(web_area(pid))
+
+
+def _url_of(area: Any) -> str:
     url = attr(area, "AXURL") if area is not None else None
     if url is None:
         return ""
@@ -394,20 +396,6 @@ def web_url(pid: int) -> str:
         return str(url.absoluteString())
     except AttributeError:
         return _s(url)
-
-
-def web_text(pid: int, limit: int = 8000) -> str:
-    """The visible text of the page in the app's front window, up to ``limit`` characters."""
-    area = web_area(pid)
-    parts: list[str] = []
-    size = 0
-    for el, _d, _p in _bfs(area, 20000, 120) if area is not None else ():
-        if _s(attr(el, "AXRole")) == "AXStaticText" and (t := _s(attr(el, "AXValue")).strip()):
-            parts.append(t)
-            size += len(t) + 1
-            if size >= limit:
-                break
-    return "\n".join(parts)[:limit]
 
 
 @pooled
@@ -433,6 +421,206 @@ def dock_badge(app_name: str) -> str | None:
         if _s(attr(el, "AXSubrole")) == "AXApplicationDockItem" and _s(attr(el, "AXTitle")).strip().casefold() == want:
             return _s(attr(el, "AXStatusLabel")) or None
     return None
+
+
+# ---- a whole page, read for the user (page_read) ------------------------------------------------------
+
+__all__ += ["enable_web_reading", "web_title", "page_text", "web_page"]
+
+# Controls say what can be done on a page, not what it says: their words are skipped. An image's
+# words are left to a screenshot (see neo.decide.kinds.site).
+_NOT_CONTENT = frozenset({
+    "AXButton", "AXPopUpButton", "AXMenuButton", "AXMenu", "AXMenuBar", "AXMenuItem", "AXToolbar", "AXTextField",
+    "AXSecureTextField", "AXSearchField", "AXComboBox", "AXCheckBox", "AXRadioButton", "AXSlider", "AXIncrementor",
+    "AXScrollBar", "AXDisclosureTriangle", "AXTabGroup", "AXImage",
+})  # fmt: skip
+# The landmarks every page of a site repeats: its header, navigation, footer and search box.
+_BOILERPLATE = frozenset({"AXLandmarkBanner", "AXLandmarkNavigation", "AXLandmarkContentInfo", "AXLandmarkSearch"})
+_MAIN = frozenset({"AXLandmarkMain", "AXDocumentArticle"})
+_ASIDE = frozenset({"AXLandmarkComplementary"})
+# The same parts on a page without landmarks, told by the class or id its authors gave them. Only
+# outside the main content: inside it, a word like these may be the content itself.
+_BOILER_WORDS = frozenset({
+    "nav", "navbar", "navigation", "footer", "sidebar", "cookie", "cookies", "consent", "breadcrumb",
+    "breadcrumbs", "newsletter", "advert", "advertisement", "ad", "ads",
+})  # fmt: skip
+_HINT_DEPTH = 30  # page furniture sits near the top of the tree: deeper containers aren't asked
+_EDITOR_MIN = 80  # an editable area this long is a document in a web editor, not a form's field
+_MAIN_MIN = 400  # a main landmark with less text than this isn't where the page's content is
+_THIN = 200  # a read this short after the filters is read again without them
+
+
+def enable_web_reading(app: Any, rt: str) -> list[tuple[str, bool]]:
+    """:func:`enable_web_tree` for reading a whole page. A Chromium-based app is given both
+    switches, AXManualAccessibility (which newer versions honour) and AXEnhancedUserInterface
+    (which older ones need); an Electron app the first, and the second only when that is refused.
+    A switch that is already on (the user's own assistive setup) is left alone. Returns what to
+    restore (:func:`restore_web_tree`)."""
+    if rt == "native":
+        return []
+    if attr(app, "AXEnhancedUserInterface") in (True, 1):
+        return []
+    changed: list[tuple[str, bool]] = []
+    for name in ("AXManualAccessibility", "AXEnhancedUserInterface"):
+        prev = attr(app, name)
+        if prev in (True, 1):
+            continue
+        if set_attr(app, name, True):
+            changed.append((name, bool(prev)))
+            if rt == "electron":
+                break
+    return changed
+
+
+def web_title(pid: int, area: Any = None) -> str:
+    """The title of the page in the app's front window (``area``, when already found): the web
+    area's own, else the window's."""
+    area = web_area(pid) if area is None else area
+    for el, name in ((area, "AXTitle"), (area, "AXDescription"), (window(app_el(pid)), "AXTitle")):
+        if el is not None and (t := " ".join(_s(attr(el, name)).split())):
+            return t
+    return ""
+
+
+def _boilerplate(el: Any) -> bool:
+    """The container's class names or id say it is page furniture (a navigation bar, a footer…)."""
+    names = attr(el, "AXDOMClassList")
+    try:
+        classes = [_s(n) for n in names] if names is not None and not isinstance(names, str) else []
+    except TypeError:
+        classes = []
+    words = " ".join([_s(attr(el, "AXDOMIdentifier")), *classes]).casefold()
+    return not _BOILER_WORDS.isdisjoint(re.split(r"[^a-z0-9]+", words))
+
+
+def _heading(el: Any) -> tuple[int, str]:
+    """(level 1-6, text) of a heading: its level is its AXValue; its words, its texts' or its label."""
+    v = attr(el, "AXValue")
+    level = v if isinstance(v, int) and not isinstance(v, bool) and 1 <= v <= 6 else 2
+    words = [
+        _s(attr(c, "AXValue"))
+        for c, _d, _p in _bfs(el, 200, 12)
+        if c is not el and _s(attr(c, "AXRole")) == "AXStaticText"
+    ]
+    text = " ".join(" ".join(words).split()) or " ".join((_s(attr(el, "AXTitle")) or _s(attr(el, "AXDescription"))).split())
+    return level, text
+
+
+def _pieces(area: Any, budget: int, max_nodes: int, filters: bool) -> list[tuple[str, int, int, str]]:
+    """The page's words in reading order (depth first): (where, block, cell, text) per text, where
+    is 'main' (a main landmark or an article), 'aside' (a complementary one) or 'body'. Texts of
+    one block (a paragraph, a list item, a table row: anything but a link) belong on one line;
+    ``cell`` tells a row's cells apart. A heading is one piece, its text marked with its level.
+    ``filters``: skip the site's header, navigation, footer and search, by landmark or by name."""
+    out: list[tuple[str, int, int, str]] = []
+    size = seq = n = 0
+    stack: list[tuple[Any, str, int, int, int]] = [(area, "body", 0, 0, 0)]
+    while stack and n < max_nodes and size < budget:
+        el, where, block, cell, depth = stack.pop()
+        n += 1
+        role = _s(attr(el, "AXRole"))
+        if role == "AXStaticText":
+            if t := " ".join(_s(attr(el, "AXValue")).split()):
+                out.append((where, block, cell, t))
+                size += len(t) + 1
+            continue
+        if role in _NOT_CONTENT:
+            continue
+        if role == "AXTextArea":
+            t = _s(attr(el, "AXValue")).strip()
+            if len(t) >= _EDITOR_MIN:
+                seq += 1
+                out.append((where, seq, 0, t))
+                size += len(t) + 1
+            continue
+        sub = _s(attr(el, "AXSubrole"))
+        if filters and (
+            sub in _BOILERPLATE
+            or (where != "main" and depth <= _HINT_DEPTH and role in ("AXGroup", "AXList") and _boilerplate(el))
+        ):
+            continue
+        if sub in _MAIN:
+            where = "main"
+        elif sub in _ASIDE and where != "main":
+            where = "aside"
+        if role == "AXHeading":
+            level, t = _heading(el)
+            if t:
+                seq += 1
+                out.append((where, seq, 0, "#" * level + " " + t))
+                size += len(t) + level + 2
+            continue
+        seq += 1
+        if role == "AXCell":
+            cell = seq  # the row stays the block: its cells share a line
+        elif role != "AXLink":  # a link's words are part of the sentence around it
+            block, cell = seq, 0
+        if depth < 150:
+            kids = list(attr(el, "AXChildren") or [])
+            stack.extend((k, where, block, cell, depth + 1) for k in reversed(kids))
+    return out
+
+
+_CLOSERS = tuple(",.;:!?)]}%»”’")
+
+
+def _joins(prev: str, text: str) -> bool:
+    """Does ``text`` carry on the sentence ``prev`` left open (words an inline element, a bold
+    word say, split off)? A text that starts in lower case or with closing punctuation does."""
+    return not prev.startswith("#") and not prev.endswith((".", "!", "?", ":")) and (
+        text[0].islower() or text.startswith(_CLOSERS)
+    )
+
+
+def _lines(pieces: list[tuple[str, int, int, str]]) -> list[str]:
+    """One line per block, its texts joined; a table row's cells joined with ' | '."""
+    lines: list[str] = []
+    last: tuple[int, int] | None = None
+    for _w, block, cell, text in pieces:
+        if lines and last is not None and last[0] == block and cell and last[1] and cell != last[1]:
+            lines[-1] += " | " + text
+        elif lines and ((last is not None and last[0] == block) or _joins(lines[-1], text)):
+            lines[-1] += ("" if text.startswith(_CLOSERS) else " ") + text
+        elif not lines or lines[-1] != text:  # a text repeated right after itself is said once
+            lines.append(text)
+        last = (block, cell)
+    return lines
+
+
+def _compose(pieces: list[tuple[str, int, int, str]], limit: int) -> str:
+    """The main content first, then the rest of the page (a sidebar last), cut at ``limit``."""
+    main = _lines([p for p in pieces if p[0] == "main"])
+    if sum(len(x) for x in main) >= _MAIN_MIN:
+        rest = _lines([p for p in pieces if p[0] == "body"]) + _lines([p for p in pieces if p[0] == "aside"])
+        text = "\n".join(main) + ("\n\n[elsewhere on the page]\n" + "\n".join(rest) if rest else "")
+    else:
+        text = "\n".join(_lines([p for p in pieces if p[0] != "aside"]) + _lines([p for p in pieces if p[0] == "aside"]))
+    if len(text) <= limit:
+        return text
+    cut = text.rfind("\n", 0, limit)
+    return text[: cut if cut > limit // 2 else limit].rstrip() + "\n…"
+
+
+def page_text(area: Any, limit: int = 8000, max_nodes: int = 6000) -> str:
+    """What a page says, for a person: headings (marked '#', '##'…) and the main content first,
+    each paragraph on a line, without the site's header, navigation, footer, search box or
+    controls where the tree tells them apart, cut at ``limit`` characters. A page those filters
+    leave (nearly) empty is read again without them."""
+    if area is None:
+        return ""
+    text = _compose(_pieces(area, limit * 3, max_nodes, True), limit)
+    if len(text) < _THIN:
+        whole = _compose(_pieces(area, limit * 3, max_nodes, False), limit)
+        text = whole if len(whole) > len(text) else text
+    return text
+
+
+def web_page(pid: int, limit: int = 8000) -> tuple[str, str, str]:
+    """(address, title, text) of the page in the app's front window (see :func:`page_text`)."""
+    area = web_area(pid)
+    if area is None:
+        return "", "", ""
+    return _url_of(area), web_title(pid, area), page_text(area, limit)
 
 
 # ---- a new note or document through the window (write_note) ------------------------------------------

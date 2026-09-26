@@ -55,3 +55,27 @@ def capture(region: tuple[int, int, int, int] | None = None) -> tuple[ImagePart,
     buf = io.BytesIO()
     img.save(buf, format="PNG", optimize=True)
     return ImagePart(buf.getvalue(), "image/png"), points_per_px
+
+
+def capture_window(window_id: int) -> ImagePart:
+    """A png of one window (its own pixels, even where another window covers it; no shadow),
+    at most ``_MAX_W`` wide. For looking at it, not for clicking: no coordinates come with it."""
+    if not can_capture():
+        Q.CGRequestScreenCaptureAccess()
+        raise PermissionError(
+            "Screen Recording permission is off. Enable it for this app in System Settings → "
+            "Privacy & Security → Screen Recording, then try again."
+        )
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+        path = Path(f.name)
+    try:
+        cmd = ["screencapture", "-x", "-o", "-t", "png", "-l", str(int(window_id)), str(path)]
+        subprocess.run(cmd, check=True, timeout=10)
+        img = Image.open(path).convert("RGB")
+    finally:
+        path.unlink(missing_ok=True)
+    if img.width > _MAX_W:
+        img = img.resize((_MAX_W, round(img.height * _MAX_W / img.width)), Image.LANCZOS)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG", optimize=True)
+    return ImagePart(buf.getvalue(), "image/png")
