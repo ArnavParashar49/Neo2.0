@@ -120,6 +120,10 @@ class Settings(BaseSettings):
     decide_modes: Annotated[dict[str, DecideMode], NoDecode] = {}
     decide_kind_routing: bool = False  # Laya may name a task kind no fast path covered (after its eval)
     notes_dir: Path = Path.home() / "Documents" / "NEO Notes"  # a note no notes app could take
+    # "play …": "web" plays it in the browser (on play_site) unless the user names an app ("on
+    # Spotify"); "apps" lets NEO pick among the players on this Mac first. The user's choice.
+    play_default: Literal["web", "apps"] = "web"
+    play_site: str = "youtube"  # the site word the web prefers ("" = whichever video site the search finds)
 
     @field_validator("decide_modes", mode="before")
     @classmethod
