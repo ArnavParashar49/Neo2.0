@@ -58,10 +58,10 @@ class App:
         if reply is None:
             await bus().note("That question had already expired — nothing was done.")
             return
-        if self.voice and reply.text:
+        if self.voice and reply.text and not reply.silent:  # approved and done: nothing to say
             if hasattr(self.voice, "inform"):
-                await self.voice.inform(reply.text)  # Live says how it went, in the user's language
-            elif not reply.silent:
+                await self.voice.inform(reply.text)  # Live says what went wrong, in the user's language
+            else:
                 await self.voice.speak(reply.text)
 
     async def on_command(self, cmd: dict[str, Any]) -> None:

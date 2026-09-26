@@ -163,6 +163,13 @@ class Session:
 
         return await self._agent(text, d, images, job)
 
+    async def command(self, text: str, steps: list[tuple[str, dict]]) -> Reply:
+        """Run a command the fast paths fully cover — no model, no reflex round-trip (the voice
+        layer calls this the moment the user finishes a sentence). Anything that fails is handed
+        to the agent, exactly like a typed command."""
+        job = f"j{next(_job_ids)}"
+        return await self._quick(text, None, steps, job=job)
+
     async def cancel_all(self) -> int:
         """Stop every running job (the user said stop) and drop any unanswered question."""
         n = 0
@@ -409,7 +416,7 @@ class Session:
                 await bus().say("Cancelled.", final=True, job=job)
                 await self._clear_confirming()
                 await bus().end_job(job)
-                return Reply("Cancelled.", "confirm", job=job)
+                return Reply("Cancelled.", "confirm", job=job, silent=True)  # the card closing says it
             if self._pending_action and p.action_id != self._pending_action and not action_id:
                 # Something else was staged after the question the user heard: don't guess.
                 confirm.cancel("mismatch")
@@ -434,7 +441,8 @@ class Session:
             msg = out.text if out.ok else f"That didn't work: {out.text}"
             await bus().say(msg[:600], final=True, job=job)
             await bus().end_job(job)
-            return Reply(msg, "confirm", job=job)
+            # Done as approved: nothing to say. Only a failure is worth hearing.
+            return Reply(msg, "confirm", job=job, silent=out.ok and not out.text.startswith("NEEDS_"))
         # Let the agent see the outcome and finish whatever it was doing.
         t = registry().get(tool)
         result = fence(tool, out.text[:800]) if t and t.untrusted and out.ok else out.text[:800]
@@ -448,10 +456,13 @@ class Session:
         if res.stopped == "needs_confirm" and self._stage_pending(res, ctx.taint):
             await bus().say(res.question, final=True, job=job)
             return Reply(res.question, "confirm", None, res, job=job)
-        # The user just said yes to something consequential: always tell them how it went.
+        # Shown in the overlay either way; spoken only if it didn't go as approved.
         await bus().say(res.text, final=True, job=job)
         await bus().end_job(job)
-        return Reply(res.text, "agent", None, res, job=job)
+        done = res.stopped == "done" and not res.question and all(st.ok for st in res.steps)
+        failed_words = ("couldn't", "could not", "can't", "cannot", "unable", "error", "failed", "didn't")
+        silent = out.ok and done and not any(w in res.text.lower() for w in failed_words)
+        return Reply(res.text, "agent", None, res, job=job, silent=silent)
 
     async def _expire_confirm(self, action_id: str) -> None:
         """If nobody answers, the question lapses and the orb stops asking."""
