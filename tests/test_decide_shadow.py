@@ -103,6 +103,29 @@ def test_nothing_is_logged_from_a_dry_run_that_outlived_an_erase_and_the_erase_d
     assert asyncio.run(privacy.forget_everything())["task dry runs"] == 1 and not shadow.path().exists()
 
 
+def test_a_dry_run_asks_laya_only_while_its_model_is_loaded(shadow_runs, monkeypatch):
+    """Nobody waits for a dry run: it never loads the zero-shot model (1.7 GB, under the Laya lock
+    the next utterance's reflex waits on)."""
+    from neo.decide import engine
+    from neo.reflex import zeroshot
+
+    asked = []
+    monkeypatch.setattr(zeroshot, "ask", lambda state, q, wait_s, stale=None: asked.append(state))
+    monkeypatch.setattr(zeroshot, "available", lambda: True)  # downloaded: a question would load it
+
+    async def facts():
+        can = engine._zero_shot_can_answer()
+        return {"can": can, "answered": await engine._ask_laya({"request": "x"}, {}) is not None}
+
+    monkeypatch.setattr(zeroshot, "_agent", None)
+    _later("add_event", facts())
+    assert asked == [] and _lines()[0] == {**_lines()[0], "can": False, "laya": False}
+    assert engine._zero_shot_can_answer()  # the request itself still may load it
+    monkeypatch.setattr(zeroshot, "_agent", object())  # loaded: a question costs no load
+    _later("add_event", facts())
+    assert asked == [{"request": "x"}] and _lines()[1]["can"] is True and "laya" not in _lines()[1]
+
+
 def test_in_tests_a_dry_run_never_starts_unless_asked_for():
     ran = []
 

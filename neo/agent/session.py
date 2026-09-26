@@ -303,7 +303,9 @@ class Session:
                 out = await registry().invoke(tool, args, ctx)
                 await bus().tool_end(tool, out.ok, out.text, job=job)
                 outcomes.step(job, tool, out.ok, halt=out.halt)
-                if not out.ok:  # e.g. weather for "the forecast for Q3 sales": the agent can do better
+                # e.g. weather for "the forecast for Q3 sales": the agent can do better. Never NEO's
+                # own question to the user: that is the user's to answer, not a model's.
+                if not out.ok and not out.halt:
                     print(f"  ~ {tool} failed; handing to the agent")
                     ran = "; ".join(f"{tl}({', '.join(f'{k}={v!r}' for k, v in a.items())})" for tl, a in steps[:i])
                     note = f"\n[ALREADY DONE] These steps of the request already ran — don't repeat them: {ran}" if ran else ""

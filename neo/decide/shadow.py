@@ -6,7 +6,8 @@ goes to ``data_dir/decide_shadow.log`` (0600): the kind and facts that are app k
 names, ids, counts and booleans. Never a title, a name, a query or a message: the drivers' dry runs
 report none, and a value that isn't a plain str/number/bool is dropped here. Lines older than 30
 days go on each write; the privacy erase deletes the file; a dry run that ends after an erase
-writes nothing.
+writes nothing. A dry run asks Laya only while its model is loaded (``engine.dry_run``); a line
+with ``"laya": false`` is a choice the prior made alone.
 """
 
 from __future__ import annotations
@@ -73,7 +74,11 @@ def later(kind: str, facts: Awaitable[Mapping[str, Any]], **extra: Any) -> None:
     started = privacy.generation()
 
     async def go() -> None:
+        from neo.decide import engine
+
         run.begin_request()  # anything the dry run would learn is dropped after an erase, too
+        went_without: dict[str, bool] = {}
+        engine.dry_run.set(went_without)  # Laya only if it is loaded already (see engine.dry_run)
         try:
             got = dict(await asyncio.wait_for(facts, TIMEOUT_S))
         except TimeoutError:
@@ -83,7 +88,7 @@ def later(kind: str, facts: Awaitable[Mapping[str, Any]], **extra: Any) -> None:
         if privacy.generation() != started:
             return
         try:
-            record(kind, {**got, **extra})
+            record(kind, {**got, **went_without, **extra})
         except OSError as e:
             print(f"[decide] shadow log for {kind} not written ({str(e)[:60]})")
 

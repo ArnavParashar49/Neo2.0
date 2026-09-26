@@ -276,8 +276,11 @@ def save_event(spec: EventSpec) -> Receipt:
     eid = str(ev.eventIdentifier() or "")
     verified = False
     if status("event") == "full" and eid:
-        got = s.eventWithIdentifier_(eid)
-        verified = got is not None and str(got.title()) == spec.title and _py(got.startDate()) == _py(ev.startDate())
+        try:
+            got = s.eventWithIdentifier_(eid)
+            verified = got is not None and str(got.title()) == spec.title and _py(got.startDate()) == _py(ev.startDate())
+        except Exception as e:  # noqa: BLE001 - it is saved; only the check failed: unverified
+            print(f"[eventkit] reading the new event back failed ({type(e).__name__})")
     return Receipt(eid, str(cal.calendarIdentifier()) if cal is not None else "", verified)
 
 
@@ -318,8 +321,11 @@ def save_reminder(spec: ReminderSpec) -> Receipt:
     rid = str(r.calendarItemIdentifier() or "")
     verified = False
     if status("reminder") == "full" and rid:
-        got = s.calendarItemWithIdentifier_(rid)
-        verified = got is not None and str(got.title()) == spec.title
+        try:
+            got = s.calendarItemWithIdentifier_(rid)
+            verified = got is not None and str(got.title()) == spec.title
+        except Exception as e:  # noqa: BLE001 - it is saved; only the check failed: unverified
+            print(f"[eventkit] reading the new reminder back failed ({type(e).__name__})")
     return Receipt(rid, str(lst.calendarIdentifier()) if lst is not None else "", verified)
 
 

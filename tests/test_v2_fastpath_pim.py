@@ -115,6 +115,12 @@ TO_A_MODEL = [
     "search 2tb ssd on shopkart",  # a site word NEO hasn't landed on yet
     "search news on apple",  # about apple, or on a site?
     "search milk in notes",  # an app on this Mac
+    # "<app> mein <site>", "<site> pe <x>": more than a target to open ("open X in Y" goes there too)
+    "webby mein shopkart kholo",
+    "notes mein naya note kholo",
+    "shopkart pe deals kholo",
+    "mera naya document kholo",
+    "open shopkart in webby",
 ]
 
 

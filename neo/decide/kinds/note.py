@@ -96,10 +96,17 @@ def _req(fields: dict, said: str) -> Req:
     text = _without(said, body, title) or "save a note"
     if named and named.casefold() not in text.casefold():
         text = f"{text} in {named}"
-    digest = hashlib.sha256("\0".join((title, body, folder, named)).encode()).hexdigest()[:16]
-    return Req(
-        KIND, {"title": title, "body": body, "folder": folder}, text, named=named, sig=("note", digest)
-    )
+    parsed = {"title": title, "body": body, "folder": folder}
+    return Req(KIND, parsed, text, named=named, sig=_sig(title, body, folder, named))
+
+
+def _sig(title: str, body: str, folder: str, named: str) -> tuple:
+    """What makes two notes the same one: the words of the title it gets (its first words when
+    none is given) and of its body, case and punctuation aside, and where it goes. A model that
+    retries "note: buy milk" as title "Buy milk", body "buy milk." asks for the same note."""
+    first = title or " ".join(body.split()[:TITLE_WORDS])
+    words = (" ".join(k for w in s.split() if (k := _key(w))) for s in (first, body or title, folder, named))
+    return ("note", hashlib.sha256("\0".join(words).encode()).hexdigest()[:16])
 
 
 def _parts(req: Req) -> tuple[str, str, bool]:

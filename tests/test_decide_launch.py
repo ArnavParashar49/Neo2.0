@@ -215,14 +215,21 @@ def test_urls_and_paths_open_as_given(monkeypatch, target, how, url):
 @pytest.mark.parametrize(
     "target, url",
     [
-        ("192.168.1.1", "https://192.168.1.1"),
-        ("192.168.1.1/admin", "https://192.168.1.1/admin"),
-        ("127.0.0.1:8000", "https://127.0.0.1:8000"),
-        ("localhost:3000/app", "https://localhost:3000/app"),
-        ("localhost", "https://localhost"),
-        ("docs.example.org:8443", "https://docs.example.org:8443"),  # the port kept
+        # this Mac and the local network: http (a dev server or a router rarely serves https)
+        ("192.168.1.1", "http://192.168.1.1"),
+        ("192.168.1.1/admin", "http://192.168.1.1/admin"),
+        ("127.0.0.1:8000", "http://127.0.0.1:8000"),
+        ("localhost:3000/app", "http://localhost:3000/app"),
+        ("localhost", "http://localhost"),
+        ("nas:5000", "http://nas:5000"),
+        ("printer.local:631/jobs", "http://printer.local:631/jobs"),
+        ("::1", "http://[::1]"),
+        ("fe80::1", "http://[fe80::1]"),
+        ("100.64.0.7:8080", "http://100.64.0.7:8080"),  # a VPN's shared range
+        # anything else: https, the port kept
+        ("docs.example.org:8443", "https://docs.example.org:8443"),
         ("docs.example.org:8443/guide", "https://docs.example.org:8443/guide"),
-        ("::1", "https://[::1]"),
+        ("1.2.3.4", "https://1.2.3.4"),
     ],
 )
 def test_a_network_address_opens_as_given_and_is_never_looked_up(monkeypatch, target, url):
@@ -259,6 +266,10 @@ def test_shadow_opens_nothing_and_compares_with_legacy(monkeypatch):
         launch.shadow("shopkart", "No app called 'shopkart'; opened https://m.shopkart.in in Webby")
     )
     assert got["agrees"] is True
+    # a domain: legacy opens https://<words> and names only the words (and where it went)
+    for said in ("Opened shopkart.in in Webby", "Opened shopkart.in in Webby (it may be behind Notebook)"):
+        assert asyncio.run(launch.shadow("shopkart.in", said)) == {"how": "site", "key": "shopkart.in", "agrees": True}
+    assert asyncio.run(launch.shadow("shopkart.in", "Error: couldn't open 'shopkart.in': no"))["agrees"] is False
     assert asyncio.run(launch.shadow("notebook", "Opened Notebook")) == {
         "how": "app",
         "key": "test.notebook",

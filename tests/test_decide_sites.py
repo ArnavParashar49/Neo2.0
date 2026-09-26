@@ -192,6 +192,22 @@ def test_opensearch_relative_href_and_optional_params_dropped(monkeypatch):
     assert discover() == [sites.Template("https://shop.example.in/s?k={searchTerms}", "opensearch")]
 
 
+def test_the_page_is_parsed_off_the_event_loop(monkeypatch):
+    import threading
+
+    parsed_on: list[bool] = []
+    real = sites._read_page
+
+    def read_page(page, host):
+        parsed_on.append(threading.current_thread() is threading.main_thread())
+        return real(page, host)
+
+    monkeypatch.setattr(sites, "_read_page", read_page)
+    serve(monkeypatch, {f"https://{HOST}/": home(body='<form action="/p"><input type="search" name="w"></form>')})
+    assert discover() == [sites.Template("https://shop.example.in/p?w={searchTerms}", "site_form")]
+    assert parsed_on == [False]  # the loop (Live's audio runs on it) never parses up to MAX_PAGE of HTML
+
+
 def test_opensearch_off_domain_dtd_or_extra_params_are_refused(monkeypatch):
     serve(monkeypatch, {
         f"https://{HOST}/": home('<link rel="search" type="application/opensearchdescription+xml" href="https://evil.example/osd.xml">'),

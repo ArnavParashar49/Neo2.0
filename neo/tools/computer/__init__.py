@@ -580,7 +580,9 @@ async def hotkey(a: dict, c: ToolContext) -> str:
         last = _reg().last
         if not last or last[0] not in _INPUT_TOOLS or time.time() - last[1] > _UNDO_WINDOW_S:
             return "Error: undo what? I haven't typed anything just now."
-    if want == "note":
+    # only "new note" while write_note is on: any other call naming "note" (a model's, a playbook
+    # saved before a rollback) presses its own keys, as legacy does
+    if want == "note" and _chord(keys) == {"cmd", "n"} and decide_mode("write_note") == "on":
         return await _new_note(c)
     specific = want not in ("", "browser", "browser|finder", "document", "tabs")
     if err := await _guard_front(want if specific else ""):
@@ -725,8 +727,9 @@ async def click_text(a: dict, c: ToolContext) -> str:
             r"(?P<target>[\w.+-]+(?:\s+[\w.+-]+){0,2})[\s.!]*$",
             {"target": "<target>"},
         ),
-        (  # "safari kholo", "mera mail khol do"
+        (  # "<app> kholo", "mera mail khol do"; like the English one, never "<app> mein <site>"
             r"^\s*(?:(?:mera|meri|mere)\s+)?(?!(?:ye|yeh|isko|usko|woh|wo)\b)"
+            r"(?!.*\b(?:mein|me|pe|par|se|ka|ki|ke|aur|phir|wala|wali|naya|nayi|naye)\b)"
             r"(?P<target>[\w.+-]+(?:\s+[\w.+-]+){0,2}?)\s+(?:kholo|khol\s+do|khol\s+dijiye)\s*[.!।]*\s*$",
             {"target": "<target>"},
             lambda f: decide_mode("open_app") == "on",

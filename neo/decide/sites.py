@@ -450,26 +450,23 @@ def learned_template(host: str, prefix: str = "") -> Template | None:
     return Template(url, "learned") if _one_slot(url) else None
 
 
-async def discover(host: str, prefix: str = "") -> list[Template]:
-    """What the site publishes about its search, best first: OpenSearch, JSON-LD, a search form
-    (for a section, only those inside it). Reads the site's page: :func:`learned_template` first."""
+def _read_page(page: _Page, host: str) -> tuple[list[str], list[Template]]:
+    """(the site's OpenSearch description URLs, the templates the page itself holds: JSON-LD, a
+    search form). Parsing up to MAX_PAGE of HTML takes tens of ms: called off the event loop."""
     from lxml import etree, html
 
-    out: list[Template] = []
-    page = await _fetch(f"https://{host}{prefix}/")
-    if page is None or not page.text.strip():
-        return out
     try:
         doc = html.fromstring(page.text)
     except (etree.LxmlError, ValueError, TypeError):  # a page with no elements ("Document is empty")
-        return out
+        return [], []
+    osd: list[str] = []
     for link in doc.iter("link"):
         rel = (link.get("rel") or "").lower().split()
         if "search" in rel and (link.get("type") or "").lower() == "application/opensearchdescription+xml":
             osd_url = urljoin(page.url, link.get("href") or "")
-            if _same_site(osd_url, host) and (osd := await _fetch(osd_url, MAX_OSD)) and (t := _from_osd(osd.text, host)):
-                out.append(Template(t, "opensearch"))
-                break
+            if _same_site(osd_url, host):
+                osd.append(osd_url)
+    found: list[Template] = []
     for script in doc.iter("script"):
         if (script.get("type") or "").lower() != "application/ld+json":
             continue
@@ -478,10 +475,26 @@ async def discover(host: str, prefix: str = "") -> list[Template]:
         except (ValueError, RecursionError):  # not JSON, or nested too deep to read
             continue
         if t:
-            out.append(Template(t, "jsonld"))
+            found.append(Template(t, "jsonld"))
             break
     if t := _search_form(page, doc, host):
-        out.append(Template(t, "site_form"))
+        found.append(Template(t, "site_form"))
+    return osd, found
+
+
+async def discover(host: str, prefix: str = "") -> list[Template]:
+    """What the site publishes about its search, best first: OpenSearch, JSON-LD, a search form
+    (for a section, only those inside it). Reads the site's page: :func:`learned_template` first."""
+    out: list[Template] = []
+    page = await _fetch(f"https://{host}{prefix}/")
+    if page is None or not page.text.strip():
+        return out
+    osd_urls, found = await asyncio.to_thread(_read_page, page, host)
+    for osd_url in osd_urls:
+        if (osd := await _fetch(osd_url, MAX_OSD)) and (t := await asyncio.to_thread(_from_osd, osd.text, host)):
+            out.append(Template(t, "opensearch"))
+            break
+    out += found
     unique: dict[str, Template] = {}
     for t in out:
         if _under(t.url, prefix):  # a section's page may offer the whole site's search

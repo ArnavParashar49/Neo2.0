@@ -699,6 +699,17 @@ def test_a_note_that_may_have_been_made_is_not_made_again(world):
     assert len(world.osa.of("make")) == 2
 
 
+def test_a_models_retry_with_its_own_title_is_the_same_note(world):
+    """The fast path passes no title; a model retrying it names the note by its words."""
+    world.chosen += [cand(NOTEBOOK, "script_make"), cand(None, "file")]
+    world.osa.answers.update(make=(124, "", "timed out after 8s"), search=(0, "OK", ""))
+    first = asyncio.run(note.write({"title": "", "body": "buy milk"}, "make a note saying buy milk"))
+    assert first.unsure and run.to_output(first).ok  # said, and nobody should try it again
+    again = asyncio.run(note.write({"title": "Buy milk", "body": "Buy milk."}))
+    assert again.unsure and again.text == first.text and len(world.osa.of("make")) == 1
+    assert not config.settings().notes_dir.exists()
+
+
 def test_a_shadow_preview_touches_no_app(world):
     world.chosen += [cand(JOTTER, "ax_new"), cand(None, "file")]
     facts = asyncio.run(note.preview({"body": "milk"}))

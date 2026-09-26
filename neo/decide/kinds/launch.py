@@ -108,18 +108,31 @@ async def _used_app(kind: str, text: str, apps: list[App]) -> App | None:
     )
 
 
+def _local(host: str) -> bool:
+    """This Mac or a network of the user's: an IP that isn't a public one (loopback, private,
+    link-local, a VPN's shared range), "localhost", a machine's name (no dot) or an mDNS name."""
+    h = host.casefold()
+    try:
+        ip = ipaddress.ip_address(h)
+    except ValueError:
+        return h == "localhost" or "." not in h or h.endswith(".local")
+    return not ip.is_global
+
+
 def _address(t: str) -> str | None:
     """The page for a network address ("192.168.1.1/admin", "localhost:3000", "<host>:8080"),
-    port and path kept; None for anything else (a time, "12:30", has no host)."""
+    port and path kept; None for anything else (a time, "12:30", has no host). This Mac and the
+    local network over http (a dev server or a router rarely serves https, and a browser never
+    falls back from an https link), anything else over https."""
     head, slash, rest = t.partition("/")
     m = _HOST_PORT.match(t)
     if (m and not m.group(1).isdigit()) or head.casefold() == "localhost":
-        return f"https://{t}"
+        return f"{'http' if _local(m.group(1) if m else head) else 'https'}://{t}"
     try:
         ip = ipaddress.ip_address(head)
     except ValueError:
         return None
-    return f"https://{f'[{ip}]' if ip.version == 6 else ip}{slash}{rest}"
+    return f"{'http' if _local(head) else 'https'}://{f'[{ip}]' if ip.version == 6 else ip}{slash}{rest}"
 
 
 def _named(t: str, apps: list[App]) -> App | None:
@@ -304,7 +317,12 @@ def _agrees(ch: Choice, legacy: str) -> bool:
     url = _URL_IN_TEXT.search(legacy or "")
     failed = (legacy or "").startswith("Error")
     if ch.how == "site" and ch.site is not None:
-        return url is not None and sites.on_site(url.group(0), ch.site.host, ch.site.prefix)
+        if url is not None:
+            opened = url.group(0)
+        else:  # legacy opens words written as a domain at https://<words> and names only the words
+            host = None if failed else sites._domain(ch.target)
+            opened = f"https://{host}" if host else ""
+        return bool(opened) and sites.on_site(opened, ch.site.host, ch.site.prefix)
     if ch.how in ("app", "noun", "handler"):
         return (
             ch.app is not None and url is None and not failed and ch.app.name.casefold() in legacy.casefold()

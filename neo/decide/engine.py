@@ -304,6 +304,28 @@ class Kind(NamedTuple):
 _OTHER = Kind("other", 0.0)
 _NO_KIND_HEAD = object()  # _reflex_call: the reflex has no kind head (zero-shot may guess)
 
+# Set while a shadow dry run (neo.decide.shadow) decides. Nobody waits for its answer, so it asks
+# Laya only while the zero-shot model is loaded: it never starts the ~1.7 GB load, nor holds the
+# shared Laya lock through one while the user may be saying the next thing. The dict notes for the
+# shadow log that it went without ("laya": False, the prior decided).
+dry_run: ContextVar[dict | None] = ContextVar("neo_decide_dry_run", default=None)
+
+
+def _dry_without_laya() -> bool:
+    """This is a dry run and the zero-shot model isn't loaded: Laya isn't asked."""
+    note = dry_run.get()
+    if note is None:
+        return False
+    try:
+        from neo.reflex import zeroshot
+
+        if zeroshot.loaded():
+            return False
+    except Exception:  # noqa: BLE001 - no Laya: the prior decides
+        pass
+    note["laya"] = False
+    return True
+
 
 def _laya_call(state: Any, questions: dict, stale: threading.Event) -> dict | None:
     """One zero-shot pass on :mod:`neo.reflex.zeroshot` (in a worker thread); None if it can't answer."""
@@ -369,10 +391,14 @@ async def _off_loop(fn: Any, *args: Any, timeout: float | None = None) -> Any:
 
 
 async def _ask_laya(state: Any, questions: dict, timeout: float | None = None) -> dict | None:
+    if _dry_without_laya():
+        return None
     return await _off_loop(_laya_call, state, questions, timeout=timeout)
 
 
 def _zero_shot_can_answer() -> bool:
+    if _dry_without_laya():
+        return False
     try:
         from neo.reflex import zeroshot
 

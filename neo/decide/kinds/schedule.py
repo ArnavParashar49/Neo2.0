@@ -100,12 +100,18 @@ class Spec:
     @property
     def sig(self) -> tuple:
         """What makes two adds the same one (a retried request adds nothing new): the title, the
-        calendar or list named, and the time as said ("in 20 minutes" moves with the clock), else
-        the ISO time."""
+        calendar or list named, and when it is, to the minute (the user's words and a model's ISO
+        time for them agree on that)."""
         if self.kind == "read_calendar":
             return ()
-        at = self.phrase or (aescript.iso(self.start) if self.start else "")
-        return (_norm(self.title), _norm(self.container), at)
+        return (_norm(self.title), _norm(self.container), aescript.iso(self.start) if self.start else "")
+
+    @property
+    def said_sig(self) -> tuple:
+        """The same with the time as said: "in 20 minutes" asked again moves with the clock."""
+        if self.kind == "read_calendar" or not self.phrase:
+            return ()
+        return (_norm(self.title), _norm(self.container), self.phrase)
 
     @property
     def said_back(self) -> bool:
@@ -303,7 +309,7 @@ async def _request(spec: Spec, text: str) -> Req:
             said = engine.mask_apps(said, await asyncio.to_thread(inventory.inventory))
         except Exception:  # noqa: BLE001 - no inventory: the engine finds no app named either
             pass
-    return Req(spec.kind, asdict(spec), said, named=spec.app, sig=spec.sig)
+    return Req(spec.kind, asdict(spec), said, named=spec.app, sig=spec.sig, also=(spec.said_sig,))
 
 
 # ---- words: names, times ----------------------------------------------------------------------
@@ -1119,7 +1125,7 @@ async def carry_out(kind: str, args: dict, text: str = "", *, ask_access: bool =
     if ask_access and unasked and not spec.app:
         await _ask_store(entity)
     res = await run.run_best(_DRIVERS[kind], req)
-    if res.ok or isinstance(res.text, Halt):
+    if res.ok or res.unsure or isinstance(res.text, Halt):
         return res
     if why := eventkit.available(entity):
         line = f"(The Mac's {_STORE[entity]} store can't be used: {why}.)"

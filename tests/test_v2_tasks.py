@@ -396,6 +396,32 @@ def test_a_new_document_goes_by_legacys_names_until_write_note_is_on(decide_mode
     assert note.doc_like(editor) and computer._doc_like("Padwise", 7) and not computer._doc_like("Notes", 1)
 
 
+def test_the_users_notes_app_takes_new_note_only_while_write_note_is_on(decide_modes, monkeypatch, real_handlers):
+    """A call naming "note" in any other mode, or with other keys (a model's, a playbook saved
+    before a rollback), goes the legacy way: no Accessibility press, no launch."""
+    from neo.tools import computer
+
+    went: list[str] = []
+
+    async def new_note(c):
+        went.append("new note")
+        return "New note in Jotter."
+
+    async def legacy_guard(want=""):
+        went.append(f"legacy {want}")
+        return "Error: stopped here"
+
+    monkeypatch.setattr(computer, "_new_note", new_note)
+    monkeypatch.setattr(computer, "_guard_front", legacy_guard)
+    for mode in ("shadow", "legacy"):
+        decide_modes(write_note=mode)
+        _run("hotkey", {"keys": "cmd+n", "app": "note"})
+    decide_modes(write_note="on")
+    _run("hotkey", {"keys": "cmd+s", "app": "note"})
+    assert went == ["legacy note"] * 3
+    assert _run("hotkey", {"keys": "Command + N", "app": "note"}).text == "New note in Jotter."
+
+
 def test_live_and_the_prompts_change_only_for_kinds_switched_on(decide_modes):
     from neo.agent import prompt
     from neo.voice import live

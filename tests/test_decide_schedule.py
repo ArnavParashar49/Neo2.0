@@ -474,6 +474,76 @@ async def test_a_repeat_is_told_by_its_words_and_its_list(world):
     assert other.ok and "to Errands" in other.text and len(world.ek.saved) == 3  # another list: another reminder
 
 
+def test_the_users_words_and_a_models_iso_time_for_them_are_the_same_add():
+    now = datetime(2026, 9, 26, 10, 0)
+    said = schedule.parse_args("add_event", {"title": "lunch with sam", "start": "tomorrow at 1"}, now)
+    iso = schedule.parse_args("add_event", {"title": "Lunch with Sam", "start": "2026-09-27T13:00"}, now)
+    assert said.start == iso.start and said.sig == iso.sig and iso.said_sig == ()
+    assert said.said_sig == ("lunch with sam", "", "tomorrow at 1")  # "in 20 minutes" moves with the clock
+    other = schedule.parse_args("add_event", {"title": "Lunch with Sam", "start": "2026-09-27T14:00"}, now)
+    assert other.sig != said.sig
+
+
+async def test_a_read_back_that_breaks_after_the_save_is_unconfirmed_and_never_saved_twice(world, monkeypatch):
+    def broken(self, i):
+        raise ValueError("objc hiccup")
+
+    monkeypatch.setattr(world.ek.module.EKEventStore, "eventWithIdentifier_", broken)
+    first = await add_event()
+    assert not first.ok and first.unsure and "may have added it" in first.text and first.say is True
+    again = await add_event(title="lunch with sam")  # the model retrying it
+    assert again.unsure and again.text == first.text and len(world.ek.saved) == 1
+
+
+# ---- through the session: the user's words, a fast path, the driver ------------------------------------------
+
+
+def _heard(text: str, monkeypatch) -> tuple:
+    """(the session's reply to the user's ``text``, the session): with the kind on, a fast path
+    runs the tool; no model may be asked anything."""
+    import neo.agent.session as sess_mod
+    from neo import events
+    from neo.agent import early
+    from neo.agent.session import Session
+    from neo.events import EventBus
+    from neo.reflex.schema import Decision
+
+    class Reflex:
+        async def decide(self, t):
+            return Decision("agent_task", 0.95, False, 0.0, False, 0.0, "laya+head")
+
+    monkeypatch.setattr(events, "_bus", EventBus())
+    monkeypatch.setattr(early, "_actor", None)
+    monkeypatch.setattr(sess_mod, "brain", lambda purpose="agent": pytest.fail("handed to a model"))
+    session = Session(reflex=Reflex())
+    return asyncio.run(session.handle(text, from_user=True)), session
+
+
+def test_an_add_that_may_have_happened_is_said_and_never_handed_to_a_model(world, decide_modes, monkeypatch):
+    decide_modes(add_event="on")
+    monkeypatch.setitem(schedule.BUDGET_S, "eventkit", 0.2)
+    world.ek.on_save = lambda: time.sleep(0.4)  # saved, but past the attempt's budget
+    reply, _s = _heard("put lunch with sam on my calendar tomorrow at 1", monkeypatch)
+    assert reply.route == "quick" and not reply.silent and "may have" in reply.text
+    assert len(world.ek.saved) == 1
+    # a model's own retry of it (its casing, an ISO time) adds nothing either
+    from neo.agent.registry import ToolContext, registry
+
+    start = at(1, 13).isoformat(timespec="minutes")
+    out = asyncio.run(registry().invoke("calendar_add", {"title": "Lunch with Sam", "start": start}, ToolContext()))
+    assert out.ok and "may have" in out.text and len(world.ek.saved) == 1
+
+
+def test_the_ask_once_calendar_question_is_asked_not_handed_to_a_model(world, decide_modes, monkeypatch):
+    decide_modes(add_event="on")
+    world.ek.status[0] = DENIED  # the calendar app's own dictionary, with two calendars to add to
+    reply, session = _heard("put gym on my calendar tomorrow at 7", monkeypatch)
+    assert reply.route == "quick" and not reply.silent
+    assert "Which calendar should I use for new events in Datebook" in reply.text
+    assert "Which calendar" in session.history[-1].text  # the conversation holds the question
+    assert not any("make new" in s for s, _a in world.osa.calls) and world.ek.saved == []
+
+
 async def test_a_bad_time_or_title_asks_and_touches_nothing(world):
     for args, want in (({"title": "x", "start": "whenever you like"}, "couldn't tell when"),
                        ({"title": "", "start": "2026-10-01T10:00"}, "What should it be called?"),
