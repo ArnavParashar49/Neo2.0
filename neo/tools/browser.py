@@ -233,6 +233,13 @@ class _Browser:
         # Links pages showed NEO (absolute): opening one of them is following the page, not a URL a
         # model put together — it can't carry anything of the user's out.
         self.links: dict[str, None] = {}
+        self.shown: dict[int, str] = {}  # id(tab) → the URL NEO last showed a model from it
+
+    def saw(self, page) -> None:
+        self.shown[id(page)] = str(page.url)
+        if len(self.shown) > 64:
+            live = {id(p) for p in self.pages()}
+            self.shown = {k: v for k, v in self.shown.items() if k in live}
 
     async def page(self, *, new_tab: bool = False):
         async with self._lock:
@@ -277,6 +284,7 @@ class _Browser:
 
     def _watch(self, page) -> None:
         page.on("dialog", self._dialog)
+        page.on("close", lambda p: self.shown.pop(id(p), None))
 
     async def _dialog(self, dialog) -> None:
         """A page's own alert / confirm / prompt. Dismissed — "Cancel" is the choice that changes
@@ -304,7 +312,7 @@ class _Browser:
             with suppress(Exception):
                 await self._pw.stop()
         self._ctx = self._pw = self.current = self.els_page = None
-        self.els, self.els_url, self._gone = [], "", False
+        self.els, self.els_url, self._gone, self.shown = [], "", False, {}
 
     def pages(self) -> list:
         return [p for p in (self._ctx.pages if self._ctx is not None else []) if not p.is_closed()]
@@ -469,12 +477,58 @@ _JS_PAGE = r"""() => {
       && /captcha|challenge/i.test((f.title || '') + ' ' + (f.src || '')) && !/size=invisible/i.test(f.src || '')),
   };
 }"""
+# The values of the inputs that hold a secret — by what the input is (type, autocomplete), not by
+# what it is called: the page's snapshot shows every input's value, a password's too, and a label
+# can be in any language (or missing).
+_JS_SECRETS = r"""() => {
+  const CODE = /one[- ]?time|\botp\b|verification code|security code|\b2fa\b|two[- ]factor|passcode|auth(?:entication)? code|\bcvv|\bcvc\b/i;
+  const words = i => [i.name, i.id, i.placeholder, i.getAttribute('aria-label')].join(' ');
+  const out = [];
+  const walk = root => {
+    for (const e of root.querySelectorAll('*')) {
+      if (e.shadowRoot) walk(e.shadowRoot);
+      if (e.tagName !== 'INPUT' || !e.value || out.length >= 50) continue;
+      const auto = (e.getAttribute('autocomplete') || '').toLowerCase();
+      if (e.type === 'password' || /password|one-time-code|\bcc-/.test(auto) || CODE.test(words(e))) out.push(e.value);
+    }
+  };
+  walk(document);
+  return out;
+}"""
+
+
+async def _secret_values(page) -> set[str] | None:
+    """What the secret inputs of the page and its frames hold (None = the page itself couldn't
+    be asked)."""
+    got: set[str] = set()
+    for i, fr in enumerate(_frames(page)):
+        try:
+            vals = await fr.evaluate(_JS_SECRETS)
+        except Exception:  # noqa: BLE001 — a frame that went away
+            if i == 0:
+                return None
+            continue
+        got |= {" ".join(str(v).split()) for v in vals or [] if str(v).strip()}
+    return got
+
+
+def _mask(entries: list[_El | str], secrets: set[str] | None) -> None:
+    """No secret's value in a snapshot: a field holding one shows as [filled]. When the page
+    couldn't say what its secrets are, no field shows its value."""
+    for e in entries:
+        if not isinstance(e, _El) or not e.value or e.role not in _VALUED:
+            continue
+        if secrets is None or " ".join(e.value.split()) in secrets:
+            e.value = ""
+            e.states = (*e.states, "filled")
+
+
 # Words a human-check page says (on the page itself, not in a small widget's frame).
 _CHALLENGE = re.compile(
     r"verify (?:that )?you(?:['’]| a)re (?:a )?human|i['’]?m not a robot|are you a (?:human|robot)|unusual traffic|"
     r"checking (?:if the site connection is secure|your browser)|press (?:and|&) hold|"
     r"complete the security check|(?:solve|complete) (?:the|this) (?:captcha|puzzle)|"
-    r"(?:enter|type) the (?:characters|captcha|text) (?:you see|shown|below|in the image)",
+    r"(?:enter|type) the (?:characters|captcha|text|letters) (?:you see|seen|shown|below|in the image)",
     re.I,
 )
 
@@ -548,6 +602,7 @@ async def _read(
         await _front(page)
         return ToolOutput(_handoff("captcha", page.url))
     entries = _parse(await _aria(page))
+    _mask(entries, await _secret_values(page))
     _b.remember(page, entries)
     text = _page_text(probe, find)
     n_els = sum(isinstance(e, _El) for e in entries)
@@ -580,26 +635,115 @@ async def _read(
         title = await page.title()
     except Exception:  # noqa: BLE001
         title = ""
+    _b.saw(page)
     return ToolOutput(_render(page.url, title, notes, entries, text, max_chars, find), images=images)
+
+
+async def _open_risk(url: str, c: ToolContext) -> str:
+    """After reading untrusted content: why opening `url` is the user's call ("" = it isn't) — a
+    link that smuggles data out, or one that reaches this Mac's own services."""
+    from neo.tools.computer import policy
+
+    if not c.tainted():
+        return ""
+    if policy.url_carries_data(url) and _no_fragment(url) not in _b.links:
+        return "the link carries data"
+    return await asyncio.to_thread(policy.private_host, url)
+
+
+def _open_card(a: dict, url: str, why: str, c: ToolContext) -> dict | str:
+    return confirm.gated("browser_open", a, f"open {url[:80]} ({why}, after reading {c.tainted()})", detail=url)
+
+
+def _hostname(url: str) -> str:
+    try:
+        return (urlsplit(str(url)).hostname or "").lower()
+    except ValueError:
+        return ""
+
+
+async def _stray(page, c: ToolContext, start: str) -> str:
+    """Why NEO must not show `page` now ("" = it may): after reading untrusted content it ended up
+    on this Mac or the local network — a redirect, a script, a tab a page opened — having started
+    on a public page. (Where NEO is sent is checked before it goes; this is where it arrived.)"""
+    from neo.tools.computer import policy
+
+    url = str(page.url)
+    if not c.tainted() or not url.lower().startswith(("http://", "https://")):
+        return ""
+    if start and _hostname(start) == _hostname(url):
+        return ""  # still the site it started on
+    why = await asyncio.to_thread(policy.private_host, url)
+    if not why:
+        return ""
+    if start.lower().startswith(("http://", "https://")) and await asyncio.to_thread(policy.private_host, start):
+        return ""  # it was on this network already: where the user (or their OK) sent it
+    return why
+
+
+async def _leave(page, url: str, how: str) -> None:
+    """Take NEO's browser off a page it mustn't show: close the tab it just followed ("close"),
+    step back ("back") or forward again ("forward") — or, failing that, a blank page."""
+    if how == "none":
+        return
+    with suppress(Exception):
+        if how == "close":
+            await page.close()
+            return
+        if how == "forward":
+            await page.go_forward(wait_until="domcontentloaded", timeout=_NAV_MS)
+        else:
+            await page.go_back(wait_until="domcontentloaded", timeout=_NAV_MS)
+    if not page.is_closed() and str(page.url) == url:
+        with suppress(Exception):
+            await page.goto("about:blank")
+
+
+async def _keep_off(page, c: ToolContext, start: str, leave: str = "back") -> confirm.Halt | None:
+    """A stray page (see _stray) is left unread, and opening it becomes the user's call: the very
+    card browser_open asks for that URL, so their yes opens it."""
+    why = await _stray(page, c, start)
+    if not why:
+        return None
+    url = str(page.url)
+    gate = _open_card({"url": url}, url, why, c)
+    if not isinstance(gate, str):
+        return None  # confirmation is turned off
+    await _leave(page, url, leave)
+    return gate
+
+
+async def _show(page, c: ToolContext, start: str, *, leave: str = "back", **read) -> ToolOutput:
+    """`_read(page)` — unless it is a page NEO mustn't show (see _keep_off)."""
+    if stop := await _keep_off(page, c, start, leave):
+        return ToolOutput(stop, halt=True, staged=stop.action_id)
+    return await _read(page, **read)
+
+
+def _halted(out: ToolOutput) -> bool:
+    return out.halt or isinstance(out.text, confirm.Halt)
 
 
 def _then(done: str, out: ToolOutput) -> ToolOutput:
     """An action's result with the page it led to (a question for the user stays as it is)."""
-    if isinstance(out.text, confirm.Halt):
+    if _halted(out):
         return out
     return ToolOutput(f"{done}\n{out.text}", images=out.images)
 
 
-async def _after(page, before: set[int], url0: str, done: str) -> ToolOutput | str:
+async def _after(page, before: set[int], url0: str, done: str, c: ToolContext) -> ToolOutput | str:
     """After a click, a submit or a key: follow a new tab, or wait for a new page and read it; an
     in-place change gets a moment to finish."""
     new = await _b.follow(page, before, url0)
     if new is not None:
         await _settle(new)
-        return _then(f"{done}{_b.popups()} It opened a new tab, which NEO follows now.", await _read(new))
+        out = await _show(new, c, url0, leave="close")
+        if _halted(out):
+            _b.current = page  # the tab it opened is closed again
+        return _then(f"{done}{_b.popups()} It opened a new tab, which NEO follows now.", out)
     if page.url != url0:
         await _settle(page)
-        return _then(done + _b.popups(), await _read(page))
+        return _then(done + _b.popups(), await _show(page, c, url0))
     with suppress(Exception):
         await page.wait_for_load_state("networkidle", timeout=1500)
     return f"{done}{_b.popups()} The page stayed at {page.url} (browser_read shows what changed)."
@@ -686,8 +830,11 @@ _JS_INFO = r"""e => {
   const labels = e.labels ? [...e.labels].map(l => l.innerText).join(' ') : '';
   const box = e.closest('dialog,[role=dialog],[role=alertdialog],form');
   const a = e.closest('a[href]');
+  const field = e.tagName === 'TEXTAREA' || e.tagName === 'SELECT' || (e.tagName === 'INPUT'
+    && !/^(?:submit|button|reset|image|checkbox|radio|file|range|color|hidden)$/i.test(e.type));
   return {
     tag: e.tagName.toLowerCase(), type: (e.getAttribute('type') || '').toLowerCase(),
+    editable: field || e.isContentEditable || /^(?:textbox|searchbox|combobox)$/.test(e.getAttribute('role') || ''),
     autocomplete: (e.getAttribute('autocomplete') || '').toLowerCase(),
     words: [e.name, e.id, e.placeholder, e.getAttribute('aria-label'), labels].filter(Boolean).join(' ').slice(0, 300),
     label: own.replace(/\s+/g, ' ').trim().slice(0, 200),
@@ -785,24 +932,14 @@ def _p(props: dict, required: list[str] | None = None) -> dict:
     ],
 )
 async def browser_open(a: dict, c: ToolContext) -> str | ToolOutput:
-    from neo.tools.computer import policy
-
     url = _norm_url(str(a["url"]))
     scheme = url.split(":", 1)[0].lower()
     if scheme not in ("http", "https"):
         return f"Error: NEO's browser only opens web pages, not {scheme}: links."
-    why = ""
-    if c.tainted():
-        # After reading a page or an email, a link that smuggles data out — or reaches this Mac's
-        # own services — is the user's call.
-        if policy.url_carries_data(url) and _no_fragment(url) not in _b.links:
-            why = "the link carries data"
-        elif private := await asyncio.to_thread(policy.private_host, url):
-            why = private
-    if why:
-        gate = confirm.gated(
-            "browser_open", a, f"open {url[:80]} ({why}, after reading {c.tainted()})", detail=url
-        )
+    # After reading a page or an email, a link that smuggles data out — or reaches this Mac's own
+    # services — is the user's call.
+    if why := await _open_risk(url, c):
+        gate = _open_card(a, url, why, c)
         if isinstance(gate, str):
             return gate
     page = await _b.page(new_tab=confirm.as_bool(a.get("new_tab")))
@@ -817,7 +954,14 @@ async def browser_open(a: dict, c: ToolContext) -> str | ToolOutput:
     if status >= 400:
         notes.append(f"The site answered {status}.")
     await _settle(page)
-    return await _read(page, notes=notes)
+    out = await _show(page, c, url, notes=notes)
+    if c.origin in ("user", "live") and not _halted(out):
+        # The user's own words through a fast path ("open example.com in your browser"): no model
+        # reads this page, and the reply is kept as NEO's own words — so it's NEO's line, not the
+        # site's text (declining its cookie banner and a human check still happened above).
+        said = f" (it answered {status})" if status >= 400 else ""
+        return ToolOutput(f"Opened {_host(page.url)} in NEO's browser{said}.", say=False)
+    return out
 
 
 @tool(
@@ -832,7 +976,7 @@ async def browser_open(a: dict, c: ToolContext) -> str | ToolOutput:
 async def browser_read(a: dict, c: ToolContext) -> ToolOutput:
     page = await _b.page()
     limit = max(1000, min(int(a.get("max_chars") or _READ_CHARS), 20000))
-    return await _read(page, limit, str(a.get("find") or ""))
+    return await _show(page, c, _b.shown.get(id(page), ""), max_chars=limit, find=str(a.get("find") or ""))
 
 
 @tool(
@@ -902,7 +1046,7 @@ async def browser_click(a: dict, c: ToolContext) -> str | ToolOutput:
             await loc.click(timeout=_CLICK_MS)
     except Exception as e:  # noqa: BLE001
         return f"Error: couldn't click {desc}: {_err(e)}"
-    return await _after(page, before, url0, f"Clicked {desc}.")
+    return await _after(page, before, url0, f"Clicked {desc}.", c)
 
 
 @tool(
@@ -958,11 +1102,50 @@ async def browser_type(a: dict, c: ToolContext) -> str | ToolOutput:
     except Exception as e:  # noqa: BLE001
         return f"Error: couldn't type into {desc}: {_err(e)}"
     if submit:
-        return await _after(page, before, url0, f"Typed into {desc} and submitted.")
+        return await _after(page, before, url0, f"Typed into {desc} and submitted.", c)
     return f"Typed into {desc}."
 
 
-_PASTE = re.compile(r"^(?:control|ctrl|meta|cmd|command)\+v$|^shift\+insert$", re.I)
+_MODIFIERS = {
+    "control": "control", "ctrl": "control", "meta": "meta", "cmd": "meta", "command": "meta",
+    "controlormeta": "meta", "shift": "shift", "alt": "alt", "option": "alt",
+}  # fmt: skip
+# Keys that only move around a page: never a command, whatever a page asked for.
+_MOVING = {
+    "tab", "escape", "esc", "arrowup", "arrowdown", "arrowleft", "arrowright", "up", "down", "left",
+    "right", "pageup", "pagedown", "home", "end", "shift", "control", "alt", "meta",
+}  # fmt: skip
+
+
+def _combo(key: str) -> tuple[set[str], str]:
+    """(modifiers, key) of a key combo as Playwright takes it, however it's spelled: "Meta+KeyV",
+    "ControlOrMeta+v", "cmd + V" and " " all come out plain ({"meta"}, "v"), (set(), "space")."""
+    if not key.strip():
+        return set(), "space" if key else ""
+    raw = key.strip()
+    if raw == "+" or raw.endswith("++"):
+        parts, last = raw[:-2].split("+") if len(raw) > 1 else [], "+"
+    else:
+        *parts, last = raw.split("+")
+    mods = {_MODIFIERS.get(p.strip().lower(), p.strip().lower()) for p in parts if p.strip()}
+    last = last.strip()
+    if re.fullmatch(r"(?:Key[A-Za-z]|Digit\d)", last):
+        last = last[-1]
+    last = last.lower()
+    return mods, {"spacebar": "space", "return": "enter", "numpadenter": "enter", "del": "delete"}.get(last, last)
+
+
+def _pastes(mods: set[str], last: str) -> bool:
+    return (last == "v" and bool(mods & {"control", "meta"})) or (last == "insert" and "shift" in mods)
+
+
+def _editable(info: dict) -> bool:
+    if "editable" in info:
+        return bool(info["editable"])
+    tag, kind = info.get("tag"), str(info.get("type") or "")
+    return tag in ("textarea", "select") or (
+        tag == "input" and kind not in ("submit", "button", "reset", "image", "checkbox", "radio", "file")
+    )
 
 
 @tool(
@@ -974,22 +1157,52 @@ _PASTE = re.compile(r"^(?:control|ctrl|meta|cmd|command)\+v$|^shift\+insert$", r
     untrusted=True,
 )
 async def browser_press(a: dict, c: ToolContext) -> str | ToolOutput:
-    key = str(a["key"]).strip()
-    if _PASTE.match(key.replace(" ", "")):
+    from neo.tools.computer import policy
+
+    key = str(a["key"])
+    mods, last = _combo(key)
+    key = key.strip() or "Space"
+    if _pastes(mods, last):
         # The clipboard is the user's (it can hold a password): it never goes into a web page.
         return "Error: NEO doesn't paste the clipboard into web pages — type the text with browser_type."
     page = await _b.page()
-    if key.split("+")[-1].lower() in ("enter", "return", "numpadenter"):
-        focused = page.locator("*:focus").first
-        if await focused.count() and not await _is_search(focused):
-            gate = confirm.gated(
-                "browser_press", a, f"press Enter on {_host(page.url)} — it submits the form", detail=page.url
+    host = _host(page.url)
+    focused = page.locator("*:focus").first
+    has_focus = last not in _MOVING and bool(await focused.count())
+    info = await _info(focused) if has_focus else {}
+    field = _editable(info)
+    label = "" if field else str(info.get("label") or "").strip()  # a field's "label" is its text
+    summary = ""
+    if last == "enter":
+        if has_focus and not await _is_search(focused):
+            summary = (
+                f"press Enter on “{label[:60]}” on {host}"
+                if label
+                else f"press Enter on {host} — it submits the form"
             )
-            if isinstance(gate, str):
-                return gate
+    elif last == "space" and not field and not mods & {"control", "meta", "alt"}:
+        # Space on a focused button presses it, like a click.
+        if policy.commits(label, str(info.get("around") or "")):
+            summary = f"press Space on “{label[:60]}” on {host}"
+        elif info.get("tag") == "iframe":
+            summary = f"press Space inside an embedded frame on {host}"
+    elif (
+        c.tainted()
+        and (len(last) == 1 or last in ("delete", "backspace"))
+        and not (len(last) == 1 and mods & {"control", "meta"})
+        and not field
+    ):
+        # Outside a text field a letter is a web app's shortcut ("#" deletes, "l" likes, "r"
+        # replies…): after reading a page or an email, the user's call.
+        summary = f"press {key[:20]} on {host} — outside a text field a page can treat it as a command (after reading {c.tainted()})"
+    if summary:
+        gate = confirm.gated("browser_press", a, summary, detail=f"{page.url}\n{label[:80]}".strip())
+        if isinstance(gate, str):
+            return gate
+    if last in ("enter", "space"):
         before, url0 = {id(p) for p in _b.pages()}, page.url
         await page.keyboard.press(key)
-        return await _after(page, before, url0, f"Pressed {key}.")
+        return await _after(page, before, url0, f"Pressed {key}.", c)
     await page.keyboard.press(key)
     await asyncio.sleep(_SETTLE_S)
     return f"Pressed {key}."
@@ -1028,7 +1241,7 @@ async def browser_back(a: dict, c: ToolContext) -> str | ToolOutput:
     if resp is None and page.url == url0:
         return "Nothing to go back to in this tab."
     await _settle(page)
-    return _then("Went back.", await _read(page))
+    return _then("Went back.", await _show(page, c, url0, leave="forward"))
 
 
 @tool(
@@ -1062,6 +1275,8 @@ async def browser_tabs(a: dict, c: ToolContext) -> str | ToolOutput:
     if action == "close":
         await page.close()
         return f"Closed tab {i}. {len(_b.pages())} left."
+    if stop := await _keep_off(page, c, _b.shown.get(id(page), ""), leave="none"):
+        return stop
     _b.current = page
     await _front(page)
     return _then(f"Switched to tab {i}.", await _read(page))
@@ -1077,7 +1292,10 @@ async def browser_tabs(a: dict, c: ToolContext) -> str | ToolOutput:
 )
 async def browser_screenshot(a: dict, c: ToolContext) -> ToolOutput:
     page = await _b.page()
+    if stop := await _keep_off(page, c, _b.shown.get(id(page), "")):
+        return ToolOutput(stop, halt=True, staged=stop.action_id)
     img = await _shot(page)
+    _b.saw(page)
     return ToolOutput(
         f"Screenshot of {page.url} ({_VIEWPORT['width']}×{_VIEWPORT['height']}).",
         images=[ImagePart(img, "image/jpeg")],

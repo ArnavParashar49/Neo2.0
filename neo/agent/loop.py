@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from dataclasses import dataclass, field, replace
 from typing import Literal
 
@@ -78,43 +79,78 @@ async def _settle(ev: EventBus, idle: bool, job: str = "") -> None:
 # run in the prompt is pure token cost (and on an 8K-TPM brain, pure waiting).
 _OBSERVATIONS = {
     "ax_tree", "ax_find", "screenshot", "apps_running", "page_read", "read_file",
-    # NEO's browser: each of these returns the page as it is now (or a picture of it), so a newer
-    # one of any of them makes the older ones stale
+    # NEO's browser: each of these returns a page as it is now (or a picture of it)
     "browser_read", "browser_open", "browser_click", "browser_type", "browser_back", "browser_tabs",
     "browser_screenshot",
 }  # fmt: skip
 _SUPERSEDED_KEEP = 200
+# A browsing job compares pages ("the cheapest of these three"): the latest view of this many
+# different pages stays whole; a newer view of the same page, or more pages than this, trims it.
+_BROWSER_PAGES = 3
+_PAGE_URL = re.compile(r"^URL: (\S+)$", re.M)
+_PAGE_FIND = re.compile(r"^\(only what mentions “(.*)”\)$", re.M)
 
 
-def _view(name: str) -> str:
-    return "browser" if name.startswith("browser_") else name
+def _view(r: ToolResult) -> tuple[str, str]:
+    """(what this observation is a view of, the page's URL — "" for anything but a browser page).
+    A find= read of a page is its own view: it doesn't replace the whole page."""
+    if not r.name.startswith("browser_"):
+        return r.name, ""
+    m = _PAGE_URL.search(r.content[:2000])
+    if not m:
+        return r.name, ""
+    f = _PAGE_FIND.search(r.content[:2000])
+    return f"browser:{m.group(1)}" + (f"|{f.group(1)}" if f else ""), m.group(1)
 
 
 def _supersede_observations(messages: list[Message], *, start: int = 0) -> None:
-    """Replace all but the newest result of each observation tool in this run with a stub."""
+    """Replace all but the newest result of each observation in this run with a stub (for NEO's
+    browser: of each page, keeping a few pages whole). Only the newest picture of the browser
+    keeps its pixels."""
     seen: set[str] = set()
+    pages: set[str] = set()
+    browser_shot = False
     for m in reversed(messages[start:]):
         if m.role != "tool":
             continue
         for r in m.tool_results:
             if r.name not in _OBSERVATIONS:
                 continue
-            if _view(r.name) in seen and (len(r.content) > _SUPERSEDED_KEEP or r.images):
+            key, url = _view(r)
+            stale = key in seen or (url and url not in pages and len(pages) >= _BROWSER_PAGES)
+            if stale and (len(r.content) > _SUPERSEDED_KEEP or r.images):
                 r.content = (
                     r.content[:_SUPERSEDED_KEEP].rstrip()
                     + f" …[older {r.name} result trimmed; a newer one follows]"
                 )
                 r.images = []  # an old screenshot is the most expensive stale thing of all
-            seen.add(_view(r.name))
+            if r.name.startswith("browser_") and r.images:
+                if browser_shot:
+                    r.images = []
+                browser_shot = True
+            seen.add(key)
+            if url:
+                pages.add(url)
 
 
 async def _run_calls(
-    calls: list[ToolCall], reg: Registry, ctx: ToolContext, ev: EventBus, limit: int, job: str = ""
+    calls: list[ToolCall],
+    reg: Registry,
+    ctx: ToolContext,
+    ev: EventBus,
+    limit: int,
+    job: str = "",
+    allowed: set[str] | None = None,
 ) -> list[ToolResult]:
+    """`allowed`: the only tools that may run (None = any the model names)."""
     # A model chose these calls, whoever started the run (the taint list stays shared).
     ctx = ctx if ctx.origin == "agent" else replace(ctx, origin="agent")
 
     async def one(c: ToolCall) -> ToolResult:
+        if allowed is not None and c.name not in allowed:
+            return ToolResult(
+                c.id, c.name, f"Error: {c.name[:60]} isn't available here — use only the tools you were given.", ok=False
+            )
         await ev.tool_start(c.name, c.args, job=job)
         t = reg.get(c.name)
         if t and any(k in c.name for k in _SEARCHY):
@@ -122,8 +158,10 @@ async def _run_calls(
         out: ToolOutput = await reg.invoke(c.name, c.args, ctx)
         await ev.tool_end(c.name, out.ok, out.text, job=job)
         content = _truncate(out.text, limit)
-        if t and t.untrusted and out.ok and not _halt_kind(content):
-            content = fence(c.name, content)  # third-party words: data for the model, never orders
+        if t and t.untrusted and not out.halt:
+            # Third-party words — a failure too can quote them (a page's element names, a report
+            # that starts with "Error"): data for the model, never orders.
+            content = fence(c.name, content)
         return ToolResult(call_id=c.id, name=c.name, content=content, ok=out.ok, images=out.images)
 
     # Keep the model's order: consecutive read-only (parallel_safe) calls run together, any
@@ -171,7 +209,10 @@ async def run_agent(
     max_seconds: float | None = None,
     tools: list[ToolSpec] | None = None,
     job: str = "",
+    strict: bool = False,
 ) -> AgentResult:
+    """`strict`: only the `tools` given ever run — whatever else the model names gets an error,
+    and `more_tools` isn't answered (a run fenced off from the rest of NEO, like `browse`)."""
     s = settings()
     reg = reg or default_registry()
     ev = ev or default_bus()
@@ -250,8 +291,8 @@ async def run_agent(
             )
 
         # `more_tools` is answered here, not by the registry: it grows this run's tool list.
-        meta = [c for c in turn.tool_calls if c.name == "more_tools"]
-        real = [c for c in turn.tool_calls if c.name != "more_tools"]
+        meta = [] if strict else [c for c in turn.tool_calls if c.name == "more_tools"]
+        real = [c for c in turn.tool_calls if strict or c.name != "more_tools"]
         meta_results: list[ToolResult] = []
         for c in meta:
             from neo.agent.toolselect import selector
@@ -266,7 +307,9 @@ async def run_agent(
             )
         await ev.set_state(NeoState.WORKING, job=job)
         results = meta_results + (
-            await _run_calls(real, reg, ctx, ev, s.max_tool_result_chars, job) if real else []
+            await _run_calls(real, reg, ctx, ev, s.max_tool_result_chars, job, set(enabled) if strict else None)
+            if real
+            else []
         )
         results.sort(key=lambda r: [c.id for c in turn.tool_calls].index(r.call_id))
         messages.append(Message.tool(results))
