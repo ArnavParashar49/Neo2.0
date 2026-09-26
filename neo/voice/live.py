@@ -71,6 +71,9 @@ _DIRECT_WHEN_ON = {"calendar_add": "add_event"}
 _IDLE_CLOSE_S = 90.0
 _IDEM_S = 30.0  # the same idempotent action again within this long is a retry: skipped
 _HOLD_S = 1.2  # a command's reply is held this long: if no tool call comes, it was a real reply
+# Told to say nothing, the model often sends a turn of near-silent audio instead. Below this level
+# a chunk is silence: it never counts toward the hold, and never turns the orb to "speaking".
+_VOICE_RMS = 0.006
 _LANE_S = 30.0  # how long the model's calls for a sentence NEO ran itself are skipped
 _SETTLE_S = 0.3  # no new words for this long after the model starts answering = sentence over
 _CONNECT_TIMEOUT_S = 12.0
@@ -169,6 +172,27 @@ _TARGETED = re.compile(r"\b(?:in|into|on|at|inside)\s+(?:the|a|an|my|this|that)\
 _TRAILING_JOIN = re.compile(r"(?:\b(?:and|then|also|plus)|,)\s*$", re.I)
 
 
+# How people address NEO and soften a command — "Neo, …", "hey Neo …", "can you …?", "… please".
+# None of it changes what is asked, so the fast paths and the speech gate look past it.
+_ADDRESS = re.compile(
+    r"^\s*(?:(?:hey|hi|hello|hallo|ok(?:ay)?|yo|arre|oye|so|um+|uh+|acha|achha)\b\s*[,!.]?\s*)*"
+    r"(?:(?:neo|neil|nio)\b[\s,!.:-]*)?",
+    re.I,
+)
+_POLITE = re.compile(r"^\s*(?:(?:can|could|would|will)\s+you\s+(?:please\s+)?|please\s+|kindly\s+|zara\s+)", re.I)
+_POLITE_TAIL = re.compile(r"[\s,]*\b(?:please|pls|for\s+me|na|yaar)\s*[.!?]*\s*$", re.I)
+
+
+def _core(text: str) -> tuple[str, bool]:
+    """(the request itself, whether it came in a polite frame): "Neo, can you open YouTube?" →
+    ("open YouTube", True). A polite frame's "?" doesn't make a command a question."""
+    t = _ADDRESS.sub("", text, count=1)
+    polite = bool(_POLITE.match(t))
+    t = _POLITE.sub("", t, count=1)
+    t = _POLITE_TAIL.sub("", t).strip().rstrip("?.!").strip()
+    return (t or " ".join(text.split())), polite
+
+
 def _command_steps(text: str, *, settled: bool = False) -> list[tuple[str, dict]] | None:
     """The fast-path plan for a sentence that is purely actions ("open notes and type hello",
     "search cat videos on youtube"), or None: a question, an answer tool, a reference like "it"
@@ -183,7 +207,7 @@ def _command_steps(text: str, *, settled: bool = False) -> list[tuple[str, dict]
     text = " ".join(text.split())
     if not text or _TRAILING_JOIN.search(text):
         return None
-    steps = fastpath.plan(text)
+    steps = fastpath.plan(_core(text)[0])
     if not steps:
         return None
     for tool, args in steps:
@@ -210,8 +234,11 @@ _HI_ASKS = re.compile(
 
 
 def _asks(text: str) -> bool:
-    """Does the user want to hear something back? ("search cats on youtube" opens a page: no.)"""
-    return (asks_something(text) or bool(_HI_ASKS.search(text))) and _command_steps(text) is None
+    """Does the user want to hear something back? ("search cats on youtube" opens a page: no;
+    "can you open YouTube?" is a command said politely: no; "is it raining?": yes.)"""
+    core, polite = _core(text)
+    question = asks_something(core) or (text.strip().endswith("?") and not polite) or bool(_HI_ASKS.search(text))
+    return question and _command_steps(text) is None
 
 
 def _is_action_call(fc) -> bool:
@@ -253,10 +280,11 @@ def _multi_step(text: str) -> bool:
     """Does the utterance ask for more than one thing?"""
     from neo.agent import fastpath
 
-    steps = fastpath.plan(text)
+    core = _core(text)[0]  # "Neo, open YouTube, please" is one thing, whatever its commas
+    steps = fastpath.plan(core)
     if steps is not None:
         return len(steps) > 1
-    return bool(re.search(r"\b(?:and|then|after\s+that)\b|,", text, re.I))
+    return bool(re.search(r"\b(?:and|then|after\s+that)\b|,", core, re.I))
 
 
 def _canon(text: str) -> str:
@@ -943,6 +971,8 @@ class LiveVoice:
         if gate == "mute":
             return
         if gate == "hold":
+            if not self._held and rms(data) < _VOICE_RMS:
+                return  # silence before any voice: nothing to hold (a silent turn never opens)
             self._held.append(data)
             if sum(len(d) for d in self._held) / 2 / 24000 < _HOLD_S:
                 return
@@ -960,6 +990,8 @@ class LiveVoice:
 
     def _play(self, data: bytes) -> None:
         if not self._speaking:
+            if rms(data) < _VOICE_RMS:
+                return  # silence isn't speaking: the orb only turns when there's a voice to hear
             self._speaking = True
             self._speaking_since = time.time()
             asyncio.create_task(self._refresh_state())

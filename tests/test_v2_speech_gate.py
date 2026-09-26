@@ -7,6 +7,7 @@ import asyncio
 import threading
 from types import SimpleNamespace as NS
 
+import numpy as np
 import pytest
 
 from neo.agent.registry import Registry, ToolOutput
@@ -52,7 +53,16 @@ def heard(text, finished=True):
     return sc(input_transcription=NS(text=text, finished=finished))
 
 
+_TONE = (np.sin(np.arange(2400) * 2 * np.pi * 220 / 24000) * 6000).astype(np.int16).tobytes()  # 0.1 s of voice
+
+
 def audio(n=1):
+    """n chunks of the model speaking (0.1 s each)."""
+    return sc(model_turn=NS(parts=[NS(inline_data=NS(data=_TONE)) for _ in range(n)]))
+
+
+def silence(n=1):
+    """n chunks of the near-silent audio the model sends when told to say nothing."""
     return sc(model_turn=NS(parts=[NS(inline_data=NS(data=b"\x00\x00" * 2400)) for _ in range(n)]))
 
 
@@ -315,3 +325,77 @@ def test_the_same_open_again_is_a_retry_but_the_same_keystroke_is_not(voice, mon
     assert voice.ran.count(("type_text", {"text": "hi"})) == 2  # typing twice is what was asked
     retries = [r for r in voice._live.responses if "same call as" in r.response["result"]]
     assert len(retries) == 4
+
+
+# ---- after a command, NEO goes straight back to listening ---------------------------------------
+
+
+def _states(monkeypatch):
+    from neo.events import bus
+
+    seen = []
+    orig = bus().publish
+
+    async def pub(kind, **data):
+        if kind == "state":
+            seen.append(data["state"])
+        return await orig(kind, **data)
+
+    monkeypatch.setattr(bus(), "publish", pub)
+    return seen
+
+
+def test_a_silent_reply_to_a_command_never_shows_speaking(voice, monkeypatch):
+    from neo import config
+
+    monkeypatch.setenv("NEO_LIVE_COMMAND_LANE", "false")
+    monkeypatch.setattr(config, "_settings", None)
+    seen = _states(monkeypatch)
+    asyncio.run(feed(voice, heard("Can you open YouTube?"), silence(20), call("open_url", {"url": "www.youtube.com"}), silence(30), DONE, settle=0.3))
+    assert ("open_url", {"url": "www.youtube.com"}) in voice.ran
+    assert "speaking" not in seen and voice.spk.played == [] and not voice._speaking
+    assert seen[-1] == "listening"
+
+
+def test_a_polite_or_addressed_command_runs_on_the_fast_lane(voice):
+    asyncio.run(feed(voice, heard("Neo, can you open YouTube?"), call("open_url", {"url": "youtube.com"}, "m1"), DONE))
+    asyncio.run(feed(voice, heard("Hey Neo, open Notes, please."), DONE))
+    assert [t for t, _ in voice.lane] == ["Neo, can you open YouTube?", "Hey Neo, open Notes, please."]
+    assert voice.ran == []  # the model's own call was skipped: NEO already did it
+    assert voice.spk.played == []
+
+
+def test_a_real_answer_after_leading_silence_is_still_spoken(voice):
+    asyncio.run(feed(voice, heard("what's the capital of France?"), silence(10), said("Paris."), audio(), DONE))
+    assert len(voice.spk.played) == 1  # the silence was skipped, the voice played
+
+
+@pytest.mark.parametrize(
+    "text,asks",
+    [
+        ("Can you open YouTube?", False),
+        ("Neo, could you please play 505?", False),
+        ("Could you send a message to Sam?", False),
+        ("Is it raining?", True),
+        ("Can you tell me the weather?", True),
+        ("Neo, what's the time?", True),
+        ("kya time hai", True),
+        ("open notes and tell me how many notes I have", True),
+    ],
+)
+def test_a_polite_frame_does_not_make_a_command_a_question(text, asks):
+    from neo.voice.live import _asks
+
+    assert _asks(text) is asks
+
+
+@pytest.mark.parametrize(
+    "text,multi",
+    [("Neo, open YouTube, please.", False), ("Okay, open YouTube", False), ("open notes and type hi", True)],
+)
+def test_a_vocative_comma_is_not_a_second_step(text, multi):
+    from neo.tools import load_all
+    from neo.voice.live import _multi_step
+
+    load_all()
+    assert _multi_step(text) is multi
