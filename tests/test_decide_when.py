@@ -32,6 +32,8 @@ def at(d: int, h: int = 0, m: int = 0, month: int = 9, year: int = 2026) -> date
         ("tomorrow at 5", at(27, 17), "5 PM tomorrow"),  # another day: a daytime hour
         ("tomorrow at 9", at(27, 9), "9 AM tomorrow"),
         ("tomorrow at 9pm", at(27, 21), ""),
+        ("tomorrow at 12", at(27, 12), "12 PM tomorrow"),  # a daytime 12 is noon
+        ("monday at 12:30", at(28, 12, 30), "12:30 PM Monday"),
         ("today at 5", at(26, 17), "5 PM today"),
         ("tonight", at(26, 21), "9 PM today"),
         ("tonight at 10", at(26, 22), ""),
@@ -58,6 +60,8 @@ def at(d: int, h: int = 0, m: int = 0, month: int = 9, year: int = 2026) -> date
         ("sawa 5 baje", at(26, 17, 15), "5:15 PM today"),
         ("paune 5", at(26, 16, 45), "4:45 PM today"),
         ("kal dopahar dhai baje", at(27, 14, 30), ""),
+        ("kal 12 baje", at(27, 12), "12 PM tomorrow"),
+        ("kal sawa 12", at(27, 12, 15), "12:15 PM tomorrow"),
         ("dedh baje", at(27, 1, 30), "1:30 AM tomorrow"),
         ("parso subah 7 baje", at(28, 7), ""),
         ("20 minute mein", at(26, 14, 20), ""),
@@ -151,6 +155,7 @@ def test_the_past_for_reads():
         "in 20", "in 0 minutes", "20 minute", "tomorrow kal", "kal tomorrow", "monday tuesday", "in 5 minutes at 6",
         "today tomorrow", "morning evening", "tomorrow tonight",
         "5 at 6 at 7", "30 feb",
+        "in 99999999999999 minutes", "in 99999999 hours", "99999999 ghante mein",  # past any calendar
     ],
 )
 def test_anything_unsure_is_none(phrase):

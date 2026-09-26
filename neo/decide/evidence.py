@@ -23,7 +23,6 @@ import re
 import stat
 from dataclasses import dataclass
 from functools import lru_cache
-from xml.parsers.expat import ExpatError
 
 __all__ = ["Evidence", "read", "responsible_usage", "NONE"]
 
@@ -89,7 +88,7 @@ def _plist(path: str) -> dict:
         return {}
     try:
         d = plistlib.loads(raw)
-    except (plistlib.InvalidFileException, ExpatError, ValueError, TypeError, OverflowError):
+    except Exception:  # noqa: BLE001 - plistlib fails in many ways on a bad file (a bad <date>: AttributeError)
         return {}
     return d if isinstance(d, dict) else {}
 
@@ -101,7 +100,7 @@ def _actions(contents: str) -> list[str]:
         return []
     try:
         data = json.loads(raw)
-    except (ValueError, UnicodeDecodeError):
+    except (ValueError, RecursionError):  # not JSON, or nested too deep to read
         return []
     acts = data.get("actions") if isinstance(data, dict) else None
     out: list[str] = []

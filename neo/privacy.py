@@ -37,13 +37,14 @@ async def forget_everything() -> dict[str, int]:
     memory.forget()  # the corrections' embeddings (RAM only)
     finetune.feature_cache().unlink(missing_ok=True)  # rebuilt from the public datasets on the next retrain
     from neo.decide import engine as decide
-    from neo.decide import eventkit, learned, media, run
+    from neo.decide import eventkit, learned, media, run, sites
 
     counts["app choices"] = decide.forget()
     counts["learned media"] = media.forget()
     counts["learned places & people"] = learned.forget()
     run.forget()  # receipts and last actions (memory only)
     eventkit.forget()
+    sites.forget()  # site words searched for lately (memory only)
     for p in (s.audit_log, s.audit_log.with_name(s.audit_log.name + ".1")):
         p.unlink(missing_ok=True)
     logs = s.data_dir / "logs"

@@ -27,7 +27,8 @@ from datetime import datetime
 from typing import Any
 from urllib.parse import parse_qsl, quote, unquote, urlencode, urljoin, urlsplit, urlunsplit
 
-__all__ = ["SiteRes", "Template", "site_like", "resolve", "discover", "sanitize", "learn_landing", "template_failed"]
+__all__ = ["SiteRes", "Template", "site_like", "resolve", "discover", "sanitize", "learn_landing", "template_failed",
+           "forget"]  # fmt: skip
 
 TERMS = "{searchTerms}"
 FETCH_S = 5.0
@@ -159,6 +160,11 @@ def _search(query: str, region: str) -> list[dict]:
 
 
 _searched: dict[str, tuple[float, SiteRes | None]] = {}
+
+
+def forget() -> None:
+    """The privacy erase: the site words searched for lately (memory only) go too."""
+    _searched.clear()
 
 
 async def resolve(word: str) -> SiteRes | None:
@@ -340,7 +346,7 @@ def _search_form(page: _Page, doc: Any, host: str) -> str | None:
 
 async def discover(host: str, prefix: str = "") -> list[Template]:
     """The site's search templates, best first: learned, OpenSearch, JSON-LD, a search form."""
-    from lxml import html
+    from lxml import etree, html
 
     from neo.decide import learned
 
@@ -352,7 +358,7 @@ async def discover(host: str, prefix: str = "") -> list[Template]:
         return out
     try:
         doc = html.fromstring(page.text)
-    except (ValueError, TypeError):
+    except (etree.LxmlError, ValueError, TypeError):  # a page with no elements ("Document is empty")
         return out
     for link in doc.iter("link"):
         rel = (link.get("rel") or "").lower().split()
@@ -366,7 +372,7 @@ async def discover(host: str, prefix: str = "") -> list[Template]:
             continue
         try:
             t = _jsonld(json.loads(script.text or ""), host)
-        except ValueError:
+        except (ValueError, RecursionError):  # not JSON, or nested too deep to read
             continue
         if t:
             out.append(Template(t, "jsonld"))
@@ -381,20 +387,26 @@ async def discover(host: str, prefix: str = "") -> list[Template]:
 
 def sanitize(url: str, query: str) -> str | None:
     """The template of a search page NEO landed on: the one parameter (or path segment) holding
-    the query becomes {searchTerms} and everything else is dropped; None if there isn't exactly
-    one such slot, or the page isn't https."""
+    the query becomes {searchTerms} and everything else is dropped (other parameters, ';' path
+    parameters, credentials in the host); None if there isn't exactly one such slot, another
+    path segment carries a parameter ("ref=..."), or the page isn't https."""
     u = urlsplit(url)
     want = " ".join(query.split()).casefold()
     if u.scheme != "https" or not want:
         return None
     params = [(k, v) for k, v in parse_qsl(u.query, keep_blank_values=True) if " ".join(v.split()).casefold() == want]
-    segs = [s for s in u.path.split("/") if " ".join(unquote(s).replace("+", " ").split()).casefold() == want]
+    path = [s.split(";", 1)[0] for s in u.path.split("/")]  # ";jsessionid=...": session state
+    segs = [i for i, s in enumerate(path) if " ".join(unquote(s).replace("+", " ").split()).casefold() == want]
     if len(params) + len(segs) != 1:
         return None
     if params:
-        return urlunsplit((u.scheme, u.netloc, u.path, f"{quote(params[0][0])}={TERMS}", ""))
-    path = "/".join(TERMS if s == segs[0] else s for s in u.path.split("/"))
-    return urlunsplit((u.scheme, u.netloc, path, "", ""))
+        query_part = f"{quote(params[0][0])}={TERMS}"
+    else:
+        path[segs[0]], query_part = TERMS, ""
+    if any("=" in s for s in path):
+        return None  # a token or a tracking value in the path: which parts the site needs can't be told
+    netloc = u.netloc.rpartition("@")[2]  # never a user name or password
+    return urlunsplit((u.scheme, netloc, "/".join(path), query_part, ""))
 
 
 def learn_landing(word: str, host: str, template: str | None, prefix: str = "") -> None:

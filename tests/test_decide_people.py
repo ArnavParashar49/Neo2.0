@@ -248,6 +248,18 @@ def test_relatives_through_the_me_card(cn):
     assert resolve("mom").status == "not_found"
 
 
+def test_a_relative_saved_under_that_word_without_a_relation(cn):
+    cn.contacts += [Contact("c-ma", nick="Mom", phones=[(MOBILE, "+91 96666 11111")]), Contact("c-pa", "Papa")]
+    for me in (ME, Contact("c-me2", "Arjun"), None):  # the me card names another mother, none, or is missing
+        cn.me = me
+        want = "c-mom" if me is ME else "c-ma"  # the me card's relation first
+        for word in ("mom", "Mom", "my mom"):
+            r = resolve(word)
+            assert r.status == "ok" and r.person.contact_id == want, (word, me)
+        assert resolve("papa").person.contact_id == "c-pa"
+        assert resolve("dad").status == "not_found"
+
+
 def test_devanagari_names_match_by_romanisation(cn):
     assert resolve("प्रिया").person.contact_id == "c-priya"
     assert resolve("राहुल शर्मा").person.contact_id == "c-rahul"

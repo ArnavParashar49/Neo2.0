@@ -290,14 +290,17 @@ def _owner(store: Any, h: Handle) -> Any | None:
     return hits[0] if len(hits) == 1 else None
 
 
-def _kin(store: Any, phrase: str) -> list[Any] | None:
-    """The contact the me card names for a relative ("mom"); None when the phrase isn't one."""
+def _kin_word(phrase: str) -> str:
+    """The word for a relative the phrase is ("my mom" -> "mom"); '' when it isn't one."""
     words = normalize(phrase).split()
-    rel = KIN.get(" ".join(words[1:] if len(words) > 1 and words[0] in _MY else words))
-    if rel is None:
-        return None
+    w = " ".join(words[1:] if len(words) > 1 and words[0] in _MY else words)
+    return w if w in KIN else ""
+
+
+def _kin(store: Any, word: str) -> list[Any]:
+    """The contacts the me card names as this relative."""
     cn = _cn()
-    want = getattr(cn, f"CNLabelContactRelation{rel}", None)
+    want = getattr(cn, f"CNLabelContactRelation{KIN[word]}", None)
     me, _err = store.unifiedMeContactWithKeysToFetch_error_(_keys(), None)
     if me is None or want is None:
         return []
@@ -347,8 +350,9 @@ def _resolve(phrase: str, need: Need) -> Resolution:
         if p is not None and any(h.label == bound.get("label") for h in p.handles):
             return Resolution("ok", p, label=str(bound["label"]))
         learned.drop("bindings", key)  # that contact, or that number of theirs, is gone
-    kin = _kin(store, phrase)
-    found = kin if kin is not None else _by_name(store, phrase)
+    word = _kin_word(phrase)
+    # a relative by the me card's relation; else, like any name, a contact saved under the word ("Mom")
+    found = (_kin(store, word) if word else []) or _by_name(store, word or phrase)
     people = list({p.contact_id: p for p in map(_person, found)}.values())
     if len(people) == 1:
         return Resolution("ok", people[0])
@@ -362,7 +366,8 @@ def _resolve(phrase: str, need: Need) -> Resolution:
 async def resolve(phrase: str, need: Need) -> Resolution:
     """Who ``phrase`` is, in this order: a literal number or address (named after its contact when
     it has one), the contact the user confirmed for this phrase before, a relative on the me card,
-    then a contact by name. ``need`` is what will be sent (message or email)."""
+    then a contact by name (a relative's word too: many save a parent as "Mom"). ``need`` is what
+    will be sent (message or email)."""
     return await asyncio.to_thread(_resolve, phrase, need)
 
 

@@ -12,7 +12,7 @@ import pytest
 
 from neo import privacy
 from neo.config import settings
-from neo.decide import engine, learned, run
+from neo.decide import engine, learned, run, sites
 
 
 @pytest.fixture(autouse=True)
@@ -86,11 +86,12 @@ def test_forget_everything_empties_every_decision_store():
     engine.record("write_note", "test.notebook", "script_make", True)
     engine.record_pref("send_message", "test.chat", True, about="h1")
     run.remember_last("write_note", "test.notebook")
+    sites._searched["shopkart|in"] = (0.0, sites.SiteRes("www.shopkart.in", "search", "in"))  # a site word said
     counts = asyncio.run(privacy.forget_everything())
     assert counts["learned places & people"] == len(learned.NAMESPACES)
     assert counts["app choices"] == 2  # one arm, one preference
     assert all(learned.get(ns, "k") is None for ns in learned.NAMESPACES)
     assert not (settings().data_dir / "decide_learned").exists()
     assert not engine.proven("write_note", "test.notebook") and engine.pref_factor("send_message", "test.chat", "h1") == 1.0
-    assert run.last("write_note") is None
+    assert run.last("write_note") is None and sites._searched == {}
     assert learned.forget() == 0

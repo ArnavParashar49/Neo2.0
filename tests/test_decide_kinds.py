@@ -27,13 +27,23 @@ def test_nouns(word, kind):
 
 
 @pytest.mark.parametrize(
-    "text, yes",
-    [("no, in notebook", True), ("not there, on jotter", True), ("actually use jotter", True),
-     ("nahi, jotter pe", True), ("jotter pe nahin", True), ("नहीं, जोटर में", True), ("put it in jotter instead", True),
-     ("note that the knot is tight", False), ("nothing to add", False), ("another note", False), ("", False)],
+    "text, app, yes",
+    [("no, in notebook", "notebook", True), ("not there, on jotter", "jotter", True),
+     ("actually use jotter", "jotter", True), ("nahi, jotter pe", "jotter", True), ("नहीं, जोटर में", "जोटर", True),
+     ("jotter pe nahin", "jotter", True), ("put it in jotter instead", "jotter", True), ("No. Jotter!", None, True),
+     ("note that the knot is tight", None, False), ("nothing to add", None, False), ("another note", None, False),
+     ("", None, False),
+     # a cue inside what is being written or sent is content, not a redirect
+     ("add a note in jotter do not forget the milk", "jotter", False),
+     ("add a note in jotter: actually the meeting moved", "jotter", False),
+     ("text priya on chatwave that there is no class today", "chatwave", False),
+     ("jotter mein likho ki kal nahi aaunga", "jotter", False),
+     ("note in jotter buy oat milk instead", "jotter", False),
+     ("put it in jotter instead", None, False)],  # after the app's name only when it is known
 )
-def test_correction_cues_are_whole_words(text, yes):
-    assert kinds.is_correction(text) is yes
+def test_correction_cues_open_the_request_or_follow_the_app(text, app, yes):
+    span = (text.index(app), text.index(app) + len(app)) if app else None
+    assert kinds.is_correction(text, span) is yes
 
 
 def test_driver_lookup(monkeypatch):

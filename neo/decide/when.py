@@ -214,11 +214,11 @@ def _relative(tok: list[str], i: int, postfix: bool = False) -> tuple[timedelta,
     if n is None or j >= len(tok):
         return None
     unit = tok[j]
-    if unit in _MINUTES:
-        d = timedelta(minutes=n)
-    elif unit in _HOURS:
-        d = timedelta(hours=n)
-    else:
+    if unit not in _MINUTES and unit not in _HOURS:
+        return None
+    try:
+        d = timedelta(minutes=n) if unit in _MINUTES else timedelta(hours=n)
+    except OverflowError:  # past any calendar: not a time NEO can use
         return None
     j += 1
     if postfix:
@@ -310,7 +310,12 @@ def parse(phrase: str, now: datetime, *, future: bool = True) -> When | None:
     if p is None or len(p.days) > 1 or not (p.days or p.part or p.clock or p.delta):
         return None
     if p.delta is not None:  # "in 20 minutes" stands alone
-        return When(now + p.delta, None, False, "") if not (p.days or p.part or p.clock) else None
+        if p.days or p.part or p.clock:
+            return None
+        try:
+            return When(now + p.delta, None, False, "")
+        except OverflowError:  # after the year 9999
+            return None
     spec = p.days[0] if p.days else None
     day_explicit = spec is not None
     if spec == "kal":
@@ -349,9 +354,9 @@ def parse(phrase: str, now: datetime, *, future: bool = True) -> When | None:
             start += timedelta(days=1)
             guessed = True
     elif day_explicit and day != now.date():
-        # a bare hour on another day: a daytime hour (8 AM to 7 PM)
-        h = p.clock.hour % 12
-        start = datetime.combine(day, time(h + 12 if 1 <= h <= 7 else h, p.clock.minute))
+        # a bare hour (1 to 12) on another day: a daytime hour (8 AM to 7 PM; 12 is noon)
+        h = p.clock.hour
+        start = datetime.combine(day, time(h + 12 if h <= 7 else h, p.clock.minute))
         guessed = True
     else:
         # a bare hour today: the next time the clock shows it (the last, for the past), within 12 hours

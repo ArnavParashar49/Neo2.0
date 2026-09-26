@@ -43,6 +43,9 @@ CORRECTION = re.compile(
     r"(?<![\wऀ-ॿ])(?:no|nope|not|instead|actually|rather|nahi|nahin|balki|नहीं|नही|बल्कि)(?![\wऀ-ॿ])",
     re.I,
 )
+_WORD = re.compile(r"[\wऀ-ॿ]+")
+# a word between the app's name and a closing cue ("<app> pe nahin")
+_POSTPOSITIONS = frozenset({"on", "in", "pe", "par", "mein", "me", "पे", "पर", "में"})
 
 
 def noun_kind(word: str) -> str | None:
@@ -51,8 +54,20 @@ def noun_kind(word: str) -> str | None:
     return NOUNS.get(w)
 
 
-def is_correction(text: str) -> bool:
-    return bool(CORRECTION.search(text or ""))
+def is_correction(text: str, app: tuple[int, int] | None = None) -> bool:
+    """Does the request redirect what NEO just did? Only the command's own words count, never what
+    is being written or sent ("note in <app>: do not forget the milk" is a new note): a cue that
+    opens the request ("no, in <app>", "actually use <app>"), or, given where ``text`` names the
+    app, one that ends it right after the name ("<app> instead", "<app> pe nahin")."""
+    words = _WORD.findall(text or "")
+    if words and CORRECTION.fullmatch(words[0]):
+        return True
+    if app is None:
+        return False
+    after = _WORD.findall(text[app[1] :])
+    if after and after[0].casefold() in _POSTPOSITIONS:
+        after = after[1:]
+    return len(after) == 1 and bool(CORRECTION.fullmatch(after[0]))
 
 
 def driver(kind: str) -> ModuleType | None:

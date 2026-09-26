@@ -223,6 +223,18 @@ def test_private_hosts_and_redirects_there_are_never_fetched(monkeypatch):
     assert discover("10.0.0.5") == [] and seen == []
 
 
+@pytest.mark.parametrize(
+    "page",
+    ["<!-- nothing here -->", "<?php ?>",
+     home('<script type="application/ld+json">' + "[" * 100_000 + "</script>",
+          '<form role="search" action="/find"><input name="q"></form>')],
+)
+def test_a_page_the_parsers_choke_on_gives_what_was_found(monkeypatch, page):
+    serve(monkeypatch, {f"https://{HOST}/": page})
+    sites.learn_landing("shop", HOST, "https://shop.example.in/s?k={searchTerms}")
+    assert [t.how for t in discover()] == ["learned"] + (["site_form"] if "<form" in page else [])
+
+
 def test_oversized_insecure_and_failed_pages(monkeypatch):
     monkeypatch.setattr(sites, "MAX_PAGE", 100)
     serve(monkeypatch, {f"https://{HOST}/": home(body="x" * 500)})
@@ -247,6 +259,11 @@ def test_oversized_insecure_and_failed_pages(monkeypatch):
         ("https://shop.example.in/s?k=2tb+ssd&also=2tb+ssd", "2tb ssd", None),  # two slots: which one?
         ("https://shop.example.in/s?k=other", "2tb ssd", None),
         ("http://shop.example.in/s?k=2tb+ssd", "2tb ssd", None),
+        # the browser's own URL: a session in a path parameter or credentials in the host never stay
+        ("https://shop.example.in/search;jsessionid=ABC123?q=2tb+ssd&sid=9", "2tb ssd", "https://shop.example.in/search?q={searchTerms}"),
+        ("https://videos.example/search;s=1/cats%20dancing;jsessionid=X", "cats dancing", "https://videos.example/search/{searchTerms}"),
+        ("https://user:pw@shop.example.in:8443/find?q=ssd", "ssd", "https://shop.example.in:8443/find?q={searchTerms}"),
+        ("https://shop.example.in/s/ref=nb_sb_noss_2?k=2tb+ssd", "2tb ssd", None),  # a token in the path: not learned
     ],
 )
 def test_sanitize_keeps_only_the_terms_slot(url, query, want):

@@ -407,6 +407,10 @@ def _build_static(app: str, key: tuple, need_category: bool = False) -> _Static 
     if os.path.isdir(os.path.join(app, "Contents", "Frameworks", "Electron Framework.framework")):
         signals.add("electron")
     aliases = tuple(dict.fromkeys(a for a in (*names, stem) if a))
+    try:
+        ev = evidence.read(where, info)
+    except Exception:  # noqa: BLE001 - evidence only adds to an app: an unreadable file must never drop it
+        ev = evidence.NONE
     return _Static(
         key=key,
         path=app,
@@ -422,7 +426,7 @@ def _build_static(app: str, key: tuple, need_category: bool = False) -> _Static 
         tags=sdef.caps(script),
         web_start_url=_web_start_url(info),
         signals=frozenset(signals),
-        ev=evidence.read(where, info),
+        ev=ev,
     )
 
 
