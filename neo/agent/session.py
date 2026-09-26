@@ -585,7 +585,7 @@ class Session:
 
     async def _expire_confirm(self, action_id: str) -> None:
         """If nobody answers, the question lapses and the orb stops asking."""
-        await asyncio.sleep(confirm._TTL_S)
+        await asyncio.sleep(confirm.ttl_s())
         if self._pending_action == action_id:
             confirm.cancel("expired")
             self._drop_pending()

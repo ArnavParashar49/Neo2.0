@@ -16,6 +16,11 @@ full command / script / path on the overlay's card. Only the user can approve:
 Only NEO's own code can halt a run with a question: :func:`stage` and :func:`ask_user` return a
 :class:`Halt` string, which a web page or an email that happens to start with "NEEDS_CONFIRM"
 never is.
+
+The pending question lives in a :class:`Gate`. NEO.app has one; an agent embedded in another app
+(neo.runtime) has one per conversation, so one user's "yes" can never approve another's card
+and two threads of one user never supersede each other's. An approval belongs to the gate that
+issued it: inside another conversation it releases nothing.
 """
 
 from __future__ import annotations
@@ -23,14 +28,18 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
+import os
 import secrets
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
+from neo import runtime
 from neo.config import settings
 
 NEEDS_CONFIRM = "NEEDS_CONFIRM"
@@ -63,17 +72,97 @@ class Pending:
     key: str = ""  # hash of tool + params + summary + detail: what an approval covers
 
 
+class Gate:
+    """Where one conversation's pending question lives.
+
+    NEO.app's own gate (`app=True`) audits to settings().audit_log, read at call time. An
+    embedded agent's gate audits to `audit_path` (None: no file) and hands each record to
+    `audit_sink`; its lines carry the agent's name. `ttl_s` None: the module's _TTL_S, read at
+    call time."""
+
+    def __init__(
+        self,
+        *,
+        ttl_s: float | None = None,
+        audit_path: Path | None = None,
+        audit_sink: Callable[[dict[str, Any]], None] | None = None,
+        agent: str = "",
+        app: bool = False,
+    ) -> None:
+        self.pending: Pending | None = None
+        self.ttl_s = ttl_s
+        self.audit_path = audit_path
+        self.audit_sink = audit_sink
+        self.agent = agent
+        self.app = app
+
+    def ttl(self) -> float:
+        return _TTL_S if self.ttl_s is None else self.ttl_s
+
+    def log_path(self) -> Path | None:
+        return settings().audit_log if self.app else self.audit_path
+
+
 @dataclass
 class _Approval:
     action_id: str
     released: dict[str, Any] | None = None
     key: str = ""
+    gate: Gate | None = None  # the gate whose card this approves: no other gate honours it
+    via: dict[str, Any] | None = None  # who approved, through which channel (audited)
 
 
-_pending: Pending | None = None
+_default_gate = Gate(app=True)  # NEO.app's
 _approved: ContextVar[_Approval | None] = ContextVar("neo_approved_action", default=None)
+# The action ids staged while handling one request (neo.runtime's hosts ask "did *this* request
+# stage the pending card?"). A list shared by reference, so ids staged in asyncio.gather children
+# (read-only tools run in parallel) reach the request that created it.
+_stage_sink: ContextVar[list[str] | None] = ContextVar("neo_stage_sink", default=None)
 _SECRET_KEYS = ("key", "token", "password", "secret")
 _TTL_S = 120.0  # a question nobody answered: forget it rather than hijack the next request
+
+
+def _gate() -> Gate:
+    """The bound conversation's gate (neo.runtime), else NEO.app's. In library mode with nothing
+    bound this fails closed: never a shared slot another agent could approve."""
+    sc = runtime.current_scope()
+    if sc is not None:
+        return sc.get_or_create("gate", lambda: _scope_gate(sc))
+    runtime.check_unbound("the confirmation gate")
+    return _default_gate
+
+
+def _scope_gate(sc: runtime.Scope) -> Gate:
+    rt = sc.runtime
+    return Gate(
+        audit_path=rt.settings.audit_log if rt.audit_file else None, audit_sink=rt.audit_sink, agent=rt.name
+    )
+
+
+def current_gate() -> Gate:
+    return _gate()
+
+
+def ttl_s() -> float:
+    """How long the current gate's question stays open."""
+    return _gate().ttl()
+
+
+@contextmanager
+def collecting() -> Iterator[list[str]]:
+    """Collect the action ids staged (or asked again) inside, including by parallel tool calls."""
+    sink: list[str] = []
+    token = _stage_sink.set(sink)
+    try:
+        yield sink
+    finally:
+        _stage_sink.reset(token)
+
+
+def _collect(aid: str) -> None:
+    sink = _stage_sink.get()
+    if sink is not None and aid not in sink:
+        sink.append(aid)
 
 
 def clean(params: dict[str, Any] | None) -> dict[str, Any]:
@@ -108,42 +197,72 @@ _AUDIT_MAX_BYTES = 1_000_000
 _AUDIT_KEEP_S = 180 * 86400
 
 
-def audit(action_id: str, tool: str, params: dict[str, Any], status: str) -> None:
-    """Best-effort append; never raises. Kept to ~1 MB plus one older file, at most 180 days."""
+def audit(
+    action_id: str,
+    tool: str,
+    params: dict[str, Any],
+    status: str,
+    *,
+    via: dict[str, Any] | None = None,
+    gate: Gate | None = None,
+) -> None:
+    """Best-effort append; never raises. Kept to ~1 MB plus one older file, at most 180 days.
+
+    `via`: who approved or declined, through which channel. It and the gate's agent name are
+    added only when set, so NEO.app's lines stay exactly as they were."""
+    g = gate or _gate()
     try:
-        line = json.dumps(
-            {
-                "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
-                "status": status,
-                "action": action_id,
-                "tool": tool,
-                "params": _redact(params),
-            }
-        )
-        path = settings().audit_log
+        rec: dict[str, Any] = {
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "status": status,
+            "action": action_id,
+            "tool": tool,
+            "params": _redact(params),
+        }
+        if g.agent:
+            rec["agent"] = g.agent
+        if via is not None:
+            rec["via"] = via
+        line = json.dumps(rec)
+        if g.audit_sink is not None:
+            try:
+                g.audit_sink(json.loads(line))  # a copy: the host can't change what was logged
+            except Exception:  # noqa: BLE001 — the host's callback must not block the gate
+                pass
+        path = g.log_path()
+        if path is None:
+            logging.getLogger("neo.audit").info(line)
+            return
         old = path.with_name(path.name + ".1")
         try:
             if path.stat().st_size > _AUDIT_MAX_BYTES:
                 path.replace(old)
         except FileNotFoundError:
             pass
-        _prune_audit(path, old)
-        with open(path, "a", encoding="utf-8") as f:
+        _prune_audit(path, old, gate=g)
+        with os.fdopen(os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600), "a", encoding="utf-8") as f:
             f.write(line + "\n")
     except Exception:
         pass
 
 
-_last_prune = 0.0
+_last_prune = 0.0  # NEO.app's audit log
+_last_prune_at: dict[str, float] = {}  # an embedded agent's, by file
 
 
-def _prune_audit(*paths) -> None:
+def _prune_audit(*paths, gate: Gate | None = None) -> None:
     """Drop lines older than 180 days (checked at most once a day): a light user's log never
     reaches the size limit, so size-based rotation alone would keep everything forever."""
     global _last_prune
-    if time.time() - _last_prune < 86400:
-        return
-    _last_prune = time.time()
+    if gate is None or gate.app:
+        if time.time() - _last_prune < 86400:
+            return
+        _last_prune = time.time()
+    else:
+        k = str(paths[0])
+        if time.time() - _last_prune_at.get(k, 0.0) < 86400:
+            return
+        _last_prune_at[k] = time.time()
     cutoff = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(time.time() - _AUDIT_KEEP_S))
     for p in paths:
         try:
@@ -157,7 +276,8 @@ def _prune_audit(*paths) -> None:
             p.unlink(missing_ok=True)
             continue
         tmp = p.with_name(p.name + ".tmp")
-        tmp.write_text("\n".join(keep) + "\n", encoding="utf-8")
+        with os.fdopen(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w", encoding="utf-8") as f:
+            f.write("\n".join(keep) + "\n")
         tmp.replace(p)
 
 
@@ -196,56 +316,67 @@ def card(p: Pending | None) -> dict[str, Any] | None:
 
 def stage(tool: str, params: dict[str, Any], summary: str, detail: str = "") -> Halt:
     """Stage an operation and return the halt sentinel + the question for the user."""
-    global _pending
+    g = _gate()
     params = clean(params)
     key = op_key(tool, params, summary, detail)
-    if peek() is not None and _pending is not None and _pending.key == key:
+    if _peek(g) is not None and g.pending is not None and g.pending.key == key:
         # asked again: same card, same id
-        return Halt(f"{NEEDS_CONFIRM}: {summary} — Should I go ahead?", _pending.action_id)
-    if _pending:
-        audit(_pending.action_id, _pending.tool, _pending.params, "superseded")
-        _announce("confirm_done", action_id=_pending.action_id, outcome="superseded")
+        _collect(g.pending.action_id)
+        return Halt(f"{NEEDS_CONFIRM}: {summary} — Should I go ahead?", g.pending.action_id)
+    if g.pending:
+        audit(g.pending.action_id, g.pending.tool, g.pending.params, "superseded", gate=g)
+        _announce("confirm_done", action_id=g.pending.action_id, outcome="superseded")
     aid = f"{tool}:{secrets.token_hex(8)}"
-    _pending = Pending(action_id=aid, tool=tool, params=dict(params), summary=summary, detail=detail, key=key)
-    audit(aid, tool, params, "staged")
-    _announce("confirm", **card(_pending))  # type: ignore[arg-type]
+    g.pending = Pending(action_id=aid, tool=tool, params=dict(params), summary=summary, detail=detail, key=key)
+    audit(aid, tool, params, "staged", gate=g)
+    _collect(aid)
+    _announce("confirm", **card(g.pending))  # type: ignore[arg-type]
     try:  # close the card when nobody answers, even if nothing else asks in the meantime
-        asyncio.get_running_loop().call_later(_TTL_S + 1, peek)
+        asyncio.get_running_loop().call_later(g.ttl() + 1, peek)  # carries this gate's context
     except RuntimeError:
         pass
     return Halt(f"{NEEDS_CONFIRM}: {summary} — Should I go ahead?", aid)
 
 
 def peek() -> Pending | None:
-    if _pending and time.time() - _pending.staged_at > _TTL_S:
-        cancel("expired")
-    return _pending
+    return _peek(_gate())
+
+
+def _peek(g: Gate) -> Pending | None:
+    if g.pending and time.time() - g.pending.staged_at > g.ttl():
+        _cancel(g, "expired")
+    return g.pending
 
 
 @contextmanager
-def approved(aid: str) -> Iterator[None]:
+def approved(aid: str, *, via: dict[str, Any] | None = None) -> Iterator[None]:
     """The user said yes to exactly this action: the call made inside may go ahead.
 
     A context variable, so it covers only the task that re-invokes the tool — another job running
     at the same moment can't ride on the approval. Every gate that call passes through (the
     registry's and the handler's) sees the same approval; when it's over the question is closed
-    whether or not a gate consumed it."""
-    approval = _Approval(aid)
+    whether or not a gate consumed it. It approves only this conversation's card (the gate it
+    was given in). `via`: who said yes, through which channel — audited."""
+    g = _gate()
+    approval = _Approval(aid, gate=g, via=via)
     token = _approved.set(approval)
     try:
         yield
     finally:
         _approved.reset(token)
-        if approval.released is None and _pending and _pending.action_id == aid:
-            consume_now(aid)
+        if approval.released is None and g.pending and g.pending.action_id == aid:
+            _consume_now(g, aid, via=via)
 
 
 def consume_now(aid: str) -> dict[str, Any] | None:
-    global _pending
-    if not _pending or _pending.action_id != aid:
+    return _consume_now(_gate(), aid)
+
+
+def _consume_now(g: Gate, aid: str, *, via: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    if not g.pending or g.pending.action_id != aid:
         return None
-    p, _pending = _pending, None
-    audit(aid, p.tool, p.params, "confirmed")
+    p, g.pending = g.pending, None
+    audit(aid, p.tool, p.params, "confirmed", via=via, gate=g)
     _announce("confirm_done", action_id=aid, outcome="confirmed")
     return p.params
 
@@ -256,29 +387,36 @@ def consume(key: str) -> dict[str, Any] | None:
     approval = _approved.get()
     if approval is None:
         return None
+    g = _gate()
+    if approval.gate is not g:
+        return None  # another conversation's yes: it approves nothing here
     if approval.released is not None:
         return approval.released if approval.key == key else None  # a second gate on the same call
-    if not _pending or _pending.action_id != approval.action_id or _pending.key != key:
+    if not g.pending or g.pending.action_id != approval.action_id or g.pending.key != key:
         return None
     approval.key = key
-    released = consume_now(approval.action_id)
+    released = _consume_now(g, approval.action_id, via=approval.via)
     approval.released = released
     return released
 
 
-def cancel(reason: str = "user cancelled") -> str:
-    global _pending
-    if _pending:
-        audit(_pending.action_id, _pending.tool, _pending.params, f"cancelled: {reason}")
-        _announce("confirm_done", action_id=_pending.action_id, outcome=reason)
-    _pending = None
+def cancel(reason: str = "user cancelled", *, via: dict[str, Any] | None = None) -> str:
+    return _cancel(_gate(), reason, via=via)
+
+
+def _cancel(g: Gate, reason: str, *, via: dict[str, Any] | None = None) -> str:
+    if g.pending:
+        audit(g.pending.action_id, g.pending.tool, g.pending.params, f"cancelled: {reason}", via=via, gate=g)
+        _announce("confirm_done", action_id=g.pending.action_id, outcome=reason)
+    g.pending = None
     return "CANCELLED"
 
 
 def approval_active() -> bool:
-    """True only inside :func:`approved`: the session re-invoking a staged action after the
-    user's yes."""
-    return _approved.get() is not None
+    """True only inside :func:`approved` for this conversation's gate: the session re-invoking a
+    staged action after the user's yes."""
+    a = _approved.get()
+    return a is not None and a.gate is _gate()
 
 
 def gated(

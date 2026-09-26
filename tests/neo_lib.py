@@ -18,7 +18,8 @@ def make_runtime(
     catalog tools, and its data dir created. Turns library mode on, as the SDK does."""
     from neo.tools import load_all
 
-    load_all()
+    if not runtime.library_mode():  # NEO.app's loader (task modes read the app's settings)
+        load_all()
     s = LibrarySettings(data_dir=data_dir, **settings)
     s.ensure_dirs()
     if library:
