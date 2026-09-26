@@ -28,9 +28,9 @@ import numpy as np
 from google import genai
 from google.genai import types as gt
 
+from neo.agent import confirm
 from neo.agent.early import early
 from neo.agent.prompt import build as build_prompt
-from neo.agent import confirm
 from neo.agent.registry import ToolContext, fence, registry
 from neo.agent.session import answer_of
 from neo.config import settings
@@ -433,10 +433,13 @@ class LiveVoice:
                 kind = _failure_kind(e)
                 await bus().note(f"Voice session failed ({why[:60]}) — say “Hey Neo” to retry")
                 await bus().set_state(NeoState.IDLE)
-                if (kind == "quota" or self._connect_failures >= 2) and self.on_down is not None:
-                    if time.time() - self._down_reported > 300:
-                        self._down_reported = time.time()
-                        asyncio.create_task(self.on_down(kind, why))
+                if (
+                    (kind == "quota" or self._connect_failures >= 2)
+                    and self.on_down is not None
+                    and time.time() - self._down_reported > 300
+                ):
+                    self._down_reported = time.time()
+                    asyncio.create_task(self.on_down(kind, why))
                 return
             if self._connect_failures:
                 from neo import health

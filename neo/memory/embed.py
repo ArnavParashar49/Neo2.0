@@ -30,7 +30,11 @@ def _get():
             try:
                 from sentence_transformers import SentenceTransformer
 
-                _model = SentenceTransformer(MODEL, device="cpu", cache_folder=str(settings().models_dir))
+                from neo import models
+
+                _model = SentenceTransformer(
+                    MODEL, device="cpu", cache_folder=str(settings().models_dir), revision=models.EMBEDDER_REVISION
+                )
             except Exception as e:  # noqa: BLE001 — embeddings are an optimisation, never a failure
                 print(f"[memory] embedding model unavailable: {str(e)[:100]}")
                 _failed = True

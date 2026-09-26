@@ -293,10 +293,9 @@ async def _voice_supervisor(app: App, stop: asyncio.Event) -> None:
     """Bring voice up, and keep it up: retry if it can't start, and when Gemini Live keeps
     failing (quota used up, network down) say so and switch to the on-device voice until Live
     works again."""
+    from neo import health
     from neo.voice import devices
     from neo.voice.pipeline import local_ready, make_local, make_voice
-
-    from neo import health
 
     if devices.mic_status() in (devices.DENIED, devices.RESTRICTED):
         print("[voice] microphone access is off for NEO")

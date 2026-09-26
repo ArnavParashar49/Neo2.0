@@ -33,7 +33,6 @@ from neo.agent import confirm
 from neo.config import settings
 from neo.events import bus
 
-
 # A port probe or a half-open socket isn't a websocket client; don't dump a traceback for it.
 logging.getLogger("websockets.server").setLevel(logging.CRITICAL)
 

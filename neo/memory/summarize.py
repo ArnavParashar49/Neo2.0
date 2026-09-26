@@ -6,7 +6,6 @@ Lets the next session answer "what did we do yesterday" and carry over unfinishe
 from __future__ import annotations
 
 import asyncio
-
 import time
 
 from neo.memory.store import store

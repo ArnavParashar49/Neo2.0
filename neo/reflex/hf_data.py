@@ -26,24 +26,12 @@ from neo.config import settings
 CLINC: dict[str, tuple[str, str]] = {
     # ---- conversation / knowledge → chat
     **dict.fromkeys(
-        """restaurant_reviews nutrition_info oil_change_how gas_type meaning_of_life
-        improve_credit_score measurement_conversion flip_coin do_you_have_pets tell_joke
-        exchange_rate meal_suggestion tire_change user_name what_are_your_hobbies jump_start
-        vaccines food_last who_do_you_work_for international_visa translate carry_on insurance
-        what_is_your_name where_are_you_from cook_time roll_dice who_made_you how_old_are_you
-        recipe yes no maybe ingredients_list what_can_i_ask_you are_you_a_bot plug_type
-        oil_change_when thank_you fun_fact ingredient_substitution calories calculator definition
-        next_holiday mpg spelling greeting goodbye repeat change_ai_name change_user_name
-        change_accent change_speed whisper_mode change_language timezone interest_rate
-        redeem_rewards oos reset_settings sync_device gas tire_pressure last_maintenance
-        international_fees apr min_payment
-       """.split(),
+        ["restaurant_reviews", "nutrition_info", "oil_change_how", "gas_type", "meaning_of_life", "improve_credit_score", "measurement_conversion", "flip_coin", "do_you_have_pets", "tell_joke", "exchange_rate", "meal_suggestion", "tire_change", "user_name", "what_are_your_hobbies", "jump_start", "vaccines", "food_last", "who_do_you_work_for", "international_visa", "translate", "carry_on", "insurance", "what_is_your_name", "where_are_you_from", "cook_time", "roll_dice", "who_made_you", "how_old_are_you", "recipe", "yes", "no", "maybe", "ingredients_list", "what_can_i_ask_you", "are_you_a_bot", "plug_type", "oil_change_when", "thank_you", "fun_fact", "ingredient_substitution", "calories", "calculator", "definition", "next_holiday", "mpg", "spelling", "greeting", "goodbye", "repeat", "change_ai_name", "change_user_name", "change_accent", "change_speed", "whisper_mode", "change_language", "timezone", "interest_rate", "redeem_rewards", "oos", "reset_settings", "sync_device", "gas", "tire_pressure", "last_maintenance", "international_fees", "apr", "min_payment"],
         ("chat", ""),
     ),
     # ---- needs current information from the web → quick_action + web_search
     **dict.fromkeys(
-        """directions distance traffic direct_deposit flight_status travel_alert
-        travel_suggestion restaurant_suggestion how_busy exchange_rate""".split(),
+        ["directions", "distance", "traffic", "direct_deposit", "flight_status", "travel_alert", "travel_suggestion", "restaurant_suggestion", "how_busy", "exchange_rate"],
         ("quick_action", "web_search"),
     ),
     # ---- one-shot commands → quick_action (+ the NEO tool when there is one)
@@ -63,16 +51,7 @@ CLINC: dict[str, tuple[str, str]] = {
     "smart_home": ("quick_action", ""),
     # ---- needs an app, a website, an account or several steps → agent_task
     **dict.fromkeys(
-        """account_blocked accept_reservations report_lost_card order schedule_meeting
-        freeze_account restaurant_reservation make_call text bill_balance balance uber car_rental
-        credit_limit shopping_list expiration_date routing todo_list card_declined
-        rewards_balance share_location book_flight insurance_change todo_list_update
-        cancel_reservation transactions credit_score report_fraud spending_history reminder
-        payday find_phone order_status confirm_reservation damaged_card pin_change
-        replacement_card_duration new_card income taxes pto_request rollover_401k
-        pto_request_status application_status update_playlist credit_limit_change pay_bill
-        lost_luggage book_hotel w2 shopping_list_update pto_balance order_checks
-        schedule_maintenance transfer current_location travel_notification pto_used bill_due""".split(),
+        ["account_blocked", "accept_reservations", "report_lost_card", "order", "schedule_meeting", "freeze_account", "restaurant_reservation", "make_call", "text", "bill_balance", "balance", "uber", "car_rental", "credit_limit", "shopping_list", "expiration_date", "routing", "todo_list", "card_declined", "rewards_balance", "share_location", "book_flight", "insurance_change", "todo_list_update", "cancel_reservation", "transactions", "credit_score", "report_fraud", "spending_history", "reminder", "payday", "find_phone", "order_status", "confirm_reservation", "damaged_card", "pin_change", "replacement_card_duration", "new_card", "income", "taxes", "pto_request", "rollover_401k", "pto_request_status", "application_status", "update_playlist", "credit_limit_change", "pay_bill", "lost_luggage", "book_hotel", "w2", "shopping_list_update", "pto_balance", "order_checks", "schedule_maintenance", "transfer", "current_location", "travel_notification", "pto_used", "bill_due"],
         ("agent_task", ""),
     ),
     "cancel": ("stop", ""),
@@ -101,8 +80,7 @@ MASSIVE: dict[str, tuple[str, str]] = {
     "general_joke": ("chat", ""),
     "general_quirky": ("chat", ""),
     **dict.fromkeys(
-        """iot_cleaning iot_coffee iot_hue_lightchange iot_hue_lightdim iot_hue_lightoff
-        iot_hue_lighton iot_hue_lightup iot_wemo_off iot_wemo_on""".split(),
+        ["iot_cleaning", "iot_coffee", "iot_hue_lightchange", "iot_hue_lightdim", "iot_hue_lightoff", "iot_hue_lighton", "iot_hue_lightup", "iot_wemo_off", "iot_wemo_on"],
         ("quick_action", ""),
     ),
     "lists_createoradd": ("agent_task", ""),

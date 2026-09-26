@@ -156,8 +156,7 @@ def due(now: float | None = None) -> bool:
 def retrain() -> dict | None:
     """Retrain the heads in this process on the already-loaded Laya, then hot-swap them."""
     global _training
-    from neo.reflex import get_laya, laya_lock
-    from neo.reflex import finetune
+    from neo.reflex import finetune, get_laya, laya_lock
 
     laya = get_laya()
     if laya is None or _training:
@@ -222,7 +221,7 @@ async def learn_loop(is_idle) -> None:
             if enabled() and time.time() - idle_since >= _IDLE_S and due():
                 done = asyncio.get_running_loop().create_future()
 
-                def run() -> None:
+                def run(done: asyncio.Future = done) -> None:
                     try:
                         retrain()
                     finally:

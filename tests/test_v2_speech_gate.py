@@ -125,7 +125,7 @@ def test_a_command_is_done_silently_even_if_the_model_narrates(voice, monkeypatc
     asyncio.run(feed(voice, heard("open notes"), said("Sure, opening Notes"), audio(), call("open_app", {"target": "Notes"}), audio(), DONE, settle=0.2))
     assert voice.spk.played == []  # "Sure, opening Notes" never reached the speaker
     assert ("open_app", {"target": "Notes"}) in voice.ran
-    assert not [l for l in voice._dialog if l[1] == "NEO"]  # and isn't remembered as said
+    assert not [line for line in voice._dialog if line[1] == "NEO"]  # and isn't remembered as said
 
 
 def test_a_question_is_answered_out_loud(voice):

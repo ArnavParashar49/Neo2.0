@@ -89,10 +89,7 @@ def is_secret(path: str | os.PathLike, base: str | os.PathLike | None = None) ->
 
 def covers_secret(path: str | os.PathLike, base: str | os.PathLike | None = None) -> bool:
     """Would a recursive read of this directory reach a secret? (the home folder, ~/Library…)"""
-    for p in _variants(path, base):
-        if is_secret(p) or any(_under(HOME / d, p) for d in _SECRET_DIRS):
-            return True
-    return False
+    return any(is_secret(p) or any(_under(HOME / d, p) for d in _SECRET_DIRS) for p in _variants(path, base))
 
 
 # ---- file writes -----------------------------------------------------------------------------

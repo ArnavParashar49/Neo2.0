@@ -303,7 +303,9 @@ def train(args: argparse.Namespace, *, agent=None, lock=None, cancelled=None) ->
             import laya
 
             t0 = time.time()
-            agent = laya.load("convaiinnovations/laya", device=settings().laya_device)
+            from neo import models
+
+            agent = laya.load(models.laya_dir(), device=settings().laya_device)  # the pinned encoder
             print(f"laya loaded in {time.time() - t0:.1f}s", file=sys.stderr)
         if need_emb:
             t0 = time.time()
@@ -453,6 +455,7 @@ def train(args: argparse.Namespace, *, agent=None, lock=None, cancelled=None) ->
         json.dumps(
             {
                 "version": 2,
+                "encoder": _encoder_revision(),
                 "split": _SPLIT,
                 "mu": mu.tolist(),
                 "sd": sd.tolist(),
@@ -533,6 +536,12 @@ def drop_from_cache(texts: set[str]) -> int:
     teach_by = {t: v for t, v in teach_by.items() if t not in texts}
     save_cache(emb_by, teach_by)
     return before - len(emb_by)
+
+
+def _encoder_revision() -> str:
+    from neo import models
+
+    return models.LAYA_REVISION  # the head only fits features from this exact encoder
 
 
 if __name__ == "__main__":

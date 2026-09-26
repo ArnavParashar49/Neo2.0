@@ -70,8 +70,10 @@ class LocalVoice:
         from mlx_audio.stt.utils import load as stt_load
         from mlx_audio.tts.utils import load_model as tts_load
 
-        self._stt = stt_load(s.stt_model)
-        self._tts = tts_load(s.tts_model)
+        from neo import models
+
+        self._stt = stt_load(models.local_path(s.stt_model))  # pinned revisions for the defaults
+        self._tts = tts_load(models.local_path(s.tts_model))
         try:
             from silero_vad import VADIterator, load_silero_vad
 

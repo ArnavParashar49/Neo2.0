@@ -134,10 +134,10 @@ def test_control_tools_are_quiet_and_live_direct():
 
 
 def test_dictate_appends_on_a_new_line_when_the_note_has_text(monkeypatch):
-    from neo.tools import computer as comp
-    from neo.tools.computer import ax
     import neo.providers as prov
     from neo.providers.base import Turn
+    from neo.tools import computer as comp
+    from neo.tools.computer import ax
 
     typed = []
 

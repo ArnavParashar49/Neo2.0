@@ -112,7 +112,7 @@ async def bring_front(name: str, *, wait: float = 1.5) -> tuple[bool, str]:
     real, pid = a.localizedName(), int(a.processIdentifier())
     if await _wait_front(pid, 0.05):
         return True, real
-    for attempt in range(3):  # the app may still be opening its first window
+    for _ in range(3):  # the app may still be opening its first window
         await asyncio.to_thread(force_front, pid)
         if await _wait_front(pid, 0.4):
             return True, real

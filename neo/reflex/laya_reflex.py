@@ -27,7 +27,9 @@ class LayaReflex:
     def __init__(self, device: str | None = None) -> None:
         import laya  # heavy import (torch) — keep it lazy
 
-        self._agent = laya.load("convaiinnovations/laya", device=device or settings().laya_device)
+        from neo import models
+
+        self._agent = laya.load(models.laya_dir(), device=device or settings().laya_device)  # pinned
         self._head = _load_head(settings().data_dir / "reflex_head.json")
         self._questions = questions_for(self._head["subq"]) if self._head else QUESTIONS
         self.decide("warm up")  # first MPS call is ~2 s; take it now
@@ -157,6 +159,13 @@ def _load_head(path: Path) -> dict[str, Any] | None:
     try:
         if path.exists():
             h = json.loads(path.read_text())
+            from neo import models
+
+            if h.get("encoder") and h["encoder"] != models.LAYA_REVISION:
+                # Trained on another encoder's features: its outputs would be meaningless (and the
+                # confirm gate reads its "destructive" signal). Zero-shot until it's retrained.
+                print("[reflex] the trained head is for a different Laya encoder — ignoring it until retrained")
+                return None
             if h.get("version") == 2:
                 return {
                     "version": 2,

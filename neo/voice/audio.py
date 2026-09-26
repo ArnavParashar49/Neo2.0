@@ -276,12 +276,14 @@ def _watch() -> None:
                 reason = "the input device changed"
             elif now_dev[1] != last[1]:
                 reason = "the output device changed"
-            elif broken or any(
-                (isinstance(o, Mic) and o.stalled()) or (isinstance(o, Speaker) and o.active and o._stream is None)
-                for o in list(_streams)
-            ):
-                if time.monotonic() - last_stall_fix > (_STALL_RETRY_S if not broken else 5.0):
-                    reason, last_stall_fix = "the audio stopped working", time.monotonic()
+            elif (
+                broken
+                or any(
+                    (isinstance(o, Mic) and o.stalled()) or (isinstance(o, Speaker) and o.active and o._stream is None)
+                    for o in list(_streams)
+                )
+            ) and time.monotonic() - last_stall_fix > (_STALL_RETRY_S if not broken else 5.0):
+                reason, last_stall_fix = "the audio stopped working", time.monotonic()
             last = now_dev
             if reason:
                 time.sleep(0.4)  # let macOS finish switching (AirPods announce themselves in steps)

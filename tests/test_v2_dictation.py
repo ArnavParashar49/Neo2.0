@@ -128,8 +128,8 @@ def test_never_types_into_a_password_field(monkeypatch):
 
 def test_dictate_composes_with_the_fast_brain_then_types(monkeypatch):
     typed = _stub_typing(monkeypatch)
-    from neo.agent.registry import ToolContext
     import neo.providers as prov
+    from neo.agent.registry import ToolContext
 
     class B:
         name = "fake"

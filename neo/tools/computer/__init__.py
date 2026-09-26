@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-import time
 import re
+import time
 
 from neo.agent import confirm
 from neo.agent.registry import ToolContext, ToolOutput, tool
@@ -555,9 +555,9 @@ async def hotkey(a: dict, c: ToolContext) -> str:
         return f"Error: going back only makes sense in a browser or Finder, and {front or 'nothing'} is in front."
     if want == "document" and front not in _DOC_APPS:
         return "Error: which app should the new document be in?"
-    if want == "tabs" and front not in _TAB_APPS:
-        if err := await _guard_front("Safari"):  # "new tab" from an app without tabs: the browser
-            return err
+    # "new tab" from an app without tabs: the browser
+    if want == "tabs" and front not in _TAB_APPS and (err := await _guard_front("Safari")):
+        return err
     if gate := await _ask_before_keys(a, keys, ax.frontmost_app()[0], c):
         return gate
     return inp.hotkey(keys)
