@@ -58,10 +58,6 @@ def questions_for(subq: list[str]) -> dict[str, Any]:
     return {**QUESTIONS, **{k: SUBQ[k] for k in subq}}
 
 
-def dim_for(subq: list[str]) -> int:
-    return EMB_DIM + len(subq) + len(_INTENTS) + 1
-
-
 def answers_to_vector(ans: dict[str, Any], subq: list[str]) -> np.ndarray:
     p = ans["intent"].get("probabilities", {})
     zs = [np.log(max(float(p.get(k, 0.0)), 1e-6)) for k in _INTENTS]
@@ -84,29 +80,6 @@ def embed(agent, texts: list[str]) -> np.ndarray:
     return pooled.cpu().numpy().astype(np.float32)
 
 
-def extract_all(agent, texts: list[str], batch: int = 32, progress: bool = False) -> dict[str, np.ndarray]:
-    """One pass over the texts with EVERY question; returns per-block arrays so heads with any
-    sub-question subset can be fit offline without re-running the model."""
-    import sys
-
-    embs, subs, zs, base = [], [], [], []
-    for i in range(0, len(texts), batch):
-        chunk = texts[i : i + batch]
-        embs.append(embed(agent, chunk))
-        for t in chunk:
-            ans = agent.system_one({"text": t}, questions_for(ALL_SUBQ))["answers"]
-            v = answers_to_vector(ans, ALL_SUBQ)
-            subs.append(v[: len(ALL_SUBQ)])
-            zs.append(v[len(ALL_SUBQ) :])
-            # Laya's zero-shot yes/no answers: the teacher for the fast (embedding-only) heads.
-            base.append([float(ans["destructive"].get("noul", 0.0)), float(ans["needs_screen"].get("noul", 0.0))])
-        if progress:
-            print(f"\r  features {min(i + batch, len(texts))}/{len(texts)}", end="", file=sys.stderr)
-    if progress:
-        print(file=sys.stderr)
-    return {"emb": np.vstack(embs), "sub": np.vstack(subs), "zs": np.vstack(zs), "base": np.array(base, np.float32)}
-
-
 def embed_only(agent, texts: list[str], batch: int = 64, progress: bool = False) -> np.ndarray:
     """Just the encoder embedding (~20 ms per text on MPS): all the fast heads need."""
     import sys
@@ -119,14 +92,6 @@ def embed_only(agent, texts: list[str], batch: int = 64, progress: bool = False)
     if progress:
         print(file=sys.stderr)
     return np.vstack(out)
-
-
-def assemble(blocks: dict[str, np.ndarray], subq: list[str]) -> np.ndarray:
-    idx = [ALL_SUBQ.index(k) for k in subq]
-    n = blocks["emb"].shape[0]
-    return np.hstack(
-        [blocks["emb"], blocks["sub"][:, idx], blocks["zs"], np.ones((n, 1), np.float32)]
-    ).astype(np.float32)
 
 
 def features_one(agent, text: str, subq: list[str], ans: dict[str, Any] | None = None) -> np.ndarray:

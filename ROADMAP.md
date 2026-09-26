@@ -167,9 +167,17 @@ A 30-agent review confirmed 25 defects in the NEO.app / learning / speed batch; 
 - Learning: Live labels follow the user's turn (a partial transcript at tool time and the final wording are one label), agent_task relays that ran fast paths are labelled by what ran, clarifying questions aren't learned as chat, private content (dictation, memories, notes, mail, codes/numbers) is never stored, 180-day / 2,000-row retention, `NEO_LEARN=off`, append-only writes, the no-regression gate covers the intent, reply and tool heads, atomic head writes, retraining never blocks shutdown.
 - Search/weather: pronoun queries ("search for it on Amazon") and multi-command sentences never hit search_site's fast path; weather needs a real place/time ("the forecast for Q3 sales", "how cold is it in here" aren't weather); time words ("next week", "tomorrow morning", "on Friday") are understood; any failed fast-path step hands the request to the agent; failed/cancelled lookups can be retried; per-question state resets on interruptions and new sessions; the spoken context is time-limited and passed as quoted material in the user's turn, never in the system prompt; open_app only raises the browser for web URLs.
 
+### Production readiness (2026-09-26)
+
+A 54-agent audit found 45 gaps across security, reliability, packaging, onboarding, privacy and code health; four batches closed them, and three further adversarial reviews (two on the security batch, one on reliability and privacy) confirmed and fixed what the first passes missed.
+- **Install:** `scripts/install-app.sh` puts the core's runtime (exact `requirements.lock` versions) in `~/Library/Application Support/NEO`, signs NEO.app by bundle id so permissions survive updates, installs exactly one copy in `/Applications` and starts it; the websocket only admits the overlay (token + origin); the app owns the permission prompts and asks once per version.
+- **Security:** an allowlist decides what runs without asking (read-only shell and AppleScript, new files in the user's folders); everything else is shown in full and needs the user's own approval — typed, spoken after NEO read the question out, or the card's ⌘⏎ for that exact action. Web pages, mail, files and the screen are fenced as data and can't fake a question, plant memories or smuggle data out; secrets are never read; background fetches never reach the Mac or the LAN.
+- **Reliability:** audio follows device changes; voice starts in the background, survives a network blip at login and falls back to the on-device cascade when Live is down; the wake-word model download is checksummed and atomic; timers survive sleep and restarts; the memory store is thread-safe; history is bounded and summarised in checkpoints; learning keeps learning and backs off after failures.
+- **Privacy:** logs never hold what the user typed, said, sent or read; playbooks keep paths, not content; retention limits on disk; `NEO_CLOUD_MEMORY`; *Erase NEO's Memory…*; the overlay is hidden from screen capture; README lists every cloud destination.
+
 ### Next
 
-- Developer ID signing + notarization, so permissions survive rebuilds and the app can be shared.
+- Developer ID signing + notarization, so the app can be shared (bundle-id signing already keeps permissions across local rebuilds).
 - Skills: a small curated set loaded on demand, replacing the v1 271-folder dump.
 
 ## Removed from v1 (and why)
