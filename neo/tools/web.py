@@ -9,41 +9,9 @@ import httpx
 
 from neo.agent.registry import ToolContext, tool
 
-# "search X on amazon", "open it on google": a real search page on that site, in the browser.
-_SITES: dict[str, str] = {
-    "google": "https://www.google.com/search?q={q}",
-    "google images": "https://www.google.com/search?tbm=isch&q={q}",
-    "images": "https://www.google.com/search?tbm=isch&q={q}",
-    "google maps": "https://www.google.com/maps/search/{q}",
-    "maps": "https://www.google.com/maps/search/{q}",
-    "youtube": "https://www.youtube.com/results?search_query={q}",
-    "amazon": "https://www.{amazon}/s?k={q}",
-    "flipkart": "https://www.flipkart.com/search?q={q}",
-    "ebay": "https://www.ebay.com/sch/i.html?_nkw={q}",
-    "wikipedia": "https://en.wikipedia.org/w/index.php?search={q}",
-    "github": "https://github.com/search?q={q}&type=repositories",
-    "reddit": "https://www.reddit.com/search/?q={q}",
-    "stack overflow": "https://stackoverflow.com/search?q={q}",
-    "stackoverflow": "https://stackoverflow.com/search?q={q}",
-    "twitter": "https://x.com/search?q={q}",
-    "x": "https://x.com/search?q={q}",
-    "linkedin": "https://www.linkedin.com/search/results/all/?keywords={q}",
+# The table of known sites and their search pages (legacy until sites are found by evidence).
+from neo.tools.computer.legacy import _ENGINE_RE, _SITE_RE, site_search_url
 
-    "imdb": "https://www.imdb.com/find/?q={q}",
-    "duckduckgo": "https://duckduckgo.com/?q={q}",
-    "bing": "https://www.bing.com/search?q={q}",
-    "news": "https://news.google.com/search?q={q}",
-    "google news": "https://news.google.com/search?q={q}",
-    "pinterest": "https://www.pinterest.com/search/pins/?q={q}",
-    "instagram": "https://www.instagram.com/explore/search/keyword/?q={q}",
-}
-_AMAZON = {
-    "IN": "amazon.in", "GB": "amazon.co.uk", "DE": "amazon.de", "FR": "amazon.fr", "IT": "amazon.it",
-    "ES": "amazon.es", "CA": "amazon.ca", "JP": "amazon.co.jp", "AU": "amazon.com.au", "MX": "amazon.com.mx",
-    "BR": "amazon.com.br", "NL": "amazon.nl", "AE": "amazon.ae", "SG": "amazon.sg", "SE": "amazon.se",
-}
-SITE_NAMES = sorted(_SITES, key=len, reverse=True)
-_SITE_RE = "|".join(n.replace(" ", r"\s+") for n in SITE_NAMES)
 # "search for it on amazon", "open that one on google": the thing comes from the conversation,
 # which only the model has — never a fast path.
 _VAGUE_QUERY = (
@@ -51,10 +19,6 @@ _VAGUE_QUERY = (
     r"\s+(?:on|in|at)\b)"
 )
 _VAGUE_QUERY_AFTER_FOR = r"(?!(?:for\s+)?(?:it|this|that|these|those|them|one|(?:the|this|that)\s+(?:\w+\s+)?one)\s*[.!?]*\s*$)"
-# Sites named by a generic word ("maps", "news", "images", "x") need an explicit search verb —
-# "open the news on …" / "find x on …" are too ambiguous for a fast path.
-_GENERIC_SITES = {"maps", "news", "images", "x"}
-_ENGINE_RE = "|".join(n.replace(" ", r"\s+") for n in SITE_NAMES if n not in _GENERIC_SITES)
 
 
 def _country() -> str:
@@ -64,18 +28,6 @@ def _country() -> str:
         return str(NSLocale.currentLocale().countryCode() or "")
     except Exception:  # noqa: BLE001
         return ""
-
-
-def site_search_url(site: str, query: str) -> str:
-    from urllib.parse import quote_plus
-
-    key = " ".join(site.lower().replace("www.", "").replace(".com", "").split())
-    q = quote_plus(query.strip())
-    if key in _SITES:
-        return _SITES[key].format(q=q, amazon=_AMAZON.get(_country(), "amazon.com"))
-    if "." in site:  # a domain: Google, limited to that site
-        return f"https://www.google.com/search?q={quote_plus(f'site:{site.strip()} {query.strip()}')}"
-    return f"https://www.google.com/search?q={quote_plus(f'{query.strip()} {site.strip()}')}"
 
 
 _UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15"

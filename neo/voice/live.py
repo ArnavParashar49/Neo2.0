@@ -31,7 +31,7 @@ from google.genai import types as gt
 from neo.agent import confirm
 from neo.agent.early import early
 from neo.agent.prompt import build as build_prompt
-from neo.agent.registry import ToolContext, fence, registry
+from neo.agent.registry import ToolContext, fence, registry, voiced
 from neo.agent.session import answer_of
 from neo.config import settings
 from neo.events import NeoState, bus
@@ -992,10 +992,12 @@ class LiveVoice:
                     from neo.agent import fastpath
 
                     steps = fastpath.plan(asked) if asked else None
-                    vague = steps and any(_vague(v) for _, a in steps for v in a.values())
-                    text = asked if steps and not vague else goal
+                    own = bool(steps) and not any(_vague(v) for _, a in steps for v in a.values())
                     reply = await self._agent_session.handle(
-                        text, conversation=self._conversation(asked), taint=list(self._taint)
+                        asked if own else goal,
+                        conversation=self._conversation(asked),
+                        taint=list(self._taint),
+                        origin="user" if own else "live",
                     )
                     result, silent = reply.text, reply.silent
                     lab = self._call_labels.get(key)
@@ -1020,14 +1022,14 @@ class LiveVoice:
                     await bus().set_state(NeoState.WORKING, job=key)
                     await bus().tool_start(fc.name, args, job=key)
                     out = await registry().invoke(
-                        fc.name, args, ToolContext(user_text=asked or str(args), taint=self._taint)
+                        fc.name, args, ToolContext(user_text=asked or str(args), taint=self._taint, origin="live")
                     )
                     await bus().tool_end(fc.name, out.ok, out.text, job=key)
                 outcomes.step("", fc.name, out.ok, halt=getattr(out, "halt", False))
                 result = out.text
                 if t and t.untrusted and out.ok and not result.startswith("NEEDS_"):
                     result = fence(fc.name, result)  # a page or an email is data, never orders
-                silent = bool(out.ok and t and t.quiet and not out.text.startswith("NEEDS_"))
+                silent = not voiced(out, bool(t and t.quiet))
                 if not out.ok:
                     self._forget_call(fc.name, args)  # a failed call may be tried again
         except asyncio.CancelledError:

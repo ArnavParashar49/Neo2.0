@@ -39,7 +39,17 @@ _CONTROL_ARGS = ("confirm", "cancel")  # never part of an operation: models used
 
 
 class Halt(str):
-    """A NEEDS_CONFIRM / NEEDS_USER result produced by NEO's own code (see the module doc)."""
+    """A NEEDS_CONFIRM / NEEDS_USER result produced by NEO's own code (see the module doc).
+
+    `action_id`: the card a NEEDS_CONFIRM stands for, so whoever asks the user adopts that card
+    and never one another job staged at the same moment."""
+
+    action_id: str
+
+    def __new__(cls, text: str, action_id: str = "") -> Halt:
+        h = super().__new__(cls, text)
+        h.action_id = action_id
+        return h
 
 
 @dataclass
@@ -75,7 +85,9 @@ def op_key(tool: str, params: dict[str, Any], summary: str = "", detail: str = "
     return hashlib.sha256(blob.encode()).hexdigest()
 
 
-_CONTENT_KEYS = {"body", "content", "text", "new_string", "old_string", "brief", "value", "subject"}
+_CONTENT_KEYS = {
+    "body", "content", "text", "new_string", "old_string", "brief", "value", "subject", "notes", "message",
+}
 
 
 def _redact(params: dict[str, Any]) -> dict[str, Any]:
@@ -188,7 +200,8 @@ def stage(tool: str, params: dict[str, Any], summary: str, detail: str = "") -> 
     params = clean(params)
     key = op_key(tool, params, summary, detail)
     if peek() is not None and _pending is not None and _pending.key == key:
-        return Halt(f"{NEEDS_CONFIRM}: {summary} — Should I go ahead?")  # asked again: same card, same id
+        # asked again: same card, same id
+        return Halt(f"{NEEDS_CONFIRM}: {summary} — Should I go ahead?", _pending.action_id)
     if _pending:
         audit(_pending.action_id, _pending.tool, _pending.params, "superseded")
         _announce("confirm_done", action_id=_pending.action_id, outcome="superseded")
@@ -200,7 +213,7 @@ def stage(tool: str, params: dict[str, Any], summary: str, detail: str = "") -> 
         asyncio.get_running_loop().call_later(_TTL_S + 1, peek)
     except RuntimeError:
         pass
-    return Halt(f"{NEEDS_CONFIRM}: {summary} — Should I go ahead?")
+    return Halt(f"{NEEDS_CONFIRM}: {summary} — Should I go ahead?", aid)
 
 
 def peek() -> Pending | None:
@@ -262,14 +275,23 @@ def cancel(reason: str = "user cancelled") -> str:
     return "CANCELLED"
 
 
-def gated(tool: str, params: dict[str, Any], summary: str, detail: str = "") -> dict[str, Any] | str:
+def approval_active() -> bool:
+    """True only inside :func:`approved`: the session re-invoking a staged action after the
+    user's yes."""
+    return _approved.get() is not None
+
+
+def gated(
+    tool: str, params: dict[str, Any], summary: str, detail: str = "", *, always: bool = False
+) -> dict[str, Any] | str:
     """One-liner for tool handlers.
 
     Returns the released params when the user approved this exact operation (or when
     confirmation is turned off), otherwise the ``NEEDS_CONFIRM`` string for the model.
+    `always`: ask even with confirmation turned off — for what reaches another person (a send).
     """
     params = clean(params)
-    if not settings().confirm_destructive:
+    if not settings().confirm_destructive and not always:
         return params
     released = consume(op_key(tool, params, summary, detail))
     if released is not None:

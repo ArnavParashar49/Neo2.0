@@ -6,13 +6,14 @@ environment or a ``.env`` file in the project root; nothing is written to Git.
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal, get_args
 
 from pydantic import Field, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 # Keys and settings: ~/.neo/.env (where NEO.app's installed runtime looks), and a checkout's own
@@ -21,6 +22,7 @@ USER_ENV = Path.home() / ".neo" / ".env"
 
 BrainName = Literal["gemini", "gemini_lite", "groq", "local", "claude"]
 VoiceBackend = Literal["auto", "live", "local", "off"]
+DecideMode = Literal["legacy", "shadow", "on", "off"]
 
 
 class Settings(BaseSettings):
@@ -101,6 +103,32 @@ class Settings(BaseSettings):
     max_tool_result_chars: int = 6000
     confirm_destructive: bool = True
 
+    # ---- task kinds (neo/decide) -------------------------------------------------------
+    # How each kind runs (notes, reminders, calendar, mail…): "legacy" = today's scripts,
+    # "shadow" = those, while the new path only logs what it would have chosen, "on" = the new
+    # path, "off" = a new kind stays unavailable. A kind left out gets its release default.
+    # NEO_DECIDE_MODES="add_event=on,read_calendar=shadow"
+    decide_modes: Annotated[dict[str, DecideMode], NoDecode] = {}
+    decide_kind_routing: bool = False  # Laya may name a task kind no fast path covered (after its eval)
+    notes_dir: Path = Path.home() / "Documents" / "NEO Notes"  # a note no notes app could take
+
+    @field_validator("decide_modes", mode="before")
+    @classmethod
+    def _decide_modes(cls, v):
+        """A dict, JSON, or "kind=mode, kind=mode". An unknown mode is dropped: the kind keeps
+        its default, and a typo never stops NEO from starting."""
+        if isinstance(v, str) and v.strip().startswith("{"):
+            try:
+                v = json.loads(v)
+            except ValueError:
+                v = {}
+        elif isinstance(v, str):
+            v = dict(p.split("=", 1) for p in v.replace(";", ",").split(",") if "=" in p)
+        if not isinstance(v, dict):
+            return {}
+        pairs = ((str(k).strip().lower(), str(m).strip().lower()) for k, m in v.items())
+        return {k: m for k, m in pairs if k and m in get_args(DecideMode)}
+
     # ---- server / ui -----------------------------------------------------------------
     ws_host: str = "127.0.0.1"
     ws_port: int = 8765
@@ -118,7 +146,7 @@ class Settings(BaseSettings):
                 out.append(k)
         return out
 
-    @field_validator("data_dir", mode="before")
+    @field_validator("data_dir", "notes_dir", mode="before")
     @classmethod
     def _expand(cls, v):  # NEO_DATA_DIR=~/.neo must not create a literal "~" directory
         return Path(str(v)).expanduser().resolve()

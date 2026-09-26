@@ -1,7 +1,8 @@
 """Zero-LLM dispatch: regex fast paths, and plans that cover a whole utterance with them.
 
-Tools declare `fast_path=[(regex, args)]`. `match()` finds the tool whose pattern accepts a
-text. `plan()` covers a whole utterance with fast-path steps — "open notes and type salt and
+Tools declare `fast_path=[(regex, args)]`, or `(regex, args, check)` when the words alone can't
+tell ("search X on <W>" is a site search only if W is a site NEO knows). `match()` finds the
+tool whose pattern accepts a text. `plan()` covers a whole utterance with fast-path steps — "open notes and type salt and
 pepper" → open_app(notes), type_text("salt and pepper") — or returns None so the utterance
 goes to a model. The rules that make it safe:
 
@@ -38,7 +39,7 @@ def match(text: str) -> Step | None:
     brightness, timer, clock) come first so a broad pattern can never shadow a specific one."""
     tools = sorted(registry().all(), key=lambda t: 0 if t.category == "system" else 1)
     for t in tools:
-        for pattern, args in t.fast_path:
+        for pattern, args, *check in t.fast_path:
             m = re.search(pattern, text, re.I)
             if not m:
                 continue
@@ -49,8 +50,19 @@ def match(text: str) -> Step | None:
                     filled[k] = strip_quotes(m.groupdict().get(v[1:-1]))
                 else:
                     filled[k] = v
+            if check and not _claims(check[0], filled):
+                continue
             return t.name, filled
     return None
+
+
+def _claims(check, filled: dict) -> bool:
+    """A pattern's check on its captures. One that fails can't tell: the utterance goes on to the
+    next pattern, and in the end to a model, rather than to a guess."""
+    try:
+        return bool(check(dict(filled)))
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def _tool(name: str) -> RegisteredTool | None:

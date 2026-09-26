@@ -26,12 +26,18 @@ dependencies = [
   "pyobjc-framework-Cocoa; sys_platform == 'darwin'",
   "pyobjc-framework-Quartz; sys_platform == 'darwin'",
   "pyobjc-framework-ApplicationServices; sys_platform == 'darwin'",
+  # calendars, reminders and contacts through the system stores (the same pyobjc release)
+  "pyobjc-framework-EventKit>=12.2,<13; sys_platform == 'darwin'",
+  "pyobjc-framework-Contacts>=12.2,<13; sys_platform == 'darwin'",
   # tools
   "pillow",
   "httpx",
   "ddgs",
   "trafilatura",
   "pypdf",
+  "python-dateutil",       # recurring events (RRULE) when a calendar is read by script
+  "tld",                   # a site's registered domain
+  "lxml",                  # a site's own search form and metadata
   # core
   "numpy",
   "pydantic>=2",
