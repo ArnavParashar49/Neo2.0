@@ -123,3 +123,18 @@ def test_importing_neo_configures_nothing_but_a_null_handler():
         type(h).__module__.startswith("_pytest") for h in logging.getLogger().handlers
     )
     assert callable(neo.log_to_stdout)
+
+
+@pytest.mark.parametrize("module", ["generate", "finetune", "hf_data", "dataset"])
+def test_the_training_commands_still_print_neos_lines(module):
+    """`python -m neo.reflex.<module>` used to print the providers' status lines ("[gemini] …
+    quota exhausted; trying next key"); now they are log records, which a command line shows
+    only with NEO's stdout logging set up — first thing in its __main__ block."""
+    import ast
+    from pathlib import Path
+
+    tree = ast.parse((Path(__file__).resolve().parents[1] / "neo" / "reflex" / f"{module}.py").read_text())
+    mains = [n for n in tree.body if isinstance(n, ast.If) and "__main__" in ast.unparse(n.test)]
+    assert mains, module
+    first = next(st for st in mains[0].body if not isinstance(st, ast.Import | ast.ImportFrom))
+    assert isinstance(first, ast.Expr) and ast.unparse(first.value).endswith("log_to_stdout()"), ast.unparse(first)

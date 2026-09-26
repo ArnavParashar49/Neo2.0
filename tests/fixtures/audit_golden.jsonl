@@ -1,0 +1,12 @@
+{"ts": "TS", "status": "staged", "action": "shell:0000000000000001", "tool": "shell", "params": {"command": "rm x", "password": "***"}}
+{"ts": "TS", "status": "superseded", "action": "shell:0000000000000001", "tool": "shell", "params": {"command": "rm x", "password": "***"}}
+{"ts": "TS", "status": "staged", "action": "mail_send:0000000000000002", "tool": "mail_send", "params": {"to": "a@b", "body": "<11 chars>", "api_key": "***"}}
+{"ts": "TS", "status": "confirmed", "action": "mail_send:0000000000000002", "tool": "mail_send", "params": {"to": "a@b", "body": "<11 chars>", "api_key": "***"}}
+{"ts": "TS", "status": "staged", "action": "trash:0000000000000003", "tool": "trash", "params": {"path": "/x"}}
+{"ts": "TS", "status": "cancelled: user cancelled", "action": "trash:0000000000000003", "tool": "trash", "params": {"path": "/x"}}
+{"ts": "TS", "status": "staged", "action": "trash:0000000000000004", "tool": "trash", "params": {"path": "/y"}}
+{"ts": "TS", "status": "confirmed", "action": "trash:0000000000000004", "tool": "trash", "params": {"path": "/y"}}
+{"ts": "TS", "status": "staged", "action": "x:0000000000000005", "tool": "x", "params": {"a": "1", "nested": "{'token': 't', 'n': [1, 2]}"}}
+{"ts": "TS", "status": "cancelled: stale", "action": "x:0000000000000005", "tool": "x", "params": {"a": "1", "nested": "{'token': 't', 'n': [1, 2]}"}}
+{"ts": "TS", "status": "staged", "action": "y:0000000000000006", "tool": "y", "params": {"a": "1"}}
+{"ts": "TS", "status": "cancelled: expired", "action": "y:0000000000000006", "tool": "y", "params": {"a": "1"}}

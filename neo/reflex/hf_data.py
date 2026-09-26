@@ -251,4 +251,7 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    from neo import log_to_stdout
+
+    log_to_stdout()  # the providers' status lines, as this command always printed them
     main()

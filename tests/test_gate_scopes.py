@@ -201,6 +201,41 @@ def test_neo_apps_audit_lines_are_unchanged(tmp_path):
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
 
+async def test_neo_apps_audit_lines_match_the_released_ones(monkeypatch):
+    """Byte for byte what NEO.app wrote before agents existed: the same calls, replayed with
+    fixed ids and times, against lines captured at 4764b73 (fixtures/audit_golden.jsonl) —
+    staging, the same card again, superseding, approval, cancel, a stray approval, expiry."""
+    import secrets
+    import time
+    from pathlib import Path
+
+    from neo.config import settings
+
+    ids = iter(range(1, 100))
+    monkeypatch.setattr(secrets, "token_hex", lambda n: f"{next(ids):016x}")
+    monkeypatch.setattr(time, "strftime", lambda fmt, *a: "TS")
+    mail = {"to": "a@b", "body": "hello there", "api_key": "sk-1"}
+    confirm.stage("shell", {"command": "rm x", "password": "p", "confirm": True}, "delete x", "rm x")
+    confirm.stage("shell", {"command": "rm x", "password": "p"}, "delete x", "rm x")  # the same card
+    h = confirm.stage("mail_send", mail, "send", "")  # supersedes it
+    with confirm.approved(h.action_id):
+        assert confirm.gated("mail_send", mail, "send", "") == mail
+    confirm.stage("trash", {"path": "/x"}, "trash x")
+    confirm.cancel()
+    confirm.stage("trash", {"path": "/y"}, "trash y")
+    with confirm.approved("nope"):
+        pass
+    with confirm.approved(confirm.peek().action_id):
+        pass
+    confirm.stage("x", {"a": 1, "nested": {"token": "t", "n": [1, 2]}}, "x")
+    confirm.cancel("stale")
+    confirm.stage("y", {"a": 1}, "y")
+    monkeypatch.setattr(confirm, "_TTL_S", -1)
+    assert confirm.peek() is None
+    golden = Path(__file__).parent / "fixtures" / "audit_golden.jsonl"
+    assert settings().audit_log.read_text() == golden.read_text()
+
+
 def test_an_agents_audit_lines_say_which_agent_and_who_approved(agents):
     a, _, _ = agents
     via = {"channel": "web-ui", "approver": "user:42"}

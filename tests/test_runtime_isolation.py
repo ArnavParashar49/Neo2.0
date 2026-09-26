@@ -130,10 +130,13 @@ async def test_two_agents_at_once_share_nothing(tmp_path, home, monkeypatch):
     with runtime.bind(b.scope()):
         assert store().recall("mallory") == []
 
-    # audit: each agent's own log, with its name
-    for rt in (a, b):
-        recs = [json.loads(ln) for ln in rt.settings.audit_log.read_text().splitlines()] if rt.settings.audit_log.exists() else []
-        assert {r["agent"] for r in recs} <= {rt.name}
+    # audit: A's card in A's own log, with its name and who approved; B staged nothing
+    recs = [json.loads(ln) for ln in a.settings.audit_log.read_text().splitlines()]
+    assert [(r["status"], r["action"], r["agent"], r.get("via")) for r in recs] == [
+        ("staged", card.action_id, "a", None),
+        ("confirmed", card.action_id, "a", {"channel": "test"}),
+    ]
+    assert not b.settings.audit_log.exists()
     assert not (Path(os.environ["NEO_DATA_DIR"]) / "audit.log").exists()
 
     # NEO.app's learning and the task kinds' state: untouched
