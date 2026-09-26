@@ -49,6 +49,8 @@ def ready() -> bool:
 def embed_texts(texts: list[str]) -> np.ndarray | None:
     if not texts:
         return np.zeros((0, DIM), dtype=np.float32)
+    if settings().embeddings == "off":  # keyword recall only: the model is never loaded
+        return None
     m = _get()
     if m is None:
         return None

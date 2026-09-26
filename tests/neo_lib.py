@@ -25,3 +25,42 @@ def make_runtime(
     if library:
         runtime.set_library_mode()
     return runtime.Runtime(name, s, catalog().subset(tools))
+
+
+class ScriptedBrain:
+    """A fake provider that plays back turns (a str is a text turn) and records what it saw."""
+
+    supports_vision = True
+    supports_tools = True
+
+    def __init__(self, turns, *, name: str = "scripted", model: str = "script-1") -> None:
+        from neo.providers.base import Turn
+
+        self.turns = [Turn(text=t) if isinstance(t, str) else t for t in turns]
+        self.name, self.model = name, model
+        self.systems: list[str] = []
+        self.tools_seen: list[list[str]] = []
+        self.calls = 0
+
+    async def complete(self, messages, *, system="", tools=None, effort="medium", max_tokens=4096):
+        from neo.providers.base import Turn
+
+        self.calls += 1
+        self.systems.append(system)
+        self.tools_seen.append([t.name for t in tools or []])
+        return self.turns.pop(0) if self.turns else Turn(text="(no more turns)")
+
+    async def stream(self, messages, *, system="", max_tokens=2048):
+        self.calls += 1
+        self.systems.append(system)
+        t = self.turns.pop(0) if self.turns else None
+        yield t.text if t else "(no more turns)"
+
+
+def scripted(rt: runtime.Runtime, turns, **kw) -> ScriptedBrain:
+    """Make `turns` the agent's only brain, for every purpose."""
+    from neo.providers import BrainPool
+
+    brain = ScriptedBrain(turns, **kw)
+    rt.brains = BrainPool(overrides=dict.fromkeys(("agent", "fast", "vision", "light", "offline"), [brain]))
+    return brain

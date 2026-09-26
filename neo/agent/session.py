@@ -13,8 +13,10 @@ import contextvars
 import itertools
 import re
 import time
+import types
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Any, Literal
 
 from neo.agent import confirm, fastpath
 from neo.agent.loop import AgentResult, run_agent
@@ -70,6 +72,10 @@ _request_taint: contextvars.ContextVar[tuple[str, ...]] = contextvars.ContextVar
 # The erase generation a request started in (neo.privacy): one that began before "Erase NEO's
 # Memory" must not put its conversation back into the cleared history.
 _job_generation: contextvars.ContextVar[int | None] = contextvars.ContextVar("job_generation", default=None)
+# What the caller handed the tools for this request (an embedding host's tenant, user id…):
+# ToolContext.extras of every tool call it makes.
+_NO_EXTRAS: Mapping[str, Any] = types.MappingProxyType({})
+_request_extras: contextvars.ContextVar[Mapping[str, Any]] = contextvars.ContextVar("request_extras", default=_NO_EXTRAS)
 
 
 def _mark_job() -> None:
@@ -96,6 +102,8 @@ class Reply:
     job: str = ""
     silent: bool = False  # the task was done quietly: nothing to speak, no chat bubble
     tools: tuple[str, ...] = ()  # quick route: the fast-path tools that ran
+    brain: str = ""  # the provider that answered (chat and agent routes)
+    model: str = ""
 
 
 @dataclass
@@ -108,6 +116,7 @@ class Session:
     _pending_args: dict = field(default_factory=dict)
     _pending_action: str = ""
     _pending_taint: list = field(default_factory=list)
+    _pending_extras: dict = field(default_factory=dict)  # the asking request's tool extras
     # Who asked the pending question: an agent run of this session (the answer's result goes back
     # to a model to finish the job) or a direct command (the answer's result is the reply).
     _pending_origin: Literal["agent", "direct"] = "agent"
@@ -116,8 +125,12 @@ class Session:
     _chunk_started: float = field(default_factory=time.time)
     _bg: set = field(default_factory=set)  # background summaries in flight
     _hist_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    _agent_slots: asyncio.Semaphore = field(default_factory=lambda: asyncio.Semaphore(_MAX_AGENT_JOBS))
+    max_agent_jobs: int = _MAX_AGENT_JOBS  # agent runs at once; more wait their turn
+    _agent_slots: asyncio.Semaphore = field(init=False)
     jobs: dict[str, asyncio.Task] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        self._agent_slots = asyncio.Semaphore(self.max_agent_jobs)
 
     # ---- public --------------------------------------------------------------------
     async def handle(
@@ -129,16 +142,19 @@ class Session:
         from_user: bool = False,
         taint: list[str] | tuple[str, ...] = (),
         origin: Literal["user", "live"] | None = None,
+        extras: Mapping[str, Any] | None = None,
     ) -> Reply:
         """Handle one request. `from_user` = these are the user's own words (typed, or their
         transcribed speech) — only then can they answer a pending confirmation. Text a model wrote
         (Gemini Live's agent_task goal) never can. `origin`: who chose the words a fast path runs,
         the user or Live's model; by default the user only with `from_user` (Live passes "user" for
-        the user's own sentence, which it hands over without `from_user`)."""
+        the user's own sentence, which it hands over without `from_user`). `extras`: handed to
+        every tool this request calls (ToolContext.extras)."""
         origin = origin or ("user" if from_user else "live")
         if conversation:
             _conversation.set(conversation)
         _request_taint.set(tuple(taint))
+        _request_extras.set(dict(extras or {}))
         _mark_job()
         text = _WAKE_PREFIX.sub("", text.strip(), count=1).strip() or text.strip()
         if not text:
@@ -173,7 +189,7 @@ class Session:
         # Regex fast paths are precise; trust them unless the reflex says this is conversation.
         # ("type Laptops in the heading" reads as an agent task to the reflex, but the words are
         # the whole job — no model needed.) A plan covers the whole utterance or nothing.
-        if d.intent != "chat" and (steps := fastpath.plan(text)):
+        if d.intent != "chat" and settings().fast_paths and (steps := fastpath.plan(text)):
             return await self._quick(text, d, steps, job=job, origin=origin)
 
         if d.intent == "chat" and not images and not d.needs_screen:
@@ -261,7 +277,7 @@ class Session:
             tools=0,
         )
         await bus().end_job(job)
-        return Reply(reply, "chat", d, job=job)
+        return Reply(reply, "chat", d, job=job, brain=getattr(chain, "last_used", ""), model=getattr(chain, "last_model", ""))
 
     async def _quick(
         self, text: str, d: Decision, steps: list[tuple[str, dict]], *, job: str, origin: Origin
@@ -299,7 +315,9 @@ class Session:
                 if prev in _APP_TOOLS and tool not in _APP_TOOLS:
                     await asyncio.sleep(_SETTLE_AFTER_APP_S)
                 await bus().tool_start(tool, args, job=job)
-                ctx = ToolContext(user_text=text, taint=list(_request_taint.get()), origin=origin)
+                ctx = ToolContext(
+                    user_text=text, taint=list(_request_taint.get()), origin=origin, extras=dict(_request_extras.get())
+                )
                 out = await registry().invoke(tool, args, ctx)
                 await bus().tool_end(tool, out.ok, out.text, job=job)
                 outcomes.step(job, tool, out.ok, halt=out.halt)
@@ -361,7 +379,7 @@ class Session:
         self.jobs[job] = asyncio.current_task()  # type: ignore[assignment]
         try:
             async with self._agent_slots:
-                playbook_ctx = await asyncio.to_thread(self._playbooks_for, text)
+                playbook_ctx = await asyncio.to_thread(self._playbooks_for, text) if _playbooks_on() else ""
                 if only:  # the reflex chose: that tool's schema and nothing else to get lost in
                     from neo.agent.toolselect import MORE_TOOLS
 
@@ -369,7 +387,7 @@ class Session:
                 else:
                     tools = await asyncio.to_thread(self._tools_for, text, needs_screen, playbook_ctx)
                 snapshot = self._trimmed()
-                ctx = ToolContext(user_text=text, taint=list(_request_taint.get()))
+                ctx = ToolContext(user_text=text, taint=list(_request_taint.get()), extras=dict(_request_extras.get()))
                 res = await run_agent(
                     _with_conversation(text),
                     provider=chain,
@@ -394,7 +412,7 @@ class Session:
         if res.stopped == "needs_confirm" and self._stage_pending(res, ctx.taint):
             await bus().say(res.question, final=True, job=job)
             return Reply(res.question, "confirm", d, res, job=job)
-        if res.stopped == "done" and not ctx.taint:
+        if res.stopped == "done" and not ctx.taint and _playbooks_on():
             # A path learned while reading a page or an email could have been steered by it.
             await asyncio.to_thread(self._save_playbook, text, res)
         silent = _quietly(d, res)
@@ -412,7 +430,7 @@ class Session:
             tools=len(res.steps),
         )
         await bus().end_job(job)
-        return Reply(res.text, "agent", d, res, job=job, silent=silent)
+        return Reply(res.text, "agent", d, res, job=job, silent=silent, brain=getattr(chain, "last_used", ""), model=getattr(chain, "last_model", ""))
 
     # ---- tool selection ---------------------------------------------------------------
     def _tools_for(self, text: str, needs_screen: bool, playbook_ctx: str):
@@ -458,25 +476,35 @@ class Session:
             print(f"[playbook] save failed: {str(e)[:80]}")
 
     # ---- confirmation ------------------------------------------------------------------
-    def _stage_pending(self, res: AgentResult, taint: list[str] | None = None) -> bool:
+    def _stage_pending(
+        self, res: AgentResult, taint: list[str] | None = None, extras: Mapping[str, Any] | None = None
+    ) -> bool:
         """Remember exactly which staged action the agent's question refers to."""
         p = confirm.peek()
         if not p or (res.pending_action and p.action_id != res.pending_action):
             confirm.cancel("stale")
             self._drop_pending()
             return False
-        self._adopt(p, taint or [], "agent")
+        self._adopt(p, taint or [], "agent", extras)
         return True
 
-    def _adopt(self, p: confirm.Pending, taint: list[str] | tuple[str, ...], origin: Literal["agent", "direct"]) -> None:
-        """The question the user now hears is this staged action, asked by `origin`."""
+    def _adopt(
+        self,
+        p: confirm.Pending,
+        taint: list[str] | tuple[str, ...],
+        origin: Literal["agent", "direct"],
+        extras: Mapping[str, Any] | None = None,
+    ) -> None:
+        """The question the user now hears is this staged action, asked by `origin`. `extras`:
+        the asking request's tool extras (default: this request's), for the run that answers it."""
         self._pending_tool, self._pending_args, self._pending_action = p.tool, dict(p.params), p.action_id
         self._pending_taint, self._pending_origin = list(taint), origin
+        self._pending_extras = dict(extras if extras is not None else _request_extras.get())
         asyncio.create_task(self._expire_confirm(p.action_id))
 
     def _drop_pending(self) -> None:
         self._pending_tool, self._pending_args, self._pending_action = "", {}, ""
-        self._pending_taint, self._pending_origin = [], "agent"
+        self._pending_taint, self._pending_origin, self._pending_extras = [], "agent", {}
 
     async def _handle_confirmation(self, text: str, job: str) -> Reply:
         """The user's own words while a question is pending."""
@@ -487,13 +515,16 @@ class Session:
             self._drop_pending()
             await self._clear_confirming()
             await bus().end_job(job)
-            return await self.handle(text, from_user=True, taint=_request_taint.get())
+            return await self.handle(text, from_user=True, taint=_request_taint.get(), extras=_request_extras.get())
         return await self.answer(ans, job=job, text=text) or Reply("", "confirm", job=job)
 
-    async def answer(self, yes: bool, *, action_id: str = "", job: str = "", text: str = "") -> Reply | None:
+    async def answer(
+        self, yes: bool, *, action_id: str = "", job: str = "", text: str = "", via: dict[str, Any] | None = None
+    ) -> Reply | None:
         """The user's answer to the pending question — their typed or spoken yes/no, or the
         overlay's button for `action_id`. Runs the staged action exactly as it was shown.
-        Returns None when there is nothing (any more) to answer."""
+        Returns None when there is nothing (any more) to answer. `via`: who answered, through
+        which channel (an embedding host's approval route) — audited with the decision."""
         async with self._answer_lock:  # a spoken "yes" and a click on the card can't both run it
             _mark_job()
             job = job or f"j{next(_job_ids)}"
@@ -502,7 +533,7 @@ class Session:
                 await bus().end_job(job)
                 return None
             if not yes:
-                confirm.cancel()
+                confirm.cancel(via=via)
                 outcomes.confirm(False)  # "no" at a confirmation: not what they wanted
                 self._drop_pending()
                 await bus().say("Cancelled.", final=True, job=job)
@@ -511,7 +542,7 @@ class Session:
                 return Reply("Cancelled.", "confirm", job=job, silent=True)  # the card closing says it
             if self._pending_action and p.action_id != self._pending_action and not action_id:
                 # Something else was staged after the question the user heard: don't guess.
-                confirm.cancel("mismatch")
+                confirm.cancel("mismatch", via=via)
                 self._drop_pending()
                 msg = "That request changed underneath me, so I didn't do anything. Ask again and I'll confirm first."
                 await bus().say(msg, final=True, job=job)
@@ -522,13 +553,14 @@ class Session:
             ours = staged_here and self._pending_origin == "agent"  # an agent job of this session asked it
             # The card was built with the request's taint: the approved call rebuilds it the same.
             taint = list(self._pending_taint) if staged_here else []
+            extras = dict(self._pending_extras) if staged_here else dict(_request_extras.get())
             tool, args, aid = p.tool, dict(p.params), p.action_id
             self._drop_pending()
             await self._clear_confirming()
             await bus().set_state(NeoState.WORKING, job=job)
             await bus().tool_start(tool, args, job=job)
-            approval = ToolContext(user_text=text or "yes", taint=list(taint), origin="approval")
-            with confirm.approved(aid):
+            approval = ToolContext(user_text=text or "yes", taint=list(taint), origin="approval", extras=dict(extras))
+            with confirm.approved(aid, via=via):
                 out = await registry().invoke(tool, args, approval)
             await bus().tool_end(tool, out.ok, out.text, job=job)
             # The approved call may stage a new card ("<App> couldn't open Priya's chat. Send it
@@ -542,7 +574,7 @@ class Session:
             if restaged is not None:
                 if episode:
                     outcomes.step(episode, tool, out.ok, halt=True)
-                self._adopt(restaged, taint, "agent" if ours else "direct")
+                self._adopt(restaged, taint, "agent" if ours else "direct", extras)
                 # Worded as its owner asks: an agent's question the way the agent loop words it.
                 q = f"{restaged.summary} — Should I go ahead?" if ours else out.text
                 await bus().set_state(NeoState.CONFIRMING, job=job)
@@ -560,10 +592,11 @@ class Session:
         result = fence(tool, out.text[:800]) if t and t.untrusted and out.ok else out.text[:800]
         follow = f"[User confirmed. {tool} result: {result}] Continue and finish the task, or report the result."
         snapshot = self._trimmed()
-        ctx = ToolContext(user_text=text or "yes", taint=taint)
+        ctx = ToolContext(user_text=text or "yes", taint=taint, extras=dict(extras))
+        chain = brain("agent")
         try:
             res = await run_agent(
-                follow, provider=brain("agent"), system=self._system(), history=snapshot, ctx=ctx, effort="medium", job=job
+                follow, provider=chain, system=self._system(), history=snapshot, ctx=ctx, effort="medium", job=job
             )
         except asyncio.CancelledError:
             if episode:
@@ -572,16 +605,16 @@ class Session:
         await self._remember(*res.messages[len(snapshot) :])
         if episode:  # how the job the user said yes to actually ended (maybe at another question)
             _learn_from(episode, res)
-        if res.stopped == "needs_confirm" and self._stage_pending(res, ctx.taint):
+        if res.stopped == "needs_confirm" and self._stage_pending(res, ctx.taint, extras):
             await bus().say(res.question, final=True, job=job)
-            return Reply(res.question, "confirm", None, res, job=job)
+            return Reply(res.question, "confirm", None, res, job=job, brain=getattr(chain, "last_used", ""), model=getattr(chain, "last_model", ""))
         # Shown in the overlay either way; spoken only if it didn't go as approved.
         await bus().say(res.text, final=True, job=job)
         await bus().end_job(job)
         done = res.stopped == "done" and not res.question and all(st.ok for st in res.steps)
         failed_words = ("couldn't", "could not", "can't", "cannot", "unable", "error", "failed", "didn't")
         silent = out.ok and done and not any(w in res.text.lower() for w in failed_words)
-        return Reply(res.text, "agent", None, res, job=job, silent=silent)
+        return Reply(res.text, "agent", None, res, job=job, silent=silent, brain=getattr(chain, "last_used", ""), model=getattr(chain, "last_model", ""))
 
     async def _expire_confirm(self, action_id: str) -> None:
         """If nobody answers, the question lapses and the orb stops asking."""
@@ -627,7 +660,7 @@ class Session:
                         (i for i in range(len(self.history) - 1, -1, -1) if self.history[i].role == "user"), 0
                     )
                 gone = self.history[self._summarized : cut]
-                if sum(1 for m in gone if m.role == "user") >= 1:
+                if sum(1 for m in gone if m.role == "user") >= 1 and _summaries_on():
                     self._spawn(self._summarize(gone, self._chunk_started))
                     self._chunk_started = time.time()
                 self.history = self.history[cut:]
@@ -651,6 +684,8 @@ class Session:
     async def checkpoint(self, *, final: bool = False, budget_s: float = 8.0) -> str:
         """Summarise what happened since the last summary, so a crash or a power cut loses at
         most the last stretch. Runs periodically while idle, and once at shutdown."""
+        if not _summaries_on():
+            return ""
         async with self._hist_lock:
             chunk = self.history[self._summarized :]
             if sum(1 for m in chunk if m.role == "user") < (1 if final else _CHECKPOINT_MIN_ASKS):
@@ -685,6 +720,16 @@ def _last_user_index(h: list[Message], n: int) -> int:
             if seen == n:
                 return i
     return 0
+
+
+def _playbooks_on() -> bool:
+    s = settings()
+    return s.memory_enabled and s.playbooks
+
+
+def _summaries_on() -> bool:
+    s = settings()
+    return s.memory_enabled and s.summaries
 
 
 def _with_conversation(text: str) -> str:
