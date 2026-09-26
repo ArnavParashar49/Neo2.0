@@ -55,6 +55,9 @@ class Settings(BaseSettings):
 
     # ---- reflex ----------------------------------------------------------------------
     reflex: Literal["laya", "lite", "off"] = "laya"
+    # The Laya checkpoint under the reflex heads: multilingual also understands Hindi and Hinglish
+    # and embeds ~2x faster; english is the older one (its heads must be retrained after a switch).
+    reflex_encoder: Literal["multilingual", "english"] = "multilingual"
     laya_device: str = "mps"
     reflex_confidence_floor: float = 0.55  # below this, escalate to the lite model
     reflex_tool_floor: float = 0.85  # Laya may pick the tool itself above this confidence
@@ -85,6 +88,12 @@ class Settings(BaseSettings):
         runs when asked for (and a typo must never stop NEO from starting)."""
         s = str(v or "off").strip().lower()
         return s if s in ("local", "cloud") else "off"
+
+    @field_validator("reflex_encoder", mode="before")
+    @classmethod
+    def _reflex_encoder(cls, v):
+        """A typo must not stop NEO from starting: anything but english is the default."""
+        return "english" if str(v or "").strip().lower() in ("english", "en") else "multilingual"
 
     # ---- voice -----------------------------------------------------------------------
     voice: VoiceBackend = "auto"  # auto = Live if key + quota, else local cascade

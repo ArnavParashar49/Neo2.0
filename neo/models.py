@@ -8,10 +8,14 @@ overnight. Revisions here only change when NEO is updated and re-tested.
 
 from __future__ import annotations
 
+import os
+
 LAYA = "convaiinnovations/laya"
 LAYA_REVISION = "55cf4c4ebb4ebe31b2550e8bdf3bd21b99753851"
-# The files Laya's own loader fetches (the repo also holds sibling checkpoints NEO doesn't use).
+# The files of one checkpoint, as Laya's own loader fetches them. The repo holds several: English at
+# the root, the others in subfolders (settings.reflex_encoder -> subfolder).
 LAYA_FILES = ["rl_agent_config.json", "model.safetensors", "tokenizer/*", "encoder/*"]
+LAYA_SUBFOLDERS = {"english": "", "multilingual": "multilingual"}
 
 EMBEDDER = "sentence-transformers/all-MiniLM-L6-v2"
 EMBEDDER_REVISION = "1110a243fdf4706b3f48f1d95db1a4f5529b4d41"
@@ -28,11 +32,15 @@ def revision(repo: str) -> str | None:
     return {LAYA: LAYA_REVISION, EMBEDDER: EMBEDDER_REVISION, **REVISIONS}.get(repo)
 
 
-def laya_dir() -> str:
-    """Laya's checkpoint at the pinned revision (downloaded once; afterwards from the cache)."""
+def laya_dir(encoder: str = "english") -> str:
+    """One Laya checkpoint at the pinned revision (downloaded once; afterwards from the cache): only
+    its own files, so the multilingual reflex never pulls the 1.7 GB English weights."""
     from huggingface_hub import snapshot_download
 
-    return snapshot_download(LAYA, revision=LAYA_REVISION, allow_patterns=LAYA_FILES)
+    sub = LAYA_SUBFOLDERS[encoder]
+    patterns = [f"{sub}/{f}" if sub else f for f in LAYA_FILES]
+    root = snapshot_download(LAYA, revision=LAYA_REVISION, allow_patterns=patterns)
+    return os.path.join(root, sub) if sub else root
 
 
 def local_path(repo: str) -> str:

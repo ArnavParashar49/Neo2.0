@@ -72,6 +72,43 @@ def asks_something(text: str) -> bool:
     return wants_reply(text) or bool(_ASKS_RE.search(text))
 
 
+# A request about what is on the screen. Labels NEO's own rows for the needs_screen head, and backs
+# the head up at run time (it only sees phrasings like these in its training data anyway).
+SCREEN_RE = re.compile(
+    r"\b(?:this|that|the|my) (?:screen|window|page|form|error|tab|article|table|dialog|button)s?\b"
+    r"|\bwhat am i looking at|\bthat'?s open\b|\bon (?:my|the) screen\b|\bthis (?:one|thing)\b",
+    re.I,
+)
+
+
+def refers_to_screen(text: str) -> bool:
+    return bool(SCREEN_RE.search(text))
+
+
+# The words of an action that is hard to undo, English and Hinglish ("delete/install/pay karo" are
+# caught by the English verb). A backstop under the destructive head so the confirm signal never
+# misses them: the head was measured missing Hinglish sends (recall 0.17-0.33).
+_DESTRUCTIVE_RE = re.compile(
+    r"\b(?P<w>send|e-?mail|message|text|reply|post|delete|remove|erase|format|install|uninstall|pay|buy|transfer)\b"
+    r"|\b(?:bhej(?:o|\s*do|\s*de|\s*dijiye)|hata(?:o|\s*do|\s*de)|mita(?:o|\s*do|\s*de)|khar[ie]+d(?:o|\s*lo|\s*le))\b",
+    re.I,
+)
+# ...but "my email", "the last message", "some text" name a thing, not an action.
+_NOUNS = {"email", "e-mail", "message", "text", "reply", "post", "format", "transfer"}
+_DETERMINER = re.compile(
+    r"\b(?:my|the|a|an|any|some|of|new|unread|last|latest|this|that|his|her|their|your|our|what|which|selected)\s+$",
+    re.I,
+)
+
+
+def sounds_destructive(text: str) -> bool:
+    for m in _DESTRUCTIVE_RE.finditer(text):
+        if (m.group("w") or "").lower() in _NOUNS and _DETERMINER.search(text[: m.start()]):
+            continue
+        return True
+    return False
+
+
 @dataclass
 class Decision:
     intent: Intent
@@ -87,6 +124,8 @@ class Decision:
     reply: bool = True  # does the user want an answer, or just the thing done (silently)?
     reply_p: float = 1.0
     margin: float | None = None  # top intent probability minus the runner-up (Laya only)
+    kind: str = ""  # an action's task kind (a neo/decide TASKS key), when the reflex has a kind head
+    kind_p: float = 0.0
 
     @property
     def confident(self) -> bool:

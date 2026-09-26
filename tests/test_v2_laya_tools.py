@@ -25,7 +25,7 @@ def _env(tmp_path, monkeypatch):
     load_all()
 
 
-def test_v2_head_decides_from_the_embedding_alone(tmp_path):
+def test_v2_head_decides_from_the_embedding_alone(tmp_path, monkeypatch):
     from neo.reflex import laya_reflex as lr
 
     d = 8
@@ -36,7 +36,7 @@ def test_v2_head_decides_from_the_embedding_alone(tmp_path):
     tool_classes = ["clock", "none", "web_search"]
     W_tool = np.zeros((3, d + 1), np.float32)
     W_tool[0, 2] = 6.0  # feature 2 → clock
-    head = {
+    head = {  # a single linear net per decision, as the first v2 heads were saved: still loads
         "version": 2,
         "mu": [0.0] * (d + 1),
         "sd": [1.0] * (d + 1),
@@ -44,12 +44,13 @@ def test_v2_head_decides_from_the_embedding_alone(tmp_path):
         "destructive": {"W": np.zeros((2, d + 1)).tolist()},
         "needs_screen": {"W": np.zeros((2, d + 1)).tolist()},
         "tool": {"W": W_tool.tolist(), "classes": tool_classes},
+        "kind": "mlp",  # the model type, in files from before the kind head
         "zs_below": 0.6,
     }
     path = tmp_path / "reflex_head.json"
     path.write_text(json.dumps(head))
     loaded = lr._load_head(path)
-    assert loaded["version"] == 2 and loaded["tool_classes"] == tool_classes
+    assert loaded["version"] == 2 and loaded["tool"]["classes"] == tool_classes and loaded["kind"] is None
 
     vecs = {"what time is it": [1, 0, 1, 0, 0, 0, 0, 0], "tell me a joke": [0, 1, 0, 0, 0, 0, 0, 0], "hmm": [0.1, 0.1, 0, 0, 0, 0, 0, 0]}
     calls = []
@@ -60,21 +61,14 @@ def test_v2_head_decides_from_the_embedding_alone(tmp_path):
             return {"answers": {"intent": {"probabilities": {"chat": 0.1, "quick_action": 0.1, "agent_task": 0.7, "stop": 0.1}}}}
 
     r = lr.LayaReflex.__new__(lr.LayaReflex)
-    r._agent, r._head = Agent(), loaded
-    monkeypatch_embed = lambda agent, texts: np.array([vecs[t] for t in texts], np.float32)  # noqa: E731
-    import neo.reflex.features as feats
-
-    orig = feats.embed
-    feats.embed = monkeypatch_embed
-    try:
-        a = r.decide("what time is it")
-        assert a.intent == "quick_action" and a.tool == "clock" and a.tool_p > 0.9 and a.source == "laya+head"
-        b = r.decide("tell me a joke")
-        assert b.intent == "chat" and b.tool == "" and calls == []  # confident: zero-shot never ran
-        c = r.decide("hmm")  # unsure: the head's pick stands, marked unsure; no zero-shot call
-        assert c.source == "laya+unsure" and calls == [] and c.intent == "chat"
-    finally:
-        feats.embed = orig
+    r._agent, r._head, r.encoder, r.dim = Agent(), loaded, "multilingual", d
+    monkeypatch.setattr(lr.features, "embed", lambda agent, texts: np.array([vecs[t] for t in texts], np.float32))
+    a = r.decide("what time is it")
+    assert a.intent == "quick_action" and a.tool == "clock" and a.tool_p > 0.9 and a.source == "laya+head"
+    b = r.decide("tell me a joke")
+    assert b.intent == "chat" and b.tool == "" and calls == []  # confident: zero-shot never ran
+    c = r.decide("hmm")  # unsure: the head's pick stands, marked unsure; no zero-shot call
+    assert c.source == "laya+unsure" and calls == [] and c.intent == "chat"
 
 
 def _reflex(intent, tool="", tool_p=0.0):

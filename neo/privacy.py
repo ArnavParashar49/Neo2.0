@@ -36,6 +36,7 @@ async def forget_everything() -> dict[str, int]:
     counts["learned requests"] = learn.forget_examples()
     memory.forget()  # the corrections' embeddings (RAM only)
     finetune.feature_cache().unlink(missing_ok=True)  # rebuilt from the public datasets on the next retrain
+    finetune.reset_to_base()  # the heads fit on your requests go; the one trained without them stays
     from neo.decide import engine as decide
     from neo.decide import eventkit, learned, media, run, sites
 

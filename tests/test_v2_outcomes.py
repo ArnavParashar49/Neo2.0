@@ -1072,7 +1072,7 @@ def _laya(tmp_path, monkeypatch, head, vec):
     path = tmp_path / "head.json"
     path.write_text(json.dumps(head))
     r = lr.LayaReflex.__new__(lr.LayaReflex)
-    r._agent, r._head = object(), lr._load_head(path)
+    r._agent, r._head, r.encoder = object(), lr._load_head(path), "multilingual"
     monkeypatch.setattr(feats, "embed", lambda agent, texts: np.array([vec for _ in texts], np.float32))
     return r
 
