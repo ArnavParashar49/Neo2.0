@@ -129,3 +129,38 @@ def test_a_data_dir_named_through_the_data_volume(tmp_path):
         assert policy.is_secret(p), p
     assert policy.covers_secret(real.parent) and not policy.shell_is_read_only(f"cat {real}/audit.log")
     rt.close()
+
+
+async def test_applescript_never_sees_the_hosts_environment(monkeypatch, tmp_path):
+    """`system attribute "X"` reads osascript's environment: it asks first, and an agent's
+    osascript gets the shell tool's basic environment, never the host process's."""
+    from neo.agent.registry import ToolContext, registry
+    from neo.tools.computer import apps
+
+    monkeypatch.setenv("HOST_DATABASE_URL", "postgres://svc:hunter2@db/prod")
+    envs: list = []
+
+    class _Proc:
+        returncode = 0
+
+        async def communicate(self):
+            return b"ok", b""
+
+    async def fake_exec(*cmd, **kw):
+        envs.append(kw.get("env"))
+        return _Proc()
+
+    monkeypatch.setattr(apps.asyncio, "create_subprocess_exec", fake_exec)
+    for script in ('system attribute "HOST_DATABASE_URL"', "get system attribute", "system info"):
+        assert not policy.script_is_read_only(script), script
+    assert policy.script_is_read_only('name of application "Finder"')
+    rt = make_runtime(tmp_path / "a", "a", ["applescript"])
+    with runtime.bind(rt.scope()):
+        out = await registry().invoke("applescript", {"script": 'system attribute "HOST_DATABASE_URL"'}, ToolContext())
+        assert out.halt and envs == []  # asks first
+        await registry().invoke("applescript", {"script": 'name of application "Finder"'}, ToolContext())
+        basic = shell._env()
+    assert envs and envs[-1] == basic and "HOST_DATABASE_URL" not in envs[-1]
+    runtime.set_library_mode(False)
+    await apps.osascript('name of application "Finder"')
+    assert envs[-1] is None  # NEO.app's osascript: its own environment, as always

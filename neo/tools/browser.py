@@ -24,10 +24,12 @@ tool = functools.partial(_register, requires=frozenset({"playwright"}))
 
 
 class _Browser:
-    def __init__(self) -> None:
+    def __init__(self, *, web_only: bool = False) -> None:
         self._pw = None
         self._ctx = None
         self._lock = asyncio.Lock()
+        # An embedded agent's: nothing it loads goes to this machine or its network (_only_the_web)
+        self.web_only = web_only
 
     async def page(self):
         async with self._lock:
@@ -45,6 +47,8 @@ class _Browser:
                     args=["--disable-blink-features=AutomationControlled"],
                 )
                 self._ctx.set_default_timeout(_TIMEOUT_MS)
+                if self.web_only:
+                    await self._ctx.route("**/*", _only_the_web)
             pages = self._ctx.pages
             return pages[-1] if pages else await self._ctx.new_page()
 
@@ -64,9 +68,40 @@ def _browser() -> _Browser:
     """The bound agent's own browser (neo.runtime), else NEO.app's."""
     rt = runtime.current_runtime()
     if rt is not None:
-        return rt.get_or_create("browser", _Browser)
+        return rt.get_or_create("browser", lambda: _Browser(web_only=rt.library))
     runtime.check_unbound("NEO's browser")
     return _b
+
+
+async def _only_the_web(route) -> None:
+    """Every request an embedded agent's browser makes — a page, a frame, a script's fetch — goes
+    to the public internet only, never to the machine it runs on (a server's cloud metadata,
+    localhost) or its network. A redirect's next hop isn't routed: where it lands is checked by
+    _local_page before anything of the page is read."""
+    from neo.security import policy
+
+    url = route.request.url
+    if url.startswith(("http:", "https:")) and await asyncio.to_thread(policy.private_host, url):
+        await route.abort("blockedbyclient")
+        return
+    await route.continue_()
+
+
+async def _local_page(page) -> str:
+    """Embedded: the page is on this machine or its network (a redirect, a click or a script led
+    there) → leave it, and say so instead of reading it. "" = fine (and always, in NEO.app)."""
+    if not runtime.library_bound():
+        return ""
+    from neo.security import policy
+
+    url = str(getattr(page, "url", "") or "")
+    if not url.startswith(("http:", "https:")) or not (why := await asyncio.to_thread(policy.private_host, url)):
+        return ""
+    try:
+        await page.goto("about:blank")
+    except Exception:  # noqa: BLE001 — refused either way
+        pass
+    return f"Error: the page went to {_host(url)} — {why}, which NEO's browser doesn't open here."
 
 
 def _norm_url(url: str) -> str:
@@ -133,6 +168,9 @@ async def browser_open(a: dict, c: ToolContext) -> str:
     scheme = url.split(":", 1)[0].lower()
     if scheme not in ("http", "https"):
         return f"Error: NEO's browser only opens web pages, not {scheme}: links."
+    # An embedded agent's browser only goes to the public internet (as web_fetch, always).
+    if runtime.library_bound() and (private := await asyncio.to_thread(policy.private_host, url)):
+        return f"Error: not opening {url} — {private}."
     why = ""
     if c.tainted():
         # After reading a page or an email, a link that smuggles data out — or reaches this Mac's
@@ -148,6 +186,8 @@ async def browser_open(a: dict, c: ToolContext) -> str:
     page = await _browser().page()
     await page.goto(url, wait_until="domcontentloaded")
     await asyncio.sleep(0.4)
+    if err := await _local_page(page):
+        return err
     return await _snapshot(page, 9000)
 
 
@@ -162,6 +202,8 @@ async def browser_open(a: dict, c: ToolContext) -> str:
 )
 async def browser_read(a: dict, c: ToolContext) -> str:
     page = await _browser().page()
+    if err := await _local_page(page):
+        return err
     return await _snapshot(page, int(a.get("max_chars") or 9000))
 
 
@@ -278,6 +320,8 @@ async def browser_back(a: dict, c: ToolContext) -> str:
 )
 async def browser_screenshot(a: dict, c: ToolContext) -> ToolOutput:
     page = await _browser().page()
+    if err := await _local_page(page):
+        return ToolOutput(err, ok=False)
     png = await page.screenshot(type="png")
     return ToolOutput(f"Browser screenshot of {page.url}", images=[ImagePart(png, "image/png")])
 

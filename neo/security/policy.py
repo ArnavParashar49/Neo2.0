@@ -339,6 +339,7 @@ def shell_is_read_only(cmd: str, cwd: str | os.PathLike | None = None) -> bool:
 _SCRIPT_ACTS = re.compile(
     r"do\s+(?:shell\s+)?script|do\s+javascript|run\s+script|load\s+script|store\s+script|"
     r"current\s+application|use\s+framework|«|\bcall\s+method\b|\busing\s+terms\b|System\s+Events|"
+    r"system\s+attribute|system\s+info|"  # the environment NEO runs in (a host's keys), this machine's details
     r"\b(?:set|make|send|delete|save|open|close|quit|move|duplicate|remove|erase|empty|restart|"
     r"shut\s*down|log\s*out|sleep|play|pause|activate|launch|reveal|select|print|display|create|"
     r"import|export|convert|copy|put|write|read|mount|eject|update|forward|reply|redirect|mark|"

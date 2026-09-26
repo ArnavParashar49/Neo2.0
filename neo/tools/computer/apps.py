@@ -13,9 +13,21 @@ from AppKit import NSWorkspace
 from neo.agent.confirm import ask_user
 
 
+def _env() -> dict[str, str] | None:
+    """An embedded agent's osascript (and whatever its `do shell script` runs) gets the shell
+    tool's basic environment, never the host process's; NEO.app's inherits its own, as always."""
+    from neo import runtime
+
+    if not runtime.library_bound():
+        return None
+    from neo.tools.computer.shell import _env as basic
+
+    return basic()
+
+
 async def _run(cmd: list[str], timeout: float = 30) -> tuple[int, str, str]:
     p = await asyncio.create_subprocess_exec(
-        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=_env()
     )
     try:
         out, err = await asyncio.wait_for(p.communicate(), timeout)

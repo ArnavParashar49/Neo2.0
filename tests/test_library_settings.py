@@ -333,6 +333,9 @@ def test_the_browser_follows_the_agents_settings(two, monkeypatch):
         def set_default_timeout(self, ms):
             pass
 
+        async def route(self, pattern, handler):  # an agent's browser: the web only (test_browser_web_only)
+            pass
+
         async def new_page(self):
             return "page"
 
