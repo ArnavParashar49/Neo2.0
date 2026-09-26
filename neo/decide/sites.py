@@ -4,12 +4,15 @@
   word NEO learned here or an installed web-app wrapper's site; False for an installed app, a
   time or "my <x>"; None when local evidence can't tell ("apple", "climate change").
 * :func:`resolve` - the word as a host: a domain as given, a learned site, a web-app wrapper's
-  site, else a region-aware web search whose result's own domain spells the word.
+  site, else a web search for its website in this country: of the results whose own domain
+  spells the word, the domain most of them agree on (this country's first), at its front host.
 * :func:`discover` - the site's search URL template from what the site itself publishes: an
   OpenSearch description, a JSON-LD SearchAction, or a GET search form found by structure (a
   search role, a search input, the OS's own word for "Search"), with no list of parameter names.
 * :func:`sanitize` - a search page's URL reduced to its terms slot (every other parameter, such
   as a session or tracking token, dropped).
+* :func:`fill`, :func:`on_site`, :func:`carries` - a template's search page for a query, and
+  whether a page a browser shows is on a site and holds a query (how a landing is confirmed).
 
 A site or template is learned only after a confirmed landing (:func:`learn_landing`); a search
 query is never stored. The network is reached only through :func:`_fetch` (and the web search),
@@ -24,11 +27,22 @@ import re
 import time
 from dataclasses import dataclass
 from datetime import datetime
+from functools import lru_cache
 from typing import Any
-from urllib.parse import parse_qsl, quote, unquote, urlencode, urljoin, urlsplit, urlunsplit
+from urllib.parse import (
+    parse_qsl,
+    quote,
+    quote_plus,
+    unquote,
+    unquote_plus,
+    urlencode,
+    urljoin,
+    urlsplit,
+    urlunsplit,
+)
 
-__all__ = ["SiteRes", "Template", "site_like", "resolve", "discover", "sanitize", "learn_landing", "template_failed",
-           "forget"]  # fmt: skip
+__all__ = ["SiteRes", "Template", "site_like", "resolve", "discover", "sanitize", "fill", "registrable", "on_site",
+           "carries", "learn_landing", "template_failed", "forget"]  # fmt: skip
 
 TERMS = "{searchTerms}"
 FETCH_S = 5.0
@@ -81,6 +95,31 @@ def _language() -> str:
         return "en"
 
 
+def _country_name(cc: str) -> str:
+    """The region's name in English ('in' -> 'India'), as a search engine reads it; '' if unknown."""
+    if not cc:
+        return ""
+    try:
+        from Foundation import NSLocale
+
+        return str(NSLocale.alloc().initWithLocaleIdentifier_("en").localizedStringForCountryCode_(cc.upper()) or "")
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+@lru_cache(maxsize=1)
+def _accept_language() -> str:
+    """The user's languages, as a browser would send them: a site's search template must not
+    carry a language the site guessed from where the request came from."""
+    try:
+        from Foundation import NSLocale
+
+        langs = [str(x) for x in (NSLocale.preferredLanguages() or [])][:3]
+    except Exception:  # noqa: BLE001
+        langs = []
+    return ", ".join(f"{lang};q={1 - n / 10:.1f}" if n else lang for n, lang in enumerate(langs)) or "en"
+
+
 def _words(word: str) -> list[str]:
     return re.findall(r"[a-z0-9]+", (word or "").casefold())
 
@@ -129,6 +168,25 @@ def _country_tld(host: str) -> str:
     return r.tld.rsplit(".", 1)[-1] if r is not None else ""
 
 
+def _front(host: str) -> bool:
+    """A site's front host ('example.org', 'www.', 'm.'), not one of its side sites ('blog.')."""
+    r = _parts(host)
+    return r is not None and r.subdomain.casefold() in ("", "www", "m")
+
+
+def _pick(word: str, rows: list, cc: str) -> tuple[str, str] | None:
+    """(host, path prefix) of the site the results agree ``word`` names: of the registrable
+    domains spelling it, one in this country if any, the one most results are on (the first on a
+    tie), at its front host."""
+    groups: dict[str, list[tuple[str, str]]] = {}
+    for r in rows:
+        if isinstance(r, dict) and (m := _matches(word, str(r.get("href") or ""))):
+            groups.setdefault(registrable(m[0]), []).append(m)
+    local = [g for g in groups.values() if cc and _country_tld(g[0][0]) == ("uk" if cc == "gb" else cc)]
+    best = max(local or groups.values(), key=len, default=None)  # max keeps the first of equals
+    return next((m for m in best if _front(m[0])), best[0]) if best else None
+
+
 def _webapp(word: str, apps: list) -> tuple[str, str] | None:
     return next((m for a in apps if a.web_start_url and (m := _matches(word, a.web_start_url))), None)
 
@@ -156,7 +214,7 @@ def _search(query: str, region: str) -> list[dict]:
     """A web search's results ({"href": ...}); the one other place the network is reached."""
     from ddgs import DDGS
 
-    return list(DDGS().text(query, region=region, max_results=8) or [])
+    return list(DDGS().text(query, region=region, max_results=10) or [])
 
 
 _searched: dict[str, tuple[float, SiteRes | None]] = {}
@@ -169,7 +227,9 @@ def forget() -> None:
 
 async def resolve(word: str) -> SiteRes | None:
     """The website ``word`` names, first rule that applies: a domain as given, a site learned
-    here, an installed web-app wrapper's site, then a region-aware web search (cached 10 min)."""
+    here, an installed web-app wrapper's site, then a web search (cached 10 min). The search asks
+    for the word's website in this country: a bare name mostly finds pages about the site (an
+    encyclopedia, its blog) rather than the site, and a store has one site per country."""
     from neo.decide import inventory, learned
 
     cc = _country()
@@ -185,13 +245,12 @@ async def resolve(word: str) -> SiteRes | None:
     # the search engine's own vocabulary names Great Britain's region 'uk'
     region = f"{'uk' if cc == 'gb' else cc or 'wt'}-{_language() if cc else 'wt'}"
     try:
-        rows = await asyncio.to_thread(_search, " ".join(word.split()), region)
+        query = " ".join((*word.split(), "official website", _country_name(cc))).strip()
+        rows = await asyncio.to_thread(_search, query, region)
     except Exception as e:  # noqa: BLE001 - no network: not a site as far as NEO can tell
         print(f"[decide] site search failed ({str(e)[:60]})")
         return None
-    hits = [m for r in rows if isinstance(r, dict) and (m := _matches(word, str(r.get("href") or "")))]
-    local = [m for m in hits if cc and _country_tld(m[0]) == ("uk" if cc == "gb" else cc)]
-    best = (local or hits or [None])[0]  # the store for this country when the site has one
+    best = _pick(word, rows, cc)
     res = SiteRes(best[0], "search", cc, best[1]) if best else None
     _searched[k] = (time.monotonic(), res)
     return res
@@ -217,7 +276,7 @@ async def _fetch(url: str, limit: int = MAX_PAGE) -> _Page | None:
             httpx.AsyncClient(
                 follow_redirects=True,
                 timeout=FETCH_S,
-                headers={"User-Agent": _UA},
+                headers={"User-Agent": _UA, "Accept-Language": _accept_language()},
                 event_hooks={"request": [each_hop]},
                 max_redirects=5,
                 transport=_transport,
@@ -407,6 +466,38 @@ def sanitize(url: str, query: str) -> str | None:
         return None  # a token or a tracking value in the path: which parts the site needs can't be told
     netloc = u.netloc.rpartition("@")[2]  # never a user name or password
     return urlunsplit((u.scheme, netloc, "/".join(path), query_part, ""))
+
+
+def fill(template: str, query: str) -> str:
+    """The search page for ``query``: the template's terms slot filled in, encoded for where it
+    sits (a query parameter or a path segment)."""
+    base, sep, params = template.partition("?")
+    if TERMS in params:
+        return base + sep + params.replace(TERMS, quote_plus(query))
+    return base.replace(TERMS, quote(query, safe="")) + sep + params
+
+
+def registrable(url_or_host: str) -> str:
+    """The registrable domain ('shop.example.co.in' -> 'example.co.in'); '' when there is none."""
+    r = _parts(url_or_host)
+    return str(r.fld).casefold() if r is not None else ""
+
+
+def on_site(url: str, host: str) -> bool:
+    """Is the page at ``url`` on the site ``host`` belongs to (the same registrable domain)?"""
+    mine = registrable(host)
+    return bool(mine) and registrable(url) == mine
+
+
+def carries(url: str, query: str) -> bool:
+    """Does the page's address hold every word of ``query`` (decoded, any case, any script)?"""
+    words = re.findall(r"\w+", query.casefold())
+    try:
+        u = urlsplit(url)
+    except ValueError:
+        return False
+    shown = unquote_plus(f"{u.path} {u.query} {u.fragment}").casefold()
+    return bool(words) and all(w in shown for w in words)
 
 
 def learn_landing(word: str, host: str, template: str | None, prefix: str = "") -> None:

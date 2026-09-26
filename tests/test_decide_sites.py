@@ -21,6 +21,7 @@ WRAPPER = App(bundle_id="test.vidzone", name="Vidzone", path="/Applications/Vidz
 def here(monkeypatch):
     monkeypatch.setattr(sites, "_country", lambda: "in")
     monkeypatch.setattr(sites, "_language", lambda: "en")
+    monkeypatch.setattr(sites, "_country_name", lambda cc: {"in": "India", "gb": "United Kingdom"}.get(cc, ""))
     monkeypatch.setattr(inventory, "snapshot", lambda: [NOTEBOOK, WRAPPER])
     monkeypatch.setattr(inventory, "_words_known", {})
     monkeypatch.setattr(inventory, "_common_words", lambda words: {w: w in {"notebook", "climate", "change"} for w in words})
@@ -75,7 +76,7 @@ def test_resolve_order_domain_learned_wrapper_then_search(monkeypatch):
     assert asyncio.run(sites.resolve("vidzone")) == sites.SiteRes("www.vidzone.tv", "webapp", "in")
     got = asyncio.run(sites.resolve("ShopKart"))
     assert got == sites.SiteRes("www.shopkart.in", "search", "in")  # the store for this country
-    assert s.calls == [("ShopKart", "in-en")]
+    assert s.calls == [("ShopKart official website India", "in-en")]  # its own site, in this country
     asyncio.run(sites.resolve("shopkart"))
     assert len(s.calls) == 1  # cached
     sites.learn_landing("shopkart", "www.shopkart.in", None)
@@ -88,6 +89,47 @@ def test_the_search_regions_quirk_and_no_local_store(monkeypatch):
     monkeypatch.setattr(sites, "_country", lambda: "gb")
     assert asyncio.run(sites.resolve("shopkart")).host == "www.shopkart.com"
     assert s.calls[-1][1] == "uk-en"
+
+
+def test_the_domain_most_results_agree_on_at_its_front_host(monkeypatch):
+    s = FakeSearch([
+        "https://en.wiki.example.org/wiki/Shopkart",
+        "https://shopkart.blog/",  # the site's blog, one result
+        "https://corporate.shopkart.net/about",
+        "https://careers.shopkart.com/",
+        "https://www.shopkart.com/login",
+        "https://www.shopkart.com/",
+    ])
+    monkeypatch.setattr(sites, "_search", s)
+    monkeypatch.setattr(sites, "_country", lambda: "")
+    assert asyncio.run(sites.resolve("shopkart")) == sites.SiteRes("www.shopkart.com", "search", "")
+    assert s.calls == [("shopkart official website", "wt-wt")]  # no region known: no country in the words
+    sites._searched.clear()
+    monkeypatch.setattr(sites, "_search", FakeSearch(["https://shopkart.blog/", "https://corporate.shopkart.net/"]))
+    assert asyncio.run(sites.resolve("shopkart")).host == "shopkart.blog"  # equals: the first
+
+
+def test_pages_are_fetched_in_the_users_languages(monkeypatch):
+    got = []
+    sites._accept_language.cache_clear()
+
+    class Locale:
+        @staticmethod
+        def preferredLanguages():
+            return ["en-IN", "hi-IN", "en-GB", "fr"]
+
+    import Foundation
+
+    monkeypatch.setattr(Foundation, "NSLocale", Locale)
+
+    def handler(request):
+        got.append(request.headers.get("accept-language"))
+        return httpx.Response(404)
+
+    monkeypatch.setattr(sites, "_transport", httpx.MockTransport(handler))
+    asyncio.run(sites.discover("shop.example.in"))
+    sites._accept_language.cache_clear()
+    assert got == ["en-IN, hi-IN;q=0.9, en-GB;q=0.8"]
 
 
 def test_multi_word_sites_by_subdomain_or_path(monkeypatch):
@@ -281,3 +323,32 @@ def test_learning_a_landing_and_dropping_a_failing_template():
     sites.template_failed(HOST)
     assert learned.get("templates", HOST) is None
     sites.template_failed(HOST)  # nothing left to drop
+
+
+# ---- a search page, and whether a landing is one ----------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "template, query, want",
+    [
+        ("https://shop.example.in/s?k={searchTerms}", "2tb ssd & more", "https://shop.example.in/s?k=2tb+ssd+%26+more"),
+        ("https://videos.example.org/search/{searchTerms}?hl=en", "cats/dogs", "https://videos.example.org/search/cats%2Fdogs?hl=en"),
+        ("https://shop.example.in/s?k={searchTerms}", "नमस्ते", "https://shop.example.in/s?k=%E0%A4%A8%E0%A4%AE%E0%A4%B8%E0%A5%8D%E0%A4%A4%E0%A5%87"),
+    ],
+)
+def test_fill_encodes_the_query_for_where_the_slot_sits(template, query, want):
+    assert sites.fill(template, query) == want
+
+
+def test_a_landing_is_on_the_site_and_holds_the_query():
+    assert sites.registrable("https://www.shop.example.co.in/x") == "example.co.in"
+    assert sites.registrable("10.0.0.1") == "" and sites.registrable("") == ""
+    assert sites.on_site("https://m.shopkart.in/s?q=x", "www.shopkart.in")
+    assert not sites.on_site("https://accounts.other.in/login", "www.shopkart.in")
+    assert not sites.on_site("https://10.0.0.1/", "10.0.0.1")  # no registrable domain: never "the same site"
+    assert sites.carries("https://shop.example.in/s?k=2TB+SSD&ref=x", "2tb ssd")
+    assert sites.carries("https://videos.example.org/results#q=cats%20dancing", "Cats dancing")
+    assert sites.carries(sites.fill("https://shop.example.in/s?k={searchTerms}", "नमस्ते दोस्त"), "नमस्ते दोस्त")
+    assert not sites.carries("https://shop.example.in/", "2tb ssd")
+    assert not sites.carries("https://shop.example.in/s?k=2tb", "2tb ssd")
+    assert not sites.carries("https://shop.example.in/s?k=x", "  ")

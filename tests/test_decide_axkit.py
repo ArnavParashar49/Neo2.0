@@ -193,3 +193,24 @@ def test_dock_badge(monkeypatch):
     assert axkit.dock_badge("postbox") == "3" and axkit.dock_badge("Notebook") is None and axkit.dock_badge("Nope") is None
     monkeypatch.setattr(axkit, "_dock_pid", lambda: None)
     assert axkit.dock_badge("Postbox") is None
+
+
+def test_set_search_takes_search_and_address_fields_but_never_a_password(monkeypatch):
+    search = El("AXTextField", AXSubrole="AXSearchField", AXPlaceholderValue="Search", AXValue="")
+    address = El("AXComboBox", AXValue="https://example.test/")
+    FakeAX(monkeypatch, El("AXApplication", [search, address]))
+    assert not axkit.set_text(search, "cats")  # a message never lands in a search box
+    assert axkit.set_search(search, "cats") and search.attrs["AXValue"] == "cats"
+    assert axkit.set_search(address, "cats site:example.test") and address.attrs["AXValue"] == "cats site:example.test"
+    assert not axkit.set_search(El("AXTextField", AXSubrole="AXSecureTextField"), "hunter2")
+    assert not axkit.set_search(El("AXButton"), "x") and not axkit.set_search(None, "x")
+
+
+def test_web_area_pid_and_sign_in_come_from_medias_primitives(monkeypatch):
+    area = El("AXWebArea")
+    win = El("AXWindow", [El("AXGroup", [area]), El("AXTextField", AXSubrole="AXSecureTextField")])
+    FakeAX(monkeypatch, El("AXApplication", [win], AXFocusedWindow=win))
+    assert axkit.web_area(1) is area
+    assert axkit.needs_sign_in(win) and not axkit.needs_sign_in(area)
+    monkeypatch.setattr(media, "_pid_of", lambda bid: 55 if bid == "test.webby" else None)
+    assert axkit.pid_of("test.webby") == 55 and axkit.pid_of("test.nope") is None
