@@ -21,7 +21,7 @@ from google import genai
 from google.genai import errors as gerrors
 from google.genai import types as gt
 
-from neo.config import settings
+from neo.config import Settings, settings
 from neo.providers.base import (
     Message,
     ProviderError,
@@ -132,23 +132,28 @@ class GeminiProvider:
         keys: Sequence[str] | None = None,
         fallback_models: Sequence[str] | None = None,
     ) -> None:
-        """`keys`: every key, in priority order (quota is per key). Settings are read only for
-        what isn't passed: given a model, keys and fallbacks, this never reads them."""
+        """`keys`: every key, in priority order (quota is per key). Given a key (or keys), it's
+        the host's: nothing is read from settings, and the model and fallbacks not passed are the
+        release's (a host may build it before any agent exists — NEO.app's settings would read
+        ~/.neo). Given no key, the keys and what isn't passed come from settings."""
         # The SDK nags about automatic function calling on the async path even though we never use it.
         logging.getLogger("google_genai.models").setLevel(logging.ERROR)
-        s = settings() if model is None or fallback_models is None or (keys is None and not api_key) else None
+        own = keys is not None or bool(api_key)
+        d = Settings.model_fields
         if keys is not None:
             key_list = list(dict.fromkeys(k.strip() for k in keys if k and k.strip()))
         elif api_key:
             key_list = [api_key]
         else:
-            assert s is not None
-            key_list = s.gemini_keys if s.gemini_api_key else []
+            key_list = settings().gemini_keys if settings().gemini_api_key else []
         if not key_list:
             raise ProviderError("GEMINI_API_KEY is not set")
-        self.model = model or s.gemini_model  # type: ignore[union-attr]
+        self.model = model or (d["gemini_model"].default if own else settings().gemini_model)
         lite = "lite" in self.model
-        fallbacks = list(fallback_models) if fallback_models is not None else s.gemini_fallback_models  # type: ignore[union-attr]
+        if fallback_models is not None:
+            fallbacks = list(fallback_models)
+        else:
+            fallbacks = list(d["gemini_fallback_models"].default if own else settings().gemini_fallback_models)
         self.models = [self.model] + ([] if lite else [m for m in fallbacks if m != self.model])
         http = gt.HttpOptions(timeout=_REQUEST_TIMEOUT_MS)
         self._clients = [genai.Client(api_key=k, http_options=http) for k in key_list]

@@ -97,7 +97,8 @@ async def _provider(name: str):
     if name == "gemini":
         from neo.providers.gemini import GeminiProvider
 
-        return GeminiProvider(api_key=settings().gemini_api_key or None)
+        s = settings()
+        return GeminiProvider(s.gemini_model, s.gemini_api_key or None, fallback_models=s.gemini_fallback_models)
     if name == "local":
         from neo.providers.local_server import is_up
 

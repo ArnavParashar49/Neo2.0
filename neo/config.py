@@ -238,6 +238,9 @@ class LibrarySettings(Settings):
     data_dir: Path  # required: an embedded agent never defaults to ~/.neo
     # Embedders get the quiet defaults: no local models, no memory, no voice, a headless browser.
     reflex: Literal["lite", "off"] = "off"  # "laya" is one process-wide model: NEO.app's
+    # No brain but the ones the host gave: the local model server is one only when named here.
+    # (Whatever answers on 127.0.0.1:8080 of a server is some other service.)
+    offline_brain: BrainName | None = None
     embeddings: Literal["local", "off"] = "off"
     memory_enabled: bool = False
     learn: bool = False

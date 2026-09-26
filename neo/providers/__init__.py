@@ -215,14 +215,14 @@ class Chain:
 
 
 def brain(purpose: Purpose = "agent") -> Chain:
-    if own := pool().overrides.get(purpose):  # the host's providers for this purpose
+    if own := _hosts(purpose):
         return Chain(own, sticky=purpose != "vision")
     s = settings()
     if purpose == "fast":
-        order: list[BrainName] = [s.fast_brain, s.brain, s.offline_brain]
+        order: list[BrainName | None] = [s.fast_brain, s.brain, s.offline_brain]
     elif purpose == "vision":
         # Only brains that can see the screenshot come first; text-only ones would drop it silently.
-        vision: list[BrainName] = [n for n in (s.brain, "gemini", "claude") if n not in ("groq", "local")]
+        vision: list[BrainName | None] = [n for n in (s.brain, "gemini", "claude") if n not in ("groq", "local")]
         order = vision + [n for n in (s.brain, s.fast_brain, s.offline_brain) if n not in vision]
         return Chain(_dedupe(order), sticky=False)
     elif purpose == "offline":
@@ -235,13 +235,23 @@ def brain(purpose: Purpose = "agent") -> Chain:
     return Chain(_dedupe(order))
 
 
+def _hosts(purpose: Purpose) -> list[Provider]:
+    """The host's own providers for this purpose — or, for a purpose it gave none for, the ones
+    it gave for its agent (or any): a host that brought its brains gets no others."""
+    ov = pool().overrides
+    for p in (purpose, "agent", "fast", "light", "vision", "offline"):
+        if ov.get(p):
+            return ov[p]
+    return []
+
+
 def _key(n: BrainName | Provider) -> str:
     return n if isinstance(n, str) else str(getattr(n, "name", "") or type(n).__name__)
 
 
-def _dedupe(order: list[BrainName]) -> list[BrainName]:
+def _dedupe(order: Sequence[BrainName | None]) -> list[BrainName]:
     seen: list[BrainName] = []
     for n in order:
-        if n not in seen:
+        if n is not None and n not in seen:  # None: no such brain (an embedded agent's offline one)
             seen.append(n)
     return seen

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+from pathlib import Path
 
 import pytest
 from neo_lib import make_runtime
@@ -110,8 +112,8 @@ def test_the_hosts_providers_stand_in_for_the_named_brains(tmp_path):
             return [c async for c in prov.brain("fast").stream([])]
 
         assert asyncio.run(chat()) == ["from host-quick"]
-        # a purpose the host left out falls back to the agent's own (keyless) named brains
-        assert prov.brain("offline").names == ["local"]
+        # a purpose the host left out gets the host's agent providers, never a named brain
+        assert prov.brain("offline").names == [main]
 
 
 def test_a_chain_of_host_providers_fails_over(tmp_path):
@@ -174,3 +176,82 @@ def test_neo_apps_pool_is_the_module_cache(monkeypatch, genai_clients):
     p = prov.make("gemini")
     assert prov._cache == {"gemini": p} and prov.make("gemini") is p
     assert prov.pool() is prov._app_pool
+
+
+# ---- no brain the host didn't give ------------------------------------------------------------------
+
+
+def test_an_agent_never_falls_back_to_a_local_server(tmp_path):
+    """Whatever answers on 127.0.0.1:8080 of the host's machine is nobody's brain for an agent."""
+    from neo.config import Settings
+
+    a = make_runtime(tmp_path / "a", "a", gemini_api_key="k-a")
+    with runtime.bind(a.scope()):
+        for purpose in ("agent", "fast", "vision", "light", "offline"):
+            assert "local" not in prov.brain(purpose).names, purpose
+        assert prov.brain("offline").names == [] and prov.brain("agent").names == ["gemini", "groq"]
+    b = make_runtime(tmp_path / "b", "b", offline_brain="local")  # the host asked for it
+    with runtime.bind(b.scope()):
+        assert prov.brain("agent").names == ["gemini", "groq", "local"]
+    runtime.set_library_mode(False)
+    assert Settings().offline_brain == "local"  # NEO.app: as before
+    assert prov.brain("fast").names == ["groq", "gemini", "local"]
+
+
+def test_the_hosts_providers_stand_in_for_every_purpose(tmp_path):
+    a = make_runtime(tmp_path / "a", "a", gemini_api_key="k-a")
+    host, fast = Fake("host"), Fake("fast")
+    a.brains = prov.BrainPool(overrides={"agent": [host]})
+    with runtime.bind(a.scope()):
+        for purpose in ("agent", "fast", "vision", "light", "offline"):
+            assert prov.brain(purpose).names == [host], purpose
+        assert asyncio.run(prov.brain("fast").complete([])).text == "from host"
+    a.brains = prov.BrainPool(overrides={"agent": [host], "fast": [fast]})
+    with runtime.bind(a.scope()):
+        assert prov.brain("fast").names == [fast] and prov.brain("light").names == [host]
+
+
+def test_a_hosts_provider_built_before_any_agent_reads_no_settings(tmp_path):
+    """Built first, with library mode still off: ClaudeProvider(api_key=...) used to build
+    NEO.app's settings for its model — reading ~/.neo/.env and creating ~/.neo."""
+    import os
+    import subprocess
+    import sys
+    import textwrap
+
+    home = tmp_path / "home"
+    home.mkdir()
+    env = {k: v for k, v in os.environ.items() if k not in ("NEO_DATA_DIR", "PYTEST_CURRENT_TEST")}
+    env["HOME"] = str(home)
+    code = textwrap.dedent(
+        """
+        import json, os
+        from neo import config
+        from neo.config import Settings
+        from neo.providers.claude import ClaudeProvider
+        from neo.providers.gemini import GeminiProvider
+
+        c, g = ClaudeProvider(api_key="sk-host"), GeminiProvider(api_key="k-host")
+        d = Settings.model_fields
+        print(json.dumps([c.model == d["claude_model"].default, g.models[0] == d["gemini_model"].default,
+                          g.models[1:] == d["gemini_fallback_models"].default, config._settings is None,
+                          os.path.exists(os.path.expanduser("~/.neo"))]))
+        """
+    )
+    root = Path(__file__).resolve().parents[1]
+    out = subprocess.run([sys.executable, "-c", code], cwd=root, env=env, capture_output=True, text=True, timeout=120)
+    assert out.returncode == 0, out.stderr[-2000:]
+    assert json.loads(out.stdout.strip().splitlines()[-1]) == [True, True, True, True, False]
+    assert not (home / ".neo").exists()
+
+
+def test_the_teacher_still_uses_the_apps_gemini_model(monkeypatch, genai_clients):
+    from neo import config
+    from neo.reflex import teacher
+
+    monkeypatch.setenv("GEMINI_API_KEY", "app-key")
+    monkeypatch.setenv("NEO_GEMINI_MODEL", "gemini-custom")
+    monkeypatch.setenv("NEO_GEMINI_FALLBACK_MODELS", '["gemini-fb"]')
+    monkeypatch.setattr(config, "_settings", None)
+    p = asyncio.run(teacher._provider("gemini"))
+    assert p.models == ["gemini-custom", "gemini-fb"] and genai_clients == ["app-key"]

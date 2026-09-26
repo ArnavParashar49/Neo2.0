@@ -12,7 +12,7 @@ from typing import Any, Literal
 
 import anthropic
 
-from neo.config import settings
+from neo.config import Settings, settings
 from neo.providers.base import (
     Message,
     ProviderError,
@@ -79,13 +79,16 @@ class ClaudeProvider:
     def __init__(
         self, model: str | None = None, *, api_key: str | None = None, client: anthropic.AsyncAnthropic | None = None
     ) -> None:
-        """Settings are read only for what isn't passed (a model, and a key or a client)."""
+        """Given a key or a client, it's the host's: nothing is read from settings, and the model
+        defaults to the release's (a host may build it before any agent exists — NEO.app's
+        settings would read ~/.neo). Given neither, the key and model come from settings."""
         key = api_key
-        if client is None and key is None:
+        own = client is not None or key is not None
+        if not own:
             key = settings().anthropic_api_key
         if client is None and not key:
             raise ProviderError("ANTHROPIC_API_KEY is not set")
-        self.model = model or settings().claude_model
+        self.model = model or (Settings.model_fields["claude_model"].default if own else settings().claude_model)
         self._client = client or anthropic.AsyncAnthropic(api_key=key)
 
     async def complete(
