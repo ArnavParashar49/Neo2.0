@@ -58,6 +58,7 @@ _DIRECT_TOOLS = {
     "hotkey",
     "click_text",
     "scroll",
+    "search_site",
 }
 _IDLE_CLOSE_S = 90.0
 _CONNECT_TIMEOUT_S = 12.0
@@ -71,7 +72,10 @@ _LIVE_EXTRA = """You are speaking aloud, so keep replies short and natural. When
 (open, type, set, play, remind…), just call the tool — don't announce it, confirm it, or say "done";
 stay quiet unless something went wrong. When one sentence asks for several things ("type github.com
 and press enter"), make every call, in order. Speak when the user asks a question or wants information.
-If a tool result starts with NEEDS_USER, tell the user exactly that, briefly. For anything that needs
+If a tool result starts with NEEDS_USER, tell the user exactly that, briefly. To show the user
+something on a website ("open it on Amazon", "search that on Google"), call search_site with the
+actual product or topic from the conversation as the query — never "it". An agent_task goal must be
+self-contained: include the names, products and details from the conversation. For anything that needs
 several steps or looking at the screen, files, mail or the web, call agent_task with a clear goal and
 then relay its result in one or two sentences. Don't narrate tool use. When the user is working in
 an app that is already open (a note, a document, a message) and asks you to type or add something,
@@ -151,6 +155,7 @@ class LiveVoice:
         self._goals: dict[str, str] = {}  # function-call id → agent_task goal in flight
         self._server_cancelled: set[str] = set()
         self._utterance = ""  # what the user said in the current turn (for "did they ask something?")
+        self._dialog: list[tuple[str, str]] = []  # the spoken conversation, for agent_task context
         # Keystrokes, clicks and app switches run one at a time in the order the model asked:
         # non-blocking calls would otherwise race ("type X" and "press enter").
         self._ui_lock = asyncio.Lock()
@@ -469,12 +474,14 @@ class LiveVoice:
                 self._last_turn_end = time.time()
                 if user_buf:
                     await bus().say("".join(user_buf), role="user", final=True)
+                    self._remember_line("user", "".join(user_buf))
                     user_buf.clear()
                 # The model heard the whole sentence and calls the tools itself; the early actor
                 # only ever acts mid-sentence here (its runs answer the model's matching calls).
                 early().new_utterance()
                 if model_buf:
                     await bus().say("".join(model_buf), final=True)
+                    self._remember_line("NEO", "".join(model_buf))
                     model_buf.clear()
                 # Don't block the receive loop on playback — server-side events must keep flowing.
                 asyncio.create_task(self._after_playback())
@@ -523,7 +530,7 @@ class LiveVoice:
                     from neo.agent import fastpath
 
                     text = asked if asked and fastpath.plan(asked) else goal
-                    reply = await self._agent_session.handle(text)
+                    reply = await self._agent_session.handle(text, conversation=self._conversation(asked))
                     result, silent = reply.text, reply.silent
             elif (done := early().claim(fc.name, args)) is not None:
                 result = done  # already ran while the user was still talking
@@ -594,6 +601,18 @@ class LiveVoice:
         elif not silent:  # session went away mid-task: don't lose the result
             await bus().say(result[:600], final=True)
             await self._refresh_state()
+
+    def _remember_line(self, who: str, text: str) -> None:
+        text = " ".join(text.split())
+        if text:
+            self._dialog.append((who, text[:600]))
+            del self._dialog[:-12]
+
+    def _conversation(self, asked: str) -> str:
+        lines = [f"{who}: {text}" for who, text in self._dialog[-10:]]
+        if asked and (not self._dialog or self._dialog[-1][1] != " ".join(asked.split())):
+            lines.append(f"user: {asked}")  # the sentence that triggered this, not yet final
+        return "\n".join(lines)
 
     def _agent_task_running(self, goal: str, *, except_key: str) -> bool:
         g = _canon(goal)

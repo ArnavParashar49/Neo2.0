@@ -9,6 +9,7 @@ never interleave inside each other's transcript. Long agent jobs are limited to 
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import itertools
 import re
 import time
@@ -46,6 +47,9 @@ _QUALIFIER = re.compile(
     re.I,
 )
 _job_ids = itertools.count(1)
+# The recent voice conversation, when a request comes from Gemini Live: the agent can't hear
+# it, so "open it on Amazon" needs it to know what "it" is. Per task (jobs run concurrently).
+_conversation: contextvars.ContextVar[str] = contextvars.ContextVar("conversation", default="")
 
 
 @dataclass
@@ -72,7 +76,11 @@ class Session:
     jobs: dict[str, asyncio.Task] = field(default_factory=dict)
 
     # ---- public --------------------------------------------------------------------
-    async def handle(self, text: str, *, images: list[ImagePart] | None = None) -> Reply:
+    async def handle(
+        self, text: str, *, images: list[ImagePart] | None = None, conversation: str = ""
+    ) -> Reply:
+        if conversation:
+            _conversation.set(conversation)
         text = _WAKE_PREFIX.sub("", text.strip(), count=1).strip() or text.strip()
         if not text:
             return Reply("", "chat")
@@ -388,6 +396,11 @@ class Session:
 
     # ---- helpers ---------------------------------------------------------------------
     def _system(self, extra: str = "") -> str:
+        if conv := _conversation.get():
+            extra = (
+                "[RECENT CONVERSATION — spoken with the user just now; use it to resolve 'it', "
+                "'that one', names and products]\n" + conv + ("\n\n" + extra if extra else "")
+            )
         return build_prompt(self.memory_context, extra)
 
     async def _remember(self, *msgs: Message) -> None:

@@ -49,7 +49,11 @@ def _env(tmp_path, monkeypatch):
         ("make a note called groceries saying milk and eggs", ("notes_create", {"title": "groceries", "body": "milk and eggs"})),
         ("create a note saying buy milk", ("notes_create", {"title": "", "body": "buy milk"})),
         ("search for the best laptops under 1000", ("web_search", {"query": "the best laptops under 1000"})),
-        ("search for cat videos in spotify", None),  # app-specific search: not the web
+        ("search for cat videos in spotify", ("search_site", {"site": "spotify", "query": "cat videos"})),
+        ("search 2tb ssd on amazon", ("search_site", {"site": "amazon", "query": "2tb ssd"})),
+        ("search amazon for crucial x9 pro", ("search_site", {"site": "amazon", "query": "crucial x9 pro"})),
+        ("open youtube and search for cat videos", ("search_site", {"site": "youtube", "query": "cat videos"})),
+        ("open it on amazon", None),  # "it" comes from the conversation: the model resolves it
         ("remember that i park on level 3", ("memory", {"action": "remember", "text": "i park on level 3", "kind": "note"})),
         ("remember to call mom", None),  # a reminder, not a memory
         ("what did i say about parking", ("memory", {"action": "recall", "query": "parking"})),
@@ -180,3 +184,57 @@ def test_confirmation_expires(monkeypatch):
 
     time.sleep(0.02)
     assert confirm.peek() is None  # lapsed: the next request is not treated as an answer
+
+
+def test_search_site_builds_real_search_urls(monkeypatch):
+    from neo.tools import web
+
+    monkeypatch.setattr(web, "_country", lambda: "IN")
+    assert web.site_search_url("amazon", "crucial x9 pro 2tb") == "https://www.amazon.in/s?k=crucial+x9+pro+2tb"
+    assert web.site_search_url("Google", "ssd") == "https://www.google.com/search?q=ssd"
+    assert web.site_search_url("bestbuy.com", "ssd").endswith("site%3Abestbuy.com+ssd")
+    opened = []
+
+    async def fake_open(url):
+        opened.append(url)
+        return f"Opened {url} in Chrome"
+
+    monkeypatch.setattr(web, "_country", lambda: "")
+    from neo.tools.computer import apps
+
+    monkeypatch.setattr(apps, "open_app", fake_open)
+    out = asyncio.run(registry().invoke("search_site", {"site": "youtube", "query": "lofi"}, ToolContext(user_text="")))
+    assert out.ok and opened == ["https://www.youtube.com/results?search_query=lofi"]
+    out = asyncio.run(registry().invoke("search_site", {"site": "amazon", "query": "it"}, ToolContext(user_text="")))
+    assert not out.ok and len(opened) == 1  # never searches for the word "it"
+
+
+def test_agent_gets_the_spoken_conversation(monkeypatch):
+    import neo.agent.session as sess_mod
+    from neo.agent.session import Session
+    from neo.providers.base import Turn
+    from neo.reflex.schema import Decision
+
+    seen = {}
+
+    class B:
+        name = "fake"
+        supports_vision = False
+        supports_tools = True
+
+        async def complete(self, messages, *, system="", **kw):
+            seen["system"] = system
+            return Turn(text="ok")
+
+        async def stream(self, messages, **kw):
+            yield ""
+
+    monkeypatch.setattr(sess_mod, "brain", lambda purpose="agent": B())
+
+    class R:
+        async def decide(self, t):
+            return Decision("agent_task", 0.9, False, 0.0, False, 0.0, "fake")
+
+    conv = "user: what's a cheaper SSD?\nNEO: The Crucial X9 Pro 2TB is about half the price."
+    asyncio.run(Session(reflex=R()).handle("open it on amazon", conversation=conv))
+    assert "Crucial X9 Pro 2TB" in seen["system"] and "RECENT CONVERSATION" in seen["system"]

@@ -311,7 +311,7 @@ def test_live_agent_task_uses_the_users_words_when_fast_paths_cover_them(monkeyp
     seen = []
 
     class S:
-        async def handle(self, text):
+        async def handle(self, text, **kw):
             from neo.agent.session import Reply
 
             seen.append(text)
@@ -319,7 +319,7 @@ def test_live_agent_task_uses_the_users_words_when_fast_paths_cover_them(monkeyp
 
     v = live_mod.LiveVoice.__new__(live_mod.LiveVoice)
     v._agent_session, v._tool_tasks, v._goals, v._server_cancelled = S(), {}, {}, set()
-    v._live, v._ui_lock = None, asyncio.Lock()
+    v._live, v._ui_lock, v._dialog = None, asyncio.Lock(), []
 
     class FC:
         id, name, args = "c1", "agent_task", {"goal": "Create a new note in the Notes app"}

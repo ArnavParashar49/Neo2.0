@@ -137,8 +137,9 @@ async def open_app(name: str) -> str:
                 site = f"https://{host}"
                 code, _, err = await _run(["open", site])
                 if code == 0:
-                    await asyncio.sleep(0.6)
-                    set_target(front_name())  # the browser that took the URL
+                    browser = default_browser()
+                    ok, real = await bring_front(browser) if browser else (False, "")
+                    set_target(real or front_name())  # the browser that took the URL
                     return f"No app called {name!r}; opened {site} in your browser"
             else:
                 return f"Error: {name!r} isn't an installed app and {host} doesn't exist"
@@ -153,9 +154,28 @@ async def open_app(name: str) -> str:
             return f"Opened {real}"
     if code != 0:
         return f"Error: couldn't open {name!r}: {err}"
+    if "://" in name or "." in name:  # a URL: bring the browser that got it to the front
+        browser = default_browser()
+        if browser:
+            ok, real = await bring_front(browser)
+            set_target(real)
+            return f"Opened {name} in {real}" if ok else f"Opened {name} in {real} (it may be behind {front_name()})"
     await asyncio.sleep(0.6)
     set_target(front_name())
     return f"Opened {name}"
+
+
+def default_browser() -> str:
+    """The app that opens https links (Safari, Chrome, Arc…)."""
+    try:
+        from AppKit import NSURL
+
+        url = NSWorkspace.sharedWorkspace().URLForApplicationToOpenURL_(NSURL.URLWithString_("https://example.com"))
+        if url is not None:
+            return str(url.lastPathComponent()).removesuffix(".app")
+    except Exception:  # noqa: BLE001
+        pass
+    return ""
 
 
 async def activate(name: str) -> str:
