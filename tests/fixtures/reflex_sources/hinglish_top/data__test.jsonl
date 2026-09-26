@@ -1,0 +1,2 @@
+{"en_query": "Remind me to water the plants at 6 pm .", "cs_query": "Mujhe 6 baje plants ko paani dene ki yaad dilana", "cs_parse": "[IN:CREATE_REMINDER Mujhe [SL:DATE_TIME 6 baje ] [SL:TODO plants ko paani dene ] ki yaad dilana ]"}
+{"en_query": "Play some old Hindi songs .", "cs_query": "Kuch purane Hindi gaane chalao", "cs_parse": "[IN:PLAY_MUSIC Kuch purane [SL:MUSIC_GENRE Hindi ] gaane chalao ]"}

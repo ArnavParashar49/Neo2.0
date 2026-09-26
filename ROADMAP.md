@@ -175,6 +175,14 @@ A 54-agent audit found 45 gaps across security, reliability, packaging, onboardi
 - **Reliability:** audio follows device changes; voice starts in the background, survives a network blip at login and falls back to the on-device cascade when Live is down; the wake-word model download is checksummed and atomic; timers survive sleep and restarts; the memory store is thread-safe; history is bounded and summarised in checkpoints; learning keeps learning and backs off after failures.
 - **Privacy:** logs never hold what the user typed, said, sent or read; playbooks keep paths, not content; retention limits on disk; `NEO_CLOUD_MEMORY`; *Erase NEO's Memory…*; the overlay is hidden from screen capture; README lists every cloud destination.
 
+### Laya data: Hindi, Hinglish, public sets (2026-09-26)
+
+- `python -m neo.reflex.hf_data` builds ~48k train rows from 14 pinned public sources (`neo/reflex/sources.py`: revision, licence and label mapping of each) plus a 30.6k-row benchmark, `reflex_eval.jsonl` (Hinglish-TOP, MTOP en/hi, CLINC, MASSIVE en/hi test splits) that `dataset.build()` never reads; train rows sharing a sentence or a translation group with it are held out. Rows carry `lang` (en / hi / hinglish), `split`, `group` and, when the source knows, `kind` (neo/decide task kinds), `destructive`, `screen`, `reply`.
+- Measured motivation (research): Hinglish tool accuracy 0.57 → 0.85 and Devanagari 0.31 → 0.82 with Hinglish / Hindi rows; Hinglish small talk is misrouted 98 % of the time without Hinglish chat rows.
+- New label sources: SGD for destructive (bookings, payments, transfers; playing and calendar entries stay reversible), reply and stop; TOPv2/MTOP for send_message; glaive for notes/mail/calendar tools; AgentNet/OmniACT for agent tasks and needs_screen (only when the wording points at the screen). MASSIVE's "be quiet" / "shut up" mute rows are now `stop`.
+- `neo/reflex/templates_hi.py`: romanised-Hindi templates for every class with explicit labels (Hinglish destructive recall was 0.17–0.33) and 250 Hinglish + 50 Devanagari stop phrases, added to `dataset.build()` as NEO's own rows.
+- Leyzer (the only public open_app / search_site set) is opt-in: the repository hosting its data is CC-BY-NC-ND although its HF card says CC-BY.
+
 ### Next
 
 - Developer ID signing + notarization, so the app can be shared (bundle-id signing already keeps permissions across local rebuilds).

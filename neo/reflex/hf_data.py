@@ -1,15 +1,22 @@
-"""Real human phrasings for the reflex, from open Hugging Face intent datasets.
+"""Real human phrasings for the reflex, from open datasets mapped onto NEO's labels.
 
 Our own training data is templates plus LLM-generated sentences — clean, but nobody talks like
-that. CLINC150 and MASSIVE are ~27k crowd-sourced assistant utterances ("you're too loud",
-"emails", "olly make me a coffee", "how bad is traffic on my commute"); their intents map onto
-NEO's routes (chat / quick_action / agent_task / stop) and, where NEO has a matching tool,
-onto that tool. The mapping is the whole point: we don't learn *their* labels, we learn how
-people phrase *ours*.
+that. Public intent, dialogue, function-calling and computer-use sets (neo/reflex/sources.py has
+each one's pin, licence and mapping) supply how people actually phrase NEO's routes (chat /
+quick_action / agent_task / stop), tools, task kinds, "is it destructive", "does it need the
+screen" and "does it want an answer" — in English, Devanagari Hindi and romanised Hinglish.
 
-    python -m neo.reflex.hf_data            # writes ~/.neo/reflex_hf.jsonl (cached datasets)
+    python -m neo.reflex.hf_data                  # → <data_dir>/reflex_hf.jsonl + reflex_eval.jsonl
+    python -m neo.reflex.hf_data --with leyzer    # also the opt-in sources
+    python -m neo.reflex.hf_data --only clinc,massive --scale 0.5
 
-Rows: {"text", "intent", "tool", "source"}; `tool` is "" when no single NEO tool applies.
+Rows: {text, intent, tool, source, hf_intent, lang, split, group} plus, when the source says,
+kind / destructive / screen / reply (left out when unknown, which is not the same as False).
+``reflex_hf.jsonl`` holds train rows only; ``reflex_eval.jsonl`` is the benchmark (Hinglish-TOP,
+MTOP en/hi, CLINC and MASSIVE en/hi test splits) and is never read by dataset.build(). A train
+row whose text or group (a translation or re-punctuation of the same sentence) is in the benchmark
+is held out; duplicates across sources are dropped; each source is capped per intent (seeded
+round-robin), so ~60k public rows can't bury NEO's own.
 """
 
 from __future__ import annotations
@@ -17,179 +24,187 @@ from __future__ import annotations
 import json
 import random
 import sys
+import time
 from collections import Counter
 from pathlib import Path
 
 from neo.config import settings
+from neo.reflex.sources import (  # noqa: F401 — CLINC/MASSIVE/_clean are imported from here by older scripts
+    BY_NAME,
+    CLINC,
+    MASSIVE,
+    SOURCES,
+    Fetcher,
+    Source,
+    clean,
+    text_key,
+)
 
-# (intent, tool). A tool means "this one tool, called once, does it".
-CLINC: dict[str, tuple[str, str]] = {
-    # ---- conversation / knowledge → chat
-    **dict.fromkeys(
-        ["restaurant_reviews", "nutrition_info", "oil_change_how", "gas_type", "meaning_of_life", "improve_credit_score", "measurement_conversion", "flip_coin", "do_you_have_pets", "tell_joke", "exchange_rate", "meal_suggestion", "tire_change", "user_name", "what_are_your_hobbies", "jump_start", "vaccines", "food_last", "who_do_you_work_for", "international_visa", "translate", "carry_on", "insurance", "what_is_your_name", "where_are_you_from", "cook_time", "roll_dice", "who_made_you", "how_old_are_you", "recipe", "yes", "no", "maybe", "ingredients_list", "what_can_i_ask_you", "are_you_a_bot", "plug_type", "oil_change_when", "thank_you", "fun_fact", "ingredient_substitution", "calories", "calculator", "definition", "next_holiday", "mpg", "spelling", "greeting", "goodbye", "repeat", "change_ai_name", "change_user_name", "change_accent", "change_speed", "whisper_mode", "change_language", "timezone", "interest_rate", "redeem_rewards", "oos", "reset_settings", "sync_device", "gas", "tire_pressure", "last_maintenance", "international_fees", "apr", "min_payment"],
-        ("chat", ""),
-    ),
-    # ---- needs current information from the web → quick_action + web_search
-    **dict.fromkeys(
-        ["directions", "distance", "traffic", "direct_deposit", "flight_status", "travel_alert", "travel_suggestion", "restaurant_suggestion", "how_busy", "exchange_rate"],
-        ("quick_action", "web_search"),
-    ),
-    # ---- one-shot commands → quick_action (+ the NEO tool when there is one)
-    "weather": ("quick_action", "weather"),
-    "time": ("quick_action", "clock"),
-    "date": ("quick_action", "clock"),
-    "timer": ("quick_action", "timer"),
-    "alarm": ("quick_action", "reminder_add"),
-    "reminder_update": ("quick_action", "reminder_add"),
-    "calendar": ("quick_action", "calendar_today"),
-    "meeting_schedule": ("quick_action", "calendar_today"),
-    "calendar_update": ("quick_action", "calendar_add"),
-    "change_volume": ("quick_action", "volume"),
-    "play_music": ("quick_action", "play_music"),
-    "next_song": ("quick_action", ""),
-    "what_song": ("quick_action", ""),
-    "smart_home": ("quick_action", ""),
-    # ---- needs an app, a website, an account or several steps → agent_task
-    **dict.fromkeys(
-        ["account_blocked", "accept_reservations", "report_lost_card", "order", "schedule_meeting", "freeze_account", "restaurant_reservation", "make_call", "text", "bill_balance", "balance", "uber", "car_rental", "credit_limit", "shopping_list", "expiration_date", "routing", "todo_list", "card_declined", "rewards_balance", "share_location", "book_flight", "insurance_change", "todo_list_update", "cancel_reservation", "transactions", "credit_score", "report_fraud", "spending_history", "reminder", "payday", "find_phone", "order_status", "confirm_reservation", "damaged_card", "pin_change", "replacement_card_duration", "new_card", "income", "taxes", "pto_request", "rollover_401k", "pto_request_status", "application_status", "update_playlist", "credit_limit_change", "pay_bill", "lost_luggage", "book_hotel", "w2", "shopping_list_update", "pto_balance", "order_checks", "schedule_maintenance", "transfer", "current_location", "travel_notification", "pto_used", "bill_due"],
-        ("agent_task", ""),
-    ),
-    "cancel": ("stop", ""),
-}
-
-MASSIVE: dict[str, tuple[str, str]] = {
-    "alarm_set": ("quick_action", "reminder_add"),
-    "alarm_query": ("agent_task", ""),
-    "alarm_remove": ("agent_task", ""),
-    "audio_volume_down": ("quick_action", "volume"),
-    "audio_volume_up": ("quick_action", "volume"),
-    "audio_volume_mute": ("quick_action", "volume"),
-    "audio_volume_other": ("quick_action", "volume"),
-    "calendar_query": ("quick_action", "calendar_today"),
-    "calendar_set": ("quick_action", "calendar_add"),
-    "calendar_remove": ("agent_task", ""),
-    "cooking_query": ("chat", ""),
-    "cooking_recipe": ("chat", ""),
-    "datetime_convert": ("chat", ""),
-    "datetime_query": ("quick_action", "clock"),
-    "email_addcontact": ("agent_task", ""),
-    "email_query": ("quick_action", "mail_unread"),
-    "email_querycontact": ("agent_task", ""),
-    "email_sendemail": ("agent_task", "mail_send"),
-    "general_greet": ("chat", ""),
-    "general_joke": ("chat", ""),
-    "general_quirky": ("chat", ""),
-    **dict.fromkeys(
-        ["iot_cleaning", "iot_coffee", "iot_hue_lightchange", "iot_hue_lightdim", "iot_hue_lightoff", "iot_hue_lighton", "iot_hue_lightup", "iot_wemo_off", "iot_wemo_on"],
-        ("quick_action", ""),
-    ),
-    "lists_createoradd": ("agent_task", ""),
-    "lists_query": ("agent_task", ""),
-    "lists_remove": ("agent_task", ""),
-    "music_dislikeness": ("chat", ""),
-    "music_likeness": ("chat", ""),
-    "music_query": ("chat", ""),
-    "music_settings": ("quick_action", ""),
-    "news_query": ("quick_action", "web_search"),
-    "play_audiobook": ("quick_action", "play_music"),
-    "play_game": ("quick_action", ""),
-    "play_music": ("quick_action", "play_music"),
-    "play_podcasts": ("quick_action", "play_music"),
-    "play_radio": ("quick_action", "play_music"),
-    "qa_currency": ("quick_action", "web_search"),  # rates change: needs the web
-    "qa_definition": ("chat", ""),
-    "qa_factoid": ("chat", ""),
-    "qa_maths": ("chat", ""),
-    "qa_stock": ("quick_action", "web_search"),
-    "recommendation_events": ("quick_action", "web_search"),
-    "recommendation_locations": ("quick_action", "web_search"),
-    "recommendation_movies": ("quick_action", "web_search"),
-    "social_post": ("agent_task", ""),
-    "social_query": ("agent_task", ""),
-    "takeaway_order": ("agent_task", ""),
-    "takeaway_query": ("agent_task", ""),
-    "transport_query": ("quick_action", "web_search"),
-    "transport_taxi": ("agent_task", ""),
-    "transport_ticket": ("agent_task", ""),
-    "transport_traffic": ("quick_action", "web_search"),
-    "weather_query": ("quick_action", "weather"),
-}
-
-_WAKE_WORDS = ("olly ", "alexa ", "hey computer, ", "computer, ")
+_clean = clean
 
 
-def _clean(text: str) -> str:
-    t = " ".join(text.strip().split())
-    low = t.lower()
-    for w in _WAKE_WORDS:  # MASSIVE addresses "olly"; NEO's wake word is stripped before the reflex
-        if low.startswith(w):
-            t = t[len(w) :]
-            break
-    return t.strip(" ,.")
-
-
-def load_rows(per_label: int = 60, seed: int = 0) -> list[dict]:
-    """Balanced sample per source intent (60 × 210 intents ≈ 10k rows), mapped to NEO labels."""
-    from datasets import load_dataset
-
-    rnd = random.Random(seed)
-    rows: list[dict] = []
-    unmapped: Counter = Counter()
-
-    clinc = load_dataset("clinc/clinc_oos", "plus", split="train")
-    names = clinc.features["intent"].names
-    by: dict[str, list[str]] = {}
-    for r in clinc:
-        by.setdefault(names[r["intent"]], []).append(r["text"])
-    for label, texts in by.items():
-        if label not in CLINC:
-            unmapped[f"clinc:{label}"] += len(texts)
-            continue
-        intent, tool = CLINC[label]
-        for t in rnd.sample(texts, min(per_label, len(texts))):
-            rows.append({"text": _clean(t), "intent": intent, "tool": tool, "source": f"clinc:{label}"})
-
-    massive = load_dataset("mteb/amazon_massive_intent", "en", split="train")
-    by = {}
-    for r in massive:
-        by.setdefault(r["label"], []).append(r["text"])
-    for label, texts in by.items():
-        if label not in MASSIVE:
-            unmapped[f"massive:{label}"] += len(texts)
-            continue
-        intent, tool = MASSIVE[label]
-        for t in rnd.sample(texts, min(per_label, len(texts))):
-            t = _clean(t)
-            if len(t.split()) >= 2 or intent == "stop":  # "emails" alone is too ambiguous to learn from
-                rows.append({"text": t, "intent": intent, "tool": tool, "source": f"massive:{label}"})
-
-    if unmapped:
-        print(f"unmapped intents (skipped): {dict(unmapped)}", file=sys.stderr)
-    seen: set[str] = set()
-    out = []
+def _sample(rows: list[dict], src: Source, rnd: random.Random, admit, scale: float) -> tuple[list[dict], int]:
+    """Round-robin over the source's keys (intent × language by default), a seeded shuffle within
+    each, up to `cap` per key and `total` overall. Returns (kept, rows never looked at)."""
+    cap = max(1, round(src.cap * scale))
+    total = None if src.total is None else max(1, round(src.total * scale))
+    buckets: dict[str, list[dict]] = {}
     for r in rows:
-        k = r["text"].lower()
-        if k and k not in seen:
-            seen.add(k)
-            out.append(r)
-    rnd.shuffle(out)
-    return out
+        buckets.setdefault(src.key_of(r), []).append(r)
+    order = sorted(buckets)
+    for k in order:
+        rnd.shuffle(buckets[k])
+    pos = dict.fromkeys(order, 0)
+    taken: Counter = Counter()
+    out: list[dict] = []
+    active = order
+    while active and (total is None or len(out) < total):
+        nxt = []
+        for k in active:
+            b = buckets[k]
+            while pos[k] < len(b):
+                r = b[pos[k]]
+                pos[k] += 1
+                if admit(r):
+                    out.append(r)
+                    taken[k] += 1
+                    break
+            if pos[k] < len(b) and taken[k] < cap:
+                nxt.append(k)
+            if total is not None and len(out) >= total:
+                break
+        active = nxt
+    return out, sum(len(b) - pos[k] for k, b in buckets.items())
+
+
+def build(
+    names: list[str] | None = None,
+    *,
+    fetcher=None,
+    seed: int = 0,
+    scale: float = 1.0,
+    log=print,
+) -> tuple[list[dict], list[dict], dict]:
+    """(train rows, eval rows, report). `names`: the sources to use (default: every default source)."""
+    want = set(names or [s.name for s in SOURCES if s.default])
+    chosen = [s for s in SOURCES if s.name in want]  # registry order is the dedupe priority
+    fx = fetcher or Fetcher(settings().data_dir / "hf_cache")
+    skipped: Counter = Counter()
+    raw: dict[str, list[dict]] = {}
+    report: dict = {"sources": {}, "skipped_labels": skipped,
+                    "not_used": {s.name: s.note for s in SOURCES if s not in chosen}}
+    for s in chosen:
+        t0 = time.time()
+        raw[s.name] = [r for r in s.load(fx, skipped) if r]
+        report["sources"][s.name] = {"licence": s.licence, "rows": len(raw[s.name]), "seconds": round(time.time() - t0, 1)}
+        log(f"  {s.name:20s} {len(raw[s.name]):7d} mapped rows in {time.time() - t0:5.1f}s")
+
+    # The benchmark: every eval row, each sentence once per source and language.
+    eval_rows, ev_seen = [], set()
+    for s in chosen:
+        for r in raw[s.name]:
+            k = (s.name, r["lang"], text_key(r["text"]))
+            if r["split"] == "eval" and k not in ev_seen:
+                ev_seen.add(k)
+                eval_rows.append(r)
+    held_text = {text_key(r["text"]) for r in eval_rows}
+    held_group = {r["group"] for r in eval_rows}
+
+    seen_text: set[str] = set()
+    seen_group: set[tuple[str, str]] = set()
+    train: list[dict] = []
+    for s in chosen:
+        st = report["sources"][s.name]
+        rows = [r for r in raw[s.name] if r["split"] == "train"]
+        free = [r for r in rows if text_key(r["text"]) not in held_text and r["group"] not in held_group]
+        st.update(eval=sum(r["split"] == "eval" for r in raw[s.name]), held_out=len(rows) - len(free))
+        dups = Counter()
+
+        def admit(r: dict, dups=dups) -> bool:
+            k, g = text_key(r["text"]), (r["group"], r["lang"])
+            if k in seen_text or g in seen_group:  # same sentence, or its copy in the same language
+                dups["n"] += 1
+                return False
+            seen_text.add(k)
+            seen_group.add(g)
+            return True
+
+        kept, unseen = _sample(free, s, random.Random(f"{seed}:{s.name}"), admit, scale)
+        st.update(duplicate=dups["n"], capped=unseen, kept=len(kept))
+        train += kept
+    random.Random(seed).shuffle(train)
+    return train, eval_rows, report
+
+
+def load_rows(seed: int = 0, **kw) -> list[dict]:
+    """Train rows only (the old entry point)."""
+    return build(seed=seed, **kw)[0]
+
+
+def _write(path: Path, rows: list[dict]) -> None:
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows))
+    tmp.replace(path)
+
+
+def summary(train: list[dict], eval_rows: list[dict], report: dict) -> str:
+    def line(title: str, c: Counter) -> str:
+        return f"{title}: " + ", ".join(f"{k} {v}" for k, v in c.most_common())
+
+    out = ["", f"{'source':20s} {'mapped':>7s} {'eval':>6s} {'held':>6s} {'dup':>6s} {'capped':>7s} {'kept':>6s}  licence"]
+    for name, st in report["sources"].items():
+        out.append(f"{name:20s} {st['rows']:7d} {st.get('eval', 0):6d} {st.get('held_out', 0):6d} "
+                   f"{st.get('duplicate', 0):6d} {st.get('capped', 0):7d} {st.get('kept', 0):6d}  {st['licence']}")
+    for name, why in report["not_used"].items():
+        if why:
+            out.append(f"{name:20s} not used: {why}")
+    out.append(f"\ntrain {len(train)} rows")
+    for title, key in (("intent", "intent"), ("lang", "lang"), ("kind", "kind")):
+        out.append("  " + line(title, Counter(r.get(key, "–") for r in train)))
+    out.append("  " + line("tool", Counter(r["tool"] for r in train if r["tool"])))
+    for flag in ("destructive", "screen", "reply"):
+        c = Counter("unknown" if flag not in r else str(r[flag]).lower() for r in train)
+        out.append(f"  {flag}: " + ", ".join(f"{k} {v}" for k, v in sorted(c.items())))
+    out.append(f"eval {len(eval_rows)} rows")
+    out.append("  " + line("by source × lang", Counter(f"{r['source'].split(':')[0]}/{r['lang']}" for r in eval_rows)))
+    top = report["skipped_labels"].most_common(12)
+    if top:
+        out.append("unmapped / filtered (top): " + ", ".join(f"{k} {v}" for k, v in top))
+    return "\n".join(out)
 
 
 def main() -> None:
     import argparse
 
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--per-label", type=int, default=60)
-    ap.add_argument("--out", type=Path, default=settings().data_dir / "reflex_hf.jsonl")
-    args = ap.parse_args()
-    rows = load_rows(args.per_label)
-    args.out.write_text("".join(json.dumps(r) + "\n" for r in rows))
-    by_intent = Counter(r["intent"] for r in rows)
-    by_tool = Counter(r["tool"] for r in rows if r["tool"])
-    print(f"{len(rows)} rows → {args.out}")
-    print("intents:", dict(by_intent))
-    print("tools:", dict(by_tool))
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("--only", default="", help="comma-separated sources (default: all default ones)")
+    ap.add_argument("--with", dest="also", default="", help="add opt-in sources, e.g. leyzer")
+    ap.add_argument("--skip", default="", help="comma-separated sources to leave out")
+    ap.add_argument("--scale", type=float, default=1.0, help="multiply every per-source cap")
+    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--out", type=Path, default=None, help="train rows (default <data_dir>/reflex_hf.jsonl)")
+    ap.add_argument("--eval-out", type=Path, default=None, help="benchmark (default <data_dir>/reflex_eval.jsonl)")
+    ap.add_argument("--list", action="store_true", help="list the sources and exit")
+    a = ap.parse_args()
+    if a.list:
+        for s in SOURCES:
+            print(f"{s.name:20s} {'default' if s.default else 'opt-in ':8s} cap {s.cap:<5d} {s.licence}")
+        return
+    split = lambda v: [x for x in v.split(",") if x]  # noqa: E731
+    unknown = [n for n in split(a.only) + split(a.also) + split(a.skip) if n not in BY_NAME]
+    if unknown:
+        sys.exit(f"unknown source(s): {', '.join(unknown)} (see --list)")
+    names = split(a.only) or [s.name for s in SOURCES if s.default]
+    names = [n for n in dict.fromkeys(names + split(a.also)) if n not in split(a.skip)]
+    t0 = time.time()
+    train, eval_rows, report = build(names, seed=a.seed, scale=a.scale)
+    data = settings().data_dir
+    data.mkdir(parents=True, exist_ok=True)
+    out, eout = a.out or data / "reflex_hf.jsonl", a.eval_out or data / "reflex_eval.jsonl"
+    _write(out, train)
+    _write(eout, eval_rows)
+    print(summary(train, eval_rows, report))
+    print(f"\n{len(train)} train rows → {out}\n{len(eval_rows)} eval rows → {eout}\n({time.time() - t0:.0f}s)")
 
 
 if __name__ == "__main__":

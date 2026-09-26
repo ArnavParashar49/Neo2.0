@@ -1,0 +1,37 @@
+[
+ {
+  "service_name": "Payment_1",
+  "intents": [
+   {
+    "name": "MakePayment",
+    "is_transactional": true
+   }
+  ]
+ },
+ {
+  "service_name": "Music_1",
+  "intents": [
+   {
+    "name": "PlaySong",
+    "is_transactional": true
+   },
+   {
+    "name": "LookupSong",
+    "is_transactional": false
+   }
+  ]
+ },
+ {
+  "service_name": "Restaurants_1",
+  "intents": [
+   {
+    "name": "FindRestaurants",
+    "is_transactional": false
+   },
+   {
+    "name": "ReserveRestaurant",
+    "is_transactional": true
+   }
+  ]
+ }
+]

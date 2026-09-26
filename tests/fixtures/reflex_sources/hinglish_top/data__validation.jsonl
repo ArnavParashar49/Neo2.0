@@ -1,0 +1,1 @@
+{"en_query": "What is the weather in Pune today ?", "cs_query": "Aaj Pune me mausam kaisa hai ?", "cs_parse": "[IN:GET_WEATHER Aaj [SL:LOCATION Pune ] me mausam kaisa hai ? ]"}

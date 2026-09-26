@@ -365,6 +365,8 @@ _TOOL_HINTS: list[tuple[str, str]] = [
 
 # Hugging Face intents that now have a NEO tool (older ~/.neo/reflex_hf.jsonl files carry "").
 _HF_TOOLS = {"play_music": "play_music", "play_radio": "play_music", "play_podcasts": "play_music", "play_audiobook": "play_music"}
+# Optional per-row labels of reflex_hf.jsonl passed through as-is (see hf_data.py).
+_HF_LABELS = ("kind", "screen", "reply", "lang", "group", "split")
 
 
 def tool_for(text: str) -> str:
@@ -447,8 +449,12 @@ def build(n_per_class: int = 320, seed: int = 7) -> list[dict]:
             )
     for r in rows:
         r.setdefault("tool", tool_for(r["text"]) if r["intent"] == "quick_action" else "")
+    # Romanised-Hindi templates for every class, with explicit labels (templates_hi.py).
+    from neo.reflex.templates_hi import rows as hinglish_rows
+
+    rows += [r for r in hinglish_rows() if r["text"].lower() not in seen]
     # LLM-generated + real-world extras + mapped Hugging Face rows live outside the repo
-    # (see generate.py, hf_data.py, README).
+    # (see generate.py, hf_data.py, README). reflex_eval.jsonl is the benchmark: never trained on.
     for name in ("reflex_generated.jsonl", "reflex_extra.jsonl", "reflex_hf.jsonl"):
         extra = settings().data_dir / name
         if extra.exists():
@@ -459,19 +465,24 @@ def build(n_per_class: int = 320, seed: int = 7) -> list[dict]:
             else:
                 src = [json.loads(line) for line in extra.read_text().splitlines() if line.strip()]
             for r in src:
-                if r:
-                    rows.append(
-                        {
-                            "text": r["text"],
-                            "intent": r["intent"],
-                            "source": name,
-                            "hf_intent": r.get("source", "").split(":", 1)[-1] if name == "reflex_hf.jsonl" else "",
-                            "destructive": r.get("destructive", False),
-                            "tool": r.get("tool") or _HF_TOOLS.get(r.get("source", "").split(":", 1)[-1], "")
-                            if name == "reflex_hf.jsonl"
-                            else r.get("tool", tool_for(r["text"]) if r["intent"] == "quick_action" else ""),
-                        }
-                    )
+                if not r or (name == "reflex_hf.jsonl" and r.get("split", "train") != "train"):
+                    continue
+                hf = name == "reflex_hf.jsonl"
+                label = r.get("hf_intent") or r.get("source", "").split(":", 1)[-1]
+                out = {
+                    "text": r["text"],
+                    "intent": r["intent"],
+                    "source": name,
+                    "hf_intent": label if hf else "",
+                    # a public row without the label doesn't know (None); NEO's own default to False
+                    "destructive": r.get("destructive") if hf else r.get("destructive", False),
+                    "tool": r.get("tool") or _HF_TOOLS.get(label, "")
+                    if hf
+                    else r.get("tool", tool_for(r["text"]) if r["intent"] == "quick_action" else ""),
+                }
+                if hf:
+                    out.update({k: r[k] for k in _HF_LABELS if k in r})
+                rows.append(out)
     rnd.shuffle(rows)
     return rows
 

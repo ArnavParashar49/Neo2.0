@@ -184,9 +184,12 @@ What NEO keeps, and for how long:
 The head is trained locally in about a minute (plus feature extraction):
 
 ```bash
+.venv/bin/python -m neo.reflex.hf_data    # optional: ~48k public phrasings (English, Hindi, Hinglish) + a benchmark
 .venv/bin/python -m neo.reflex.generate   # optional: grow the dataset with Gemini + Groq, cross-labelled
 .venv/bin/python -m neo.reflex.finetune   # extract features, compare variants, save the fastest ≥94%
 ```
+
+`hf_data` maps open intent, dialogue, function-calling and computer-use sets (CLINC150, MASSIVE en/hi, Hinglish-TOP, TOPv2, MTOP en/hi, Schema-Guided Dialogue, glaive, AgentNet, OmniACT, …) onto NEO's labels — route, tool, task kind, destructive, needs the screen, wants a reply — and writes `~/.neo/reflex_hf.jsonl`. Every source is pinned to a revision and only the columns or byte ranges it needs are downloaded; `neo/reflex/sources.py` lists each one's licence. Some are CC-BY-SA, so the rows are built on your Mac and never committed. The Hinglish-TOP, MTOP, CLINC and MASSIVE test splits go to `reflex_eval.jsonl`, a benchmark that is never trained on (nor are translations of its sentences). Leyzer is opt-in (`--with leyzer`): the repository hosting its data is licensed non-commercial, no-derivatives. Romanised-Hindi templates for every class, including destructive requests and stop phrases ("bas karo", "ruk jao"), are part of NEO's own data (`neo/reflex/templates_hi.py`).
 
 `finetune` fits several variants (embedding only, embedding + *n* sub-questions) and picks the fastest one above the accuracy bar. On the current ~3k-item set the embedding-only head scores ~95% held-out at ~150 ms.
 
@@ -224,7 +227,7 @@ Register the module in `neo/tools/__init__.py` and it is available to every brai
 neo/
   agent/      loop.py (the one agent loop) · session.py (routing) · confirm.py · registry.py · prompt.py
   providers/  gemini.py · openai_compat.py (Groq, local) · claude.py · base.py (neutral message format)
-  reflex/     laya_reflex.py · features.py · finetune.py · generate.py · dataset.py · schema.py
+  reflex/     laya_reflex.py · features.py · finetune.py · generate.py · dataset.py · schema.py · templates_hi.py · hf_data.py + sources.py (public data)
   tools/      computer/ (ax, input, screen, apps, shell) · browser.py · system.py · web.py · memory_tool.py
   voice/      wake.py · local.py · live.py · audio.py · pipeline.py
   memory/     store.py (SQLite + FTS5 + vectors, playbooks, sessions) · embed.py · summarize.py

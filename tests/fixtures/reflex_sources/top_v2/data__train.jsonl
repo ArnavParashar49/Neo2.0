@@ -1,0 +1,6 @@
+{"domain": "reminder", "utterance": "Remind me to water the plants at 6 pm", "semantic_parse": "[IN:CREATE_REMINDER Remind [SL:PERSON_REMINDED me ] to [SL:TODO water the plants ] [SL:DATE_TIME at 6 pm ] ]"}
+{"domain": "messaging", "utterance": "Send a message to Maya saying the keys are under the mat", "semantic_parse": "[IN:SEND_MESSAGE Send a message to [SL:RECIPIENT Maya ] saying [SL:CONTENT_EXACT the keys are under the mat ] ]"}
+{"domain": "navigation", "utterance": "How long is the drive to the airport", "semantic_parse": "[IN:GET_ESTIMATED_DURATION How long is the drive to [SL:DESTINATION the airport ] ]"}
+{"domain": "alarm", "utterance": "Set an alarm for 5am tomorrow", "semantic_parse": "[IN:CREATE_ALARM Set an alarm [SL:DATE_TIME for 5am tomorrow ] ]"}
+{"domain": "music", "utterance": "skip this song", "semantic_parse": "[IN:SKIP_TRACK_MUSIC skip this song ]"}
+{"domain": "alarm", "utterance": "delete my alarm for tomorrow morning", "semantic_parse": "[IN:DELETE_ALARM delete my alarm [SL:DATE_TIME for tomorrow morning ] ]"}

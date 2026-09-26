@@ -1,0 +1,199 @@
+[
+ {
+  "dialogue_id": "1_0",
+  "turns": [
+   {
+    "speaker": "USER",
+    "utterance": "Can you find me a sushi place in Oakland?",
+    "frames": [
+     {
+      "service": "x",
+      "actions": [
+       {
+        "act": "INFORM_INTENT",
+        "canonical_values": [
+         "FindRestaurants"
+        ],
+        "slot": "intent",
+        "values": []
+       },
+       {
+        "act": "INFORM",
+        "canonical_values": [],
+        "slot": "",
+        "values": []
+       }
+      ]
+     }
+    ]
+   },
+   {
+    "speaker": "SYSTEM",
+    "utterance": "Sushi Ko is a nice place.",
+    "frames": [
+     {
+      "service": "x",
+      "actions": [
+       {
+        "act": "OFFER",
+        "canonical_values": [],
+        "slot": "",
+        "values": []
+       }
+      ]
+     }
+    ]
+   },
+   {
+    "speaker": "USER",
+    "utterance": "What's their phone number?",
+    "frames": [
+     {
+      "service": "x",
+      "actions": [
+       {
+        "act": "REQUEST",
+        "canonical_values": [],
+        "slot": "",
+        "values": []
+       }
+      ]
+     }
+    ]
+   },
+   {
+    "speaker": "USER",
+    "utterance": "Book a table there for 7 pm",
+    "frames": [
+     {
+      "service": "x",
+      "actions": [
+       {
+        "act": "INFORM_INTENT",
+        "canonical_values": [
+         "ReserveRestaurant"
+        ],
+        "slot": "intent",
+        "values": []
+       }
+      ]
+     }
+    ]
+   },
+   {
+    "speaker": "USER",
+    "utterance": "No, not right now.",
+    "frames": [
+     {
+      "service": "x",
+      "actions": [
+       {
+        "act": "NEGATE_INTENT",
+        "canonical_values": [],
+        "slot": "",
+        "values": []
+       }
+      ]
+     }
+    ]
+   },
+   {
+    "speaker": "USER",
+    "utterance": "Play the song Clocks please",
+    "frames": [
+     {
+      "service": "x",
+      "actions": [
+       {
+        "act": "INFORM_INTENT",
+        "canonical_values": [
+         "PlaySong"
+        ],
+        "slot": "intent",
+        "values": []
+       }
+      ]
+     }
+    ]
+   },
+   {
+    "speaker": "USER",
+    "utterance": "Send 40 dollars to Kim",
+    "frames": [
+     {
+      "service": "x",
+      "actions": [
+       {
+        "act": "INFORM_INTENT",
+        "canonical_values": [
+         "MakePayment"
+        ],
+        "slot": "intent",
+        "values": []
+       }
+      ]
+     }
+    ]
+   },
+   {
+    "speaker": "USER",
+    "utterance": "Find me some jazz songs",
+    "frames": [
+     {
+      "service": "x",
+      "actions": [
+       {
+        "act": "INFORM_INTENT",
+        "canonical_values": [
+         "LookupSong"
+        ],
+        "slot": "intent",
+        "values": []
+       }
+      ]
+     }
+    ]
+   },
+   {
+    "speaker": "USER",
+    "utterance": "Sounds good",
+    "frames": [
+     {
+      "service": "x",
+      "actions": [
+       {
+        "act": "SELECT",
+        "canonical_values": [],
+        "slot": "",
+        "values": []
+       }
+      ]
+     }
+    ]
+   },
+   {
+    "speaker": "USER",
+    "utterance": "Thanks, that's all.",
+    "frames": [
+     {
+      "service": "x",
+      "actions": [
+       {
+        "act": "GOODBYE",
+        "canonical_values": [],
+        "slot": "",
+        "values": []
+       },
+       {
+        "act": "THANK_YOU",
+        "canonical_values": [],
+        "slot": "",
+        "values": []
+       }
+      ]
+     }
+    ]
+   }
+  ]
+ }
+]

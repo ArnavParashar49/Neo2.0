@@ -1,0 +1,7 @@
+{"text": "what is the forecast for tomorrow in boston", "intent": "weather"}
+{"text": "text my sister that dinner is at eight", "intent": "text"}
+{"text": "never mind forget what i said", "intent": "cancel"}
+{"text": "how do you say good night in german", "intent": "translate"}
+{"text": "please wire two hundred dollars to my savings", "intent": "transfer"}
+{"text": "set an alarm for six thirty am", "intent": "alarm"}
+{"text": "some label nobody maps", "intent": "made_up_label"}

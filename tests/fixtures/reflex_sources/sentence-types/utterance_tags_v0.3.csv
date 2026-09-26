@@ -1,0 +1,6 @@
+label,sublabel,sentence
+QUESTION,REQUEST,"Could you turn the volume down, please"
+QUESTION,REQUEST,Can you book a table for four tonight
+QUESTION,REQUEST,Could you tell me the time in Tokyo
+QUESTION,REQUEST,Can you pass me the salt
+COMMAND,ACTION,Close the door
