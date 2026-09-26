@@ -89,6 +89,8 @@ def _live():
     import neo.voice.live as live_mod
 
     v = live_mod.LiveVoice.__new__(live_mod.LiveVoice)
+
+    v._taint, v._utt_started, v._last_answer = [], 0.0, (0.0, "")
     v._label, v._call_labels = None, {}
     return v
 
@@ -122,6 +124,8 @@ def test_a_partial_transcript_at_tool_time_and_the_final_one_make_one_label():
     import neo.voice.live as live_mod
 
     v = live_mod.LiveVoice.__new__(live_mod.LiveVoice)
+
+    v._taint, v._utt_started, v._last_answer = [], 0.0, (0.0, "")
     v._label, v._call_labels, v._tool_tasks, v._utterance = None, {}, {}, ""
     v._dialog, v._lookups, v._seen_calls = [], {}, {}
     v._turn_open = v._speaking = False

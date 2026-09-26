@@ -6,8 +6,9 @@ import asyncio
 import time
 import re
 
+from neo.agent import confirm
 from neo.agent.registry import ToolContext, ToolOutput, tool
-from neo.tools.computer import apps, ax, screen, shell
+from neo.tools.computer import apps, ax, policy, screen, shell
 from neo.tools.computer import input as inp
 
 _OBJ = {"type": "object", "properties": {}}
@@ -15,6 +16,15 @@ _OBJ = {"type": "object", "properties": {}}
 
 def _p(props: dict, required: list[str] | None = None) -> dict:
     return {"type": "object", "properties": props, "required": required or []}
+
+
+def _ask_before_click(tool_name: str, a: dict, label: str, app: str = "") -> str | None:
+    """A button that sends, buys, deletes, grants or publishes is the user's call."""
+    if not policy.commits(label):
+        return None
+    where = f" in {app}" if app else ""
+    gate = confirm.gated(tool_name, a, f"click “{label.strip()[:60]}”{where}")
+    return gate if isinstance(gate, str) else None
 
 
 # ---- seeing ---------------------------------------------------------------------------
@@ -28,6 +38,7 @@ def _p(props: dict, required: list[str] | None = None) -> dict:
     _p({"app": {"type": "string", "description": "App name; omit for the frontmost app"}}),
     parallel_safe=True,
     category="computer",
+    untrusted=True,
 )
 async def ax_tree(a: dict, c: ToolContext) -> str:
     return await asyncio.to_thread(ax.snapshot, a.get("app"))
@@ -39,6 +50,7 @@ async def ax_tree(a: dict, c: ToolContext) -> str:
     _p({"query": {"type": "string"}, "app": {"type": "string"}}, ["query"]),
     parallel_safe=True,
     category="computer",
+    untrusted=True,
 )
 async def ax_find(a: dict, c: ToolContext) -> str:
     return await asyncio.to_thread(ax.find, a["query"], a.get("app"))
@@ -73,6 +85,7 @@ _SCROLL = [
     ),
     category="computer",
     slow=True,
+    untrusted=True,
 )
 async def screenshot(a: dict, c: ToolContext) -> ToolOutput:
     region = None
@@ -86,7 +99,7 @@ async def screenshot(a: dict, c: ToolContext) -> ToolOutput:
     try:
         img, scale = await asyncio.to_thread(screen.capture, region)
     except PermissionError as e:
-        return ToolOutput(f"NEEDS_USER: {e}", ok=False)
+        return ToolOutput(confirm.ask_user(str(e)), ok=False)
     if region:
         note = (
             f"Region screenshot attached, origin at screen ({region[0]},{region[1]}). "
@@ -128,6 +141,9 @@ async def apps_running(a: dict, c: ToolContext) -> str:
     quiet=True,
 )
 async def ax_press(a: dict, c: ToolContext) -> str:
+    e = ax.get(a["id"])
+    if e and (gate := _ask_before_click("ax_press", a, e.title or e.value, ax.frontmost_app()[0])):
+        return gate
     return await asyncio.to_thread(ax.press, a["id"])
 
 
@@ -163,8 +179,12 @@ async def click(a: dict, c: ToolContext) -> str:
         if not e:
             return f"Error: unknown element {a['id']} — call ax_tree first."
         x, y = e.center
+        label = e.title or e.value
     else:
         x, y = a["x"], a["y"]
+        label = await asyncio.to_thread(ax.label_at, x, y)
+    if gate := _ask_before_click("click", a, label, ax.frontmost_app()[0]):
+        return gate
     return inp.click(x, y, button=a.get("button", "left"), count=int(a.get("count", 1)))
 
 
@@ -431,7 +451,7 @@ async def _type(text: str) -> None:
     shell nothing multi-line is ever entered."""
     app = ax.frontmost_app()[0].lower()
     role, _ = await asyncio.to_thread(ax.focused_role)
-    text = text.rstrip("\n")
+    text = text.replace("\r\n", "\n").replace("\r", "\n").rstrip("\n")  # a typed \r is a Return
     if role in ax._SINGLE_LINE or app in _SHELL_APPS:
         text = " ".join(part.strip() for part in text.split("\n") if part.strip())
     newline = "shift+return" if app in _CHAT_APPS else "return"
@@ -523,7 +543,38 @@ async def hotkey(a: dict, c: ToolContext) -> str:
     if want == "tabs" and front not in _TAB_APPS:
         if err := await _guard_front("Safari"):  # "new tab" from an app without tabs: the browser
             return err
+    if gate := await _ask_before_keys(a, keys, ax.frontmost_app()[0], c):
+        return gate
     return inp.hotkey(keys)
+
+
+_MOD_NAMES = {"command": "cmd", "meta": "cmd", "option": "alt", "control": "ctrl"}
+
+
+def _chord(keys: str) -> set[str]:
+    parts = (p.strip().lower() for p in keys.replace(" ", "").split("+"))
+    return {_MOD_NAMES.get(p, p) for p in parts if p}
+
+
+async def _ask_before_keys(a: dict, keys: str, app: str, c: ToolContext) -> str | None:
+    """Keys that run or send something: Return in a terminal runs whatever is on its command
+    line; ⌘⇧D sends the open Mail message; Return in a chat app sends the message — asked first
+    once this request has read something untrusted (a page or an email could have asked for it)."""
+    ch, low = _chord(keys), app.lower()
+    submit = bool(ch & {"return", "enter"}) or ("ctrl" in ch and bool(ch & {"m", "j"}))
+    what, detail = "", ""
+    if submit and low in _SHELL_APPS:
+        text = await asyncio.to_thread(ax.focused_element_text)
+        line = next((ln for ln in reversed(text.splitlines()) if ln.strip()), "")
+        what, detail = f"press Return in {app} — it runs the command on its line", line[-400:]
+    elif low == "mail" and ch == {"cmd", "shift", "d"}:
+        what = "send the message that's open in Mail"
+    elif submit and low in _CHAT_APPS and c.tainted():
+        what = f"press Return in {app} — it sends the message"
+    if not what:
+        return None
+    gate = confirm.gated("hotkey", a, what, detail=detail)
+    return gate if isinstance(gate, str) else None
 
 
 _CLICK_ROLES = ("AXButton", "AXLink", "AXMenuItem", "AXTab", "AXCheckBox", "AXRadioButton", "AXPopUpButton", "AXMenuButton", "AXCell", "AXRow", "AXStaticText", "AXImage")
@@ -570,6 +621,8 @@ async def click_text(a: dict, c: ToolContext) -> str:
     )
     e = hits[0]
     name = (e.title or e.value)[:40]
+    if gate := _ask_before_click("click_text", a, e.title or e.value, app):
+        return gate
     if "AXPress" in e.actions and not (await asyncio.to_thread(ax.press_element, e)).startswith("Error"):
         return f"Clicked '{name}' ({e.role.removeprefix('AX')})"
     inp.click(*e.center)
@@ -598,7 +651,15 @@ async def click_text(a: dict, c: ToolContext) -> str:
     early=True,
 )
 async def open_app(a: dict, c: ToolContext) -> str:
-    return await apps.open_app(a["target"])
+    target = str(a["target"]).strip()
+    why = policy.open_risk(target)
+    if not why and c.tainted() and ("://" in target or "." in target) and policy.url_carries_data(target):
+        why = f"the link carries data, after reading {c.tainted()}"
+    if why:
+        gate = confirm.gated("open_app", a, f"open {target[:80]} — {why}", detail=target)
+        if isinstance(gate, str):
+            return gate
+    return await apps.open_app(target)
 
 
 @tool(
@@ -632,8 +693,10 @@ async def quit_app(a: dict, c: ToolContext) -> str:
 
 @tool(
     "applescript",
-    "Run AppleScript and return its result. Use for anything scriptable that has no dedicated tool.",
+    "Run AppleScript and return its result. Use for anything scriptable that has no dedicated tool. "
+    "Scripts that only read (get/count/exists) run straight away; the user approves anything else.",
     _p({"script": {"type": "string"}}, ["script"]),
+    risk="destructive",
     category="apps",
     slow=True,
 )
@@ -641,8 +704,8 @@ async def applescript(a: dict, c: ToolContext) -> str:
     from neo.agent import confirm
 
     script = str(a.get("script") or "")
-    if apps.script_is_risky(script):
-        gate = confirm.gated("osa:" + script[:60], "applescript", a, f"run AppleScript: {script[:100]!r}")
+    if not policy.script_is_read_only(script):
+        gate = confirm.gated("applescript", a, "run an AppleScript", detail=script)
         if isinstance(gate, str):
             return gate
     return await apps.osascript(script, timeout=60)
@@ -656,7 +719,16 @@ async def applescript(a: dict, c: ToolContext) -> str:
     quiet=True,
 )
 async def safari_open(a: dict, c: ToolContext) -> str:
-    return await apps.safari_open(a["url"], bool(a.get("new_tab", True)))
+    url = str(a["url"]).strip()
+    scheme = url.split(":", 1)[0].lower() if re.match(r"^[a-z][\w+.-]*:", url, re.I) else "https"
+    why = "" if scheme in ("http", "https") else f"{scheme}: links run code or open other apps"
+    if not why and c.tainted() and policy.url_carries_data(url):
+        why = f"the link carries data, after reading {c.tainted()}"
+    if why:
+        gate = confirm.gated("safari_open", a, f"open {url[:80]} in Safari — {why}", detail=url)
+        if isinstance(gate, str):
+            return gate
+    return await apps.safari_open(url, bool(a.get("new_tab", True)))
 
 
 @tool(
@@ -665,6 +737,7 @@ async def safari_open(a: dict, c: ToolContext) -> str:
     _OBJ,
     parallel_safe=True,
     category="web",
+    untrusted=True,
 )
 async def safari_read(a: dict, c: ToolContext) -> str:
     url = await apps.safari_current_url()
@@ -690,12 +763,12 @@ async def safari_read(a: dict, c: ToolContext) -> str:
 async def mail_send(a: dict, c: ToolContext) -> str:
     from neo.agent import confirm
 
-    if a.get("send"):
+    if confirm.as_bool(a.get("send")):
         gate = confirm.gated(
-            f"mail:{a['to']}:{a['subject'][:30]}",
             "mail_send",
             a,
             f"send an email to {a['to']} — “{a['subject']}”",
+            detail=f"To: {a['to']}\nSubject: {a['subject']}\n\n{a['body']}",
         )
         if isinstance(gate, str):
             return gate
@@ -718,6 +791,7 @@ async def mail_send(a: dict, c: ToolContext) -> str:
             {},
         )
     ],
+    untrusted=True,
 )
 async def mail_unread(a: dict, c: ToolContext) -> str:
     return await apps.mail_unread(int(a.get("limit") or 10))
@@ -738,6 +812,7 @@ async def mail_unread(a: dict, c: ToolContext) -> str:
             {},
         )
     ],
+    untrusted=True,
 )
 async def calendar_today(a: dict, c: ToolContext) -> str:
     return await apps.calendar_today()
@@ -824,22 +899,22 @@ async def finder_reveal(a: dict, c: ToolContext) -> str:
 
 @tool(
     "shell",
-    "Run a zsh command (cwd defaults to home). Destructive commands are confirmed with the user first.",
+    "Run a zsh command (cwd defaults to home). Read-only commands (ls, cat, grep, git status…) run "
+    "straight away; anything that changes something is shown to the user to approve first.",
     _p(
         {
             "command": {"type": "string"},
             "cwd": {"type": "string"},
             "timeout": {"type": "number"},
-            "confirm": {"type": "boolean"},
         },
         ["command"],
     ),
-    risk="reversible",
+    risk="destructive",
     category="files",
     slow=True,
 )
 async def shell_tool(a: dict, c: ToolContext) -> str:
-    return await shell.run(a["command"], cwd=a.get("cwd"), timeout=float(a.get("timeout", 60)), confirm_arg=a)
+    return await shell.run(a["command"], cwd=a.get("cwd"), timeout=float(a.get("timeout", 60)), args=a)
 
 
 @tool(
@@ -848,6 +923,7 @@ async def shell_tool(a: dict, c: ToolContext) -> str:
     _p({"path": {"type": "string"}, "start": {"type": "integer"}, "lines": {"type": "integer"}}, ["path"]),
     parallel_safe=True,
     category="files",
+    untrusted=True,
 )
 async def read_file(a: dict, c: ToolContext) -> str:
     return shell.read_file(a["path"], start=int(a.get("start") or 1), lines=int(a.get("lines") or 400))
@@ -855,11 +931,9 @@ async def read_file(a: dict, c: ToolContext) -> str:
 
 @tool(
     "write_file",
-    "Create or overwrite a file with content (overwrites are confirmed).",
-    _p(
-        {"path": {"type": "string"}, "content": {"type": "string"}, "confirm": {"type": "boolean"}},
-        ["path", "content"],
-    ),
+    "Create a file with content. New files in Desktop/Documents/Downloads are written straight away; "
+    "overwrites and anything elsewhere are shown to the user to approve first.",
+    _p({"path": {"type": "string"}, "content": {"type": "string"}}, ["path", "content"]),
     risk="destructive",
     category="files",
 )
@@ -869,22 +943,22 @@ async def write_file(a: dict, c: ToolContext) -> str:
 
 @tool(
     "edit_file",
-    "Replace one exact occurrence of old_string with new_string in a file.",
+    "Replace one exact occurrence of old_string with new_string in a file (the user approves the change).",
     _p(
         {"path": {"type": "string"}, "old_string": {"type": "string"}, "new_string": {"type": "string"}},
         ["path", "old_string", "new_string"],
     ),
-    risk="reversible",
+    risk="destructive",
     category="files",
 )
 async def edit_file(a: dict, c: ToolContext) -> str:
-    return shell.edit_file(a["path"], a["old_string"], a["new_string"])
+    return shell.edit_file(a["path"], a["old_string"], a["new_string"], a)
 
 
 @tool(
     "trash",
-    "Move a file or folder to the Trash (confirmed).",
-    _p({"path": {"type": "string"}, "confirm": {"type": "boolean"}}, ["path"]),
+    "Move a file or folder to the Trash (the user approves first).",
+    _p({"path": {"type": "string"}}, ["path"]),
     risk="destructive",
     category="files",
 )

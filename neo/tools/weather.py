@@ -156,7 +156,7 @@ _Q = r"\s*[?.!]*\s*$"
         (rf"^\s*what(?:'s| is)\s+the\s+(?:temperature|temp)\s+outside{_WHEN_RE}{_PLACE}{_WHEN2}{_Q}", _ARGS),
         (rf"^\s*what(?:'s| is)\s+the\s+(?:temperature|temp|forecast)(?=\s+(?:in|at|around|for\s+(?:today|tonight|tomorrow|the\s+week)|today|tonight|tomorrow|this|next))(?:\s+outside)?{_WHEN_RE}{_PLACE}{_WHEN2}{_Q}", _ARGS),
         (rf"^\s*(?:the\s+)?weather\s+forecast{_WHEN_RE}{_PLACE}{_WHEN2}{_Q}", _ARGS),
-        (rf"^\s*(?:the\s+)?forecast(?=\s+(?:for\s+)?(?:the\s+)?(?:today|tonight|tomorrow|week|weekend|this|next|in\s))" + rf"{_WHEN_RE}{_PLACE}{_WHEN2}{_Q}", _ARGS),
+        (r"^\s*(?:the\s+)?forecast(?=\s+(?:for\s+)?(?:the\s+)?(?:today|tonight|tomorrow|week|weekend|this|next|in\s))" + rf"{_WHEN_RE}{_PLACE}{_WHEN2}{_Q}", _ARGS),
         (rf"^\s*do\s+i\s+need\s+an\s+umbrella{_WHEN_RE}{_PLACE}{_WHEN2}{_Q}", _ARGS),
     ],
 )

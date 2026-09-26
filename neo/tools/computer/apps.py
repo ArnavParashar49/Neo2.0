@@ -198,8 +198,8 @@ async def quit_app(name: str) -> str:
 
 
 async def safari_open(url: str, new_tab: bool = True) -> str:
-    if not url.startswith(("http://", "https://")):
-        url = "https://" + url
+    if not re.match(r"^[a-z][\w+.-]*:", url, re.I) or re.match(r"^[\w.-]+:\d+(?:/|$)", url):
+        url = "https://" + url  # "github.com", "localhost:3000"
     script = (
         'tell application "Safari"\n activate\n'
         + (
@@ -341,19 +341,6 @@ end parseISO"""
 async def finder_reveal(path: str) -> str:
     code, _, err = await _run(["open", "-R", path])
     return f"Revealed {path} in Finder" if code == 0 else f"Error: {err}"
-
-
-_RISKY_SCRIPT = re.compile(
-    r"do shell script|\bdelete\b|empty (?:the )?trash|\bsend\b|\bquit\b|restart|shut ?down|log ?out|"
-    r"\bkeystroke\b|key code|set volume|\bmove\b.*\bto (?:trash|folder)|\bduplicate\b|make new (?:outgoing )?message|"
-    r"\bsave\b|\bclose\b.*saving|\berase\b|\bremove\b|\bkill\b",
-    re.I | re.S,
-)
-
-
-def script_is_risky(script: str) -> bool:
-    """AppleScript that changes state or drives the GUI must go through the confirm gate."""
-    return bool(_RISKY_SCRIPT.search(script))
 
 
 def _q(s: str) -> str:

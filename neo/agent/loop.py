@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 from neo.agent.confirm import NEEDS_CONFIRM, NEEDS_USER
-from neo.agent.registry import Registry, ToolContext, ToolOutput
+from neo.agent.registry import Registry, ToolContext, ToolOutput, fence
 from neo.agent.registry import registry as default_registry
 from neo.config import settings
 from neo.events import EventBus, NeoState
@@ -108,9 +108,10 @@ async def _run_calls(
             await ev.set_state(NeoState.SEARCHING, job=job)
         out: ToolOutput = await reg.invoke(c.name, c.args, ctx)
         await ev.tool_end(c.name, out.ok, out.text, job=job)
-        return ToolResult(
-            call_id=c.id, name=c.name, content=_truncate(out.text, limit), ok=out.ok, images=out.images
-        )
+        content = _truncate(out.text, limit)
+        if t and t.untrusted and out.ok and not _halt_kind(content):
+            content = fence(c.name, content)  # third-party words: data for the model, never orders
+        return ToolResult(call_id=c.id, name=c.name, content=content, ok=out.ok, images=out.images)
 
     # Keep the model's order: consecutive read-only (parallel_safe) calls run together, any
     # side-effect call runs at its own position. Once a call asks the human, nothing after it

@@ -46,6 +46,15 @@ from neo.memory.store import store
 async def memory(a: dict, c: ToolContext) -> str:
     st = store()
     act = a.get("action")
+    if act in ("remember", "forget") and c.tainted():
+        # What NEO remembers shapes every later answer. After reading a page, an email or the
+        # screen, a memory could be planted by that content rather than the user — so they OK it.
+        from neo.agent import confirm
+
+        what = f"remember “{str(a.get('text', ''))[:80]}”" if act == "remember" else f"forget memory #{a.get('id')}"
+        gate = confirm.gated("memory", a, f"{what} (after reading {c.tainted()})", detail=str(a.get("text", "")))
+        if isinstance(gate, str):
+            return gate
     if act == "remember":
         if not a.get("text"):
             return "Error: text required"

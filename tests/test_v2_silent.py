@@ -190,7 +190,7 @@ def test_app_does_not_speak_silent_replies(monkeypatch):
     class S:
         memory_context = ""
 
-        async def handle(self, text):
+        async def handle(self, text, **kw):
             return Reply("Opened notes", "quick", silent=text.startswith("open"))
 
     app.session = S()

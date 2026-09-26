@@ -7,7 +7,8 @@ import os
 import signal
 from typing import Any
 
-from neo.agent.session import Session
+from neo.agent import confirm
+from neo.agent.session import Session, answer_of
 from neo.config import settings
 from neo.events import NeoState, bus
 from neo.memory.store import store
@@ -32,7 +33,7 @@ class App:
         if task:
             self._tasks.add(task)
         try:
-            reply = await self.session.handle(text)
+            reply = await self.session.handle(text, from_user=True)  # typed, or the user's own speech
             if speak and self.voice and reply.text and not reply.silent:
                 await self.voice.speak(reply.text)
         except asyncio.CancelledError:
@@ -50,16 +51,37 @@ class App:
                 n += 1
         return n > 0
 
+    async def answer(self, yes: bool, *, action_id: str = "", said: str = "") -> None:
+        """The user answered NEO's pending question (the card's buttons, or a typed yes/no)."""
+        reply = await self.session.answer(yes, action_id=action_id, text=said or ("yes" if yes else "no"))
+        if reply is None:
+            await bus().note("That question had already expired — nothing was done.")
+            return
+        if self.voice and reply.text:
+            if hasattr(self.voice, "inform"):
+                await self.voice.inform(reply.text)  # Live says how it went, in the user's language
+            elif not reply.silent:
+                await self.voice.speak(reply.text)
+
     async def on_command(self, cmd: dict[str, Any]) -> None:
         kind = cmd.get("cmd")
         if kind == "text":
             text = str(cmd.get("text", ""))
-            if self.voice and getattr(self.voice, "handles_text", False):
+            if confirm.peek() is not None and (ans := answer_of(text)) is not None:
+                await bus().say(text, role="user")
+                await self.answer(ans, said=text)  # typed straight to the question, in any voice mode
+            elif self.voice and getattr(self.voice, "handles_text", False):
                 await self.voice.send_text(text)  # Live answers aloud + in the transcript
             else:
                 await self.handle_text(text)
         elif kind == "confirm":
-            await self.handle_text("yes" if cmd.get("yes") else "no")
+            # The card's buttons carry the id of the exact action they show: a stale card (or a
+            # client that doesn't know the id) can't approve whatever happens to be pending now.
+            action_id = str(cmd.get("action_id") or "")
+            if not action_id:
+                await bus().note("Couldn't tell which question that answer was for — nothing was done.")
+                return
+            await self.answer(bool(cmd.get("yes")), action_id=action_id)
         elif kind == "stop":
             if self.voice:
                 await self.voice.interrupt()

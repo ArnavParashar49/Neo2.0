@@ -57,7 +57,7 @@ async def text_repl(verbose: bool) -> None:
         if not text.strip():
             continue
         sess.memory_context = store().prompt_context(text)
-        reply = await sess.handle(text)
+        reply = await sess.handle(text, from_user=True)
         print(f"neo> {reply.text}")
     from neo.memory.summarize import summarize_session
     from neo.tools.browser import shutdown as close_browser

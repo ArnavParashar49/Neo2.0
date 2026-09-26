@@ -147,7 +147,10 @@ export default function App() {
   const neo = useNeo();
   const [expanded, setExpanded] = useState(false);
   const [pinned, setPinned] = useState(false);
-  const orb = ORB[neo.state];
+  // A pending question outranks everything: the card shows exactly what will run.
+  const confirming = !!neo.ask;
+  const shown = confirming ? "confirming" : neo.state;
+  const orb = ORB[shown];
   const [text, setText] = useState("");
   const [hover, setHover] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -188,11 +191,11 @@ export default function App() {
   }, [neo.send, expand]);
 
   // A confirmation request always surfaces the card.
-  useEffect(() => { if (neo.state === "confirming") expand(); }, [neo.state, expand]);
+  useEffect(() => { if (confirming) expand(); }, [confirming, expand]);
 
   // Auto-collapse after a quiet stretch unless pinned, hovered, or being typed into.
   useEffect(() => {
-    if (!expanded || pinned || hover || neo.state !== "idle") return;
+    if (!expanded || pinned || hover || neo.state !== "idle" || confirming) return;
     const t = window.setTimeout(() => {
       if (document.activeElement === inputRef.current && text) return;
       setExpanded(false);
@@ -226,20 +229,23 @@ export default function App() {
     else if (e.key === "ArrowUp" && !text) setText(lastInput.current);
   };
 
-  // Global keys while the card is up: ⏎ / ⎋ answer a confirmation.
+  // Keys while a question is up: ⌘⏎ approves (a stray Enter meant for something else must not),
+  // ⎋ declines. The answer names the exact action on the card.
+  const answer = useCallback((yes: boolean) => {
+    if (neo.ask) neo.send({ cmd: "confirm", yes, action_id: neo.ask.action_id });
+  }, [neo.ask, neo.send]);
   useEffect(() => {
-    if (neo.state !== "confirming") return;
+    if (!confirming) return;
     const h = (e: KeyboardEvent) => {
-      if (e.key === "Enter") { e.preventDefault(); neo.send({ cmd: "confirm", yes: true }); }
-      if (e.key === "Escape") { e.preventDefault(); neo.send({ cmd: "confirm", yes: false }); }
+      if (e.key === "Enter" && e.metaKey) { e.preventDefault(); answer(true); }
+      if (e.key === "Escape") { e.preventDefault(); answer(false); }
     };
     window.addEventListener("keydown", h);
     return () => window.removeEventListener("keydown", h);
-  }, [neo.state, neo.send]);
+  }, [confirming, answer]);
 
-  const busy = !["idle", "listening"].includes(neo.state);
+  const busy = !["idle", "listening"].includes(shown);
   const lastReply = [...neo.items].reverse().find((i) => i.kind === "msg" && i.role === "assistant") as Extract<Item, { kind: "msg" }> | undefined;
-  const question = neo.state === "confirming" ? lastReply?.text : undefined;
 
   if (!expanded) {
     return (
@@ -257,7 +263,7 @@ export default function App() {
         <div className="orb" data-tauri-drag-region><ThinkingOrb state={orb} size={64} theme="dark" speed={ORB_SPEED} gravity {...({ "data-tauri-drag-region": true } as object)} /></div>
         <div className="head-text" data-tauri-drag-region>
           <div className="title" data-tauri-drag-region>NEO</div>
-          <div className={"status" + (neo.connected ? "" : " off")} data-tauri-drag-region>{neo.connected ? LABEL[neo.state] : "core offline — run  python -m neo"}</div>
+          <div className={"status" + (neo.connected ? "" : " off")} data-tauri-drag-region aria-live="polite">{neo.connected ? LABEL[shown] : "core offline — run  python -m neo"}</div>
           {neo.note && busy && <div className="note" data-tauri-drag-region>{neo.note}</div>}
         </div>
         <div className="head-actions">
@@ -277,7 +283,7 @@ export default function App() {
           </div>
         )}
         {neo.items.map((it, idx) =>
-          (neo.state === "confirming" && it.kind === "msg" && it === lastReply && idx === neo.items.length - 1) ? null :
+          (confirming && it.kind === "msg" && it === lastReply && idx === neo.items.length - 1) ? null :
           it.kind === "tools" ? (
             <Tools key={it.id} tools={it.tools} />
           ) : it.role === "user" ? (
@@ -292,12 +298,13 @@ export default function App() {
         {neo.error && <div className="msg system">{neo.error}</div>}
       </div>
 
-      {neo.state === "confirming" ? (
-        <div className="confirm">
-          <div className="confirm-q">{question ?? "Go ahead?"}</div>
+      {neo.ask ? (
+        <div className="confirm" role="alertdialog" aria-labelledby="confirm-q" aria-describedby="confirm-detail">
+          <div className="confirm-q" id="confirm-q">NEO wants to {neo.ask.summary}.</div>
+          {neo.ask.detail && <pre className="confirm-detail" id="confirm-detail">{neo.ask.detail}</pre>}
           <div className="confirm-btns">
-            <button className="primary" onClick={() => neo.send({ cmd: "confirm", yes: true })}>Yes, do it <kbd>⏎</kbd></button>
-            <button onClick={() => neo.send({ cmd: "confirm", yes: false })}>No <kbd>esc</kbd></button>
+            <button className="primary" onClick={() => answer(true)}>Yes, do it <kbd>⌘⏎</kbd></button>
+            <button onClick={() => answer(false)}>No <kbd>esc</kbd></button>
           </div>
         </div>
       ) : (

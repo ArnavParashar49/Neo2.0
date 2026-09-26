@@ -16,6 +16,8 @@ export type Item =
   | { kind: "tools"; id: number; tools: ToolRun[]; job?: string };
 
 export interface NeoEvent { type: string; data: Record<string, any>; ts: number }
+/** A question NEO is waiting on: exactly what will run if the user says yes. */
+export interface ConfirmCard { action_id: string; tool: string; summary: string; detail: string }
 
 const URL = "ws://127.0.0.1:8765";
 let nextId = 1;
@@ -36,6 +38,7 @@ export function useNeo() {
   const [items, setItems] = useState<Item[]>([]);
   const [error, setError] = useState<string>("");
   const [note, setNote] = useState<string>("");
+  const [ask, setAsk] = useState<ConfirmCard | null>(null);
   const sock = useRef<WebSocket | null>(null);
 
   useEffect(() => {
@@ -48,6 +51,13 @@ export function useNeo() {
           setState(ev.data.state);
           setItems([]);
           for (const r of ev.data.recent ?? []) apply(r);
+          setAsk(ev.data.confirm ?? null);
+          break;
+        case "confirm":
+          setAsk(ev.data as ConfirmCard);
+          break;
+        case "confirm_done":
+          setAsk((prev) => (prev && prev.action_id === ev.data.action_id ? null : prev));
           break;
         case "state":
           setState(ev.data.state);
@@ -141,6 +151,7 @@ export function useNeo() {
       ws.onclose = () => {
         if (sock.current !== ws) return; // stale socket (StrictMode double-mount) must not clobber the live one
         setConnected(false);
+        setAsk(null); // the next hello says whether it's still waiting
         sock.current = null;
         timer = window.setTimeout(connect, 1500);
       };
@@ -156,5 +167,5 @@ export function useNeo() {
 
   const clear = useCallback(() => setItems([]), []);
 
-  return { connected, state, items, error, note, send, clear };
+  return { connected, state, items, error, note, ask, send, clear };
 }

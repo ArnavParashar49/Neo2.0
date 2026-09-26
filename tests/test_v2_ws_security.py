@@ -3,11 +3,9 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import socket
 
-import pytest
 import websockets
 
 from neo.server import ws as ws_mod

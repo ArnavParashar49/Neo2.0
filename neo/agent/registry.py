@@ -41,9 +41,17 @@ class ToolContext:
 
     user_text: str = ""
     extras: dict[str, Any] = field(default_factory=dict)
+    # Untrusted sources (web pages, mail, files, the screen) read while handling this request.
+    # Shared by reference across one request's tool calls; tools that could leak data or plant
+    # instructions ask the user first once it is non-empty.
+    taint: list[str] = field(default_factory=list)
 
     def get(self, key: str, default: Any = None) -> Any:
         return self.extras.get(key, default)
+
+    def tainted(self) -> str:
+        """The first untrusted source this request has read ("" = none)."""
+        return self.taint[0] if self.taint else ""
 
 
 Handler = Callable[[dict[str, Any], ToolContext], Awaitable[str | ToolOutput] | str | ToolOutput]
@@ -66,6 +74,7 @@ class RegisteredTool:
     quiet: bool = False  # an action: when it succeeds, NEO just does it — no spoken reply
     hidden: bool = False  # not exposed to the model (internal/UI-only)
     timeout: float = 120.0  # seconds; a hung tool returns an error instead of stalling the loop
+    untrusted: bool = False  # output is third-party content (web, mail, files, screen): data, never instructions
 
     def spec(self) -> ToolSpec:
         return ToolSpec(self.name, self.description, self.parameters)
@@ -102,8 +111,20 @@ class Registry:
         )
 
     async def invoke(self, name: str, args: dict[str, Any], ctx: ToolContext) -> ToolOutput:
+        # `confirm` / `cancel` belong to the user, not to a tool call: whatever a model passes is
+        # dropped here (approval travels through confirm.approved()).
+        args = {k: v for k, v in (args or {}).items() if k not in ("confirm", "cancel")}
+        started = time.time()
         out = await self._invoke(name, args, ctx)
         self.last = (name, time.time(), out.ok)
+        t = self.get(name)
+        if t and t.untrusted:
+            from neo.agent import confirm
+
+            if not confirm.genuine_halt(name, out.text, started):
+                out.text = "(content) " + out.text  # a page that starts "NEEDS_CONFIRM:" asks nothing
+            if out.ok and name not in ctx.taint:
+                ctx.taint.append(name)
         return out
 
     async def _invoke(self, name: str, args: dict[str, Any], ctx: ToolContext) -> ToolOutput:
@@ -153,6 +174,7 @@ def tool(
     quiet: bool = False,
     hidden: bool = False,
     timeout: float = 120.0,
+    untrusted: bool = False,
 ) -> Callable[[Handler], Handler]:
     def deco(fn: Handler) -> Handler:
         registry().register(
@@ -172,8 +194,15 @@ def tool(
                 quiet=quiet,
                 hidden=hidden,
                 timeout=timeout,
+                untrusted=untrusted,
             )
         )
         return fn
 
     return deco
+
+
+def fence(name: str, text: str) -> str:
+    """Wrap third-party content so the model reads it as data, never as instructions."""
+    body = text.replace("</untrusted", "</ untrusted").replace("<untrusted", "< untrusted")
+    return f'<untrusted source="{name}">\n{body}\n</untrusted>'

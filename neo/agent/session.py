@@ -19,7 +19,7 @@ from typing import Literal
 from neo.agent import confirm, fastpath
 from neo.agent.loop import AgentResult, run_agent
 from neo.agent.prompt import build as build_prompt
-from neo.agent.registry import ToolContext, registry
+from neo.agent.registry import ToolContext, fence, registry
 from neo.config import settings
 from neo.events import NeoState, bus
 from neo.providers import brain
@@ -50,6 +50,18 @@ _job_ids = itertools.count(1)
 # The recent voice conversation, when a request comes from Gemini Live: the agent can't hear
 # it, so "open it on Amazon" needs it to know what "it" is. Per task (jobs run concurrently).
 _conversation: contextvars.ContextVar[str] = contextvars.ContextVar("conversation", default="")
+# Untrusted sources the caller already read for this request (Gemini Live fetched a page, then
+# handed the task over): the agent run starts from there instead of from a clean slate.
+_request_taint: contextvars.ContextVar[tuple[str, ...]] = contextvars.ContextVar("request_taint", default=())
+
+
+def answer_of(text: str) -> bool | None:
+    """True for a pure yes, False for a no, None for anything else."""
+    if _NO.search(text):
+        return False
+    if _YES.match(text):
+        return True
+    return None
 
 
 @dataclass
@@ -72,25 +84,44 @@ class Session:
     _pending_tool: str = ""
     _pending_args: dict = field(default_factory=dict)
     _pending_action: str = ""
+    _pending_taint: list = field(default_factory=list)
+    _answer_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     _hist_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     _agent_slots: asyncio.Semaphore = field(default_factory=lambda: asyncio.Semaphore(_MAX_AGENT_JOBS))
     jobs: dict[str, asyncio.Task] = field(default_factory=dict)
 
     # ---- public --------------------------------------------------------------------
     async def handle(
-        self, text: str, *, images: list[ImagePart] | None = None, conversation: str = ""
+        self,
+        text: str,
+        *,
+        images: list[ImagePart] | None = None,
+        conversation: str = "",
+        from_user: bool = False,
+        taint: list[str] | tuple[str, ...] = (),
     ) -> Reply:
+        """Handle one request. `from_user` = these are the user's own words (typed, or their
+        transcribed speech) — only then can they answer a pending confirmation. Text a model wrote
+        (Gemini Live's agent_task goal) never can."""
         if conversation:
             _conversation.set(conversation)
+        _request_taint.set(tuple(taint))
         text = _WAKE_PREFIX.sub("", text.strip(), count=1).strip() or text.strip()
         if not text:
             return Reply("", "chat")
         job = f"j{next(_job_ids)}"
-        await bus().say(text, role="user", job=job)
+        if from_user:
+            await bus().say(text, role="user", job=job)
 
-        if confirm.peek():
-            return await self._handle_confirmation(text, job)
-        if self._pending_action:  # the staged question expired: drop it and the "confirming" orb
+        if (p := confirm.peek()) is not None:
+            if from_user:
+                return await self._handle_confirmation(text, job)
+            if answer_of(text) is not None:
+                # A model trying to answer the user's question for them.
+                msg = f"NEEDS_USER: only the user can answer this — ask them: {p.summary}?"
+                await bus().end_job(job)
+                return Reply(msg, "confirm", job=job)
+        elif self._pending_action:  # the staged question expired: drop it and the "confirming" orb
             self._pending_tool, self._pending_args, self._pending_action = "", {}, ""
             await self._clear_confirming()
 
@@ -128,12 +159,16 @@ class Session:
         return await self._agent(text, d, images, job)
 
     async def cancel_all(self) -> int:
-        """Stop every running job (the user said stop)."""
+        """Stop every running job (the user said stop) and drop any unanswered question."""
         n = 0
         for t in list(self.jobs.values()):
             if not t.done():
                 t.cancel()
                 n += 1
+        if confirm.peek() is not None:
+            confirm.cancel("stopped")
+            self._pending_tool, self._pending_args, self._pending_action = "", {}, ""
+            await self._clear_confirming()
         return n
 
     # ---- routes ----------------------------------------------------------------------
@@ -188,7 +223,7 @@ class Session:
                 if prev in _APP_TOOLS and tool not in _APP_TOOLS:
                     await asyncio.sleep(_SETTLE_AFTER_APP_S)
                 await bus().tool_start(tool, args, job=job)
-                out = await registry().invoke(tool, args, ToolContext(user_text=text))
+                out = await registry().invoke(tool, args, ToolContext(user_text=text, taint=list(_request_taint.get())))
                 await bus().tool_end(tool, out.ok, out.text, job=job)
                 out_text, ok = out.text, out.ok
                 if not ok:  # e.g. weather for "the forecast for Q3 sales": the agent can do better
@@ -242,13 +277,14 @@ class Session:
                 else:
                     tools = await asyncio.to_thread(self._tools_for, text, needs_screen, playbook_ctx)
                 snapshot = self._trimmed()
+                ctx = ToolContext(user_text=text, taint=list(_request_taint.get()))
                 res = await run_agent(
                     _with_conversation(text),
                     provider=chain,
                     system=self._system(playbook_ctx + _already_done_note()),
                     tools=tools,
                     history=snapshot,
-                    ctx=ToolContext(user_text=text),
+                    ctx=ctx,
                     effort=effort,
                     images=images,
                     job=job,
@@ -261,10 +297,11 @@ class Session:
             self.jobs.pop(job, None)
         await self._remember(*res.messages[len(snapshot) :])  # only this job's new turns
         _learn_from(text, d, res)
-        if res.stopped == "needs_confirm" and self._stage_pending(res):
+        if res.stopped == "needs_confirm" and self._stage_pending(res, ctx.taint):
             await bus().say(res.question, final=True, job=job)
             return Reply(res.question, "confirm", d, res, job=job)
-        if res.stopped == "done":
+        if res.stopped == "done" and not ctx.taint:
+            # A path learned while reading a page or an email could have been steered by it.
             await asyncio.to_thread(self._save_playbook, text, res)
         silent = _quietly(d, res)
         if silent:
@@ -323,7 +360,7 @@ class Session:
             print(f"[playbook] save failed: {str(e)[:80]}")
 
     # ---- confirmation ------------------------------------------------------------------
-    def _stage_pending(self, res: AgentResult) -> bool:
+    def _stage_pending(self, res: AgentResult, taint: list[str] | None = None) -> bool:
         """Remember exactly which staged action the question refers to."""
         p = confirm.peek()
         if not p or (res.pending_action and p.action_id != res.pending_action):
@@ -331,51 +368,75 @@ class Session:
             self._pending_tool, self._pending_args, self._pending_action = "", {}, ""
             return False
         self._pending_tool, self._pending_args, self._pending_action = p.tool, dict(p.params), p.action_id
+        self._pending_taint = list(taint or [])
         asyncio.create_task(self._expire_confirm(p.action_id))
         return True
 
     async def _handle_confirmation(self, text: str, job: str) -> Reply:
-        if _NO.search(text) or not _YES.match(text):
-            if _NO.search(text):
-                confirm.cancel()
-                self._pending_tool, self._pending_args, self._pending_action = "", {}, ""
-                await bus().say("Cancelled.", final=True, job=job)
-                await bus().end_job(job)
-                await bus().set_state(
-                    NeoState.IDLE
-                ) if not bus().active_jobs and bus().state == NeoState.CONFIRMING else None
-                return Reply("Cancelled.", "confirm", job=job)
+        """The user's own words while a question is pending."""
+        ans = answer_of(text)
+        if ans is None:
             # Not a yes/no — treat as a new request; drop the stale confirmation.
             confirm.cancel("superseded")
             self._pending_tool, self._pending_action = "", ""
             await self._clear_confirming()
-            return await self.handle(text)
+            await bus().end_job(job)
+            return await self.handle(text, from_user=True, taint=_request_taint.get())
+        return await self.answer(ans, job=job, text=text) or Reply("", "confirm", job=job)
 
-        p = confirm.peek()
-        if not p or p.action_id != self._pending_action:
-            confirm.cancel("mismatch")
+    async def answer(self, yes: bool, *, action_id: str = "", job: str = "", text: str = "") -> Reply | None:
+        """The user's answer to the pending question — their typed or spoken yes/no, or the
+        overlay's button for `action_id`. Runs the staged action exactly as it was shown.
+        Returns None when there is nothing (any more) to answer."""
+        async with self._answer_lock:  # a spoken "yes" and a click on the card can't both run it
+            job = job or f"j{next(_job_ids)}"
+            p = confirm.peek()
+            if p is None or (action_id and p.action_id != action_id):
+                await bus().end_job(job)
+                return None
+            if not yes:
+                confirm.cancel()
+                self._pending_tool, self._pending_args, self._pending_action = "", {}, ""
+                await bus().say("Cancelled.", final=True, job=job)
+                await self._clear_confirming()
+                await bus().end_job(job)
+                return Reply("Cancelled.", "confirm", job=job)
+            if self._pending_action and p.action_id != self._pending_action and not action_id:
+                # Something else was staged after the question the user heard: don't guess.
+                confirm.cancel("mismatch")
+                self._pending_tool, self._pending_args, self._pending_action = "", {}, ""
+                msg = "That request changed underneath me, so I didn't do anything. Ask again and I'll confirm first."
+                await bus().say(msg, final=True, job=job)
+                await self._clear_confirming()
+                await bus().end_job(job)
+                return Reply(msg, "confirm", job=job)
+            ours = p.action_id == self._pending_action  # an agent job of this session asked it
+            taint = list(self._pending_taint) if ours else []
+            tool, args, aid = p.tool, dict(p.params), p.action_id
             self._pending_tool, self._pending_args, self._pending_action = "", {}, ""
-            msg = "That request changed underneath me, so I didn't do anything. Ask again and I'll confirm first."
-            await bus().say(msg, final=True, job=job)
             await self._clear_confirming()
+            await bus().set_state(NeoState.WORKING, job=job)
+            await bus().tool_start(tool, args, job=job)
+            with confirm.approved(aid):
+                out = await registry().invoke(tool, args, ToolContext(user_text=text or "yes", taint=list(taint)))
+            await bus().tool_end(tool, out.ok, out.text, job=job)
+        if not ours:
+            # Asked by a direct voice command: there's no agent run to hand the result back to.
+            msg = out.text if out.ok else f"That didn't work: {out.text}"
+            await bus().say(msg[:600], final=True, job=job)
             await bus().end_job(job)
             return Reply(msg, "confirm", job=job)
-        tool, args = self._pending_tool, dict(self._pending_args)
-        self._pending_tool, self._pending_args, self._pending_action = "", {}, ""
-        args["confirm"] = True
-        await self._clear_confirming()
-        await bus().set_state(NeoState.WORKING, job=job)
-        await bus().tool_start(tool, args, job=job)
-        out = await registry().invoke(tool, args, ToolContext(user_text=text))
-        await bus().tool_end(tool, out.ok, out.text, job=job)
         # Let the agent see the outcome and finish whatever it was doing.
-        follow = f"[User confirmed. {tool} result: {out.text[:800]}] Continue and finish the task, or report the result."
+        t = registry().get(tool)
+        result = fence(tool, out.text[:800]) if t and t.untrusted and out.ok else out.text[:800]
+        follow = f"[User confirmed. {tool} result: {result}] Continue and finish the task, or report the result."
         snapshot = self._trimmed()
+        ctx = ToolContext(user_text=text or "yes", taint=taint)
         res = await run_agent(
-            follow, provider=brain("agent"), system=self._system(), history=snapshot, effort="medium", job=job
+            follow, provider=brain("agent"), system=self._system(), history=snapshot, ctx=ctx, effort="medium", job=job
         )
         await self._remember(*res.messages[len(snapshot) :])
-        if res.stopped == "needs_confirm" and self._stage_pending(res):
+        if res.stopped == "needs_confirm" and self._stage_pending(res, ctx.taint):
             await bus().say(res.question, final=True, job=job)
             return Reply(res.question, "confirm", None, res, job=job)
         # The user just said yes to something consequential: always tell them how it went.

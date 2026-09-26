@@ -28,6 +28,7 @@ from urllib.parse import parse_qs, urlparse
 import websockets
 from websockets.asyncio.server import ServerConnection, serve
 
+from neo.agent import confirm
 from neo.config import settings
 from neo.events import bus
 
@@ -135,7 +136,17 @@ class UIServer:
         drain = asyncio.create_task(self._drain(c, q))
         try:
             await c.send(
-                json.dumps({"type": "hello", "data": {"state": bus().state.value, "recent": self._recent}})
+                json.dumps(
+                    {
+                        "type": "hello",
+                        "data": {
+                            "state": bus().state.value,
+                            "recent": self._recent,
+                            "confirm": confirm.card(confirm.peek()),  # a question still waiting
+                        },
+                    },
+                    default=str,
+                )
             )
             async for raw in c:
                 try:

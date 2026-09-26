@@ -70,7 +70,7 @@ def test_second_destructive_call_never_runs_before_confirmation():
     reg = Registry()
 
     def trash(a, c):
-        p = confirm.gated(f"trash:{a['path']}", "trash", a, f"move {a['path']} to the Trash")
+        p = confirm.gated("trash", a, f"move {a['path']} to the Trash")
         if isinstance(p, dict):
             executed.append(p["path"])
             return "trashed"
@@ -91,7 +91,7 @@ def test_second_destructive_call_never_runs_before_confirmation():
     )
     res = asyncio.run(run_agent("trash both", provider=brain, system="s", reg=reg, ev=EventBus()))
     assert res.stopped == "needs_confirm" and "a.txt" in res.question
-    assert res.pending_action == "trash:a.txt"  # the question and the staged action agree
+    assert res.pending_action == confirm.action_id("trash", {"path": "a.txt"})  # question and staged action agree
     assert confirm.peek().params["path"] == "a.txt"
     assert executed == []
     # every tool_call has a result, the second one marked skipped
@@ -233,16 +233,16 @@ def test_shell_gate_catches_bypasses_and_allows_dev_null():
         d("rm -fr ~/Library") and d("rm -r -f x") and d("rm notes.txt") and d("find . -name '*.log' -delete")
     )
     assert d("echo x | sh") and d("git branch -D main") and d("brew remove node") and d("osascript -e 'x'")
-    assert not d("ls -la 2>/dev/null") and not d("grep -r foo . 2>/dev/null") and not d("rm -- --help")
+    assert not d("ls -la 2>/dev/null") and not d("grep -n foo notes.txt 2>/dev/null")
 
 
 def test_applescript_risky_scripts_are_gated():
-    from neo.tools.computer.apps import script_is_risky
+    from neo.tools.computer.policy import script_is_read_only as ro
 
-    assert script_is_risky('tell application "Finder" to delete file "x"')
-    assert script_is_risky('do shell script "rm -rf ~"')
-    assert script_is_risky('tell application "Mail" to send m')
-    assert not script_is_risky('tell application "Safari" to get URL of current tab of window 1')
+    assert not ro('tell application "Finder" to delete file "x"')
+    assert not ro('do shell script "rm -rf ~"')
+    assert not ro('tell application "Mail" to send m')
+    assert ro('tell application "Safari" to get URL of current tab of window 1')
 
 
 def test_memory_recall_survives_apostrophes(tmp_path, monkeypatch):
@@ -294,10 +294,11 @@ def test_session_stale_confirmation_is_refused(monkeypatch):
             return Decision("agent_task", 0.9, True, 0.9, False, 0.0, "fake")
 
     s = Session(reflex=R())
-    s._pending_tool, s._pending_args, s._pending_action = "trash", {"path": "a"}, "trash:a"
-    confirm.stage("trash:b", "trash", {"path": "b"}, "move b")  # something else got staged meanwhile
+    s._pending_tool, s._pending_args = "trash", {"path": "a"}
+    s._pending_action = confirm.action_id("trash", {"path": "a"})
+    confirm.stage("trash", {"path": "b"}, "move b")  # something else got staged meanwhile
     monkeypatch.setattr(sess_mod, "brain", lambda purpose="agent": Brain([Turn(text="never")]))
-    r = asyncio.run(s.handle("yes"))
+    r = asyncio.run(s.handle("yes", from_user=True))
     assert r.route == "confirm" and "didn't do anything" in r.text
     assert confirm.peek() is None
 

@@ -46,7 +46,7 @@ def _reg() -> Registry:
     r.register(RegisteredTool("boom", "fails", {"type": "object", "properties": {}}, boom))
 
     def delete(a, c):
-        p = confirm.gated("del-1", "delete", a, "delete the file")
+        p = confirm.gated("delete", a, "delete the file")
         return "deleted" if isinstance(p, dict) else p
 
     r.register(
@@ -73,11 +73,17 @@ def test_confirm_gate_roundtrip(tmp_path, monkeypatch):
     r = _reg()
     first = asyncio.run(r.invoke("delete", {"path": "x"}, ToolContext()))
     assert first.text.startswith(confirm.NEEDS_CONFIRM)
-    # wrong action id can't release it
+    aid = confirm.peek().action_id
+    # wrong action id can't release it, and neither can a model passing confirm=True
     assert confirm.consume("other") is None
     second = asyncio.run(r.invoke("delete", {"path": "x", "confirm": True}, ToolContext()))
-    assert second.text == "deleted"
-    assert (tmp_path / "audit.log").read_text().count("\n") == 2
+    assert second.text.startswith(confirm.NEEDS_CONFIRM)
+    # only the user's approval of this exact action releases it
+    with confirm.approved(aid):
+        third = asyncio.run(r.invoke("delete", {"path": "x"}, ToolContext()))
+    assert third.text == "deleted" and confirm.peek() is None
+    log = (tmp_path / "audit.log").read_text()
+    assert log.count('"staged"') == 2 and log.count('"confirmed"') == 1
 
 
 def test_loop_runs_tools_then_answers():

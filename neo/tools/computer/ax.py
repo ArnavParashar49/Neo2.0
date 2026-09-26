@@ -227,7 +227,12 @@ def snapshot(app: str | None = None, *, max_lines: int = 250) -> str:
     """Return a compact text tree of the frontmost (or named) app's UI."""
     global _last_tree, _last_tree_ts, _last_tree_app
     if not is_trusted():
-        return "NEEDS_USER: Accessibility permission is off. Enable it for this app in System Settings → Privacy & Security → Accessibility, then try again."
+        from neo.agent.confirm import ask_user
+
+        return ask_user(
+            "Accessibility permission is off. Allow NEO in System Settings → Privacy & Security → "
+            "Accessibility (NEO's menu has a shortcut), then try again."
+        )
     if app:
         pid = pid_for_app(app)
         if pid is None:
@@ -415,3 +420,24 @@ def focused_element_text() -> str:
     if el is None:
         return ""
     return _str(_attr(el, AS.kAXValueAttribute)) or _str(_attr(el, "AXSelectedText"))
+
+
+def label_at(x: float, y: float) -> str:
+    """The label of whatever is under a screen point — and its parent's, for text inside a button."""
+    try:
+        err, el = AS.AXUIElementCopyElementAtPosition(AS.AXUIElementCreateSystemWide(), float(x), float(y), None)
+    except Exception:  # noqa: BLE001
+        return ""
+    if err or el is None:
+        return ""
+    parts: list[str] = []
+    for _ in range(2):
+        for attr in ("AXTitle", "AXDescription", "AXValue"):
+            v = _str(_attr(el, attr, ""))
+            if v:
+                parts.append(v)
+                break
+        el = _attr(el, "AXParent")
+        if el is None:
+            break
+    return " ".join(parts)[:200]

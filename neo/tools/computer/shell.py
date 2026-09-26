@@ -1,4 +1,4 @@
-"""Shell + file primitives with a destructive-command gate."""
+"""Shell + file primitives behind the confirm gate (see policy.py for what runs without asking)."""
 
 from __future__ import annotations
 
@@ -8,43 +8,40 @@ import re
 from pathlib import Path
 
 from neo.agent import confirm
+from neo.tools.computer import policy
 
-_DESTRUCTIVE = re.compile(
-    r"("
-    r"\brm\b(?:\s+\S+)*?\s+-[a-z]*[rf]|\brm\s+(?!-)\S+\s*$|"  # rm with -r/-f anywhere, or bare rm of a file
-    r"\bfind\b.*\s-delete\b|\bsudo\b|\bmkfs|\bdd\s+if=|>\s*/dev/(?!null)|\bkillall\b|\bpkill\b|\bkill\s+-9|"
-    r"\bshutdown\b|\breboot\b|\bdiskutil\s+(?:erase|partition|unmount)|"
-    r"\bgit\s+(?:push\s+(?:-f|--force)|reset\s+--hard|clean\s+-\S*f|branch\s+-D|checkout\s+--|stash\s+drop)|"
-    r"\b(?:brew|pip3?|npm|pnpm|yarn|cargo|gem)\s+(?:uninstall|remove|rm|un)\b|"
-    r"\|\s*(?:ba|z|k|da)?sh\b|\bchmod\s+-R|\bchown\s+-R|\bdefaults\s+(?:delete|write)|"
-    r"\blaunchctl\s+(?:unload|remove|bootout)|\bsecurity\s+delete|\bosascript\b|\btruncate\b|\b:>\s*\S|"
-    r"\bmv\b.*\s/(?:Users|Applications|Library|System)\b|\bcrontab\s+-r|\bpmset\b|\bnvram\b|\bcsrutil\b"
-    r")",
-    re.I,
-)
+_SECRET_ENV = re.compile(r"KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|SESSION|COOKIE|AUTH", re.I)
 
 
 def looks_destructive(cmd: str) -> bool:
-    return bool(_DESTRUCTIVE.search(cmd))
+    """Kept for callers: anything that isn't provably read-only is treated as consequential."""
+    return not policy.shell_is_read_only(cmd)
 
 
-async def run(
-    cmd: str, *, cwd: str | None = None, timeout: float = 60, confirm_arg: dict | None = None
-) -> str:
-    if looks_destructive(cmd):
+def _env() -> dict[str, str]:
+    """The user's environment minus anything that looks like a credential (NEO's API keys too)."""
+    env = {k: v for k, v in os.environ.items() if not _SECRET_ENV.search(k)}
+    env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:" + os.environ.get("PATH", "/usr/bin:/bin")
+    return env
+
+
+async def run(cmd: str, *, cwd: str | None = None, timeout: float = 60, args: dict | None = None) -> str:
+    if not policy.shell_is_read_only(cmd):
+        where = f" (in {cwd})" if cwd else ""
         gate = confirm.gated(
-            "shell:" + cmd[:60], "shell", {**(confirm_arg or {}), "command": cmd}, f"run `{cmd[:120]}`"
+            "shell", args if args is not None else {"command": cmd, "cwd": cwd}, f"run a command{where}",
+            detail=cmd,
         )
         if isinstance(gate, str):
             return gate
-    home = str(Path.home())
-    wd = os.path.expanduser(cwd) if cwd else home
+    wd = os.path.expanduser(cwd) if cwd else str(Path.home())
     p = await asyncio.create_subprocess_shell(
         cmd,
         cwd=wd,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
-        env={**os.environ, "PATH": "/opt/homebrew/bin:/usr/local/bin:" + os.environ.get("PATH", "")},
+        stdin=asyncio.subprocess.DEVNULL,
+        env=_env(),
     )
     try:
         out, _ = await asyncio.wait_for(p.communicate(), timeout)
@@ -56,7 +53,16 @@ async def run(
     return (text.strip() or "(no output)") + ("" if code == 0 else f"\n[exit {code}]")
 
 
+def _secret_refusal(path: str) -> str:
+    return (
+        f"Error: {path} holds keys, passwords or private app data, so NEO doesn't read it. "
+        "If the user needs it, they can open it themselves."
+    )
+
+
 def read_file(path: str, *, start: int = 1, lines: int = 400) -> str:
+    if policy.is_secret(path):
+        return _secret_refusal(path)
     p = Path(os.path.expanduser(path))
     if not p.exists():
         return f"Error: {path} does not exist"
@@ -85,10 +91,18 @@ def read_file(path: str, *, start: int = 1, lines: int = 400) -> str:
     return body
 
 
+def _preview(text: str, limit: int = 1500) -> str:
+    return text if len(text) <= limit else text[:limit] + f"\n… ({len(text) - limit} more characters)"
+
+
 def write_file(path: str, content: str, args: dict) -> str:
     p = Path(os.path.expanduser(path))
-    if p.exists():
-        gate = confirm.gated(f"write:{p}", "write_file", {**args, "path": str(p)}, f"overwrite {p.name}")
+    if why := policy.write_risk(path):
+        if policy.is_secret(path):
+            return f"Error: {p} holds keys or private app data — NEO doesn't write there."
+        gate = confirm.gated(
+            "write_file", args, f"write {p.name} ({why})", detail=f"{p}\n\n{_preview(content)}"
+        )
         if isinstance(gate, str):
             return gate
     p.parent.mkdir(parents=True, exist_ok=True)
@@ -96,7 +110,9 @@ def write_file(path: str, content: str, args: dict) -> str:
     return f"Wrote {len(content)} chars to {p}"
 
 
-def edit_file(path: str, old: str, new: str) -> str:
+def edit_file(path: str, old: str, new: str, args: dict) -> str:
+    if policy.is_secret(path):
+        return f"Error: {path} holds keys or private app data — NEO doesn't edit it."
     p = Path(os.path.expanduser(path))
     if not p.exists():
         return f"Error: {path} does not exist"
@@ -106,6 +122,11 @@ def edit_file(path: str, old: str, new: str) -> str:
         return "Error: old_string not found (must match exactly, including whitespace)"
     if n > 1:
         return f"Error: old_string matches {n} places; include more context to make it unique"
+    gate = confirm.gated(
+        "edit_file", args, f"edit {p.name}", detail=f"{p}\n\n− {_preview(old, 700)}\n+ {_preview(new, 700)}"
+    )
+    if isinstance(gate, str):
+        return gate
     p.write_text(text.replace(old, new, 1))
     return f"Edited {p.name}"
 
@@ -114,13 +135,13 @@ def trash(path: str, args: dict) -> str:
     p = Path(os.path.expanduser(path))
     if not p.exists():
         return f"Error: {path} does not exist"
-    gate = confirm.gated(f"trash:{p}", "trash", {**args, "path": str(p)}, f"move {p.name} to the Trash")
+    gate = confirm.gated("trash", args, f"move {p.name} to the Trash", detail=str(p.resolve()))
     if isinstance(gate, str):
         return gate
     import subprocess
 
     r = subprocess.run(
-        ["osascript", "-e", f'tell application "Finder" to delete POSIX file "{p}"'],
+        ["osascript", "-e", 'on run argv\ntell application "Finder" to delete (POSIX file (item 1 of argv))\nend run', str(p)],
         capture_output=True,
         text=True,
     )

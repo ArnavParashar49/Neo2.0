@@ -178,7 +178,7 @@ def test_confirmation_expires(monkeypatch):
     from neo.agent import confirm
 
     monkeypatch.setattr(confirm, "_TTL_S", 0.01)
-    confirm.stage("a1", "trash", {"path": "/x"}, "move /x to the Trash")
+    confirm.stage("trash", {"path": "/x"}, "move /x to the Trash")
     assert confirm.peek() is not None
     import time
 
@@ -314,6 +314,7 @@ def test_fourth_lookup_in_one_question_is_refused(monkeypatch):
 
     monkeypatch.setattr(registry().get("web_search"), "handler", fake_search)
     v = live_mod.LiveVoice.__new__(live_mod.LiveVoice)
+    v._taint, v._utt_started, v._last_answer = [], 0.0, (0.0, "")
     v._agent_session, v._tool_tasks, v._goals, v._server_cancelled = None, {}, {}, set()
     v._live, v._ui_lock, v._dialog, v._call_labels = None, asyncio.Lock(), [], {}
     v._new_question()
@@ -341,6 +342,7 @@ def test_identical_read_only_calls_run_once_per_question(monkeypatch):
 
     monkeypatch.setattr(registry().get("web_search"), "handler", fake_search)
     v = live_mod.LiveVoice.__new__(live_mod.LiveVoice)
+    v._taint, v._utt_started, v._last_answer = [], 0.0, (0.0, "")
     v._agent_session, v._tool_tasks, v._goals, v._server_cancelled = None, {}, {}, set()
     v._live, v._ui_lock, v._dialog, v._call_labels = None, asyncio.Lock(), [], {}
     v._new_question()
@@ -370,6 +372,7 @@ def test_a_failed_lookup_may_be_tried_again(monkeypatch):
 
     monkeypatch.setattr(registry().get("web_search"), "handler", flaky)
     v = live_mod.LiveVoice.__new__(live_mod.LiveVoice)
+    v._taint, v._utt_started, v._last_answer = [], 0.0, (0.0, "")
     v._agent_session, v._tool_tasks, v._goals, v._server_cancelled = None, {}, {}, set()
     v._live, v._ui_lock, v._dialog, v._call_labels = None, asyncio.Lock(), [], {}
     v._new_question()
@@ -392,6 +395,8 @@ def test_spoken_context_expires_and_is_quoted_briefly():
     import neo.voice.live as live_mod
 
     v = live_mod.LiveVoice.__new__(live_mod.LiveVoice)
+
+    v._taint, v._utt_started, v._last_answer = [], 0.0, (0.0, "")
     v._dialog = [(_t.time() - 3600, "user", "an hour-old request"), (_t.time(), "NEO", "x" * 500)]
     ctx = v._conversation("open it on amazon")
     assert "hour-old" not in ctx  # not "just now"

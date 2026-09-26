@@ -108,10 +108,30 @@ def _p(props: dict, required: list[str] | None = None) -> dict:
     category="browser",
     slow=True,
     quiet=True,
+    untrusted=True,
 )
 async def browser_open(a: dict, c: ToolContext) -> str:
+    from neo.agent import confirm
+    from neo.tools.computer import policy
+
+    url = _norm_url(a["url"])
+    scheme = url.split(":", 1)[0].lower()
+    if scheme not in ("http", "https"):
+        return f"Error: NEO's browser only opens web pages, not {scheme}: links."
+    why = ""
+    if c.tainted():
+        # After reading a page or an email, a link that smuggles data out — or reaches this Mac's
+        # own services — is the user's call.
+        if policy.url_carries_data(url):
+            why = "the link carries data"
+        elif private := await asyncio.to_thread(policy.private_host, url):
+            why = private
+    if why:
+        gate = confirm.gated("browser_open", a, f"open {url[:80]} ({why}, after reading {c.tainted()})", detail=url)
+        if isinstance(gate, str):
+            return gate
     page = await _b.page()
-    await page.goto(_norm_url(a["url"]), wait_until="domcontentloaded")
+    await page.goto(url, wait_until="domcontentloaded")
     await asyncio.sleep(0.4)
     return await _snapshot(page, 9000)
 
@@ -122,6 +142,7 @@ async def browser_open(a: dict, c: ToolContext) -> str:
     _p({"max_chars": {"type": "integer"}}),
     parallel_safe=True,
     category="browser",
+    untrusted=True,
 )
 async def browser_read(a: dict, c: ToolContext) -> str:
     page = await _b.page()
@@ -137,8 +158,16 @@ async def browser_read(a: dict, c: ToolContext) -> str:
     quiet=True,
 )
 async def browser_click(a: dict, c: ToolContext) -> str:
+    from neo.agent import confirm
+    from neo.tools.computer import policy
+
     page = await _b.page()
     loc = _locator(page, a["target"], a.get("role", ""))
+    label = str(a["target"]) + " " + await _label(loc)
+    if policy.commits(label):
+        gate = confirm.gated("browser_click", a, f"click “{label.strip()[:60]}” on {_host(page.url)}")
+        if isinstance(gate, str):
+            return gate
     try:
         await loc.click()
     except Exception as e:  # noqa: BLE001
@@ -158,8 +187,16 @@ async def browser_click(a: dict, c: ToolContext) -> str:
     quiet=True,
 )
 async def browser_type(a: dict, c: ToolContext) -> str:
+    from neo.agent import confirm
+
     page = await _b.page()
     loc = _locator(page, a["target"])
+    if confirm.as_bool(a.get("submit")) and not await _is_search(loc):
+        gate = confirm.gated(
+            "browser_type", a, f"submit the form on {_host(page.url)}", detail=f"{a['target']}: {a['text']}"
+        )
+        if isinstance(gate, str):
+            return gate
     try:
         await loc.fill(a["text"])
         if a.get("submit"):
@@ -178,7 +215,15 @@ async def browser_type(a: dict, c: ToolContext) -> str:
     quiet=True,
 )
 async def browser_press(a: dict, c: ToolContext) -> str:
+    from neo.agent import confirm
+
     page = await _b.page()
+    if str(a["key"]).split("+")[-1].lower() in ("enter", "return", "numpadenter"):
+        focused = page.locator("*:focus").first
+        if await focused.count() and not await _is_search(focused):
+            gate = confirm.gated("browser_press", a, f"press Enter on {_host(page.url)} — it submits the form")
+            if isinstance(gate, str):
+                return gate
     await page.keyboard.press(a["key"])
     return f"Pressed {a['key']}"
 
@@ -211,6 +256,7 @@ async def browser_back(a: dict, c: ToolContext) -> str:
     _p({}),
     category="browser",
     slow=True,
+    untrusted=True,
 )
 async def browser_screenshot(a: dict, c: ToolContext) -> ToolOutput:
     page = await _b.page()
@@ -226,3 +272,39 @@ async def browser_close(a: dict, c: ToolContext) -> str:
 
 async def shutdown() -> None:
     await _b.close()
+
+
+def _host(url: str) -> str:
+    from urllib.parse import urlsplit
+
+    return urlsplit(url).hostname or "this page"
+
+
+async def _label(loc) -> str:
+    """The element's own words: text, aria-label, value (a button's caption can live in any)."""
+    try:
+        return await loc.first.evaluate(
+            "e => [e.innerText, e.getAttribute('aria-label'), e.value, e.title].filter(Boolean).join(' ').slice(0, 200)",
+            timeout=1500,
+        )
+    except Exception:  # noqa: BLE001 — the click itself reports a missing element
+        return ""
+
+
+async def _is_search(loc) -> bool:
+    """A search box: submitting it only searches."""
+    try:
+        return bool(
+            await loc.first.evaluate(
+                """e => {
+                  const s = [e.type, e.getAttribute('role'), e.name, e.id, e.placeholder,
+                             e.getAttribute('aria-label'), e.form && e.form.getAttribute('role'),
+                             e.form && e.form.action].join(' ').toLowerCase();
+                  return /\\bsearch|\\bquery\\b|^\\s*q\\s|\\bq\\b|searchbox|combobox/.test(s)
+                         || (e.form && (e.form.method || 'get').toLowerCase() === 'get' && e.type !== 'password');
+                }""",
+                timeout=1500,
+            )
+        )
+    except Exception:  # noqa: BLE001
+        return False

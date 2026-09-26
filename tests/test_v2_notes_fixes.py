@@ -185,6 +185,8 @@ def test_live_quiet_since_counts_typed_text_and_model_turns():
         last_stop = 0.0
 
     v = live.LiveVoice.__new__(live.LiveVoice)
+
+    v._taint, v._utt_started, v._last_answer = [], 0.0, (0.0, "")
     v.spk = Spk()
     v._session_open = 100.0
     v._last_user_speech = 0.0

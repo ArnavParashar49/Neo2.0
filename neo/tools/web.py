@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 
 import httpx
 
@@ -163,6 +164,7 @@ def _news(query: str, n: int) -> str:
         )
     ],
     payload=True,
+    untrusted=True,
 )
 async def web_search(a: dict, c: ToolContext) -> str:
     n = int(a.get("n") or 6)
@@ -181,14 +183,39 @@ async def web_search(a: dict, c: ToolContext) -> str:
     parallel_safe=True,
     category="web",
     slow=True,
+    untrusted=True,
 )
 async def web_fetch(a: dict, c: ToolContext) -> str:
-    url = a["url"]
-    if not url.startswith("http"):
+    from neo.agent import confirm
+    from neo.tools.computer import policy
+
+    url = str(a["url"]).strip()
+    if not re.match(r"^[a-z][\w+.-]*://", url, re.I):
         url = "https://" + url
+    # A background fetch only goes to the public internet: never this Mac's own services, the
+    # router or other machines on the network (a page could ask for them).
+    if why := await asyncio.to_thread(policy.private_host, url):
+        return f"Error: not fetching {url} — {why}."
+    if c.tainted() and policy.url_carries_data(url):
+        gate = confirm.gated(
+            "web_fetch", a, f"fetch a link that carries data (after reading {c.tainted()})", detail=url
+        )
+        if isinstance(gate, str):
+            return gate
     limit = int(a.get("max_chars") or 12000)
+
+    async def _each_hop(request: httpx.Request) -> None:
+        if why := await asyncio.to_thread(policy.private_host, str(request.url)):
+            raise httpx.RequestError(f"redirected to {request.url.host} — {why}", request=request)
+
     try:
-        async with httpx.AsyncClient(follow_redirects=True, timeout=20, headers={"User-Agent": _UA}) as cl:
+        async with httpx.AsyncClient(
+            follow_redirects=True,
+            timeout=20,
+            headers={"User-Agent": _UA},
+            event_hooks={"request": [_each_hop]},
+            max_redirects=5,
+        ) as cl:
             r = await cl.get(url)
             r.raise_for_status()
     except Exception as e:  # noqa: BLE001
