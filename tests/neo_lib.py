@@ -40,6 +40,7 @@ class ScriptedBrain:
         self.name, self.model = name, model
         self.systems: list[str] = []
         self.tools_seen: list[list[str]] = []
+        self.inputs: list[str] = []  # every message text it was sent
         self.calls = 0
 
     async def complete(self, messages, *, system="", tools=None, effort="medium", max_tokens=4096):
@@ -47,6 +48,7 @@ class ScriptedBrain:
 
         self.calls += 1
         self.systems.append(system)
+        self.inputs.extend(m.text for m in messages if getattr(m, "text", ""))
         self.tools_seen.append([t.name for t in tools or []])
         return self.turns.pop(0) if self.turns else Turn(text="(no more turns)")
 

@@ -19,6 +19,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from neo import runtime
 from neo.agent import confirm, fastpath
 from neo.agent.loop import AgentResult, run_agent
 from neo.agent.prompt import build as build_prompt
@@ -154,7 +155,9 @@ class Session:
         the user's own sentence, which it hands over without `from_user`). `extras`: handed to
         every tool this request calls (ToolContext.extras)."""
         origin = origin or ("user" if from_user else "live")
-        if conversation:
+        # An embedded agent's request carries only its own context: its host may ask another
+        # agent from the same task next, and what this one was told must not ride along.
+        if conversation or runtime.library_bound():
             _conversation.set(conversation)
         _request_taint.set(tuple(taint))
         _request_extras.set(dict(extras or {}))

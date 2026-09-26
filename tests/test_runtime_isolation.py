@@ -222,3 +222,33 @@ async def test_task_kind_tools_run_their_legacy_scripts_with_no_dry_run(tmp_path
     runtime.set_library_mode(False)  # the same tool in NEO.app, whose kinds are in shadow here
     out = await registry().invoke("open_app", {"target": "Notes"}, ToolContext())
     assert out.ok and dry_runs == ["open_app"]
+
+
+async def test_one_task_asking_two_agents_carries_nothing_between_them(tmp_path):
+    """A host often calls agent A, then agent B, from the same task: what A was told as context,
+    the taint A's request started with, and A's tool extras must not ride into B's request."""
+    seen: list[tuple[str, dict, list]] = []
+
+    def probe(a, c):
+        seen.append((c.user_text, dict(c.extras), list(c.taint)))
+        return "ok"
+
+    rts = []
+    for name in ("a", "b"):
+        rt = make_runtime(tmp_path / name, name)
+        rt.registry.register(RegisteredTool("zz_probe", "probe", _OBJ, probe))
+        brain = SlowBrain([Turn(tool_calls=[ToolCall("1", "zz_probe", {})]), "done"], name=f"brain-{name}")
+        rt.brains = BrainPool(overrides=dict.fromkeys(("agent", "fast", "vision", "light", "offline"), [brain]))
+        rts.append((rt, brain))
+    (a, brain_a), (b, brain_b) = rts
+    with runtime.bind(a.scope()):
+        await Session().handle("do it", conversation="A's private notes", taint=("web_fetch",), extras={"t": "A"})
+    with runtime.bind(b.scope()):
+        await Session().handle("do it")
+    assert seen == [("do it", {"t": "A"}, ["web_fetch"]), ("do it", {}, [])]
+    assert any("A's private notes" in t for t in brain_a.inputs)  # A was told
+    assert not any("A's private notes" in t for t in brain_b.inputs + brain_b.systems)  # B never hears it
+    with runtime.bind(b.scope()):
+        from neo.agent.session import _with_conversation
+
+        assert _with_conversation("x") == "x"
