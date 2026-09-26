@@ -42,7 +42,7 @@ def loader(monkeypatch):
     state = types.SimpleNamespace(gate=threading.Event(), opened=[], locked_while_opening=[], fail=False)
     state.gate.set()
 
-    def fetch():
+    def find():  # on this Mac already, its weights read
         return "/nowhere/typed-decisions"
 
     def open_(path):
@@ -54,7 +54,7 @@ def loader(monkeypatch):
         state.opened.append(agent)
         return agent
 
-    monkeypatch.setattr(zeroshot, "_fetch", fetch)
+    monkeypatch.setattr(zeroshot, "_find", find)
     monkeypatch.setattr(zeroshot, "_open", open_)
     return state
 
@@ -63,6 +63,7 @@ def loader(monkeypatch):
 def _fresh(monkeypatch):
     monkeypatch.setattr(zeroshot, "_agent", None)
     monkeypatch.setattr(zeroshot, "_loading", None)
+    monkeypatch.setattr(zeroshot, "_fetching", None)
     monkeypatch.setattr(zeroshot, "_failed_at", float("-inf"))
     monkeypatch.setattr(zeroshot, "_used", 0.0)
     yield
@@ -103,13 +104,11 @@ def test_concurrent_first_questions_share_one_load(loader):
     assert len(loader.opened) == 1 and all(r is not None for r in out)
 
 
-def test_a_slow_load_answers_none_in_time_and_never_computes_the_stale_question(loader):
+def test_a_slow_load_answers_none_within_the_wait_and_drops_the_question(loader):
     loader.gate.clear()
-    stale = threading.Event()
     t = time.perf_counter()
-    assert zeroshot.ask("s", Q, wait_s=0.1, stale=stale) is None  # the caller's prior decides
+    assert zeroshot.ask("s", Q, wait_s=0.1) is None  # the caller's prior decides
     assert time.perf_counter() - t < 1.0
-    stale.set()  # the caller gave up
     loader.gate.set()
     assert wait_until(lambda: zeroshot._agent is not None)
     assert loader.opened[0].calls == [{"text": "warm up"}]
@@ -188,6 +187,93 @@ def test_laya_off_or_a_failed_load_answers_none_without_retrying_at_once(loader,
     assert zeroshot.ask("s", Q, wait_s=1.0) is None
     assert len(loader.locked_while_opening) == 1  # tried once; not again within RETRY_S
     assert not neo.reflex.laya_lock().locked()
+
+
+def test_a_checkpoint_not_on_this_mac_downloads_in_the_background_and_nobody_waits_for_it(loader, monkeypatch):
+    here, gate, downloads = threading.Event(), threading.Event(), []
+    monkeypatch.setattr(zeroshot, "_find", lambda: "/nowhere/typed-decisions" if here.is_set() else None)
+
+    def hub(download=True):  # ~0.8 GB to download on a fresh Mac
+        if not download:
+            raise FileNotFoundError("not in the cache")
+        downloads.append(download)
+        gate.wait(5)
+        here.set()
+        return "/nowhere/typed-decisions"
+
+    monkeypatch.setattr(zeroshot, "checkpoint_dir", hub)
+    for _ in range(3):  # the first question starts the download; none waits its wait_s for it
+        t = time.perf_counter()
+        assert zeroshot.ask("s", Q, wait_s=1.0) is None
+        assert time.perf_counter() - t < 0.5
+    assert downloads == [True] and not loader.opened
+    assert not zeroshot.available()  # neo/decide doesn't even shortlist for it meanwhile
+    gate.set()
+    assert wait_until(lambda: zeroshot._fetching is None)
+    assert zeroshot.available()
+    assert zeroshot.ask("s", Q, wait_s=2.0) is not None  # here now: loaded and answered
+    assert downloads == [True]
+
+
+def test_only_a_complete_checkpoint_on_this_mac_is_found_and_looking_never_downloads(tmp_path, monkeypatch):
+    folder = tmp_path / "typed-decisions"
+
+    def cached(download=True):
+        assert download is False
+        if not tmp_path.joinpath("cached").exists():
+            raise FileNotFoundError("nothing of this revision in the cache")
+        return str(folder)
+
+    monkeypatch.setattr(zeroshot, "checkpoint_dir", cached)
+    assert zeroshot._find() is None
+    tmp_path.joinpath("cached").touch()  # the revision's folder: the reflex's checkpoint shares it
+    assert zeroshot._find() is None
+    folder.mkdir()
+    (folder / "rl_agent_config.json").write_text("{}")
+    (folder / "model.safetensors").write_bytes(b"\0" * 1024)
+    assert zeroshot._find() == str(folder)
+
+
+def test_prefetch_downloads_without_loading_and_a_failed_download_waits_before_retrying(loader, monkeypatch):
+    from neo import config
+
+    got, offline = [], []
+
+    def hub(download=True):
+        got.append(download)
+        if not download:
+            raise FileNotFoundError("not in the cache")
+        if offline:
+            raise OSError("offline")
+        return "/x"
+
+    monkeypatch.setattr(zeroshot, "checkpoint_dir", hub)
+    zeroshot.prefetch()
+    assert wait_until(lambda: zeroshot._fetching is None) and got == [False, True]
+    assert not loader.opened and zeroshot._agent is None
+    got.clear()
+    offline.append(True)
+    zeroshot.prefetch()
+    assert wait_until(lambda: zeroshot._fetching is None) and got == [False, True]
+    zeroshot.prefetch()
+    assert zeroshot.ask("s", Q, wait_s=0.5) is None
+    time.sleep(0.05)
+    assert got == [False, True]  # not again within RETRY_S (each try may pull ~0.8 GB)
+    monkeypatch.setattr(zeroshot, "_failed_at", float("-inf"))
+    monkeypatch.setenv("NEO_REFLEX", "off")
+    monkeypatch.setattr(config, "_settings", None)
+    zeroshot.prefetch()
+    assert zeroshot._fetching is None and got == [False, True]  # Laya off: nothing to fetch
+
+
+def test_prefetch_of_a_checkpoint_already_here_never_waits_for_the_reflex(loader, monkeypatch):
+    got = []
+    monkeypatch.setattr(zeroshot, "_local", lambda: "/nowhere/typed-decisions")
+    monkeypatch.setattr(zeroshot, "checkpoint_dir", lambda download=True: got.append(download))
+    with neo.reflex.laya_lock():  # the reflex is still loading at NEO's start
+        zeroshot.prefetch()
+        assert wait_until(lambda: zeroshot._fetching is None) and not got
+        assert zeroshot.available()
 
 
 def test_the_checkpoint_is_fetched_at_the_pinned_revision_with_only_its_own_files(monkeypatch):

@@ -154,12 +154,13 @@ def use_laya(monkeypatch, pick) -> FakeLaya:
 
 
 class FakeReflex:
-    """The reflex with trained heads: its Decision carries the kind head's answer."""
+    """The reflex with trained heads: its Decision carries the kind head's answer ('' = the head
+    abstained, as it does for a chat). ``kind_head=False``: trained heads, but no kind head yet."""
 
     has_head = True
 
-    def __init__(self, kind: str | None, p: float = 0.0):
-        self.kind, self.p = kind, p
+    def __init__(self, kind: str | None, p: float = 0.0, kind_head: bool = True):
+        self.kind, self.p, self.has_kind_head = kind, p, kind_head
         self.texts: list[str] = []
 
     def decide(self, text):
@@ -167,10 +168,10 @@ class FakeReflex:
         return types.SimpleNamespace(intent="quick_action", kind=self.kind, kind_p=self.p)
 
 
-def use_reflex(monkeypatch, kind: str | None, p: float = 0.0) -> FakeReflex:
+def use_reflex(monkeypatch, kind: str | None, p: float = 0.0, kind_head: bool = True) -> FakeReflex:
     import neo.reflex
 
-    fake = FakeReflex(kind, p)
+    fake = FakeReflex(kind, p, kind_head)
     monkeypatch.setattr(neo.reflex, "get_laya", lambda: fake)
     return fake
 
@@ -303,9 +304,9 @@ def test_a_busy_laya_costs_the_lock_wait_not_the_whole_timeout(monkeypatch):
         holder.join()
     assert dt < 1.0
     assert order(c)[:3] == ["Tunewave", "web", "Cliptide"] and not fake.calls
-    assert kind == ("other", 0.0) and not reflex.texts
+    assert kind == ("other", 0.0, False) and not reflex.texts
     assert order(choose("play_media", "play something", APPS))[0] == "Cliptide"
-    assert asyncio.run(engine.decide_kind("play jazz")) == ("play_media", pytest.approx(0.9))
+    assert asyncio.run(engine.decide_kind("play jazz")) == ("play_media", pytest.approx(0.9), False)
 
 
 def test_an_answer_that_came_too_late_is_never_computed(monkeypatch):
@@ -327,7 +328,7 @@ def test_an_answer_that_came_too_late_is_never_computed(monkeypatch):
         await asyncio.sleep(0.2)  # the worker finishes loading after the caller gave up
         return r
 
-    assert asyncio.run(run()) == ("other", 0.0)
+    assert asyncio.run(run()) == ("other", 0.0, False)
     assert not fake.texts
 
 
@@ -405,6 +406,7 @@ def test_many_used_apps_go_through_laya_shortlist(monkeypatch):
         return np.array([[1.0, 0.0] if "video" in t or "film" in t else [0.0, 1.0] for t in texts])
 
     monkeypatch.setattr(embed, "embed_texts", minilm)
+    monkeypatch.setattr(embed, "ready", lambda: True)  # NEO's start loaded it
     fake = use_laya(monkeypatch, lambda s, labels: {k: (0.9 if k == "Reelio" else 0.1 / (len(labels) - 1)) for k in labels})
     c = asyncio.run(engine.choose("play_media", "play a film", apps))
     assert order(c)[:2] == ["Reelio", "web"]  # Laya's sure pick, then the web: the rest were opened once
@@ -415,13 +417,56 @@ def test_many_used_apps_go_through_laya_shortlist(monkeypatch):
 
 
 def test_without_the_embedder_the_most_used_apps_go_to_laya(monkeypatch):
+    from neo.memory import embed
+
     music = {"category": "public.app-category.music", "media_evidence": MEDIA}
     apps = [mk(f"Player{i:02d}", f"test.p{i}", **music, **LIGHT) for i in range(24)]
     fave = mk("Reelio", "test.reelio", category="public.app-category.video", media_evidence=MEDIA, **HEAVY)
     fake = use_laya(monkeypatch, prefer("Reelio", 0.9))
+    monkeypatch.setattr(embed, "ready", lambda: True)
     c = asyncio.run(engine.choose("play_media", "play a film", [*apps, fave]))  # embed_texts -> None
     assert len(fake.calls[-1][1]["app"]["criteria"]) == engine.LAYA_POOL
     assert order(c)[0] == "Reelio"
+
+
+def test_the_shortlist_never_waits_for_the_embedder_and_skips_when_laya_cannot_answer(monkeypatch):
+    from neo.memory import embed
+
+    music = {"category": "public.app-category.music", "media_evidence": MEDIA}
+    apps = [mk(f"Player{i:02d}", f"test.p{i}", **music, **LIGHT) for i in range(24)]
+    apps.append(mk("Reelio", "test.reelio", category="public.app-category.video", media_evidence=MEDIA, **HEAVY))
+    calls, gate = [], threading.Event()
+
+    def slow(texts):  # another caller's batch holds MiniLM
+        calls.append(len(texts))
+        gate.wait(3)
+        return np.array([[0.0, 1.0]] * len(texts))
+
+    monkeypatch.setattr(embed, "embed_texts", slow)
+    monkeypatch.setattr(engine, "LAYA_TIMEOUT_S", 0.3)
+    fake = use_laya(monkeypatch, prefer("Reelio", 0.9))
+
+    async def timed():
+        t = time.perf_counter()
+        c = await engine.choose("play_media", "play a film", apps)
+        dt = time.perf_counter() - t
+        gate.set()  # let a stuck worker finish so the loop can close
+        return c, dt
+
+    # not loaded yet (NEO's start is still warming it): no shortlist, never a load from here
+    c, dt = asyncio.run(timed())
+    assert not calls and dt < 0.5 and order(c)[0] == "Reelio"
+    assert len(fake.calls[-1][1]["app"]["criteria"]) == engine.LAYA_POOL
+    # loaded but busy: the shortlist and the question share LAYA_TIMEOUT_S, then the prior decides
+    gate.clear()
+    monkeypatch.setattr(embed, "ready", lambda: True)
+    c, dt = asyncio.run(timed())
+    assert calls and dt < 0.8 and order(c)[0] == "Reelio"
+    # zero-shot Laya is off: nothing would read a shortlist, so none is made
+    calls.clear()
+    monkeypatch.setattr(zeroshot, "_agent", None)
+    c, dt = asyncio.run(timed())
+    assert not calls and order(c)[0] == "Reelio"
 
 
 # ---- learning ------------------------------------------------------------------------------------
@@ -585,18 +630,97 @@ def test_concurrent_records_are_not_lost():
 def test_decide_kind_comes_from_the_reflex_kind_head(monkeypatch):
     fake = use_laya(monkeypatch, prefer("send_message", 0.99))
     reflex = use_reflex(monkeypatch, "play_media", 0.62)
-    assert asyncio.run(engine.decide_kind(" put on some jazz ")) == ("play_media", pytest.approx(0.62))
+    k = asyncio.run(engine.decide_kind(" put on some jazz "))
+    assert k == ("play_media", pytest.approx(0.62), False) and not k.advisory
     assert reflex.texts == ["put on some jazz"] and not fake.calls  # no zero-shot question at all
     # the caller's own Decision for the text is used as is: the reflex isn't asked again
     d = types.SimpleNamespace(kind="add_event", kind_p=0.7)
-    assert asyncio.run(engine.decide_kind("lunch friday", d)) == ("add_event", pytest.approx(0.7))
+    assert asyncio.run(engine.decide_kind("lunch friday", d)) == ("add_event", pytest.approx(0.7), False)
     assert reflex.texts == ["put on some jazz"] and not fake.calls
 
 
-def test_zero_shot_kind_counts_only_when_very_sure(monkeypatch):
-    use_reflex(monkeypatch, None)  # trained heads, but no kind head yet
+@pytest.fixture
+def zs_asked(monkeypatch):
+    """Every zero-shot question decide_kind asks (none is answered)."""
+    asked = []
+    monkeypatch.setattr(zeroshot, "ask", lambda state, questions, wait_s, stale=None: asked.append(state))
+    return asked
+
+
+def test_a_kind_head_that_is_busy_or_abstains_is_never_second_guessed_by_zero_shot(monkeypatch, zs_asked):
+    import neo.reflex
+
+    # a retrain holds Laya past LAYA_LOCK_S: the head may well know, so don't guess - and don't
+    # start loading 1.7 GB of zero-shot model while memory is tightest
+    reflex = use_reflex(monkeypatch, "play_media", 0.9)
+    monkeypatch.setattr(engine, "LAYA_LOCK_S", 0.05)
+    with neo.reflex.laya_lock():
+        assert asyncio.run(engine.decide_kind("play jazz")) == ("other", 0.0, False)
+    assert not zs_asked and not reflex.texts
+    # the head abstains (not an action): that is its answer
+    reflex = use_reflex(monkeypatch, "", 0.0)
+    assert asyncio.run(engine.decide_kind("how are you")) == ("other", 0.0, False)
+    assert reflex.texts == ["how are you"] and not zs_asked
+    # the caller's Decision abstained, and the reflex has a kind head: not asked again either
+    d = types.SimpleNamespace(intent="chat", kind="", kind_p=0.0)
+    assert asyncio.run(engine.decide_kind("how are you", d)) == ("other", 0.0, False)
+    assert reflex.texts == ["how are you"] and not zs_asked
+    # only a reflex without a kind head falls back to zero-shot
+    use_reflex(monkeypatch, None, kind_head=False)
+    asyncio.run(engine.decide_kind("play jazz"))
+    assert zs_asked == [{"text": "play jazz"}]
+
+
+def test_a_reflex_that_only_has_its_head_file_is_read_for_a_kind_head(monkeypatch, zs_asked):
+    import neo.reflex
+
+    class Reflex:  # no has_kind_head flag: its loaded head file says
+        has_head = True
+
+        def __init__(self, head):
+            self._head = head
+
+        def decide(self, text):
+            return types.SimpleNamespace(kind="play_media", kind_p=0.8)
+
+    monkeypatch.setattr(neo.reflex, "get_laya", lambda: Reflex({"intent": {}, "kind": {"classes": []}}))
+    assert asyncio.run(engine.decide_kind("play jazz")) == ("play_media", pytest.approx(0.8), False)
+    assert not zs_asked
+    monkeypatch.setattr(neo.reflex, "get_laya", lambda: Reflex({"intent": {}, "kind": None}))
+    asyncio.run(engine.decide_kind("play jazz"))
+    assert zs_asked == [{"text": "play jazz"}]
+
+
+def test_decide_kind_takes_at_most_the_laya_timeout_in_all(monkeypatch):
+    import neo.reflex
+
+    gate = threading.Event()
+
+    def slow_reflex():
+        time.sleep(0.3)
+        return FakeReflex(None, kind_head=False)
+
+    monkeypatch.setattr(neo.reflex, "get_laya", slow_reflex)
+    monkeypatch.setattr(zeroshot, "ask", lambda *a, **kw: gate.wait(3))  # the zero-shot model hangs
+    monkeypatch.setattr(engine, "LAYA_TIMEOUT_S", 0.5)
+
+    async def timed():
+        t = time.perf_counter()
+        r = await engine.decide_kind("play jazz")
+        dt = time.perf_counter() - t
+        gate.set()
+        return r, dt
+
+    r, dt = asyncio.run(timed())
+    assert r == ("other", 0.0, False) and dt < 0.7  # the reflex's 0.3 s came out of the same budget
+
+
+def test_zero_shot_kind_counts_only_when_very_sure_and_only_as_advice(monkeypatch):
+    use_reflex(monkeypatch, None, kind_head=False)  # trained heads, but no kind head yet
     fake = use_laya(monkeypatch, prefer("play_media", 0.97))
-    assert asyncio.run(engine.decide_kind("put on some jazz")) == ("play_media", pytest.approx(0.97))
+    k = asyncio.run(engine.decide_kind("put on some jazz"))
+    # a hint, never a route: even at this bar 9% of the kinds it gave were wrong on held-out requests
+    assert k == ("play_media", pytest.approx(0.97), True) and k.advisory
     state, q = fake.calls[-1]
     assert state == {"text": "put on some jazz"}
     assert set(q["kind"]["criteria"]) == set(engine.TASKS)
@@ -605,17 +729,18 @@ def test_zero_shot_kind_counts_only_when_very_sure(monkeypatch):
     # sure enough to order apps, not to pick the kind: zero-shot was measured 23% sure-and-wrong there
     for p in (0.9, 0.6):
         use_laya(monkeypatch, prefer("send_message", p))
-        assert asyncio.run(engine.decide_kind("remind me to call mom")) == ("other", 0.0)
+        assert asyncio.run(engine.decide_kind("remind me to call mom")) == ("other", 0.0, False)
     # a Decision without a kind (the lite reflex, rules) falls back the same way, and so does a
     # label the engine has no task for
     use_laya(monkeypatch, prefer("add_reminder", 0.99))
     for d in (types.SimpleNamespace(intent="quick_action"), types.SimpleNamespace(kind="dance", kind_p=1.0)):
-        assert asyncio.run(engine.decide_kind("remind me to call mom", d)) == ("add_reminder", pytest.approx(0.99))
+        got = asyncio.run(engine.decide_kind("remind me to call mom", d))
+        assert got == ("add_reminder", pytest.approx(0.99), True)
 
 
 def test_decide_kind_without_laya_is_other():
-    assert asyncio.run(engine.decide_kind("put on some jazz")) == ("other", 0.0)
-    assert asyncio.run(engine.decide_kind("  ")) == ("other", 0.0)
+    assert asyncio.run(engine.decide_kind("put on some jazz")) == ("other", 0.0, False)
+    assert asyncio.run(engine.decide_kind("  ")) == ("other", 0.0, False)
 
 
 def test_decide_kind_gives_up_quickly_when_laya_hangs(monkeypatch):
@@ -638,7 +763,7 @@ def test_decide_kind_gives_up_quickly_when_laya_hangs(monkeypatch):
         return r, dt
 
     r, dt = asyncio.run(timed())
-    assert r == ("other", 0.0) and dt < 1.0
+    assert r == ("other", 0.0, False) and dt < 1.0
 
 
 def test_no_app_names_in_the_engine():
@@ -710,6 +835,17 @@ def test_the_first_app_scan_runs_off_the_event_loop(monkeypatch):
     assert seen == [False]
 
 
+def test_neo_start_scans_the_apps_then_makes_sure_the_zero_shot_checkpoint_is_here(monkeypatch):
+    seen = []
+    monkeypatch.setattr(engine, "_inventory", lambda: seen.append("scan") or [])
+    monkeypatch.setattr(zeroshot, "prefetch", lambda: seen.append("fetch"))
+    engine.warm()
+    end = time.monotonic() + 2
+    while len(seen) < 2 and time.monotonic() < end:
+        time.sleep(0.01)
+    assert seen == ["scan", "fetch"]
+
+
 def test_the_privacy_erase_forgets_what_was_learned_about_apps():
     from neo.config import settings
 
@@ -737,7 +873,7 @@ def ledger(monkeypatch):
 
 def test_settled_attempts_of_a_decision_are_reported_once_each(ledger):
     async def request():
-        await engine.choose("play_media", "play a song", APPS)
+        await engine.choose("play_media", "a song", APPS, said="play a song")
         engine.record("play_media", "test.tunewave", "script", False)  # blamed: reported
         engine.record("play_media", "test.tunewave", "ax", False)  # same app, same outcome: once
         engine.record("play_media", "test.cliptide", "ax", False, "permission")  # not its fault
@@ -752,17 +888,44 @@ def test_settled_attempts_of_a_decision_are_reported_once_each(ledger):
     assert engine.prior("play_media", "test.tunewave", "ax") < 0.5  # the store still learned all of it
 
 
+def test_only_the_users_own_words_are_reported(ledger):
+    async def request(text, **said):
+        await engine.choose("play_media", text, APPS, **said)
+        engine.record("play_media", "web", "web", True)
+
+    # what a decision reads may be the model's query, or Live's arguments while the user's words
+    # are still on the way: neither is ever reported
+    asyncio.run(request("{'query': 'bohemian rhapsody'}"))
+    asyncio.run(request("bohemian rhapsody", said=" "))
+    assert ledger == []
+    asyncio.run(request("bohemian rhapsody", said="neo play bohemian rhapsody"))
+    assert ledger == [("neo play bohemian rhapsody", "play_media", "web", True)]
+
+
+def test_a_decision_that_failed_leaves_nothing_to_file_a_later_outcome_under(ledger, monkeypatch):
+    async def session_task():  # one long-lived task, two requests
+        await engine.choose("play_media", "song a", APPS, said="play song a")
+        engine.record("play_media", "test.tunewave", "script", True)
+        monkeypatch.setattr(engine, "_self_ids", lambda: 1 / 0)
+        with pytest.raises(ZeroDivisionError):
+            await engine.choose("play_media", "song b", APPS, said="play song b")
+        engine.record("play_media", "web", "web", True)  # play_best's own fallback after the failure
+
+    asyncio.run(session_task())
+    assert ledger == [("play song a", "play_media", "test.tunewave", True)]
+
+
 def test_attempts_outside_a_decision_are_not_reported(ledger):
     engine.record("play_media", "test.tunewave", "ax", True)  # no choose() in this task
 
     async def other_kind():
-        await engine.choose("play_media", "play a song", APPS)
+        await engine.choose("play_media", "play a song", APPS, said="play a song")
         engine.record("send_email", "test.tunewave", "ax", True)
 
     asyncio.run(other_kind())
 
     async def elsewhere():  # a decision in one task says nothing about another task's attempts
-        await engine.choose("play_media", "play a song", APPS)
+        await engine.choose("play_media", "play a song", APPS, said="play a song")
 
     asyncio.run(elsewhere())
     engine.record("play_media", "test.tunewave", "ax", True)
@@ -776,7 +939,7 @@ def test_no_ledger_or_a_broken_one_never_breaks_learning(monkeypatch):
     monkeypatch.delattr(neo.reflex, "outcomes", raising=False)
 
     async def request():
-        await engine.choose("play_media", "play a song", APPS)
+        await engine.choose("play_media", "play a song", APPS, said="play a song")
         engine.record("play_media", "test.tunewave", "ax", True)
 
     asyncio.run(request())

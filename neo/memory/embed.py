@@ -41,6 +41,11 @@ def _get():
         return _model
 
 
+def ready() -> bool:
+    """Whether the model is loaded: a caller that must never wait for (or start) the load asks this."""
+    return _model is not None
+
+
 def embed_texts(texts: list[str]) -> np.ndarray | None:
     if not texts:
         return np.zeros((0, DIM), dtype=np.float32)
