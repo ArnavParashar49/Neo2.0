@@ -19,7 +19,7 @@ from typing import Literal
 from neo.agent import confirm, fastpath
 from neo.agent.loop import AgentResult, run_agent
 from neo.agent.prompt import build as build_prompt
-from neo.agent.registry import ToolContext, ToolOutput, fence, registry, voiced
+from neo.agent.registry import Origin, ToolContext, ToolOutput, fence, registry, voiced
 from neo.config import settings
 from neo.events import NeoState, bus
 from neo.providers import brain
@@ -28,21 +28,26 @@ from neo.reflex import Reflex, is_bare_stop, outcomes
 from neo.reflex.schema import Decision
 
 # A confirmation must be a short, pure affirmative; any retraction anywhere wins over a leading "ok"
-# ("haan, mat bhejo" is a no). English, Hinglish and Hindi.
+# ("haan, mat bhejo" is a no). English, Hinglish and Hindi. "ji" / "जी" alone is also "I'm
+# listening" or, asked back, "pardon?", and "haa" alone as often a sigh: they count only with haan.
 _YES = re.compile(
     r"^\s*(?:yes|yeah|yep|yup|sure|ok(?:ay)?|go ahead|do it|confirm(?:ed)?|please do|proceed|go for it|"
-    r"yes please|sure thing|absolutely|correct|haan(?:\s+ji)?|haa|ji(?:\s+haan)?|th(?:ee|i)k\s+hai|kar\s+do|"
-    r"bhej\s+do|हाँ|हां|जी|ठीक\s+है|भेज\s+दो|कर\s+दो)"
+    r"yes please|sure thing|absolutely|correct|haan|haan?\s+ji|ji\s+haan?|th(?:ee|i)k\s+hai|kar\s+do|"
+    r"bhej\s+do|हाँ|हां|जी\s+(?:हाँ|हां)|ठीक\s+है|भेज\s+दो|कर\s+दो)"
     r"(?:[\s,]+(?:please|go ahead|do it|thanks|ji|kar\s+do|bhej\s+do|जी|कर\s+दो|भेज\s+दो))*[\s.!।]*$",
     re.I,
 )
 _NO = re.compile(
     r"\b(?:no|nope|don'?t|do not|cancel|stop|never ?mind|leave it|not yet|wait|hold on|abort|"
-    r"nahi|nahin|mat|ruko|rehne\s+do)\b"
+    r"nahi|nahin|ruko|rehne\s+do|abhi\s+mat|mat\s+(?:do|(?:kar|bhej)(?:o|na|en|ein|iye)?))\b"
+    # "mat" is also English ("a yoga mat"): a no only before a verb, after "abhi", or on its own.
+    r"|^\s*mat[\s.!।]*$"
     # Devanagari vowel signs aren't word characters, so \b can't mark where these words end.
     r"|(?<![\w\u0900-\u0963\u0971-\u097F])(?:नहीं|नही|मत|रुको|रहने\s+दो)(?![\w\u0900-\u0963\u0971-\u097F])",
     re.I,
 )
+# "kyun nahi" ("why not") agrees, but it's no pure yes: neither a yes nor, for its "nahi", a no.
+_WHY_NOT = re.compile(r"\bky[uo]n?\s+nahin?\b|क्यों\s+नहीं", re.I)
 _MAX_HISTORY = 40  # messages sent to the model; older ones are dropped (memory keeps the gist)
 _HISTORY_CAP = 160  # messages held in memory at all; beyond this the oldest are summarised and let go
 _CHECKPOINT_MIN_ASKS = 4  # a periodic summary needs at least this many new requests
@@ -75,7 +80,7 @@ def _mark_job() -> None:
 
 def answer_of(text: str) -> bool | None:
     """True for a pure yes, False for a no, None for anything else."""
-    if _NO.search(text):
+    if _NO.search(_WHY_NOT.sub(" ", text)):
         return False
     if _YES.match(text):
         return True
@@ -123,10 +128,14 @@ class Session:
         conversation: str = "",
         from_user: bool = False,
         taint: list[str] | tuple[str, ...] = (),
+        origin: Literal["user", "live"] | None = None,
     ) -> Reply:
         """Handle one request. `from_user` = these are the user's own words (typed, or their
         transcribed speech) — only then can they answer a pending confirmation. Text a model wrote
-        (Gemini Live's agent_task goal) never can."""
+        (Gemini Live's agent_task goal) never can. `origin`: who chose the words a fast path runs,
+        the user or Live's model; by default the user only with `from_user` (Live passes "user" for
+        the user's own sentence, which it hands over without `from_user`)."""
+        origin = origin or ("user" if from_user else "live")
         if conversation:
             _conversation.set(conversation)
         _request_taint.set(tuple(taint))
@@ -165,7 +174,7 @@ class Session:
         # ("type Laptops in the heading" reads as an agent task to the reflex, but the words are
         # the whole job — no model needed.) A plan covers the whole utterance or nothing.
         if d.intent != "chat" and (steps := fastpath.plan(text)):
-            return await self._quick(text, d, steps, job=job)
+            return await self._quick(text, d, steps, job=job, origin=origin)
 
         if d.intent == "chat" and not images and not d.needs_screen:
             return await self._chat(text, d, job)
@@ -186,7 +195,7 @@ class Session:
             # direct use (it has fast paths) when nothing in the request needs an argument.
             bare = not t.parameters.get("required") and (t.fast_path or not t.parameters.get("properties"))
             if bare and not t.quiet and not _QUALIFIER.search(text):
-                return await self._quick(text, d, [(d.tool, {})], job=job)
+                return await self._quick(text, d, [(d.tool, {})], job=job, origin=origin)
             return await self._agent(text, d, images, job, only=[d.tool])
 
         return await self._agent(text, d, images, job)
@@ -200,7 +209,7 @@ class Session:
         # A command, by construction: if the agent has to rescue it and succeeds, there's still
         # nothing to say.
         d = Decision("agent_task", 1.0, False, 0.0, False, 0.0, source="lane", reply=False, reply_p=0.0)
-        return await self._quick(text, d, steps, job=job)
+        return await self._quick(text, d, steps, job=job, origin="user")
 
     async def cancel_all(self) -> int:
         """Stop every running job (the user said stop) and drop any unanswered question."""
@@ -254,7 +263,9 @@ class Session:
         await bus().end_job(job)
         return Reply(reply, "chat", d, job=job)
 
-    async def _quick(self, text: str, d: Decision, steps: list[tuple[str, dict]], *, job: str) -> Reply:
+    async def _quick(
+        self, text: str, d: Decision, steps: list[tuple[str, dict]], *, job: str, origin: Origin
+    ) -> Reply:
         """Run fast-path steps in order with no model. Actions that worked are silent; answers,
         and anything that needs the user, are spoken. An action that fails hands the whole
         request to the agent, which can look at the screen and find another way."""
@@ -262,18 +273,20 @@ class Session:
         await bus().set_state(NeoState.WORKING, job=job)
         t0 = time.time()
         try:
-            return await self._quick_steps(text, d, steps, job=job, t0=t0)
+            return await self._quick_steps(text, d, steps, job=job, t0=t0, origin=origin)
         except asyncio.CancelledError:
             outcomes.cancelled(job)  # stopped part-way: not what they wanted
             raise
 
-    async def _quick_steps(self, text: str, d: Decision, steps: list[tuple[str, dict]], *, job: str, t0: float) -> Reply:
+    async def _quick_steps(
+        self, text: str, d: Decision, steps: list[tuple[str, dict]], *, job: str, t0: float, origin: Origin
+    ) -> Reply:
         from neo.agent.early import _APP_TOOLS, _SETTLE_AFTER_APP_S, early
 
         spoken: list[str] = []
         texts: list[str] = []
         prev = ""
-        asked: confirm.Pending | None = None  # the question a step stopped to ask
+        asked = ""  # the card a step stopped to ask about
         for i, (tool, args) in enumerate(steps):
             t = registry().get(tool)
             async with early()._lock:  # an early run still in flight finishes — and leaves its claim — first
@@ -286,7 +299,7 @@ class Session:
                 if prev in _APP_TOOLS and tool not in _APP_TOOLS:
                     await asyncio.sleep(_SETTLE_AFTER_APP_S)
                 await bus().tool_start(tool, args, job=job)
-                ctx = ToolContext(user_text=text, taint=list(_request_taint.get()), origin="user")
+                ctx = ToolContext(user_text=text, taint=list(_request_taint.get()), origin=origin)
                 out = await registry().invoke(tool, args, ctx)
                 await bus().tool_end(tool, out.ok, out.text, job=job)
                 outcomes.step(job, tool, out.ok, halt=out.halt)
@@ -295,8 +308,7 @@ class Session:
                     ran = "; ".join(f"{tl}({', '.join(f'{k}={v!r}' for k, v in a.items())})" for tl, a in steps[:i])
                     note = f"\n[ALREADY DONE] These steps of the request already ran — don't repeat them: {ran}" if ran else ""
                     return await self._agent(text, d, None, job, done_note=note)
-                if out.halt and out.text.startswith(confirm.NEEDS_CONFIRM):
-                    asked = confirm.peek()
+                asked = out.staged or asked
             prev = tool
             texts.append(out.text)
             needs_user = out.text.startswith(("NEEDS_", "Error"))
@@ -313,9 +325,10 @@ class Session:
             "turn", job=job, route="quick", brain="", model="", ms=int((time.time() - t0) * 1000), tools=len(steps)
         )
         outcomes.end(job)
-        if asked is not None and (p := confirm.peek()) is not None and p.action_id == asked.action_id:
+        if asked and (p := confirm.peek()) is not None and p.action_id == asked:
             # The question is this session's to answer, like an agent's (the answer runs it, and no
-            # model finishes the job afterwards); the orb keeps asking until then.
+            # model finishes the job afterwards); the orb keeps asking until then. Only that card:
+            # one another job staged meanwhile was never this request's question.
             self._adopt(p, _request_taint.get(), "direct")
             await bus().set_state(NeoState.CONFIRMING, job=job)
         else:
@@ -518,8 +531,9 @@ class Session:
             await bus().tool_end(tool, out.ok, out.text, job=job)
             # The approved call may stage a new card ("<App> couldn't open Priya's chat. Send it
             # with <Other app> instead?"): that is the question now, owned by whoever owned this one.
+            # Only the card it staged — not one another job staged while it ran.
             np = confirm.peek()
-            restaged = np if out.halt and np is not None and np.action_id != aid else None
+            restaged = np if np is not None and out.staged and np.action_id == out.staged else None
             # The request that asked (if still open) now waits for the run that finishes the job,
             # or for the answer to the new card.
             episode = outcomes.confirm(True, "" if restaged else tool, out.ok, more=ours)
@@ -527,9 +541,11 @@ class Session:
                 if episode:
                     outcomes.step(episode, tool, out.ok, halt=True)
                 self._adopt(restaged, taint, "agent" if ours else "direct")
+                # Worded as its owner asks: an agent's question the way the agent loop words it.
+                q = f"{restaged.summary} — Should I go ahead?" if ours else out.text
                 await bus().set_state(NeoState.CONFIRMING, job=job)
-                await bus().say(out.text, final=True, job=job)
-                return Reply(out.text, "confirm", job=job)
+                await bus().say(q, final=True, job=job)
+                return Reply(q, "confirm", job=job)
         if not ours:
             # Asked by a direct command: there's no agent run to hand the result back to.
             msg = out.text if out.ok else f"That didn't work: {out.text}"

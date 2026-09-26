@@ -39,7 +39,17 @@ _CONTROL_ARGS = ("confirm", "cancel")  # never part of an operation: models used
 
 
 class Halt(str):
-    """A NEEDS_CONFIRM / NEEDS_USER result produced by NEO's own code (see the module doc)."""
+    """A NEEDS_CONFIRM / NEEDS_USER result produced by NEO's own code (see the module doc).
+
+    `action_id`: the card a NEEDS_CONFIRM stands for, so whoever asks the user adopts that card
+    and never one another job staged at the same moment."""
+
+    action_id: str
+
+    def __new__(cls, text: str, action_id: str = "") -> Halt:
+        h = super().__new__(cls, text)
+        h.action_id = action_id
+        return h
 
 
 @dataclass
@@ -190,7 +200,8 @@ def stage(tool: str, params: dict[str, Any], summary: str, detail: str = "") -> 
     params = clean(params)
     key = op_key(tool, params, summary, detail)
     if peek() is not None and _pending is not None and _pending.key == key:
-        return Halt(f"{NEEDS_CONFIRM}: {summary} — Should I go ahead?")  # asked again: same card, same id
+        # asked again: same card, same id
+        return Halt(f"{NEEDS_CONFIRM}: {summary} — Should I go ahead?", _pending.action_id)
     if _pending:
         audit(_pending.action_id, _pending.tool, _pending.params, "superseded")
         _announce("confirm_done", action_id=_pending.action_id, outcome="superseded")
@@ -202,7 +213,7 @@ def stage(tool: str, params: dict[str, Any], summary: str, detail: str = "") -> 
         asyncio.get_running_loop().call_later(_TTL_S + 1, peek)
     except RuntimeError:
         pass
-    return Halt(f"{NEEDS_CONFIRM}: {summary} — Should I go ahead?")
+    return Halt(f"{NEEDS_CONFIRM}: {summary} — Should I go ahead?", aid)
 
 
 def peek() -> Pending | None:

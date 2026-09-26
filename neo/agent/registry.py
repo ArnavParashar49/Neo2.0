@@ -34,6 +34,7 @@ class ToolOutput:
     images: list[ImagePart] = field(default_factory=list)
     ok: bool = True
     halt: bool = False  # a NEEDS_CONFIRM / NEEDS_USER that NEO's own code produced (confirm.Halt)
+    staged: str = ""  # a NEEDS_CONFIRM halt: the action id of the card it asks about
     # Overrides the tool's `quiet` for a success: True makes a quiet action speak (a first use,
     # a guessed time, a result NEO couldn't check), False keeps an answer tool's success silent.
     say: bool | None = None
@@ -171,12 +172,13 @@ class Registry:
             from neo.agent.confirm import Halt
 
             if isinstance(r, ToolOutput):
-                r.halt = r.halt or isinstance(r.text, Halt)
+                if isinstance(r.text, Halt):
+                    r.halt, r.staged = True, r.staged or r.text.action_id
                 return r
             halt = isinstance(r, Halt)
             text = (r or "Done.").strip() if isinstance(r, str) else str(r)
             ok = not text.lower().startswith(("error", "failed"))
-            return ToolOutput(text, ok=ok, halt=halt)
+            return ToolOutput(text, ok=ok, halt=halt, staged=r.action_id if halt else "")
         except asyncio.CancelledError:
             raise
         except TimeoutError:

@@ -74,6 +74,16 @@ def test_the_task_tools_are_registered_from_tasks_with_their_flags():
     assert registry().get("notes_create").payload and registry().get("mail_send").slow
 
 
+def test_the_task_tools_keep_their_place_in_the_registry():
+    """The tool picker's keyword fallback breaks ties, and Live declares its tools, in
+    registration order: the move changes neither."""
+    names = [t.name for t in registry().all()]
+    i = names.index("safari_read")
+    assert names[i + 1 : i + 8] == [
+        "mail_send", "mail_unread", "calendar_today", "calendar_add", "notes_create", "reminder_add", "finder_reveal"
+    ]
+
+
 def test_the_task_tools_call_the_legacy_scripts_as_before(calls):
     assert _run("notes_create", {"title": "", "body": "buy milk and eggs for the party tonight"}).ok
     _run("reminder_add", {"title": "call mom"})

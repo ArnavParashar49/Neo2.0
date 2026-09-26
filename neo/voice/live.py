@@ -992,10 +992,12 @@ class LiveVoice:
                     from neo.agent import fastpath
 
                     steps = fastpath.plan(asked) if asked else None
-                    vague = steps and any(_vague(v) for _, a in steps for v in a.values())
-                    text = asked if steps and not vague else goal
+                    own = bool(steps) and not any(_vague(v) for _, a in steps for v in a.values())
                     reply = await self._agent_session.handle(
-                        text, conversation=self._conversation(asked), taint=list(self._taint)
+                        asked if own else goal,
+                        conversation=self._conversation(asked),
+                        taint=list(self._taint),
+                        origin="user" if own else "live",
                     )
                     result, silent = reply.text, reply.silent
                     lab = self._call_labels.get(key)

@@ -804,6 +804,12 @@ async def safari_read(a: dict, c: ToolContext) -> str:
     return f"URL: {url}\n\n" + await legacy.safari_page_text()
 
 
+# The task tools (neo/tools/tasks.py) were registered right here before they moved: loading them
+# at this point keeps the registry's order, which the tool picker's keyword fallback breaks ties
+# by and Live declares its tools in.
+from neo.tools import tasks  # noqa: E402, F401
+
+
 @tool(
     "finder_reveal",
     "Reveal a file or folder in Finder.",

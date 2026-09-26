@@ -88,9 +88,9 @@ def _messenger(monkeypatch, log: list):
 
 @pytest.mark.parametrize(
     "text",
-    ["haan", "haan ji", "ji haan", "haa", "ji", "theek hai", "thik hai", "kar do", "bhej do", "haan bhej do",
-     "haan, kar do", "Haan Bhej Do!", "ok bhej do", "हाँ", "हां", "जी", "ठीक है", "भेज दो", "हाँ भेज दो", "हाँ, कर दो।",
-     "yes", "okay do it"],
+    ["haan", "haan ji", "ji haan", "haa ji", "ok ji", "theek hai", "thik hai", "kar do", "bhej do", "haan bhej do",
+     "haan, kar do", "Haan Bhej Do!", "ok bhej do", "हाँ", "हां", "हाँ जी", "जी हाँ", "जी हां", "ठीक है", "भेज दो",
+     "हाँ भेज दो", "हाँ, कर दो।", "yes", "okay do it"],
 )
 def test_hindi_and_hinglish_yes(text):
     assert answer_of(text) is True
@@ -98,14 +98,24 @@ def test_hindi_and_hinglish_yes(text):
 
 @pytest.mark.parametrize(
     "text",
-    ["haan, mat bhejo", "nahi", "nahin", "mat bhejo", "ruko", "rehne do", "cancel karo", "haan ji ruko", "नहीं",
-     "नही", "मत भेजो", "रुको", "रहने दो", "हाँ, मत भेजो", "नहीं।", "haan bhej do... nahi ruko", "yes, actually no"],
+    ["haan, mat bhejo", "nahi", "nahin", "mat bhejo", "mat karo", "mat karna", "abhi mat", "mat", "Mat!", "ruko",
+     "rehne do", "cancel karo", "haan ji ruko", "नहीं", "नही", "मत भेजो", "रुको", "रहने दो", "हाँ, मत भेजो", "नहीं।",
+     "haan bhej do... nahi ruko", "kyun nahi, mat bhejo", "yes, actually no"],
 )
 def test_hindi_and_hinglish_no_wins_over_a_leading_yes(text):
     assert answer_of(text) is False
 
 
-@pytest.mark.parametrize("text", ["haan, text badal do", "मतलब क्या है", "format the disk", "haan but later"])
+@pytest.mark.parametrize(
+    "text",
+    ["haan, text badal do", "मतलब क्या है", "format the disk", "haan but later",
+     # "ji" alone is also "I'm listening" or, asked back, "pardon?"; "haa" alone is as often a sigh
+     "ji", "Ji?", "जी", "haa", "Haa.",
+     # "why not": agreeing, but no pure yes — and no retraction either
+     "haan kyun nahi", "kyun nahi", "क्यों नहीं",
+     # "mat" is also English
+     "buy a yoga mat", "add a yoga mat to my shopping list", "matlab"],
+)
 def test_neither_yes_nor_no_is_a_new_request(text):
     assert answer_of(text) is None
 
@@ -154,8 +164,13 @@ def test_a_card_restaged_for_an_agent_stays_the_agents(monkeypatch):
         s = Session(reflex=_reflex())
         r = await s.handle("tell zz hello", from_user=True)
         assert r.route == "confirm" and s._pending_origin == "agent"
+        said: list = []
+        bus().subscribe(lambda e: said.append(e.data["text"]) if e.type == "transcript" else None)
         r = await s.handle("haan", from_user=True)
-        assert r.route == "confirm" and "on two" in r.text and s._pending_origin == "agent"
+        # Worded as the agent asks every question: the card's words, no NEEDS_CONFIRM marker.
+        q = f"{confirm.peek().summary} — Should I go ahead?"
+        assert r.route == "confirm" and r.text == q and "on two" in q and said[-1] == q
+        assert s._pending_origin == "agent"
         assert brain.calls == 1  # no follow-up yet: the user hasn't answered the new card
         r = await s.handle("yes", from_user=True)
         assert r.route == "agent" and r.text == "Sent it on two."  # the agent finishes the job
@@ -178,6 +193,57 @@ def test_something_staged_after_a_fast_path_card_is_never_approved_by_its_yes(mo
     r = asyncio.run(go())
     assert "didn't do anything" in r.text and confirm.peek() is None
     assert log == [("one", "user")]
+
+
+@pytest.mark.parametrize("then", ["asks", "recards"])
+def test_the_approved_call_never_adopts_a_card_another_job_staged(monkeypatch, then):
+    """While the approved call runs, another job stages its own card. The approved call then
+    asks the user something (no card) or re-cards — and the other job's card replaces that too.
+    Neither makes the other job's card this session's question."""
+    other: list = []
+
+    def zz_send(a, c):
+        p = confirm.gated("zz_send", a, "send hi")
+        if isinstance(p, str):
+            return p
+        nxt = confirm.gated("zz_send", {**a, "app": "two"}, "send hi on two") if then == "recards" else None
+        confirm.stage("zz_other", {"x": 1}, "another job's action")
+        other.append(confirm.peek().action_id)
+        return nxt or confirm.ask_user("Which Priya: Priya Sharma or Priya Rao?")
+
+    _add(monkeypatch, "zz_send", zz_send, risk="destructive", fast_path=[(r"^zz send$", {})])
+
+    async def go():
+        s = Session(reflex=_reflex("quick_action"))
+        await s.handle("zz send", from_user=True)
+        r = await s.handle("yes", from_user=True)
+        return s, r
+
+    s, r = asyncio.run(go())
+    assert s._pending_action == "" and confirm.peek().action_id == other[0]  # still that job's own
+    assert bus()._jobs.get(r.job) != NeoState.CONFIRMING
+
+
+def test_a_fast_path_adopts_only_the_card_its_own_step_staged(monkeypatch):
+    """A card another job stages while the step's result is reported was never this request's."""
+    _add(monkeypatch, "zz_do", lambda a, c: confirm.gated("zz_do", a, "do the thing"), risk="destructive",
+         fast_path=[(r"^zz do$", {})])
+    b = bus()
+    tool_end = b.tool_end
+
+    async def another_job_asks_meanwhile(*a, **k):
+        await tool_end(*a, **k)
+        confirm.stage("zz_other", {"x": 1}, "another job's action")
+
+    monkeypatch.setattr(b, "tool_end", another_job_asks_meanwhile)
+
+    async def go():
+        s = Session(reflex=_reflex("quick_action"))
+        return s, await s.handle("zz do", from_user=True)
+
+    s, r = asyncio.run(go())
+    assert "do the thing" in r.text and s._pending_action == "" and confirm.peek().tool == "zz_other"
+    assert bus()._jobs.get(r.job) != NeoState.CONFIRMING
 
 
 def test_a_card_nobody_answers_lapses_for_fast_paths_too(monkeypatch):
@@ -252,12 +318,15 @@ def _recorder(monkeypatch, seen: list, **kw):
 def test_origin_of_a_fast_path_and_of_a_model_call(monkeypatch):
     seen: list = []
     _recorder(monkeypatch, seen)
-    asyncio.run(Session(reflex=_reflex("quick_action")).handle("zz record"))
+    asyncio.run(Session(reflex=_reflex("quick_action")).handle("zz record", from_user=True))
     asyncio.run(Session(reflex=_reflex("quick_action")).command("zz record", [("zz_rec", {})]))
+    # Words Gemini Live hands over: the user's own, or (by default) the goal its model wrote.
+    asyncio.run(Session(reflex=_reflex("quick_action")).handle("zz record", origin="user"))
+    asyncio.run(Session(reflex=_reflex("quick_action")).handle("zz record"))
     brain = Brain([Turn(tool_calls=[ToolCall("1", "zz_rec", {})]), Turn(text="ok"), Turn(text="ok")])
     monkeypatch.setattr(sess_mod, "brain", lambda purpose="agent": brain)
     asyncio.run(Session(reflex=_reflex()).handle("please record something for me zz"))
-    assert seen == ["user", "user", "agent"]
+    assert seen == ["user", "user", "user", "live", "agent"]
 
 
 def test_a_model_call_is_agent_origin_whoever_started_the_run():
@@ -278,8 +347,30 @@ def test_a_model_call_is_agent_origin_whoever_started_the_run():
     assert ctx.taint == ["zz_page"]  # still the caller's taint list: what the run read counts
 
 
-def test_live_calls_are_live_origin_and_honour_say(monkeypatch):
+def _live_voice(session=None):
+    """A Gemini Live voice with no connection: tool responses land in `sent`."""
     import threading
+    from types import SimpleNamespace
+
+    import neo.voice.live as live_mod
+
+    sent: list = []
+
+    class FakeLive:
+        async def send_tool_response(self, function_responses):
+            sent.extend(function_responses)
+
+    v = live_mod.LiveVoice.__new__(live_mod.LiveVoice)
+    v._agent_session, v._tool_tasks, v._goals, v._server_cancelled = session, {}, {}, set()
+    v._live, v._ui_lock, v._call_labels, v._taint, v._dialog = FakeLive(), asyncio.Lock(), {}, [], []
+    v._utt_started, v._last_answer, v._lookups, v._seen_calls, v._recent_idem = 0.0, (0.0, ""), {}, {}, {}
+    v._speaking, v.spk = False, SimpleNamespace(playing=threading.Event())
+    v._result_pending = v._result_speech = v._turn_open = False
+    v._asked = v._voiced_action = None
+    return v, sent
+
+
+def test_live_calls_are_live_origin_and_honour_say(monkeypatch):
     from types import SimpleNamespace
 
     import neo.voice.live as live_mod
@@ -291,27 +382,24 @@ def test_live_calls_are_live_origin_and_honour_say(monkeypatch):
         return ToolOutput("Set for 5 PM.", say=True)
 
     _add(monkeypatch, "zz_live", zz, quiet=True)
-    sent: list = []
-
-    class FakeLive:
-        async def send_tool_response(self, function_responses):
-            sent.extend(function_responses)
-
-    async def go():
-        live = FakeLive()
-        v = live_mod.LiveVoice.__new__(live_mod.LiveVoice)
-        v._agent_session, v._tool_tasks, v._goals, v._server_cancelled = None, {}, {}, set()
-        v._live, v._ui_lock, v._call_labels, v._taint = live, asyncio.Lock(), {}, []
-        v._utt_started, v._last_answer, v._lookups, v._seen_calls, v._recent_idem = 0.0, (0.0, ""), {}, {}, {}
-        v._speaking, v.spk = False, SimpleNamespace(playing=threading.Event())
-        v._result_pending = v._result_speech = v._turn_open = False
-        v._asked = v._voiced_action = None
-        await v._run_tool(live, SimpleNamespace(id="c1", name="zz_live", args={}), "")
-
-    asyncio.run(go())
+    v, sent = _live_voice()
+    asyncio.run(v._run_tool(v._live, SimpleNamespace(id="c1", name="zz_live", args={}), ""))
     assert seen == ["live"]
     # A quiet action goes back SILENT; this one asked to be heard.
     assert sent and sent[0].scheduling == live_mod.gt.FunctionResponseScheduling.WHEN_IDLE
+
+
+@pytest.mark.parametrize("asked, origin", [("zz record", "user"), ("", "live")])
+def test_live_hands_over_the_users_words_or_its_models_goal(monkeypatch, asked, origin):
+    """agent_task runs the user's own words when fast paths cover them, else the model's goal:
+    the fast path that goal matches was chosen by Live's model, not by the user."""
+    from types import SimpleNamespace
+
+    seen: list = []
+    _recorder(monkeypatch, seen)
+    v, _ = _live_voice(Session(reflex=_reflex("quick_action")))
+    asyncio.run(v._run_tool(v._live, SimpleNamespace(id="c1", name="agent_task", args={"goal": "zz record"}), asked))
+    assert seen == [origin]
 
 
 def test_the_early_actor_runs_the_users_words(monkeypatch):
