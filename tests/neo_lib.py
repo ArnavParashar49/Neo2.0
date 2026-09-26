@@ -15,16 +15,18 @@ def make_runtime(
     data_dir: Path, name: str = "agent", tools: Iterable[str] = (), *, library: bool = True, **settings: Any
 ) -> runtime.Runtime:
     """An agent with its own LibrarySettings (only `settings` passed in), a strict copy of these
-    catalog tools, and its data dir created. Turns library mode on, as the SDK does."""
+    catalog tools, and its data dir created. Library mode comes on with it, as it does for the
+    SDK; `library=False` turns it back off, for a test of NEO.app's own path next to an agent."""
     from neo.tools import load_all
 
     if not runtime.library_mode():  # NEO.app's loader (task modes read the app's settings)
         load_all()
     s = LibrarySettings(data_dir=data_dir, **settings)
     s.ensure_dirs()
-    if library:
-        runtime.set_library_mode()
-    return runtime.Runtime(name, s, catalog().subset(tools))
+    rt = runtime.Runtime(name, s, catalog().subset(tools))
+    if not library:
+        runtime.set_library_mode(False)
+    return rt
 
 
 class ScriptedBrain:

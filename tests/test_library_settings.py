@@ -386,3 +386,104 @@ def test_weather_never_guesses_here_from_the_network_for_an_agent(two, monkeypat
     assert calls == []
     runtime.set_library_mode(False)
     assert weather._home(_Client()) == (1.0, 2.0, "Server City")  # NEO.app: as before
+
+
+# ---- the pins hold after construction ----------------------------------------------------------------
+
+
+def test_the_pins_survive_assignment_and_copies(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    s = LibrarySettings(data_dir=tmp_path / "a")
+    for field, value in (("confirm_destructive", False), ("decide_modes", {"web_search": "on"}), ("data_dir", tmp_path)):
+        with pytest.raises(ValidationError):
+            setattr(s, field, value)
+    assert s.confirm_destructive and s.data_dir == (tmp_path / "a").resolve()
+    c = s.model_copy(update={"persona": "Ada", "confirm_destructive": False, "decide_modes": {"web_search": "on"}})
+    assert isinstance(c, LibrarySettings) and c.persona == "Ada"
+    assert c.confirm_destructive and c.decide_modes["web_search"] == "legacy"  # a copy is validated too
+    with pytest.raises(ValidationError, match="never uses NEO.app's own data"):
+        s.model_copy(update={"data_dir": tmp_path / "home" / ".neo"})
+
+
+def test_a_library_runtime_takes_only_pinned_library_settings(tmp_path, monkeypatch):
+    from neo.agent.registry import Registry
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+
+    with pytest.raises(TypeError, match="LibrarySettings"):
+        runtime.Runtime("app", Settings(), Registry())  # NEO.app's settings read the environment and ~/.neo
+    for bad in (
+        {"confirm_destructive": False},
+        {"decide_modes": {"web_search": "on"}},
+        {"learn": True},
+        {"data_dir": Path.home()},
+    ):
+        s = LibrarySettings.model_construct(**{"data_dir": tmp_path / "a", **bad})  # skips every validator
+        with pytest.raises(ValueError):
+            runtime.Runtime("x", s, Registry())
+    assert runtime.live_runtimes() == []
+
+
+def test_a_library_runtime_turns_library_mode_on(tmp_path):
+    import threading
+
+    from neo import config
+    from neo.agent import confirm
+    from neo.agent.registry import Registry
+
+    assert not runtime.library_mode()
+    rt = runtime.Runtime("a", LibrarySettings(data_dir=tmp_path / "a"), Registry())
+    assert runtime.library_mode()
+    out: dict[str, str] = {}
+
+    def lost_its_context():  # a raw thread: it carries no agent
+        for what, fn in (("settings", config.settings), ("gate", confirm._gate)):
+            try:
+                fn()
+                out[what] = "fell back to NEO.app's"
+            except runtime.NoRuntimeError:
+                out[what] = "closed"
+
+    t = threading.Thread(target=lost_its_context)
+    t.start()
+    t.join()
+    assert out == {"settings": "closed", "gate": "closed"} and config._settings is None
+    rt.close()
+
+
+def test_confirmation_cant_be_switched_off_inside_an_agent(tmp_path):
+    from neo.agent import confirm
+
+    rt = make_runtime(tmp_path / "a")
+    object.__setattr__(rt.settings, "confirm_destructive", False)  # past every guard above
+    with runtime.bind(rt.scope()):
+        out = confirm.gated("shell", {"command": "rm -rf ~/x"}, "run rm")
+        assert isinstance(out, str) and out.startswith(confirm.NEEDS_CONFIRM) and confirm.peek() is not None
+
+
+def test_a_rejected_key_never_shows_in_the_error(tmp_path, monkeypatch):
+    key = "AIzaSyTESTSECRET0000000000000000000000"
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    errors = []
+    for kw in (
+        {"data_dir": tmp_path / "k", "gemini_key": key},  # a typo: extra="forbid"
+        {"data_dir": tmp_path / "home" / ".neo" / "x", "GEMINI_API_KEY": key},  # the model validator
+        {"data_dir": tmp_path / "k", "reflex": "laya", "gemini_api_key": key},
+    ):
+        with pytest.raises(ValidationError) as e:
+            LibrarySettings(**kw)
+        errors.append(e.value)
+    for e in errors:
+        assert key[:10] not in str(e) and key[:10] not in repr(e) and key[:10] not in repr(e.errors()) and key[:10] not in e.json()
+    assert "gemini_key" in str(errors[0]) and "never uses NEO.app's own data" in str(errors[1])
+
+
+def test_an_unbound_erase_changes_nothing_before_it_fails(tmp_path):
+    from neo import privacy
+
+    rt = make_runtime(tmp_path / "a")
+    before = privacy._generation
+    with pytest.raises(runtime.NoRuntimeError):
+        asyncio.run(privacy.forget_everything())
+    assert privacy._generation == before
+    rt.close()

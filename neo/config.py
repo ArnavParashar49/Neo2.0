@@ -14,10 +14,11 @@ import json
 import os
 import sys
 import unicodedata
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Annotated, Literal, get_args
+from typing import Annotated, Any, Literal, get_args
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, ValidationError, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, PydanticBaseSettingsSource, SettingsConfigDict
 
 from neo import runtime
@@ -46,6 +47,7 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         env_prefix="NEO_",
         extra="ignore",
+        hide_input_in_errors=True,  # a bad value's error never prints it (a key, say)
     )
 
     # ---- keys (no prefix — read the conventional names) -------------------------------
@@ -228,7 +230,10 @@ class LibrarySettings(Settings):
     Laya's learning and its teacher off; notes that no notes app could take go under data_dir.
     """
 
-    model_config = SettingsConfigDict(env_file=None, extra="forbid", populate_by_name=True)
+    # frozen: the pins can't be switched off later (settings().confirm_destructive = False)
+    model_config = SettingsConfigDict(
+        env_file=None, extra="forbid", populate_by_name=True, frozen=True, hide_input_in_errors=True
+    )
 
     data_dir: Path  # required: an embedded agent never defaults to ~/.neo
     # Embedders get the quiet defaults: no local models, no memory, no voice, a headless browser.
@@ -239,6 +244,22 @@ class LibrarySettings(Settings):
     voice: VoiceBackend = "off"
     browser_headless: bool = True
     include_username: bool = False
+
+    def __init__(self, **values: Any) -> None:
+        try:
+            super().__init__(**values)
+        except ValidationError as e:
+            # Nothing that was passed rides along in the error — not in str(), errors() or json():
+            # a host's keys come through here, and error trackers keep all of them.
+            details: list[Any] = [
+                {"type": d["type"], "loc": d["loc"], "input": "<hidden>", **({"ctx": d["ctx"]} if "ctx" in d else {})}
+                for d in e.errors(include_url=False, include_input=False)
+            ]
+            raise ValidationError.from_exception_data(e.title, details, hide_input=True) from None
+
+    def model_copy(self, *, update: Mapping[str, Any] | None = None, deep: bool = False) -> LibrarySettings:
+        """A copy is validated like a new one: its pins and folder checks hold too."""
+        return type(self)(**{**{k: getattr(self, k) for k in type(self).model_fields}, **(update or {})})
 
     @classmethod
     def settings_customise_sources(
@@ -251,6 +272,17 @@ class LibrarySettings(Settings):
     ) -> tuple[PydanticBaseSettingsSource, ...]:
         return (init_settings,)
 
+    def _pins(self) -> dict[str, Any]:
+        """What an embedded agent always runs with, whatever was passed."""
+        return {
+            "confirm_destructive": True,
+            "decide_modes": dict.fromkeys(sorted({*DECIDE_DEFAULTS, *self.decide_modes}), "legacy"),
+            "decide_kind_routing": False,
+            "learn": False,
+            "learn_teacher": "off",
+            "notes_dir": self.data_dir / "notes",
+        }
+
     @model_validator(mode="after")
     def _pinned(self) -> LibrarySettings:
         _refuse_neo_home(self.data_dir)
@@ -258,15 +290,23 @@ class LibrarySettings(Settings):
             _refuse_neo_home(self.models_path, "models_path")
         _refuse_real_data_under_tests(self.data_dir)
         _refuse_foreign_folder(self.data_dir)
-        self.confirm_destructive = True
-        self.decide_modes = dict.fromkeys(sorted({*DECIDE_DEFAULTS, *self.decide_modes}), "legacy")
-        self.decide_kind_routing = False
-        self.learn = False
-        self.learn_teacher = "off"
-        self.notes_dir = self.data_dir / "notes"
+        for k, v in self._pins().items():
+            object.__setattr__(self, k, v)  # frozen: set while it's being built
         if self.reflex == "lite" and not self.gemini_keys:
             raise ValueError('reflex="lite" needs a Gemini key (it calls Gemini Flash-Lite itself)')
         return self
+
+    def check(self) -> None:
+        """Raise unless these are still as validated (neo.runtime, for an agent it's given):
+        a copy made without validation (model_construct) or edited past the freeze is refused."""
+        _refuse_neo_home(self.data_dir)
+        if self.models_path is not None:
+            _refuse_neo_home(self.models_path, "models_path")
+        off = sorted(k for k, v in self._pins().items() if getattr(self, k) != v)
+        if self.reflex not in ("lite", "off"):
+            off.append("reflex")
+        if off:
+            raise ValueError(f"an embedded agent's settings must keep their pinned values: {', '.join(off)}")
 
     def ensure_dirs(self) -> None:
         """Create what's missing, private to this user. A folder the host already made keeps its

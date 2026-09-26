@@ -36,6 +36,7 @@ async def forget_everything() -> dict[str, int]:
     global _generation
     if runtime.current_runtime() is not None:
         raise RuntimeError("forget_everything is NEO.app's erase; an embedded agent erases its own data dir")
+    runtime.check_unbound("forget_everything()")  # embedded, with no agent bound: before anything changes
     from neo.memory.store import store
     from neo.reflex import finetune, learn, memory, outcomes
 

@@ -429,7 +429,8 @@ def gated(
     `always`: ask even with confirmation turned off — for what reaches another person (a send).
     """
     params = clean(params)
-    if not settings().confirm_destructive and not always:
+    # An embedded agent always asks: its confirmation is pinned on (config.LibrarySettings).
+    if not settings().confirm_destructive and not always and not runtime.library_bound():
         return params
     released = consume(op_key(tool, params, summary, detail))
     if released is not None:

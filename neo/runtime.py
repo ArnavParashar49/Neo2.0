@@ -73,10 +73,21 @@ class Runtime:
     lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
 
     def __post_init__(self) -> None:
+        if self.library:
+            from neo.config import LibrarySettings
+
+            if not isinstance(self.settings, LibrarySettings):
+                raise TypeError(
+                    "an embedded agent takes LibrarySettings (only what its host passes): NEO.app's "
+                    "Settings read the environment, .env files and ~/.neo"
+                )
+            self.settings.check()
         with _live_lock:
             if self.library:
                 _refuse_shared_data_dir(self)
             _live.add(self)
+        if self.library:
+            set_library_mode()  # from now on, code that lost its agent fails closed
 
     def scope(self, conversation: str = "default") -> Scope:
         """The conversation's scope (its own gate, events and session), created on first use."""
