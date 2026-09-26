@@ -166,6 +166,7 @@ _Q = r"\s*[?.!]*\s*$"
         (r"^\s*(?:the\s+)?forecast(?=\s+(?:for\s+)?(?:the\s+)?(?:today|tonight|tomorrow|week|weekend|this|next|in\s))" + rf"{_WHEN_RE}{_PLACE}{_WHEN2}{_Q}", _ARGS),
         (rf"^\s*do\s+i\s+need\s+an\s+umbrella{_WHEN_RE}{_PLACE}{_WHEN2}{_Q}", _ARGS),
     ],
+    read_only=True,
 )
 async def weather(a: dict, c: ToolContext) -> str:
     import asyncio

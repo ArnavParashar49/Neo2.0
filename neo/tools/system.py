@@ -12,7 +12,22 @@ import time
 import uuid
 
 from neo.agent.registry import ToolContext, tool
-from neo.tools.computer.apps import _q, osascript
+
+_MAC = frozenset({"macos"})
+
+
+# The Mac's own scripting, loaded on first use: `clock` needs none of it, so importing this module
+# never loads the Mac tools (or AppKit) — the web preset uses the clock off macOS too.
+async def osascript(script: str, timeout: float = 30) -> str:
+    from neo.tools.computer.apps import osascript as run
+
+    return await run(script, timeout)
+
+
+def _q(s: str) -> str:
+    from neo.tools.computer.apps import _q as quote
+
+    return quote(s)
 
 # Fast paths are whole-utterance commands: anchored, with an explicit object and direction, so an
 # ordinary sentence that merely mentions "volume" or "dim" never triggers them.
@@ -74,6 +89,7 @@ _TIMER2_RE = _P + r"(?:set|start)\s+(?:a\s+)?(?P<minutes>\d+(?:\.\d+)?)\s*(?:min
     ],
     quiet=True,
     early=True,
+    requires=_MAC,
 )
 async def volume(a: dict, c: ToolContext) -> str:
     act = a.get("action", "set")
@@ -108,6 +124,7 @@ async def volume(a: dict, c: ToolContext) -> str:
     fast_path=[(_BR_DOWN, {"direction": "down"}), (_BR_UP, {"direction": "up"})],
     quiet=True,
     early=True,
+    requires=_MAC,
 )
 async def brightness(a: dict, c: ToolContext) -> str:
     key = 144 if a.get("direction") == "up" else 145
@@ -123,6 +140,7 @@ async def brightness(a: dict, c: ToolContext) -> str:
     category="system",
     parallel_safe=True,
     fast_path=[(_TIME_RE, {})],
+    read_only=True,
 )
 async def clock(a: dict, c: ToolContext) -> str:
     return _dt.datetime.now().strftime("It's %-I:%M %p on %A, %B %-d.")
@@ -142,6 +160,7 @@ async def clock(a: dict, c: ToolContext) -> str:
             {},
         )
     ],
+    requires=_MAC,
 )
 async def sleep_display(a: dict, c: ToolContext) -> str:
     p = await asyncio.create_subprocess_exec("pmset", "displaysleepnow")
@@ -169,6 +188,7 @@ async def sleep_display(a: dict, c: ToolContext) -> str:
         ),
     ],
     quiet=True,
+    requires=_MAC,
 )
 async def timer(a: dict, c: ToolContext) -> str:
     raw = a.get("minutes")

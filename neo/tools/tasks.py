@@ -12,13 +12,18 @@ tools) shows only while the kind is on: in shadow nothing a model or the user se
 
 from __future__ import annotations
 
+import functools
 from collections.abc import Callable
 from typing import Any
 
-from neo.agent.registry import ToolContext, catalog, tool
+from neo.agent.registry import ToolContext, catalog
+from neo.agent.registry import tool as _register
 from neo.config import DecideMode, decide_mode
 from neo.decide import shadow
 from neo.tools.computer import legacy
+
+# Every tool here uses this Mac's own apps and stores.
+tool = functools.partial(_register, requires=frozenset({"macos"}))
 
 _OBJ = {"type": "object", "properties": {}}
 _S = {"type": "string"}
@@ -198,6 +203,7 @@ async def mail_send(a: dict, c: ToolContext) -> str:
         ),
     ],
     untrusted=True,
+    read_only=True,
 )
 async def mail_unread(a: dict, c: ToolContext):
     m = mode("read_mail")
@@ -289,6 +295,7 @@ async def _schedule(kind: str, a: dict, c: ToolContext, run_legacy: Callable[[],
         ),
     ],
     untrusted=True,
+    read_only=True,
 )
 async def calendar_today(a: dict, c: ToolContext):
     return await _schedule("read_calendar", a, c, legacy.calendar_today)

@@ -9,14 +9,18 @@ accessibility (ARIA) snapshot — roles and names — which is what the click/ty
 from __future__ import annotations
 
 import asyncio
+import functools
 import re
 
 from neo import runtime
-from neo.agent.registry import ToolContext, ToolOutput, tool
+from neo.agent.registry import ToolContext, ToolOutput
+from neo.agent.registry import tool as _register
 from neo.config import settings
 from neo.providers.base import ImagePart
 
 _TIMEOUT_MS = 8000
+# Every tool here drives NEO's own Chromium (the playwright package, and `playwright install chromium`).
+tool = functools.partial(_register, requires=frozenset({"playwright"}))
 
 
 class _Browser:
@@ -123,7 +127,7 @@ def _p(props: dict, required: list[str] | None = None) -> dict:
 )
 async def browser_open(a: dict, c: ToolContext) -> str:
     from neo.agent import confirm
-    from neo.tools.computer import policy
+    from neo.security import policy
 
     url = _norm_url(a["url"])
     scheme = url.split(":", 1)[0].lower()
@@ -154,6 +158,7 @@ async def browser_open(a: dict, c: ToolContext) -> str:
     parallel_safe=True,
     category="browser",
     untrusted=True,
+    read_only=True,
 )
 async def browser_read(a: dict, c: ToolContext) -> str:
     page = await _browser().page()
@@ -170,7 +175,7 @@ async def browser_read(a: dict, c: ToolContext) -> str:
 )
 async def browser_click(a: dict, c: ToolContext) -> str:
     from neo.agent import confirm
-    from neo.tools.computer import policy
+    from neo.security import policy
 
     page = await _browser().page()
     loc = _locator(page, a["target"], a.get("role", ""))
@@ -269,6 +274,7 @@ async def browser_back(a: dict, c: ToolContext) -> str:
     category="browser",
     slow=True,
     untrusted=True,
+    read_only=True,
 )
 async def browser_screenshot(a: dict, c: ToolContext) -> ToolOutput:
     page = await _browser().page()

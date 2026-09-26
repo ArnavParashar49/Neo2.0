@@ -8,7 +8,7 @@ import re
 from pathlib import Path
 
 from neo.agent import confirm
-from neo.tools.computer import policy
+from neo.security import policy
 
 _SECRET_ENV = re.compile(r"KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|SESSION|COOKIE|AUTH", re.I)
 # Embedded in another app, NEO's commands get only these of the host process's environment: a

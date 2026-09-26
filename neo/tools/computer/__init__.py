@@ -3,14 +3,20 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import re
 import time
 
 from neo.agent import confirm
-from neo.agent.registry import ToolContext, ToolOutput, tool
+from neo.agent.registry import ToolContext, ToolOutput
+from neo.agent.registry import tool as _register
 from neo.config import decide_mode, settings
-from neo.tools.computer import apps, ax, legacy, policy, screen, shell
+from neo.security import policy
+from neo.tools.computer import apps, ax, legacy, screen, shell
 from neo.tools.computer import input as inp
+
+# Every tool here drives this Mac.
+tool = functools.partial(_register, requires=frozenset({"macos"}))
 
 _OBJ = {"type": "object", "properties": {}}
 
@@ -52,6 +58,7 @@ def _ask_before_click(tool_name: str, a: dict, label: str, app: str = "", els=No
     parallel_safe=True,
     category="computer",
     untrusted=True,
+    read_only=True,
 )
 async def ax_tree(a: dict, c: ToolContext) -> str:
     return await asyncio.to_thread(ax.snapshot, a.get("app"))
@@ -64,6 +71,7 @@ async def ax_tree(a: dict, c: ToolContext) -> str:
     parallel_safe=True,
     category="computer",
     untrusted=True,
+    read_only=True,
 )
 async def ax_find(a: dict, c: ToolContext) -> str:
     return await asyncio.to_thread(ax.find, a["query"], a.get("app"))
@@ -99,6 +107,7 @@ _SCROLL = [
     category="computer",
     slow=True,
     untrusted=True,
+    read_only=True,
 )
 async def screenshot(a: dict, c: ToolContext) -> ToolOutput:
     region = None
@@ -137,6 +146,7 @@ async def screenshot(a: dict, c: ToolContext) -> ToolOutput:
             {},
         )
     ],
+    read_only=True,
 )
 async def apps_running(a: dict, c: ToolContext) -> str:
     front, _ = ax.frontmost_app()
@@ -897,7 +907,8 @@ async def open_url(a: dict, c: ToolContext) -> str:
     parallel_safe=True,
     category="web",
     untrusted=True,
-    hidden=True,  # shown once web_search is on (neo.tools.tasks.apply_modes)
+    hidden=True,  # shown once web_search is on (neo.tools.tasks.apply_modes),
+    read_only=True,
 )
 async def page_read(a: dict, c: ToolContext):
     m = decide_mode("web_search")
@@ -924,6 +935,7 @@ async def page_read(a: dict, c: ToolContext):
     parallel_safe=True,
     category="web",
     untrusted=True,
+    read_only=True,
 )
 async def safari_read(a: dict, c: ToolContext):
     """The old name of page_read (hidden once web_search is on; goes in R6)."""
@@ -978,6 +990,7 @@ async def shell_tool(a: dict, c: ToolContext) -> str:
     parallel_safe=True,
     category="files",
     untrusted=True,
+    read_only=True,
 )
 async def read_file(a: dict, c: ToolContext) -> str:
     return shell.read_file(a["path"], start=int(a.get("start") or 1), lines=int(a.get("lines") or 400))

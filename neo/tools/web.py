@@ -11,7 +11,7 @@ from neo.agent.registry import ToolContext, tool
 from neo.config import decide_mode
 
 # The table of known sites and their search pages: web_search's legacy, until the kind is on.
-from neo.tools.computer.legacy import _ENGINE_RE, _SITE_RE, site_search_url
+from neo.tools.sites_legacy import _ENGINE_RE, _SITE_RE, site_search_url
 
 # "search for it on amazon", "open that one on google": the thing comes from the conversation,
 # which only the model has — never a fast path.
@@ -31,15 +31,19 @@ def _legacy_fp(filled: dict) -> bool:
 
 
 def _claims_web(filled: dict) -> bool:
+    if decide_mode("web_search") != "on":  # before the import: legacy never loads neo.decide
+        return False
     from neo.decide.kinds import site
 
-    return decide_mode("web_search") == "on" and site.claims_web_search(filled)
+    return site.claims_web_search(filled)
 
 
 def _claims_site(filled: dict) -> bool:
+    if decide_mode("web_search") != "on":
+        return False
     from neo.decide.kinds import site
 
-    return decide_mode("web_search") == "on" and site.claims_search_site(filled)
+    return site.claims_search_site(filled)
 
 
 def _country() -> str:
@@ -146,6 +150,7 @@ def _news(query: str, n: int) -> str:
     ],
     payload=True,
     untrusted=True,
+    read_only=True,
 )
 async def web_search(a: dict, c: ToolContext) -> str:
     n = int(a.get("n") or 6)
@@ -165,10 +170,11 @@ async def web_search(a: dict, c: ToolContext) -> str:
     category="web",
     slow=True,
     untrusted=True,
+    read_only=True,
 )
 async def web_fetch(a: dict, c: ToolContext) -> str:
     from neo.agent import confirm
-    from neo.tools.computer import policy
+    from neo.security import policy
 
     url = str(a["url"]).strip()
     if not re.match(r"^[a-z][\w+.-]*://", url, re.I):
@@ -290,6 +296,7 @@ async def web_fetch(a: dict, c: ToolContext) -> str:
         ),
     ],
     idempotent=True,
+    requires=frozenset({"macos"}),  # opens the Mac's own browser
 )
 async def search_site(a: dict, c: ToolContext):
     from neo.tools.computer import apps
