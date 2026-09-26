@@ -10,8 +10,8 @@ people phrase *ours* (route, tool, task kind, destructive, needs the screen, wan
 |--------------------|--------------------------------------------------------------|--------------------------------|
 | clinc              | clinc/clinc_oos@155b9c7 (plus)                               | CC-BY-3.0                      |
 | massive            | mteb/amazon_massive_intent@940fd47 (en, hi)                  | CC-BY-4.0 (AmazonScience/massive) |
-| hinglish_top       | WillHeld/hinglish_top@53404b8                                | Apache-2.0 (google-research-datasets/Hinglish-TOP-Dataset) |
-| hinglish_top_synth | rvv-karma/English-Hinglish-TOP@5ab1056 (synthetic rows)      | Apache-2.0                     |
+| hinglish_top       | WillHeld/hinglish_top@53404b8                                | Apache-2.0 (google-research-datasets/Hinglish-TOP-Dataset), translations of TOPv2: CC-BY-SA-4.0-derived |
+| hinglish_top_synth | rvv-karma/English-Hinglish-TOP@5ab1056 (synthetic rows)      | Apache-2.0, translations of TOPv2: CC-BY-SA-4.0-derived |
 | hinglish_chat      | Abhishekcr448/Hinglish-Everyday-Conversations-1M@cf040b1     | MIT                            |
 | topv2              | WillHeld/top_v2@5e382a8                                      | CC-BY-SA-4.0 (TOPv2)           |
 | mtop               | WillHeld/mtop@13054fc (en, hi)                               | CC-BY-SA-4.0 (MTOP)            |
@@ -20,14 +20,22 @@ people phrase *ours* (route, tool, task kind, destructive, needs the screen, wan
 | agentnet           | xlangai/AgentNet@d76ee50 (meta_data_merged.jsonl)            | MIT                            |
 | omniact            | Writer/omniact@5e4bcb2 (task texts in data.zip)              | MIT                            |
 | hwu64              | DeepPavlov/hwu64@0dd289c                                     | CC-BY-4.0 (xliuhw/NLU-Evaluation-Data) |
-| sentence_types     | TigreGotico/sentence-types@4274d78                           | none stated (sibling set is Apache-2.0) |
+| sentence_types (opt-in) | TigreGotico/sentence-types@4274d78                      | none stated (sibling set is Apache-2.0) |
 | leyzer (opt-in)    | github cartesinus/leyzer@3214355 (branch 0.2.0)              | CC-BY-NC-ND-4.0 in the data repo (HF card says CC-BY-4.0) |
 
 The HF mirrors of TOP, MTOP, Hinglish-TOP and HWU64 carry no licence tag; the upstream one is
-cited. Rows from CC-BY-SA sources (and anything derived from them) are generated on the user's
-machine only and never committed; test fixtures are invented sentences in the same format.
-Leyzer is off by default because the repository that hosts its data is non-commercial and
-no-derivatives; ``--with leyzer`` opts in.
+cited. Hinglish-TOP and rvv-karma's set are Apache-2.0, but their English column is TOPv2 text and
+the Hinglish a translation of it, so they are treated as ShareAlike like TOPv2 itself. Rows from
+CC-BY-SA sources (and anything derived from them) are generated on the user's machine only and
+never committed; test fixtures are invented sentences in the same format.
+
+Off by default, ``--with <name>`` opts in:
+- leyzer: the repository that hosts its data is licensed CC-BY-NC-ND-4.0 (non-commercial, no
+  derivatives) — the LICENSE file at the pinned commit,
+  https://github.com/cartesinus/leyzer/blob/32143559641d28fbc9659b8ff699c5b68eade93d/LICENSE —
+  although its HF card (cartesinus/leyzer-fedcsis) says CC-BY-4.0.
+- sentence_types: no licence is stated, which grants no rights; and its polite requests are the
+  noisiest mapping here (about 3 in 10 sampled rows wrong).
 
 Skipped on purpose: non-commercial (SWDA, DailyDialog, APIGen-MT-5k, SLURP audio), use-restricted
 (AgentHarm), gated (Salesforce xLAM), LDC-licensed (ATIS), RICO-ScreenQA (its questions never
@@ -45,11 +53,14 @@ import io
 import json
 import re
 import tarfile
+import unicodedata
 import zipfile
 from collections import Counter
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
+
+from neo.reflex.schema import asks_something
 
 INTENTS = ("chat", "quick_action", "agent_task", "stop")
 # neo/decide TASKS (engine.py), mirrored so building data never imports the decide engine.
@@ -108,9 +119,12 @@ def lang_of(text: str, latin: str = "en") -> str:
 
 
 def text_key(text: str) -> str:
-    """Case-, space- and edge-punctuation-insensitive identity of a sentence (dedupe, holdout)."""
-    t = re.sub(r"\s+([.,!?;:।])", r"\1", str(text).lower())
-    return " ".join(t.split()).strip(" .,!?;:'\"।")
+    """The identity of a sentence for dedupe and the benchmark holdout: NFKC, case-folded, with
+    every punctuation, space, symbol and control character removed, so re-tokenised copies match
+    ("mom ' s" / "mom's", "5 : 30 am" / "5:30am", "to do" / "todo"). Combining marks (Unicode M)
+    stay: Devanagari vowel signs carry meaning (करो ≠ करें)."""
+    t = unicodedata.normalize("NFKC", str(text)).casefold()
+    return "".join(ch for ch in t if unicodedata.category(ch)[0] not in "PZSC")
 
 
 def group_id(ns: str, text: str) -> str:
@@ -159,6 +173,86 @@ def kind_for(intent: str, tool: str, override: str | None = None) -> str | None:
     if intent not in ("quick_action", "agent_task"):
         return None  # only actions reach neo/decide
     return override or _KIND_BY_TOOL.get(tool, "other")
+
+
+# ---- what the words say, whatever the source's label ---------------------------------------------
+# A source labels an intent; some of its sentences say something else. These read the sentence —
+# for a translation, the English it was translated from, so every language of a sentence gets one
+# label. Translations without an English source fall back to their own text.
+
+# "how do i report a lost card" asks for advice (chat), it doesn't report one.
+_HOW_TO = re.compile(
+    r"^(?:(?:please|so|ok|okay|hey|hi)[\s,]+)?(?:how (?:do|can|should|would|could|does) (?:i|we|one|you)\b|"
+    r"how to\b|what (?:do|should|must|can) i do\b|what (?:are|is) the (?:steps|process|procedure)\b|"
+    r"where (?:can|do|should) i (?:find|get|go|receive|recieve|apply|report|sign up)\b|"
+    r"who (?:do|can|should) i\b|(?:(?:can|could|would) you )?(?:tell|show|explain to) me how (?:to|i|do|can|should)\b|"
+    r"what'?s the (?:best )?way to\b)",
+    re.I,
+)
+
+
+def how_to(text: str) -> bool:
+    return bool(_HOW_TO.search(text))
+
+
+# NEO's calendar_today lists today's events only; any other day needs the Calendar app.
+_W = r"\w\u0900-\u097f"  # a word character, Devanagari vowel signs included (they aren't \w)
+_OTHER_DAY = re.compile(
+    rf"(?<![{_W}])(?:tomorrow'?s?|tmrw|yesterday'?s?|last|previous|past|upcoming|coming up|later this|next day|"
+    r"day after|"
+    r"weekends?|weeks?|weekly|months?|monthly|years?|(?:mon|tues|wednes|thurs|fri|satur|sun)days?|"
+    r"january|february|march|april|june|july|august|september|october|november|december|"
+    r"(?:\d{1,2}(?:st|nd|rd|th)?\s+(?:of\s+)?may|may\s+\d)|\d{1,2}(?:st|nd|rd|th)|\d{1,2}/\d{1,2}|"
+    r"(?:the|on|for)\s+(?:twenty[- ]|thirty[- ])?(?:first|second|third|fourth|fifth|sixth|seventh|eighth|"
+    r"ninth|tenth|eleventh|twelfth|\w+teenth|twentieth|thirtieth)\b|"
+    r"कल|परसों|बीते|पिछले|पिछली|आने वाल[ीेा]|सप्ताह|हफ्ते|हफ़्ते|महीने|साल|"
+    r"सोमवार|मंगलवार|बुधवार|गुरुवार|शुक्रवार|शनिवार|रविवार|जनवरी|फरवरी|मार्च|अप्रैल|मई|जून|जुलाई|अगस्त|"
+    rf"सितंबर|सितम्बर|अक्टूबर|नवंबर|नवम्बर|दिसंबर|दिसम्बर)(?![{_W}])",
+    re.I,
+)
+_REMINDERS = re.compile(r"remind|\bdue\b|\bpending\b|\bnotif|\balert me\b|don'?t let me forget|याद|रिमाइंडर|अनुस्मारक|लंबित", re.I)
+
+
+def calendar_route(text: str) -> tuple[str, str]:
+    """(route, tool) of a calendar lookup: today's events are calendar_today; another day, or
+    reminders ("do i have any reminders set", "when is my mortgage due"), needs an agent."""
+    if _REMINDERS.search(text) or _OTHER_DAY.search(text):
+        return "agent_task", ""
+    return "quick_action", "calendar_today"
+
+
+# Deletes, clears and "take it off my list": hard to undo, whatever intent they were filed under.
+_REMOVES = re.compile(
+    r"\b(?:remove[sd]?|removing|delete[sd]?|deleting|clear(?:ed|ing)?|erase[sd]?|cancel(?:led|ed|ing)?|"
+    r"empty|get rid|wipe|cross\b.{0,40}\boff|take\b.{0,40}\boff|(?:don'?t|do not|no longer) need)\b",
+    re.I,
+)
+
+
+def removes(text: str) -> bool:
+    return bool(_REMOVES.search(text))
+
+
+# A stop said to a ringing alarm or a call, naming nothing ("be quiet", "stop now", "चुप रहो",
+# "बंद हो जाओ") is NEO's stop. A bare "turn it off" / "band karo" is not: it usually means the
+# thing that's on (neo/reflex/__init__.py makes the same call).
+_STOP_WORD = (
+    r"stop(?:\s+(?:it|that|now|talking|ringing|making\s+(?:noise|sounds?)))?|cancel(?:\s+(?:it|that))?|"
+    r"never\s*mind|quiet|be\s+(?:quiet|silent)|silence|shut\s+(?:up|off|down)|hush|sh+|enough|"
+    r"that'?s\s+enough|quit\s+it|go\s+away|"
+    r"chup(?:\s+(?:raho|rahe|rahiye|ho\s+ja(?:o)?|kar(?:o)?))?|sh?aant?h?(?:\s+(?:raho|rahe|ho\s+jao))?|"
+    r"ruko|ruk\s+ja(?:o)?|bas(?:\s+kar(?:o|\s+do)?)?|khamosh|"
+    r"चुप(?:\s+(?:रहो|रहें|रहिए|हो\s+जाओ|करो))?|शांत(?:\s+(?:रहो|रहें|हो\s+जाओ))?|रुको|रुक\s+जाओ|रुकें|"
+    r"बस(?:\s+करो)?|बंद\s*हो\s*जाओ|ख़?ामोश(?:\s+(?:रहो|हो\s+जाओ))?"
+)
+_FILLER = r"please|pls|now|ok|okay|oh|just|already|neo|na|yaar|abhi|ab|अभी|प्लीज़|प्लीज|कृपया|जी"
+_BARE_STOP = re.compile(
+    rf"^\W*(?:(?:{_FILLER})[\s,]+)*(?:{_STOP_WORD})(?:[\s,!.।]+(?:{_FILLER}|{_STOP_WORD}))*[\s,!.।?]*$", re.I
+)
+
+
+def bare_stop(text: str) -> bool:
+    return bool(_BARE_STOP.match(text.strip()))
 
 
 # ---- fetching ---------------------------------------------------------------------------------
@@ -316,12 +410,13 @@ class _RangeFile(io.RawIOBase):
 CLINC: dict[str, tuple[str, str]] = {
     # ---- conversation / knowledge → chat
     **dict.fromkeys(
-        ["restaurant_reviews", "nutrition_info", "oil_change_how", "gas_type", "meaning_of_life", "improve_credit_score", "measurement_conversion", "flip_coin", "do_you_have_pets", "tell_joke", "exchange_rate", "meal_suggestion", "tire_change", "user_name", "what_are_your_hobbies", "jump_start", "vaccines", "food_last", "who_do_you_work_for", "international_visa", "translate", "carry_on", "insurance", "what_is_your_name", "where_are_you_from", "cook_time", "roll_dice", "who_made_you", "how_old_are_you", "recipe", "yes", "no", "maybe", "ingredients_list", "what_can_i_ask_you", "are_you_a_bot", "plug_type", "oil_change_when", "thank_you", "fun_fact", "ingredient_substitution", "calories", "calculator", "definition", "next_holiday", "mpg", "spelling", "greeting", "goodbye", "repeat", "change_ai_name", "change_user_name", "change_accent", "change_speed", "whisper_mode", "change_language", "timezone", "interest_rate", "redeem_rewards", "oos", "reset_settings", "sync_device", "gas", "tire_pressure", "last_maintenance", "international_fees", "apr", "min_payment"],
+        ["nutrition_info", "oil_change_how", "gas_type", "meaning_of_life", "improve_credit_score", "measurement_conversion", "flip_coin", "do_you_have_pets", "tell_joke", "exchange_rate", "meal_suggestion", "tire_change", "user_name", "what_are_your_hobbies", "jump_start", "vaccines", "food_last", "who_do_you_work_for", "international_visa", "translate", "carry_on", "what_is_your_name", "where_are_you_from", "cook_time", "roll_dice", "who_made_you", "how_old_are_you", "recipe", "yes", "no", "maybe", "ingredients_list", "what_can_i_ask_you", "are_you_a_bot", "plug_type", "oil_change_when", "thank_you", "fun_fact", "ingredient_substitution", "calories", "calculator", "definition", "next_holiday", "mpg", "spelling", "greeting", "goodbye", "repeat", "change_ai_name", "change_user_name", "change_accent", "change_speed", "whisper_mode", "change_language", "timezone", "redeem_rewards", "oos", "gas", "tire_pressure", "last_maintenance", "international_fees"],
         ("chat", ""),
     ),
     # ---- needs current information from the web → quick_action + web_search
     **dict.fromkeys(
-        ["directions", "distance", "traffic", "direct_deposit", "flight_status", "travel_alert", "travel_suggestion", "restaurant_suggestion", "how_busy", "exchange_rate"],
+        ["directions", "distance", "traffic", "direct_deposit", "flight_status", "travel_alert", "travel_suggestion", "restaurant_suggestion", "how_busy", "exchange_rate",
+         "restaurant_reviews", "accept_reservations"],
         ("quick_action", "web_search"),
     ),
     # ---- one-shot commands → quick_action (+ the NEO tool when there is one)
@@ -341,11 +436,13 @@ CLINC: dict[str, tuple[str, str]] = {
     "smart_home": ("quick_action", ""),
     # ---- needs an app, a website, an account or several steps → agent_task
     **dict.fromkeys(
-        ["account_blocked", "accept_reservations", "report_lost_card", "order", "schedule_meeting", "freeze_account", "restaurant_reservation", "make_call", "text", "bill_balance", "balance", "uber", "car_rental", "credit_limit", "shopping_list", "expiration_date", "routing", "todo_list", "card_declined", "rewards_balance", "share_location", "book_flight", "insurance_change", "todo_list_update", "cancel_reservation", "transactions", "credit_score", "report_fraud", "spending_history", "reminder", "payday", "find_phone", "order_status", "confirm_reservation", "damaged_card", "pin_change", "replacement_card_duration", "new_card", "income", "taxes", "pto_request", "rollover_401k", "pto_request_status", "application_status", "update_playlist", "credit_limit_change", "pay_bill", "lost_luggage", "book_hotel", "w2", "shopping_list_update", "pto_balance", "order_checks", "schedule_maintenance", "transfer", "current_location", "travel_notification", "pto_used", "bill_due"],
+        ["apr", "interest_rate", "min_payment", "insurance", "reset_settings", "account_blocked", "report_lost_card", "order", "schedule_meeting", "freeze_account", "restaurant_reservation", "make_call", "text", "bill_balance", "balance", "uber", "car_rental", "credit_limit", "shopping_list", "expiration_date", "routing", "todo_list", "card_declined", "rewards_balance", "share_location", "book_flight", "insurance_change", "todo_list_update", "cancel_reservation", "transactions", "credit_score", "report_fraud", "spending_history", "reminder", "payday", "find_phone", "order_status", "confirm_reservation", "damaged_card", "pin_change", "replacement_card_duration", "new_card", "income", "taxes", "pto_request", "rollover_401k", "pto_request_status", "application_status", "update_playlist", "credit_limit_change", "pay_bill", "lost_luggage", "book_hotel", "w2", "shopping_list_update", "pto_balance", "order_checks", "schedule_maintenance", "transfer", "current_location", "travel_notification", "pto_used", "bill_due"],
         ("agent_task", ""),
     ),
     "cancel": ("stop", ""),
 }
+# "sync to my phone": nothing a Mac assistant does.
+CLINC_SKIP = frozenset(["sync_device"])
 CLINC_KIND = {"text": "send_message", "share_location": "send_message", "schedule_meeting": "add_event",
               "todo_list_update": "add_reminder", "shopping_list_update": "add_reminder"}
 # Money moved, something sent, booked or changed on an account: hard to undo.
@@ -353,7 +450,7 @@ CLINC_DESTRUCTIVE = frozenset(
     ["pay_bill", "transfer", "order", "book_flight", "book_hotel", "car_rental", "restaurant_reservation",
      "cancel_reservation", "uber", "make_call", "text", "share_location", "freeze_account", "pin_change",
      "report_lost_card", "report_fraud", "order_checks", "rollover_401k", "insurance_change", "pto_request",
-     "credit_limit_change", "schedule_maintenance"]
+     "credit_limit_change", "schedule_maintenance", "reset_settings"]
 )
 
 MASSIVE: dict[str, tuple[str, str]] = {
@@ -418,28 +515,118 @@ MASSIVE_DESTRUCTIVE = frozenset(["email_sendemail", "social_post", "takeaway_ord
                                  "transport_taxi", "alarm_remove", "calendar_remove", "lists_remove"])
 
 # 42 of MASSIVE's 110 English mute rows name no audio at all ("be quiet", "shut up", "good night"):
-# that is NEO's "stop", and CLINC's cancel already says so for the same words.
+# that is NEO's "stop", and CLINC's cancel already says so for the same words. A mode ("silent mode
+# on for three hours") is a device setting, and a row that says neither is noise ("clear data",
+# "not use"): dropped.
 _AUDIO_EN = re.compile(
     r"\b(?:volume|sounds?|audio|music|speakers?|mute|muted|unmute|songs?|tv|television|radio|podcasts?|"
     r"ring(?:er|tone)?|notifications?|alarms?|video|media|play(?:ing|back)?|mic|microphone|headphones?|"
-    r"player|loud|louder|quieter|noise|beeps?)\b",
+    r"player|loud|louder|quieter|noise|beeps?|modes?)\b",
     re.I,
 )
 _AUDIO_HI = re.compile("आवाज|ध्वनि|वॉल्यूम|म्यूट|संगीत|म्यूजिक|स्पीकर|ऑडियो|साउंड|रेडियो|टेलीविजन|टीवी|मीडिया|"
-                       "नोटिफिकेशन|सूचना|अलार्म|बजने|शोर|कम्पन")  # no \b: matras aren't \w
+                       "नोटिफिकेशन|सूचना|अलार्म|बजने|शोर|कम्पन|मोड")  # no \b: matras aren't \w
+_STOP_TALK = re.compile(
+    r"\b(?:quiet|silent|silence|shut|hush|talk(?:ing)?|speak(?:ing)?|stop|enough|good ?night)\b|"
+    r"चुप|ख़ामोश|खामोश|शांत|मौन|मूक|साइलेंट|मत बोल|बोलना बंद|बात मत|बात करना बंद|रुक|शुभ रात्रि",
+    re.I,
+)
 
 
-def _is_stop_mute(text: str) -> bool:
-    return not (_AUDIO_EN.search(text) or _AUDIO_HI.search(text))
+# "बंद करो" / "turn it off" on its own: turn the sound off, not "stop" (see bare_stop).
+_BARE_OFF = re.compile(r"^\W*(?:(?:please|कृपया)\s+)?(?:band\s+kar(?:o|\s+do|ein)?|बंद\s+कर(?:ो|ें|\s+दो|\s+दें)|"
+                       r"(?:turn|switch)\s+(?:it\s+)?off)\W*$", re.I)
+
+
+def mute_route(text: str, own: str = "") -> str | None:
+    """A MASSIVE mute row: "volume" when it names audio or a mode (or is a bare "turn it off"),
+    "stop" when it tells NEO to be quiet, None (drop it) when it says neither. `text` is the English
+    source, `own` the row's own words when it is a translation."""
+    if _AUDIO_EN.search(text) or _AUDIO_HI.search(text) or _BARE_OFF.match(own or text):
+        return "volume"
+    return "stop" if _STOP_TALK.search(text) else None
+
+
+# "bye", "talk to you later", "that's all", "not right now": the user is done — NEO's stop, as SGD's
+# goodbyes and HWU64's commandstop say. A thanks or "nice chatting" on its own is conversation.
+_CLOSER = re.compile(
+    r"\b(?:bye|goodbye|good\s*bye|good ?night|see (?:you|ya)|talk (?:to you )?later|catch you later|later|"
+    r"until next time|(?:have|got|gotta|need) to (?:go|run|leave)|i'?m (?:out|off|leaving)|signing off|"
+    r"that'?s (?:all|it|everything)|thats (?:all|it)|that'?all|that is (?:all|it|everything)|"
+    r"that(?:'ll| will| would)? be (?:all|it|everything)|all for now|nothing (?:else|more|for now|at all)|"
+    r"it'?s all|all set|all good|(?:i'?m|i am|we'?re|we are) (?:good|done|fine)|that will do|"
+    r"everything i need(?:ed)?|all (?:the \w+ )?i need(?:ed)?|(?:don'?t|do not|won'?t) (?:need|want|wish)|"
+    r"not (?:right )?now|not at (?:the|this) (?:moment|time)|not (?:just )?yet|not today|(?:some ?)?other time|"
+    r"another time|no need|not necessary|leave (?:it|them))\b",
+    re.I,
+)
+_DECLINE = re.compile(r"^\W*(?:(?:no|nope|nah)\b[\s,.!;]*(?:but\s+)?(?:thanks?|thank (?:you|u)|i appreciate)|nothing\b)",
+                      re.I)
+_THANKS = re.compile(r"\b(?:thanks?|thank (?:you|u)|appreciated?|obliged|grateful|helpful|great help)\b", re.I)
+
+
+def closes(text: str) -> bool:
+    """Does the user end the conversation or decline ("no thanks", "not right now", "that's all")?"""
+    return bool(_CLOSER.search(text) or _DECLINE.search(text))
+
+
+# Does an intent, by its name, want an answer? CLINC and MASSIVE name intents after what they ask.
+# (finetune's fallback for rows without a `reply` label; applied here so every row carries one.)
+_ASKS_LABEL = re.compile(
+    r"query|qa_|status|balance|what_|how_|when|where|who_|which|info|reviews|rate|_time|(?<!up)date|weather|"
+    r"traffic|directions|distance|calendar$|calendar_today|reminder$|todo_list$|shopping_list$|"
+    r"spending|transactions|expiration|routing|limit$|payday|income|taxes|due|used|pto_balance|"
+    r"meeting_schedule|flight_status|order_status|current_location|find_phone|what_song|"
+    r"suggestion|recommendation|definition|spelling|translate|calculator|conversion|fun_fact|"
+    r"joke|greeting|thank_you|repeat|oos|history|alerts?$|timezone|holiday|vaccines|visa|carry_on|"
+    r"plug_type|mpg|gas$|tire_pressure|jump_start|recipe|cook|ingredients|calories|nutrition|"
+    r"food_last|exchange_rate|credit_score|apr$|interest_rate|min_payment|international_fees|"
+    r"insurance$|w2|next_holiday|how_busy|accept_reservations|confirm_reservation|duration|^time$|"
+    r"are_you|do_you|what_are|what_is|where_are|who_made|how_old|meaning_of_life|what_can"
+)
+# How-to wording in these intents still wants the live thing (directions, a contact, where I am).
+_NOT_HOW_TO = frozenset(["directions", "distance", "traffic", "how_busy", "current_location", "transport_query",
+                         "transport_traffic", "recommendation_locations", "recommendation_events",
+                         "recommendation_movies", "email_querycontact"])
+_CALENDAR_LOOKUP = frozenset(["calendar", "meeting_schedule", "calendar_query"])
+_LIST_EDITS = frozenset(["calendar_update", "shopping_list_update", "todo_list_update"])
+# "save this song to my favorites" / "don't play this again": a command (like TOP LIKE/DISLIKE_MUSIC),
+# not the chat about taste the rest of music_likeness is.
+_MUSIC_CMD = re.compile(r"\b(?:save|add|favou?rites?|remember|rate|rating|stars?|put it on|(?:don'?t|do not|never) play|"
+                        r"skip)\b", re.I)
 
 
 def _intent_row(src: str, table: dict, kinds: dict, destructive: frozenset, label: str, text: str, *,
-                lang: str, split: str, group: str | None) -> dict | None:
+                en: str | None, lang: str, split: str, group: str | None, skip: Counter) -> dict | None:
+    """A CLINC / MASSIVE row: the intent's labels, refined by what the sentence (for a translation,
+    its English source `en`) says."""
     intent, tool = table[label]
-    if label == "audio_volume_mute" and _is_stop_mute(clean(text)):
-        intent, tool = "stop", ""
+    kind, d = kinds.get(label), label in destructive
+    reply = intent == "chat" or bool(_ASKS_LABEL.search(label))
+    probe = en or clean(text)
+    if label == "audio_volume_mute":
+        route = mute_route(probe, clean(text))
+        if route is None:
+            skip[f"{src}:audio_volume_mute_noise"] += 1
+            return None
+        if route == "stop":
+            intent, tool = "stop", ""
+    elif label == "goodbye":
+        intent = "stop" if closes(probe) else "chat"
+    elif label in _CALENDAR_LOOKUP:
+        intent, tool = calendar_route(probe)
+    elif label == "calendar_set" and _REMINDERS.search(probe):
+        tool, kind = "reminder_add", "add_reminder"
+    elif label in _LIST_EDITS and removes(probe):
+        intent, tool, kind, d = "agent_task", "", "other", True
+    elif label in ("music_likeness", "music_dislikeness") and _MUSIC_CMD.search(probe):
+        intent, tool, reply = "quick_action", "", False
+    if intent in ("quick_action", "agent_task") and label not in _NOT_HOW_TO and how_to(probe):
+        intent, tool, kind, d, reply = "chat", "", None, False, True  # asks how, doesn't do it
+    if intent == "stop":
+        reply = False
     return row(text, intent, tool, src, label, lang=lang, split=split, group=group,
-               kind=kind_for(intent, tool, kinds.get(label)), destructive=label in destructive, screen=False)
+               kind=kind_for(intent, tool, kind), destructive=d, screen=False, reply=reply)
 
 
 _CLINC_FILES = {"train": "plus/train-00000-of-00001.parquet", "eval": "plus/test-00000-of-00001.parquet"}
@@ -448,41 +635,47 @@ _CLINC_FILES = {"train": "plus/train-00000-of-00001.parquet", "eval": "plus/test
 def load_clinc(fx: Fetcher, skip: Counter) -> Iterator[dict]:
     for split, path in _CLINC_FILES.items():
         for r in fx.records("clinc", path, ["text", "intent"]):
-            if r["intent"] not in CLINC:
+            if r["intent"] in CLINC_SKIP:
                 skip[f"clinc:{r['intent']}"] += 1
                 continue
-            out = _intent_row("clinc", CLINC, CLINC_KIND, CLINC_DESTRUCTIVE, r["intent"], r["text"],
-                              lang="en", split=split, group=None)
+            if r["intent"] not in CLINC:
+                skip[f"clinc:unmapped:{r['intent']}"] += 1
+                continue
+            out = _intent_row("clinc", CLINC, CLINC_KIND, CLINC_DESTRUCTIVE, r["intent"], r["text"], en=None,
+                              lang="en", split=split, group=None, skip=skip)
             if out:
                 yield out
 
 
 def load_massive(fx: Fetcher, skip: Counter) -> Iterator[dict]:
-    """en + hi (Devanagari). Translations share MASSIVE's id, so they share a group."""
-    for cfg in ("en", "hi"):
-        for split, name in (("train", "train"), ("eval", "test")):
-            for line in fx.text("massive", f"{name}/{cfg}.json.gz").split("\n"):
-                if not line.strip():
-                    continue
-                r = json.loads(line)
-                label = r["label"]
-                if label not in MASSIVE:
-                    skip[f"massive:{label}"] += 1
-                    continue
-                t = clean(r["text"])
-                if len(t.split()) < 2 and not (label == "audio_volume_mute" and _is_stop_mute(t)):
-                    continue  # "emails" alone is too ambiguous to learn from ("quiet" is a clear stop)
-                out = _intent_row("massive", MASSIVE, MASSIVE_KIND, MASSIVE_DESTRUCTIVE, label, t,
-                                  lang=lang_of(t, "en" if cfg == "en" else "hinglish"), split=split,
-                                  group=f"massive:{r['id']}")
-                if out:
-                    yield out
+    """en + hi (Devanagari). Translations share MASSIVE's id, so they share a group, and a Hindi row
+    is labelled from its English source sentence."""
+    files = {(cfg, split): [json.loads(line) for line in fx.text("massive", f"{name}/{cfg}.json.gz").split("\n")
+                            if line.strip()]
+             for cfg in ("en", "hi") for split, name in (("train", "train"), ("eval", "test"))}
+    english = {r["id"]: clean(r["text"]) for (cfg, _), rs in files.items() if cfg == "en" for r in rs}
+    for (cfg, split), rs in files.items():
+        for r in rs:
+            label = r["label"]
+            if label not in MASSIVE:
+                skip[f"massive:unmapped:{label}"] += 1
+                continue
+            t = clean(r["text"])
+            en = english.get(r["id"]) if cfg != "en" else None
+            if len(t.split()) < 2 and not (label == "audio_volume_mute" and mute_route(en or t, t) == "stop"):
+                continue  # "emails" alone is too ambiguous to learn from ("quiet" is a clear stop)
+            out = _intent_row("massive", MASSIVE, MASSIVE_KIND, MASSIVE_DESTRUCTIVE, label, t, en=en,
+                              lang=lang_of(t, "en" if cfg == "en" else "hinglish"), split=split,
+                              group=f"massive:{r['id']}", skip=skip)
+            if out:
+                yield out
 
 
 # ---- TOP-style parses: TOPv2, Hinglish-TOP, MTOP -------------------------------------------------
-_WEB = ("GET_EVENT", "GET_DIRECTIONS", "GET_DISTANCE", "GET_ESTIMATED_ARRIVAL", "GET_ESTIMATED_DEPARTURE",
-        "GET_ESTIMATED_DURATION", "GET_INFO_ROAD_CONDITION", "GET_INFO_ROUTE", "GET_INFO_TRAFFIC",
-        "GET_STORIES_NEWS", "GET_DETAILS_NEWS", "QUESTION_NEWS")
+_WEB = ("GET_EVENT", "GET_DATE_TIME_EVENT", "GET_CATEGORY_EVENT", "GET_DIRECTIONS", "UPDATE_DIRECTIONS",
+        "GET_LOCATION", "GET_DISTANCE", "GET_ESTIMATED_ARRIVAL", "GET_ESTIMATED_DEPARTURE", "GET_ESTIMATED_DURATION",
+        "GET_INFO_ROAD_CONDITION", "GET_INFO_ROUTE", "GET_INFO_TRAFFIC", "GET_STORIES_NEWS", "GET_DETAILS_NEWS",
+        "QUESTION_NEWS")
 _PLAYER = ("PAUSE_MUSIC", "STOP_MUSIC", "RESUME_MUSIC", "SKIP_TRACK_MUSIC", "PREVIOUS_TRACK_MUSIC", "REPLAY_MUSIC",
            "LOOP_MUSIC", "UNLOOP_MUSIC", "START_SHUFFLE_MUSIC", "STOP_SHUFFLE_MUSIC", "REPEAT_ALL_MUSIC",
            "REPEAT_ALL_OFF_MUSIC", "FAST_FORWARD_MUSIC", "REWIND_MUSIC", "LIKE_MUSIC", "DISLIKE_MUSIC",
@@ -490,7 +683,16 @@ _PLAYER = ("PAUSE_MUSIC", "STOP_MUSIC", "RESUME_MUSIC", "SKIP_TRACK_MUSIC", "PRE
 # NEO's timer tool only starts timers: managing one is a quick action with no single tool.
 _TIMER_CTL = ("GET_TIMER", "PAUSE_TIMER", "RESUME_TIMER", "RESTART_TIMER", "ADD_TIME_TIMER", "SUBTRACT_TIME_TIMER",
               "UPDATE_TIMER", "DELETE_TIMER", "SILENCE_ALARM", "SNOOZE_ALARM")
-# intent → (route, tool, kind, destructive); anything unlisted is an agent task of kind "other".
+# Calls, messages, playlists and settings, and looking things up in apps NEO has no tool for
+# (alarms, reminders, call and message history, a contact's number): the agent does them.
+_APP = ("ADD_TO_PLAYLIST_MUSIC", "CREATE_PLAYLIST_MUSIC", "FOLLOW_MUSIC", "ANSWER_CALL", "END_CALL", "HOLD_CALL",
+        "IGNORE_CALL", "MERGE_CALL", "RESUME_CALL", "SWITCH_CALL", "UPDATE_CALL", "UPDATE_METHOD_CALL",
+        "IGNORE_MESSAGE", "SET_DEFAULT_PROVIDER_CALLING", "SET_DEFAULT_PROVIDER_MUSIC", "GET_ALARM", "GET_REMINDER",
+        "GET_REMINDER_AMOUNT", "GET_REMINDER_DATE_TIME", "GET_REMINDER_LOCATION", "GET_CALL", "GET_CALL_CONTACT",
+        "GET_CALL_TIME", "GET_MESSAGE", "GET_MESSAGE_CONTACT", "GET_CONTACT_METHOD")
+_TOP_STOP = ("stop", "", None, False)
+# intent → (route, tool, kind, destructive). An intent that isn't here (or in _TOP_SKIP) is skipped and
+# counted as unmapped, so a new one shows up in the build report instead of becoming an agent task.
 TOP: dict[str, tuple[str, str, str | None, bool]] = {
     "CREATE_ALARM": ("quick_action", "reminder_add", "add_reminder", False),
     "CREATE_REMINDER": ("quick_action", "reminder_add", "add_reminder", False),
@@ -506,28 +708,74 @@ TOP: dict[str, tuple[str, str, str | None, bool]] = {
     **dict.fromkeys(("UPDATE_ALARM", "UPDATE_REMINDER", "UPDATE_REMINDER_DATE_TIME", "UPDATE_REMINDER_TODO",
                      "UPDATE_REMINDER_LOCATION"), ("agent_task", "", "add_reminder", False)),
     **dict.fromkeys(("GET_RECIPES", "GET_INFO_RECIPES", "IS_TRUE_RECIPES", "HELP_REMINDER"), ("chat", "", None, False)),
+    **dict.fromkeys(_APP, ("agent_task", "", "other", False)),
+    # "stop sending that", "cancel this call": said while NEO is mid-send, exactly when stop matters
+    **dict.fromkeys(("CANCEL_MESSAGE", "CANCEL_CALL"), _TOP_STOP),
 }
-_TOP_SKIP = re.compile(r"^UNSUPPORTED|^(?:PREFER|DISPREFER|GET_GROUP|GET_EVENT_ATTENDEE\w*|GET_EVENT_ORGANIZER)$")
+# Not requests NEO acts on: preferences, unsupported, and MTOP's people / social-graph domain ("Is Nick
+# Foles married?", "who is Ross?" — general knowledge or Facebook data), presence ("show me as busy":
+# a status NEO can't set) and who is going to an event (Facebook's).
+_TOP_SKIP = re.compile(
+    r"^UNSUPPORTED|^(?:PREFER|DISPREFER|GET_GROUP|GET_EVENT_ATTENDEE\w*|GET_EVENT_ORGANIZER|GET_ATTENDEE_EVENT|"
+    r"GET_(?:INFO_)?CONTACT|GET_EMPLOYER|GET_AGE|GET_GENDER|GET_LANGUAGE|GET_EDUCATION_\w+|GET_UNDERGRAD|"
+    r"GET_MAJOR|GET_JOB|GET_EMPLOYMENT_TIME|GET_LIFE_EVENT\w*|GET_MUTUAL_FRIENDS|GET_AVAILABILITY|"
+    r"SET_(?:UN)?AVAILABLE)$"
+)
+# MTOP's GET_LOCATION is where a person lives or works (the people domain again); Hinglish-TOP's is
+# navigation ("Macys kaha hai"), a web search.
+_MTOP_SKIP = frozenset(["GET_LOCATION"])
 _TOP_INTENT = re.compile(r"^\s*\[IN:([A-Z_]+)")
+# Said to a ringing alarm, a call or an incoming message, words that name nothing are NEO's stop.
+_STOPPABLE = frozenset(["SILENCE_ALARM", "END_CALL", "IGNORE_MESSAGE"])
+# "turn off tomorrow's alarm", "no alarms on weekends": not silencing one that rings — deleting.
+_FUTURE_ALARM = re.compile(
+    r"\b(?:tomorrow'?s?|tonight'?s?|every|weekdays?|weekends?|(?:mon|tues|wednes|thurs|fri|satur|sun)day'?s?|"
+    r"next|(?:don'?t|do not|no longer) need|no alarms?|any alarms)\b",
+    re.I,
+)
+# "Remind Erik that …", "send the team a reminder": a message to someone, not a reminder for me.
+_FOR_OTHERS = re.compile(
+    r"^\W*(?:please\s+)?(?:remind\s+(?!(?:me|us|myself|to|about|of|that|at|in|on|for|every|tomorrow|today|"
+    r"tonight|this|next)\b)\w|send\s+(?!(?:a|an|the|me|us|myself|my)\b)\w+(?:\s+\w+)?\s+(?:an?\s+)?reminders?\b|"
+    r"send\b.{0,40}?\breminders?\b.{0,30}?\bto\s+(?:the|my|all|everyone|everybody|each|every)\b)",
+    re.I,
+)
 
 
-def top_labels(parse_or_intent: str) -> tuple[str, dict] | None:
-    """(label, row kwargs) for a TOP/MTOP intent ("IN:GET_WEATHER" or a whole parse), None to skip."""
-    m = _TOP_INTENT.match(parse_or_intent) or re.match(r"^\s*(?:IN:)?([A-Z_]+)\s*$", parse_or_intent)
-    if not m or _TOP_SKIP.search(m.group(1)):
+def top_labels(parse_or_intent: str, text: str = "", en: str = "") -> tuple[str, dict] | None:
+    """(label, row kwargs) for a TOP/MTOP intent ("IN:GET_WEATHER" or a whole parse), None to skip.
+    `text` is the sentence and `en` the English it translates (the sentence itself when empty):
+    a few intents are refined by what they say."""
+    name = _top_name(parse_or_intent)
+    if not name or _TOP_SKIP.search(name) or name not in TOP:
         return None
-    name = m.group(1)
-    route, tool, kind, destructive = TOP.get(name, ("agent_task", "", "other", False))
+    route, tool, kind, destructive = TOP[name]
+    probe = en or text
+    if name in _STOPPABLE and text and bare_stop(text):
+        route, tool, kind, destructive = _TOP_STOP
+    elif name == "SILENCE_ALARM" and _FUTURE_ALARM.search(probe):
+        route, tool, kind, destructive = TOP["DELETE_ALARM"]
+    elif name == "REMOVE_FROM_PLAYLIST_MUSIC" and probe and not removes(probe):
+        route, tool, kind, destructive = TOP["DISLIKE_MUSIC"]  # "don't play this again", "skip all Bieber"
+    elif name == "CREATE_REMINDER" and _FOR_OTHERS.search(probe):
+        route, tool, kind, destructive = "agent_task", "", "send_message", True
     asks = name.startswith(("GET_", "QUESTION_", "IS_TRUE_"))
     return name.lower(), {"intent": route, "tool": tool, "kind": kind, "destructive": destructive,
-                          "screen": False, "reply": route == "chat" or asks}
+                          "screen": False, "reply": route == "chat" or (asks and route != "stop")}
 
 
-def _top_row(src: str, text: str, parse: str, *, lang: str, split: str, group: str, skip: Counter) -> dict | None:
-    lab = top_labels(parse)
+def _top_name(parse_or_intent: str) -> str | None:
+    m = _TOP_INTENT.match(parse_or_intent) or re.match(r"^\s*(?:IN:)?([A-Z_]+)\s*$", parse_or_intent)
+    return m.group(1) if m else None
+
+
+def _top_row(src: str, text: str, parse: str, *, en: str = "", lang: str, split: str, group: str,
+             skip: Counter) -> dict | None:
+    lab = top_labels(parse, clean(text), clean(en) if en else "")
     if lab is None:
-        m = re.search(r"IN:([A-Z_]+)", parse)
-        skip[f"{src}:{m.group(1).lower() if m else '?'}"] += 1
+        name = _top_name(parse) or "?"
+        known = name in TOP or _TOP_SKIP.search(name)
+        skip[f"{src}:{'' if known else 'unmapped:'}{name.lower()}"] += 1
         return None
     label, kw = lab
     return row(text, kw.pop("intent"), kw.pop("tool"), src, label, lang=lang, split=split, group=group, **kw)
@@ -544,8 +792,9 @@ def load_hinglish_top(fx: Fetcher, skip: Counter) -> Iterator[dict]:
     for path, split in _HT_FILES.items():
         for r in fx.records("hinglish_top", path, ["en_query", "cs_query", "cs_parse"]):
             g = group_id("top", r["en_query"])
-            for text, lang in ((r["en_query"], "en"), (r["cs_query"], lang_of(r["cs_query"], "hinglish"))):
-                out = _top_row("hinglish_top", text, r["cs_parse"], lang=lang, split=split, group=g, skip=skip)
+            for text, lang, en in ((r["en_query"], "en", ""),
+                                   (r["cs_query"], lang_of(r["cs_query"], "hinglish"), r["en_query"])):
+                out = _top_row("hinglish_top", text, r["cs_parse"], en=en, lang=lang, split=split, group=g, skip=skip)
                 if out:
                     yield out
 
@@ -556,8 +805,8 @@ def load_hinglish_synth(fx: Fetcher, skip: Counter) -> Iterator[dict]:
     for r in fx.records("hinglish_top_synth", "data/train-00000-of-00001.parquet", cols):
         if r["generated_by"] != "synthetic":
             continue
-        out = _top_row("hinglish_top_synth", r["hi_en"], r["hi_en_parse"], lang=lang_of(r["hi_en"], "hinglish"),
-                       split="train", group=group_id("top", r["en"]), skip=skip)
+        out = _top_row("hinglish_top_synth", r["hi_en"], r["hi_en_parse"], en=r["en"],
+                       lang=lang_of(r["hi_en"], "hinglish"), split="train", group=group_id("top", r["en"]), skip=skip)
         if out:
             yield out
 
@@ -583,21 +832,30 @@ _MTOP_FILES = {"data/train_en-00000-of-00001-fc176d2de42e5a89.parquet": ("train"
 
 
 def load_mtop(fx: Fetcher, skip: Counter) -> Iterator[dict]:
-    """English + Devanagari; the two languages share MTOP's id, so they share a group."""
+    """English + Devanagari; the two languages share MTOP's id, so they share a group (and a Hindi
+    row is labelled from its English source sentence)."""
+    files = {path: fx.records("mtop", path, ["id", "intent", "utterance"]) for path in _MTOP_FILES}
+    english = {r["id"]: r["utterance"] for path, rs in files.items() if _MTOP_FILES[path][1] == "en" for r in rs}
     for path, (split, cfg) in _MTOP_FILES.items():
-        for r in fx.records("mtop", path, ["id", "intent", "utterance"]):
-            out = _top_row("mtop", r["utterance"], r["intent"], lang=lang_of(r["utterance"], "en" if cfg == "en" else "hinglish"),
+        for r in files[path]:
+            if _top_name(r["intent"]) in _MTOP_SKIP:
+                skip[f"mtop:{_top_name(r['intent']).lower()}"] += 1
+                continue
+            out = _top_row("mtop", r["utterance"], r["intent"], en=english.get(r["id"], "") if cfg != "en" else "",
+                           lang=lang_of(r["utterance"], "en" if cfg == "en" else "hinglish"),
                            split=split, group=f"mtop:{r['id']}", skip=skip)
             if out:
                 yield out
 
 
 # ---- Hinglish chat -----------------------------------------------------------------------------
-# Friends chatting ("kal party hai na?"); drop the lines that are really a command to someone.
+# Friends chatting ("kal party hai na?"); drop the lines that are really a command to someone, and
+# weather and time questions ("kal ka weather kaisa rahega?"): NEO answers those with a tool.
 _HI_COMMAND = re.compile(
     r"\b(?:chala(?:o|do|na)?|bajao|baja do|laga do|lagao|set kar\w*|band kar\w*|khol\w*|open|play|call kar\w*|"
     r"message kar\w*|msg kar\w*|bhej\w*|yaad dila\w*|remind\w*|alarm|timer|search|google kar\w*|dhoondh?\w*|"
-    r"order kar\w*|book kar\w*|delete|download|install)\b",
+    r"order kar\w*|book kar\w*|delete|download|install|weather|mausam|baa?rish|temperature|garmi kitni|"
+    r"thand kitni|kitne baje|(?:kya|kitna) time|time kya)\b",
     re.I,
 )
 _HINGLISH_CSV = "hinglish_conversations.csv"
@@ -686,6 +944,8 @@ def load_leyzer(fx: Fetcher, skip: Counter) -> Iterator[dict]:
             skip[f"leyzer:{label}"] += 1
             continue
         intent, tool, kind, destructive, screen, reply = lab
+        if tool == "calendar_today":
+            intent, tool = calendar_route(r["utterance"])
         out = row(r["utterance"], intent, tool, "leyzer", label, lang="en", kind=kind_for(intent, tool, kind or None),
                   destructive=destructive, screen=screen, reply=intent == "chat" or reply)
         if out:
@@ -727,7 +987,9 @@ def sgd_labels(intent: str, transactional: bool) -> tuple[str, str, str, bool]:
 
 def load_sgd(fx: Fetcher, skip: Counter) -> Iterator[dict]:
     """The user turn that starts an intent (route, tool, kind, destructive, reply), turns that decline
-    or end it ("no, not now", "that's all") as stop, and pure follow-up questions as chat."""
+    or end it ("no, not now", "that's all") as stop, and pure follow-up questions as chat. A goodbye
+    or negation that only thanks ("Great, thank you") is chat; one that only answers ("No, I didn't")
+    makes no sense without the question and is dropped."""
     transactional: dict[str, bool] = {}
     for p in _SGD_SCHEMAS:
         for svc in json.loads(fx.url_file(_gh_url("sgd", p)).read_text()):
@@ -747,11 +1009,20 @@ def load_sgd(fx: Fetcher, skip: Counter) -> Iterator[dict]:
                         skip[f"sgd:{intent}"] += 1
                         continue
                     route, tool, kind, destructive = sgd_labels(intent, transactional.get(intent, False))
-                    out = row(text, route, tool, "sgd", intent, lang="en", kind=kind, destructive=destructive,
-                              screen=False, reply=not transactional.get(intent, False) or "REQUEST" in names)
+                    if tool == "calendar_today":  # "am i free on the 5th?" isn't today's calendar
+                        route, tool = calendar_route(clean(text))
+                    out = row(text, route, tool, "sgd", intent, lang="en", kind=kind_for(route, tool, kind),
+                              destructive=destructive, screen=False,
+                              reply=not transactional.get(intent, False) or "REQUEST" in names)
                 elif names & {"NEGATE_INTENT", "GOODBYE"} or names == {"NEGATE", "THANK_YOU"}:
                     label = "negate_intent" if "NEGATE_INTENT" in names else "goodbye"
-                    out = row(text, "stop", "", "sgd", label, lang="en", destructive=False, screen=False)
+                    if closes(text):
+                        out = row(text, "stop", "", "sgd", label, lang="en", destructive=False, screen=False, reply=False)
+                    elif _THANKS.search(text):
+                        out = row(text, "chat", "", "sgd", label, lang="en", destructive=False, screen=False, reply=True)
+                    else:
+                        skip[f"sgd:{label}_answer"] += 1
+                        continue
                 elif names == {"REQUEST"}:  # "what's their address?" — answered from the conversation
                     out = row(text, "chat", "", "sgd", "request", lang="en", destructive=False, screen=False, reply=True)
                 else:
@@ -764,8 +1035,9 @@ def load_sgd(fx: Fetcher, skip: Counter) -> Iterator[dict]:
 # function-name regex → NEO tool (registry names); first match wins.
 FN2NEO: list[tuple[re.Pattern, str]] = [(re.compile(p, re.I), t) for p, t in [
     (r"^(?:send|compose|draft|reply|forward)_?(?:an_)?e?mail", "mail_send"),
-    # an inbox read, not check_email_availability / validate_email
-    (r"^(?:get|check|read|fetch|list)_(?:my_)?(?:unread_|new_|latest_|recent_)?e?mails?$|inbox", "mail_unread"),
+    # an inbox read, not check_email (glaive's address validator), check_email_availability, validate_email
+    (r"^(?:get|read|fetch|list)_(?:my_)?(?:unread_|new_|latest_|recent_)?e?mails?$|^check_(?:my_)?(?:unread|new|inbox)|inbox",
+     "mail_unread"),
     (r"(?:create|add|schedule|book|set)_(?:calendar_)?(?:event|meeting|appointment)|schedule_meeting|calendar_add", "calendar_add"),
     (r"(?:get|list|check|fetch)_(?:calendar|events|schedule|agenda|meetings)", "calendar_today"),
     (r"(?:create|add|set)_(?:todo|to_do|reminder|task)|remind", "reminder_add"),
@@ -793,7 +1065,8 @@ FN2NEO: list[tuple[re.Pattern, str]] = [(re.compile(p, re.I), t) for p, t in [
 CHAT_FN = re.compile(
     r"^(?:calculate|compute|convert|get_(?:random_)?(?:joke|fact|quote|definition)|translate|generate_"
     r"(?:password|random|username|quote|poem|story|color)|analyze_sentiment|check_(?:palindrome|anagram|prime|"
-    r"spelling)|is_|solve|reverse|count|sort|find_(?:max|min|median|gcd|lcm)|fibonacci|factorial)",
+    r"spelling)|is_|solve|reverse|count|sort|find_(?:max|min|median|gcd|lcm)|fibonacci|factorial|"
+    r"(?:check|validate|verify)_email(?:_address)?$)",  # "is john.doe@example.com a valid address?"
     re.I,
 )
 _NOT_CHAT_FN = re.compile(r"currency|exchange|stock|distance|route|travel_time|shipping|crypto", re.I)
@@ -861,12 +1134,21 @@ def _glaive_pairs(fx: Fetcher, skip: Counter, src: str) -> Iterator[tuple[str, s
         yield text, fn
 
 
+# "what events are happening in New York on the 25th": public events, not the user's calendar.
+_PUBLIC_EVENTS = re.compile(r"\bhappening\b|\b(?:in|near|around)\s+[A-Z][a-z]")
+
+
 def load_glaive(fx: Fetcher, skip: Counter) -> Iterator[dict]:
     for text, fn in _glaive_pairs(fx, skip, "glaive"):
         tool = neo_tool(fn)
         if not tool:
             continue
         route, kind, destructive, reply = GLAIVE_TOOLS[tool]
+        if tool == "calendar_today":
+            if _PUBLIC_EVENTS.search(text):
+                skip["glaive:public_events"] += 1
+                continue
+            route, tool = calendar_route(text)
         out = row(text, route, tool, "glaive", fn, lang="en", kind=kind, destructive=destructive, screen=False,
                   reply=reply)
         if out:
@@ -884,7 +1166,9 @@ def load_glaive_chat(fx: Fetcher, skip: Counter) -> Iterator[dict]:
 
 # ---- computer-use instructions: AgentNet, OmniACT ------------------------------------------------
 # needs_screen only when the wording points at something visible; "rename the recording in Zoom"
-# might or might not need the screen, so it stays unknown rather than becoming a negative.
+# might or might not need the screen, so it stays unknown rather than becoming a negative. A click
+# ("click the Send button", "click Python on python.org") is not a pointer: NEO's own rows label
+# those False (click_text finds a label without looking), so they stay unknown too.
 DEICTIC = re.compile(
     r"\b(?:this|these)\s+(?:\w+\s+){0,2}?(?:window|page|tab|file|document|doc|image|picture|photo|pdf|e-?mail|"
     r"message|slide|cell|row|column|table|text|paragraph|sentence|word|link|button|icon|folder|item|song|track|"
@@ -893,9 +1177,8 @@ DEICTIC = re.compile(
     r"|\bcurrent(?:ly)?\s+(?:open(?:ed)?|selected|active|displayed|shown|visible|page|window|tab|file|document|"
     r"slide|sheet|image|folder|directory|view|screen|cell|row|web\s?page|article|e-?mail|message)\b"
     r"|\b(?:selected|highlighted)\b|\bon[- ](?:the |my )?screen\b|\bvisible\b"
-    r"|\bthe\s+(?:open(?:ed)?|active|front(?:most)?)\s+(?:window|tab|page|document|file|app)\b"
-    r"|\b(?:click|tap|double[- ]click|right[- ]click|hover)\b"
-    r"|\b(?:the|a)\s+(?:[\"'\w-]+\s+){0,3}(?:button|icon|checkbox|check\s+box|dropdown|drop-down|toggle)\b",
+    r"|\bthe\s+(?:open(?:ed)?|active|frontmost)\s+(?:window|tab|page|document|file|app)\b"
+    r"|\b(?:that|those)\s+(?:[\"'\w-]+\s+){0,3}(?:button|icon|checkbox|check\s+box|dropdown|drop-down|toggle)s?\b",
     re.I,
 )
 # A single click / key / scroll / typed text is a NEO quick action (click_text, hotkey, scroll,
@@ -910,7 +1193,8 @@ def _single_control(text: str) -> bool:
 
 
 def _computer_use_row(src: str, label: str, text: str) -> dict | None:
-    return row(text, "agent_task", "", src, label, lang="en", screen=True if DEICTIC.search(text) else None)
+    return row(text, "agent_task", "", src, label, lang="en", screen=True if DEICTIC.search(text) else None,
+               reply=asks_something(clean(text)))
 
 
 _NOT_AN_INSTRUCTION = re.compile(r"^Recording-|\(Untitled\)|pyautogui", re.I)  # a file name, a script
@@ -959,28 +1243,33 @@ def load_hwu64(fx: Fetcher, skip: Counter) -> Iterator[dict]:
         for r in fx.records("hwu64", path, ["utterance", "label"]):
             if names.get(r["label"], r["label"]) == "general_commandstop":
                 out = row(r["utterance"], "stop", "", "hwu64", "general_commandstop", lang="en", destructive=False,
-                          screen=False)
+                          screen=False, reply=False)
                 if out:
                     yield out
 
 
 # A polite request ("Could you turn off the lights, please") wants doing, not an answer: the reply
-# head's hard negatives. Requests for information are dropped (they do want an answer), and so are
-# requests only a person could do ("lend me a hand with this box").
+# head's hard negatives. Requests for information, advice or checking are dropped (they do want an
+# answer: "Can I have the latest weather update", "Could you help me with a budget plan"), and so are
+# requests only a person could do ("lend me a hand with this box", "help me carry these boxes").
 _ASKS_INFO = re.compile(
     r"\b(?:tell|show|explain|describe|recommend|suggest|list|name|find|search|look up|check|read|give me|"
     r"let me know|what|which|who|where|when|how|information|details|overview|summary of|biography|"
-    r"profiles?|adult)\b",
+    r"profiles?|adult|directions?|address|location|nearest|weather|(?:latest|an|any|status)\s+updates?|verify|"
+    r"feedback|advi[cs]e|plan|"
+    r"routine|outline|translate|help me with|assist me)\b",
     re.I,
 )
-_PHYSICAL = re.compile(r"\b(?:hand me|pass me|lend me|borrow|feed|bring me|a hand|glass of|your (?:coat|umbrella|book|notes|pen))\b", re.I)
+_PHYSICAL = re.compile(r"\b(?:hand me|pass me|lend me|borrow|feed|bring me|a hand|glass of|cup of tea|carry|lift|a ride|drive me|"
+                       r"pick me up|your (?:coat|umbrella|book|notes|pen))\b", re.I)
 _DEVICE = re.compile(
     r"\b(?:turn|switch)\s+(?:[\w']+\s+){0,3}?(?:on|off|up|down)\b|\b(?:volume|brightness)\b|"
     r"\b(?:mute|unmute|pause|resume|skip|dim|brighten|louder|quieter)\b|"
     r"\bplay(?:ing)?\b|\b(?:set|start)\s+(?:up\s+)?(?:an?\s+|the\s+)?(?:new\s+)?(?:alarm|timer|reminder|volume|"
-    r"thermostat|temperature)\b|"
-    r"\bremind me\b|\b(?:increase|decrease|raise|lower|adjust)\s+(?:the\s+)?(?:volume|brightness|temperature|"
-    r"thermostat|bass|treble)\b|\b(?:fast forward|rewind|next track|previous track|channel)\b",
+    r"thermostat|temperature)\b|\b(?:set|get|create|add)\s+(?:an?\s+|the\s+)?(?:\w+\s+){0,2}reminder\b|"
+    r"\bremind me\b|\b(?:increase|decrease|raise|lower|adjust)\s+(?:the\s+)?(?:room\s+)?(?:volume|brightness|"
+    r"temperature|thermostat|bass|treble)\b|\b(?:fast forward|rewind|next track|previous track|channel)\b|"
+    r"\b(?:room temperature|thermostat|lights?|coffee|fan|tv|dehumidifier|humidifier|heater)\b",
     re.I,
 )
 _TIGRE_TOOL = [(re.compile(p, re.I), t) for p, t in [
@@ -1034,11 +1323,12 @@ class Source:
 SOURCES: list[Source] = [
     Source("clinc", load_clinc, "CC-BY-3.0", cap=60),
     Source("massive", load_massive, "CC-BY-4.0", cap=60),
-    Source("hinglish_top", load_hinglish_top, "Apache-2.0", cap=300),
-    Source("hinglish_top_synth", load_hinglish_synth, "Apache-2.0", cap=80),
+    Source("hinglish_top", load_hinglish_top, "Apache-2.0; translations of TOPv2 (CC-BY-SA-4.0): ShareAlike", cap=300),
+    Source("hinglish_top_synth", load_hinglish_synth, "Apache-2.0; translations of TOPv2 (CC-BY-SA-4.0): ShareAlike",
+           cap=80),
     Source("hinglish_chat", load_hinglish_chat, "MIT", cap=1500),
     Source("topv2", load_topv2, "CC-BY-SA-4.0", cap=150),
-    Source("leyzer", load_leyzer, "CC-BY-NC-ND-4.0 (data repo) / CC-BY-4.0 (HF card)", cap=50, default=False,
+    Source("leyzer", load_leyzer, "CC-BY-NC-ND-4.0 (data repo LICENSE) / CC-BY-4.0 (HF card)", cap=50, default=False,
            note="its data repository is licensed non-commercial, no-derivatives; opt in with --with leyzer"),
     Source("mtop", load_mtop, "CC-BY-SA-4.0", cap=80),
     Source("sgd", load_sgd, "CC-BY-SA-4.0", cap=60),
@@ -1048,6 +1338,10 @@ SOURCES: list[Source] = [
     Source("agentnet", load_agentnet, "MIT", cap=100, total=1500, key=lambda r: f"{r['hf_intent']}|{r.get('screen')}"),
     Source("omniact", load_omniact, "MIT", cap=40, total=1200, key=lambda r: f"{r['hf_intent']}|{r.get('screen')}"),
     Source("hwu64", load_hwu64, "CC-BY-4.0", cap=200),
-    Source("sentence_types", load_sentence_types, "none stated", cap=500),
+    Source("sentence_types", load_sentence_types, "none stated", cap=500, default=False,
+           note="no licence stated (no rights granted), and the noisiest mapping; opt in with --with sentence_types"),
 ]
+# The benchmark's sources: their eval splits are always loaded, so the holdout doesn't depend on
+# which sources a build uses.
+BENCHMARK = ("clinc", "massive", "hinglish_top", "mtop")
 BY_NAME = {s.name: s for s in SOURCES}

@@ -4,3 +4,8 @@
 {"domain": "alarm", "utterance": "Set an alarm for 5am tomorrow", "semantic_parse": "[IN:CREATE_ALARM Set an alarm [SL:DATE_TIME for 5am tomorrow ] ]"}
 {"domain": "music", "utterance": "skip this song", "semantic_parse": "[IN:SKIP_TRACK_MUSIC skip this song ]"}
 {"domain": "alarm", "utterance": "delete my alarm for tomorrow morning", "semantic_parse": "[IN:DELETE_ALARM delete my alarm [SL:DATE_TIME for tomorrow morning ] ]"}
+{"domain": "alarm", "utterance": "turn off tomorrow's alarm", "semantic_parse": "[IN:SILENCE_ALARM turn off [SL:DATE_TIME tomorrow 's ] alarm ]"}
+{"domain": "alarm", "utterance": "Quiet now", "semantic_parse": "[IN:SILENCE_ALARM Quiet now ]"}
+{"domain": "alarm", "utterance": "stop the alarm", "semantic_parse": "[IN:SILENCE_ALARM stop the alarm ]"}
+{"domain": "music", "utterance": "never play justin bieber again", "semantic_parse": "[IN:REMOVE_FROM_PLAYLIST_MUSIC never play [SL:MUSIC_ARTIST_NAME justin bieber ] again ]"}
+{"domain": "music", "utterance": "remove this song from my playlist", "semantic_parse": "[IN:REMOVE_FROM_PLAYLIST_MUSIC remove this song from my playlist ]"}

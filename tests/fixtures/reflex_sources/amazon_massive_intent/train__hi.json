@@ -2,3 +2,6 @@
 {"id": "11", "label": "audio_volume_mute", "text": "रसोई के स्पीकर म्यूट करो", "lang": "hi"}
 {"id": "12", "label": "weather_query", "text": "क्या रविवार को धूप निकलेगी", "lang": "hi"}
 {"id": "17", "label": "play_music", "text": "beatles का कोई गाना चलाओ", "lang": "hi"}
+{"id": "20", "label": "calendar_set", "text": "मुझे शुक्रवार को दंत चिकित्सक की याद दिलाना", "lang": "hi"}
+{"id": "23", "label": "music_likeness", "text": "यह गाना पसंदीदा में सहेजो", "lang": "hi"}
+{"id": "27", "label": "weather_query", "text": "क्या आज पुणे में बारिश होगी", "lang": "hi"}

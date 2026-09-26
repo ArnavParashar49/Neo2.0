@@ -1,1 +1,2 @@
 {"id": 2001, "intent": "IN:GET_STORIES_NEWS", "utterance": "any headlines about the elections"}
+{"id": 2002, "intent": "IN:GET_WEATHER", "utterance": "Will it rain in Pune today ?"}

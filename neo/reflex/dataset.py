@@ -487,6 +487,24 @@ def build(n_per_class: int = 320, seed: int = 7) -> list[dict]:
     return rows
 
 
+def benchmark(rows: list[dict] | None = None) -> tuple[list[dict], int]:
+    """The benchmark (``reflex_eval.jsonl``, see hf_data.py) minus every sentence NEO trains on.
+
+    hf_data holds the public train rows out of it, but NEO's own rows — the templates, generated
+    and your own examples — are made without looking at it ("next song", "ruk jao" are in both), so
+    whoever evaluates drops the overlap here. `rows`: what the head was trained on (default: build()).
+    Returns (benchmark rows, how many were dropped)."""
+    from neo.reflex.sources import text_key
+
+    path = settings().data_dir / "reflex_eval.jsonl"
+    if not path.exists():
+        return [], 0
+    bench = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    trained = {text_key(r["text"]) for r in (build() if rows is None else rows)}
+    keep = [r for r in bench if text_key(r["text"]) not in trained]
+    return keep, len(bench) - len(keep)
+
+
 if __name__ == "__main__":
     rows = build()
     out = Path(settings().data_dir) / "reflex_dataset.jsonl"

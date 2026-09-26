@@ -2,5 +2,6 @@
  "data/tasks/desktop/calendar/task_1.1.txt": "Task: Add an event called Standup for tomorrow at 9\nOutput Script:\npyautogui.click(10, 20)",
  "data/tasks/web/shop/task_2.3.txt": "Task: Use the Add to cart button for the first product",
  "data/tasks/desktop/finder/task_3.1.txt": "Task: Scroll down",
- "data/metadata/desktop/boxes/calendar/screen_1.json": "{}"
+ "data/metadata/desktop/boxes/calendar/screen_1.json": "{}",
+ "data/tasks/desktop/finder/task_3.2.txt": "Task: Close this window and open Downloads"
 }

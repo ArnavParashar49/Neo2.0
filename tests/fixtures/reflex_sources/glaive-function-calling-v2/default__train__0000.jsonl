@@ -6,3 +6,6 @@
 {"chat": "USER: Can you book me a flight to Rome?\n\n\nASSISTANT: I'm sorry, I can't book flights. <|endoftext|>\n\n\n"}
 {"chat": "USER: Hello there\n\n\nASSISTANT: Hi! <|endoftext|>\n\n\nUSER: How are you\n\n\nASSISTANT: Good. <|endoftext|>\n\n\nUSER: Get me the news\n\n\nASSISTANT: <functioncall> {\"name\": \"get_news\", \"arguments\": '{}'} <|endoftext|>\n\n\n"}
 {"chat": "USER: Save a note with this text:\nmilk\neggs\n\n\nASSISTANT: <functioncall> {\"name\": \"create_note\", \"arguments\": '{}'} <|endoftext|>\n\n\n"}
+{"chat": "USER: Can you check if my email address is valid?\n\n\nASSISTANT: <functioncall> {\"name\": \"check_email\", \"arguments\": '{}'} <|endoftext|>\n\n\n"}
+{"chat": "USER: What events are happening in New York on 25th December?\n\n\nASSISTANT: <functioncall> {\"name\": \"get_calendar_events\", \"arguments\": '{}'} <|endoftext|>\n\n\n"}
+{"chat": "USER: What events do I have on my calendar tomorrow?\n\n\nASSISTANT: <functioncall> {\"name\": \"get_calendar_events\", \"arguments\": '{}'} <|endoftext|>\n\n\n"}

@@ -82,7 +82,13 @@ def test_row_leaves_unknown_labels_out_and_cleans_text():
     assert r["text"] == "mute the tv" and r["source"] == "massive:audio_volume_mute" and r["hf_intent"] == "audio_volume_mute"
     assert r["destructive"] is False and "screen" not in r and "reply" not in r and "kind" not in r
     assert r["split"] == "train" and r["group"].startswith("massive:")
-    assert S.text_key("Pause my timer .") == S.text_key("pause my  timer") == "pause my timer"
+    assert S.text_key("Pause my timer .") == S.text_key("pause my  timer") == "pausemytimer"
+    # re-tokenised copies are one sentence; Devanagari vowel signs still tell words apart
+    assert S.text_key("I don ' t like this song") == S.text_key("I don't like this song")
+    assert S.text_key("Create an alarm for 5 : 30 am") == S.text_key("create an alarm for 5:30am")
+    assert S.text_key("read my to do list") == S.text_key("read my todo list")
+    assert S.text_key("रुको।") == S.text_key("रुको") != S.text_key("रुकें")
+    assert S.text_key("बंद करो") != S.text_key("बंद करें")
     assert S.group_id("top", "Pause my timer .") == S.group_id("top", "pause my timer!")
     assert S.lang_of("मेरा टाइमर रोको") == "hi" and S.lang_of("timer roko", "hinglish") == "hinglish"
 
@@ -100,11 +106,31 @@ def test_clinc_mapping_kind_destructive_and_eval_split(fx):
     assert "kind" not in t["how do you say good night in german"]  # chat never reaches neo/decide
     assert t["please wire two hundred dollars to my savings"]["destructive"] is True
     assert t["is it going to snow in denver this weekend"]["split"] == "eval"
-    assert skip["clinc:made_up_label"] == 1
+    assert skip["clinc:unmapped:made_up_label"] == 1  # listed as unmapped in the build report
+    assert (w["reply"], msg["reply"], t["never mind forget what i said"]["reply"]) == (True, False, False)
+
+
+def test_clinc_rows_are_labelled_by_what_they_say(fx):
+    rows, skip = load("clinc", fx)
+    t = by_text(rows)
+    how = t["how do i report my lost card"]  # advice, not reporting it (report_lost_card is destructive)
+    assert (how["intent"], how["tool"], how["destructive"], how["reply"]) == ("chat", "", False, True) and "kind" not in how
+    later = t["what's on my calendar for april 15"]  # calendar_today lists today only
+    assert (later["intent"], later["tool"], later["reply"]) == ("agent_task", "", True)
+    assert t["what's on my calendar today"]["tool"] == "calendar_today"
+    clear = t["clear my calendar for tomorrow"]
+    assert (clear["intent"], clear["tool"], clear["destructive"]) == ("agent_task", "", True)
+    add = t["add dentist to my calendar for friday"]
+    assert (add["tool"], add["destructive"]) == ("calendar_add", False)
+    off = t["take eggs off my shopping list"]
+    assert (off["destructive"], off["kind"]) == (True, "other")
+    assert t["what is the apr on my visa card"]["intent"] == "agent_task"  # like balance: my account
+    assert "unsync from my phone" not in t and skip["clinc:sync_device"] == 1
+    assert t["bye for now"]["intent"] == "stop" and t["it was nice chatting with you"]["intent"] == "chat"
 
 
 def test_massive_mute_rows_without_audio_are_stop_in_both_scripts(fx):
-    rows, _ = load("massive", fx)
+    rows, skip = load("massive", fx)
     t = by_text(rows)
     assert t["be quiet for a while"]["intent"] == "stop"  # wake word stripped too
     assert t["silence"]["intent"] == "stop"  # one word, but a clear stop: kept
@@ -114,6 +140,20 @@ def test_massive_mute_rows_without_audio_are_stop_in_both_scripts(fx):
     assert "emails" not in t  # a lone word is too ambiguous to learn from
     assert t["email the landlord about the broken heater"]["destructive"] is True
     assert t["add eggs to my shopping list"]["kind"] == "add_reminder"
+    assert t["silent mode on for three hours"]["tool"] == "volume"  # a device setting, not "stop"
+    assert "clear data" not in t and skip["massive:audio_volume_mute_noise"] == 1
+
+
+def test_massive_rows_and_their_translations_are_labelled_from_the_english(fx):
+    rows, _ = load("massive", fx)
+    t = by_text(rows)
+    for text in ("remind me about the dentist on friday", "मुझे शुक्रवार को दंत चिकित्सक की याद दिलाना"):
+        assert (t[text]["tool"], t[text]["kind"]) == ("reminder_add", "add_reminder"), text
+    for text in ("save this song to my favourites", "यह गाना पसंदीदा में सहेजो"):  # the Hindi names no command word
+        assert (t[text]["intent"], t[text]["reply"]) == ("quick_action", False), text
+    assert t["i really like jazz"]["intent"] == "chat"
+    assert t["how do i descale the coffee machine"]["intent"] == "chat"
+    assert all(isinstance(r["reply"], bool) for r in rows)
 
 
 def test_massive_translations_share_a_group_and_script_sets_lang(fx):
@@ -143,6 +183,34 @@ def test_top_labels():
     assert (kw["intent"], kw["reply"], kw["kind"]) == ("chat", True, None)
     assert S.top_labels("[IN:UNSUPPORTED_WEATHER what's the pollen ]") is None
     assert S.top_labels("IN:PREFER") is None
+    assert S.top_labels("IN:GET_AGE") is None and S.top_labels("IN:SET_UNAVAILABLE") is None  # people / presence
+    assert S.top_labels("IN:SOMETHING_NEW") is None  # unmapped: skipped, not an agent task
+    for name in ("GET_REMINDER", "GET_MESSAGE", "GET_CONTACT_METHOD"):
+        _, kw = S.top_labels(f"IN:{name}")
+        assert (kw["intent"], kw["reply"]) == ("agent_task", True), name
+    for name in ("GET_DATE_TIME_EVENT", "UPDATE_DIRECTIONS", "GET_LOCATION"):
+        assert S.top_labels(f"IN:{name}")[1]["tool"] == "web_search", name
+    _, kw = S.top_labels("IN:CANCEL_MESSAGE", "Sending ko quit karo")
+    assert (kw["intent"], kw["reply"]) == ("stop", False)
+
+
+@pytest.mark.parametrize("parse, text, en, want", [
+    ("IN:SILENCE_ALARM", "Quiet now", "", ("stop", False)),
+    ("IN:SILENCE_ALARM", "Please chup rahe", "Please be quiet", ("stop", False)),
+    ("IN:SILENCE_ALARM", "stop the alarm", "", ("quick_action", False)),
+    ("IN:SILENCE_ALARM", "please band karo", "Stop !", ("quick_action", False)),  # bare "band karo": turn it off
+    ("IN:SILENCE_ALARM", "turn off tomorrow's alarm", "", ("agent_task", True)),  # deletes a future alarm
+    ("IN:END_CALL", "hang up", "", ("agent_task", False)),
+    ("IN:REMOVE_FROM_PLAYLIST_MUSIC", "Fir ye song mat chalana", "Don't play this song again", ("quick_action", False)),
+    ("IN:REMOVE_FROM_PLAYLIST_MUSIC", "take this off my playlist", "", ("agent_task", True)),
+    ("IN:CREATE_REMINDER", "Darcy ko yaad dilao ki cats ko khana do", "Remind Darcy to feed the cats", ("agent_task", True)),
+    ("IN:CREATE_REMINDER", "remind me to call mom", "", ("quick_action", False)),
+])
+def test_top_labels_follow_what_the_sentence_says(parse, text, en, want):
+    _, kw = S.top_labels(parse, text, en)
+    assert (kw["intent"], kw["destructive"]) == want
+    if kw["intent"] == "agent_task" and "CREATE_REMINDER" in parse:
+        assert kw["kind"] == "send_message"  # a reminder for someone else is a message to them
 
 
 def test_hinglish_top_parallel_rows_and_benchmark_split(fx):
@@ -176,6 +244,14 @@ def test_mtop_pairs_languages_by_id(fx):
     assert t["दाल मखनी कैसे बनाते हैं"]["intent"] == "chat"
     assert {r["split"] for r in rows if r["group"] == "mtop:2001"} == {"eval"}
     assert skip["mtop:prefer"] == 1
+    # the people domain isn't NEO's; an intent nobody mapped is reported, not guessed
+    assert "how old is lia" not in t and "where does sam live" not in t
+    assert skip["mtop:get_age"] == 1 and skip["mtop:get_location"] == 1 and skip["mtop:unmapped:fly_to_moon"] == 1
+    assert t["stop sending that message"]["intent"] == "stop"
+    for text in ("remind erik that the show moved to friday", "एरिक को याद दिलाओ कि शो शुक्रवार को है"):
+        assert (t[text]["intent"], t[text]["kind"], t[text]["destructive"]) == ("agent_task", "send_message", True)
+    assert t["बंद होजाओ"]["intent"] == "stop" and t["turn it off"]["intent"] == "quick_action"
+    assert t["when does the jazz festival start"]["tool"] == "web_search"
 
 
 # ---- the other sources ---------------------------------------------------------------------------
@@ -184,6 +260,7 @@ def test_hinglish_chat_reads_the_head_and_drops_commands(fx):
     texts = {r["text"] for r in rows}
     assert "kal movie dekhne chalein kya?" in texts and "aaj office mein bahut kaam tha" in texts
     assert not any("gaana" in t for t in texts)  # a command, not chit-chat
+    assert not any("weather" in t for t in texts)  # NEO answers that with the weather tool
     assert not any("kat" in t for t in texts)  # the cut-off last line
     assert all(r["intent"] == "chat" and r["reply"] and r["lang"] == "hinglish" for r in rows)
 
@@ -215,12 +292,17 @@ def test_sgd_destructive_reply_and_stop(fx):
     assert t["No, not right now"]["intent"] == "stop" and t["Thanks, that's all"]["intent"] == "stop"
     assert (t["What's their phone number?"]["intent"], t["What's their phone number?"]["reply"]) == ("chat", True)
     assert "Sounds good" not in t and skip["sgd:LookupSong"] == 1
+    assert t["Great, thank you"]["intent"] == "chat"  # thanks alone isn't a stop
+    assert "No, I didn't" not in t and skip["sgd:negate_intent_answer"] == 1  # an answer, meaningless alone
+    assert (t["Am I free on March 5th?"]["intent"], t["Am I free on March 5th?"]["tool"]) == ("agent_task", "")
+    assert all(r["reply"] is False for r in rows if r["intent"] == "stop")
 
 
 def test_glaive_function_names_to_tools_and_calculators_to_chat(fx):
     assert S.glaive_call("USER: hi\n\n\nASSISTANT: <functioncall> {\"name\": \"get_news\"} <|endoftext|>") == ("hi", "get_news")
     assert S.neo_tool("send_email") == "mail_send" and S.neo_tool("check_email_availability") is None
-    assert S.neo_tool("check_email") == "mail_unread" and S.neo_tool("create_todo") == "reminder_add"
+    assert S.neo_tool("check_email") is None and S.neo_tool("create_todo") == "reminder_add"  # glaive's validator
+    assert S.neo_tool("get_unread_emails") == "mail_unread" and S.neo_tool("check_inbox") == "mail_unread"
     rows, skip = load("glaive", fx)
     t = by_text(rows)
     mail = t["Please email Dana that the draft is attached"]
@@ -228,8 +310,12 @@ def test_glaive_function_names_to_tools_and_calculators_to_chat(fx):
     assert t["I need to add something to my to-do list"]["tool"] == "reminder_add"  # called after a clarification
     assert not any("news" in r["text"] for r in rows)  # the call came after the third user message
     assert skip["glaive:long_or_multiline"] == 1
+    assert "What events are happening in New York on 25th December?" not in t and skip["glaive:public_events"] == 1
+    cal = t["What events do I have on my calendar tomorrow?"]
+    assert (cal["intent"], cal["tool"]) == ("agent_task", "")
     chat, _ = load("glaive_chat", fx)
-    assert [r["text"] for r in chat] == ["What tip should I leave on a 48 dollar bill?"]  # not currency: rates change
+    assert [r["text"] for r in chat] == ["What tip should I leave on a 48 dollar bill?",  # not currency: rates change
+                                         "Can you check if my email address is valid?"]
 
 
 def test_computer_use_rows_mark_the_screen_only_when_the_wording_points_at_it(fx):
@@ -237,26 +323,40 @@ def test_computer_use_rows_mark_the_screen_only_when_the_wording_points_at_it(fx
     t = by_text(rows)
     assert t["Rename the selected file on the desktop to notes-final"]["screen"] is True
     assert "screen" not in t["Create a new playlist called Focus in Spotify and add three lofi songs"]
-    assert all(r["intent"] == "agent_task" for r in rows) and len(rows) == 2
+    # a click isn't a pointer at the screen: NEO's own "click {label}" rows say False
+    assert "screen" not in t["Click on Python on python.org and download the latest installer"]
+    total = t["What is the total of the column in the current sheet"]
+    assert (total["screen"], total["reply"]) == (True, True)
+    assert t["Rename the selected file on the desktop to notes-final"]["reply"] is False
+    assert all(r["intent"] == "agent_task" for r in rows) and len(rows) == 4
     assert skip["agentnet:filtered"] == 5  # a bare click, a step list, infeasible, a file name, low alignment
     rows, _ = load("omniact", fx)
     t = by_text(rows)
     assert "Add an event called Standup for tomorrow at 9" in t  # the output script is cut off
-    assert t["Use the Add to cart button for the first product"]["screen"] is True
+    assert "screen" not in t["Use the Add to cart button for the first product"]
     assert t["Use the Add to cart button for the first product"]["hf_intent"] == "web/shop"
+    assert t["Close this window and open Downloads"]["screen"] is True
     assert not any(r["text"] == "Scroll down" for r in rows)  # one scroll is a quick action
+    assert all(isinstance(r["reply"], bool) for r in rows)
+    assert not S.DEICTIC.search("read the front page of the times")
 
 
 def test_hwu64_stop_and_polite_requests_as_reply_negatives(fx):
     rows, _ = load("hwu64", fx)
     assert {r["text"] for r in rows} == {"that is enough stop now", "please just stop talking"}
-    assert all(r["intent"] == "stop" for r in rows)
+    assert all(r["intent"] == "stop" and r["reply"] is False for r in rows)
+    assert not S.BY_NAME["sentence_types"].default  # no licence stated
     rows, _ = load("sentence_types", fx)
     t = by_text(rows)
-    assert set(t) == {"Could you turn the volume down, please", "Can you book a table for four tonight"}
+    assert set(t) == {"Could you turn the volume down, please", "Can you book a table for four tonight",
+                      "Could you please make me a cup of coffee", "Can you adjust the room temperature to 72 degrees",
+                      "Can I set a daily goal reminder"}  # not the weather update (wants an answer), not carrying
     assert (t["Could you turn the volume down, please"]["intent"], t["Could you turn the volume down, please"]["tool"]) == (
         "quick_action", "volume")
     assert t["Can you book a table for four tonight"]["intent"] == "agent_task"
+    assert t["Could you please make me a cup of coffee"]["intent"] == "quick_action"  # as MASSIVE iot_coffee
+    assert t["Can you adjust the room temperature to 72 degrees"]["intent"] == "quick_action"
+    assert t["Can I set a daily goal reminder"]["tool"] == "reminder_add"
     assert all(r["reply"] is False for r in rows)
 
 
@@ -285,7 +385,36 @@ def test_eval_rows_and_their_translations_never_train(fx):
     # CLINC's train copy of a test sentence (different case and punctuation) too
     assert not any(r["text"] == "how do you say good night in german" for r in train)
     assert {r["split"] for r in ev} == {"eval"} and {r["split"] for r in train} == {"train"}
-    assert Counter(r["source"].split(":")[0] for r in ev) == {"clinc": 2, "massive": 4, "hinglish_top": 4, "mtop": 2}
+    assert Counter(r["source"].split(":")[0] for r in ev) == {"clinc": 3, "massive": 4, "hinglish_top": 4, "mtop": 3}
+    # a re-tokenised copy from another source ("read my to do list" / CLINC's "read my todo list")
+    assert not any(S.text_key(r["text"]) == S.text_key("read my todo list") for r in train)
+
+
+def test_translations_of_a_benchmark_sentence_from_another_source_are_held_out(fx):
+    # MASSIVE's English "will it rain in pune today" is MTOP's test sentence "Will it rain in Pune today ?":
+    # its Hindi sibling (same MASSIVE id, no text in common with the benchmark) must not train either
+    train, _, report = build(fx)
+    texts = {r["text"] for r in train}
+    assert "will it rain in pune today" not in texts and "क्या आज पुणे में बारिश होगी" not in texts
+    assert report["sources"]["massive"]["held_out"] >= 2
+    held_text, held_group = hf_data.holdout(
+        [{"text": "B test", "group": "b:1"}],
+        [{"text": "B test", "group": "a:7"}, {"text": "A hindi", "group": "a:7"}, {"text": "A hindi", "group": "c:3"},
+         {"text": "C other", "group": "c:3"}, {"text": "unrelated", "group": "a:8"}])
+    assert held_group == {"b:1", "a:7", "c:3"} and S.text_key("C other") in held_text  # closed transitively
+    assert S.text_key("unrelated") not in held_text
+
+
+@pytest.mark.parametrize("names", [["topv2"], ["glaive", "sgd"], ["clinc"]])
+def test_the_benchmark_and_its_holdout_dont_depend_on_the_sources_chosen(fx, names):
+    _, full, _ = build(fx)
+    train, ev, report = build(fx, names=names)
+    assert sorted(r["text"] for r in ev) == sorted(r["text"] for r in full)
+    keys = {S.text_key(r["text"]) for r in full}
+    assert not [r for r in train if S.text_key(r["text"]) in keys]
+    assert {r["source"].split(":")[0] for r in train} <= set(names)
+    assert all(report["sources"][n]["benchmark_only"] for n in S.BENCHMARK if n not in names)
+    assert "benchmark only" in hf_data.summary(train, ev, report)
 
 
 def test_duplicates_across_sources_and_translations_are_dropped(fx):
@@ -392,12 +521,19 @@ def test_class_label_columns_are_decoded():
 def test_hinglish_stop_phrases():
     p = templates_hi.stop_phrases()
     assert len(p) == 250 and len(set(p)) == 250 and p == templates_hi.stop_phrases()
-    assert {"bas karo", "ruk jao", "rehne do", "chup ho jao", "band karo"} <= set(p)
+    assert {"bas karo", "ruk jao", "rehne do", "chup ho jao", "bolna band karo"} <= set(p)
     assert all(any(c in x for c in templates_hi.STOP_CORE) for x in p)
     assert "hatao" not in p  # "ye file hatao" deletes
     assert not any(x.split()[0] == x.split()[-1] and len(x.split()) > 2 for x in p)  # no "yaar … yaar"
+    # a bare "band karo" usually means "turn it off" (neo/reflex/__init__.py's stop rule agrees)
+    assert all("bolna band karo" in x for x in p if "band kar" in x)
+    # no honorific on the rude form ("chup kar ji"), no "quickly" on "not now" ("abhi nahi jaldi")
+    assert not any(x.endswith(" ji") and (x.startswith("oye ") or x[: -len(" ji")].split(" ", 1)[-1] in templates_hi._TU_FORM
+                                          or x[: -len(" ji")] in templates_hi._TU_FORM) for x in p)
+    assert not any(x.endswith(("nahi jaldi", "nahi abhi", "chahiye jaldi", "itna hi jaldi")) for x in p)
     hi = templates_hi.stop_phrases_devanagari()
     assert len(hi) == 50 and all(S.lang_of(x) == "hi" for x in hi)
+    assert all("बोलना बंद करो" in x for x in hi if "बंद कर" in x)
 
 
 def test_hinglish_template_rows_cover_every_class_with_valid_labels():
@@ -415,7 +551,11 @@ def test_hinglish_template_rows_cover_every_class_with_valid_labels():
         assert r["source"] == "template" and r["lang"] in ("hinglish", "hi")
         assert r["tool"] == "" or r["tool"] in tools, r
         assert r.get("kind") is None or r["kind"] in S.KINDS
-        assert isinstance(r["destructive"], bool) and isinstance(r["screen"], bool)
+        # every label explicit: nothing downstream re-derives them with an English regex
+        assert all(isinstance(r[k], bool) for k in ("destructive", "screen", "reply")), r
+    texts = {r["text"] for r in rows}
+    assert not any(t.startswith(("please shukriya", "zara kya haal")) or t.endswith("shukriya please") for t in texts)
+    assert not any("photos wala folder padho" in t or "photos wala folder mein receipts" in t for t in texts)
     agent = [r for r in rows if r["intent"] == "agent_task"]
     risky = [r["text"] for r in agent if r["destructive"]]
     assert len(risky) >= 40
@@ -458,6 +598,22 @@ def test_dataset_build_passes_new_labels_and_never_trains_on_eval():
     old = hf["an old-format row"]
     assert old["tool"] == "play_music" and old["hf_intent"] == "play_radio" and "lang" not in old
     assert not any(r["text"] in ("a stray benchmark row", "only in the benchmark") for r in out)
+
+
+def test_benchmark_drops_the_sentences_neo_trains_on():
+    from neo.config import settings
+    from neo.reflex import dataset
+
+    data = settings().data_dir
+    data.mkdir(parents=True, exist_ok=True)
+    bench = [{"text": "Ruk jao !", "intent": "stop", "tool": "", "source": "hinglish_top:silence_alarm", "lang": "hinglish"},
+             {"text": "a sentence nobody trains on", "intent": "chat", "tool": "", "source": "clinc:oos", "lang": "en"}]
+    (data / "reflex_eval.jsonl").write_text("".join(json.dumps(r) + "\n" for r in bench))
+    rows = [{"text": "ruk jao", "intent": "stop"}, {"text": "next song", "intent": "quick_action"}]
+    kept, dropped = dataset.benchmark(rows)
+    assert [r["text"] for r in kept] == ["a sentence nobody trains on"] and dropped == 1
+    kept, dropped = dataset.benchmark()  # default: what build() trains on — "ruk jao" is a template
+    assert dropped == 1 and len(kept) == 1
 
 
 def test_dataset_build_includes_the_hinglish_templates():

@@ -193,6 +193,59 @@
       ]
      }
     ]
+   },
+   {
+    "speaker": "USER",
+    "utterance": "Great, thank you",
+    "frames": [
+     {
+      "service": "x",
+      "actions": [
+       {
+        "act": "GOODBYE",
+        "canonical_values": [],
+        "slot": "",
+        "values": []
+       }
+      ]
+     }
+    ]
+   },
+   {
+    "speaker": "USER",
+    "utterance": "No, I didn't",
+    "frames": [
+     {
+      "service": "x",
+      "actions": [
+       {
+        "act": "NEGATE_INTENT",
+        "canonical_values": [],
+        "slot": "",
+        "values": []
+       }
+      ]
+     }
+    ]
+   },
+   {
+    "speaker": "USER",
+    "utterance": "Am I free on March 5th?",
+    "frames": [
+     {
+      "service": "x",
+      "actions": [
+       {
+        "act": "INFORM_INTENT",
+        "canonical_values": [
+         "GetAvailableTime"
+        ],
+        "slot": "intent",
+        "values": []
+       }
+      ]
+     }
+    ]
    }
   ]
  }

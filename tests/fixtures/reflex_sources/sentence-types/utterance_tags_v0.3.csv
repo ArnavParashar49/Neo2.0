@@ -4,3 +4,8 @@ QUESTION,REQUEST,Can you book a table for four tonight
 QUESTION,REQUEST,Could you tell me the time in Tokyo
 QUESTION,REQUEST,Can you pass me the salt
 COMMAND,ACTION,Close the door
+QUESTION,REQUEST,Can I have the latest weather update
+QUESTION,REQUEST,Could you please make me a cup of coffee
+QUESTION,REQUEST,Can you adjust the room temperature to 72 degrees
+QUESTION,REQUEST,Can I set a daily goal reminder
+QUESTION,REQUEST,Could you help me carry these boxes

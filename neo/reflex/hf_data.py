@@ -13,10 +13,12 @@ screen" and "does it want an answer" — in English, Devanagari Hindi and romani
 Rows: {text, intent, tool, source, hf_intent, lang, split, group} plus, when the source says,
 kind / destructive / screen / reply (left out when unknown, which is not the same as False).
 ``reflex_hf.jsonl`` holds train rows only; ``reflex_eval.jsonl`` is the benchmark (Hinglish-TOP,
-MTOP en/hi, CLINC and MASSIVE en/hi test splits) and is never read by dataset.build(). A train
-row whose text or group (a translation or re-punctuation of the same sentence) is in the benchmark
-is held out; duplicates across sources are dropped; each source is capped per intent (seeded
-round-robin), so ~60k public rows can't bury NEO's own.
+MTOP en/hi, CLINC and MASSIVE en/hi test splits) and is never read by dataset.build(). The
+benchmark sources are read whatever --only / --skip say, so the benchmark and its holdout are
+always whole. A train row is held out when its sentence (compared by text_key: case, spacing and
+punctuation don't count) or its group is the benchmark's, and so are the translations of such a
+row (its group), transitively. Duplicates across sources are dropped; each source is capped per
+intent (seeded round-robin), so ~50k public rows can't bury NEO's own.
 """
 
 from __future__ import annotations
@@ -30,6 +32,7 @@ from pathlib import Path
 
 from neo.config import settings
 from neo.reflex.sources import (  # noqa: F401 — CLINC/MASSIVE/_clean are imported from here by older scripts
+    BENCHMARK,
     BY_NAME,
     CLINC,
     MASSIVE,
@@ -77,6 +80,34 @@ def _sample(rows: list[dict], src: Source, rnd: random.Random, admit, scale: flo
     return out, sum(len(b) - pos[k] for k, b in buckets.items())
 
 
+def holdout(eval_rows: list[dict], rows: list[dict]) -> tuple[set[str], set[str]]:
+    """(text keys, groups) no train row may have: the benchmark's sentences and groups, closed over
+    the groups of `rows` — a row whose sentence is held brings its group (its translations and
+    re-tokenised copies) into the holdout, their sentences bring their groups, and so on."""
+    texts: dict[str, set[str]] = {}  # group → its sentences
+    groups: dict[str, set[str]] = {}  # sentence → the groups it is in
+    for r in rows:
+        k = text_key(r["text"])
+        texts.setdefault(r["group"], set()).add(k)
+        groups.setdefault(k, set()).add(r["group"])
+    held_text: set[str] = set()
+    held_group: set[str] = set()
+    todo_t = [text_key(r["text"]) for r in eval_rows]
+    todo_g = [r["group"] for r in eval_rows]
+    while todo_t or todo_g:
+        while todo_t:
+            k = todo_t.pop()
+            if k not in held_text:
+                held_text.add(k)
+                todo_g.extend(groups.get(k, ()))
+        while todo_g:
+            g = todo_g.pop()
+            if g not in held_group:
+                held_group.add(g)
+                todo_t.extend(texts.get(g, ()))
+    return held_text, held_group
+
+
 def build(
     names: list[str] | None = None,
     *,
@@ -85,30 +116,33 @@ def build(
     scale: float = 1.0,
     log=print,
 ) -> tuple[list[dict], list[dict], dict]:
-    """(train rows, eval rows, report). `names`: the sources to use (default: every default source)."""
+    """(train rows, eval rows, report). `names`: the sources to use (default: every default source).
+    The benchmark sources are loaded either way: the benchmark and its holdout never shrink."""
     want = set(names or [s.name for s in SOURCES if s.default])
     chosen = [s for s in SOURCES if s.name in want]  # registry order is the dedupe priority
+    loaded = [s for s in SOURCES if s.name in want or s.name in BENCHMARK]
     fx = fetcher or Fetcher(settings().data_dir / "hf_cache")
     skipped: Counter = Counter()
     raw: dict[str, list[dict]] = {}
     report: dict = {"sources": {}, "skipped_labels": skipped,
-                    "not_used": {s.name: s.note for s in SOURCES if s not in chosen}}
-    for s in chosen:
+                    "not_used": {s.name: s.note for s in SOURCES if s not in loaded}}
+    for s in loaded:
         t0 = time.time()
         raw[s.name] = [r for r in s.load(fx, skipped) if r]
-        report["sources"][s.name] = {"licence": s.licence, "rows": len(raw[s.name]), "seconds": round(time.time() - t0, 1)}
-        log(f"  {s.name:20s} {len(raw[s.name]):7d} mapped rows in {time.time() - t0:5.1f}s")
+        report["sources"][s.name] = {"licence": s.licence, "rows": len(raw[s.name]), "seconds": round(time.time() - t0, 1),
+                                     "benchmark_only": s not in chosen}
+        log(f"  {s.name:20s} {len(raw[s.name]):7d} mapped rows in {time.time() - t0:5.1f}s"
+            + ("  (benchmark only)" if s not in chosen else ""))
 
     # The benchmark: every eval row, each sentence once per source and language.
     eval_rows, ev_seen = [], set()
-    for s in chosen:
+    for s in loaded:
         for r in raw[s.name]:
             k = (s.name, r["lang"], text_key(r["text"]))
             if r["split"] == "eval" and k not in ev_seen:
                 ev_seen.add(k)
                 eval_rows.append(r)
-    held_text = {text_key(r["text"]) for r in eval_rows}
-    held_group = {r["group"] for r in eval_rows}
+    held_text, held_group = holdout(eval_rows, [r for rs in raw.values() for r in rs if r["split"] == "train"])
 
     seen_text: set[str] = set()
     seen_group: set[tuple[str, str]] = set()
@@ -132,6 +166,9 @@ def build(
         kept, unseen = _sample(free, s, random.Random(f"{seed}:{s.name}"), admit, scale)
         st.update(duplicate=dups["n"], capped=unseen, kept=len(kept))
         train += kept
+    for s in loaded:
+        if s not in chosen:
+            report["sources"][s.name]["eval"] = sum(r["split"] == "eval" for r in raw[s.name])
     random.Random(seed).shuffle(train)
     return train, eval_rows, report
 
@@ -153,6 +190,9 @@ def summary(train: list[dict], eval_rows: list[dict], report: dict) -> str:
 
     out = ["", f"{'source':20s} {'mapped':>7s} {'eval':>6s} {'held':>6s} {'dup':>6s} {'capped':>7s} {'kept':>6s}  licence"]
     for name, st in report["sources"].items():
+        if st.get("benchmark_only"):
+            out.append(f"{name:20s} {st['rows']:7d} {st.get('eval', 0):6d}  benchmark only (not in this build's train rows)")
+            continue
         out.append(f"{name:20s} {st['rows']:7d} {st.get('eval', 0):6d} {st.get('held_out', 0):6d} "
                    f"{st.get('duplicate', 0):6d} {st.get('capped', 0):7d} {st.get('kept', 0):6d}  {st['licence']}")
     for name, why in report["not_used"].items():
@@ -167,9 +207,12 @@ def summary(train: list[dict], eval_rows: list[dict], report: dict) -> str:
         out.append(f"  {flag}: " + ", ".join(f"{k} {v}" for k, v in sorted(c.items())))
     out.append(f"eval {len(eval_rows)} rows")
     out.append("  " + line("by source × lang", Counter(f"{r['source'].split(':')[0]}/{r['lang']}" for r in eval_rows)))
-    top = report["skipped_labels"].most_common(12)
+    top = [(k, v) for k, v in report["skipped_labels"].most_common() if ":unmapped:" not in k][:12]
     if top:
-        out.append("unmapped / filtered (top): " + ", ".join(f"{k} {v}" for k, v in top))
+        out.append("filtered (top): " + ", ".join(f"{k} {v}" for k, v in top))
+    unmapped = sorted((k, v) for k, v in report["skipped_labels"].items() if ":unmapped:" in k)
+    if unmapped:
+        out.append("unmapped labels, skipped (map them in sources.py): " + ", ".join(f"{k} {v}" for k, v in unmapped))
     return "\n".join(out)
 
 

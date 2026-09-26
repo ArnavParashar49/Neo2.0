@@ -7,7 +7,9 @@ or deletes, and Laya's destructive head, trained on English templates, catches o
 destructive, needs the screen, and whether the user wants an answer.
 
 Stop gets its own phrase set (there is no public Hinglish stop data at all): "bas karo",
-"ruk jao", "rehne do", "chup ho jao", "band karo" … with the fillers people wrap them in.
+"ruk jao", "rehne do", "chup ho jao", "bolna band karo" … with the fillers people wrap them in.
+A bare "band karo" is not one: it usually means "turn it off" (the music, the alarm), as
+neo/reflex/__init__.py's stop rule also decides.
 """
 
 from __future__ import annotations
@@ -30,6 +32,9 @@ MSGS = ["main 10 minute late hoon", "meeting 4 baje shift ho gayi hai", "report 
         "build green hai", "aaj ghar late aaunga", "call pe aa jao", "payment ho gaya hai"]
 FILES = ["ye file", "report wali file", "resume.pdf", "downloads folder ki purani files", "desktop ke screenshots",
          "budget wali sheet", "kal ke notes", "invoice.pdf", "photos wala folder"]
+DOCS = ["report wali file", "resume.pdf", "invoice.pdf", "kal ke notes", "budget wali sheet", "contract.pdf",
+        "meeting ke notes"]  # something with text in it: you read a document, not a photos folder
+SHEETS = ["expenses wali sheet", "budget wali sheet", "is mahine ki receipts wali file", "bills.xlsx"]
 THINGS = ["sasta laptop", "noise cancelling headphones", "iPhone 15 ka price", "aaj ka cricket score",
           "paneer butter masala recipe", "nearest petrol pump", "running shoes", "USB-C hub", "Goa ki flights"]
 TOPICS = ["photosynthesis", "black hole", "GST", "inflation", "cricket ke rules", "Taj Mahal ka itihas",
@@ -133,17 +138,17 @@ AGENT: list[tuple[str, str, bool, bool, bool]] = [
     ("amazon se {buy} kharido", "other", True, False, False),
     ("{buy} order kar do", "other", True, False, False),
     ("kal ke liye cab book karo", "other", True, False, False),
-    ("{file} ka naam badal ke final kar do", "other", True, False, False),
+    ("{doc} ka naam badal ke final kar do", "other", True, False, False),
     ("{person} ke saath kal 3 baje meeting set karo aur invite bhej do", "add_event", True, False, False),
     # several steps, nothing hard to undo
-    ("{file} padho aur summary do", "other", False, False, True),
+    ("{doc} padho aur summary do", "other", False, False, True),
     ("is page ko padh ke main points batao", "other", False, True, True),
     ("screen pe kya likha hai batao", "other", False, True, True),
     ("is error ko dekho aur fix batao", "other", False, True, True),
     ("ye form meri details se bhar do", "other", False, True, False),
     ("is table ko spreadsheet mein copy karo", "other", False, True, False),
     ("{topic} pe research karke Notes mein likho", "write_note", False, False, False),
-    ("{file} ko PDF mein convert karo", "other", False, False, False),
+    ("{doc} ko PDF mein convert karo", "other", False, False, False),
     ("{file} ko archive folder mein move karo", "other", False, False, False),
     ("mere unread emails dekho aur urgent wale flag karo", "other", False, False, False),
     ("agle mahine Tokyo ki sabse sasti flight dhoondo", "web_search", False, False, True),
@@ -151,7 +156,7 @@ AGENT: list[tuple[str, str, bool, bool, bool]] = [
     ("{person} ka last message dhoondo aur summary batao", "other", False, False, True),
     ("scraper naam ka python project setup karo", "other", False, False, False),
     ("{topic} par ek presentation banao", "other", False, False, False),
-    ("{file} mein receipts ka total kitna hai", "other", False, False, True),
+    ("{sheet} mein receipts ka total kitna hai", "other", False, False, True),
 ]
 # Conversation and knowledge: always wants an answer, never touches the computer.
 CHAT: list[str] = [
@@ -178,16 +183,23 @@ CHAT: list[str] = [
     "hindi mein thank you ko kya bolte hain",
     "mujhe {topic} ke baare mein kuch interesting batao",
 ]
+# Greetings and thanks as people say them: never wrapped in "please …" / "… jaldi" ("please shukriya").
+CHAT_SOCIAL = frozenset(["tum kaun ho", "tumhara naam kya hai", "kaise ho", "kya haal hai neo", "tum kya kya kar sakte ho",
+                         "shukriya", "thank you yaar", "bahut badhiya", "good morning neo"])
 
 # ---- stop phrases ---------------------------------------------------------------------------------
+# Not "hatao" ("ye file hatao" deletes) and not a bare "band karo" (usually "turn it off").
 STOP_CORE = ["bas karo", "bas kar", "bas bas", "bas", "ruk jao", "ruko", "ruk ja", "rehne do", "rehne de",
-             "rehne dijiye", "chup ho jao", "chup ho ja", "chup raho", "chup kar", "chup", "band karo",
-             "band kar do", "bolna band karo", "mat bolo", "chhodo", "chhod do", "jaane do", "cancel karo",
-             "cancel kar do", "stop karo", "stop kar do", "kuch nahi", "abhi nahi", "nahi chahiye", "bas itna hi",
-             "so jao", "shaant ho jao", "khamosh"]  # not "hatao": "ye file hatao" deletes
+             "rehne dijiye", "chup ho jao", "chup ho ja", "chup raho", "chup kar", "chup", "bolna band karo",
+             "mat bolo", "chhodo", "chhod do", "jaane do", "cancel karo", "cancel kar do", "stop karo", "stop kar do",
+             "kuch nahi", "abhi nahi", "nahi chahiye", "bas itna hi", "so jao", "shaant ho jao", "khamosh"]
+# The rude tu-form (or "oye") doesn't take "ji" ("chup kar ji"), and "not now" doesn't take "quickly"
+# ("abhi nahi jaldi").
+_TU_FORM = frozenset(["bas kar", "ruk ja", "rehne de", "chup ho ja", "chup kar", "chup", "khamosh"])
+_NEGATIVE = frozenset(["kuch nahi", "abhi nahi", "nahi chahiye", "bas itna hi"])
 STOP_PRE = ["", "arre ", "yaar ", "neo ", "please ", "bhai ", "acha ", "theek hai ", "nahi nahi ", "oye ", "arey yaar "]
 STOP_POST = ["", " yaar", " please", " na", " abhi", " bhai", " ab", " ji", " neo", " jaldi"]
-STOP_DEVANAGARI = ["बस करो", "बस", "रुको", "रुक जाओ", "रहने दो", "चुप हो जाओ", "चुप रहो", "चुप", "बंद करो", "बंद कर दो",
+STOP_DEVANAGARI = ["बस करो", "बस", "रुको", "रुक जाओ", "रहने दो", "चुप हो जाओ", "चुप रहो", "चुप", "बोलना बंद करो",
                    "छोड़ो", "जाने दो", "कैंसल करो", "मत बोलो", "अभी नहीं", "कुछ नहीं"]
 STOP_PRE_HI = ["", "अरे ", "यार ", "प्लीज़ "]
 STOP_POST_HI = ["", " यार", " प्लीज़", " ना", " अभी"]
@@ -200,10 +212,16 @@ def stop_phrases(n: int = 250, seed: int = 0) -> list[str]:
     """`n` distinct romanised stop phrases: every bare core word, then wrapped variants."""
     rnd = random.Random(f"hinglish-stop:{seed}")
     combos = [f"{p}{c}{s}".strip() for c in STOP_CORE for p in STOP_PRE for s in STOP_POST
-              if (p or s) and p.strip() != s.strip()]
+              if (p or s) and p.strip() != s.strip() and _fits(p, c, s)]
     rnd.shuffle(combos)
     out = list(dict.fromkeys(STOP_CORE + combos))
     return out[: max(n, len(STOP_CORE))]
+
+
+def _fits(pre: str, core: str, post: str) -> bool:
+    if post == " ji" and (core in _TU_FORM or pre == "oye "):
+        return False
+    return not (post in (" jaldi", " abhi") and core in _NEGATIVE)
 
 
 def stop_phrases_devanagari(n: int = 50, seed: int = 0) -> list[str]:
@@ -218,7 +236,8 @@ def _fill(t: str, rnd: random.Random) -> str:
     return t.format(
         song=rnd.choice(SONGS), artist=rnd.choice(ARTISTS), genre=rnd.choice(GENRES), app=rnd.choice(APPS),
         site=rnd.choice(SITES), city=rnd.choice(CITIES), person=rnd.choice(PEOPLE), team=rnd.choice(TEAMS),
-        msg=rnd.choice(MSGS), file=rnd.choice(FILES), thing=rnd.choice(THINGS), topic=rnd.choice(TOPICS),
+        msg=rnd.choice(MSGS), file=rnd.choice(FILES), doc=rnd.choice(DOCS), sheet=rnd.choice(SHEETS),
+        thing=rnd.choice(THINGS), topic=rnd.choice(TOPICS),
         math=rnd.choice(MATH), write=rnd.choice(WRITE), word=rnd.choice(WORDS), time=rnd.choice(TIMES),
         todo=rnd.choice(TODOS), event=rnd.choice(EVENTS), fact=rnd.choice(FACTS), label=rnd.choice(LABELS),
         n=rnd.choice(MINUTES), amount=rnd.choice(AMOUNTS), bill=rnd.choice(BILLS), buy=rnd.choice(BUYS),
@@ -234,7 +253,9 @@ def _cycle(templates: list, n: int, rnd: random.Random, seen: set[str]):
         tpl = spec[0] if isinstance(spec, tuple) else spec
         t = _fill(tpl, rnd)
         r = rnd.random()
-        if r < 0.3:
+        if tpl in CHAT_SOCIAL:
+            pass
+        elif r < 0.3:
             t = rnd.choice(_PREFIX) + t
         elif r < 0.5:
             t = t + rnd.choice(_SUFFIX)
@@ -260,13 +281,15 @@ def rows(n_chat: int = 60, n_quick: int = 120, n_agent: int = 100, n_stop: int =
     for t, (_, kind, destructive, screen, reply) in _cycle(AGENT, n_agent, rnd, seen):
         out.append({**base, "text": t, "intent": "agent_task", "tool": "", "kind": kind, "destructive": destructive,
                     "screen": screen, "reply": reply})
+    # A stop wants nothing said back: every label explicit, so nothing downstream has to guess.
     for t in stop_phrases(n_stop, seed):
         if t.lower() not in seen:
             seen.add(t.lower())
-            out.append({**base, "text": t, "intent": "stop", "tool": "", "destructive": False, "screen": False})
+            out.append({**base, "text": t, "intent": "stop", "tool": "", "destructive": False, "screen": False,
+                        "reply": False})
     for t in stop_phrases_devanagari(seed=seed):
         if t not in seen:
             seen.add(t)
             out.append({**base, "text": t, "intent": "stop", "tool": "", "destructive": False, "screen": False,
-                        "lang": "hi"})
+                        "reply": False, "lang": "hi"})
     return out
