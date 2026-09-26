@@ -369,6 +369,41 @@ _HOTKEYS: list[tuple[str, dict]] = [
     (rf"{_LEAD}close\s+(?:this|the|that)\s+(?:window|tab|note|document)(?:\s+please)?{_TAIL}", {"keys": "cmd+w"}),
     (rf"{_LEAD}(?:go\s+to\s+the\s+)?next\s+tab{_TAIL}", {"keys": "ctrl+tab"}),
     (rf"{_LEAD}(?:go\s+to\s+the\s+)?(?:previous|last|prev)\s+tab{_TAIL}", {"keys": "ctrl+shift+tab"}),
+    # a browser's own undo for tabs: ⌘⇧T brings back what was closed, most recent first
+    (
+        rf"{_LEAD}(?:re-?open|bring\s+back|restore|undo\s+clos(?:e|ing))\s+(?:the\s+)?(?:last\s+|previous\s+|recently\s+)?"
+        rf"(?:closed\s+)?tab(?:\s+(?:i|you)\s+(?:just\s+)?closed)?{_TAIL}",
+        {"keys": "cmd+shift+t", "app": "browser"},
+    ),
+    *[
+        (rf"{_LEAD}(?:go\s+to|switch\s+to|open)\s+(?:the\s+)?(?:{w})\s+tab{_TAIL}", {"keys": f"cmd+{i}", "app": "browser"})
+        for i, w in enumerate(
+            ("first|1st", "second|2nd", "third|3rd", "fourth|4th", "fifth|5th", "sixth|6th", "seventh|7th", "eighth|8th"), 1
+        )
+    ],
+    *[
+        (rf"{_LEAD}(?:go\s+to|switch\s+to)\s+tab\s+(?:number\s+)?{i}{_TAIL}", {"keys": f"cmd+{i}", "app": "browser"})
+        for i in range(1, 9)
+    ],
+    (rf"{_LEAD}(?:open\s+)?(?:an?\s+)?(?:new\s+)?(?:private|incognito)\s+(?:window|tab){_TAIL}", {"keys": "cmd+shift+n", "app": "browser"}),
+    (rf"{_LEAD}close\s+(?:all\s+(?:the\s+)?tabs|the\s+whole\s+window|this\s+whole\s+window){_TAIL}", {"keys": "cmd+shift+w", "app": "browser"}),
+    (rf"{_LEAD}(?:go\s+to|focus|select|click)\s+(?:on\s+)?(?:the\s+)?(?:address|url|search)\s+bar{_TAIL}", {"keys": "cmd+l", "app": "browser"}),
+    (rf"{_LEAD}bookmark\s+(?:this|the)\s+(?:page|tab|site){_TAIL}", {"keys": "cmd+d", "app": "browser"}),
+    (
+        rf"{_LEAD}(?:hard\s+(?:reload|refresh)|(?:reload|refresh)\s+(?:the\s+page\s+)?without\s+(?:the\s+)?cache){_TAIL}",
+        {"keys": "cmd+shift+r", "app": "browser"},
+    ),
+    # Hinglish
+    (rf"{_LEAD}(?:ek\s+)?naya\s+tab\s+(?:kholo|khol\s+do|open\s+karo){_TAIL}", {"keys": "cmd+t", "app": "tabs"}),
+    (rf"{_LEAD}(?:ye|yeh|is|iss)\s+tab\s+(?:ko\s+)?(?:band\s+karo|band\s+kar\s+do|close\s+karo|close\s+kar\s+do){_TAIL}", {"keys": "cmd+w"}),
+    (
+        rf"{_LEAD}(?:(?:band|close)\s+(?:kiya\s+hua|hua)|pichla\s+band|last\s+closed)\s+tab\s+(?:wapas|phir\s+se)\s+"
+        rf"(?:kholo|khol\s+do|lao|le\s+aao){_TAIL}",
+        {"keys": "cmd+shift+t", "app": "browser"},
+    ),
+    (rf"{_LEAD}agla\s+tab(?:\s+(?:kholo|dikhao|pe\s+jao))?{_TAIL}", {"keys": "ctrl+tab"}),
+    (rf"{_LEAD}pichla\s+tab(?:\s+(?:kholo|dikhao|pe\s+jao))?{_TAIL}", {"keys": "ctrl+shift+tab"}),
+    (rf"{_LEAD}(?:page\s+)?(?:refresh|reload)\s+(?:karo|kar\s+do){_TAIL}", {"keys": "cmd+r", "app": "browser"}),
     (rf"{_LEAD}go\s+back(?:\s+a\s+page)?{_TAIL}", {"keys": "cmd+[", "app": "browser|finder"}),
     (rf"{_LEAD}go\s+forward(?:\s+a\s+page)?{_TAIL}", {"keys": "cmd+]", "app": "browser|finder"}),
     (rf"{_LEAD}(?:reload|refresh)(?:\s+(?:the|this)\s+page)?{_TAIL}", {"keys": "cmd+r", "app": "browser"}),
@@ -565,8 +600,16 @@ async def dictate(a: dict, c: ToolContext) -> str:
 
 @tool(
     "hotkey",
-    "Press a key or chord, e.g. 'return', 'cmd+s', 'cmd+shift+t', 'escape', 'tab'. Optional app: "
-    "bring that app to the front first.",
+    "Press a key or chord, e.g. 'return', 'cmd+s', 'escape', 'tab'. Optional app: bring that app to "
+    "the front first. The Mac's standard shortcuts - use them instead of clicking or scripting: "
+    "browser: new tab cmd+t, close tab cmd+w, reopen closed tab cmd+shift+t, next / previous tab "
+    "ctrl+tab / ctrl+shift+tab, tab 1-8 cmd+1..cmd+8, last tab cmd+9, address bar cmd+l, reload cmd+r "
+    "(hard reload cmd+shift+r), back / forward cmd+[ / cmd+], new window cmd+n, private window "
+    "cmd+shift+n, close window cmd+shift+w, bookmark cmd+d, find on page cmd+f, zoom cmd+= / cmd+- / "
+    "cmd+0; any app: select all cmd+a, copy / cut / paste cmd+c / cmd+x / cmd+v, undo / redo cmd+z / "
+    "cmd+shift+z, save cmd+s, new document cmd+n, close window cmd+w, quit app cmd+q, hide app cmd+h, "
+    "minimize cmd+m, full screen ctrl+cmd+f, switch app cmd+tab, Spotlight cmd+space, screenshot "
+    "cmd+shift+3 (an area cmd+shift+4).",
     _p({"keys": {"type": "string"}, "app": {"type": "string"}}, ["keys"]),
     category="computer",
     fast_path=_HOTKEYS,
@@ -784,16 +827,35 @@ async def activate_app(a: dict, c: ToolContext) -> str:
     _p({"name": {"type": "string"}}, ["name"]),
     category="apps",
     quiet=True,
-    fast_path=[
-        (
-            r"^\s*(?:please\s+)?(?:quit|close|kill)\s+(?!(?:this|that|it|the|all|my|a|an|every)\b)"
-            r"(?P<name>[\w.+-]+(?:\s+[\w.+-]+){0,2}?)(?:\s+app)?\s*[.!]*\s*$",
-            {"name": "<name>"},
-        )
-    ],
 )
 async def quit_app(a: dict, c: ToolContext) -> str:
     return await apps.quit_app(a["name"])
+
+
+@tool(
+    "close",
+    "Close what the user names, no questions: a running app (quits it) or browser tabs by site or "
+    "title ('close YouTube' closes every YouTube tab). Use this for any 'close / quit X' - never "
+    "write AppleScript to close something.",
+    _p({"target": {"type": "string"}}, ["target"]),
+    category="apps",
+    quiet=True,
+    idempotent=True,
+    # "close youtube", "quit spotify", "close the netflix tab" — not "close this tab/window" or
+    # "close the app" (a key press on what's in front: see hotkey)
+    fast_path=[
+        (
+            r"^\s*(?:please\s+)?(?:quit|close|kill|exit)\s+(?!(?:this|that|it|all|every)\b)"
+            r"(?!(?:the|the\s+current)\s+(?:window|tab|note|document|app)\s*[.!]*\s*$)"
+            r"(?P<target>[\w.+'-]+(?:\s+[\w.+'-]+){0,3}?)\s*[.!]*\s*$",
+            {"target": "<target>"},
+        )
+    ],
+)
+async def close(a: dict, c: ToolContext) -> str:
+    from neo.decide.close import close_target
+
+    return await close_target(str(a.get("target") or ""))
 
 
 @tool(

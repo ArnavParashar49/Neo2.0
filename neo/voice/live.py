@@ -56,6 +56,7 @@ _DIRECT_TOOLS = {
     "mail_unread",
     "notes_create",
     "open_url",
+    "close",
     "type_text",
     "dictate",
     "hotkey",
@@ -98,7 +99,11 @@ tool failed, or when a result starts with NEEDS_USER or NEEDS_CONFIRM. When one 
 several things ("type github.com and press enter"), make every call, in order, silently.
 To play a song, artist, podcast or video, call play_music with its name (and the app or site only if
 the user named one) — never open a music or video website yourself; NEO picks the app that can play it.
-To open a website, call open_url once with its address; it opens in the user's default browser. Pass
+To close an app, a window or a site's tabs by name ("close YouTube", "Spotify band karo"), call close
+with what they named - never write a script to close something. For tabs, windows and other keyboard
+actions ("new tab", "reopen the tab I closed", "go to the second tab"), call hotkey with the Mac's
+standard shortcut listed in its description. To open a website, call open_url
+once with its address; it opens in the user's default browser. Pass
 browser only when the user named a browser app ("in Firefox"); "on Google" means the web, not a browser.
 If a tool result starts with NEEDS_USER, tell the user exactly that, briefly. If it starts with
 NEEDS_CONFIRM, ask the user that question, briefly, and wait — only the user can say yes; you
@@ -203,7 +208,7 @@ _POLITE = re.compile(
 )
 _POLITE_TAIL = re.compile(r"(?:[\s,]*\b(?:please|pls|for\s+me|na|yaar)\b)+\s*[.!?]*\s*$", re.I)
 # The argument that names what a step acts on: in "can you …?" it has to name something.
-_NAMED_ARG = {"open_app": "target", "quit_app": "name", "play_music": "query", "search_site": "query"}
+_NAMED_ARG = {"open_app": "target", "quit_app": "name", "close": "target", "play_music": "query", "search_site": "query"}
 _SMALL_WORDS = {"of", "the", "a", "an", "and", "for", "to", "in", "on", "at", "by", "with", "from", "me", "my", "you", "your", "is", "it"}
 
 

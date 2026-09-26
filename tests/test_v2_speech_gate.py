@@ -448,7 +448,7 @@ def test_a_real_reply_keeps_its_pauses(voice):
         # a polite word after an app name is no part of the name
         ("open YouTube please", [("open_app", {"target": "YouTube"})]),
         ("Neo, open Notes, please.", [("open_app", {"target": "Notes"})]),
-        ("close Spotify yaar", [("quit_app", {"name": "Spotify"})]),
+        ("close Spotify yaar", [("close", {"target": "Spotify"})]),
     ],
 )
 def test_the_lane_never_cuts_a_payload_short(text, steps):

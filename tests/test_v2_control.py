@@ -37,7 +37,7 @@ def _env(tmp_path, monkeypatch):
         ("take a screenshot", ("hotkey", {"keys": "cmd+shift+3"})),
         ("scroll down", ("scroll", {"at_pointer": True, "dy": -8})),
         ("scroll to the top", ("hotkey", {"keys": "cmd+up", "app": "browser"})),
-        ("quit spotify", ("quit_app", {"name": "spotify"})),
+        ("quit spotify", ("close", {"target": "spotify"})),
         ("close this window", ("hotkey", {"keys": "cmd+w"})),
         ("switch to safari", ("open_app", {"target": "safari"})),
         ("what apps are open", ("apps_running", {})),
