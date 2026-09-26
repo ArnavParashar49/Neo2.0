@@ -322,3 +322,26 @@ def test_a_network_blip_at_startup_keeps_live_on(monkeypatch):
     monkeypatch.setattr(live_mod, "LiveVoice", V)
     v = asyncio.run(pipeline.make_voice(lambda t: None, None))
     assert isinstance(v, V) and started == ["live"]
+
+
+def test_the_wake_word_is_a_leading_neo(monkeypatch):
+    from neo.voice import wake
+
+    class Rec:
+        def Reset(self):
+            pass
+
+    ws = wake.WakeSpotter.__new__(wake.WakeSpotter)
+    ws._rec, ws._streak = Rec(), 0
+
+    def partials(text, n):
+        return [ws._judge(text, False) for _ in range(n)]
+
+    assert partials("neo", wake._STABLE)[-1] == "wake"  # "Neo" on its own, once it holds
+    assert partials("neo open", 1) == [None]  # a single flicker isn't enough
+    ws._streak = 0
+    assert ws._judge("hey neo", True) == "wake_final" and ws._judge("neil", True) == "wake_final"
+    for said in ("i need a new phone", "[unk] neo", "you know", "neon lights", "leo is here"):
+        ws._streak = 0
+        assert all(r is None for r in partials(said, 5)), said  # "neo" has to come first
+    assert ws._judge("stop", True) == "stop_final"

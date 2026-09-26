@@ -240,7 +240,7 @@ async def run() -> None:
     asyncio.create_task(learn_loop(_idle))
     asyncio.create_task(_checkpoint_loop(app, _idle))
     bus().subscribe(_log_activity)
-    print("NEO is running. Say 'Hey Neo', or type in the overlay.")
+    print("NEO is running. Say 'Neo', or type in the overlay.")
     await stop.wait()
     # Everything below must finish well inside NEO.app's grace period (it SIGKILLs after 12 s).
     if app.voice:

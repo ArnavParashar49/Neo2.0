@@ -1,7 +1,7 @@
 """Picks the voice backend: Gemini Live when the key + quota allow it, else the local cascade.
 
 A failed check at startup is usually the network not being up yet (NEO starts at login) — that
-doesn't turn Live off: it connects on the next "Hey Neo". Only a definite "this key can't use
+doesn't turn Live off: it connects on the next "Neo". Only a definite "this key can't use
 Live" falls back to the on-device voice for good.
 """
 
@@ -63,7 +63,7 @@ async def make_voice(on_text: TextHandler, agent_session=None):
             elif refused:
                 raise
             else:
-                print(f"[voice] Gemini Live not reachable yet ({why}); it will connect on “Hey Neo”")
+                print(f"[voice] Gemini Live not reachable yet ({why}); it will connect on “Neo”")
         if not refused:
             await v.start()
             print(f"[voice] Gemini Live ({s.gemini_live_model})")

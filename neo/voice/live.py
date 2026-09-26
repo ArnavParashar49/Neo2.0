@@ -431,7 +431,7 @@ class LiveVoice:
                 print(f"[live] connect failed: {why}")
                 self._connect_failures += 1
                 kind = _failure_kind(e)
-                await bus().note(f"Voice session failed ({why[:60]}) — say “Hey Neo” to retry")
+                await bus().note(f"Voice session failed ({why[:60]}) — say “Neo” to retry")
                 await bus().set_state(NeoState.IDLE)
                 if (
                     (kind == "quota" or self._connect_failures >= 2)

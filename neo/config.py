@@ -73,7 +73,6 @@ class Settings(BaseSettings):
 
     # ---- voice -----------------------------------------------------------------------
     voice: VoiceBackend = "auto"  # auto = Live if key + quota, else local cascade
-    wake_word: str = "hey neo"
     listen_timeout_s: float = 5.0  # close the voice session after this much silence from you
     # Voice commands the fast paths fully cover run the moment you stop talking, without
     # waiting for Gemini Live to pick the tool (questions still go to the model).

@@ -307,7 +307,7 @@ export default function App() {
         {neo.connected && neo.problems.map((p) => <div key={p} className="msg system problem" role="alert">{p}</div>)}
         {neo.items.length === 0 && (
           <div className="empty">
-            <div className="empty-hint">Say <b>“Hey Neo”</b>, or try one of these</div>
+            <div className="empty-hint">Say <b>“Neo”</b>, or try one of these</div>
             <div className="suggest">
               {SUGGESTIONS.map((s) => <button key={s} onClick={() => submit(s)}>{s}</button>)}
             </div>
