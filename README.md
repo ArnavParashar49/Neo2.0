@@ -252,6 +252,10 @@ Working end to end today: routing, quick actions, chat, web research, screen rea
 
 NEO 2.0 is a from-scratch successor to [NEO v1](https://github.com/ArnavParashar49/NEO).
 
+## Author
+
+Built by **Arnav Parashar** — [GitHub](https://github.com/ArnavParashar49) · [LinkedIn](https://www.linkedin.com/in/arnavparashar49/)
+
 ## License
 
 [MIT](LICENSE). The models and datasets NEO downloads keep their own licences: training
