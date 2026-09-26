@@ -71,12 +71,13 @@ class Reflex:
         with _lock:
             d = laya.decide(text)
             emb, center = getattr(laya, "last_embedding", None), getattr(laya, "center", None)
+            kind = getattr(laya, "last_kind", None)
         if emb is None or center is None:
             return d
         from neo.reflex import memory
 
         # A request the user corrected a moment ago gets the fix now, not after the next retrain.
-        return memory.recall(d, text, emb, center)
+        return memory.recall(d, text, emb, center, kind)
 
     def _get_lite(self):
         if self._lite is None and settings().gemini_api_key:

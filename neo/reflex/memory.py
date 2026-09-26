@@ -195,8 +195,10 @@ def forget() -> None:
     _memory.forget()
 
 
-def recall(d: Decision, text: str, emb, center) -> Decision:
-    """The head's decision, or the remembered correction when this request repeats one."""
+def recall(d: Decision, text: str, emb, center, kind: tuple[str, float] | None = None) -> Decision:
+    """The head's decision, or the remembered correction when this request repeats one. `kind`:
+    the kind head's (kind, p) for this text whatever the intent head said (LayaReflex.last_kind):
+    a correction to an action carries it, one to chat or a stop carries none."""
     if emb is None or center is None or not learn.enabled() or d.intent == "stop":
         return d
     try:
@@ -212,6 +214,10 @@ def recall(d: Decision, text: str, emb, center) -> Decision:
         if item.intent == d.intent and d.tool_p >= HEAD_SURE:
             return d
         learn.count("memory_hits")
+        if item.intent == d.intent:
+            kind_of = (d.kind, d.kind_p)
+        else:
+            kind_of = (kind or ("", 0.0)) if item.intent in ("quick_action", "agent_task") else ("", 0.0)
         return dataclasses.replace(
             d,
             intent=item.intent,  # type: ignore[arg-type]
@@ -219,6 +225,8 @@ def recall(d: Decision, text: str, emb, center) -> Decision:
             tool=item.tool,
             tool_p=sim if item.tool else 0.0,
             source="laya+memory",
+            kind=kind_of[0],
+            kind_p=float(kind_of[1]),
         )
     except Exception as e:  # noqa: BLE001 — the memory must never break a decision
         print(f"[reflex] correction memory skipped: {str(e)[:80]}")
