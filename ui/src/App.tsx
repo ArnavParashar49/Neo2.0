@@ -277,7 +277,7 @@ export default function App() {
 
   if (!expanded) {
     return (
-      <div className="pill" data-tauri-drag-region title={neo.connected ? "Click to open · drag to move · ⌥⌘" : "NEO core is offline"} onMouseDown={onOrbDown} onClick={onOrbClick}>
+      <div className="pill" data-tauri-drag-region role="button" tabIndex={0} aria-label={neo.connected ? `Open NEO — ${LABEL[shown]}` : "NEO — core offline"} title={neo.connected ? "Click to open · drag to move · ⌥⌘" : "NEO core is offline"} onMouseDown={onOrbDown} onClick={onOrbClick} onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); expand(); } }}>
         {/* Tauri only starts a window drag from the element that carries the attribute, so it goes on the canvas too. */}
         <ThinkingOrb state={orb} size={64} theme="dark" speed={ORB_SPEED} {...({ "data-tauri-drag-region": true } as object)} />
         {!neo.connected && <span className="offline-dot" />}
@@ -297,9 +297,9 @@ export default function App() {
           {neo.note && <div className="note" data-tauri-drag-region aria-live="polite">{neo.note}</div>}
         </div>
         <div className="head-actions">
-          <button className={"icon" + (pinned ? " on" : "")} title={pinned ? "Unpin (auto-hide when idle)" : "Pin open"} onClick={() => setPinned((p) => !p)}>{Icon.pin}</button>
-          <button className="icon" title="Clear transcript" onClick={neo.clear}>{Icon.broom}</button>
-          <button className="icon" title="Collapse (Esc)" onClick={() => setExpanded(false)}>{Icon.collapse}</button>
+          <button className={"icon" + (pinned ? " on" : "")} title={pinned ? "Unpin (auto-hide when idle)" : "Pin open"} aria-label={pinned ? "Unpin" : "Pin open"} aria-pressed={pinned} onClick={() => setPinned((p) => !p)}>{Icon.pin}</button>
+          <button className="icon" title="Clear transcript" aria-label="Clear transcript" onClick={neo.clear}>{Icon.broom}</button>
+          <button className="icon" title="Collapse (Esc)" aria-label="Collapse" onClick={() => setExpanded(false)}>{Icon.collapse}</button>
         </div>
       </header>
 
@@ -365,19 +365,24 @@ export default function App() {
             spellCheck={false}
           />
           {text ? (
-            <button className="icon accent" title="Send" onClick={() => submit()}>{Icon.send}</button>
+            <button className="icon accent" title="Send" aria-label="Send" onClick={() => submit()}>{Icon.send}</button>
           ) : (
             <button
               className={"icon" + (neo.state === "listening" ? " live" : "")}
-              title="Hold to talk"
+              title="Hold to talk (or hold Space)"
+              aria-label="Hold to talk"
+              aria-pressed={neo.state === "listening"}
               onMouseDown={() => neo.send({ cmd: "ptt", on: true })}
               onMouseUp={() => neo.send({ cmd: "ptt", on: false })}
               onMouseLeave={() => neo.send({ cmd: "ptt", on: false })}
+              onKeyDown={(e) => { if (e.key === " " && !e.repeat) { e.preventDefault(); neo.send({ cmd: "ptt", on: true }); } }}
+              onKeyUp={(e) => { if (e.key === " ") { e.preventDefault(); neo.send({ cmd: "ptt", on: false }); } }}
+              onBlur={() => neo.send({ cmd: "ptt", on: false })}
             >
               {Icon.mic}
             </button>
           )}
-          {busy && <button className="icon danger" title="Stop" onClick={() => neo.send({ cmd: "stop" })}>{Icon.stop}</button>}
+          {busy && <button className="icon danger" title="Stop" aria-label="Stop" onClick={() => neo.send({ cmd: "stop" })}>{Icon.stop}</button>}
         </div>
       )}
       <div className="hide-btn-hint" aria-hidden />
