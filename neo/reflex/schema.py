@@ -85,16 +85,35 @@ def refers_to_screen(text: str) -> bool:
     return bool(SCREEN_RE.search(text))
 
 
-# The words of an action that is hard to undo, English and Hinglish ("delete/install/pay karo" are
-# caught by the English verb). A backstop under the destructive head so the confirm signal never
-# misses them: the head was measured missing Hinglish sends (recall 0.17-0.33).
+# The words of an action that is hard to undo, in English, Hinglish and Hindi ("delete/install/pay
+# karo" are caught by the English verb). A backstop under the destructive head so the confirm signal
+# never misses them: the head was measured missing Hinglish sends (recall 0.17-0.33), and its
+# training positives are English templates only.
+_DV = "\u0900-\u097f"  # Devanagari: its vowel signs aren't word characters, so \b can't bound a word
 _DESTRUCTIVE_RE = re.compile(
-    r"\b(?P<w>send|e-?mail|message|text|reply|post|delete|remove|erase|format|install|uninstall|pay|buy|transfer)\b"
-    r"|\b(?:bhej(?:o|\s*do|\s*de|\s*dijiye)|hata(?:o|\s*do|\s*de)|mita(?:o|\s*do|\s*de)|khar[ie]+d(?:o|\s*lo|\s*le))\b",
+    r"\b(?P<w>send|e-?mail|message|text|reply|post|delete|remove|erase|format|install|uninstall|pay|buy|"
+    r"purchase|transfer|wipe|overwrite)\b"
+    r"|(?<!fast )(?<!fast-)\bforward\s+(?:it|this|that|these|those|them|the|my|his|her|all|everything|"
+    r"an?\s+(?:e-?mail|mail|message|file|link))\b"
+    r"|\bempty\s+(?:the\s+|my\s+)?(?:trash|bin|recycle\s+bin)\b|\bmake\s+(?:a|an|the)\s+(?:payment|transfer|purchase)\b"
+    # Hinglish imperatives: bhej / bhejo / bhejna / bhej do / bhej dena / bhej dijiye (not "bheja": a
+    # brain, or "sent"), hata / mita alike, kharid lo, khaali kar do (not "kharidari", "khaali hai").
+    r"|\b(?:bhej(?:o|na|ne|iye|ie|en|\s*d(?:o|e|ena|en|ijiye|ijie)|\s*l(?:o|e|ena))?"
+    r"|(?:hata|mita)(?:o|na|iye|ie|en|\s*d(?:o|e|ena|en|ijiye|ijie))"
+    r"|khar(?:i|ee)d(?:o|na|iye|ie|en|\s*l(?:o|e|ena|en|ijiye|ijie)|\s*d(?:o|e|ena))"
+    r"|kh(?:aa|a)l[iy]\s+kar(?:o|na|en|\s*d(?:o|e|ena|en|ijiye|ijie)))\b"
+    # Hindi: भेजो / भेज दो, हटाओ / हटा दो, मिटाओ, खरीदो / ख़रीद लो, and डिलीट / इंस्टॉल / पे / पेमेंट /
+    # भुगतान / ट्रांसफ़र / ईमेल / मैसेज + करो (not भेजा, खरीदारी, मिठाई, पेड़)
+    rf"|(?<![{_DV}])(?:भेज(?:ो|ना|िए|िये|ें|\s+(?:दो|दे|देना|दें|दीजिए|दीजिये))?"
+    r"|(?:हटा|मिटा)(?:ओ|ना|इए|इये|एं|एँ|\s+(?:दो|दे|देना|दें|दीजिए|दीजिये))"
+    r"|(?:ख\u093c?|\u0959)रीद(?:ो|ना|िए|िये|ें|\s+(?:लो|ले|लेना|लें|लीजिए|लीजिये|दो|दे))"
+    r"|(?:डिल[ीि]ट|(?:अन)?इ[ंन]्?स्ट[ॉा]ल|पे|पेमेंट|भुगतान|ट्रांस(?:फ\u093c?|\u095e)र|ई-?मेल|मेल|मैसेज)"
+    r"\s*(?:करो|करना|करें|कीजिए|कीजिये|कर\s+(?:दो|दे|देना|दें|दीजिए|दीजिये)))"
+    rf"(?![{_DV}])",
     re.I,
 )
 # ...but "my email", "the last message", "some text" name a thing, not an action.
-_NOUNS = {"email", "e-mail", "message", "text", "reply", "post", "format", "transfer"}
+_NOUNS = {"email", "e-mail", "message", "text", "reply", "post", "format", "purchase", "transfer"}
 _DETERMINER = re.compile(
     r"\b(?:my|the|a|an|any|some|of|new|unread|last|latest|this|that|his|her|their|your|our|what|which|selected)\s+$",
     re.I,

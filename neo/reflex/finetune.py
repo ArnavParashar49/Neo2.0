@@ -4,8 +4,8 @@ One encoder pass feeds six heads: intent, destructive, needs_screen, reply (want
 tool (the one NEO tool a quick action needs) and kind (neo/decide's task kind). Each head is three
 seeds averaged; its loss (cross-entropy, or spherical — which holds up under noisy labels) and its
 temperature are chosen on rows it never trained on, and a new head replaces the current one only if
-it passes the gate (`_gate`). Every run also fits a head without any of your own rows, which the
-privacy erase falls back to (`reset_to_base`).
+it passes the gate (`_gate`). Every run also fits a head without any of your own rows (nor their
+labels on anyone else's rows), which the privacy erase falls back to (`reset_to_base`).
 
     python -m neo.reflex.finetune             # extract (or reuse cache), train, gate, save
     python -m neo.reflex.finetune --refresh   # ignore the feature cache
@@ -13,26 +13,29 @@ privacy erase falls back to (`reset_to_base`).
 
 Data: templates (dataset.py) + reflex_generated.jsonl (generate.py) + reflex_hf.jsonl (hf_data.py)
 + reflex_extra.jsonl (your own requests). A row's own kind/destructive/screen/reply labels win over
-derived ones; split=="eval" rows are never trained on.
+derived ones; split=="eval" rows are never trained on (and evaluate.py drops from the benchmark any
+sentence the training data has).
 """
 
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
 import math
+import os
 import re
 import sys
+import threading
 import time
-from contextlib import nullcontext
 from pathlib import Path
 
 import numpy as np
 
 from neo.config import settings
 from neo.reflex.dataset import build
-from neo.reflex.features import embed_only, forward, head_probs, load_encoder, parse_head, softmax
+from neo.reflex.features import embed_only, forward, head_probs, load_encoder, load_head, parse_head, softmax
 from neo.reflex.schema import INTENT_CRITERIA, QUESTIONS, refers_to_screen, sounds_destructive, wants_reply
 
 _INTENTS = list(INTENT_CRITERIA)
@@ -43,9 +46,14 @@ _SEEDS = (0, 1, 2)  # a 3-seed ensemble: +1.1 points, and seed-to-seed spread 2.
 _LOSSES = ("ce", "spherical")
 _MIN_CLASS_ROWS = 12
 _MIN_SLICE = 50  # fewer rows than this can't choose a temperature or a loss
-_SPLIT = "hash5-v1"
+_MIN_ANSWER = 5  # ...nor rows with fewer than two answers this common
+# v2: your requests are held out too (the user and calibration slices), 1 in 20 public groups
+# calibrates, and the base slice follows `group`. A head from the v1 split trained on every one of
+# your rows, so it can't be judged on them: it counts as no comparable head.
+_SPLIT = "hash5-v2"
 _VALIDATION = ("validation", "val", "dev")
 _EVAL = ("eval", "test")
+_PUBLIC_CAL = 20  # 1 in this many public/NEO groups is the public validation (calibration) slice
 # Fields only rows from a labelled public source carry (hf_data.py).
 _PUBLIC_LABELS = ("kind", "screen", "reply", "lang", "split", "group")
 _TEACHER_Q = {k: QUESTIONS[k] for k in ("destructive", "needs_screen")}
@@ -282,6 +290,11 @@ def labels(rows: list[dict]) -> dict[str, np.ndarray]:
         "kind": np.array([_kind_label(r, kinds) for r in rows], dtype=object),
         "script": np.array([script_of(r) for r in rows], dtype=object),
         "weight": np.array([_weight(r) for r in rows], dtype=np.float32),
+        # For the heads whose labels your requests don't verify (destructive, needs_screen, reply:
+        # derived from the words, or from a row with the same words), a request of yours weighs what
+        # a public row does. At 10 they only shifted those heads' priors: a retrain on 500 requests
+        # missed 23 more destructive rows (McNemar p<0.01) and was rightly rejected.
+        "weight_derived": np.array([1.0 if r.get("source") == OWN else _weight(r) for r in rows], dtype=np.float32),
     }
     for i, r in enumerate(rows):
         # NEO's own derivations where the row has no label. Destructive: a template's hint words, and
@@ -296,6 +309,21 @@ def labels(rows: list[dict]) -> dict[str, np.ndarray]:
         s = _given(r, "screen")
         lab["destructive"][i] = d
         lab["needs_screen"][i] = s if s >= 0 else int(refers_to_screen(r["text"]))
+    # Your request carries no destructive label (the ledger doesn't record one): a template or a
+    # labelled public row with the same words gives it theirs ("delete this folder" stays destructive
+    # after you said it, and "cancel my alarm" isn't taught as harmless at your rows' weight just
+    # because it was a quick action).
+    own = np.array([r.get("source") == OWN for r in rows], dtype=bool)
+    if own.any():
+        said: dict[str, int] = {}
+        for r, o, d in zip(rows, own, lab["destructive"], strict=True):
+            if not o and d >= 0 and (r.get("source") == "template" or _given(r, "destructive") >= 0):
+                k = _norm(r["text"])
+                said[k] = max(said.get(k, 0), int(d))
+        for i in np.where(own)[0]:
+            k = _norm(rows[i]["text"])
+            if k in said and _given(rows[i], "destructive") < 0:
+                lab["destructive"][i] = said[k]
     lab["destructive_trusted"] = lab["destructive"] >= 0
     lab["needs_screen_trusted"] = lab["needs_screen"] >= 0
     return lab
@@ -311,34 +339,48 @@ def _held_out(text: str) -> bool:
 
 
 def slices(rows: list[dict]) -> dict[str, np.ndarray]:
-    """Which rows train and which judge, fixed by hashes of the text so every run agrees:
+    """Which rows train and which judge, fixed by hashes so every run agrees:
 
     * base: ~20% of the public/NEO rows (by `group` when a row has one, so a translation of a
-      held-out sentence is held out too) — the general skill;
+      held-out sentence is held out too) — the general skill, and the fixed rows the anchors are
+      measured on;
     * user: 20% of your verified requests (another hash) — did it learn *your* phrasing;
-    * cal: 10% of your requests plus the public validation rows — fits temperatures, ECE;
+    * cal: 10% of your requests plus the public validation rows (a split named so, and 1 in 20
+      public/NEO groups: the public sources fold their own validation splits into train) — fits
+      temperatures, chooses losses, measures ECE;
     * train: the rest.
 
-    `shadowed`: other rows with the same text as one of yours. Your verdict replaces theirs in the
-    head (the same sentence mustn't train on one label and judge on another), but not in the base
-    head, which never sees yours and so must not depend on them."""
+    None of the public rows' slices depends on your rows. `shadowed`: other rows with the same words
+    as one of yours. Your verdict replaces theirs in the head (the same sentence mustn't train on one
+    label and judge on another), but not in the base head, which never sees yours."""
     own = np.array([r.get("source") == OWN for r in rows], dtype=bool)
-    own_texts = {r["text"].strip().lower() for r, o in zip(rows, own, strict=True) if o}
-    shadowed = ~own & np.array([r["text"].strip().lower() in own_texts for r in rows], dtype=bool)
+    own_texts = {_norm(r["text"]) for r, o in zip(rows, own, strict=True) if o}
+    shadowed = ~own & np.array([_norm(r["text"]) in own_texts for r in rows], dtype=bool)
     verified = own & np.array([bool(r.get("verified")) for r in rows], dtype=bool)
     user = verified & np.array([_hash("user:", r["text"]) % 5 == 0 for r in rows], dtype=bool)
-    cal = (own & ~user & np.array([_hash("cal:", r["text"]) % 10 == 0 for r in rows], dtype=bool)) | (
-        ~own & np.array([r.get("split") in _VALIDATION for r in rows], dtype=bool)
+    group = [str(r.get("group") or r["text"]) for r in rows]
+    public_cal = np.array(
+        [r.get("split") in _VALIDATION or _hash("cal:", g) % _PUBLIC_CAL == 0 for r, g in zip(rows, group, strict=True)],
+        dtype=bool,
     )
-    base = ~own & ~cal & np.array([_held_out(str(r.get("group") or r["text"])) for r in rows], dtype=bool)
+    cal = (own & ~user & np.array([_hash("cal:", r["text"]) % 10 == 0 for r in rows], dtype=bool)) | (~own & public_cal)
+    base = ~own & ~cal & np.array([_held_out(g) for g in group], dtype=bool)
     return {"own": own, "user": user, "cal": cal, "base": base, "train": ~(user | cal | base), "shadowed": shadowed}
+
+
+def _norm(text: str) -> str:
+    """How dataset.py and learn.py match your sentences to others: case and spacing aside."""
+    return " ".join(str(text).lower().split())
 
 
 def training_rows(per_class: int) -> list[dict]:
     """The data minus eval rows, in an order fixed by a hash: the head fit without your rows can't
-    depend on them even through the shuffle."""
-    rows = [r for r in build(per_class) if r.get("split") not in _EVAL]
-    rows.sort(key=lambda r: (_hash("order:", r["text"]), str(r.get("source"))))
+    depend on them even through the shuffle. Built without dataset.py's own-row override (which
+    relabels templates with your words and drops public rows with them): `shadowed` keeps those
+    rows out of the head here, and the base head must not learn your labels through them."""
+    rows = [r for r in build(per_class, override=False) if r.get("split") not in _EVAL]
+    # A total order (duplicates included): dataset.py's shuffle depends on how many rows you have.
+    rows.sort(key=lambda r: (_hash("order:", r["text"]), str(r.get("source")), json.dumps(r, sort_keys=True, default=str)))
     return rows
 
 
@@ -352,9 +394,7 @@ def _fit(name, Xs, y, classes, w, masks, candidates) -> dict | None:
     cal = np.where(cal_m & have)[0]
     if len(cal) < _MIN_SLICE:  # no calibration rows (no own rows, no public validation split)
         cal = np.where(base_m & have)[0]
-    sel = np.where(user_m & have)[0]
-    if len(sel) < _MIN_SLICE:
-        sel = cal
+    sel = _chooser(y, np.where(user_m & have)[0], cal)
     if len(tr) < _MIN_CLASS_ROWS or len(np.unique(y[tr])) < 2:
         return None
     k = len(classes)
@@ -376,22 +416,30 @@ def _fit(name, Xs, y, classes, w, masks, candidates) -> dict | None:
     return {"members": [[[pack(W), pack(b)] for W, b in m] for m in members], "classes": classes, "T": T, "loss": loss, "ece": err}
 
 
-def _fit_heads(rows, X, lab, sl, keep, losses: dict[str, str] | None = None) -> dict:
-    """All six heads on the rows in `keep`; `losses` pins each head's loss (else both are tried)."""
+def _chooser(y: np.ndarray, user: np.ndarray, cal: np.ndarray) -> np.ndarray:
+    """The rows that choose a head's loss: your held-out requests, if they give at least two answers
+    (_MIN_ANSWER rows each) among _MIN_SLICE — on rows that all say "no" (your requests carry no
+    needs_screen label, the words decide), the loss that says "no" loudest wins, and that head then
+    misses the screen requests (measured: recall 0.70 -> 0.48) — else the calibration rows."""
+    if len(user) >= _MIN_SLICE and (np.bincount(y[user]) >= _MIN_ANSWER).sum() >= 2:
+        return user
+    return cal
+
+
+def _fit_heads(rows, X, lab, sl, keep) -> dict:
+    """All six heads on the rows in `keep`, each with the loss that does better on held-out rows in
+    `keep` (nothing outside `keep` reaches the result: the base head must be exactly the head a run
+    without your requests would fit)."""
     from neo.decide.engine import TASKS
 
     mu, sd = standardise(X[keep])
     Xs = (X - mu) / sd
     masks = tuple(sl[k] & keep for k in ("train", "cal", "user", "base"))
-    w = lab["weight"]
-
-    def cands(name):
-        return (losses[name],) if losses and name in losses else _LOSSES
-
+    w, w_derived = lab["weight"], lab["weight_derived"]
     out = {"mu": mu.tolist(), "sd": sd.tolist()}
-    out["intent"] = _fit("intent", Xs, lab["intent"], _INTENTS, w, masks, cands("intent"))
+    out["intent"] = _fit("intent", Xs, lab["intent"], _INTENTS, w, masks, _LOSSES)
     for name, classes in (("destructive", ["no", "yes"]), ("needs_screen", ["no", "yes"]), ("reply", ["do it", "answer"])):
-        out[name] = _fit(name, Xs, lab[name], classes, w, masks, cands(name))
+        out[name] = _fit(name, Xs, lab[name], classes, w_derived, masks, _LOSSES)
 
     # tool: quick actions (and any row naming a tool), plus a "none" region of chat/agent rows —
     # without it the head has never seen an utterance that needs no single tool, and names one
@@ -405,48 +453,71 @@ def _fit_heads(rows, X, lab, sl, keep, losses: dict[str, str] | None = None) -> 
     counts = {c: int(((names == c) & keep).sum()) for c in set(names[keep]) - {""}}
     classes = sorted(c for c, n in counts.items() if n >= _MIN_CLASS_ROWS or c == "none")
     y_tool = np.array([classes.index(t) if t in classes else -1 for t in names])
-    out["tool"] = _fit("tool", Xs, y_tool, classes, w, masks, cands("tool"))
+    out["tool"] = _fit("tool", Xs, y_tool, classes, w, masks, _LOSSES)
 
     k_counts = {c: int(((lab["kind"] == c) & keep).sum()) for c in TASKS}
     k_classes = [c for c in TASKS if k_counts[c] >= _MIN_CLASS_ROWS]
     y_kind = np.array([k_classes.index(c) if c in k_classes else -1 for c in lab["kind"]])
-    out["kind"] = _fit("kind", Xs, y_kind, k_classes, w, masks, cands("kind"))
+    out["kind"] = _fit("kind", Xs, y_kind, k_classes, w, masks, _LOSSES)
     return out
 
 
 # ---- judging a head -----------------------------------------------------------------------------
+# What the session cancels everything on besides the bare-stop rule (agent/session.py): a "stop" of
+# at most this many words that the intent head is at least this sure of.
+_STOP_WORDS, _STOP_SURE = 2, 0.9
+
+
+def cancels(P: np.ndarray, rules: dict) -> np.ndarray:
+    """Per row: would the session cancel everything? The bare-stop rule, or a short "stop" the
+    intent head (probabilities `P`) is sure of — its top pick alone isn't enough."""
+    return rules["stop"] | ((P.argmax(1) == _STOP) & rules["short"] & (P[:, _STOP] >= _STOP_SURE))
+
+
 def score(h: dict, X: np.ndarray, lab: dict, sl: dict, rules: dict) -> dict:
-    """A parsed head's numbers on the rows no head trains on. destructive / needs_screen / stop
-    count what NEO acts on — the head or the rule behind it."""
+    """A parsed head's numbers on the rows no head trains on (other sources' copies of your
+    sentences aside). base, the per-intent recalls, reply, tool and kind: on the base slice, the
+    fixed rows the anchors are measured on. ECE: on the calibration slice (the public validation
+    rows and 10% of your requests). destructive, needs_screen and stop: what NEO acts on — the head
+    or the rule behind it, and for stop what the session cancels on, over the stops it can cancel on
+    at all — with the per-row hits (`*_ok`) for a paired test."""
     held = (sl["base"] | sl["user"] | sl["cal"]) & ~sl["shadowed"]
     idx = np.where(held)[0]
     Xs = (X[idx] - h["mu"]) / h["sd"]
     y = lab["intent"][idx]
     P = head_probs(h["intent"], Xs)
     ok = P.argmax(1) == y
+    base, user, cal = sl["base"][idx], sl["user"][idx], sl["cal"][idx]
+    rules = {k: v[idx] for k, v in rules.items()}
 
     def acc(mask):
         return float(ok[mask].mean()) if mask.any() else float("nan")
 
-    m: dict = {"base": acc(sl["base"][idx]), "user": acc(sl["user"][idx]), "user_ok": ok[sl["user"][idx]]}
-    cal = sl["cal"][idx] if sl["cal"][idx].sum() >= _MIN_SLICE else sl["base"][idx]
-    m["ece"] = ece(P[cal], y[cal])
+    m: dict = {"base": acc(base), "user": acc(user), "user_ok": ok[user], "n": {"base": int(base.sum()), "user": int(user.sum())}}
+    if cal.sum() < _MIN_SLICE:  # too few to calibrate on (tiny data): every held-out row
+        cal = np.ones(len(idx), dtype=bool)
+    m["ece"], m["n"]["ece"] = ece(P[cal], y[cal]), int(cal.sum())
+    for i, c in enumerate(_INTENTS):
+        m[f"recall {c}"], m["n"][f"recall {c}"] = acc(base & (y == i)), int((base & (y == i)).sum())
     for s in ("latin-undecided", "devanagari"):
         m[s] = acc(lab["script"][idx] == s)
-    stop = y == _STOP
-    m["stop"] = float(((P.argmax(1) == _STOP) | rules["stop"][idx])[stop].mean()) if stop.any() else float("nan")
+    # The stops the session can act on: a longer "stop" is never cancelled on the head's word.
+    stop = (y == _STOP) & (rules["stop"] | rules["short"])
+    m["stop_ok"] = cancels(P, rules)[stop]
+    m["stop"], m["n"]["stop"] = float(m["stop_ok"].mean()) if stop.any() else float("nan"), int(stop.sum())
     for name in ("destructive", "needs_screen"):
         pos = lab[f"{name}_trusted"][idx] & (lab[name][idx] == 1)
+        m[name], m["n"][name] = float("nan"), int(pos.sum())  # NaN: no positives, or the head is gone
         if h[name] is None or not pos.any():
-            m[name] = float("nan")
             continue
         p = head_probs(h[name], Xs[pos])[:, 1]
-        m[name] = float((np.maximum(p, rules[name][idx][pos]) >= 0.5).mean())
+        m[f"{name}_ok"] = np.maximum(p, rules[name][pos]) >= 0.5
+        m[name] = float(m[f"{name}_ok"].mean())
         m[f"{name}_head"] = float((p >= 0.5).mean())
-    have = lab["reply"][idx] >= 0
+    have = base & (lab["reply"][idx] >= 0)
     m["reply"] = float((head_probs(h["reply"], Xs[have]).argmax(1) == lab["reply"][idx][have]).mean()) if h["reply"] is not None and have.any() else float("nan")
     for name in ("tool", "kind"):
-        have = lab[name][idx] != ""
+        have = base & (lab[name][idx] != "")
         if h[name] is None or not have.any():
             m[name] = float("nan")
             continue
@@ -456,11 +527,13 @@ def score(h: dict, X: np.ndarray, lab: dict, sl: dict, rules: dict) -> dict:
 
 
 def rule_signals(rows: list[dict]) -> dict[str, np.ndarray]:
-    """What the rules behind the heads say for each row: a bare stop, destructive words, the screen."""
+    """What the rules behind the heads say for each row: a bare stop, destructive words, the screen
+    (and whether it is short enough for the session to cancel on the head's "stop")."""
     from neo.reflex import is_bare_stop
 
     return {
         "stop": np.array([is_bare_stop(r["text"]) for r in rows], dtype=bool),
+        "short": np.array([len(r["text"].split()) <= _STOP_WORDS for r in rows], dtype=bool),
         "destructive": np.array([float(sounds_destructive(r["text"])) for r in rows], dtype=np.float32),
         "needs_screen": np.array([float(refers_to_screen(r["text"])) for r in rows], dtype=np.float32),
     }
@@ -476,57 +549,97 @@ def mcnemar_worse(cur_ok: np.ndarray, new_ok: np.ndarray) -> float:
     return sum(math.comb(n, i) for i in range(b, n + 1)) / 2**n
 
 
-_TOL = {"reply": 0.01, "tool": 0.02, "kind": 0.02}
-# With no head to compare to (the first one, or a new encoder), a new head must clear these: well
-# under what the public data gives either encoder (base 0.905-0.922, destructive with the rule
-# 0.99-1.0, stop 0.83-0.89 — its held-out rows include loose generated "stop"s — ECE ~0.02).
-_FLOORS = {"base": 0.85, "destructive": 0.95, "stop": 0.8, "ece": 0.05}
+# Held to the first head's numbers on the base slice (a fixed anchor, see _gate), with this slack.
+_ANCHORED = {"base": 0.01, "reply": 0.01, "tool": 0.02, "kind": 0.02}
+# What NEO acts on: a new head may miss at most max(1 row, 2 points) more of these than the current
+# one, and not significantly more (one-sided exact McNemar on the positives, p < 0.1).
+_RECALLS = ("destructive", "stop", "needs_screen")
+_RECALL_TOL, _RECALL_P = 0.02, 0.1
+# With no head to compare to (the first one, a new encoder, an erase with nothing to go back to), a
+# new head must clear these, each on at least _MIN_JUDGE rows. Measured on the public data (49.7k
+# rows, multilingual encoder): base 0.90, each intent's recall 0.82-0.91, destructive with the rule
+# 0.84 (the rule alone 0.41: the public sets label calls, bookings, orders and deletions), the stops
+# the session cancels on 0.76 (the rule alone 0.55), ECE 0.014. The floors sit well under those and
+# above what the rules alone give: they catch a broken head, not a slightly worse one. ECE over
+# _FLOORS["ece"] only warns: a head that isn't well calibrated still beats Laya's zero-shot (intent
+# 0.37), and NEO must not stay without one.
+_FLOORS = {"base": 0.85, "recall": 0.6, "destructive": 0.75, "stop": 0.6, "ece": 0.10}
+_MIN_JUDGE = 30
 
 
-def _gate(new: dict, cur: dict | None, anchor: float) -> tuple[bool, list[str]]:
+def _num(v) -> bool:
+    return v is not None and v == v  # not NaN: measured
+
+
+def _gate(new: dict, cur: dict | None, anchor: dict) -> tuple[bool, list[str]]:
     """Accept only if: your requests aren't worse (paired McNemar p<0.1, and >= current - 0.5 pt);
-    the general skill stays >= the first head's - 1 pt (a fixed anchor, so small losses can't pile
-    up over retrains); what NEO acts on for destructive, stop and needs_screen misses nothing more;
-    calibration ECE <= max(0.05, current + 0.01); reply/tool/kind within a small tolerance."""
+    the general skill and the reply, tool and kind heads stay within a little of the first head's
+    numbers on the base slice (`anchor`: fixed, so small losses can't pile up over retrains); what
+    NEO acts on for destructive, stop and needs_screen misses at most max(1 row, 2 pt) more and not
+    significantly more (McNemar), and none of those heads is lost; ECE <= max(0.05, current + 0.01).
+    `cur` None: nothing compares, so the absolute floors (_FLOORS) decide."""
     lines: list[str] = []
     ok = True
 
-    def check(name: str, passed: bool, text: str) -> None:
+    def check(name: str, passed: bool, text: str, *, warn: bool = False) -> None:
         nonlocal ok
-        ok &= passed
-        lines.append(f"  {'ok  ' if passed else 'FAIL'} {name:13s} {text}")
-
-    def num(v) -> bool:
-        return v == v  # not NaN: the slice has rows
+        ok &= passed or warn
+        lines.append(f"  {'ok  ' if passed else 'WARN' if warn else 'FAIL'} {name:13s} {text}")
 
     if cur is None:
-        for name, floor in _FLOORS.items():
-            v = new[name]
-            if num(v):
-                passed = v <= floor if name == "ece" else v >= floor
-                check(name, passed, f"{v:.3f} ({'<=' if name == 'ece' else '>='} floor {floor})")
+        n = new.get("n", {})
+        floors = [("base slice", "base", _FLOORS["base"])]
+        floors += [(f"recall {c}", f"recall {c}", _FLOORS["recall"]) for c in _INTENTS]
+        floors += [(k, k, _FLOORS[k]) for k in ("destructive", "stop")]
+        for label, key, floor in floors:
+            if not _num(new.get(key)) or n.get(key, _MIN_JUDGE) < _MIN_JUDGE:
+                lines.append(f"  --   {label:13s} not judged (n={n.get(key, 0)} < {_MIN_JUDGE})")
+                continue
+            check(label, new[key] >= floor, f"{new[key]:.3f} (>= floor {floor}, n={n.get(key, '?')})")
+        if _num(new.get("ece")):
+            e, floor = new["ece"], _FLOORS["ece"]
+            check("ECE", e <= floor, f"{e:.3f} (<= floor {floor}, n={n.get('ece', '?')})"
+                  + ("" if e <= floor else ": kept anyway, a head beats none"), warn=True)  # fmt: skip
         return ok, lines
-    if len(new["user_ok"]):
+
+    if len(new["user_ok"]) and len(new["user_ok"]) == len(cur["user_ok"]):
         p = mcnemar_worse(cur["user_ok"], new["user_ok"])
         check("user slice", p >= 0.1 and new["user"] >= cur["user"] - 0.005,
               f"{cur['user']:.3f} -> {new['user']:.3f} (n={len(new['user_ok'])}, McNemar p={p:.2f})")  # fmt: skip
-    check("base slice", new["base"] >= anchor - 0.01, f"{cur['base']:.3f} -> {new['base']:.3f} (>= anchor {anchor:.3f} - 0.01)")
-    for name in ("destructive", "stop", "needs_screen"):
-        if num(new[name]) and num(cur[name]):
-            check(name, new[name] >= cur[name], f"recall {cur[name]:.3f} -> {new[name]:.3f}")
-    if num(new["ece"]) and num(cur["ece"]):
+    for name in _RECALLS:
+        if not _num(cur.get(name)):
+            continue
+        if not _num(new.get(name)):
+            check(name, False, f"recall {cur[name]:.3f} -> none: the head is gone")
+            continue
+        was, now = cur[f"{name}_ok"], new[f"{name}_ok"]
+        lost = int(was.sum()) - int(now.sum())
+        allowed = max(1.0, _RECALL_TOL * len(now))
+        p = mcnemar_worse(was, now)
+        check(name, lost <= allowed and p >= _RECALL_P,
+              f"recall {cur[name]:.3f} -> {new[name]:.3f} (n={len(now)}, {lost:+d} missed, <= {allowed:.1f}; McNemar p={p:.2f})")  # fmt: skip
+    if _num(new.get("ece")) and _num(cur.get("ece")):
         limit = max(0.05, cur["ece"] + 0.01)
         check("ECE", new["ece"] <= limit, f"{cur['ece']:.3f} -> {new['ece']:.3f} (<= {limit:.3f})")
-    for name, tol in _TOL.items():
-        if num(new[name]) and num(cur[name]):
-            check(name, new[name] >= cur[name] - tol, f"{cur[name]:.3f} -> {new[name]:.3f}")
+    for name, tol in _ANCHORED.items():
+        if not _num(anchor.get(name)):
+            continue
+        passed = _num(new.get(name)) and new[name] >= anchor[name] - tol
+        was = f"{cur[name]:.3f}" if _num(cur.get(name)) else "none"
+        now = f"{new[name]:.3f}" if _num(new.get(name)) else "none (the head is gone)"
+        check("base slice" if name == "base" else name, passed, f"{was} -> {now} (>= anchor {anchor[name]:.3f} - {tol})")
     return ok, lines
 
 
 def _fingerprint(rows: list[dict], mask: np.ndarray) -> str:
-    """Identifies the base slice's contents: the anchor only means something on the same rows."""
+    """Identifies the base slice's contents: the anchors only mean something on the same rows."""
     keys = sorted(f"{r['text']}\t{r['intent']}" for r, m in zip(rows, mask, strict=True) if m)
     return hashlib.md5("\n".join(keys).encode()).hexdigest()[:16]
+
+
+def _plain(m: dict) -> dict:
+    """A score's numbers for the head file: no per-row arrays, NaN as null."""
+    return {k: v if _num(v) else None for k, v in m.items() if not k.endswith("_ok") and k != "n"}
 
 
 # ---- training -----------------------------------------------------------------------------------
@@ -552,16 +665,19 @@ def train(args: argparse.Namespace, *, agent=None, lock=None, cancelled=None) ->
     """Build the data, fill the feature cache, fit every head, save if it passes the gate.
 
     `cancelled()` true (the user erased NEO's memory while this ran): nothing is written — the
-    features and the head were computed from sentences that must no longer exist.
+    features and the head were computed from sentences that must no longer exist. It is checked
+    right before every write, under the lock the erase's reset_to_base takes, and once more after.
 
     `agent`/`lock`: reuse a Laya instance that is already loaded (the running core) instead of
-    loading a second copy; every call into it holds `lock` (MPS is not thread-safe)."""
+    loading a second copy; every call into it holds `lock` (MPS is not thread-safe). The heads are
+    for that agent's encoder (the running reflex is on the English one while the multilingual one
+    isn't downloaded)."""
     from neo import models
 
-    lock = lock or nullcontext()
+    lock = lock or contextlib.nullcontext()
     quiet = agent is not None  # inside the core: no progress bars in the log
     s = settings()
-    encoder = s.reflex_encoder
+    encoder = getattr(agent, "neo_encoder", None) or s.reflex_encoder
     rows = training_rows(args.per_class)
     texts = [r["text"] for r in rows]
     lab = labels(rows)
@@ -582,44 +698,44 @@ def train(args: argparse.Namespace, *, agent=None, lock=None, cancelled=None) ->
     new_json = _head_json(fitted, args, encoder, dim, len(rows))
     rules = rule_signals(rows)
     new = score(parse_head(new_json), X, lab, sl, rules)
+    fp = _fingerprint(rows, sl["base"])
 
     head_path = s.data_dir / "reflex_head.json"
-    cur = None
     try:
         cur_json = json.loads(head_path.read_text())
         cur_h = parse_head(cur_json, encoder, dim) if cur_json.get("split") == _SPLIT else None
-    except (OSError, ValueError):
+    except (OSError, ValueError, AttributeError):
         cur_json, cur_h = {}, None
-    if cur_h is not None:  # judged on *this* data's held-out rows: scores from other data don't compare
-        cur = score(cur_h, X, lab, sl, rules)
-    # The anchor is the first head's base score on these same rows (re-set when the public data
-    # changes, since the score then means something else).
-    fp = _fingerprint(rows, sl["base"])
+    # Judged on *this* data's held-out rows: scores from other data don't compare.
+    cur = score(cur_h, X, lab, sl, rules) if cur_h is not None else None
+    # The anchors are the first head's numbers on the base slice, re-set when the public data
+    # changes (they then mean something else); a head gated against nothing is its own anchor.
     old = cur_json.get("anchor") or {}
-    anchor = new["base"] if cur is None else old["base"] if old.get("data") == fp else cur["base"]
-    new_json["anchor"] = {"base": anchor, "data": fp}
+    if cur is not None and old.get("data") == fp:
+        anchor = {k: old[k] if _num(old.get(k)) else cur[k] for k in _ANCHORED}
+    else:
+        anchor = {k: (cur or new)[k] for k in _ANCHORED}
+    new_json["anchor"] = {**_plain(anchor), "data": fp}
     new_json["teacher"] = agree
-    new_json["held_out"] = {k: None if v != v else v for k, v in new.items() if k != "user_ok"}
+    new_json["held_out"] = _plain(new)
     accepted, lines = _gate(new, cur, anchor)
-    print(f"\ntrained in {time.time() - t0:.0f}s; gate " + ("against the current head" if cur else "(no comparable head: absolute floors)"))
+    how = "against the current head" if cur else "(no comparable head): absolute floors"
+    print(f"\ntrained in {time.time() - t0:.0f}s; gate {how}")
     print("\n".join(lines))
     report = {
         "rows": len(rows), "encoder": encoder, "intent": new["base"], "tool": new["tool"], "reply": new["reply"],
         "kind": new["kind"], "ece": new["ece"], "previous": cur["base"] if cur else None, "saved": False, "gate": lines,
     }  # fmt: skip
-    base_path = base_head_path()
     if not accepted and not args.force:
         print("\nkept the current head")
-        if not base_path.exists() and not (cancelled and cancelled()):
-            _write(base_path, _base_json(rows, X, lab, sl, fitted, new_json, args, encoder, dim))
+        if load_head(base_head_path(), encoder, dim) is None:  # none for this encoder: an erase needs one
+            base = _base_head(rows, X, lab, sl, rules, new, new_json, args, encoder, dim, fp)
+            if base is not None and not _save(cancelled, None, base):
+                return {**report, "cancelled": True}
         return report
-    base_json = _base_json(rows, X, lab, sl, fitted, new_json, args, encoder, dim)
-    if cancelled and cancelled():
+    base = _base_head(rows, X, lab, sl, rules, new, new_json, args, encoder, dim, fp)
+    if not _save(cancelled, new_json, base):
         return {**report, "cancelled": True}
-    if head_path.exists():
-        head_path.with_suffix(".prev.json").write_text(head_path.read_text())  # one step of undo
-    _write(head_path, new_json)
-    _write(base_path, base_json)
     report["saved"] = True
     print(f"\nsaved head → {head_path}  (base {new['base']:.3f}, tool {new['tool']:.3f}, kind {new['kind']:.3f}, {models.LAYA_SUBFOLDERS[encoder] or 'english'} {dim}-d)")
     if not quiet:
@@ -702,27 +818,63 @@ def _head_json(fitted: dict, args, encoder: str, dim: int, n_rows: int) -> dict:
     }
 
 
-def _base_json(rows, X, lab, sl, fitted, new_json, args, encoder, dim) -> dict:
-    """The head without any of your own rows (for the privacy erase), with the losses the full run
-    chose. Without own rows it *is* the new head."""
-    keep = ~sl["own"]
-    if keep.all():
-        return new_json
-    print("\nbase head (none of your requests):")
-    losses = {k: v["loss"] for k, v in fitted.items() if isinstance(v, dict) and "loss" in v}
-    base = _head_json(_fit_heads(rows, X, lab, sl, keep, losses), args, encoder, dim, int(keep.sum()))
-    # Its own anchor: after an erase, nothing measured on a head fit on your rows carries over.
-    h = parse_head(base)
-    idx = np.where(sl["base"])[0]  # never your rows
-    pred = head_probs(h["intent"], (X[idx] - h["mu"]) / h["sd"]).argmax(1)
-    base["anchor"] = {"base": float((pred == lab["intent"][idx]).mean()), "data": new_json["anchor"]["data"]}
-    return base
+def _base_head(rows, X, lab, sl, rules, new, new_json, args, encoder, dim, fp) -> dict | None:
+    """The head without any of your own rows, for the privacy erase: fit on exactly what a run
+    without your requests would fit on (their words on other rows keep those rows' labels), each loss
+    chosen without them, and anchored on its own numbers — after an erase, nothing measured on a head
+    fit on your rows carries over. Without own rows it *is* the new head (`new` its score). None if
+    it doesn't clear the absolute floors: after an erase, no head (and a retrain) beats a bad one."""
+    if sl["own"].any():
+        print("\nbase head (none of your requests):")
+        base = _head_json(_fit_heads(rows, X, lab, sl, ~sl["own"]), args, encoder, dim, int((~sl["own"]).sum()))
+        # judged, and its numbers kept, on public rows only: nothing in its file comes from yours
+        public = {**{k: v & ~sl["own"] for k, v in sl.items()}, "shadowed": np.zeros_like(sl["own"])}
+        new = score(parse_head(base), X, lab, public, rules)
+        base["anchor"] = {**_plain({k: new[k] for k in _ANCHORED}), "data": fp}
+        base["held_out"] = _plain(new)
+    else:
+        base = new_json
+    passed, lines = _gate(new, None, {})
+    if not passed:
+        print("base head not kept (an erase would put it back):\n" + "\n".join(lines))
+    return base if passed else None
 
 
-def _write(path: Path, head: dict) -> None:
-    tmp = path.with_suffix(".tmp")  # written whole, then swapped in: never a torn head
-    tmp.write_text(json.dumps(head))
-    tmp.replace(path)
+# Head files are written, and put back by an erase (reset_to_base), one writer at a time.
+_head_lock = threading.Lock()
+
+
+def _save(cancelled, head: dict | None, base: dict | None) -> bool:
+    """Write the head (the one it replaces kept as .prev: one step of undo) and the base head —
+    unless the user erased NEO's memory meanwhile. That is checked under the lock reset_to_base
+    takes, right before the writes, so a head fit on erased rows can't land after the erase put the
+    base head back; and once more after, in case the erase started while this wrote. Returns
+    whether it wrote (and nothing was erased)."""
+    path = settings().data_dir / "reflex_head.json"
+    with _head_lock:
+        if cancelled and cancelled():
+            return False
+        if head is not None:
+            if path.exists():
+                _write(path.with_suffix(".prev.json"), path.read_bytes())
+            _write(path, head)
+        if base is not None:
+            _write(base_head_path(), base)
+    if cancelled and cancelled():
+        reset_to_base()  # the erase may have run before these writes finished: undo them
+        return False
+    return True
+
+
+def _write(path: Path, data: dict | bytes) -> None:
+    """Written whole, then swapped in: never a torn head. The temporary file is this writer's own
+    (a retrain from the command line may run beside the core's)."""
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    try:
+        tmp.write_bytes(data if isinstance(data, bytes) else json.dumps(data).encode())
+        tmp.replace(path)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def _show_mistakes(h: dict, X, lab, sl, texts, limit: int = 15) -> None:
@@ -792,24 +944,30 @@ def base_head_path() -> Path:
 
 def reset_to_base() -> bool:
     """The privacy erase: the head trained without any of your requests replaces the current one,
-    the one-step undo goes, and the running reflex switches over. With no base head (heads from
-    before it existed) the head goes too: Laya answers zero-shot until it is retrained. Returns
-    whether a base head was there."""
-    from neo import reflex
+    the one-step undo goes, and the running reflex re-reads it before its next decision (one still
+    loading too). With no base head (heads from before it existed) the head goes too: Laya answers
+    zero-shot until it is retrained. Returns whether a base head was put back. Never raises: the
+    rest of the erase must still run."""
+    from neo.reflex import laya_reflex
 
     head = settings().data_dir / "reflex_head.json"
     base = base_head_path()
-    head.with_suffix(".prev.json").unlink(missing_ok=True)
-    had = base.exists()
-    if had:
-        tmp = head.with_suffix(".tmp")
-        tmp.write_bytes(base.read_bytes())
-        tmp.replace(head)
-    else:
-        head.unlink(missing_ok=True)
-    if reflex._laya is not None:
-        with reflex.laya_lock():
-            reflex._laya.reload_head()
+    had = False
+    try:
+        with _head_lock:
+            head.with_suffix(".prev.json").unlink(missing_ok=True)
+            had = base.is_file()
+            if had:
+                _write(head, base.read_bytes())
+            else:
+                head.unlink(missing_ok=True)
+    except Exception as e:  # noqa: BLE001
+        print(f"[reflex] couldn't put back the head trained without your requests ({str(e)[:80]}): removing the head")
+        had = False
+        for p in (head, head.with_suffix(".prev.json")):
+            with contextlib.suppress(OSError):
+                p.unlink(missing_ok=True)
+    laya_reflex.head_changed()
     return had
 
 

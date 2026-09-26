@@ -35,7 +35,9 @@ def load_encoder(encoder: str, device: str):
     # fp16 autocast never beat fp32 on the M3 Pro at any row count (neither did compile or fast=True,
     # which stay off); laya would switch it on at 5 rows.
     os.environ.setdefault("LAYA_MPS_AMP_MIN_ROWS", "1000000")
-    return laya.load(models.laya_dir(encoder), device=device)
+    agent = laya.load(models.laya_dir(encoder), device=device)
+    agent.neo_encoder = encoder  # which heads fit it: a retrain handed this agent trains for it
+    return agent
 
 
 def embed(agent, texts: list[str]) -> np.ndarray:

@@ -22,15 +22,27 @@ from neo.reflex.schema import INTENT_CRITERIA, QUESTIONS, Decision, refers_to_sc
 
 _INTENTS = list(INTENT_CRITERIA)
 _ACTIONS = ("quick_action", "agent_task")
+_head_epoch = 0  # bumped whenever the head file is swapped under a running reflex (the privacy erase)
+
+
+def head_changed() -> None:
+    """The head file was replaced behind the reflex's back (finetune.reset_to_base): every reflex
+    re-reads it before its next decision — one that was still loading when it happened too."""
+    global _head_epoch
+    _head_epoch += 1
 
 
 class LayaReflex:
+    _epoch: int | None = None  # the head change this reflex's head was read after
+
     def __init__(
         self, device: str | None = None, *, encoder: str | None = None, head: Path | None = None, agent=None
     ) -> None:
         s = settings()
         self.encoder = encoder or s.reflex_encoder
-        self._agent = agent or load_encoder(self.encoder, device or s.laya_device)  # pinned
+        if agent is None:
+            agent, self.encoder = _load(self.encoder, device or s.laya_device)  # pinned
+        self._agent = agent
         self.dim = int(self._agent.model.encoder.config.hidden_size)
         self._head_path = head or s.data_dir / "reflex_head.json"
         # After each decide() with a head: the utterance's L2-normalised embedding (float32) and the
@@ -46,6 +58,7 @@ class LayaReflex:
         """Re-read the head file (the caller holds the Laya lock): a freshly trained head, the base
         head after an erase, or none — a head for another encoder counts as none until retrained."""
         path = Path(self._head_path)
+        self._epoch = _head_epoch
         self._head = _load_head(path, self.encoder, self.dim)
         if self._head is None and path.exists():
             print("[reflex] the trained head doesn't fit this Laya encoder — ignoring it until retrained")
@@ -53,12 +66,25 @@ class LayaReflex:
 
     @property
     def has_head(self) -> bool:
+        """A head for this encoder is loaded (after an erase, the one it put back). Asked from the
+        learn loop, which mustn't wait on the Laya lock: a busy reflex answers as of its last read."""
+        if self._epoch is not None and self._epoch != _head_epoch:
+            from neo.reflex import laya_lock
+
+            lock = laya_lock()
+            if lock.acquire(blocking=False):
+                try:
+                    self.reload_head()
+                finally:
+                    lock.release()
         return self._head is not None
 
     def decide(self, text: str) -> Decision:
         """The decision for `text`. With a head it also leaves ``last_embedding`` (the text's
         L2-normalised embedding) and ``center`` (the head's mean embedding) for the correction
         memory (neo/reflex/memory.py); otherwise both are None."""
+        if self._epoch is not None and self._epoch != _head_epoch:
+            self.reload_head()  # the erase put the head without your requests back
         if self._head is None:
             return self._zero_shot(text)
         t0 = time.perf_counter()
@@ -138,6 +164,19 @@ class LayaReflex:
             latency_ms=(time.perf_counter() - t0) * 1000,
             margin=top[-1] - top[-2],
         )
+
+
+def _load(encoder: str, device: str):
+    """(agent, encoder): the pinned checkpoint for `encoder`. Offline before the multilingual one was
+    ever downloaded, the English one for this run (its heads are what this Mac had before) rather
+    than no local reflex at all."""
+    try:
+        return load_encoder(encoder, device), encoder
+    except FileNotFoundError as e:
+        if encoder == "english":
+            raise
+        print(f"[reflex] {e} — using the English checkpoint until then")
+        return load_encoder("english", device), "english"
 
 
 def _choice_probs(ans: dict[str, Any]) -> dict[str, float]:

@@ -20,7 +20,9 @@ rows are kept 180 days, teacher-only ones 30; at most 2,000, the least useful dr
 ``NEO_LEARN=off`` turns all of it off and ``forget_examples()`` wipes it. When enough new rows
 (or a few corrections) have piled up and NEO has been idle for a while, the heads are retrained
 inside the running core, reusing the Laya model already in memory, and swapped in — only if they
-score at least as well as the current ones.
+score at least as well as the current ones. A reflex with no head for its encoder at all (a new
+encoder, a first run, an erase with no head to go back to) is retrained once as soon as NEO is idle,
+without waiting for new requests: zero-shot is far worse than any head.
 """
 
 from __future__ import annotations
@@ -307,8 +309,25 @@ def pending() -> int:
 def due(now: float | None = None) -> bool:
     now = now or time.time()
     n, fixes = _pending()
-    since = now - float(_state().get("trained_at", 0.0))
-    return n >= _BURST or (n >= _MIN_NEW and since >= _MIN_GAP_S) or fixes >= _MIN_FIXES
+    st = _state()
+    since = now - float(st.get("trained_at", 0.0))
+    if n >= _BURST or (n >= _MIN_NEW and since >= _MIN_GAP_S) or fixes >= _MIN_FIXES:
+        return True
+    headless = _headless()
+    return headless is not None and st.get("headless_tried") != headless
+
+
+def _headless() -> str | None:
+    """When the loaded reflex has no head it can use for its encoder, which one (a key naming the
+    encoder), else None. Only a reflex that is already loaded counts: never load Laya just to ask.
+    The retrain for it is tried once per encoder (retrain() records it, and an erase clears it):
+    a rejected or failed one isn't retried in a loop, new requests and fixes still retrain."""
+    from neo import models, reflex
+
+    laya = reflex._laya
+    if laya is None or getattr(laya, "has_head", True):
+        return None
+    return f"{models.LAYA_REVISION}:{getattr(laya, 'encoder', '')}"
 
 
 def retrain() -> dict | None:
@@ -324,6 +343,8 @@ def retrain() -> dict | None:
     gen = _erase_gen
     try:
         seq = int(_state().get("seq", 0))  # rows after this one arrive while training: still new
+        # This retrain is the one try a reflex without a usable head gets (see due()).
+        tried = {"headless_tried": h} if (h := _headless()) else {}
         n_rows = len(_read(_path(EXTRA)))
         t0 = time.time()
         try:
@@ -333,16 +354,18 @@ def retrain() -> dict | None:
         except Exception as e:  # noqa: BLE001
             # Count it as a try: the next one waits the usual gap instead of re-running (and
             # re-failing) every few idle minutes.
-            _write_state({"trained_at": started, "trained_rows": n_rows, "trained_seq": seq, "last_error": str(e)[:300]})
+            _write_state({"trained_at": started, "trained_rows": n_rows, "trained_seq": seq, "last_error": str(e)[:300], **tried})
             print(f"[reflex] retrain failed: {str(e)[:160]}")
             return None
         if report.get("cancelled") or _erase_gen != gen:
+            if report.get("saved"):
+                finetune.reset_to_base()  # it saved before the erase could stop it: undo that
             print("[reflex] retrain discarded: NEO's memory was erased while it ran")
             return None
         if report.get("saved"):
             with laya_lock():
                 laya.reload_head()
-        _write_state({"trained_at": started, "trained_rows": n_rows, "trained_seq": seq, "last": report})
+        _write_state({"trained_at": started, "trained_rows": n_rows, "trained_seq": seq, "last": report, **tried})
         prev = report.get("previous")
         print(
             f"[reflex] learned from {n_rows} of your requests in {time.time() - t0:.0f}s: intent "
@@ -368,6 +391,8 @@ def _write_state(state: dict) -> None:
         cur = _state()
         st = dict(state)
         st.setdefault("seq", int(cur.get("seq", 0)))
+        if cur.get("headless_tried"):
+            st.setdefault("headless_tried", cur["headless_tried"])
         if "trained_at" in st:
             st.setdefault("trained_seq", st["seq"])
         st.setdefault("daily", cur.get("daily", {}))

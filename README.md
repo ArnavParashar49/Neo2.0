@@ -182,18 +182,19 @@ What NEO keeps, and for how long:
 
 ## Training the reflex
 
-The head is trained locally in about a minute (plus feature extraction):
+The heads are trained locally in a few minutes (plus feature extraction the first time):
 
 ```bash
 .venv/bin/python -m neo.reflex.hf_data    # optional: ~45k public phrasings (English, Hindi, Hinglish) + a benchmark
 .venv/bin/python -m neo.reflex.generate   # optional: grow the dataset with Gemini + Groq, cross-labelled
 .venv/bin/python -m neo.reflex.generate --focus chat:quick_action   # or --from-confusion FILE, --lang hinglish: ≤300 rows at one weak boundary
-.venv/bin/python -m neo.reflex.finetune   # extract features, compare variants, save the fastest ≥94%
+.venv/bin/python -m neo.reflex.finetune   # embed (cached per text), fit the heads, gate, save
+.venv/bin/python -m neo.reflex.evaluate   # the head on the benchmark: by language and source, recalls, tool/kind, ECE, latency
 ```
 
 `hf_data` maps open intent, dialogue, function-calling and computer-use sets (CLINC150, MASSIVE en/hi, Hinglish-TOP, TOPv2, MTOP en/hi, Schema-Guided Dialogue, glaive, AgentNet, OmniACT, …) onto NEO's labels — route, tool, task kind, destructive, needs the screen, wants a reply — and writes `~/.neo/reflex_hf.jsonl`. Every source is pinned to a revision and only the columns or byte ranges it needs are downloaded; `neo/reflex/sources.py` lists each one's licence. Some are CC-BY-SA (Hinglish-TOP too: it translates TOPv2), so the rows are built on your Mac and never committed. The Hinglish-TOP, MTOP, CLINC and MASSIVE test splits go to `reflex_eval.jsonl`, a benchmark whose sentences — and their translations and re-punctuated copies, from any source — are never trained on, whichever sources a build uses. NEO's own templates share a few short sentences with it ("next song", "ruk jao"): evaluate on `dataset.benchmark(rows)`, which drops what the head trained on. Leyzer is opt-in (`--with leyzer`): the repository hosting its data is licensed non-commercial, no-derivatives. So is `sentence_types` (no licence stated). Romanised-Hindi templates for every class, including destructive requests and stop phrases ("bas karo", "ruk jao"), are part of NEO's own data (`neo/reflex/templates_hi.py`).
 
-`finetune` fits several variants (embedding only, embedding + *n* sub-questions) and picks the fastest one above the accuracy bar. On the current ~3k-item set the embedding-only head scores ~95% held-out at ~150 ms.
+`finetune` embeds every sentence once with Laya's multilingual checkpoint (`NEO_REFLEX_ENCODER=english` keeps the older English one; a head only ever runs on the encoder it was trained for) and fits six small MLP heads on it — intent, destructive, needs the screen, wants a reply, tool and task kind — each a 3-seed ensemble with its loss and temperature chosen on held-out rows. Rows are split by hashes, so every run agrees: a fixed base slice of the public and NEO rows (the anchors), 20% of your verified requests (the user slice), and a calibration slice (10% of your requests plus 1 in 20 public groups). A new head replaces the current one only if your requests aren't worse (paired McNemar), the base slice, reply, tool and kind stay within a point or two of the first head's numbers, and it misses at most max(1 row, 2 points) more destructive, stop and screen requests (and not significantly more); with nothing comparable, it has to clear absolute floors instead (calibration alone never keeps NEO without a head). Every run also fits the head a run without your requests would fit — on none of your rows or labels — and "forget everything" puts that one back. With the public data (~50k rows), the multilingual head scores 0.86 on the benchmark (English 0.87, Hinglish 0.88, Devanagari 0.81) at ~12 ms a decision; the English checkpoint's 0.84 (Devanagari 0.70) at ~22 ms.
 
 The best training data is your own usage. When NEO misroutes something, add a line to `~/.neo/reflex_extra.jsonl`:
 
