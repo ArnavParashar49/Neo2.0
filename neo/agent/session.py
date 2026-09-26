@@ -24,7 +24,7 @@ from neo.config import settings
 from neo.events import NeoState, bus
 from neo.providers import brain
 from neo.providers.base import ImagePart, Message, ToolResult
-from neo.reflex import Reflex, is_bare_stop
+from neo.reflex import Reflex, is_bare_stop, outcomes
 from neo.reflex.schema import Decision
 
 # A confirmation must be a short, pure affirmative; any retraction anywhere wins over a leading "ok".
@@ -148,6 +148,8 @@ class Session:
             await self.cancel_all()
             await bus().end_job(job)
             return Reply("Okay.", "stop", d, job=job)
+        if from_user:  # the user's own words: learn from how this goes (a Live relay is Live's)
+            outcomes.begin(job, text, decision=d)
 
         # Regex fast paths are precise; trust them unless the reflex says this is conversation.
         # ("type Laptops in the heading" reads as an agent task to the reflex, but the words are
@@ -169,6 +171,7 @@ class Session:
             and not t.hidden
         ):
             print(f"  ~ laya picked {d.tool} ({d.tool_p:.2f})")
+            outcomes.count("tool_lane")
             # "any rain later?" → weather with its defaults: fine for a read-only tool built for
             # direct use (it has fast paths) when nothing in the request needs an argument.
             bare = not t.parameters.get("required") and (t.fast_path or not t.parameters.get("properties"))
@@ -191,6 +194,7 @@ class Session:
 
     async def cancel_all(self) -> int:
         """Stop every running job (the user said stop) and drop any unanswered question."""
+        outcomes.stop()  # right after NEO answered, a stop says the answer was wrong
         n = 0
         for t in list(self.jobs.values()):
             if not t.done():
@@ -204,6 +208,7 @@ class Session:
 
     # ---- routes ----------------------------------------------------------------------
     async def _chat(self, text: str, d: Decision, job: str) -> Reply:
+        outcomes.route(job, "chat")
         await bus().set_state(NeoState.THINKING, job=job)
         t0 = time.time()
         msgs = self._trimmed() + [Message.user(_with_conversation(text))]
@@ -220,6 +225,7 @@ class Session:
         except Exception:  # noqa: BLE001 — fall back to the agent loop, which has its own failover
             return await self._agent(text, d, None, job)
         reply = "".join(out).strip()
+        outcomes.reply(job, reply)
         await self._remember(Message.user(text), Message.assistant(reply))
         await bus().say(reply, final=True, job=job)
         await bus().publish(
@@ -238,6 +244,7 @@ class Session:
         """Run fast-path steps in order with no model. Actions that worked are silent; answers,
         and anything that needs the user, are spoken. An action that fails hands the whole
         request to the agent, which can look at the screen and find another way."""
+        outcomes.route(job, "quick")
         await bus().set_state(NeoState.WORKING, job=job)
         t0 = time.time()
         from neo.agent.early import _APP_TOOLS, _SETTLE_AFTER_APP_S, early
@@ -252,6 +259,7 @@ class Session:
             done = early().claim(tool, args)
             if done is not None:
                 out_text, ok = done, True  # the early actor already did this while the user was speaking
+                outcomes.step(job, tool, True)
             else:
                 if prev in _APP_TOOLS and tool not in _APP_TOOLS:
                     await asyncio.sleep(_SETTLE_AFTER_APP_S)
@@ -259,6 +267,7 @@ class Session:
                 out = await registry().invoke(tool, args, ToolContext(user_text=text, taint=list(_request_taint.get())))
                 await bus().tool_end(tool, out.ok, out.text, job=job)
                 out_text, ok = out.text, out.ok
+                outcomes.step(job, tool, ok, halt=getattr(out, "halt", False))
                 if not ok:  # e.g. weather for "the forecast for Q3 sales": the agent can do better
                     print(f"  ~ {tool} failed; handing to the agent")
                     ran = "; ".join(f"{tl}({', '.join(f'{k}={v!r}' for k, v in a.items())})" for tl, a in steps[:i])
@@ -279,6 +288,7 @@ class Session:
         await bus().publish(
             "turn", job=job, route="quick", brain="", model="", ms=int((time.time() - t0) * 1000), tools=len(steps)
         )
+        outcomes.end(job)
         await bus().end_job(job)
         return Reply(reply_text, "quick", d, job=job, silent=silent, tools=tuple(t for t, _ in steps))
 
@@ -300,6 +310,7 @@ class Session:
         else:
             purpose = "agent"
         effort = "high" if (d and d.intent == "agent_task") else "medium"
+        outcomes.route(job, "agent")
         t0 = time.time()
         chain = brain(purpose)
         self.jobs[job] = asyncio.current_task()  # type: ignore[assignment]
@@ -326,13 +337,14 @@ class Session:
                     job=job,
                 )
         except asyncio.CancelledError:
+            outcomes.cancelled(job)
             await bus().say("Stopped.", final=True, job=job)
             await bus().end_job(job)
             raise
         finally:
             self.jobs.pop(job, None)
         await self._remember(*res.messages[len(snapshot) :])  # only this job's new turns
-        _learn_from(text, d, res)
+        _learn_from(job, res)
         if res.stopped == "needs_confirm" and self._stage_pending(res, ctx.taint):
             await bus().say(res.question, final=True, job=job)
             return Reply(res.question, "confirm", d, res, job=job)
@@ -437,6 +449,7 @@ class Session:
                 return None
             if not yes:
                 confirm.cancel()
+                outcomes.confirm(False)  # "no" at a confirmation: not what they wanted
                 self._pending_tool, self._pending_args, self._pending_action = "", {}, ""
                 await bus().say("Cancelled.", final=True, job=job)
                 await self._clear_confirming()
@@ -461,6 +474,7 @@ class Session:
             with confirm.approved(aid):
                 out = await registry().invoke(tool, args, ToolContext(user_text=text or "yes", taint=list(taint)))
             await bus().tool_end(tool, out.ok, out.text, job=job)
+            outcomes.confirm(True, tool, out.ok)
         if not ours:
             # Asked by a direct voice command: there's no agent run to hand the result back to.
             msg = out.text if out.ok else f"That didn't work: {out.text}"
@@ -606,26 +620,13 @@ def _with_conversation(text: str) -> str:
     )
 
 
-def _learn_from(text: str, d: Decision | None, res: AgentResult) -> None:
-    """If the reflex sent this to the agent and the agent's own behaviour says otherwise, keep
-    the correction for Laya. Requests relayed by Gemini Live are the model's paraphrase, not the
-    user's words — those are labelled on the Live side instead."""
-    if d is None or _conversation.get() or res.stopped != "done" or res.question:
-        return
-    used = [st.tool for st in res.steps if st.tool != "more_tools"]
-    try:
-        from neo.reflex.learn import record
-
-        answer = res.text.strip().lower()
-        asked_back = answer.endswith("?") or any(
-            w in answer for w in ("i can't", "i cannot", "i'm unable", "i don't have access", "could you", "which one", "do you want")
-        )
-        if not used and not asked_back and len(answer) > 40:  # a real answer, given without tools
-            record(text, "chat", source="agent-outcome")
-        elif len(used) == 1 and (t := registry().get(used[0])) is not None and t.fast_path:
-            record(text, "quick_action", used[0], source="agent-outcome")
-    except Exception:  # noqa: BLE001 — learning is best effort
-        pass
+def _learn_from(job: str, res: AgentResult) -> None:
+    """Tell the outcome ledger what the agent run did — every tool and whether it worked, and how
+    the run ended — so Laya learns from what actually happened, not from what was guessed
+    (neo/reflex/outcomes.py). A request relayed by Gemini Live counts for the user's own words
+    there. The question a halted run asks isn't a step: the user's answer decides that one."""
+    steps = [(st.tool, st.ok) for st in res.steps if not st.result.startswith(("NEEDS_CONFIRM", "NEEDS_USER"))]
+    outcomes.agent_done(job, steps, stopped=res.stopped, answer=res.text, question=bool(res.question))
 
 
 # Tools whose result is information for the user: a run that used one has something to say,

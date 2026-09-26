@@ -33,3 +33,18 @@ def _no_real_embeddings(monkeypatch):
     from neo.memory import embed
 
     monkeypatch.setattr(embed, "embed_texts", lambda texts: None)
+
+
+@pytest.fixture(autouse=True)
+def _fresh_learning_state():
+    """Requests still settling in RAM, the correction memory and unsaved counters are
+    process-wide: none of them may carry from one test into the next."""
+    from neo.reflex import learn, memory, outcomes
+
+    outcomes.forget()
+    memory.forget()
+    learn._counts.clear()
+    yield
+    outcomes.forget()
+    memory.forget()
+    learn._counts.clear()

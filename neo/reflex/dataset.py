@@ -472,8 +472,35 @@ def build(n_per_class: int = 320, seed: int = 7) -> list[dict]:
                             else r.get("tool", tool_for(r["text"]) if r["intent"] == "quick_action" else ""),
                         }
                     )
+    rows = _own_outcomes_win(rows)
     rnd.shuffle(rows)
     return rows
+
+
+_OWN_FIELDS = ("w", "verified", "wrong", "conf", "margin", "script", "kind")
+
+
+def _own_outcomes_win(rows: list[dict]) -> list[dict]:
+    """What actually happened beats a guess: a sentence the user said and verified overrides every
+    other row with the same words (case and spacing aside) from any source. Their rows also carry
+    the ledger's weight and flags through (w, verified, wrong…) so training can weight them."""
+    extra = settings().data_dir / "reflex_extra.jsonl"
+    if not extra.exists():
+        return rows
+    from neo.reflex.learn import _read as read_examples
+    from neo.reflex.learn import norm
+
+    own = {norm(r["text"]): r for r in read_examples(extra)}
+    verified = {k for k, r in own.items() if r.get("verified")}
+    out = []
+    for r in rows:
+        k = norm(r["text"])
+        if r.get("source") == "reflex_extra.jsonl":
+            r.update({f: own[k][f] for f in _OWN_FIELDS if k in own and f in own[k]})
+        elif k in verified:
+            continue
+        out.append(r)
+    return out
 
 
 if __name__ == "__main__":

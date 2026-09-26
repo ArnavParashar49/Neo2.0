@@ -8,11 +8,16 @@ import time
 
 import pytest
 
-from neo.reflex import learn
+from neo.reflex import learn, outcomes
 
 
 def _rows():
     return learn._read(learn._path(learn.EXTRA))  # as training sees them: latest verdict per sentence
+
+
+def _settle():
+    """Let every request in the outcome ledger settle, as if a minute had passed."""
+    outcomes.tick(time.time() + 3600)
 
 
 def test_record_keeps_real_requests_and_skips_noise():
@@ -109,20 +114,27 @@ def _live():
     [
         ([], True, ("chat", "")),
         (["weather"], True, ("quick_action", "weather")),
-        (["hotkey", "open_app"], False, ("quick_action", "")),
+        (["hotkey", "open_app"], False, ("agent_task", "")),  # two different tools: more than one action
         (["agent_task"], True, ("agent_task", "")),
         ([], False, None),  # nothing came of it: room noise, not recorded
     ],
 )
 def test_live_labels_each_sentence_by_what_the_model_did(tools, spoke, expected):
+    from neo.tools import load_all
+
+    load_all()
     v = _live()
     v._label = {"text": "what's it like in Paris tomorrow", "tools": list(tools), "spoke": spoke, "open": False}
     v._file_label()
+    assert _rows() == []  # nothing is written until the request has settled
+    _settle()
     rows = _rows()
     if expected is None:
         assert rows == []
     else:
         assert (rows[0]["intent"], rows[0]["tool"]) == expected and rows[0]["source"] == "live"
+        # Only the model's choice is known — no result came back to say how it went.
+        assert rows[0]["w"] == 0.5 and rows[0]["verified"] is False
 
 
 def test_a_partial_transcript_at_tool_time_and_the_final_one_make_one_label():
@@ -178,6 +190,7 @@ def test_a_partial_transcript_at_tool_time_and_the_final_one_make_one_label():
     asyncio.run(run())
     assert v._label["text"] == "what's the weather in Paris" and v._label["tools"] == ["weather"]
     v._file_label()
+    _settle()
     assert [(r["text"], r["intent"], r["tool"]) for r in _rows()] == [("what's the weather in Paris", "quick_action", "weather")]
 
 
@@ -215,9 +228,19 @@ def test_agent_outcome_corrects_the_reflex(monkeypatch):
 
     load_all()
     d = Decision("agent_task", 0.7, False, 0, False, 0, "laya+head")
-    _learn_from("tell me about black holes", d, AgentResult("Black holes are regions of spacetime where gravity is so strong that nothing escapes.", "done", []))
-    _learn_from("do the usual thing", d, AgentResult("Which one do you mean — the report or the email?", "done", []))  # a question back
-    _learn_from("how many tabs do i have", d, AgentResult("3", "done", [Step("apps_running", {}, "ok", True)]))
-    _learn_from("tidy my desktop", d, AgentResult("Done.", "done", [Step("shell", {}, "", True), Step("shell", {}, "", True)]))
-    rows = {r["text"]: (r["intent"], r["tool"]) for r in _rows()}
-    assert rows == {"tell me about black holes": ("chat", ""), "how many tabs do i have": ("quick_action", "apps_running")}
+    for i, (text, res) in enumerate(
+        [
+            ("tell me about black holes", AgentResult("Black holes are regions of spacetime where gravity is so strong that nothing escapes.", "done", [])),
+            ("do the usual thing", AgentResult("Which one do you mean — the report or the email?", "done", [])),  # a question back
+            ("how many tabs do i have", AgentResult("3", "done", [Step("apps_running", {}, "ok", True)])),
+            ("tidy my desktop", AgentResult("Done.", "done", [Step("shell", {}, "", True), Step("shell", {}, "", True)])),
+        ]
+    ):
+        outcomes.begin(f"j{i}", text, decision=d)
+        _learn_from(f"j{i}", res)
+    _settle()
+    rows = {r["text"]: (r["intent"], r["tool"], r["verified"], r["conf"]) for r in _rows()}
+    assert rows == {
+        "tell me about black holes": ("chat", "", True, 0.7),
+        "how many tabs do i have": ("quick_action", "apps_running", True, 0.7),
+    }
