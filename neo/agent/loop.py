@@ -76,8 +76,18 @@ async def _settle(ev: EventBus, idle: bool, job: str = "") -> None:
 
 # Screen observations go stale the moment the next one is taken; keeping every ax_tree dump of a
 # run in the prompt is pure token cost (and on an 8K-TPM brain, pure waiting).
-_OBSERVATIONS = {"ax_tree", "ax_find", "screenshot", "apps_running", "browser_read", "page_read", "read_file"}
+_OBSERVATIONS = {
+    "ax_tree", "ax_find", "screenshot", "apps_running", "page_read", "read_file",
+    # NEO's browser: each of these returns the page as it is now (or a picture of it), so a newer
+    # one of any of them makes the older ones stale
+    "browser_read", "browser_open", "browser_click", "browser_type", "browser_back", "browser_tabs",
+    "browser_screenshot",
+}  # fmt: skip
 _SUPERSEDED_KEEP = 200
+
+
+def _view(name: str) -> str:
+    return "browser" if name.startswith("browser_") else name
 
 
 def _supersede_observations(messages: list[Message], *, start: int = 0) -> None:
@@ -89,13 +99,13 @@ def _supersede_observations(messages: list[Message], *, start: int = 0) -> None:
         for r in m.tool_results:
             if r.name not in _OBSERVATIONS:
                 continue
-            if r.name in seen and (len(r.content) > _SUPERSEDED_KEEP or r.images):
+            if _view(r.name) in seen and (len(r.content) > _SUPERSEDED_KEEP or r.images):
                 r.content = (
                     r.content[:_SUPERSEDED_KEEP].rstrip()
                     + f" …[older {r.name} result trimmed; a newer one follows]"
                 )
                 r.images = []  # an old screenshot is the most expensive stale thing of all
-            seen.add(r.name)
+            seen.add(_view(r.name))
 
 
 async def _run_calls(
