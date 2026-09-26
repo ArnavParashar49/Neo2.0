@@ -16,9 +16,10 @@ For a request NEO works out, from evidence only (no app names anywhere in this f
      is unsure or unavailable, by the prior alone. A destination that is no app (the Mac's shared
      calendar or reminders store, :mod:`neo.decide.routes`) is weighed like one, and for kinds
      with preferences the user's corrections and per-person choices scale the prior;
-   * the task's fallback (the web, through the default browser);
-   * used apps that are less likely to work than the fallback (see WEB_AFF), installed-but-unused
-     apps, then apps that keep failing (still tried, so they can recover).
+   * the task's fallback (the web, through the default browser; a local last resort such as a
+     file for some kinds);
+   * used apps that are less likely to work than the web fallback (see WEB_AFF), installed-but-
+     unused apps, then apps that keep failing (still tried, so they can recover).
 
 3. what worked (:func:`record`): a discounted Beta(a, b) per (kind, app, method) in
    ``<data_dir>/decide.json``. Three blamed failures in a row demote an arm; failures that are not
@@ -1321,9 +1322,10 @@ async def choose(
         fallback.append(
             Candidate(None, fb_mean, 0.0, f"fallback: {fb}{on}; {_record_words(data, kind, fb)}", (fb,), site=site)
         )
-    # A used app goes before the fallback when its prior beats the fallback's (see WEB_AFF), when
-    # it has done this before at least as reliably, or when Laya is sure it's the one; the others
-    # (e.g. a player opened once, weeks ago, with nothing in its library) go after it.
+    # A used app goes before the web fallback when its prior beats the fallback's (see WEB_AFF),
+    # when it has done this before at least as reliably, or when Laya is sure it's the one; the
+    # others (e.g. a player opened once, weeks ago, with nothing in its library) go after it. A
+    # local fallback (a file) is only what's left when the apps fail: every used app goes first.
     bar = fb_mean * (AFF_FLOOR + (1 - AFF_FLOOR) * WEB_AFF)
     before: list[Candidate] = []
     after: list[Candidate] = []
@@ -1331,6 +1333,7 @@ async def choose(
     for n, (i, s, p) in enumerate(ordered):
         keep = (
             not fallback
+            or task.fallback != WEB
             or i.prior >= bar
             or (i.proven and i.mean >= fb_mean)
             or (n == 0 and p >= LAYA_SURE_P)

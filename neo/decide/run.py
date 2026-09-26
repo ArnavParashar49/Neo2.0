@@ -9,7 +9,8 @@ order, the budgets and when to stop, generalising :func:`neo.decide.media.play_b
 
 **At most once.** An attempt that may already have created or sent something (it passed its
 commit point, see :func:`commit`, and then timed out or was cancelled, or it says so with
-``Effect.UNKNOWN``) ends the loop: NEO never makes a second copy or sends twice.
+``Effect.UNKNOWN``) ends the loop, and the same add asked again within RECENT_S gets the same
+answer: NEO never makes a second copy or sends twice.
 
 **Nothing learned after an erase.** :func:`begin_request` notes the privacy generation; every
 write this module (and the engine's preferences and the learned stores) makes is dropped once the
@@ -189,7 +190,8 @@ class Driver(Protocol):
 
     def describe(self, app: App) -> str: ...  # capability words for Laya ("can script send")
 
-    async def attempt(self, req: Req, cand: Candidate, method: str) -> Outcome: ...
+    # None: nothing to go by (a hint that isn't there), not an attempt
+    async def attempt(self, req: Req, cand: Candidate, method: str) -> Outcome | None: ...
 
     async def fallback(self, req: Req, key: str) -> Outcome | None: ...
 
@@ -268,7 +270,8 @@ def last(kind: str, within_s: float = RECENT_S) -> tuple[str, str] | None:
 
 
 def idempotent(kind: str, sig: tuple) -> dict | None:
-    """The receipt of the same add within the last RECENT_S (a repeated or retried request)."""
+    """The receipt of the same add within the last RECENT_S (a repeated or retried request);
+    ``{"unconfirmed": <what was said>}`` when that add may or may not have happened."""
     hit = _receipts.get((kind, sig))
     return hit[1] if hit and time.monotonic() - hit[0] <= RECENT_S else None
 
@@ -373,7 +376,9 @@ async def run_best(driver: Driver, req: Req, *, max_attempts: int = 6) -> Result
     from neo.decide import engine
 
     begin_request()
-    if req.sig and idempotent(req.kind, req.sig) is not None:
+    if req.sig and (seen := idempotent(req.kind, req.sig)) is not None:
+        if unsure := seen.get("unconfirmed"):  # a retry of an add that may have happened: not again
+            return Result(unsure, False, say=True)
         return Result("Already added a moment ago.", True, say=True)
     t0 = time.monotonic()
     try:
@@ -405,7 +410,7 @@ async def run_best(driver: Driver, req: Req, *, max_attempts: int = 6) -> Result
         # whose object never resolved did nothing), so only UNKNOWN stops the loop here
         out, _ = await _attempt_once(driver, req, c, m, budget, unknown)
         if out is None:
-            continue  # the fallback doesn't apply: not an attempt
+            continue  # a fallback that doesn't apply, or a hint with nothing to show: not an attempt
         attempts += 1
         record(req.kind, c.key, m, out)
         if out.ok:
@@ -417,6 +422,8 @@ async def run_best(driver: Driver, req: Req, *, max_attempts: int = 6) -> Result
         outs.append(out)
         trail.append(f"{_who(c)} ({m}): {out.text}")
         if out.effect is Effect.UNKNOWN or out.reason in _STOP:
+            if out.effect is Effect.UNKNOWN and req.sig:
+                _remember_receipt(req.kind, req.sig, {"unconfirmed": out.text})
             await _note(trail)
             return Result(out.text, False, say=True if out.say is None else out.say)
     await _note(trail)

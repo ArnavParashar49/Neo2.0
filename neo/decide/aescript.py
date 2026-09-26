@@ -409,7 +409,7 @@ def render_create(r: CreateRoute, bid: str, values: dict[str, Any], container_id
             continue
         v = values[slot]
         if slot == "body" and r.html:
-            v = "".join(f"<div>{html.escape(line) or '<br>'}</div>" for line in str(v).split("\n"))
+            v = note_html(str(v))
         argv.append(_arg(kind, v))
         fields.append(f"{_prop(code)}:{_value(kind, len(argv))}")
     after = '\t\tset newId to ""\n\t\tset cName to ""\n'
@@ -562,3 +562,326 @@ def render_list(lr: ListRoute, bid: str, container_id: str, t0: datetime, t1: da
         f"{reads}\tend tell\n\tset out to \"OK\"\n{rows}\treturn out\nend run\n{_DATE_HANDLER}"
     )
     return script, [bid, container_id, iso(t0), iso(t1)]
+
+
+# ---- notes and the inbox (write_note, read_mail) ------------------------------------------------------
+# Scripts for making a note and for listing unread mail, built like the rest: codes from the app's
+# own dictionary, values in argv only (item 1 is always the bundle id), answers in the status /
+# separator protocol above.
+
+__all__ += [
+    "NoteRoute",
+    "note_route",
+    "note_html",
+    "render_note",
+    "render_note_search",
+    "render_folders",
+    "UnreadRoute",
+    "unread_route",
+    "render_unread",
+    "may_script",
+]
+
+
+def may_script(bundle_id: str) -> bool:
+    """NEO may already script this app and it is running: macOS answers without asking the
+    user, and nothing is launched (a check for work nobody is waiting on)."""
+    m = _media()
+    return m.automation(bundle_id, False) == m.AE_ALLOWED
+
+
+def _elements(d: Dictionary, klass: str) -> set[str]:
+    """Element classes of ``klass``, its superclasses' included."""
+    out: set[str] = set()
+    seen: set[str] = set()
+    while klass and klass not in seen:
+        seen.add(klass)
+        out.update(d.elements.get(klass, ()))
+        klass = d.inherits.get(klass, "")
+    return out
+
+
+def _class_named(d: Dictionary, name_rx: str, code: str) -> str:
+    """The class with this de-facto code, else the first whose name matches; '' if none."""
+    rx = re.compile(name_rx, re.I)
+    hits = [n for n, (c, _p) in d.classes.items() if (c == code or rx.match(n.strip())) and ok4(c)]
+    return next((n for n in hits if d.class_code(n) == code), hits[0] if hits else "")
+
+
+@dataclass(frozen=True)
+class NoteRoute:
+    """How an app's dictionary makes a note: the make event and its parameters, the note class
+    and the properties to set and to read back, where a new note goes, and the folders the user
+    can name. Every value is a four- (or eight-) char code checked by :func:`ok4` / :func:`ok8`."""
+
+    klass: str
+    make: str
+    p_new: str
+    p_at: str
+    p_props: str
+    title: str  # '' when the class has no writable title
+    body: str
+    html: bool  # the body holds HTML
+    ident: str  # '' = a new note can't be re-resolved by id
+    text: str  # what is read back: its plain text, else the body itself
+    created: str  # '' = found again by title
+    chain: tuple[str, ...]  # the default container, outermost property first; () = the application
+    folder: str  # a class the user can name notes into, and its name and id properties
+    folder_name: str
+    folder_id: str
+    folders_listed: bool  # the application lists those folders itself
+
+
+def note_route(d: Dictionary | None) -> NoteRoute | None:
+    """The dictionary's way to make a note with a body, or None when it has none."""
+    if d is None:
+        return None
+    make = d.command("make") or next((c for c in d.commands.values() if c.code.lower() == "corecrel"), None)
+    klass = _class_named(d, r"^(\w+\s+)?notes?$", "note")
+    if make is None or not ok8(make.code) or not klass:
+        return None
+    new, at, props = (make.param(n) for n in ("new", "at", "with properties"))
+    body = slot_prop(d, klass, "body", write=True)
+    if not (new and props and body and ok4(new[1]) and ok4(props[1])):
+        return None
+    chain, holder = _default_chain(d, klass) or ((), "")
+    if chain and not (at and ok4(at[1])):
+        return None
+    if not chain and klass not in _elements(d, "application"):
+        return None  # no default place for a new note: the dictionary route can't choose one
+    folder = holder or next(
+        (c for c in sorted(_elements(d, "application")) if klass in _elements(d, c) and c != klass), ""
+    )
+    fname, fid = (slot_prop(d, folder, s) if folder else None for s in ("title", "id"))
+    title, ident = slot_prop(d, klass, "title", write=True), slot_prop(d, klass, "id")
+    text, created = slot_prop(d, klass, "plain") or body, slot_prop(d, klass, "created")
+    named = bool(folder and fname and fid and ok4(d.class_code(folder)))
+    return NoteRoute(
+        klass=d.class_code(klass),
+        make=make.code,
+        p_new=new[1],
+        p_at=at[1] if at and ok4(at[1]) else "",
+        p_props=props[1],
+        title=title[1] if title else "",
+        body=body[1],
+        html=is_html(d, klass, body[0]),
+        ident=ident[1] if ident else "",
+        text=text[1],
+        created=created[1] if created else "",
+        chain=chain,
+        folder=d.class_code(folder) if named else "",
+        folder_name=fname[1] if named and fname else "",
+        folder_id=fid[1] if named and fid else "",
+        folders_listed=named and folder in _elements(d, "application"),
+    )
+
+
+def note_html(text: str) -> str:
+    """Plain text for an HTML body: every line escaped and in its own block (an empty line keeps
+    its place), so nothing the user said can become markup."""
+    return "".join(f"<div>{html.escape(line) or '<br>'}</div>" for line in text.split("\n"))
+
+
+# the note and inbox scripts' header: argv item 1 is the bundle id, the rest is data
+_BID_HEAD = "on run argv\n\tset bid to item 1 of argv\n\tset US to character id 31\n\tset RS to character id 30\n"
+# Local handlers: text of a possibly missing value, clipped text, a date read back as ISO text, and
+# an ISO local date built in-script (locale-safe: no date string is ever parsed by AppleScript).
+_HANDLERS = """
+on txt(x)
+\tif x is missing value then return ""
+\treturn x as text
+end txt
+on clip(x)
+\tset x to my txt(x)
+\tif (count x) > 400 then return text 1 thru 400 of x
+\treturn x
+end clip
+on iso(d)
+\tif d is missing value then return ""
+\treturn (d as «class isot» as string)
+end iso
+on isoDate(s)
+\tset d to current date
+\tset day of d to 1
+\tset year of d to (text 1 thru 4 of s) as integer
+\tset month of d to (text 6 thru 7 of s) as integer
+\tset day of d to (text 9 thru 10 of s) as integer
+\tset hours of d to (text 12 thru 13 of s) as integer
+\tset minutes of d to (text 15 thru 16 of s) as integer
+\tset seconds of d to (text 18 thru 19 of s) as integer
+\treturn d
+end isoDate
+"""
+
+
+def _where(r: NoteRoute, folder_arg: int | None) -> str:
+    """Lines (inside the app's tell block) that set ``c`` to where the note goes: the folder whose
+    id is argv item ``folder_arg`` when it still exists, else the default container (missing
+    value = the application itself)."""
+    chain = " of ".join(f"«property {p}»" for p in reversed(r.chain))
+    default = f"set c to {chain}" if r.chain else "set c to missing value"
+    if folder_arg is None or not r.folder:
+        return f"\t\t{default}\n"
+    return (
+        f"\t\ttry\n\t\t\tset c to «class {r.folder}» id (item {folder_arg} of argv)\n"
+        f"\t\t\tget «property {r.folder_name}» of c\n\t\ton error\n\t\t\t{default}\n\t\tend try\n"
+    )
+
+
+def render_note(
+    r: NoteRoute, bundle_id: str, title: str, body: str, folder_id: str = ""
+) -> tuple[str, list[str]]:
+    """(script, argv) that makes the note and reads it back through the app's own id for it.
+    Answers OK, id, title, text (first 400 chars), container name; just OK when the note was made
+    but couldn't be read back (the caller then looks for it rather than making another)."""
+    argv = [bundle_id, title, note_html(body) if r.html else body]
+    if folder_id and r.folder:
+        argv.append(folder_id)
+    props = ", ".join(
+        f"«class {code}»:(item {i} of argv)" for code, i in ((r.title, 2), (r.body, 3)) if code
+    )
+    make = f"«event {r.make}» given «class {r.p_new}»:«class {r.klass}»"
+    tail = f", «class {r.p_props}»:{{{props}}}"
+    if r.chain:
+        do_make = f"\t\tset o to {make}, «class {r.p_at}»:c{tail}\n"
+    else:
+        at = f"\t\t\tset o to {make}, «class {r.p_at}»:c{tail}\n" if r.p_at else f"\t\t\tset o to {make}{tail}\n"
+        do_make = f"\t\tif c is missing value then\n\t\t\tset o to {make}{tail}\n\t\telse\n{at}\t\tend if\n"
+    read = ['set p to ""', 'set n to ""', 'set cn to ""', 'set oid to ""']
+    if r.ident:
+        read += [
+            f"set oid to («property {r.ident}» of o) as text",
+            f"set o2 to «class {r.klass}» id oid",  # found again by the app itself: a real read-back
+            f"set p to «property {r.text}» of o2",
+        ]
+        if r.title:
+            read.append(f"set n to «property {r.title}» of o2")
+    if r.folder_name:
+        read.append(f"if c is not missing value then set cn to «property {r.folder_name}» of c")
+    lines = "".join(f"\t\t\t{x}\n" for x in read)
+    script = (
+        f"{_BID_HEAD}\ttell application id bid\n{_where(r, 4 if len(argv) > 3 else None)}{do_make}\tend tell\n"
+        # the note exists from here on: nothing below may fail the script (a failure would read as
+        # "nothing happened" and a second note would follow)
+        f"\ttry\n\t\ttell application id bid\n{lines}\t\tend tell\n"
+        "\t\treturn \"OK\" & US & oid & US & my clip(n) & US & my clip(p) & US & my txt(cn)\n"
+        "\ton error\n\t\treturn \"OK\"\n\tend try\nend run\n" + _HANDLERS
+    )
+    return script, argv
+
+
+def render_note_search(
+    r: NoteRoute, bundle_id: str, since: datetime, title: str, folder_id: str = ""
+) -> tuple[str, list[str]] | None:
+    """(script, argv) listing the notes made at or after ``since`` (by title when the dictionary
+    has no creation date) where a new note would have gone: id, title, text per row. None when
+    the dictionary gives no way to find one again."""
+    # the value a `whose` test compares with is bound first: evaluated here, not inside the app
+    if r.created:
+        bind, test = "\tset t0 to my isoDate(item 2 of argv)\n", f"«property {r.created}» ≥ t0"
+    elif r.title:
+        bind, test = "\tset wanted to item 3 of argv\n", f"«property {r.title}» is wanted"
+    else:
+        return None
+    argv = [bundle_id, since.strftime("%Y-%m-%dT%H:%M:%S"), title]
+    if folder_id and r.folder:
+        argv.append(folder_id)
+    ident = f"(«property {r.ident}» of o) as text" if r.ident else '""'
+    name = f"«property {r.title}» of o" if r.title else '""'
+    script = (
+        f"{_BID_HEAD}{bind}\ttell application id bid\n{_where(r, 4 if len(argv) > 3 else None)}"
+        f"\t\tif c is missing value then\n\t\t\tset hits to every «class {r.klass}» whose {test}\n"
+        f"\t\telse\n\t\t\tset hits to every «class {r.klass}» of c whose {test}\n\t\tend if\n\tend tell\n"
+        "\tif (count hits) > 20 then set hits to items 1 thru 20 of hits\n"
+        '\tset out to "OK"\n\trepeat with o in hits\n\t\ttell application id bid\n'
+        f"\t\t\tset oid to {ident}\n\t\t\tset n to {name}\n\t\t\tset p to «property {r.text}» of o\n\t\tend tell\n"
+        "\t\tset out to out & RS & oid & US & my clip(n) & US & my clip(p)\n\tend repeat\n\treturn out\nend run\n"
+        + _HANDLERS
+    )
+    return script, argv
+
+
+def render_folders(r: NoteRoute, bundle_id: str) -> tuple[str, list[str]] | None:
+    """(script, argv) listing the folders the user can name (name, id per row); None when the
+    application doesn't list them itself."""
+    if not r.folders_listed:
+        return None
+    script = (
+        f"{_BID_HEAD}\ttell application id bid\n"
+        f"\t\tset ns to «property {r.folder_name}» of every «class {r.folder}»\n"
+        f"\t\tset ids to «property {r.folder_id}» of every «class {r.folder}»\n\tend tell\n"
+        '\tset out to "OK"\n\trepeat with i from 1 to count ns\n'
+        "\t\tset out to out & RS & my txt(item i of ns) & US & my txt(item i of ids)\n\tend repeat\n"
+        "\treturn out\nend run\n" + _HANDLERS
+    )
+    return script, [bundle_id]
+
+
+@dataclass(frozen=True)
+class UnreadRoute:
+    """How an app's dictionary lists unread mail: the application's inbox property, its unread
+    count, the message class and the properties read from each message ('' = not in it)."""
+
+    inbox: str
+    count: str
+    message: str
+    read: str
+    sender: str
+    subject: str
+    received: str
+
+
+def unread_route(d: Dictionary | None) -> UnreadRoute | None:
+    """The dictionary's inbox, unread count and message read status, or None without them."""
+    if d is None:
+        return None
+    app_props = d.class_props.get("application") or {}
+    inbox = next(((c, t) for p, (c, t) in app_props.items() if c == "inmb" or re.match(r"^inbox$", p.strip(), re.I)), None)
+    if inbox is None or inbox[1] not in d.classes or not ok4(inbox[0]):
+        return None
+    box = inbox[1]
+    box_props = (d.class_props.get(box) or {}).items()
+    count = next((c for p, (c, _t) in box_props if c == "mbuc" or re.match(r"^unread\s+count$", p.strip(), re.I)), "")
+    message = _class_named(d, r"^(e-?mail\s+)?messages?$", "mssg")
+    if not message or message not in _elements(d, box) or not ok4(count):
+        return None
+    read = slot_prop(d, message, "read")
+    if read is None:
+        return None
+    got = {s: slot_prop(d, message, s) for s in ("sender", "subject", "received")}
+    if got["sender"] is None and got["subject"] is None:
+        return None
+    return UnreadRoute(
+        inbox=inbox[0],
+        count=count,
+        message=d.class_code(message),
+        read=read[1],
+        **{s: (p[1] if p else "") for s, p in got.items()},
+    )
+
+
+def render_unread(
+    r: UnreadRoute, bundle_id: str, limit: int, scan: int, *, only_running: bool = False
+) -> tuple[str, list[str]]:
+    """(script, argv) reading the inbox's unread count, then the newest ``scan`` messages by
+    index, keeping up to ``limit`` unread ones: sender, subject, date received (ISO). Never a
+    `whose` filter (it drops the connection on big inboxes) and never a property set (nothing is
+    marked read). ``only_running``: answer EMPTY rather than start the app."""
+    box = f"«property {r.inbox}»"
+    get = "".join(
+        f"\t\t\t\tset {v} to «property {code}» of m\n" if code else f"\t\t\t\tset {v} to missing value\n"
+        for v, code in (("s", r.sender), ("t", r.subject), ("d", r.received))
+    )
+    guard = '\tif application id bid is not running then return "EMPTY"\n' if only_running else ""
+    script = (
+        f"{_BID_HEAD}\tset lim to (item 2 of argv) as integer\n\tset scan to (item 3 of argv) as integer\n{guard}"
+        f"\ttell application id bid\n\t\tset total to «property {r.count}» of {box}\n"
+        f"\t\tset n to count «class {r.message}» of {box}\n\tend tell\n"
+        '\tif n > scan then set n to scan\n\tset out to "OK" & US & my txt(total)\n\tset k to 0\n'
+        "\trepeat with i from 1 to n\n\t\tif k ≥ lim then exit repeat\n\t\ttell application id bid\n"
+        f"\t\t\tset m to «class {r.message}» i of {box}\n\t\t\tset seen to «property {r.read}» of m\n"
+        f"\t\t\tif seen is false then\n{get}\t\t\tend if\n\t\tend tell\n"
+        "\t\tif seen is false then\n\t\t\tset out to out & RS & my txt(s) & US & my txt(t) & US & my iso(d)\n"
+        "\t\t\tset k to k + 1\n\t\tend if\n\tend repeat\n\treturn out\nend run\n" + _HANDLERS
+    )
+    return script, [bundle_id, str(int(limit)), str(int(scan))]
