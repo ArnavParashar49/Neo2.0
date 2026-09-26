@@ -1,6 +1,8 @@
 //! ⌥⌘ on its own summons NEO: press Option and Command together and let go, with nothing else
-//! in between. macOS's hotkey API needs a real key, so this watches the keyboard with a
-//! listen-only event tap (it needs the Accessibility permission NEO already asks for).
+//! in between. macOS's hotkey API needs a real key, so this watches the keyboard with an event
+//! tap. It is a pass-through tap (every event is returned untouched), which macOS covers with the
+//! Accessibility permission NEO already has — a listen-only tap would need a second permission,
+//! Input Monitoring, and its own prompt.
 //!
 //! A *gesture* runs from the first of ⌥/⌘ going down until both are up again. It fires only if
 //! both were held together, released within MAX_HOLD, and nothing else happened during the whole
@@ -82,7 +84,7 @@ fn install(state: Arc<Mutex<State>>, on_chord: Arc<dyn Fn() + Send + Sync>) -> O
         // Head of the chain: see every key before another tap can swallow it (listen-only, so
         // nothing is changed or delayed).
         CGEventTapPlacement::HeadInsertEventTap,
-        CGEventTapOptions::ListenOnly,
+        CGEventTapOptions::Default, // pass-through: needs Accessibility only (see top)
         vec![
             CGEventType::FlagsChanged,
             CGEventType::KeyDown,
@@ -124,8 +126,12 @@ pub fn watch(on_chord: impl Fn() + Send + Sync + 'static, on_ready: impl Fn() + 
         let state = Arc::new(Mutex::new(State::default()));
         let mut first = true;
         let tap = loop {
-            if let Some(tap) = install(state.clone(), on_chord.clone()) {
-                break tap;
+            // Only once Accessibility is granted: creating a tap without it can make macOS prompt,
+            // and this loop must never nag.
+            if crate::perms::accessibility() {
+                if let Some(tap) = install(state.clone(), on_chord.clone()) {
+                    break tap;
+                }
             }
             if first {
                 let _ = tx.send(false);

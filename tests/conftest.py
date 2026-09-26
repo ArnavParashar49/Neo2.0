@@ -7,6 +7,13 @@ os.environ.setdefault("NEO_VOICE", "off")
 
 import pytest
 
+from neo.config import Settings
+
+# Hermetic: no test may read the developer's real keys or settings (~/.neo/.env, ./.env).
+Settings.model_config["env_file"] = None
+for _k in ("GEMINI_API_KEY", "GEMINI_API_KEYS", "GROQ_API_KEY", "ANTHROPIC_API_KEY"):
+    os.environ.pop(_k, None)
+
 
 @pytest.fixture(autouse=True)
 def _isolated_data_dir(tmp_path, monkeypatch):

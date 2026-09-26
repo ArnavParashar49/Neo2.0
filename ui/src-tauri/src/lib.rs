@@ -4,6 +4,7 @@
 
 mod chord;
 mod core;
+mod perms;
 
 use tauri::image::Image;
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
@@ -30,6 +31,12 @@ fn toggle(app: &AppHandle) {
     }
 }
 
+/// The overlay's key to the core's websocket (see core::ws_token).
+#[tauri::command]
+fn ws_token() -> String {
+    core::ws_token()
+}
+
 #[tauri::command]
 fn hide_window(app: AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
@@ -51,7 +58,7 @@ pub fn run() {
                 })
                 .build(),
         )
-        .invoke_handler(tauri::generate_handler![hide_window])
+        .invoke_handler(tauri::generate_handler![hide_window, ws_token])
         .manage(core::Core::default())
         .setup(|app| {
             #[cfg(target_os = "macos")]
@@ -60,6 +67,11 @@ pub fn run() {
             // The brain: start NEO's Python core (or use one that's already running).
             app.state::<core::Core>().start();
             core::sync_launch_at_login();
+            // Accessibility + Screen Recording belong to NEO.app: ask once per version, then the
+            // menu shows what's missing.
+            perms::ask_once(&app.package_info().version.to_string());
+            let ax_item = MenuItem::with_id(app, "allow_ax", "Allow Accessibility…", !perms::accessibility(), None::<&str>)?;
+            let sc_item = MenuItem::with_id(app, "allow_sc", "Allow Screen Recording…", !perms::screen_recording(), None::<&str>)?;
 
             let summon = Shortcut::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::Space);
             app.global_shortcut().register(summon)?;
@@ -94,7 +106,7 @@ pub fn run() {
             let sep2 = PredefinedMenuItem::separator(app)?;
             let menu = Menu::with_items(
                 app,
-                &[&status_item, &show_item, &sep, &restart_item, &logs_item, &login_item, &sep2, &quit_item],
+                &[&status_item, &ax_item, &sc_item, &show_item, &sep, &restart_item, &logs_item, &login_item, &sep2, &quit_item],
             )?;
             let login_check = login_item.clone();
             TrayIconBuilder::with_id("neo")
@@ -106,6 +118,8 @@ pub fn run() {
                 .on_menu_event(move |app, e| match e.id.as_ref() {
                     "quit" => app.exit(0),
                     "show" => show(app),
+                    "allow_ax" => perms::open_settings("Privacy_Accessibility"),
+                    "allow_sc" => perms::open_settings("Privacy_ScreenCapture"),
                     "restart" => {
                         // Off the main thread: stopping the core can take a few seconds.
                         let core = app.state::<core::Core>().inner().clone();
@@ -131,10 +145,24 @@ pub fn run() {
                 .build(app)?;
 
             let (core, handle, item) = (app.state::<core::Core>().inner().clone(), app.handle().clone(), status_item.clone());
+            let (ax_w, sc_w) = (ax_item.clone(), sc_item.clone());
             std::thread::spawn(move || {
                 let mut last = String::new();
                 loop {
-                    let now = core.status.lock().unwrap().clone();
+                    let (ax, sc) = (perms::accessibility(), perms::screen_recording());
+                    let core_status = core.status.lock().unwrap().clone();
+                    let now = match (ax, sc) {
+                        (false, _) => format!("{core_status} — needs Accessibility"),
+                        (true, false) => format!("{core_status} — needs Screen Recording"),
+                        _ => core_status,
+                    };
+                    let (a, s) = (ax_w.clone(), sc_w.clone());
+                    let _ = handle.run_on_main_thread(move || {
+                        let _ = a.set_enabled(!ax);
+                        let _ = a.set_text(if ax { "Accessibility: allowed ✓" } else { "Allow Accessibility…" });
+                        let _ = s.set_enabled(!sc);
+                        let _ = s.set_text(if sc { "Screen Recording: allowed ✓" } else { "Allow Screen Recording…" });
+                    });
                     if now != last {
                         last = now.clone();
                         let (h, item) = (handle.clone(), item.clone());

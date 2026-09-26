@@ -232,3 +232,18 @@ def test_fresh_app_lookup_prefers_the_real_app(monkeypatch):
     )
     assert focus.pid_running("notes")[0] == ("Notes", 2)
     assert focus.pid_running("Safari") == []
+
+
+def test_core_never_prompts_when_the_app_launched_it(monkeypatch):
+    from neo import permissions
+
+    monkeypatch.setattr(permissions, "missing", lambda: ["Accessibility"])
+    prompted = []
+    import ApplicationServices as AS
+
+    monkeypatch.setattr(AS, "AXIsProcessTrustedWithOptions", lambda o: prompted.append(1) or False)
+    monkeypatch.setenv("NEO_LAUNCHED_BY_APP", "1")
+    assert permissions.request_missing() == ["Accessibility"] and prompted == []
+    monkeypatch.delenv("NEO_LAUNCHED_BY_APP")
+    assert permissions.request_missing() == ["Accessibility"] and prompted == [1]  # from a terminal: once…
+    assert permissions.request_missing() == ["Accessibility"] and prompted == [1]  # …not again today

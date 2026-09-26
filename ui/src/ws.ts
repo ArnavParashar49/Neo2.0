@@ -1,6 +1,7 @@
 // Websocket client for the NEO core. Turns the event stream into a transcript timeline:
 // user bubbles, tool-activity groups, and assistant replies (streamed partials merge in place).
 import { useCallback, useEffect, useRef, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 
 export type NeoState =
   | "idle" | "listening" | "thinking" | "working" | "searching" | "speaking" | "connecting" | "confirming";
@@ -127,9 +128,13 @@ export function useNeo() {
       }
     };
 
-    const connect = () => {
+    const connect = async () => {
       if (!alive) return;
-      const ws = new WebSocket(URL);
+      // The core only admits clients that know the token NEO.app keeps in ~/.neo/ws-token.
+      let token = "";
+      try { token = await invoke<string>("ws_token"); } catch { /* outside NEO.app: no token, no access */ }
+      if (!alive) return;
+      const ws = new WebSocket(`${URL}/?token=${encodeURIComponent(token)}`);
       sock.current = ws;
       ws.onopen = () => { if (sock.current === ws) { setConnected(true); setError(""); } };
       ws.onmessage = (m) => { if (sock.current !== ws) return; try { apply(JSON.parse(m.data)); } catch { /* ignore */ } };

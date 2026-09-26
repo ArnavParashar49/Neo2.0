@@ -1,6 +1,6 @@
 [project]
 name = "neo"
-version = "2.0.0"
+version = "2.1.0"
 description = "NEO — a free, local-first AI agent for your Mac"
 requires-python = ">=3.11,<3.13"
 license = { text = "CC-BY-NC-4.0" }
@@ -18,6 +18,10 @@ dependencies = [
   "vosk",
   "sounddevice",
   "soundfile",
+  "silero-vad",            # speech detection (5 s listening window)
+  "torch",                 # Laya, silero
+  "sentence-transformers", # memory + tool-selection embeddings
+  "playwright",            # NEO's own browser tool
   # macOS control
   "pyobjc-framework-Cocoa; sys_platform == 'darwin'",
   "pyobjc-framework-Quartz; sys_platform == 'darwin'",
@@ -38,6 +42,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest", "pytest-asyncio", "ruff", "mypy"]
+train = ["datasets"]  # python -m neo.reflex.hf_data (Laya's Hugging Face training rows)
 
 [project.scripts]
 neo = "neo.main:main"

@@ -21,6 +21,9 @@ const MAX_RESTARTS: usize = 5; // within RESTART_WINDOW, then give up (a crash l
 const RESTART_WINDOW: Duration = Duration::from_secs(300);
 const LOG_ROTATE_BYTES: u64 = 10 * 1024 * 1024;
 const GRACE: Duration = Duration::from_secs(12); // the core saves its session summary on SIGTERM
+const STARTUP_GRACE: Duration = Duration::from_secs(120); // loading models can take this long
+const UNRESPONSIVE: Duration = Duration::from_secs(60); // websocket gone this long → hung
+const RETRY_AFTER_GIVING_UP: Duration = Duration::from_secs(600);
 
 #[derive(Clone, Default)]
 pub struct Core {
@@ -43,22 +46,51 @@ fn pidfile() -> PathBuf {
     home().join(".neo").join("core.pid")
 }
 
-/// Where the NEO repo (with its .venv) lives: $NEO_HOME, else ~/.neo/app.json {"core_dir"},
-/// else the checkout this app was built from.
-fn core_dir() -> PathBuf {
-    if let Ok(p) = std::env::var("NEO_HOME") {
-        return PathBuf::from(p);
-    }
-    if let Ok(text) = fs::read_to_string(home().join(".neo").join("app.json")) {
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
-            if let Some(p) = v.get("core_dir").and_then(|x| x.as_str()) {
-                return PathBuf::from(p);
-            }
+/// The secret the overlay presents to the core's websocket (~/.neo/ws-token, readable only by
+/// this user). Created here if missing, before the core starts, so both sides agree.
+pub fn ws_token() -> String {
+    let path = home().join(".neo").join("ws-token");
+    if let Ok(t) = fs::read_to_string(&path) {
+        let t = t.trim().to_string();
+        if t.len() >= 32 {
+            return t;
         }
     }
-    // ui/src-tauri → the repo root, as it was on the build machine.
-    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
-    dir.canonicalize().unwrap_or(dir)
+    let mut bytes = [0u8; 32];
+    if let Ok(mut f) = File::open("/dev/urandom") {
+        use std::io::Read;
+        let _ = f.read_exact(&mut bytes);
+    }
+    let token: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    let _ = fs::create_dir_all(path.parent().unwrap());
+    use std::os::unix::fs::OpenOptionsExt;
+    if let Ok(mut f) = OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&path) {
+        let _ = f.write_all(token.as_bytes());
+    }
+    token
+}
+
+/// NEO's installed runtime (scripts/install-app.sh puts a Python environment with the core here).
+/// Outside ~/Documents on purpose: macOS guards that folder, and a background app reading it
+/// blocks on a "NEO would like to access your Documents" prompt before Python even starts.
+fn runtime_dir() -> PathBuf {
+    home().join("Library").join("Application Support").join("NEO")
+}
+
+/// Where the core runs from. A release build uses only the installed runtime — no environment
+/// variable or file can point NEO.app (and the permissions macOS gave it) at other code. A dev
+/// build (`tauri dev`) may use $NEO_HOME or the checkout it was built from.
+fn core_dir() -> PathBuf {
+    if cfg!(debug_assertions) {
+        if let Ok(p) = std::env::var("NEO_HOME") {
+            return PathBuf::from(p);
+        }
+        if !runtime_dir().join(".venv").join("bin").join("python").exists() {
+            let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
+            return dir.canonicalize().unwrap_or(dir);
+        }
+    }
+    runtime_dir()
 }
 
 fn port_in_use() -> bool {
@@ -203,6 +235,31 @@ impl Core {
     }
 
     fn supervise(&self) {
+        let _ = ws_token(); // make sure it exists before the core (or the overlay) needs it
+        loop {
+            self.run_until_given_up();
+            if self.stopping.load(Ordering::SeqCst) {
+                return;
+            }
+            // Gave up (crash loop), found someone else's core, or NEO isn't installed: look again
+            // later instead of never — or at once if the user picks Restart NEO.
+            let until = Instant::now() + RETRY_AFTER_GIVING_UP;
+            while Instant::now() < until {
+                if self.stopping.load(Ordering::SeqCst) {
+                    return;
+                }
+                if self.restart_now.swap(false, Ordering::SeqCst) {
+                    break;
+                }
+                if *self.status.lock().unwrap() == "using a core started outside the app" && !port_in_use() {
+                    break; // that core went away: run our own
+                }
+                thread::sleep(Duration::from_millis(500));
+            }
+        }
+    }
+
+    fn run_until_given_up(&self) {
         reclaim_orphan();
         if port_in_use() {
             self.set_status("using a core started outside the app");
@@ -211,9 +268,9 @@ impl Core {
         }
         let dir = core_dir();
         if !dir.join(".venv").join("bin").join("python").exists() {
-            let msg = format!("can't find NEO's Python environment in {}", dir.display());
+            let msg = "not installed — run scripts/install-app.sh".to_string();
             self.set_status(&msg);
-            log(&msg);
+            log(&format!("no NEO runtime in {}", dir.display()));
             return;
         }
         let _ = fs::create_dir_all(logs_dir());
@@ -235,9 +292,34 @@ impl Core {
                     return;
                 }
             }
-            // Wait for it to exit (polling, so terminate() can reach the child too).
+            // Wait for it to exit (polling, so terminate() can reach the child too) — and restart it
+            // if it stops answering: a process that exists isn't the same as a core that works.
+            let started = Instant::now();
+            let mut last_ok = Instant::now();
+            let mut ever_up = false;
+            let mut last_probe = Instant::now();
             loop {
                 thread::sleep(Duration::from_millis(500));
+                if last_probe.elapsed() >= Duration::from_secs(5) {
+                    last_probe = Instant::now();
+                    if port_in_use() {
+                        last_ok = Instant::now();
+                        ever_up = true;
+                    } else {
+                        let hung = if ever_up { last_ok.elapsed() > UNRESPONSIVE } else { started.elapsed() > STARTUP_GRACE };
+                        if hung {
+                            log("the core stopped answering — restarting it");
+                            self.set_status("not responding — restarting");
+                            let pid = self.child.lock().unwrap().as_ref().map(|c| c.id());
+                            if let Some(pid) = pid {
+                                unsafe {
+                                    libc::kill(pid as i32, libc::SIGKILL);
+                                }
+                            }
+                            last_ok = Instant::now();
+                        }
+                    }
+                }
                 let mut guard = self.child.lock().unwrap();
                 match guard.as_mut().map(|c| c.try_wait()) {
                     Some(Ok(Some(code))) => {
@@ -264,8 +346,8 @@ impl Core {
             restarts.retain(|t| now.duration_since(*t) < RESTART_WINDOW);
             restarts.push(now);
             if restarts.len() > MAX_RESTARTS {
-                log("the core keeps crashing — stopped restarting it (see core.log)");
-                self.set_status("crashed repeatedly — see Open Logs, then Restart NEO");
+                log("the core keeps crashing — pausing restarts for 10 minutes (see core.log)");
+                self.set_status("crashed repeatedly — see Open Logs; retrying in 10 min");
                 return;
             }
             self.set_status("restarting");
@@ -316,10 +398,11 @@ impl Core {
             self.start();
             return;
         }
+        self.set_status("restarting");
         self.restart_now.store(true, Ordering::SeqCst);
-        if !self.terminate() {
-            // Nothing running (between restarts): the backoff loop sees restart_now and goes now.
-        }
+        // Nothing running (between restarts, or waiting to retry): the waiting loop sees
+        // restart_now and starts at once.
+        self.terminate();
     }
 
     pub fn stop(&self) {
