@@ -994,3 +994,122 @@ async def test_a_bound_agent_s_cerebras_uses_its_own_settings_and_folder(tmp_pat
         assert p.account.ledger.path == tmp_path / "agent" / spend.FILE
         assert (await p.complete(ASK)).text == "ok"
     assert json.loads((tmp_path / "agent" / spend.FILE).read_text())["tokens"]["gpt-oss-120b"] == [1000, 200]
+
+
+# ---- the wiring, on brain-effort's chain (seeing fallbacks, a run's time budget) ------------------
+# These run once this branch sits on brain-effort (the integrator merges it first) and check the
+# wiring this workstream hands over: _build makes both brains; brain() places them with
+# with_cerebras(order, purpose, s) and eyes=with_cerebras_eyes(EYES, s); "cerebras" is text-only;
+# base.failure_words says an error's own `words` and spoken_name knows both names; _too_late
+# reports a brain's cooling_reason() instead of "no time left".
+
+on_the_chain = pytest.mark.skipif(
+    not hasattr(prov, "EYES"), reason="needs brain-effort's chain: runs once the integrator merges it"
+)
+
+
+class _Busy:
+    supports_tools = True
+
+    def __init__(self, name: str, vision: bool = True) -> None:
+        self.name, self.model, self.supports_vision = name, name, vision
+
+    async def complete(self, messages, **kw):
+        raise Overloaded(f"{self.name}: 503")
+
+    async def stream(self, messages, **kw):
+        raise Overloaded(f"{self.name}: 503")
+        yield ""  # (an async generator)
+
+
+def _busy(monkeypatch, *names: str, text_only: tuple[str, ...] = ("local",)) -> None:
+    real = prov._build
+    busy = {n: _Busy(n, vision=n not in text_only) for n in names}
+    monkeypatch.setattr(prov, "_build", lambda n: busy[n] if n in busy else real(n))
+
+
+def _screenshot_step() -> list[Message]:
+    return [
+        Message.user("what's in the front window?"),
+        Message.assistant(tool_calls=[ToolCall("c0", "screenshot", {})]),
+        Message.tool([ToolResult("c0", "screenshot", "shot", images=[_shot(500)])]),
+    ]
+
+
+@on_the_chain
+async def test_wired_a_picture_step_goes_to_cerebras_vision_when_gemini_is_overloaded(cset, fake, monkeypatch):
+    cset(GEMINI_API_KEY="g-test")
+    _busy(monkeypatch, "gemini", "gemini_lite", "local")
+    fake.default = (200, completion("A save dialog is open.", model=cb.VISION_MODEL), {})
+    chain = prov.brain("agent")
+    turn = await chain.complete(_screenshot_step(), effort="low")
+    assert chain.last_used == cb.VISION_BRAIN and turn.sees
+    assert [b["model"] for b in fake.bodies] == [cb.VISION_MODEL]  # never the text model with a picture
+    names = [*chain.names, *chain.eyes]
+    assert names.index(cb.VISION_BRAIN) < names.index("groq_vision")  # ahead of Groq's vision brain
+    assert prov.brain("vision").names.index(cb.VISION_BRAIN) < prov.brain("vision").names.index("groq_vision")
+
+
+@on_the_chain
+async def test_wired_a_text_step_goes_to_cerebras_ahead_of_groq(cset, fake, monkeypatch):
+    cset(GEMINI_API_KEY="g-test", GROQ_API_KEY="gsk-test")
+    _busy(monkeypatch, "gemini")
+    chain = prov.brain("agent")
+    assert chain.names.index(cb.TEXT_BRAIN) < chain.names.index("groq")
+    assert (await chain.complete(ASK, effort="low")).text == "ok" and chain.last_used == cb.TEXT_BRAIN
+    fast = prov.brain("fast")
+    assert fast.names.index(cb.TEXT_BRAIN) < fast.names.index("groq")
+
+
+@on_the_chain
+async def test_wired_without_a_key_no_chain_names_cerebras(monkeypatch):
+    monkeypatch.delenv("CEREBRAS_API_KEY", raising=False)
+    monkeypatch.setenv("GEMINI_API_KEY", "g-test")
+    monkeypatch.setattr(config, "_settings", _settings_class()())
+    monkeypatch.setattr(prov, "_cache", {})
+    monkeypatch.setattr(prov, "_demoted", {})
+    _busy(monkeypatch, "gemini", "gemini_lite", "local")
+    for purpose in ("agent", "fast", "vision", "light"):
+        c = prov.brain(purpose)
+        assert not {cb.TEXT_BRAIN, cb.VISION_BRAIN} & {*c.names, *c.eyes}, purpose
+    with pytest.raises(AllBrainsFailed) as e:
+        await prov.brain("agent").complete(ASK)
+    assert "Cerebras" not in e.value.spoken()
+    with pytest.raises(AllBrainsFailed) as e:
+        await prov.brain("agent").complete(_screenshot_step())
+    assert "Cerebras" not in e.value.spoken()
+
+
+def _spend_it(s) -> None:
+    """Today's (tiny) budget, all spent already."""
+    spend.Ledger(s.data_dir / spend.FILE, daily_budget=0.001, key=KEY).add(cb.TEXT_MODEL, 10_000, 0)
+
+
+@on_the_chain
+async def test_wired_the_stop_message_gives_cerebras_own_reason(cset, fake, monkeypatch):
+    s = cset(NEO_CEREBRAS_DAILY_BUDGET="0.001", GEMINI_API_KEY="g-test")
+    _spend_it(s)
+    _busy(monkeypatch, "gemini", "local")
+    with pytest.raises(AllBrainsFailed) as e:
+        await prov.brain("agent").complete(ASK)
+    said = e.value.spoken()
+    assert "Cerebras' daily budget of $0.0010 is used up" in said and "free quota" not in said
+    assert fake.chats == 0
+    assert "skip" in cb.spoken_notes()  # and the skip itself is said once, with the reply
+    from neo.providers.base import spoken_name
+
+    assert spoken_name(cb.VISION_BRAIN) == "Cerebras vision" and spoken_name(cb.TEXT_BRAIN) == "Cerebras"
+
+
+@on_the_chain
+async def test_wired_a_spent_budget_inside_a_run_is_the_budget_not_the_time(cset, fake, monkeypatch):
+    from neo.providers import budget
+
+    s = cset(NEO_CEREBRAS_DAILY_BUDGET="0.001", GEMINI_API_KEY="g-test")
+    _spend_it(s)
+    _busy(monkeypatch, "gemini", "local")
+    with budget.seconds(180.0), pytest.raises(AllBrainsFailed) as e:
+        await prov.brain("agent").complete(ASK)
+    assert e.value.kind != "budget"  # not OutOfTime: the run had time; Cerebras had no budget
+    said = e.value.spoken()
+    assert "daily budget of $0.0010 is used up" in said and "time" not in said
