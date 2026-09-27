@@ -119,7 +119,7 @@ def homography(src, dst) -> np.ndarray | None:
     A[1::2, 3:6] = np.c_[x, y, np.ones_like(x)]
     A[1::2, 6:9] = -np.c_[v * x, v * y, v]
     try:
-        _, sv, Vt = np.linalg.svd(A)
+        Vt = np.linalg.svd(A)[2]
     except np.linalg.LinAlgError:
         return None
     Hn = Vt[-1].reshape(3, 3)
@@ -215,7 +215,7 @@ def _close(edge: np.ndarray, gap: int = 3) -> np.ndarray:
 def _candidates(edge: np.ndarray, min_run: int) -> list[tuple[float, float, float]]:
     """(position, run start, run end) of each straight line at least ``min_run`` long (lines in
     adjacent columns merged: the strongest stands for them)."""
-    cols = np.nonzero(edge.sum(axis=0) >= min_run - 2 * 3)[0]  # (only columns with edge enough for a line)
+    cols = np.nonzero(edge.sum(axis=0) >= min_run // 2)[0]  # (only columns with edge enough for a line)
     length = np.zeros(edge.shape[1], np.int64)
     end = np.zeros(edge.shape[1], np.int64)
     if len(cols):
@@ -410,6 +410,7 @@ def _subpixel(R: np.ndarray, pts: np.ndarray) -> np.ndarray:
 
 # ---- a lattice of X-corners -----------------------------------------------------------------------
 
+
 def _spacing(H: np.ndarray, i: float, j: float) -> float:
     p = _apply(H, [(i, j), (i + 1, j), (i, j + 1)])
     return float(min(np.linalg.norm(p[1] - p[0]), np.linalg.norm(p[2] - p[0])))
@@ -469,6 +470,8 @@ def _grow(g: np.ndarray, P: np.ndarray, lat: dict[tuple[int, int], int], sign: f
         if not added:
             break
     return lat
+
+
 def _clean(P: np.ndarray, lat: dict[tuple[int, int], int]) -> tuple[dict[tuple[int, int], int], np.ndarray | None, float]:
     """Drop lattice points far from the fitted mapping; (lattice, mapping, rms error / spacing)."""
     for _ in range(3):
@@ -503,8 +506,8 @@ def _seek_lattice(g: np.ndarray, P: np.ndarray, strength: np.ndarray, seeds: int
     for s in np.argsort(-strength)[:seeds]:
         if int(s) in done:
             continue
-        near = np.argsort(D[s])[1:9]
-        for a, b in itertools.combinations(near, 2):
+        cells = []
+        for a, b in itertools.combinations(np.argsort(D[s])[1:9], 2):
             u, v = P[a] - P[s], P[b] - P[s]
             nu, nv = np.linalg.norm(u), np.linalg.norm(v)
             if nu < 6 or nv < 6 or not (0.33 < nu / nv < 3.0):
@@ -513,9 +516,21 @@ def _seek_lattice(g: np.ndarray, P: np.ndarray, strength: np.ndarray, seeds: int
                 continue
             d4 = np.linalg.norm(P - (P[s] + u + v), axis=1)
             c = int(np.argmin(d4))
-            if d4[c] > 0.25 * min(nu, nv) or c in (s, a, b):
-                continue
-            cell = {(0, 0): int(s), (1, 0): int(a), (0, 1): int(b), (1, 1): c}
+            if d4[c] <= 0.25 * min(nu, nv) and c not in (s, a, b):
+                cells.append((int(a), int(b), c))
+        if not cells:
+            continue
+        # the corner of four alternating squares, judged on all the candidate cells at once (as if flat
+        # there: a unit cell is small enough)
+        U = np.array([P[a] - P[s] for a, _, _ in cells])
+        V = np.array([P[b] - P[s] for _, b, _ in cells])
+        pts = P[s] + _QUAD[None, :, :1] * U[:, None, :] + _QUAD[None, :, 1:] * V[:, None, :]
+        q = _sample(g, pts[..., 0].ravel(), pts[..., 1].ravel()).reshape(len(cells), 4, 9).mean(axis=2)
+        contrast = np.abs(q[:, 0] + q[:, 1] - q[:, 2] - q[:, 3]) / 2
+        spread = np.abs(q[:, 0] - q[:, 1]) + np.abs(q[:, 2] - q[:, 3])
+        for n in np.nonzero(contrast > np.maximum(12.0, 1.5 * spread))[0]:
+            a, b, c = cells[n]
+            cell = {(0, 0): int(s), (1, 0): a, (0, 1): b, (1, 1): c}
             H = homography(list(cell), P[list(cell.values())])
             if H is None:
                 continue
@@ -597,7 +612,8 @@ def _extent(rgb: np.ndarray, H: np.ndarray, c0: int, r0: int, c1: int, r1: int) 
     more on any side while its squares alternate like the board's; ((c0, r0, c1, r1), tones, share
     of all the board's squares that agree)."""
     sq = _block(c0, r0, c1, r1)
-    t = _tones(rgb, H, sq[_inside(rgb.shape, H, sq)] if _inside(rgb.shape, H, sq).any() else sq)
+    seen = _inside(rgb.shape, H, sq)
+    t = _tones(rgb, H, sq[seen] if seen.any() else sq)
     if t.gap < 30:
         return None  # no two colours: not a board of squares
     for _ in range(2 * _MAX_CELLS):
@@ -751,9 +767,9 @@ def _perspective(H: np.ndarray, cols: int, rows: int) -> float:
     return max(sides) / max(1e-9, min(sides))
 
 
-def _work(pic: Picture, area: tuple[float, float, float, float] | None, long_side: int = 1000):
+def _work(pic: Picture, area: tuple[float, float, float, float] | None, f: int):
     """The grey picture to look for corners in: ``area`` (image pixels x, y, w, h) or all of it,
-    averaged down to at most ``long_side`` pixels. (grey, factor, crop x, crop y)."""
+    averaged down ``f`` times. (grey, factor, crop x, crop y)."""
     g = pic.gray
     h, w = g.shape
     ox = oy = 0
@@ -761,11 +777,24 @@ def _work(pic: Picture, area: tuple[float, float, float, float] | None, long_sid
         x, y, aw, ah = area
         ox, oy = max(0, int(math.floor(x))), max(0, int(math.floor(y)))
         g = g[oy : min(h, int(math.ceil(y + ah))), ox : min(w, int(math.ceil(x + aw)))]
-    f = max(1, math.ceil(max(g.shape) / long_side))
     if f > 1:
         hh, ww = g.shape[0] // f * f, g.shape[1] // f * f
         g = g[:hh, :ww].reshape(hh // f, f, ww // f, f).mean(axis=(1, 3))
     return np.ascontiguousarray(g, np.float32), f, ox, oy
+
+
+_WORK_SQUARE = 24  # pixels: X-corners are looked for where a square is about this big
+
+
+def _scales(pic: Picture, area, square: float | None) -> list[int]:
+    """How far to average the picture down before looking for X-corners: to about _WORK_SQUARE
+    pixels a square when the square's size is known; else the picture at most ~1000 px long, then
+    coarser and finer (big squares' wood grain would drown their corners; small ones would blur)."""
+    if square:
+        return [max(1, round(square / _WORK_SQUARE))]
+    long = max(area[2], area[3]) if area is not None else max(pic.rgb.shape[:2])
+    f0 = max(1, math.ceil(long / 1000))
+    return list(dict.fromkeys([f0, 2 * f0, max(1, f0 // 2)]))
 
 
 def _lift(f: int, ox: int, oy: int) -> np.ndarray:
@@ -795,21 +824,25 @@ def _settle(pic: Picture, H_img: np.ndarray, keys: np.ndarray, **kw) -> tuple[Bo
     return b, ""
 
 
-def find_tilted(pic: Picture, area: tuple[float, float, float, float] | None = None) -> Board | None:
+def find_tilted(pic: Picture, area: tuple[float, float, float, float] | None = None, *, square: float | None = None) -> Board | None:
     """A board of alternating squares in ``pic`` (or its ``area``, image pixels), seen at any angle
-    — NEO's own: from the X-corners it finds, no model involved. None when there is none."""
-    g, f, ox, oy = _work(pic, area)
-    if min(g.shape) < 40:
-        return None
-    P, strength = _peaks(_saddle(g, 2), 3)
-    lat, H = _seek_lattice(g, P, strength)
-    if H is None or len(lat) < 12:
-        return None
-    keys = np.array(list(lat), float)
-    if np.any(keys.max(0) - keys.min(0) < 2):
-        return None
-    b, _ = _settle(pic, _lift(f, ox, oy) @ H, keys, source="neo")
-    return b
+    — NEO's own: from the X-corners it finds, no model involved. ``square``: about how big a square
+    is (pixels), when known. None when there is none."""
+    for f in _scales(pic, area, square):
+        g, f, ox, oy = _work(pic, area, f)
+        if min(g.shape) < 40:
+            continue
+        P, strength = _peaks(_saddle(g, 2), 3)
+        lat, H = _seek_lattice(g, P, strength)
+        if H is None or len(lat) < 12:
+            continue
+        keys = np.array(list(lat), float)
+        if np.any(keys.max(0) - keys.min(0) < 2):
+            continue
+        b, _ = _settle(pic, _lift(f, ox, oy) @ H, keys, source="neo")
+        if b is not None:
+            return b
+    return None
 
 
 def _order(corners) -> np.ndarray:
@@ -882,15 +915,15 @@ def from_corners(pic: Picture, corners, *, rows: int | None = None, cols: int | 
     x1, y1 = quad.max(0) + pad
     region = (float(x0), float(y0), float(x1 - x0), float(y1 - y0))
 
-    def fits(b: Board) -> bool:
+    def fits(b: Board, reach: float) -> bool:
         got = _apply(np.linalg.inv(pic.to_screen), b.corners())
-        return all(np.min(np.linalg.norm(got - q, axis=1)) <= 0.75 * square for q in quad)
+        return all(np.min(np.linalg.norm(got - q, axis=1)) <= reach * square for q in quad)
 
-    own = find_tilted(pic, region)
-    if own is not None and fits(own) and (own.rows, own.cols) == (n_r, n_c):
+    own = find_tilted(pic, region, square=square)  # (NEO's own grid, where the corners say: kept when they agree)
+    if own is not None and fits(own, 1.0) and ((rows is None and cols is None) or (own.rows, own.cols) == (n_r, n_c)):
         own.source = "vision"
         return own, ""
-    g, f, ox, oy = _work(pic, region)
+    g, f, ox, oy = _work(pic, region, _scales(pic, region, square)[0])
     L = _lift(f, ox, oy)
     lat, H, P = _seeded(g, np.linalg.inv(L) @ H0, n_c, n_r)
     if H is None:
@@ -900,7 +933,7 @@ def from_corners(pic: Picture, corners, *, rows: int | None = None, cols: int | 
         return None, why
     if (rows or cols or b.rows != b.cols) and (b.rows != n_r or b.cols != n_c):
         return None, f"the squares there make a {b.rows}×{b.cols} board, not {n_r}×{n_c}"
-    if not fits(b):
+    if not fits(b, 0.75):
         return None, "the board NEO found there doesn't have those corners — check them"
     return b, ""
 
