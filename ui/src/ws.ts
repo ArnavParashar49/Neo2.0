@@ -2,6 +2,7 @@
 // user bubbles, tool-activity groups, and assistant replies (streamed partials merge in place).
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { BrowserHub } from "./browser/hub";
 
 export type NeoState =
   | "idle" | "listening" | "thinking" | "working" | "searching" | "speaking" | "connecting" | "confirming";
@@ -13,7 +14,9 @@ export interface TurnMeta { route: string; brain: string; model: string; ms: num
 export interface ToolRun { name: string; args?: Record<string, unknown>; ok?: boolean; summary?: string; running: boolean }
 export type Item =
   | { kind: "msg"; id: number; role: "user" | "assistant" | "system"; text: string; final: boolean; ts: number; meta?: TurnMeta; job?: string }
-  | { kind: "tools"; id: number; tools: ToolRun[]; job?: string };
+  | { kind: "tools"; id: number; tools: ToolRun[]; job?: string }
+  /** Where a browser session began: its card, its live row, or (once ended) its summary row. */
+  | { kind: "browser"; id: number; sid: string; job?: string; ts: number };
 
 export interface NeoEvent { type: string; data: Record<string, any>; ts: number }
 /** A question NEO is waiting on: exactly what will run if the user says yes. */
@@ -21,8 +24,19 @@ export interface ConfirmCard { action_id: string; tool: string; summary: string;
 
 const URL = "ws://127.0.0.1:8765";
 let nextId = 1;
+/** `?mock=browser` (dev builds only): a scripted in-page core instead of the real socket. */
+export const MOCK = import.meta.env.DEV && new URLSearchParams(location.search).get("mock") === "browser";
 
-export function useNeo() {
+export function useNeo(opts: { surface?: "overlay" | "window" } = {}) {
+  const hubRef = useRef<BrowserHub | null>(null);
+  if (!hubRef.current) {
+    hubRef.current = new BrowserHub(opts.surface ?? "overlay");
+    if (import.meta.env.DEV && MOCK) {
+      hubRef.current.ignoreHidden = true;
+      ((window as unknown as { neoHubs?: BrowserHub[] }).neoHubs ??= []).push(hubRef.current);
+    }
+  }
+  const hub = hubRef.current;
   const [connected, setConnected] = useState(false);
   const [state, setStateNow] = useState<NeoState>("idle");
   const lastChange = useRef(0);
@@ -49,19 +63,37 @@ export function useNeo() {
     let timer: number | undefined;
 
     const apply = (ev: NeoEvent) => {
+      if (ev.type.startsWith("browser_")) {
+        hub.handle(ev.type, ev.data);
+        if (ev.type === "browser_open") {
+          const { sid, job } = ev.data;
+          setItems((prev) => (prev.some((i) => i.kind === "browser" && i.sid === sid) ? prev : [...prev, { kind: "browser", id: nextId++, sid, job, ts: ev.ts }]));
+        } else if (ev.type === "browser_close" && ev.data.reason === "erased") {
+          setItems((prev) => prev.filter((i) => i.kind !== "browser"));
+        }
+        return;
+      }
       switch (ev.type) {
         case "hello":
+          hub.beginHello();
           setState(ev.data.state);
           setItems([]);
           for (const r of ev.data.recent ?? []) apply(r);
           setAsk(ev.data.confirm ?? null);
           setProblems(ev.data.problems ?? []);
+          hub.endHello(ev.data.browser);
+          {
+            // A live session whose browser_open fell out of the replay still needs its anchor.
+            const sid = hub.sid;
+            if (sid) setItems((prev) => (prev.some((i) => i.kind === "browser" && i.sid === sid) ? prev : [...prev, { kind: "browser", id: nextId++, sid, job: ev.data.browser?.live?.job ?? undefined, ts: ev.ts }]));
+          }
           break;
         case "problems":
           setProblems(ev.data.items ?? []);
           break;
         case "erased":
           setItems([]);
+          hub.clearEnded();
           setErasedAt(Date.now());
           break;
         case "confirm":
@@ -96,7 +128,9 @@ export function useNeo() {
               next[i] = { ...(prev[i] as Extract<Item, { kind: "msg" }>), text, final, ts: ev.ts };
               return next;
             }
-            return [...prev.slice(-120), { kind: "msg", id: nextId++, role, text, final, ts: ev.ts, job }];
+            // Trim old lines, but never a browser session's anchor (its row lives there).
+            const keep = prev.length > 120 ? prev.filter((it, k) => k >= prev.length - 120 || it.kind === "browser") : prev;
+            return [...keep, { kind: "msg", id: nextId++, role, text, final, ts: ev.ts, job }];
           });
           break;
         }
@@ -155,16 +189,29 @@ export function useNeo() {
     const connect = async () => {
       if (!alive) return;
       // The core only admits clients that know the token NEO.app keeps in ~/.neo/ws-token.
-      let token = "";
-      try { token = await invoke<string>("ws_token"); } catch { /* outside NEO.app: no token, no access */ }
-      if (!alive) return;
-      const ws = new WebSocket(`${URL}/?token=${encodeURIComponent(token)}`);
+      let ws: WebSocket;
+      if (import.meta.env.DEV && MOCK) {
+        const { MockSocket } = await import("./browser/mock/socket");
+        if (!alive) return;
+        ws = new MockSocket() as unknown as WebSocket;
+      } else {
+        let token = "";
+        try { token = await invoke<string>("ws_token"); } catch { /* outside NEO.app: no token, no access */ }
+        if (!alive) return;
+        ws = new WebSocket(`${URL}/?token=${encodeURIComponent(token)}`);
+      }
+      ws.binaryType = "arraybuffer"; // live page frames arrive as binary (§10.4)
       sock.current = ws;
-      ws.onopen = () => { if (sock.current === ws) { setConnected(true); setError(""); } };
-      ws.onmessage = (m) => { if (sock.current !== ws) return; try { apply(JSON.parse(m.data)); } catch { /* ignore */ } };
+      ws.onopen = () => { if (sock.current === ws) { setConnected(true); setError(""); hub.setConnected(true); } };
+      ws.onmessage = (m) => {
+        if (sock.current !== ws) return;
+        if (typeof m.data !== "string") { if (m.data instanceof ArrayBuffer) hub.frame(m.data); return; }
+        try { apply(JSON.parse(m.data)); } catch { /* ignore */ }
+      };
       ws.onclose = () => {
         if (sock.current !== ws) return; // stale socket (StrictMode double-mount) must not clobber the live one
         setConnected(false);
+        hub.setConnected(false);
         setAsk(null); // the next hello says whether it's still waiting
         sock.current = null;
         timer = window.setTimeout(connect, 1500);
@@ -181,8 +228,14 @@ export function useNeo() {
     sock.current.send(JSON.stringify(cmd));
     return true;
   }, []);
+  hub.setSender(send);
 
-  const clear = useCallback(() => setItems([]), []);
+  // Clear transcript: rows, posters and thumbnails go too — but a live session keeps its anchor.
+  const clear = useCallback(() => {
+    const live = hub.sid;
+    setItems((prev) => prev.filter((i) => i.kind === "browser" && i.sid === live));
+    hub.clearEnded();
+  }, [hub]);
 
-  return { connected, state, items, error, note, ask, problems, erasedAt, send, clear };
+  return { connected, state, items, error, note, ask, problems, erasedAt, send, clear, hub };
 }
