@@ -138,6 +138,11 @@ async def test_the_same_in_other_words(world, said):
     assert out is not None and world.pressed == ["Game › New Game", "Start"], said
 
 
+async def test_the_resolver_switched_off_presses_nothing_from_words(world, monkeypatch):
+    monkeypatch.setattr(menus, "_resolver_mode", lambda: "off")
+    assert await menus.by_utterance("start a new game", user("start a new game")) is None and world.pressed == []
+
+
 async def test_a_translated_button_word_is_not_the_users_word(world):
     """"shuru karo" means start, but the sheet's "Start" isn't literally in the words: asked."""
     out = await menus.by_utterance("new game shuru karo", user("new game shuru karo"))
@@ -162,6 +167,7 @@ async def test_a_models_call_gets_the_sheets_controls_as_ids(world):
     assert world.pressed == ["Game › New Game"] and out.ok and not out.halt
     assert "e41" in out.text and "e43" in out.text and '<untrusted source="screen">' in out.text
     assert "screen" in c.taint  # its words were read: what follows is asked again
+    assert not re.search(r"@\(|\d+\s*,\s*\d+|\bx\s*=|\by\s*=", out.text)  # ids only: never where things are
 
 
 async def test_live_and_sdk_words_never_answer_a_sheet(world):
@@ -462,3 +468,37 @@ def test_grounding_a_big_menu_bar_is_fast(capsys):
     with capsys.disabled():
         print(f"\n[bench] menu grounding over {len(items)} commands: {per:.2f} ms per request")
     assert per < 250  # generous: a shared machine; measured ~10 ms
+
+
+# ---- seams for the integration ---------------------------------------------------------------------------
+
+
+async def test_a_by_meaning_stage_plugs_in_but_never_answers_a_sheet(world, monkeypatch):
+    monkeypatch.setattr(menus, "meaning", lambda request, titles: titles.index("New Game") if "another game" in request else None)
+    said = "begin another game"
+    assert await menus.by_utterance(said, user(said)) is None and world.pressed == []  # the resolver in shadow
+    monkeypatch.setattr(menus, "_resolver_mode", lambda: "live")
+    out = await menus.by_utterance(said, user(said))
+    assert world.pressed == ["Game › New Game"] and out.halt  # the sheet: asked, not answered
+
+
+def test_the_tool_spec_fits_the_registry():
+    import inspect
+
+    from neo.agent import registry
+
+    inspect.signature(registry.tool).bind(**menus.TOOL)
+    assert menus.TOOL["name"] == "menu_command" and menus.TOOL["fast_path"] is menus.FAST_PATHS
+
+
+@pytest.mark.parametrize(
+    "said,text,name",
+    [
+        ("type hello in the search field", "hello", "search"),
+        ('type "a, b and c" into the notes box', '"a, b and c"', "notes"),
+        ("fill in the subject field with Lunch", "Lunch", "subject"),
+    ],
+)
+def test_field_fast_paths(said, text, name):
+    m = next((re.search(p, said, re.I) for p, _ in menus.FIELD_FAST_PATHS if re.search(p, said, re.I)), None)
+    assert m is not None and (m.group("text"), m.group("field")) == (text, name)

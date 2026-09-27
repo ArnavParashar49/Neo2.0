@@ -32,6 +32,7 @@ import asyncio
 import logging
 import re
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Any
@@ -56,6 +57,11 @@ __all__ = [
     "parse_field",
 ]
 
+# A by-meaning stage for Latin paraphrases (the commands resolver's MiniLM+Laya agreement), plugged
+# in at integration: (request, candidate titles) -> the index it picks, or None. Consulted only while
+# the resolver is promoted to "live"; a command it picks never gets its sheet answered by itself.
+meaning: Callable[[str, list[str]], int | None] | None = None
+
 _SETTLE_S = 0.6  # how long a press is watched for a sheet, a new window or a title change
 _CLOSE_S = 1.0  # how long an answered sheet is watched for closing
 _EVERY_S = 0.03
@@ -68,14 +74,27 @@ _now = time.monotonic
 _sleep = asyncio.sleep
 
 
-def _gates():
-    """The frozen gate helpers, looked up on every call (so a test's patch reaches them): the gates
-    module once computer/__init__ is split, the package itself before that."""
-    try:
-        from neo.tools.computer import gates  # type: ignore[attr-defined]
-    except ImportError:
-        from neo.tools import computer as gates
-    return gates
+class _Gates:
+    """The frozen gate helpers (the confirmation gate, the key gate, the protected-app checks), looked
+    up by name on every use so a test's patch reaches them: the package's own name first (it
+    re-exports them), else computer/gates once the package is split."""
+
+    def __getattr__(self, name: str) -> Any:
+        from neo.tools import computer
+
+        found = getattr(computer, name, None)
+        if found is None:
+            from neo.tools.computer import gates  # type: ignore[attr-defined]
+
+            found = getattr(gates, name)
+        return found
+
+
+_GATES = _Gates()
+
+
+def _gates() -> Any:
+    return _GATES
 
 
 # ---- words ------------------------------------------------------------------------------------------
@@ -453,6 +472,14 @@ def _ground(ask: _Ask, items: list) -> _Pick:
         if _resolver_mode() == "live":
             return _Pick(os_hits[0], "os")
         return _Pick(shadow_os=True)
+    fn = meaning
+    if fn is not None and cands and _resolver_mode() == "live" and not uistrings.non_latin(request):
+        try:
+            k = fn(request, [i.title for i in cands])
+        except Exception:  # noqa: BLE001 - a stage that fails picks nothing
+            k = None
+        if isinstance(k, int) and 0 <= k < len(cands):
+            return _Pick(cands[k], "meaning")
     return _Pick()
 
 
@@ -622,6 +649,8 @@ async def _run(a: dict, c: ToolContext, *, claim: bool) -> ToolOutput | str | No
 def _used(req: list[str], pick: _Pick) -> set[int]:
     """Which of the user's words the chosen command accounts for."""
     title = pick.item.title
+    if pick.stage == "meaning":
+        return set(range(len(req)))  # the resolver read the whole request as this command
     if pick.stage == "os":
         forms = uistrings.localized(title) + uistrings.english_sources(title) + (title,)
         words = {w for f in forms for w in uistrings.content_words(f)}
@@ -653,6 +682,14 @@ def _button_label(b: Any) -> str:
     return (getattr(b, "title", "") or getattr(b, "value", "") or "").strip()
 
 
+def _control(b: Any) -> str:
+    """A sheet's control for a model: its id, kind and label - never where it is (a brain that can't
+    see never gets coordinates; the id is what it presses)."""
+    role = str(getattr(b, "role", "") or "").removeprefix("AX") or "Control"
+    off = "" if getattr(b, "enabled", True) else " (disabled)"
+    return f"{getattr(b, 'id', '?')} {role} “{_button_label(b)[:60]}”{off}"
+
+
 async def _answer_sheet(
     item: Any, ask: _Ask, pick: _Pick, name: str, pid: int, a: dict, c: ToolContext, after: Any, said: str,
     req: list[str], extra: frozenset[str],
@@ -674,6 +711,8 @@ async def _answer_sheet(
     btn, used = None, set()
     if c.origin != "user" or not ask.user:
         why = "not the user's own words"
+    elif pick.stage not in ("exact", "lexical"):
+        why = "the command was picked by meaning, not by its words"
     elif blk is None or not pushable:
         why = "its buttons can't be read"
     elif getattr(blk, "owner_pid", pid) != pid:
@@ -723,7 +762,7 @@ async def _answer_sheet(
         quoted = f" “{words[:120]}”" if words else ""
         return ToolOutput(confirm.ask_user(f"{name} opened a {kind}{quoted} — {choices}? Which one should I press?"), ok=True)
     lines = [f"says: {words[:400]}"] if words else []
-    lines += [b.line() if hasattr(b, "line") else f"{getattr(b, 'id', '?')} {_button_label(b)}" for b in buttons[:12]]
+    lines += [_control(b) for b in buttons[:12]]
     how = (
         "answer it by pressing one of its controls by id (ax_press) — a button that commits asks the user first"
         if buttons
@@ -757,8 +796,8 @@ async def by_utterance(text: str, c: ToolContext) -> ToolOutput | None:
     """The user's own words, when they name one of the working app's menu commands and nothing
     more ("start a new game"): that command, and its sheet under the rule above. None - nothing
     done, nothing pressed - when the words aren't that (the model takes the request)."""
-    if c.origin != "user" or not (text or "").strip():
-        return None
+    if c.origin != "user" or not (text or "").strip() or _resolver_mode() == "off":
+        return None  # (settings.resolver "off": nothing is pressed from words by itself)
     ctx = c if c.user_text else ToolContext(user_text=text, extras=c.extras, taint=c.taint, origin=c.origin)
     out = await _run({"utterance": text}, ctx, claim=True)
     return None if out is None else _out(out)
