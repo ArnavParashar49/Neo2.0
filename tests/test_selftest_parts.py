@@ -61,13 +61,16 @@ def _nothing_real(monkeypatch, tmp_path):
         "can you check your computer controls?",
         "please test your computer controls now",
         "check if your computer controls are working",
-        "check whether the computer controls work properly",
+        "check whether your computer controls work properly",
+        "can you check neo's computer controls",
         "verify your controls",
         "run a controls self-test",
+        "run your controls check",
         "self-test your controls",
+        "self-test the computer controls",  # "self-test" says whose
         "diagnose your mouse and keyboard controls",
         "apne computer controls check karo",
-        "computer controls check kar lo",
+        "neo ke computer controls test kar lo",
         "अपने कंप्यूटर कंट्रोल्स चेक करो",
     ],
 )
@@ -87,6 +90,17 @@ def test_the_request_is_recognised(text):
         "check your computer",
         "type check your computer controls",
         "what are computer controls",
+        # nobody's controls in particular (a game's, an app the user is building): never NEO's own test
+        "test the input controls",
+        "test input controls",
+        "check the mouse and keyboard controls",
+        "check my computer controls",
+        "check computer controls",
+        "check whether the computer controls work properly",
+        "run the controls test",
+        "start a controls check",
+        "computer controls check kar lo",
+        "कंप्यूटर कंट्रोल्स चेक करो",
     ],
 )
 def test_other_sentences_are_not_a_request(text):
