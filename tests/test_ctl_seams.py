@@ -268,14 +268,23 @@ _PKG = runtime.__name__.rpartition(".")[0]  # NEO's package (neo2.core), as its 
 # Accessibility kit they share (neo2.core.decide: axkit, media, the kinds).
 _SCANNED_DIRS = ("tools", "tools/computer", "decide", "decide/kinds")
 # What makes a tool one that acts: an input event (to the front app or to one app), or an
-# Accessibility press, value, focus or text. (Bringing an app forward — its window raised through
-# the AX door — and switching a browser's web tree on for reading are not input.)
+# Accessibility press, value, focus or text — a menu command's press, and the AX door itself
+# (perform_action / set_attribute), whoever calls it.
 _ACTUATORS = (
     {("neo2.core.tools.computer.input", n) for n in ("click", "drag", "scroll", "type_text", "hotkey", "_post", "_post_to_pid")}
-    | {("neo2.core.tools.computer.ax", n) for n in ("press", "press_el", "press_element", "set_value", "set_el_value", "focus_el")}
+    | {("neo2.core.tools.computer.ax", n) for n in ("press", "press_el", "press_element", "set_value", "set_el_value", "focus_el",
+                                                    "press_menu_item", "perform_action", "set_attribute")}
     | {("neo2.core.decide.axkit", n) for n in ("perform", "set_text", "set_search", "clear_text", "post_return", "_put", "_type")}
     | {("neo2.core.decide.media", n) for n in ("_perform", "_post_return", "_set_query")}
 )  # fmt: skip
+# The door's callers that are not input, listed one by one (a new caller of the door is an input
+# tool's, or it is added here on purpose): bringing an app forward — its window raised through the
+# door — is not input. (Switching a browser's web tree on for reading goes through media._set, which
+# reaches the door by the module it looks up at call time: no edge here.)
+_NOT_INPUT = {
+    ("neo2.core.tools.computer.ax", "raise_window"),  # the window under the pointer made key (a click's)
+    ("neo2.core.tools.computer.focus", "force_front"),  # an app brought forward, its window raised
+}
 # A task kind's driver is its own module (run.run_best(sys.modules[__name__], …)): these are called.
 _DRIVER_HOOKS = ("attempt", "fallback", "accepts")
 
@@ -336,7 +345,7 @@ def _acts(start: tuple[str, str], graph) -> bool:
         node = todo.pop()
         if node in _ACTUATORS:
             return True
-        if node in seen or node not in graph:
+        if node in seen or node not in graph or node in _NOT_INPUT:
             continue
         seen.add(node)
         todo.extend(graph[node])
@@ -366,6 +375,20 @@ def test_every_tool_that_acts_is_an_input_tool():
     declared = {t.name for t in mine if t.category == "computer" and not t.read_only}
     assert declared <= INPUT_TOOLS, declared - INPUT_TOOLS
     assert not acting & {t.name for t in tools if t.read_only}  # (a look never acts)
+
+
+def test_a_menu_press_and_the_ax_door_itself_count_as_acting():
+    """A tool that presses a menu item, or calls the AX door directly, acts - whatever else it
+    calls; only the door's callers listed as not input (a window raised) are passed over."""
+    graph = _call_graph()
+    ax_mod = "neo2.core.tools.computer.ax"
+    for name in ("press_el", "press_menu_item", "perform_action", "set_attribute"):
+        assert _acts((ax_mod, name), graph), name
+    assert _acts(("neo2.core.tools.computer.menus", "menu_command"), graph)
+    # every caller of the door the graph sees is an actuator, or listed as not input on purpose
+    door = {(ax_mod, "perform_action"), (ax_mod, "set_attribute")}
+    callers = {node for node, refs in graph.items() if refs & door and node not in door}
+    assert callers and callers <= _ACTUATORS | _NOT_INPUT, callers - _ACTUATORS - _NOT_INPUT
 
 
 def test_input_tools_and_the_planned_tools_are_known_names():

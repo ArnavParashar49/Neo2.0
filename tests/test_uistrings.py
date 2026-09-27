@@ -274,3 +274,78 @@ def test_an_apps_tables_are_found_without_walking_its_whole_bundle(tmp_path, mon
     assert len(U.for_bundle(str(tmp_path / "NoTables.app"))) == 0
     with capsys.disabled():
         print(f"\n[bench] first contact with a 2,400-file bundle: {first_ms:.1f} ms, {sum(seen)} entries looked at")
+
+
+# ---- review fixes: a crafted table costs a bounded amount ----------------------------------------------
+
+
+def _wide_table(path: Path, n: int, *, flat: bool = False) -> Path:
+    """A binary plist cheap on disk and dear to read: {"en": D, "hi": D} (``flat``: D itself), D a
+    dict of ``n`` one-byte references (every key and value the same string) - two bytes an entry."""
+    head = bytes([0xD0 | n]) if n < 15 else bytes([0xDF, 0x12]) + n.to_bytes(4, "big")
+    if flat:
+        objs = [head + bytes([1]) * (2 * n), b"\x51k"]
+    else:
+        objs = [bytes([0xD2, 1, 2, 3, 3]), b"\x52en", b"\x52hi", head + bytes([4]) * (2 * n), b"\x51k"]
+    body = bytearray(b"bplist00")
+    offsets = []
+    for o in objs:
+        offsets.append(len(body))
+        body += o
+    table = len(body)
+    for off in offsets:
+        body += off.to_bytes(4, "big")
+    body += bytes(6) + bytes([4, 1]) + len(objs).to_bytes(8, "big") + bytes(8) + table.to_bytes(8, "big")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(bytes(body))
+    return path
+
+
+def test_a_table_with_more_entries_than_ui_text_has_is_never_read(tmp_path):
+    """Probe: 300,000 entries in 600 KB (the OS's own biggest table has about 7,000 per language)."""
+    import time
+
+    small = _wide_table(tmp_path / "small.loctable", 3)
+    assert plistlib.loads(small.read_bytes()) == {"en": {"k": "k"}, "hi": {"k": "k"}}
+    assert U._table_langs(str(small), ("hi",)) == ({"k": "k"}, {"hi": {"k": "k"}})
+    wide = _wide_table(tmp_path / "wide.loctable", 300_000)
+    t0 = time.perf_counter()
+    with pytest.raises(ValueError):
+        U._table_langs(str(wide), ("hi",))
+    assert time.perf_counter() - t0 < 0.5 and 300_000 > U._MAX_ENTRIES >= 7_030
+
+
+def _app_with(tmp_path: Path, tables: dict[str, dict]) -> Path:
+    app = tmp_path / "Crafted.app"
+    for name, body in tables.items():
+        _table(app / "Contents" / "Resources" / name, body)
+    return app
+
+
+def test_an_apps_tables_never_cost_more_than_its_budget(tmp_path, monkeypatch):
+    big = {"en": {f"k{i}": f"Command number {i}" for i in range(200)}, "hi": {f"k{i}": f"आदेश संख्या {i}" for i in range(200)}}
+    small = {"en": {"n": "New Round"}, "hi": {"n": "नया राउंड"}}
+    app = _app_with(tmp_path, {"Big.loctable": big, "Small.loctable": small})
+    size_big = (app / "Contents" / "Resources" / "Big.loctable").stat().st_size
+    monkeypatch.setattr(U, "_APP_MAX_BYTES", size_big - 1)  # the big one alone is more than the budget
+    pairs = U._bundle_pairs(str(app), ("hi",))
+    assert pairs == {"New Round": {"नया राउंड"}}  # the big table was never read, the small one was
+    # entries: a budget for the whole app, whatever the bytes
+    rows = {f"T{t}.loctable": {"en": {f"k{i}": f"Word {t} {i}" for i in range(30)}, "hi": {f"k{i}": f"शब्द {t} {i}" for i in range(30)}}
+            for t in range(4)}  # fmt: skip
+    app = _app_with(tmp_path / "e", rows)
+    monkeypatch.setattr(U, "_APP_MAX_BYTES", 32 << 20)
+    monkeypatch.setattr(U, "_APP_MAX_READ", 100)  # one table's three dicts (2 + 30 + 30), not two
+    assert len(U._bundle_pairs(str(app), ("hi",))) == 30
+
+
+def test_an_apps_binary_strings_file_is_read_within_the_same_bounds(tmp_path, monkeypatch):
+    res = tmp_path / "S.app" / "Contents" / "Resources"
+    for lang, words in (("en", {"deal": "Deal Again"}), ("hi", {"deal": "फिर से बाँटें"})):
+        (res / f"{lang}.lproj").mkdir(parents=True)
+        (res / f"{lang}.lproj" / "Main.strings").write_bytes(plistlib.dumps(words, fmt=plistlib.FMT_BINARY))
+    assert U._bundle_pairs(str(tmp_path / "S.app"), ("hi",)) == {"Deal Again": {"फिर से बाँटें"}}
+    assert U._read_strings(str(_wide_table(tmp_path / "ok.strings", 3, flat=True))) == {"k": "k"}
+    wide = _wide_table(tmp_path / "w.strings", 300_000, flat=True)
+    assert plistlib.loads(wide.read_bytes()) == {"k": "k"}  # (what a plain load makes of it, entry by entry)
+    assert U._read_strings(str(wide)) == {}  # refused, not decoded entry by entry

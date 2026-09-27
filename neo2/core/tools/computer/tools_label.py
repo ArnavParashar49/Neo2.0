@@ -20,11 +20,13 @@ from neo2.core.tools.computer._catalog import _p, tool
 tool(**menus.TOOL, by_utterance=True)(menus.menu_command)
 
 
-def _menu_meaning(request: str, titles: list[str]) -> int | None:
+def _menu_meaning(request: str, titles: list[str], *, origin: str = "agent") -> int | None:
     """The resolver's pick among a menu's command titles (menus.meaning): only a stage that acts —
-    menus asks this only once "meaning" is promoted — and never a guess (None)."""
+    menus asks this only once "meaning" is promoted, and only for the user's own words — and never
+    a guess (None). ``origin``: who chose the words (the resolver's own rule: only "user" gets its
+    by-meaning stages)."""
     cands = [resolve.Candidate(t, "AXMenuItem", id=str(i)) for i, t in enumerate(titles)]
-    res = resolve.resolve(request, cands, want="menu", origin="user", log_it=False)
+    res = resolve.resolve(request, cands, want="menu", origin=origin, log_it=False)
     return int(res.candidate.id) if isinstance(res, resolve.Resolved) and res.stage == "meaning" else None
 
 

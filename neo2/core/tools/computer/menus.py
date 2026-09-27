@@ -12,12 +12,16 @@ choices as ids (a model's words).
   ``policy.commits``, each part read back into English on its own in any language the OS string
   index knows), and like its keyboard shortcut (the key gate).
 * **A sheet is answered by itself only when all of these hold** (DECISIONS 46): the request is the
-  user's own words (origin "user"); the sheet belongs to the menu's own app (the same pid); exactly
-  one of its buttons has its words, as they are, in the user's words - words the command's name
-  didn't take ("print" chooses Print…, it doesn't also answer its Print); that button doesn't
-  commit; the sheet's text carries no loss or consequence wording (checked whatever the button);
-  and the request is fully used up by the menu item, that button and filler words. Otherwise NEO
-  asks - the user in words (also after their yes to one of their own commands), a model with ids.
+  user's own words (origin "user", to NEO.app - never an embedding host's); the sheet belongs to the
+  menu's own app (the same pid); its words were all read (a walk cut short, or more words than the
+  AX core keeps, is a sheet NEO didn't read); exactly one of its buttons has its words, as they
+  are, in the user's words - words the command's name didn't take ("print" chooses Print…, it
+  doesn't also answer its Print); that button doesn't commit; the sheet's text carries no loss or
+  consequence wording (checked whatever the button); the request is fully used up by the menu item,
+  that button and filler words; and the frozen confirmation gate, judging that button like any
+  other press, doesn't ask (its card, answered yes, presses that button of that sheet - never the
+  command again). Otherwise NEO asks - the user in words (also after their yes to one of their own
+  commands), a model with ids.
 * **Fail closed on words NEO can't read**: a label in a script with no English back-translation
   (Hindi while the OS index isn't built) is never pressed by itself - NEO asks first. A sheet's
   title and texts are read back one by one and sentence by sentence; one that nothing reads counts
@@ -29,9 +33,12 @@ choices as ids (a model's words).
 * **Which element is pressed is decided once**: the item (or button) gated is the one pressed.
 
 Matching is lexical and live (an exact title, or the title's words in order in the request). The
-OS-strings stage (a Hindi request, an English menu) runs in shadow unless ``settings.resolver`` is
-"live" (DECISIONS 40); every grounding is logged to the shadow log without its words. An app's own
-string tables are read only when there are words in another script to read.
+OS-strings and by-meaning stages (a Hindi request, an English menu; a paraphrase) run in shadow
+unless ``settings.resolver`` is "live" (DECISIONS 40), and only ever for the user's own words to
+NEO.app - a model's, Gemini Live's, an approval's or an embedding host's words get the exact and
+lexical matches only (after a yes, the command resolved when it was asked is pinned); every
+grounding is logged to the shadow log without its words. An app's own string tables are read only
+when there are words in another script to read.
 """
 
 from __future__ import annotations
@@ -42,6 +49,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from functools import lru_cache
+from types import SimpleNamespace
 from typing import Any
 
 from neo2.core import logger
@@ -66,9 +74,10 @@ __all__ = [
 ]
 
 # A by-meaning stage for Latin paraphrases (the commands resolver's MiniLM+Laya agreement), plugged
-# in at integration: (request, candidate titles) -> the index it picks, or None. Consulted only while
-# the resolver is promoted to "live"; a command it picks never gets its sheet answered by itself.
-meaning: Callable[[str, list[str]], int | None] | None = None
+# in at integration: (request, candidate titles, origin=…) -> the index it picks, or None. Consulted
+# only while the resolver is promoted to "live", and only for the user's own words to NEO.app; a
+# command it picks never gets its sheet answered by itself.
+meaning: Callable[..., int | None] | None = None
 
 _SETTLE_S = 0.6  # the longest a press is watched for a sheet, a new window or a title change
 _QUIET_S = 0.3  # nothing changed this long after a press: it shows nothing (no sheet is coming)
@@ -222,6 +231,22 @@ def _promoted(stage: str) -> bool:
         return False
 
 
+def _library() -> bool:
+    """An embedding host's request (library mode): its "user" text is the host's, never the user's
+    own words to NEO.app. Can't tell: yes (the stricter)."""
+    try:
+        from neo2.core import runtime
+
+        return runtime.library_bound() or runtime.library_mode()
+    except Exception:  # noqa: BLE001
+        return True
+
+
+def _own(c: ToolContext) -> bool:
+    """May the by-meaning stages (OS strings, meaning) read these words: the user's own, to NEO.app?"""
+    return c.origin == "user" and not _library()
+
+
 def _script(text: str) -> str:
     return "latin" if not uistrings.non_latin(text) else ("mixed" if re.search(r"[A-Za-z]", text) else "other")
 
@@ -335,6 +360,8 @@ class _Ask:
     path: tuple[str, ...] = ()  # "File > Export > PDF"
     text: str = ""  # the request grounded by meaning (the whole utterance), when no item is given
     user: str = ""  # the user's own words (origin "user"), which a sheet's answer must come from
+    own: bool = False  # the by-meaning stages may read them: the user's own words to NEO.app
+    origin: str = ""  # who chose the words (the ToolContext's origin)
 
 
 @dataclass
@@ -373,6 +400,12 @@ def _explicit(text: str) -> tuple[str, str, tuple[str, ...]] | None:
 
 def _ask_of(a: dict, c: ToolContext) -> _Ask | None:
     user = c.user_text if c.origin == "user" else ""
+    pinned = a.get("_path") if c.origin == "approval" else None  # ("_" args survive only an approval)
+    if isinstance(pinned, (list, tuple)) and len(pinned) >= 2 and all(isinstance(p, str) and p.strip() for p in pinned):
+        # After the user's yes: the command resolved when it was asked (a by-meaning pick can't be
+        # found again from words an approval doesn't give those stages) - by its whole path, exactly.
+        parts = tuple(str(p) for p in pinned)
+        return _Ask(parts[-1], parts[0], parts, "", user, False, c.origin)
     path_arg = str(a.get("path") or "").strip()
     item = str(a.get("item") or "").strip()
     menu = str(a.get("menu") or "").strip()
@@ -392,7 +425,7 @@ def _ask_of(a: dict, c: ToolContext) -> _Ask | None:
     menu = re.sub(r"\s+(?:menu|मेनू|मेन्यू)$", "", _strip_frame(menu), flags=re.I)
     if not item and not text:
         return None
-    return _Ask(item, menu, path, "" if item else text, user)
+    return _Ask(item, menu, path, "" if item else text, user, _own(c), c.origin)
 
 
 def _in_menu(it: Any, ask: _Ask) -> bool:
@@ -454,6 +487,8 @@ def _ground(ask: _Ask, items: list) -> _Pick:
         if it is not None or opts:
             return _Pick(it, "lexical", used, opts)
         request = ask.text
+    if not ask.own:
+        return _Pick()  # a model's, Live's, an approval's or a host's words: as they are, nothing by meaning
     # The OS's own strings: a Hindi request for an English menu, or the other way round.
     os_hits = [i for i in cands if uistrings.os_match(request, i.title)]
     titles = {uistrings.norm(i.title) for i in os_hits}
@@ -464,7 +499,7 @@ def _ground(ask: _Ask, items: list) -> _Pick:
     fn = meaning
     if fn is not None and cands and _promoted("meaning") and not uistrings.non_latin(request):
         try:
-            k = fn(request, [i.title for i in cands])
+            k = fn(request, [i.title for i in cands], origin=ask.origin)
         except Exception:  # noqa: BLE001 - a stage that fails picks nothing
             k = None
         if isinstance(k, int) and 0 <= k < len(cands):
@@ -614,12 +649,15 @@ async def _gate_item(item: Any, name: str, pid: int, a: dict, c: ToolContext, pi
     # the "… › Delete" it is, though no one OS string is the whole path.
     label = " › ".join(item.path[1:]) or item.title
     committing = policy.commits(label)
+    # A yes presses the command resolved now: a by-meaning pick is pinned by its path (an approval
+    # gets no by-meaning stage to find it again from the words).
+    staged = a if pick.stage in ("exact", "lexical") else {**a, "_path": list(item.path)}
     if not committing and not all(uistrings.readable(p) for p in item.path):
         # fail closed: words NEO can't read in English (one question: a committing one asks below)
-        gate = confirm.gated("menu_command", a, f"choose “{where[:80]}” in {name}")
+        gate = confirm.gated("menu_command", staged, f"choose “{where[:80]}” in {name}")
         if isinstance(gate, str):
             return gate
-    if gate := await g._ask_first("menu_command", a, label, name, []):
+    if gate := await g._ask_first("menu_command", staged, label, name, []):
         return gate
     if (chord := _chord(item)) and (gate := await g._ask_before_keys(a, chord, name, c, pid)):
         return gate  # the same question its keyboard shortcut would ask
@@ -631,6 +669,8 @@ async def _gate_item(item: Any, name: str, pid: int, a: dict, c: ToolContext, pi
 
 async def _run(a: dict, c: ToolContext, *, claim: bool) -> ToolOutput | str | None:
     g = _gates()
+    if c.origin == "approval" and isinstance(a.get("_sheet"), str) and a["_sheet"].strip():
+        return await _answer_approved(a, c, a["_sheet"].strip())  # (the command was chosen before the card)
     ask = _ask_of(a, c)
     if ask is None:
         return None if claim else ToolOutput("Error: which menu command? Give its name (and its menu, if known).", ok=False)
@@ -743,6 +783,44 @@ def _control(b: Any) -> str:
     return f"{getattr(b, 'id', '?')} {role} “{_button_label(b)[:60]}”{off}"
 
 
+def _sheet_words(blk: Any) -> tuple[list[str], bool]:
+    """(the sheet's words - its title, then each of its texts on its own -, whether they are all it
+    says). Each is read back into English on its own: joined, a Hindi title and text are no one
+    string the OS has. A text area's words count too (the frozen gate's reader takes them)."""
+    if blk is None:
+        return [], False
+    title = (getattr(blk, "title", "") or "").strip()
+    texts = getattr(blk, "texts", None)
+    if not isinstance(texts, (list, tuple)):  # an AX core that keeps only the short text
+        texts = [getattr(blk, "text", "") or ""]
+    areas = [getattr(b, "value", "") or "" for b in getattr(blk, "buttons", None) or [] if getattr(b, "role", "") == "AXTextArea"]
+    words = [x for x in (title, *(str(t or "").strip() for t in (*texts, *areas))) if x]
+    return words, getattr(blk, "complete", False) is True
+
+
+def _sheet_els(words: list[str], blk: Any) -> list:
+    """The sheet as the frozen gate's reader (gates._dialog_text) takes a window: its words, then
+    its controls."""
+    return [SimpleNamespace(role="AXStaticText", value=w, title="") for w in words] + list(getattr(blk, "buttons", None) or [])
+
+
+def _pushable(blk: Any) -> list:
+    buttons = [b for b in (getattr(blk, "buttons", None) or []) if _button_label(b)] if blk is not None else []
+    return [b for b in buttons if getattr(b, "role", "") == "AXButton" and getattr(b, "enabled", True)]
+
+
+async def _press_answer(btn: Any, pid: int, kind: str, head: str, failed: str) -> ToolOutput:
+    """Press the sheet's button (the one gated), then watch the sheet close."""
+    before = await asyncio.to_thread(_scene, pid)
+    out = await asyncio.to_thread(ax.press_el, btn)  # the button gated is the one pressed
+    if out.startswith("Error"):
+        return ToolOutput(f"{failed} ({out.removeprefix('Error: ')}).", ok=False)
+    now = await _watch(pid, before, _CLOSE_S, until=lambda b, s: getattr(s, "known", False) and s.sheet != b.sheet)
+    closed = getattr(now, "known", False) and not now.sheet
+    text_out = head + (f" — the {kind} closed." if closed else f", but the {kind} is still open — look before pressing again.")
+    return _with_effect(ToolOutput(text_out, say=None if closed else True), changed=True, scene_changed=True, sheet="" if closed else now.sheet)
+
+
 async def _answer_sheet(
     item: Any, ask: _Ask, pick: _Pick, name: str, pid: int, a: dict, c: ToolContext, after: Any, said: str,
     req: list[str], extra: frozenset[str],
@@ -754,25 +832,22 @@ async def _answer_sheet(
     g._taint(c, "screen")  # its words were read
     kind = getattr(blk, "kind", "") if blk is not None else "sheet"
     kind = "dialog" if kind in ("modal", "dialog") else "sheet"
-    title = (getattr(blk, "title", "") or "").strip() if blk is not None else ""
-    # Its words as the separate texts it shows (a title, each static text): each is read back into
-    # English on its own - joined, a Hindi title and text are no one string the OS has.
-    texts = getattr(blk, "texts", None) if blk is not None else None
-    if not isinstance(texts, (list, tuple)):
-        texts = [(getattr(blk, "text", "") or "")] if blk is not None else []
-    parts = [x for x in (title, *(str(t or "").strip() for t in texts)) if x]
+    parts, whole = _sheet_words(blk)
     words = " ".join(parts) or after.sheet
     buttons = [b for b in (getattr(blk, "buttons", None) or []) if _button_label(b)] if blk is not None else []
-    pushable = [b for b in buttons if getattr(b, "role", "") == "AXButton" and getattr(b, "enabled", True)]
+    pushable = _pushable(blk)
 
     why = ""
     btn, used = None, set()
-    if c.origin != "user" or not ask.user:
+    gate: str | None = None
+    if c.origin != "user" or not ask.user or _library():
         why = "not the user's own words"
     elif pick.stage not in ("exact", "lexical"):
         why = "the command was picked by meaning, not by its words"
     elif blk is None or not pushable:
         why = "its buttons can't be read"
+    elif not whole:
+        why = "its words weren't all read"  # a walk cut short, or more than the AX core keeps
     elif getattr(blk, "owner_pid", pid) != pid:
         why = "another app's"
     elif (front := getattr(after, "front_pid", 0)) and front != pid and not ax.is_neo(front):
@@ -801,19 +876,21 @@ async def _answer_sheet(
             why = "the request says more"
         elif g._protected(name, pid):
             return g._protected_out()
+        else:
+            # The frozen gate judges this press like any other (the sheet's words, whole): its card,
+            # answered yes, presses this button of this sheet (``_sheet``) - never the command again.
+            label = _button_label(btn)
+            gate = await g._ask_first("menu_command", {**a, "_sheet": label}, label, name, _sheet_els(parts, blk))
+            if gate:
+                why = "the confirmation gate asks"
     await _log(want="sheet", acted=btn is not None and not why, reason=why or "auto", n=len(buttons), origin=c.origin)
+    if gate:
+        return gate
     if btn is not None and not why:
         label = _button_label(btn)
-        before = await asyncio.to_thread(_scene, pid)
-        out = await asyncio.to_thread(ax.press_el, btn)  # the button gated is the one pressed
-        if out.startswith("Error"):
-            return ToolOutput(f"{said}, but its {kind}'s “{label}” couldn't be pressed ({out.removeprefix('Error: ')}).", ok=False)
-        now = await _watch(pid, before, _CLOSE_S, until=lambda b, s: getattr(s, "known", False) and s.sheet != b.sheet)
-        closed = getattr(now, "known", False) and not now.sheet
-        text_out = f"{said}, then answered its {kind} with “{label}”" + (
-            f" — the {kind} closed." if closed else f", but the {kind} is still open — look before pressing again."
+        return await _press_answer(
+            btn, pid, kind, f"{said}, then answered its {kind} with “{label}”", f"{said}, but its {kind}'s “{label}” couldn't be pressed"
         )
-        return _with_effect(ToolOutput(text_out, say=None if closed else True), changed=True, scene_changed=True, sheet="" if closed else now.sheet)
     labels = [_button_label(b) for b in (pushable or buttons)]
     if _users_lane(c):  # the user's own command (or the run after their yes to it): asked in words
         choices = " or ".join(f"“{x[:30]}”" for x in labels[:_OPTIONS]) or "its buttons"
@@ -829,6 +906,34 @@ async def _answer_sheet(
     out = ToolOutput(f"{said}. It opened a {kind} in {name} that waits for an answer: {how}.\n" + fence("screen", "\n".join(lines) or after.sheet))
     out = _with_handoff(out, [f"{getattr(b, 'id', '')} “{_button_label(b)}”" for b in buttons])
     return _with_effect(out, changed=True, scene_changed=True, sheet=after.sheet, looked=bool(buttons))
+
+
+async def _answer_approved(a: dict, c: ToolContext, want: str) -> ToolOutput | str:
+    """After the user's yes to the card the confirmation gate raised for a sheet's button (one their
+    own command opened, above): that button of the sheet still open in that app, pressed once the
+    gate lets it (the yes was to exactly this). Never the menu command again: it was chosen before
+    the card was."""
+    g = _gates()
+    if err := g._needs_input():
+        return err
+    got = await _target(a)
+    if not isinstance(got, tuple):
+        return got
+    name, pid = got
+    blk = await asyncio.to_thread(_blocker, pid)
+    g._taint(c, "screen")  # its words were read
+    kind = "dialog" if getattr(blk, "kind", "") in ("modal", "dialog") else "sheet"
+    same = [b for b in _pushable(blk) if uistrings.norm(_button_label(b)) == uistrings.norm(want)]
+    if blk is None or getattr(blk, "owner_pid", pid) != pid or len(same) != 1:
+        return ToolOutput(f"Error: that {kind} in {name} isn't open any more — nothing was pressed.", ok=False)
+    btn = same[0]
+    label = _button_label(btn)
+    parts, _ = _sheet_words(blk)
+    if gate := await g._ask_first("menu_command", a, label, name, _sheet_els(parts, blk)):
+        return gate  # (a card that isn't this one - the sheet says something else now: asked again)
+    return await _press_answer(
+        btn, pid, kind, f"Answered the {kind} in {name} with “{label}”", f"Error: “{label}” on the {kind} in {name} couldn't be pressed"
+    )
 
 
 # ---- the tool ----------------------------------------------------------------------------------------
@@ -854,8 +959,8 @@ async def by_utterance(text: str, c: ToolContext) -> ToolOutput | None:
     """The user's own words, when they name one of the working app's menu commands and nothing
     more ("start a new game"): that command, and its sheet under the rule above. None - nothing
     done, nothing pressed - when the words aren't that (the model takes the request)."""
-    if c.origin != "user" or not (text or "").strip() or _resolver_mode() == "off":
-        return None  # (settings.resolver "off": nothing is pressed from words by itself)
+    if not _own(c) or not (text or "").strip() or _resolver_mode() == "off":
+        return None  # (an embedding host's words, or settings.resolver "off": nothing pressed from words by itself)
     ctx = c if c.user_text else ToolContext(user_text=text, extras=c.extras, taint=c.taint, origin=c.origin)
     out = await _run({"utterance": text}, ctx, claim=True)
     return None if out is None else _out(out)
@@ -867,8 +972,25 @@ _VERB = r"(?:choose|select|click(?:\s+on)?|pick|press|hit|use|run|open|go\s+to)"
 _NAME = r"[^\s>›→»,;!?\"“”][^>›→»,;!?\"“”]{0,58}?"
 _Q = r"[\"“']?"
 _QE = r"[\"”']?"
+
+
+def _titled(part: str) -> bool:
+    """Does it start as a menu's title does: a capital letter, or a letter of a script with no
+    capitals (Hindi)?"""
+    c = part.strip(" \"“”'")[:1]
+    return c.isalpha() and (c.isupper() or c.lower() == c.upper())
+
+
+def _menu_path(got: dict) -> bool:
+    """A path the fast path may claim: every part reads like a menu title ("File > New Window",
+    "File › Export › PDF"). "usd -> inr", "10 > 5", "home > settings > wifi" name no menu: left to
+    the reflex (a model can still call menu_command with a path)."""
+    parts = [p for p in _ARROW.split(str(got.get("path") or "")) if p.strip()]
+    return len(parts) >= 2 and all(_titled(p) for p in parts)
+
+
 # Only words that name a menu: a bare "click X" is click_text's, "click X then Y" is two steps.
-FAST_PATHS: list[tuple[str, dict]] = [
+FAST_PATHS: list[tuple] = [
     # "choose New Window from the File menu", "click Save As… in the File menu"
     (
         rf"{_LEAD}{_VERB}\s+(?:the\s+)?{_Q}(?P<item>{_NAME}){_QE}(?:\s+(?:command|item|option|menu\s+item|entry))?"
@@ -876,7 +998,11 @@ FAST_PATHS: list[tuple[str, dict]] = [
         {"item": "<item>", "menu": "<menu>"},
     ),
     # "File > New Window", "choose File › Export › PDF"
-    (rf"{_LEAD}(?:{_VERB}\s+)?(?:the\s+)?(?P<path>{_NAME}(?:\s*(?:->|>|›|→|»)\s*{_NAME}){{1,4}}){_TAIL}", {"path": "<path>"}),
+    (
+        rf"{_LEAD}(?:{_VERB}\s+)?(?:the\s+)?(?P<path>{_NAME}(?:\s*(?:->|>|›|→|»)\s*{_NAME}){{1,4}}){_TAIL}",
+        {"path": "<path>"},
+        _menu_path,
+    ),
     # "open the File menu and choose New Window", "click the Game menu, then New Game"
     (
         rf"{_LEAD}(?:open|click(?:\s+on)?|go\s+to)\s+(?:the\s+)?{_Q}(?P<menu>{_NAME}){_QE}\s+menu\s*,?\s+(?:and\s+)?(?:then\s+)?"
@@ -998,8 +1124,9 @@ def _fields(name: str, pid: int) -> list:
     return [e for e in els if e.role in _FIELD_ROLES and e.enabled and e.w > 0 and e.h > 0]
 
 
-def _ground_field(phrase: str, els: list) -> tuple[Any, list]:
-    """(the field, or None; the candidates when several match)."""
+def _ground_field(phrase: str, els: list, own: bool = False) -> tuple[Any, list]:
+    """(the field, or None; the candidates when several match). ``own``: the user's own words to
+    NEO.app, which alone the OS-strings stage may read."""
     want = [w for w in _toks(phrase) if w not in _FIELD_WORDS] or _toks(phrase)
     if not want:
         return None, []
@@ -1021,6 +1148,8 @@ def _ground_field(phrase: str, els: list) -> tuple[Any, list]:
         got = pick([e for e in els if e.role == "AXSearchField"])
         if got is not None:
             return got
+    if not own:
+        return None, []  # a model's, Live's or a host's words: the label as they gave it
     os_hits = [e for e in els if _field_label(e) and uistrings.os_match(phrase, _field_label(e))]
     if len(os_hits) == 1 and _promoted("os_strings"):
         return os_hits[0], []
@@ -1055,7 +1184,7 @@ async def _fill(text: str, field_name: str, c: ToolContext, app: str, replace: b
         return got
     name, pid = got
     els = await asyncio.to_thread(_fields, name, pid)
-    e, several = _ground_field(field_name, els)
+    e, several = _ground_field(field_name, els, _own(c))
     await _log(want="field", stage="lexical" if e is not None else "none", acted=e is not None, n=len(els),
                ambiguous=bool(several), script=_script(field_name), origin=c.origin)  # fmt: skip
     if e is None:
@@ -1081,9 +1210,29 @@ async def _fill(text: str, field_name: str, c: ToolContext, app: str, replace: b
             f"holds, call again with replace=true; to add to it, click at its end and use type_text.{note}",
             ok=False,
         )
+    # A line break in a one-line field or a command line would run or submit it: joined, as
+    # ax_set_value joins it (the same check - naming the field instead of its id is no way around it).
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    joined = "\n" in text and await _one_line_only(e, pid)
+    if joined:
+        text = " ".join(part.strip() for part in text.split("\n") if part.strip())
     out = await asyncio.to_thread(ax.set_el_value, e, text)
     if out.startswith("Error"):
         return ToolOutput(out, ok=False)
     if await asyncio.to_thread(ax.regular, pid):
         apps.set_target(name)
-    return _with_effect(ToolOutput(f"Typed “{text[:60]}” into {shown} in {name}.{note}"), changed=True)
+    how = _joined_note() if joined else ""
+    return _with_effect(ToolOutput(f"Typed “{text[:60]}” into {shown} in {name}{how}.{note}"), changed=True)
+
+
+async def _one_line_only(e: Any, pid: int) -> bool:
+    """ax_set_value's check (tools_ax): would a line break in this field run or submit it?"""
+    from neo2.core.tools.computer import tools_ax
+
+    return await tools_ax._one_line_only(e, pid)
+
+
+def _joined_note() -> str:
+    from neo2.core.tools.computer import tools_ax
+
+    return tools_ax._JOINED

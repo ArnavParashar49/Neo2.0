@@ -87,9 +87,14 @@ MAX_LEN = 100  # UI strings: a button, a menu item, an alert's sentence
 IDLE_S = 30.0  # NEO idle this long before the index is loaded or built
 _VERSION = 1
 _MAX_TABLE = 64 << 20  # a table bigger than this isn't UI text
+# …nor is a dict with more entries than this: the OS's biggest has about 7,000 per language, while a
+# crafted one holds a million in 2 MB (two one-byte references an entry), each a tuple and a decode.
+_MAX_ENTRIES = 50_000
 _APPS_KEPT = 8  # app bundles' tables kept in RAM
 _APP_MAX_FILES = 400
-_APP_MAX_BYTES = 32 << 20
+_APP_MAX_BYTES = 32 << 20  # an app's tables and .strings files read, in all (one past what is left: skipped)
+_APP_MAX_READ = 100_000  # dict entries read in an app's tables, in all (a real app's: under 10,000)
+_STRINGS_MAX_BYTES = 4 << 20  # a .strings file is read this far
 _APP_MAX_DEPTH = 1  # an app's own UI tables sit in its Resources or one folder down, never deeper
 _APP_MAX_ENTRIES = 3000  # files and folders looked at in one bundle's Resources, at most
 _EMPTY_KEPT = 256  # app bundles remembered as having no tables to read
@@ -277,7 +282,7 @@ class _BPlist:
     """Just enough of a binary property list to read part of a big one: an object is decoded only
     when asked for, by its reference, so a table's other languages are never touched."""
 
-    def __init__(self, buf: memoryview) -> None:
+    def __init__(self, buf: memoryview, entries: list[int] | None = None) -> None:
         if len(buf) < 40 or bytes(buf[:8]) != b"bplist00":
             raise ValueError("not a binary plist")
         osz, rsz, n, top, table = struct.unpack(">6xBBQQQ", bytes(buf[-32:]))
@@ -285,6 +290,7 @@ class _BPlist:
         if not (1 <= osz <= 8 and 1 <= rsz <= 8) or n == 0 or top >= n or table + n * osz > end:
             raise ValueError("a broken trailer")
         self.b, self.osz, self.rsz, self.n, self.top, self.table, self.end = buf, osz, rsz, n, top, table, end
+        self.entries = entries  # [dict entries that may still be read]: a budget shared across tables
 
     def _int(self, pos: int, size: int) -> int:
         if pos < 0 or pos + size > self.end:
@@ -326,6 +332,12 @@ class _BPlist:
         start, n = self._count(pos, m & 0xF)
         if start + 2 * n * self.rsz > self.end:
             raise ValueError("out of bounds")
+        if n > _MAX_ENTRIES:
+            raise ValueError("more entries than a table of UI text has")
+        if self.entries is not None:
+            self.entries[0] -= n
+            if self.entries[0] < 0:
+                raise ValueError("more entries than the budget left")
         r = self.rsz
         return [(self._int(start + i * r, r), self._int(start + (n + i) * r, r)) for i in range(n)]
 
@@ -342,17 +354,20 @@ class _BPlist:
         return out
 
 
-def _table_langs(path: str, langs: Iterable[str]) -> tuple[dict[str, str], dict[str, dict[str, str]]]:
-    """(English, {lang: localized}) of one .loctable, decoding nothing else."""
+def _table_langs(
+    path: str, langs: Iterable[str], *, max_bytes: int = _MAX_TABLE, entries: list[int] | None = None
+) -> tuple[dict[str, str], dict[str, dict[str, str]]]:
+    """(English, {lang: localized}) of one .loctable, decoding nothing else. ``max_bytes``: a bigger
+    file isn't read; ``entries``: a budget of dict entries, shared across tables (ValueError past it)."""
     with open(path, "rb") as fh:
         size = os.fstat(fh.fileno()).st_size
-        if size < 40 or size > _MAX_TABLE:
+        if size < 40 or size > min(max_bytes, _MAX_TABLE):
             return {}, {}
         with mmap.mmap(fh.fileno(), 0, access=mmap.ACCESS_READ) as mm:
             view = memoryview(mm)
             p: _BPlist | None = None
             try:
-                p = _BPlist(view)
+                p = _BPlist(view, entries)
                 tops = {p.string(k): v for k, v in p.dict_refs(p.top) or ()}
                 en_ref = next((tops[k] for k in _EN_KEYS if k in tops), None)
                 want = {lang: tops[lang] for lang in langs if lang in tops}
@@ -461,11 +476,18 @@ def _unescape(s: str) -> str:
     return re.sub(r"\\(.)", lambda m: _ESCAPES.get(m.group(1), m.group(1)), s)
 
 
-def _read_strings(path: str) -> dict[str, str]:
-    """A .strings file: a plist (binary or XML), or the old "key" = "value"; text."""
+def _read_strings(path: str, entries: list[int] | None = None) -> dict[str, str]:
+    """A .strings file: a plist (binary or XML), or the old "key" = "value"; text. A binary one is
+    read like a table (its entries within the caps; ``entries``: the app's budget left)."""
     with open(path, "rb") as fh:
-        raw = fh.read(4 << 20)
-    if raw.startswith(b"bplist00") or raw.lstrip().startswith(b"<?xml"):
+        raw = fh.read(_STRINGS_MAX_BYTES)
+    if raw.startswith(b"bplist00"):
+        try:
+            p = _BPlist(memoryview(raw), entries)
+            return p.table_at(p.top)
+        except (ValueError, UnicodeError, struct.error):
+            return {}
+    if raw.lstrip().startswith(b"<?xml"):
         try:
             v = plistlib.loads(raw)
         except Exception:  # noqa: BLE001
@@ -484,14 +506,17 @@ def _bundle_pairs(path: str, langs: tuple[str, ...], max_len: int = MAX_LEN) -> 
     pairs: dict[str, set[str]] = {}
     if not res.is_dir():
         return pairs
-    files, budget = 0, _APP_MAX_BYTES
+    files, budget, entries = 0, _APP_MAX_BYTES, [_APP_MAX_READ]
     for table in _tables([str(res)], max_depth=_APP_MAX_DEPTH, max_entries=_APP_MAX_ENTRIES):
         files += 1
-        if files > _APP_MAX_FILES or budget <= 0:
+        if files > _APP_MAX_FILES or budget <= 0 or entries[0] <= 0:
             return pairs
         try:
-            budget -= os.path.getsize(table)
-            en_tab, loc_tabs = _table_langs(table, langs)
+            size = os.path.getsize(table)
+            if size > budget:
+                continue  # more than is left of the app's budget: never read
+            left, budget = budget, budget - size
+            en_tab, loc_tabs = _table_langs(table, langs, max_bytes=left, entries=entries)
         except (OSError, ValueError, UnicodeError, struct.error, KeyError, BufferError):
             continue
         _add(pairs, en_tab, loc_tabs, max_len)
@@ -507,7 +532,11 @@ def _bundle_pairs(path: str, langs: tuple[str, ...], max_len: int = MAX_LEN) -> 
             if not src.is_file():
                 continue
             try:
-                _add(pairs, _read_strings(str(src)), {lang: _read_strings(str(f))}, max_len)
+                size = sum(min(os.path.getsize(x), _STRINGS_MAX_BYTES) for x in (src, f))
+                if size > budget or entries[0] <= 0:
+                    continue  # (the same budget as the tables')
+                budget -= size
+                _add(pairs, _read_strings(str(src), entries), {lang: _read_strings(str(f), entries)}, max_len)
             except OSError:
                 continue
     return pairs
