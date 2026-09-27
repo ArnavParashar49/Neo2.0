@@ -5,28 +5,26 @@ from __future__ import annotations
 
 import asyncio
 
-from neo2.core.agent.registry import ToolContext
-from neo2.core.tools.computer import apps, ax, gates
+from neo2.core.agent.registry import Effect, ToolContext, ToolOutput, fence
+from neo2.core.tools.computer import apps, ax, gates, wait
 from neo2.core.tools.computer._catalog import _p, tool
 
 
 @tool(
     "ax_tree",
-    "Read the frontmost (or named) app's UI as a text tree of elements with ids, roles, titles, "
-    "values and screen positions. Use this FIRST to see what's on screen — it's fast and exact. "
-    "Element ids (e12) can be used with ax_press, ax_set_value, and click. When it shows little "
-    "(a game board, a map, a canvas), take a screenshot and click at pixel positions in "
-    "it (with its shot id) instead.",
-    _p({"app": {"type": "string", "description": "App name; omit for the frontmost app"}}),
+    ax.AX_TREE_DESCRIPTION,
+    ax.AX_TREE_PARAMS,
     parallel_safe=True,
     category="computer",
     untrusted=True,
     read_only=True,
+    timeout=10.0,
 )
 async def ax_tree(a: dict, c: ToolContext) -> str:
     if err := gates._needs_ax():
         return err
-    return await asyncio.to_thread(ax.snapshot, a.get("app"))
+    # (stopped with the call: a cancelled look ends its walk; a blind brain's has no coordinates)
+    return await ax.tree(a.get("app"), a.get("window"), blind=bool(c.get("blind")))
 
 
 @tool(
@@ -37,11 +35,12 @@ async def ax_tree(a: dict, c: ToolContext) -> str:
     category="computer",
     untrusted=True,
     read_only=True,
+    timeout=10.0,
 )
 async def ax_find(a: dict, c: ToolContext) -> str:
     if err := gates._needs_ax():
         return err
-    return await asyncio.to_thread(ax.find, a["query"], a.get("app"))
+    return await ax.find_async(a["query"], a.get("app"), blind=bool(c.get("blind")))
 
 
 def _element_pid(e: ax.Element) -> int:
@@ -54,8 +53,9 @@ def _element_pid(e: ax.Element) -> int:
     _p({"id": {"type": "string"}}, ["id"]),
     category="computer",
     quiet=True,
+    timeout=10.0,
 )
-async def ax_press(a: dict, c: ToolContext) -> str:
+async def ax_press(a: dict, c: ToolContext) -> str | ToolOutput:
     if err := gates._needs_ax():
         return err
     e = ax.get(str(a.get("id") or ""))  # resolved once: the element gated is the element pressed
@@ -69,13 +69,22 @@ async def ax_press(a: dict, c: ToolContext) -> str:
         return gates._protected_out()
     if gate := await gates._ask_first("ax_press", a, e.title or e.value, owner):
         return gate
-    before = await gates._watch(c, pid, [])
+    # The look before a press a model chose (the user's own commands aren't second-guessed: they
+    # are watching): the element's state and the scene, then watched until the first change.
+    watch = await asyncio.to_thread(ax.press_watch, e, pid) if c.origin == "agent" else None
     out = await asyncio.to_thread(ax.press_el, e)
     if not out.startswith("Error") and owner and await asyncio.to_thread(ax.regular, pid):
         apps.set_target(owner)  # "press the field, then type": the typing goes to that app
-    if before is not None and not out.startswith("Error"):
-        out += await gates._changes(before, pid, c)
-    return out
+    effect = None
+    if watch is not None and not out.startswith("Error"):
+        ch = await wait.in_thread(ax.press_change, watch, e)
+        effect = Effect(changed=ch.changed, scene_changed=ch.scene_changed, sheet=ch.sheet, looked=False)
+        if ch.changed:
+            out += " " + ch.said
+            if ch.details:
+                gates._taint(c, "screen")
+                out += "\n" + fence("screen", ch.details)
+    return ToolOutput(out, ok=not out.startswith("Error"), effect=effect)
 
 
 @tool(
@@ -85,6 +94,7 @@ async def ax_press(a: dict, c: ToolContext) -> str:
     _p({"id": {"type": "string"}, "value": {"type": "string"}}, ["id", "value"]),
     category="computer",
     quiet=True,
+    timeout=10.0,
 )
 async def ax_set_value(a: dict, c: ToolContext) -> str:
     if err := gates._needs_input():

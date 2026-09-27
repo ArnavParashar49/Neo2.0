@@ -44,6 +44,16 @@ _INPUT_TOOLS = ("type_text", "dictate", "hotkey", "click_text", "ax_set_value")
 _UNDO_WINDOW_S = 120.0
 
 
+def _layout() -> None:
+    """The keyboard layout's letter keys, read afresh when it changed (cheap when it didn't): here,
+    on the event loop's thread, the one where macOS allows reading it; a chord sent from a worker
+    thread then presses the key that types its letter on this layout (⌘Z on AZERTY)."""
+    try:
+        inp.refresh_layout()
+    except Exception:  # noqa: BLE001 - can't read it: the US positions stay
+        pass
+
+
 async def _ensure_text_focus() -> tuple[str | None, bool]:
     """Put the keyboard focus somewhere typeable in the front window of NEO's target app.
 
@@ -58,6 +68,7 @@ async def _ensure_text_focus() -> tuple[str | None, bool]:
     area = await asyncio.to_thread(ax.main_text_area)
     created = False
     if area is None and await asyncio.to_thread(gates._doc_like, app, pid):
+        _layout()
         await asyncio.to_thread(inp.hotkey, "cmd+n")  # the front window shows no editor at all: a fresh note/document
         created = True
         await asyncio.sleep(0.7)
@@ -83,6 +94,7 @@ async def _ensure_text_focus() -> tuple[str | None, bool]:
         await asyncio.sleep(0.2)
         if not await asyncio.to_thread(ax.focused_editable):
             return f"Error: I couldn't put the cursor in {app or 'the front app'}'s text — click into it first.", created
+    _layout()
     await asyncio.to_thread(inp.hotkey, "cmd+down")  # dictation appends at the end
     return None, created
 
@@ -253,6 +265,7 @@ async def hotkey(a: dict, c: ToolContext) -> str:
     if gate := await gates._ask_before_keys(a, keys, name, c, pid):
         return gate
     before = await gates._watch(c, pid, []) if _may_change_scene(keys) else None
+    _layout()
     out = await asyncio.to_thread(inp.hotkey, keys)
     if before is not None and not out.startswith("Error"):
         out += await gates._changes(before, pid, c)  # ⌘N may open a window, or a sheet that waits for an answer
@@ -274,6 +287,7 @@ async def _new_note(c: ToolContext) -> str:
     item = await asyncio.to_thread(axkit.menu_item, pid, "n", 0) if pid else None
     if item and await asyncio.to_thread(axkit.perform, item[0], "AXPress"):
         return f"New note in {app.name}."
+    _layout()
     return await asyncio.to_thread(inp.hotkey, "cmd+n")
 
 

@@ -51,7 +51,7 @@ __all__ = [
 KIND = "open_app"
 OPEN_S = 15.0  # `open` returns once LaunchServices has taken the request
 PID_S = 5.0  # a just-launched app has registered its process by then
-SETTLE_S = 0.6  # a file or a link's app has come to the front by then
+SETTLE_S = 0.6  # at most this long for a file or a link's app to come to the front (polled)
 # "mailto:x", "x-help:y": a link in some scheme (but "host:8080" is no scheme)
 _SCHEME_URL = re.compile(r"^[a-z][a-z0-9+.-]*:(?!\d)\S*$", re.I)
 _URL_IN_TEXT = re.compile(r"https?://[^\s,;)]+", re.I)
@@ -199,13 +199,9 @@ async def start(app: App) -> str:
 async def wait_pid(bundle_id: str, wait_s: float = PID_S) -> int | None:
     """The app's pid once it runs (None if it hasn't started within ``wait_s``)."""
     from neo2.core.decide import axkit
+    from neo2.core.tools.computer import wait
 
-    deadline = time.monotonic() + wait_s
-    while True:
-        pid = await asyncio.to_thread(axkit.pid_of, bundle_id)
-        if pid or time.monotonic() >= deadline:
-            return pid
-        await asyncio.sleep(0.2)
+    return await wait.until(lambda: axkit.pid_of(bundle_id), wait_s, every=0.05, thread=True) or None
 
 
 @pooled
@@ -236,11 +232,12 @@ async def _open_given(ch: Choice) -> Result:
     if ch.url.lower().startswith(("http://", "https://")):
         text = await apps.open_url(ch.url)
         return Result(text, not text.startswith("Error"))
+    before = await asyncio.to_thread(apps.front_name)
     code, err = await _open([ch.url])
     if code:
         return Result(f"Error: couldn't open {ch.target}: {err or 'macOS refused'}", False)
-    await asyncio.sleep(SETTLE_S)  # then whatever took it is where "type ..." goes next
-    apps.set_target(await asyncio.to_thread(apps.front_name))
+    # then whatever took it is where "type ..." goes next: done as soon as it is in front
+    apps.set_target(await apps.settle_opened(ch.url, before, SETTLE_S, SETTLE_S))
     return Result(f"Opened {ch.target}", True)
 
 

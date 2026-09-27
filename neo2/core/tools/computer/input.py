@@ -4,15 +4,19 @@ space the AX tree uses. A screenshot's pixels map onto it by the transform its n
 
 from __future__ import annotations
 
+import ctypes
 import math
 import re
+import threading
 import time
+import unicodedata
 from collections.abc import Callable
 from typing import Any
 
 import Quartz as Q
 
 from neo2.core import effects
+from neo2.core.tools.computer import wait
 
 _KEYCODES = {
     "a": 0,
@@ -91,6 +95,15 @@ _KEYCODES = {
     "f10": 109,
     "f11": 103,
     "f12": 111,
+    "f13": 105,
+    "f14": 107,
+    "f15": 113,
+    "f16": 106,
+    "f17": 64,
+    "f18": 79,
+    "f19": 80,
+    "f20": 90,
+    "help": 114,
     "capslock": 57,
 }
 _MODS = {
@@ -108,7 +121,17 @@ _MOD_ALIASES = {
     "ctrl": "ctrl", "control": "ctrl", "ctl": "ctrl", "⌃": "ctrl",
     "fn": "fn", "function": "fn",
 }  # fmt: skip
-_KEY_ALIASES = {"plus": "+", "minus": "-", "equals": "=", "esc": "escape", "enter": "return", "del": "delete"}
+_KEY_ALIASES = {
+    "plus": "+", "minus": "-", "equals": "=", "esc": "escape", "enter": "return", "del": "delete",
+    # the names models write keys by
+    "spacebar": "space", "comma": ",", "period": ".", "dot": ".", "slash": "/", "backslash": "\\",
+    "semicolon": ";", "quote": "'", "apostrophe": "'", "backquote": "`", "backtick": "`", "grave": "`",
+    "leftbracket": "[", "rightbracket": "]", "bracketleft": "[", "bracketright": "]",
+    "pgup": "pageup", "pgdn": "pagedown", "arrowup": "up", "arrowdown": "down", "arrowleft": "left",
+    "arrowright": "right", "uparrow": "up", "downarrow": "down", "leftarrow": "left", "rightarrow": "right",
+    "fwddelete": "forwarddelete", "forwarddel": "forwarddelete", "bksp": "backspace", "ret": "return",
+    "cr": "return", "caps": "capslock",
+}  # fmt: skip
 # A symbol typed with shift on the (US) key that carries it: ⌘⇧} is ⌘⇧], "cmd+?" is ⌘⇧/.
 _SHIFTED = {
     "!": "1", "@": "2", "#": "3", "$": "4", "%": "5", "^": "6", "&": "7", "*": "8", "(": "9", ")": "0",
@@ -120,9 +143,23 @@ _SHIFTED = {
 # is posted: the watcher marks it as NEO's own and raises instead when it wouldn't reach the test
 # window, or when the user has taken over the mouse or keyboard. None the rest of the time.
 _watch: Callable[[Any], None] | None = None
+_sent = 0  # events posted by this process (a look taken before one may be out of date after it)
+_TIME = time  # (a test that skips the input pacing swaps this module's `time` for its own)
+
+
+def _pause(s: float) -> None:
+    """The input's own pacing: a precise sleep (no ~25% overshoot) on the wait clock."""
+    if s <= 0:
+        return
+    if time is not _TIME:
+        time.sleep(s)
+        return
+    wait.precise_sleep(s)
 
 
 def _post(ev) -> None:
+    global _sent
+    _sent += 1
     if _watch is not None:
         _watch(ev)
     effects.guard("input", "post a keyboard or mouse event", via=Q.CGEventPost)
@@ -132,7 +169,10 @@ def _post(ev) -> None:
 def _post_to_pid(pid: int, ev) -> None:
     """An event for one app only (CGEventPostToPid: it reaches that app in front or not), through
     the same watcher and effects switch as _post — the watcher reads where it goes off the event
-    (kCGEventTargetUnixProcessID) — and never into NEO's own processes or a protected app."""
+    (kCGEventTargetUnixProcessID) — and never into NEO's own processes or a protected app. Counted
+    like _post's (a look kept from before it is out of date)."""
+    global _sent
+    _sent += 1
     try:
         Q.CGEventSetIntegerValueField(ev, Q.kCGEventTargetUnixProcessID, int(pid))
     except Exception:  # noqa: BLE001 - (a test's stand-in event)
@@ -203,6 +243,9 @@ def _buttons(button: str):
 
 
 _COUNT_WORDS = {1: "", 2: "Double-", 3: "Triple-"}
+_MOVE_SETTLE_S = 0.02  # the pointer rests where it lands before the button goes down
+_CLICK_GAP_S = 0.05  # between the clicks of a double or triple click
+_SCROLL_SETTLE_S = 0.015  # the pointer rests where the wheel turns
 
 
 def click_count(count) -> int:
@@ -227,8 +270,10 @@ def click(x: float, y: float, *, button: str = "left", count: int = 1, mods=()) 
     flags = mods_flags(mods)
     down, up, btn = _buttons(button)
     move(x, y)
-    time.sleep(0.02)
+    _pause(_MOVE_SETTLE_S)
     for i in range(1, count + 1):
+        if i > 1:
+            _pause(_CLICK_GAP_S)  # (between the clicks of a double click; none after the last)
         d = Q.CGEventCreateMouseEvent(None, down, (x, y), btn)
         u = Q.CGEventCreateMouseEvent(None, up, (x, y), btn)
         Q.CGEventSetIntegerValueField(d, Q.kCGMouseEventClickState, i)
@@ -238,7 +283,6 @@ def click(x: float, y: float, *, button: str = "left", count: int = 1, mods=()) 
             Q.CGEventSetFlags(u, flags)
         _post(d)
         _post(u)
-        time.sleep(0.05)
     return f"{_COUNT_WORDS[count]}{button.capitalize()}-clicked at ({int(x)}, {int(y)})"
 
 
@@ -249,7 +293,9 @@ _DRAG_SETTLE_S = 0.05
 _DRAG_HOLD_S = 0.12
 _DRAG_FIRST_PT = 4.0
 _DRAG_STEPS = 20
-_DRAG_S = 0.4
+_DRAG_S = 0.4  # at most this long on the way…
+_DRAG_MIN_S = 0.2  # …at least this long…
+_DRAG_PT_PER_S = 1200.0  # …at about this speed in between
 _DRAG_REST_S = 0.08
 
 
@@ -257,26 +303,28 @@ def drag(x1: float, y1: float, x2: float, y2: float, steps: int = _DRAG_STEPS) -
     x1, y1, x2, y2 = _num(x1, "x1"), _num(y1, "y1"), _num(x2, "x2"), _num(y2, "y2")
     steps = max(1, int(steps))
     move(x1, y1)
-    time.sleep(_DRAG_SETTLE_S)
+    _pause(_DRAG_SETTLE_S)
     at = (x1, y1)
     d = Q.CGEventCreateMouseEvent(None, Q.kCGEventLeftMouseDown, at, Q.kCGMouseButtonLeft)
     Q.CGEventSetIntegerValueField(d, Q.kCGMouseEventClickState, 1)
     _post(d)
     try:  # once the button is down, it always comes up again — whatever goes wrong on the way
-        time.sleep(_DRAG_HOLD_S)
+        _pause(_DRAG_HOLD_S)
         dx, dy = x2 - x1, y2 - y1
         dist = math.hypot(dx, dy)
         points = []
         if dist > _DRAG_FIRST_PT * 2:
             points.append((x1 + dx / dist * _DRAG_FIRST_PT, y1 + dy / dist * _DRAG_FIRST_PT))
         points += [(x1 + dx * i / steps, y1 + dy * i / steps) for i in range(1, steps + 1)]
+        # a human pace for the distance: a short drag isn't dragged out as long as a long one
+        span = min(_DRAG_S, max(_DRAG_MIN_S, dist / _DRAG_PT_PER_S))
         for p in points:
             ev = Q.CGEventCreateMouseEvent(None, Q.kCGEventLeftMouseDragged, p, Q.kCGMouseButtonLeft)
             Q.CGEventSetIntegerValueField(ev, Q.kCGMouseEventClickState, 1)
             _post(ev)
             at = p
-            time.sleep(_DRAG_S / len(points))
-        time.sleep(_DRAG_REST_S)
+            _pause(span / len(points))
+        _pause(_DRAG_REST_S)
     finally:
         u = Q.CGEventCreateMouseEvent(None, Q.kCGEventLeftMouseUp, at, Q.kCGMouseButtonLeft)
         Q.CGEventSetIntegerValueField(u, Q.kCGMouseEventClickState, 1)
@@ -285,26 +333,204 @@ def drag(x1: float, y1: float, x2: float, y2: float, steps: int = _DRAG_STEPS) -
 
 
 def scroll(x: float, y: float, dy: int = -5, dx: int = 0) -> str:
+    """Turn the wheel at a screen point: the pointer moves there first, and the wheel event itself
+    carries the point (an event without one is taken where the pointer was a moment before)."""
     x, y = _num(x, "x"), _num(y, "y")
     dy, dx = int(_num(dy, "dy")), int(_num(dx, "dx"))
     move(x, y)
-    _post(Q.CGEventCreateScrollWheelEvent(None, Q.kCGScrollEventUnitLine, 2, dy, dx))
+    _pause(_SCROLL_SETTLE_S)
+    ev = Q.CGEventCreateScrollWheelEvent(None, Q.kCGScrollEventUnitLine, 2, dy, dx)
+    place = getattr(Q, "CGEventSetLocation", None)  # (a stand-in Quartz may not place events)
+    if place is not None:
+        place(ev, (x, y))
+    _post(ev)
     return f"Scrolled {'down' if dy < 0 else 'up'} {abs(dy)} at ({int(x)},{int(y)})"
 
 
-def type_text(text: str, *, chunk: int = 20, delay: float = 0.01) -> str:
-    """Type Unicode text into the focused element (keyboard-layout independent)."""
-    for i in range(0, len(text), chunk):
-        piece = text[i : i + chunk]  # slicing by code point never splits a surrogate pair
-        n16 = len(piece.encode("utf-16-le")) // 2  # CG wants UTF-16 unit count, not code points
+# ---- text: whole characters, at most 20 UTF-16 units an event ------------------------------------------
+_CHUNK_UNITS = 20  # CGEventKeyboardSetUnicodeString takes at most this many UTF-16 units
+
+
+def _units(s: str) -> int:
+    return len(s.encode("utf-16-le")) // 2
+
+
+def _extends(c: str) -> bool:
+    """A character that belongs to the one before it: a combining mark (a vowel sign, a nukta, an
+    accent), a variation selector, an emoji skin tone, a tag."""
+    o = ord(c)
+    return (
+        unicodedata.category(c) in ("Mn", "Mc", "Me")
+        or 0xFE00 <= o <= 0xFE0F
+        or 0x1F3FB <= o <= 0x1F3FF
+        or 0xE0020 <= o <= 0xE007F
+        or 0xE0100 <= o <= 0xE01EF
+    )
+
+
+def _regional(c: str) -> bool:
+    return 0x1F1E6 <= ord(c) <= 0x1F1FF
+
+
+def clusters(text: str) -> list[str]:
+    """The text as the characters a person sees (grapheme clusters, closely enough): a letter with
+    its marks, a Devanagari conjunct (joined by a virama), an emoji with its skin tone or its ZWJ
+    family, a flag's two letters."""
+    out: list[str] = []
+    i, n = 0, len(text)
+    while i < n:
+        j = i + 1
+        if _regional(text[i]) and j < n and _regional(text[j]):
+            j += 1
+        while j < n:
+            c = text[j]
+            if _extends(c):
+                j += 1
+            elif c == "\u200d" and j + 1 < n:  # a zero-width joiner joins the next one on
+                j += 2
+            elif unicodedata.combining(text[j - 1]) == 9 and unicodedata.category(c) == "Lo":
+                j += 1  # after a virama: the next consonant is the same conjunct
+            else:
+                break
+        out.append(text[i:j])
+        i = j
+    return out
+
+
+def chunks(text: str, units: int = _CHUNK_UNITS) -> list[str]:
+    """``text`` in pieces of at most ``units`` UTF-16 units each, never splitting a character a
+    person sees (one longer than that alone is split between code points)."""
+    out: list[str] = []
+    cur, n = "", 0
+    for g in clusters(text):
+        u = _units(g)
+        if u > units:  # a very long cluster: code points, never half a surrogate pair
+            if cur:
+                out.append(cur)
+                cur, n = "", 0
+            for ch in g:
+                cu = _units(ch)
+                if n + cu > units:
+                    out.append(cur)
+                    cur, n = "", 0
+                cur, n = cur + ch, n + cu
+            continue
+        if n + u > units:
+            out.append(cur)
+            cur, n = "", 0
+        cur, n = cur + g, n + u
+    if cur:
+        out.append(cur)
+    return out
+
+
+def type_text(text: str, *, chunk: int = _CHUNK_UNITS, delay: float = 0.01) -> str:
+    """Type Unicode text into the focused element (keyboard-layout independent), in pieces of at
+    most ``chunk`` UTF-16 units that never split a character."""
+    pieces = chunks(text, max(1, min(int(chunk), _CHUNK_UNITS)))
+    for k, piece in enumerate(pieces):
+        n16 = _units(piece)
         d = Q.CGEventCreateKeyboardEvent(None, 0, True)
         Q.CGEventKeyboardSetUnicodeString(d, n16, piece)
         _post(d)
         u = Q.CGEventCreateKeyboardEvent(None, 0, False)
         Q.CGEventKeyboardSetUnicodeString(u, n16, piece)
         _post(u)
-        time.sleep(delay)
+        if k < len(pieces) - 1:
+            _pause(delay)
     return f"Typed {len(text)} characters"
+
+
+# ---- the keyboard layout: where a letter's key is --------------------------------------------------------
+# A shortcut names a character ("cmd+z"), and apps match it by the character the key types in the
+# current layout: on AZERTY, ⌘Z is the key US keyboards call W. The letter keys are read from the
+# current ASCII-capable layout (UCKeyTranslate); the Text Input Sources calls behind it must run on
+# the main thread (macOS asserts it), so :func:`refresh_layout` reads them there and a hotkey on a
+# worker thread uses what it read. Named keys (return, arrows, F-keys) are the same on every layout.
+_layout: tuple[str, dict[str, int]] | None = None
+_layout_lock = threading.Lock()
+
+
+def _layout_id() -> str:
+    """The current keyboard layout's id, from the preferences (safe on any thread)."""
+    try:
+        from CoreFoundation import CFPreferencesCopyAppValue
+
+        return str(CFPreferencesCopyAppValue("AppleCurrentKeyboardLayoutInputSourceID", "com.apple.HIToolbox") or "")
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _tis_letters() -> tuple[str, dict[str, int]] | None:
+    """(layout id, character → keycode) of the current ASCII-capable layout. Main thread only."""
+    cf = ctypes.CDLL("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
+    carbon = ctypes.CDLL("/System/Library/Frameworks/Carbon.framework/Carbon")
+    cf.CFDataGetBytePtr.restype, cf.CFDataGetBytePtr.argtypes = ctypes.c_void_p, [ctypes.c_void_p]
+    cf.CFRelease.argtypes = [ctypes.c_void_p]
+    cf.CFStringGetCString.restype = ctypes.c_bool
+    cf.CFStringGetCString.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_long, ctypes.c_uint32]
+    carbon.TISCopyCurrentASCIICapableKeyboardLayoutInputSource.restype = ctypes.c_void_p
+    carbon.TISGetInputSourceProperty.restype = ctypes.c_void_p
+    carbon.TISGetInputSourceProperty.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    carbon.LMGetKbdType.restype = ctypes.c_uint8
+    carbon.UCKeyTranslate.restype = ctypes.c_int32
+    carbon.UCKeyTranslate.argtypes = [
+        ctypes.c_void_p, ctypes.c_uint16, ctypes.c_uint16, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_uint32,
+        ctypes.POINTER(ctypes.c_uint32), ctypes.c_ulong, ctypes.POINTER(ctypes.c_ulong), ctypes.c_void_p,
+    ]  # fmt: skip
+    src = carbon.TISCopyCurrentASCIICapableKeyboardLayoutInputSource()
+    if not src:
+        return None
+    try:
+        data = carbon.TISGetInputSourceProperty(src, ctypes.c_void_p.in_dll(carbon, "kTISPropertyUnicodeKeyLayoutData"))
+        sid = carbon.TISGetInputSourceProperty(src, ctypes.c_void_p.in_dll(carbon, "kTISPropertyInputSourceID"))
+        if not data:
+            return None
+        buf = ctypes.create_string_buffer(256)
+        name = buf.value.decode() if sid and cf.CFStringGetCString(sid, buf, 256, 0x08000100) else ""
+        layout, kbd = cf.CFDataGetBytePtr(data), carbon.LMGetKbdType()
+        keys: dict[str, int] = {}
+        for code in range(128):
+            dead, n, out = ctypes.c_uint32(0), ctypes.c_ulong(0), (ctypes.c_uint16 * 4)()
+            # kUCKeyActionDisplay, no modifiers, no dead keys
+            if carbon.UCKeyTranslate(layout, code, 3, 0, kbd, 1, ctypes.byref(dead), 4, ctypes.byref(n), out) != 0:
+                continue
+            if n.value == 1 and (ch := chr(out[0]).lower()).isprintable() and not ch.isspace():
+                keys.setdefault(ch, code)
+        return name, keys
+    finally:
+        cf.CFRelease(src)
+
+
+def refresh_layout() -> bool:
+    """Read the current keyboard layout's character keys — on the main thread only (the event
+    loop's), where the Text Input Sources calls may run; elsewhere nothing is read (False)."""
+    global _layout
+    if threading.current_thread() is not threading.main_thread():
+        return False
+    now = _layout_id()
+    with _layout_lock:
+        if _layout is not None and _layout[0] == now and now:
+            return True
+    try:
+        got = _tis_letters()
+    except Exception:  # noqa: BLE001 - can't read it: the US positions stay
+        got = None
+    if not got or len(got[1]) < 30:
+        return False
+    with _layout_lock:
+        _layout = (now or got[0], got[1])
+    return True
+
+
+def keycode(key: str) -> int:
+    """The virtual keycode that types ``key`` (a named key, or a character) on the current layout."""
+    if len(key) == 1:
+        with _layout_lock:
+            got = _layout
+        if got is not None and key in got[1] and (not got[0] or got[0] == _layout_id()):
+            return got[1][key]
+    return _KEYCODES[key]
 
 
 def parse_chord(combo: str) -> tuple[int, str]:
@@ -318,11 +544,14 @@ def parse_chord(combo: str) -> tuple[int, str]:
     if s.endswith("++"):
         s = s[:-2] + "+plus"
     parts = [p for p in s.split("+") if p]
-    if len(parts) == 1 and "-" in parts[0].strip("-"):
-        parts = [p for p in parts[0].split("-") if p]  # "ctrl-shift-tab"
+    joined = parts[0].lower().replace("-", "").replace("_", "") if len(parts) == 1 else ""
+    if len(parts) == 1 and "-" in parts[0].strip("-") and joined not in _KEYCODES and joined not in _KEY_ALIASES:
+        parts = [p for p in parts[0].split("-") if p]  # "ctrl-shift-tab" (but "page-down" is one key)
     flags, key = 0, None
     for raw in parts:
         p = raw.lower()
+        if len(p) > 1 and p not in _KEYCODES and p not in _KEY_ALIASES:
+            p = p.replace("_", "").replace("-", "")  # "page_down", "arrow-down"
         mod = _MOD_ALIASES.get(p)
         if mod is not None:
             flags |= _MODS[mod]
@@ -341,6 +570,9 @@ def parse_chord(combo: str) -> tuple[int, str]:
     return flags, key
 
 
+_KEY_HOLD_S = 0.02  # a key is held this long (some apps miss a press with no time between)
+
+
 def hotkey(combo: str) -> str:
     """Press a key chord like 'cmd+shift+s', 'return', 'cmd+space'. An unknown key or modifier is
     an error — never a bare key pressed without the modifiers that were asked for."""
@@ -348,12 +580,12 @@ def hotkey(combo: str) -> str:
         flags, key = parse_chord(combo)
     except ValueError as e:
         return f"Error: {e}"
-    code = _KEYCODES[key]
+    code = keycode(key)
     d = Q.CGEventCreateKeyboardEvent(None, code, True)
     u = Q.CGEventCreateKeyboardEvent(None, code, False)
     Q.CGEventSetFlags(d, flags)
     Q.CGEventSetFlags(u, flags)
     _post(d)
-    time.sleep(0.02)
+    _pause(_KEY_HOLD_S)
     _post(u)
     return f"Pressed {combo}"

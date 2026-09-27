@@ -117,6 +117,17 @@ def _app_mode(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _us_keyboard_layout(monkeypatch):
+    """Keys are pressed where a US layout has them, whatever this Mac's keyboard layout is: the
+    suite never reads the real one (a test that means a layout sets it)."""
+    try:
+        from neo2.core.tools.computer import input as inp
+    except ImportError:  # no macOS frameworks: nothing to fake
+        return
+    monkeypatch.setattr(inp, "_tis_letters", lambda: None)
+
+
+@pytest.fixture(autouse=True)
 def _accessibility_on(monkeypatch):
     """The suite never depends on whether this Mac granted the test runner Accessibility: it is
     on, and a test that needs it off says so (monkeypatching ax.is_trusted)."""
