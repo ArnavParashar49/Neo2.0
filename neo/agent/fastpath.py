@@ -143,8 +143,10 @@ def _plan(text: str, first_index: int) -> list[Step] | None:
 # ---- the by-utterance lane -------------------------------------------------------------------
 # A tool registered with ``by_utterance=True`` (click_text, menu_command…) can take the user's whole
 # request and find its target by meaning (neo.tools.computer.resolve): no model call to fill in a
-# label. Only for the user's own words: a model's (the agent loop, an embedding host's Session.handle)
-# and Gemini Live's relays never drive a by-meaning press; they keep the exact regex fast paths.
+# label. Only for the user's own words in NEO.app: a model's (the agent loop) and Gemini Live's
+# relays never drive a by-meaning press, and neither does an embedding host (library mode: an
+# AsyncAgent.ask defaults to origin "user", but the host's settings don't carry the resolver's keys);
+# they keep the exact regex fast paths. ``settings.resolver = "off"`` closes the lane too.
 
 
 def _by_utterance_tools() -> dict[str, RegisteredTool]:
@@ -164,21 +166,28 @@ def by_utterance(text: str, *, origin: str, decision=None) -> Step | None:
     """One step for the whole request — ``(tool, {"utterance": text, "label": <the control's name>})``
     — when a by-utterance tool should take it without a model, else None.
 
-    * ``origin`` must be "user" (the user's own words); anything else → None.
+    * ``origin`` must be "user" (the user's own words); anything else → None. Never in library mode,
+      never with ``settings.resolver = "off"``.
+    * Never a question (a trailing "?" read before any punctuation is trimmed, a wh-word or
+      auxiliary first, kya / क्या …), a key ("press enter") or a vague name ("click it"), whoever
+      picked the tool.
     * The reflex picked a by-utterance tool (``decision.intent == "quick_action"``, ``decision.tool``,
       ``tool_p`` at the reflex_tool_floor) → that tool.
     * Or the words themselves point at a control (phrases.pointing: "click X", "press X" that isn't a
-      key, "X pe click karo", "X dabao", "X पर क्लिक करो"…), one clause, not a question, and the
-      reflex doesn't call it conversation → the click tool (the by-utterance tool that takes a press).
+      key, "X pe click karo", "X dabao", "X पर क्लिक करो"…), one clause, and the reflex doesn't call
+      it conversation → the click tool (the by-utterance tool that takes a press).
     """
     if origin != "user":
         return None
-    text = (text or "").strip(_EDGE)
+    raw = " ".join((text or "").split())
     tools = _by_utterance_tools()
-    if not text or not tools:
+    if not raw or not tools or _closed():
         return None
     from neo.tools.computer import phrases
 
+    if phrases.is_question(raw):
+        return None  # decided on the words as said: "click send?" asks, it doesn't press
+    text = raw.strip(_EDGE)
     intent = str(getattr(decision, "intent", "") or "")
     picked = str(getattr(decision, "tool", "") or "")
     p = float(getattr(decision, "tool_p", 0.0) or 0.0)
@@ -186,13 +195,28 @@ def by_utterance(text: str, *, origin: str, decision=None) -> Step | None:
     if intent == "quick_action" and picked in tools and p >= _tool_floor():
         if SPLIT.search(text) and core is None:
             return None  # two things ("reply and send"): the agent's job
-        return picked, {"utterance": text, "label": core or phrases.strip_frame(text)}
+        name = core or phrases.strip_frame(text)
+        if not phrases.nameable(name):
+            return None  # a key ("press enter"), or nothing named ("click it", "is button pe click karo")
+        return picked, {"utterance": text, "label": name}
     if core is None or intent == "chat":
         return None
     press = [n for n, t in tools.items() if _takes(t, "press")]
     if not press:
         return None
     return press[0], {"utterance": text, "label": core}
+
+
+def _closed() -> bool:
+    """The lane is shut: an embedding host's request (library mode), or ``settings.resolver = "off"``
+    (nothing is pressed from words by itself). Can't tell → shut."""
+    try:
+        from neo import runtime
+        from neo.tools.computer import resolve
+
+        return runtime.library_bound() or resolve.mode() == "off"
+    except Exception:  # noqa: BLE001
+        return True
 
 
 def _takes(t: RegisteredTool, want: str) -> bool:

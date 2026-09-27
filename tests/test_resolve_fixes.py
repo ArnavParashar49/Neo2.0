@@ -193,7 +193,7 @@ def test_a_slow_minilm_in_shadow_hands_off_within_the_budget():
     res = rs.resolve("start the new game", cands(*[f"Label {i}" for i in range(50)]), embed=slow_embed, choose=lambda r, o, w: (None, 0.0), index=False, log_it=False)
     dt = time.perf_counter() - t0
     release.set()
-    assert isinstance(res, rs.Ambiguous) and dt < rs.BUDGET_S + 0.15
+    assert isinstance(res, rs.Ambiguous) and dt < rs.SHADOW_WAIT_S + 0.15 < rs.BUDGET_S
     assert res.shadow.get("meaning") == "late"
 
 

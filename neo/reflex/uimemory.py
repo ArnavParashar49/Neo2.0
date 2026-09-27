@@ -3,8 +3,9 @@
 A *recipe* is the steps one request took in one app — press "New Game" in the menu bar, then
 "Start" in the sheet it opened — with what each step was seen to do (a sheet with these buttons
 opened, the sheet closed, the title changed, the focus moved). It is kept only when the outcome
-ledger (neo.reflex.outcomes) settles that request as verified: every step changed something, the
-user didn't stop it, correct it or decline a question.
+ledger (neo.reflex.outcomes) settles that request as verified: every step was seen to change
+something (an unknown effect is no recipe), the user didn't stop it, correct it or decline a
+question.
 
 **Key.** The owning app's bundle id (evidence from the element's process, never a name), the
 script (Devanagari or Latin) and the request's reflex embedding, centred on the head's mean as
@@ -14,7 +15,8 @@ hand only the same words (skeleton, normalised) match.
 **Replay** (:func:`replay`) runs the steps through callables the caller gives it — the tool
 handlers, so every press still passes the gate and the protected-app rules — and checks each
 step's effect. At the first mismatch it stops and hands over "did X, expected Y, saw Z"; two
-failed replays in a row retire the recipe until it works again from the model's run.
+failed replays in a row retire the recipe until it works again from the model's run. A recipe is
+recalled only for the user's own words (``origin == "user"``): a model's or Live's never replay one.
 
 **Aliases.** When the model chose a control from the resolver's shortlist and that press was
 verified, the wording (stripped of its click frame) is remembered for that app: next time the
@@ -22,7 +24,9 @@ resolver's alias stage finds it without the model.
 
 **Privacy.** Only skeleton text (learn.skeleton: never a message's or a note's body), bundle ids and
 UI chrome labels (buttons, menu items, tabs…, never rows, cells, static text or field values) are
-written, to ``ui_memory.json`` (0600). Embeddings stay in RAM (rebuilt at idle, as memory.py
+written, to ``ui_memory.json`` (0600). What a step saw is kept as facts: that the title or the
+focus changed (never the title or the focused text: a document's name, a message), whether a sheet
+opened or closed, and a sheet's controls by role with the chrome ones' labels only. Embeddings stay in RAM (rebuilt at idle, as memory.py
 does). NEO_LEARN=off turns it off; the privacy erase deletes it; recipes unused for 180 days go;
 at most 500. Not in library mode.
 """
@@ -83,6 +87,9 @@ _CHROME = frozenset(
      "AXMenuButton", "AXDisclosureTriangle", "AXSegment", "AXToolbarButton"}
 )  # fmt: skip
 _EXPECT = ("sheet", "sheet_closed", "title", "focus", "changed")
+_FLAGS = ("sheet_closed", "changed")  # facts: kept as booleans
+_CHANGED = ("title", "focus")  # kept only as "it changed" (their text can be the user's content)
+_SHEET_MAX = 12
 
 
 @dataclass
@@ -121,17 +128,31 @@ class Step:
             return None
         if kind == "key" and not keys:
             return None
-        exp = {k: _plain(v) for k, v in (d.get("expect") or {}).items() if k in _EXPECT}
+        exp = {k: _fact(k, v) for k, v in (d.get("expect") or {}).items() if k in _EXPECT}
         return cls(kind, role, label, path, keys, {k: v for k, v in exp.items() if v is not None})
 
 
-def _plain(v: Any) -> Any:
-    if isinstance(v, (bool, int, float)):
-        return v
-    if isinstance(v, str):
-        return v[:80]
-    if isinstance(v, (list, tuple)):
-        return [str(x)[:40] for x in v][:8]
+def _fact(key: str, v: Any) -> Any:
+    """What a step saw, as it may be kept: booleans for the flags; "it changed" for a title or the
+    focus (their text is never kept); a sheet's controls by role, with a label only on UI chrome
+    (a plain string can't say what it is: only that something was there)."""
+    if key in _FLAGS:
+        return bool(v) if isinstance(v, (bool, int)) else None
+    if key in _CHANGED:
+        if isinstance(v, bool):
+            return v
+        return True if isinstance(v, str) and v.strip() else None
+    if key == "sheet":
+        if isinstance(v, bool):
+            return v
+        if not isinstance(v, (list, tuple)):
+            return None
+        out: list[dict[str, str]] = []
+        for x in list(v)[:_SHEET_MAX]:
+            role = str(x.get("role", "") or "")[:40] if isinstance(x, dict) else ""
+            label = " ".join(str(x.get("label", "") or "").split())[:40] if isinstance(x, dict) else ""
+            out.append({"role": role, "label": label} if role in _CHROME and label else {"role": role})
+        return out
     return None
 
 
@@ -316,10 +337,12 @@ class UIMemory:
             return str(a["label"]) if a else None
 
     # ---- recall ---------------------------------------------------------------------------------------
-    def recall(self, text: str, bundle: str, emb: Any = None, center: Any = None) -> Recipe | None:
+    def recall(self, text: str, bundle: str, emb: Any = None, center: Any = None, *, origin: str = "") -> Recipe | None:
         """This app's recipe for this request: same bundle and script, and the centred reflex
-        embedding at τ (or, without one, the same words). Never a retired recipe."""
-        if not _active() or not bundle:
+        embedding at τ (or, without one, the same words). Never a retired recipe, and only for the
+        user's own words (``origin == "user"``): a replay presses without a model, so a model's,
+        Live's or an approval's words never get one."""
+        if origin != "user" or not _active() or not bundle:
             return None
         with self._lock:
             recipes = [r for r in self._load().values() if r.bundle == bundle and not r.retired and r.script == learn.script(text)]
@@ -468,8 +491,8 @@ def settled(text: str, sigs: list[dict[str, Any]]) -> Recipe | None:
     if len(bundles) != 1 or not next(iter(bundles)):
         return None  # several apps, or one whose bundle id is unknown
     bundle = next(iter(bundles))
-    if any(s.get("changed") is False for s in sigs):
-        return None
+    if any(s.get("changed") is not True for s in sigs):
+        return None  # a step that changed nothing, or whose effect nobody saw, replays nothing
     for s in sigs:
         if s.get("alias") and s.get("label") and s.get("role") in _CHROME:
             _memory.learn_alias(text, bundle, str(s["label"]))
@@ -518,8 +541,8 @@ def remember(text: str, bundle: str, steps) -> Recipe | None:
     return _memory.remember(text, bundle, steps)
 
 
-def recall(text: str, bundle: str, emb: Any = None, center: Any = None) -> Recipe | None:
-    return _memory.recall(text, bundle, emb, center)
+def recall(text: str, bundle: str, emb: Any = None, center: Any = None, *, origin: str = "") -> Recipe | None:
+    return _memory.recall(text, bundle, emb, center, origin=origin)
 
 
 def alias(text: str, bundle: str) -> str | None:

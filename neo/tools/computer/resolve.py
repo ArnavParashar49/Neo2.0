@@ -121,6 +121,9 @@ MINILM_ONLY_SIM = 0.55
 LAYA_WAIT_LIVE_S = 1.5  # engine.LAYA_LOCK_S: the shared Laya lock, when the stage acts
 LAYA_WAIT_SHADOW_S = 0.2  # only logging: never hold up the handoff for long
 BUDGET_S = 0.6  # the by-meaning stages together; past it they are skipped (logged as such)
+# In shadow the stage only orders the model's shortlist and logs: the request waits for it no longer
+# than this (MiniLM takes 5-60 ms, Laya's lock is waited for LAYA_WAIT_SHADOW_S at most).
+SHADOW_WAIT_S = 0.3
 _VEC_CAP = 20000  # label vectors kept in RAM (never on disk: labels can be the user's content)
 
 # Roles a press / a field / a menu command may land on, best first (click_text's order: a control
@@ -984,6 +987,8 @@ def resolve(
         run.notes.setdefault("meaning", "skipped")
     else:
         ch = _default_choose if choose is None else (choose or (lambda r, o, w: (None, 0.0)))
+        if "meaning" not in acting:
+            left = min(left, SHADOW_WAIT_S)
         wait = min(LAYA_WAIT_LIVE_S if "meaning" in acting else LAYA_WAIT_SHADOW_S, left)
         meaning = _meaning_in_time(run, emb, ch, wait, left, log_it and shadow_ok)
         if meaning is not None:

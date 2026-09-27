@@ -19,9 +19,10 @@ from neo.reflex.schema import Decision
 
 _ids = itertools.count(1)
 BUNDLE = "org.example.board"  # a made-up bundle id: evidence from the element's process
+SHEET = [{"role": "AXButton", "label": "Start"}, {"role": "AXButton", "label": "Cancel"}]
 NEW_GAME = [
     {"kind": "menu", "role": "AXMenuItem", "label": "New Game", "path": ["Game", "New Game"], "bundle": BUNDLE,
-     "expect": {"sheet": ["Start", "Cancel"]}, "changed": True},
+     "expect": {"sheet": SHEET}, "changed": True},
     {"kind": "press", "role": "AXButton", "label": "Start", "bundle": BUNDLE, "expect": {"sheet_closed": True}, "changed": True},
 ]  # fmt: skip
 
@@ -64,20 +65,20 @@ def run(text: str, sigs: list[dict], *, ok: bool = True, tool: str = "menu_comma
 def test_a_verified_flow_becomes_a_recipe_for_that_app(clock):
     run("start a new game please", NEW_GAME)
     clock.advance(30)
-    r = uimemory.recall("start a new game please", BUNDLE)
+    r = uimemory.recall("start a new game please", BUNDLE, origin="user")
     assert r is not None and [s.describe() for s in r.steps] == ["Game › New Game", "“Start”"]
-    assert r.steps[0].expect == {"sheet": ["Start", "Cancel"]} and r.script == "latin"
-    assert uimemory.recall("start a new game please", "org.example.other") is None  # another app
+    assert r.steps[0].expect == {"sheet": SHEET} and r.script == "latin"
+    assert uimemory.recall("start a new game please", "org.example.other", origin="user") is None  # another app
 
 
 def test_a_failed_corrected_or_stopped_request_teaches_no_flow(clock):
     run("start a new game please", NEW_GAME, ok=False)
     clock.advance(30)
-    assert uimemory.recall("start a new game please", BUNDLE) is None
+    assert uimemory.recall("start a new game please", BUNDLE, origin="user") is None
     k = run("start a new game now", NEW_GAME)
     outcomes.stop(k, early=True)
     clock.advance(30)
-    assert uimemory.recall("start a new game now", BUNDLE) is None
+    assert uimemory.recall("start a new game now", BUNDLE, origin="user") is None
 
 
 def test_a_step_that_changed_nothing_or_two_apps_keep_nothing(clock):
@@ -115,9 +116,9 @@ def test_recall_by_the_centred_reflex_embedding(clock):
     clock.advance(30)
     near = emb + np.array([0.0, 0.05, 0.0, 0.0], dtype=np.float32)
     far = np.array([3.0, 1.0, 1.0, 1.0], dtype=np.float32)
-    assert uimemory.recall("begin a fresh game", BUNDLE, near, center) is not None
-    assert uimemory.recall("resign this game", BUNDLE, far, center) is None
-    assert uimemory.recall("नया गेम शुरू करो", BUNDLE, near, center) is None  # another script
+    assert uimemory.recall("begin a fresh game", BUNDLE, near, center, origin="user") is not None
+    assert uimemory.recall("resign this game", BUNDLE, far, center, origin="user") is None
+    assert uimemory.recall("नया गेम शुरू करो", BUNDLE, near, center, origin="user") is None  # another script
 
 
 def test_learning_off_and_library_mode_keep_nothing(clock, monkeypatch):
@@ -148,7 +149,7 @@ def test_replay_checks_every_step_and_hands_over_at_the_first_mismatch(clock):
 
     async def run_step(step):
         ran.append(step.describe())
-        return {"sheet": ["Start", "Cancel"]} if step.kind == "menu" else {"sheet_closed": False}
+        return {"sheet": SHEET} if step.kind == "menu" else {"sheet_closed": False}
 
     def check(step, got):
         if step.expect.get("sheet"):
@@ -159,14 +160,14 @@ def test_replay_checks_every_step_and_hands_over_at_the_first_mismatch(clock):
     assert not out.ok and out.done == 1 and ran == ["Game › New Game", "“Start”"]
     assert "Game › New Game" in out.handoff and "sheet_closed=True" in out.handoff and "still open" in out.handoff
     assert asyncio.run(uimemory.replay(r, run_step, check)).ok is False
-    assert uimemory.recall("start a new game please", BUNDLE) is None  # two misses in a row: retired
+    assert uimemory.recall("start a new game please", BUNDLE, origin="user") is None  # two misses in a row: retired
 
 
 def test_a_replay_that_works_counts(clock):
     r = uimemory.remember("start a new game please", BUNDLE, NEW_GAME)
     out = asyncio.run(uimemory.replay(r, lambda s: "ok", lambda s, g: (True, "")))
     assert out.ok and out.done == 2
-    assert uimemory.recall("start a new game please", BUNDLE).ok == 2
+    assert uimemory.recall("start a new game please", BUNDLE, origin="user").ok == 2
 
 
 def test_a_step_that_raises_hands_over(clock):
@@ -200,7 +201,7 @@ def test_the_privacy_erase_forgets_recipes_and_aliases(clock):
     uimemory.learn_alias("kick it off", BUNDLE, "Begin")
     assert uimemory.forget() == 2
     assert not learn._path(uimemory.FILE).exists()
-    assert uimemory.recall("start a new game please", BUNDLE) is None and uimemory.alias("kick it off", BUNDLE) is None
+    assert uimemory.recall("start a new game please", BUNDLE, origin="user") is None and uimemory.alias("kick it off", BUNDLE) is None
 
 
 def test_rebuild_re_embeds_skeletons_in_ram(clock):
@@ -224,3 +225,50 @@ def test_rebuild_soon_waits_for_a_loaded_laya(clock, monkeypatch):
 
     monkeypatch.setattr(reflex, "_laya", None)
     assert uimemory.rebuild_soon(lambda: True) is False  # never loads Laya for this
+
+
+# ---- review fixes ------------------------------------------------------------------------------------------
+def test_what_a_step_saw_reaches_disk_only_as_facts_and_chrome(clock, tmp_path):
+    mem = uimemory.UIMemory(path=lambda: tmp_path / "ui_memory.json", clock=clock)
+    steps = [{"kind": "press", "role": "AXButton", "label": "Save", "bundle": "org.example.editor", "changed": True,
+              "expect": {"title": "Q3 layoffs - draft for Priya.docx", "focus": "Dear Priya, about your salary",
+                         "sheet": [{"role": "AXButton", "label": "Replace"}, {"role": "AXStaticText", "label": "Priya.docx already exists"},
+                                   "Priya's notes"],
+                         "changed": True, "sheet_closed": False}}]  # fmt: skip
+    r = mem.remember("click save", "org.example.editor", steps)
+    assert r is not None
+    body = (tmp_path / "ui_memory.json").read_text()
+    assert "Priya" not in body and "salary" not in body
+    exp = r.steps[0].expect
+    assert exp["title"] is True and exp["focus"] is True and exp["changed"] is True and exp["sheet_closed"] is False
+    assert exp["sheet"] == [{"role": "AXButton", "label": "Replace"}, {"role": "AXStaticText"}, {"role": ""}]
+    again = uimemory.UIMemory(path=lambda: tmp_path / "ui_memory.json", clock=clock)
+    assert again.recall("click save", "org.example.editor", origin="user").steps[0].expect == exp  # the same after a reload
+
+
+def test_an_old_file_with_content_in_it_is_cleaned_on_load(clock, tmp_path):
+    p = tmp_path / "ui_memory.json"
+    old = {"recipes": [{"key": "k", "bundle": BUNDLE, "script": "latin", "skeleton": "click save", "made": clock.t, "used": clock.t,
+                        "steps": [{"kind": "press", "role": "AXButton", "label": "Save", "expect": {"title": "Dear Priya"}}]}]}  # fmt: skip
+    p.write_text(json.dumps(old))
+    mem = uimemory.UIMemory(path=lambda: p, clock=clock)
+    assert mem.recall("click save", BUNDLE, origin="user").steps[0].expect == {"title": True}
+
+
+def test_a_step_whose_effect_is_unknown_is_no_recipe(clock):
+    unknown = {**NEW_GAME[1], "changed": None}
+    run("start a new game please", [NEW_GAME[0], unknown])
+    clock.advance(30)
+    assert len(uimemory.memory()) == 0
+    run("start a new game please", [NEW_GAME[0], {k: v for k, v in NEW_GAME[1].items() if k != "changed"}])
+    clock.advance(30)
+    assert len(uimemory.memory()) == 0
+
+
+@pytest.mark.parametrize("origin", ["agent", "live", "approval", ""])
+def test_a_recipe_replays_only_for_the_users_own_words(clock, origin):
+    run("start a new game please", NEW_GAME)
+    clock.advance(30)
+    assert uimemory.recall("start a new game please", BUNDLE, origin="user") is not None
+    assert uimemory.recall("start a new game please", BUNDLE, origin=origin) is None
+    assert uimemory.recall("start a new game please", BUNDLE) is None  # no origin: closed

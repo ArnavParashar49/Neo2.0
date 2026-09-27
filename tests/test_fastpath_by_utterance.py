@@ -89,3 +89,51 @@ def test_no_by_utterance_tools_no_lane(monkeypatch):
 def test_the_regex_fast_paths_are_unchanged(reg):
     # the lane is beside plan(), never inside it: plan() knows nothing of by_utterance
     assert fastpath.plan("new game pe click karo") is None
+
+
+# ---- review fixes: the lane decides on the raw words, and refuses what pointing() refuses ---------------
+@pytest.mark.parametrize("text", ["click send?", "save pe click karna?", "start button dabana?", "press delete account?"])
+def test_a_question_mark_is_read_before_anything_is_stripped(reg, text):
+    assert fastpath.by_utterance(text, origin="user", decision=D()) is None
+    assert fastpath.by_utterance(text, origin="user", decision=D("quick_action", "click_text", 0.95)) is None
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "what does the share button do?",
+        "what does the share button do",
+        "which button deletes my account?",
+        "kya ye button safe hai?",
+        "kya ye button safe hai",
+        "ये बटन क्या करता है",
+        "press enter",
+        "hit cmd+s",
+        "click it",
+        "is button pe click karo",
+    ],
+)
+def test_the_reflexs_pick_never_turns_a_question_a_key_or_a_vague_word_into_a_press(reg, text):
+    assert fastpath.by_utterance(text, origin="user", decision=D("quick_action", "click_text", 0.95)) is None
+
+
+def test_the_reflexs_pick_still_takes_a_plain_request(reg):
+    got = fastpath.by_utterance("start a new game", origin="user", decision=D("quick_action", "click_text", 0.95))
+    assert got == ("click_text", {"utterance": "start a new game", "label": "start a new game"})
+    got = fastpath.by_utterance("click new tab.", origin="user", decision=D())
+    assert got == ("click_text", {"utterance": "click new tab", "label": "new"})  # the handler resolves the utterance
+
+
+def test_resolver_off_means_nothing_is_pressed_from_words(reg, monkeypatch):
+    from neo.tools.computer import resolve
+
+    monkeypatch.setattr(resolve, "mode", lambda: "off")
+    assert fastpath.by_utterance("new game pe click karo", origin="user", decision=D()) is None
+    assert fastpath.by_utterance("start a new game", origin="user", decision=D("quick_action", "click_text", 0.99)) is None
+
+
+def test_an_embedding_hosts_requests_keep_the_regex_paths_only(reg, monkeypatch):
+    from neo import runtime
+
+    monkeypatch.setattr(runtime, "library_bound", lambda: True)
+    assert fastpath.by_utterance("new game pe click karo", origin="user", decision=D()) is None
