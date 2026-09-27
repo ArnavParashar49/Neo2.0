@@ -27,6 +27,7 @@ import asyncio
 import itertools
 import re
 import secrets
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -38,8 +39,9 @@ SETTLE_S = 0.12  # after bringing an app forward (or raising a window), before t
 HOVER_S = 0.1  # the pointer rests where the input will be this long before the first look
 LOOK_S = 0.15  # after the input, the first look at what changed (most changes start at once)…
 LOOK_AGAIN_S = 0.85  # …and once more when nothing had yet (a page that loads, a slow redraw)
-POLL_S = 0.1  # after a key or a press: a look at the window, sheet and focus this often…
-SCENE_LOOKS = 4  # …at most this many times, done at the first change
+POLL_S = 0.04  # after a key or a press: a look at the window, sheet and focus this often…
+SCENE_WAIT_S = 0.4  # …for at most this long, done at the first change
+SCENE_POLL_S = 0.04  # while waiting for a look at the picture: the scene (cheap) this often
 
 
 class Refused(Exception):
@@ -603,28 +605,56 @@ async def before(pid: int, pts: list[tuple[float, float]], hover: tuple[float, f
     return await look(pid, pts)
 
 
+async def _scene_meanwhile(before: Look, pid: int, wait: float, only_at_points: bool) -> Outcome | None:
+    """Wait ``wait`` seconds, looking at the scene (the front app, the window, a sheet, the focus:
+    a few quick Accessibility questions) every SCENE_POLL_S: the outcome as soon as it shows a change
+    — no picture needed to know something happened — else None. Never longer than ``wait`` by the
+    sleeps asked for, nor by the clock (a slow app's answers count against it)."""
+    if wait <= 0:
+        return None
+    if not before.scene.known:
+        await asyncio.sleep(wait)
+        return None
+    waited, start = 0.0, time.monotonic()
+    while waited + 1e-9 < wait and time.monotonic() - start < wait:
+        step = min(SCENE_POLL_S, wait - waited)
+        await asyncio.sleep(step)
+        waited += step
+        now = Look(await asyncio.to_thread(ax.scene, pid), None)
+        out = compare(Look(before.scene, None), now, [], only_at_points)
+        if out.changed:
+            return out
+    return None
+
+
 async def outcome(
     before: Look, pid: int, pts: list[tuple[float, float]], where: list[str], only_at_points: bool = False
 ) -> Outcome:
-    """What the input changed: looked at once, and again a moment later if nothing had yet."""
+    """What the input changed: the scene watched meanwhile (a sheet that opens, an app that comes
+    forward, the focus that moves: done at once), the picture looked at after LOOK_S, and both again
+    until LOOK_AGAIN_S later if nothing had changed yet (a page that loads, a slow redraw)."""
     if before.pixels is None and not before.scene.known:
         return compare(before, None, where)
-    await asyncio.sleep(LOOK_S)
+    if (early := await _scene_meanwhile(before, pid, LOOK_S, only_at_points)) is not None:
+        return early
     out = compare(before, await look(pid, pts), where, only_at_points)
     if out.changed is False:
-        await asyncio.sleep(LOOK_AGAIN_S)
+        if (early := await _scene_meanwhile(before, pid, LOOK_AGAIN_S, only_at_points)) is not None:
+            return early
         out = compare(before, await look(pid, pts), where, only_at_points)
     return out
 
 
 async def scene_change(before: Look, pid: int) -> Outcome:
     """What a key or an AX press changed in the scene (the front app, the window, a sheet, the
-    focus): looked at every POLL_S, done at the first change."""
+    focus): looked at every POLL_S for at most SCENE_WAIT_S, done at the first change."""
     if not before.scene.known:
         return compare(before, None, [])
     out = compare(before, before, [])
-    for _ in range(SCENE_LOOKS):
+    waited = 0.0
+    while waited + 1e-9 < SCENE_WAIT_S:
         await asyncio.sleep(POLL_S)
+        waited += POLL_S
         out = compare(before, await look(pid, []), [])
         if out.changed:
             break

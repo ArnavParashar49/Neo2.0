@@ -488,3 +488,84 @@ def test_a_confirmation_is_still_a_confirmation_on_the_new_handlers(world, new_t
     world.regions.insert(0, (600, 530, 80, 24, CHESS, "Send", "AXButton", ""))
     out = run("click", {"x": 610, "y": 540})
     assert out.halt and out.text.startswith("NEEDS_CONFIRM") and world.events() == []
+
+
+# ---- the outcome, without fixed sleeps: a scene change ends the wait at once ---------------------------------
+
+
+@pytest.fixture
+def clock(monkeypatch):
+    """A fake clock: pointer's sleeps advance it (no real waiting), its monotonic reads it."""
+    import asyncio
+    import types
+
+    t = {"now": 0.0, "samples": 0}
+
+    async def sleep(s):
+        t["now"] += s
+
+    monkeypatch.setattr(pointer, "asyncio", types.SimpleNamespace(sleep=sleep, to_thread=asyncio.to_thread))
+    monkeypatch.setattr(pointer, "time", types.SimpleNamespace(monotonic=lambda: t["now"]))
+    monkeypatch.setattr(pointer, "LOOK_S", 0.15)
+    monkeypatch.setattr(pointer, "LOOK_AGAIN_S", 0.85)
+    return t
+
+
+def _outcome_world(monkeypatch, t, *, sheet_at=None, pixels_at=None):
+    grey = Image.new("L", (24, 24), 40)
+    dark = Image.new("L", (24, 24), 200)
+
+    def scene(pid):
+        sheet = "a sheet “Start a New Game?”" if sheet_at is not None and t["now"] >= sheet_at else ""
+        return ax.Scene(front="Chess", front_pid=CHESS, title="Chess", sheet=sheet, known=True)
+
+    def sample(pts, r=60):
+        t["samples"] += 1
+        return [dark if pixels_at is not None and t["now"] >= pixels_at else grey for _ in pts]
+
+    monkeypatch.setattr(ax, "scene", scene)
+    monkeypatch.setattr(screen, "sample_points", sample)
+    return pointer.Look(scene(CHESS), [grey])
+
+
+def _run_outcome(before):
+    import asyncio
+
+    return asyncio.run(pointer.outcome(before, CHESS, [(612.0, 540.0)], ["(612, 540)"]))
+
+
+def test_a_sheet_that_opens_at_60ms_ends_the_wait_before_the_first_picture(monkeypatch, clock):
+    before = _outcome_world(monkeypatch, clock, sheet_at=0.06)
+    out = _run_outcome(before)
+    assert out.changed is True and out.scene_changed and "sheet" in out.said
+    assert clock["now"] <= 0.081 and clock["samples"] == 0  # seen at the 2nd look at the scene; no picture needed
+
+
+def test_a_board_that_redraws_at_once_is_seen_at_the_first_picture(monkeypatch, clock):
+    before = _outcome_world(monkeypatch, clock, pixels_at=0.0)
+    out = _run_outcome(before)
+    assert out.changed is True and not out.scene_changed and clock["now"] == pytest.approx(0.15) and clock["samples"] == 1
+
+
+def test_nothing_changed_is_said_by_one_second_with_two_pictures(monkeypatch, clock):
+    before = _outcome_world(monkeypatch, clock)
+    out = _run_outcome(before)
+    assert out.changed is False and clock["now"] == pytest.approx(1.0) and clock["samples"] == 2
+
+
+def test_a_late_sheet_is_caught_between_the_two_pictures(monkeypatch, clock):
+    before = _outcome_world(monkeypatch, clock, sheet_at=0.4)
+    out = _run_outcome(before)
+    assert out.changed is True and clock["now"] == pytest.approx(0.43) and clock["samples"] == 1  # (was 1.0 s, 2 pictures)
+
+
+def test_a_slow_app_cannot_stretch_the_wait(monkeypatch, clock):
+    before = _outcome_world(monkeypatch, clock)
+
+    def scene(pid):  # every answer takes 0.3 s of the clock (a busy app)
+        clock["now"] += 0.3
+        return before.scene
+
+    monkeypatch.setattr(ax, "scene", scene)
+    _run_outcome(before)
+    assert clock["now"] < 1.0 + 2 * 0.3 + 0.61  # the clock bounds the watching, not only the sleeps
