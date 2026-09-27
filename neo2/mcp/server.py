@@ -157,7 +157,8 @@ class ServerOptions:
 
 
 def agent_config(opts: ServerOptions) -> AgentConfig:
-    """The agent's config: only what the options say, unless --env opts into the environment."""
+    """The agent's config: only what the options say, unless --env opts into the environment
+    (where an Anthropic key alone makes Claude the brain, unless NEO_MCP_BRAIN says otherwise)."""
     overrides: dict[str, Any] = {}
     if opts.tools is not None:
         overrides["tools"] = opts.tools
@@ -168,6 +169,12 @@ def agent_config(opts: ServerOptions) -> AgentConfig:
     changes: dict[str, Any] = {}
     if cfg.name == "default":
         changes["name"] = "mcp"
+    if (
+        "brain" not in cfg.model_fields_set  # NEO_MCP_BRAIN didn't choose one
+        and not (_usable(cfg, cfg.brain) or _usable(cfg, cfg.fast_brain))
+        and cfg.anthropic_api_key is not None
+    ):
+        changes["brain"] = "claude"  # --env found only an Anthropic key: think with Claude
     if opts.protect_apps:
         changes["protected_apps"] = tuple(dict.fromkeys((*cfg.protected_apps, *opts.protect_apps)))
     return _rebuilt(cfg, **changes) if changes else cfg

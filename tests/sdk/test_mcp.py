@@ -664,6 +664,25 @@ def test_options_and_the_environment(monkeypatch, tmp_path):
         NeoMCP(neo2.AgentConfig(tools="none"), provider=ScriptedBrain([]), approve="yes")  # type: ignore[arg-type]
 
 
+def test_an_anthropic_key_alone_is_enough_with_env(monkeypatch, tmp_path):
+    """--env with only ANTHROPIC_API_KEY (what NO_BRAIN and the README say is enough): Claude is
+    the brain, unless NEO_MCP_BRAIN chose one."""
+    from neo2.sdk.agent import _usable
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-fake")
+    cfg = server.agent_config(ServerOptions(env=True))
+    assert cfg.brain == "claude" and _usable(cfg, cfg.brain) and cfg.name == "mcp"
+    assert server.agent_config(ServerOptions()).brain == "gemini"  # no --env: no key, nothing read
+    env_file = tmp_path / "keys.env"
+    env_file.write_text("GROQ_API_KEY=gsk-fake\n")
+    assert server.agent_config(ServerOptions(env_files=(str(env_file),))).brain == "gemini"  # groq is its fast brain
+    monkeypatch.setenv("GEMINI_API_KEY", "g-fake")
+    assert server.agent_config(ServerOptions(env=True)).brain == "gemini"  # a key for the default brain
+    monkeypatch.delenv("GEMINI_API_KEY")
+    monkeypatch.setenv("NEO_MCP_BRAIN", "gemini")
+    assert server.agent_config(ServerOptions(env=True)).brain == "gemini"  # the operator's choice stays
+
+
 def test_the_command_line():
     from neo2.mcp import _parser, _tools_arg
 
