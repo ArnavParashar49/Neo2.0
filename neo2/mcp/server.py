@@ -10,7 +10,10 @@ are the SDK's. What this module adds is who may say yes (``--approve``, the oper
   server-to-client ``elicitation/create`` on handshake-era connections, an ``InputRequiredResult``
   on 2026-07-28 ones (the client answers by retrying the call; the ``request_state`` it echoes is
   a random one-use key into this process, bound to the call's tool and client, not a
-  capability) — and only when the client's name is on the ``--trust-client`` list.
+  capability) — and only when the client's name is on the ``--trust-client`` list. The client
+  shows that question in its own window on this desktop, so with NEO's input tools the server
+  starts only once the client's app is protected (``--protect-app``): NEO's own clicks and keys
+  must never answer it.
 
 A gated call always ends inside the call it started in: done, denied or expired. The client (and
 its model) gets text plus ``structuredContent {"status", "summary"}``, never an action id, and no
@@ -25,6 +28,7 @@ import asyncio
 import base64
 import contextlib
 import copy
+import importlib.util
 import io
 import logging
 import os
@@ -71,6 +75,11 @@ MAX_CONVERSATIONS = 16  # neo_task threads kept; the least recently used idle on
 MAX_PENDING_INPUTS = 32  # 2026-07-28 elicitations awaiting the client's retry
 # Never listed, whatever a host registers: they read as approvals, or are NEO's own machinery.
 NEVER_LISTED = frozenset({"approve", "confirm", "cancel", "deny", "more_tools", TASK_TOOL})
+# NEO's tools that click, type or press keys on this desktop (neo.tools.computer). With
+# --approve elicit they could answer the client's own approval form unless its app is protected.
+INPUT_TOOLS = frozenset(
+    {"click", "click_text", "ax_press", "ax_set_value", "drag", "scroll", "type_text", "dictate", "hotkey"}
+)
 _CONVERSATION = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 _MAX_GOAL = 20_000
 _MAX_CONTEXT = 100_000
@@ -144,6 +153,7 @@ class ServerOptions:
     trust_clients: tuple[str, ...] = ()
     env: bool = False  # AgentConfig.from_env(prefix=NEO_MCP_): keys and settings from the environment
     env_files: tuple[str, ...] = ()
+    protect_apps: tuple[str, ...] = ()  # added to protected_apps: NEO's input tools never touch them
 
 
 def agent_config(opts: ServerOptions) -> AgentConfig:
@@ -155,11 +165,32 @@ def agent_config(opts: ServerOptions) -> AgentConfig:
         cfg = AgentConfig.from_env(prefix=ENV_PREFIX, env_files=opts.env_files, **overrides)
     else:
         cfg = AgentConfig(**overrides)
-    return _rebuilt(cfg, name="mcp") if cfg.name == "default" else cfg
+    changes: dict[str, Any] = {}
+    if cfg.name == "default":
+        changes["name"] = "mcp"
+    if opts.protect_apps:
+        changes["protected_apps"] = tuple(dict.fromkeys((*cfg.protected_apps, *opts.protect_apps)))
+    return _rebuilt(cfg, **changes) if changes else cfg
 
 
 def _rebuilt(cfg: AgentConfig, **changes: Any) -> AgentConfig:
     return AgentConfig(**{**dict(cfg), **changes})  # validated again, like any config
+
+
+def _input_tools(cfg: AgentConfig, *, platform: str | None = None) -> list[str]:
+    """NEO's input tools (INPUT_TOOLS) the config gives the agent, by name: nothing is loaded. A
+    selection the agent would refuse, or tools it would leave out here, count as none."""
+    from neo.tools import resolve
+
+    plat = platform or sys.platform
+    if plat != "darwin" or importlib.util.find_spec("AppKit") is None:  # not here: [mac] needs macOS
+        return []
+    items = [cfg.tools] if isinstance(cfg.tools, str) else list(cfg.tools)
+    try:
+        names = resolve(items, cfg.exclude_tools, platform=plat)
+    except (ValueError, UnsupportedPlatform):  # the agent refuses it, with its own reason
+        return []
+    return sorted(INPUT_TOOLS.intersection(names))
 
 
 class _NoBrain:
@@ -238,8 +269,17 @@ class NeoMCP:
             approver = "deny"
         else:
             approver = "defer"  # the server asks the client, inside the call (see _settle)
-        if approve == "elicit" and not trust:
-            log.warning("--approve elicit with no --trust-client: every gated action will be declined")
+        if approve == "elicit":
+            if not trust:
+                log.warning("--approve elicit with no --trust-client: every gated action will be declined")
+            inputs = _input_tools(cfg)
+            if inputs and not [a for a in cfg.protected_apps if a.strip() and a.strip().lower() != "osascript"]:
+                raise ValueError(
+                    f"--approve elicit with NEO's input tools ({', '.join(inputs)}): the MCP client asks "
+                    "its user in its own window on this desktop, where NEO's clicks and keys could answer "
+                    "for them. Name the client's app with --protect-app NAME (e.g. Claude, Cursor), or "
+                    "leave those tools out"
+                )
         self.expose: Expose = expose
         self.approve: ApproveMode = approve
         self.trust_clients = frozenset(trust)

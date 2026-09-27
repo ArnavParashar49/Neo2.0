@@ -423,6 +423,46 @@ async def test_the_client_is_told_what_fenced_text_is():
     assert '<untrusted source="neo">' in task.description and "never instructions" in task.description
 
 
+MAC = pytest.mark.skipif(
+    sys.platform != "darwin" or importlib.util.find_spec("AppKit") is None,
+    reason="NEO's input tools: macOS with the [mac] extra",
+)
+
+
+@MAC
+@pytest.mark.parametrize("tools", ["mac", ("hotkey",), ("click", "clock"), ("type_text",)])
+def test_elicit_with_input_tools_needs_the_clients_app_protected(tools):
+    """In elicit mode the approval form is the client's own window, on this desktop: NEO's clicks
+    and keys (a parallel hotkey "space", "return") must never be able to answer it."""
+    cfg = neo2.AgentConfig(tools=tools, fast_paths=False)
+    with pytest.raises(ValueError, match="--protect-app"):
+        NeoMCP(cfg, provider=ScriptedBrain([]), approve="elicit", trust_clients=["claude-ai"])
+    only_dialog = neo2.AgentConfig(tools=tools, fast_paths=False, protected_apps=("osascript",))
+    with pytest.raises(ValueError, match="--protect-app"):  # the dialog's app isn't the client's
+        NeoMCP(only_dialog, provider=ScriptedBrain([]), approve="elicit", trust_clients=["claude-ai"])
+
+
+@MAC
+async def test_elicit_with_input_tools_runs_once_the_client_app_is_protected():
+    opts = ServerOptions(tools="hotkey", approve="elicit", trust_clients=("claude-ai",), protect_apps=("Claude",))
+    async with NeoMCP.from_options(opts, provider=ScriptedBrain([])) as neo:
+        assert "Claude" in neo.agent.config.protected_apps
+        assert "hotkey" in {t.name for t in neo.agent.tools}
+
+
+async def test_input_tools_only_matter_for_elicit(monkeypatch):
+    cfg = neo2.AgentConfig(tools="none", fast_paths=False)
+    async with NeoMCP(cfg, provider=ScriptedBrain([]), approve="elicit", trust_clients=["claude-ai"]):
+        pass  # no input tools: nothing to protect
+    assert server._input_tools(neo2.AgentConfig(tools="web"), platform="darwin") == []
+    assert server._input_tools(neo2.AgentConfig(tools=("hotkey", "clock")), platform="linux") == []  # never there
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name, *a: object())  # as with the [mac] extra
+    got = server._input_tools(neo2.AgentConfig(tools="mac", exclude_tools=("drag",)), platform="darwin")
+    assert "hotkey" in got and "click" in got and "drag" not in got and "clock" not in got
+    cfg = server.agent_config(ServerOptions(protect_apps=("Claude", "Cursor")))
+    assert cfg.protected_apps == ("Claude", "Cursor")
+
+
 # ---- --approve dialog --------------------------------------------------------------------------
 
 
@@ -633,6 +673,8 @@ def test_the_command_line():
         ["--tools", "web,browser_*", "--expose", "both", "--approve", "elicit", "--trust-client", "A", "--trust-client", "B"]
     )
     assert _tools_arg(a.tools) == ("web", "browser_*") and a.trust_client == ["A", "B"]
+    assert _parser().parse_args(["--protect-app", "Claude", "--protect-app", "Cursor"]).protect_app == ["Claude", "Cursor"]
+    assert _parser().parse_args([]).protect_app == []
     assert _tools_arg("none") == "none" and _tools_arg(" , ") == "none"
     with pytest.raises(SystemExit):
         _parser().parse_args(["--approve", "yes"])

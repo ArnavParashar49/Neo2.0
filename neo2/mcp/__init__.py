@@ -14,7 +14,10 @@
                ``dialog`` (macOS): a native dialog of this process asks the user.
                ``elicit``: the MCP client asks its user (MCP elicitation), and only for client
                names given with ``--trust-client NAME``. This trusts the client: a client may
-               answer elicitations by itself.
+               answer elicitations by itself. With NEO's input tools (``--tools mac``) it also
+               needs ``--protect-app``.
+``--protect-app``  An app NEO's input tools never click or type into (repeatable): the client's
+               own app with ``--approve elicit`` (e.g. Claude, Cursor), whose window asks the user.
 ``--env``      Read keys (GEMINI_API_KEY, GROQ_API_KEY, ANTHROPIC_API_KEY…) and NEO_MCP_* settings
                from the environment (and ``--env-file`` files). Without it nothing is read from
                the environment, and ``neo_task`` has no model to think with.
@@ -122,6 +125,13 @@ def _parser() -> argparse.ArgumentParser:
         metavar="NAME",
         help="with --approve elicit: a client name (its clientInfo.name) whose elicitation answers count; repeatable",
     )
+    p.add_argument(
+        "--protect-app",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help="an app NEO's clicks and keys never touch (with --approve elicit and input tools: the client's app); repeatable",
+    )
     p.add_argument("--env", action="store_true", help="read keys and NEO_MCP_* settings from the environment")
     p.add_argument(
         "--env-file",
@@ -179,6 +189,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             trust_clients=tuple(args.trust_client),
             env=bool(args.env or args.env_file),
             env_files=tuple(args.env_file),
+            protect_apps=tuple(args.protect_app),
         )
         try:
             asyncio.run(run_stdio(opts, wire_fd=wire, handle_signals=True))
