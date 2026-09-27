@@ -33,9 +33,11 @@ import logging
 import re
 import time
 from dataclasses import dataclass, field
+from functools import lru_cache
 from typing import Any
 
 from neo.agent import confirm
+from neo.agent.confirm import Halt
 from neo.agent.registry import ToolContext, ToolOutput, fence
 from neo.config import settings
 from neo.decide import uistrings
@@ -54,7 +56,7 @@ __all__ = [
     "parse_field",
 ]
 
-_SETTLE_S = 0.8  # how long a press is watched for a sheet, a new window or a title change
+_SETTLE_S = 0.6  # how long a press is watched for a sheet, a new window or a title change
 _CLOSE_S = 1.0  # how long an answered sheet is watched for closing
 _EVERY_S = 0.03
 _MENU_TTL_S = 2.0  # a menu bar read is reused this long (a claim, then the run)
@@ -114,7 +116,13 @@ _TAIL_FRAME = re.compile(
 
 
 def _toks(text: str) -> list[str]:
-    return [w for w in uistrings.words(text) if w not in _ARTICLES]
+    return list(_toks_of(text or ""))
+
+
+@lru_cache(maxsize=16384)
+def _toks_of(text: str) -> tuple[str, ...]:
+    """A text's words as matching sees them (articles dropped) - titles repeat, so kept."""
+    return tuple(w for w in uistrings.words(text) if w not in _ARTICLES)
 
 
 def _span(req: list[str], want: list[str]) -> tuple[int, int] | None:
@@ -586,7 +594,7 @@ async def _run(a: dict, c: ToolContext, *, claim: bool) -> ToolOutput | str | No
     if not getattr(item, "enabled", True):
         return ToolOutput(f"Error: “{where}” can't be chosen right now (it's greyed out).", ok=False)
     if await asyncio.to_thread(_in_system_menu, item):
-        return ToolOutput(SYSTEM_MENU, ok=False)
+        return None if claim else ToolOutput(SYSTEM_MENU, ok=False)
     if gate := await _gate_item(item, name, pid, a, c, pick, ask):
         return gate
     before = await asyncio.to_thread(_scene, pid)
@@ -634,11 +642,11 @@ def _no_pick(ask: _Ask, pick: _Pick, name: str, items: list, c: ToolContext) -> 
         )
         return _with_handoff(out, opts)
     tops = list(dict.fromkeys(i.path[0] for i in items if getattr(i, "path", ())))[:12]
-    menus = ("\n" + fence("screen", "its menus: " + ", ".join(tops))) if tops else ""
+    listing = ("\n" + fence("screen", "its menus: " + ", ".join(tops))) if tops else ""
     if tops:
         g._taint(c, "screen")
     where = f" in the {ask.menu} menu" if ask.menu else ""
-    return ToolOutput(f"Error: no menu command{where} of {name} matches “{said[:60]}”.{menus}", ok=False)
+    return ToolOutput(f"Error: no menu command{where} of {name} matches “{said[:60]}”.{listing}", ok=False)
 
 
 def _button_label(b: Any) -> str:
@@ -709,7 +717,7 @@ async def _answer_sheet(
             f" — the {kind} closed." if closed else f", but the {kind} is still open — look before pressing again."
         )
         return _with_effect(ToolOutput(text_out, say=None if closed else True), changed=True, scene_changed=True, sheet="" if closed else now.sheet)
-    labels = [_button_label(b) for b in buttons]
+    labels = [_button_label(b) for b in (pushable or buttons)]
     if c.origin == "user":
         choices = " or ".join(f"“{x[:30]}”" for x in labels[:_OPTIONS]) or "its buttons"
         quoted = f" “{words[:120]}”" if words else ""
@@ -729,20 +737,31 @@ async def _answer_sheet(
 # ---- the tool ----------------------------------------------------------------------------------------
 
 
-async def menu_command(a: dict, c: ToolContext) -> str | ToolOutput:
+def _out(x: ToolOutput | str) -> ToolOutput:
+    """One result shape: a question NEO's own code asks (a Halt) stays one."""
+    if isinstance(x, ToolOutput):
+        if isinstance(x.text, Halt):
+            x.halt, x.staged = True, x.staged or x.text.action_id
+        return x
+    halt = isinstance(x, Halt)
+    return ToolOutput(x, ok=halt or not x.startswith(("Error", "NEEDS_")), halt=halt, staged=x.action_id if halt else "")
+
+
+async def menu_command(a: dict, c: ToolContext) -> ToolOutput:
     """Choose a menu-bar command of the front (or named) app by its name."""
     out = await _run(a, c, claim=False)
-    return out if out is not None else ToolOutput("Error: which menu command?", ok=False)
+    return _out(out) if out is not None else ToolOutput("Error: which menu command?", ok=False)
 
 
-async def by_utterance(text: str, c: ToolContext) -> ToolOutput | str | None:
+async def by_utterance(text: str, c: ToolContext) -> ToolOutput | None:
     """The user's own words, when they name one of the working app's menu commands and nothing
     more ("start a new game"): that command, and its sheet under the rule above. None - nothing
     done, nothing pressed - when the words aren't that (the model takes the request)."""
     if c.origin != "user" or not (text or "").strip():
         return None
     ctx = c if c.user_text else ToolContext(user_text=text, extras=c.extras, taint=c.taint, origin=c.origin)
-    return await _run({"utterance": text}, ctx, claim=True)
+    out = await _run({"utterance": text}, ctx, claim=True)
+    return None if out is None else _out(out)
 
 
 _LEAD = r"^\s*(?:and\s+|now\s+|please\s+|then\s+)*(?:can\s+you\s+|could\s+you\s+)?"
@@ -911,10 +930,14 @@ def _ground_field(phrase: str, els: list) -> tuple[Any, list]:
     return None, []
 
 
-async def fill_field(text: str, field_name: str, c: ToolContext, *, app: str = "") -> str | ToolOutput:
+async def fill_field(text: str, field_name: str, c: ToolContext, *, app: str = "") -> ToolOutput:
     """Type ``text`` into the field called ``field_name`` in the front (or named) app's window: that
     field, found by its label, set through Accessibility and read back. Never a password field,
     never NEO's own or a protected app's."""
+    return _out(await _fill(text, field_name, c, app))
+
+
+async def _fill(text: str, field_name: str, c: ToolContext, app: str) -> str | ToolOutput:
     g = _gates()
     if err := g._needs_input():
         return err

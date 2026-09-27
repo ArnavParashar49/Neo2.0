@@ -67,7 +67,7 @@ __all__ = [
 
 # Where the OS keeps its interface text: the frameworks (AppKit's menus and alerts), the private
 # frameworks, the apps that ship with macOS and their newer home in the app cryptex, and the core
-# services (the Finder, the Dock). Paths, never app names.
+# services (the desktop's own apps). Paths, never app names.
 ROOTS: tuple[str, ...] = (
     "/System/Library/Frameworks",
     "/System/Library/PrivateFrameworks",

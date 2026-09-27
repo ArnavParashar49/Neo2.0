@@ -1,0 +1,464 @@
+"""neo.tools.computer.menus on a fake menu bar: menu commands by their words, the sheet a command
+opens (answered by itself only under DECISIONS 46's rule), the system menu never used, every press
+gated, words NEO can't read in English asked about, and typing into a named field. Nothing real is
+read or pressed: the AX calls are fakes, the clock is fake, and no model is ever asked."""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+
+import pytest
+
+from neo import config
+from neo.agent import confirm
+from neo.agent.registry import ToolContext, ToolOutput
+from neo.decide import uistrings
+from neo.tools import computer as comp
+from neo.tools.computer import ax, menus
+
+APP, PID, NEO_PID, OTHER_PID = "Game Box", 4242, 77, 999
+
+
+@dataclass
+class Blocker:  # as the AX core reports a sheet or dialog in the way
+    kind: str
+    title: str
+    buttons: list = field(default_factory=list)
+    owner_pid: int = PID
+    text: str = ""
+
+
+def button(label: str, n: int, role: str = "AXButton", enabled: bool = True) -> ax.Element:
+    return ax.Element(f"e{n}", role, label, "", 100 + n, 200, 80, 24, enabled=enabled, actions=["AXPress"], ref=object())
+
+
+class World:
+    """One app in front with a menu bar; some commands open a sheet."""
+
+    def __init__(self, monkeypatch, items: list[menus.Item], *, front=(APP, PID)):
+        self.items, self.pressed, self.sheets = items, [], {}
+        self.system = {id(i.ref) for i in items if i.path and i.path[0] == ""}
+        self.blocker: Blocker | None = None
+        self.scene = ax.Scene(front=front[0], front_pid=front[1], title="Round 1", focus="Group", known=True)
+        self.clock = [0.0]
+        mp = monkeypatch
+        mp.setattr(ax, "working_app", lambda: front)
+        mp.setattr(ax, "frontmost_app", lambda: front)
+        mp.setattr(ax, "is_neo", lambda pid, name="": pid == NEO_PID)
+        mp.setattr(ax, "regular", lambda pid: True)
+        mp.setattr(ax, "app_names", lambda pid: {APP} if pid == PID else set())
+        mp.setattr(ax, "menu_items", lambda pid: list(self.items) if pid == PID else [], raising=False)
+        mp.setattr(ax, "in_system_menu", lambda ref: id(ref) in self.system, raising=False)
+        mp.setattr(ax, "press_menu_item", self.press_item, raising=False)
+        mp.setattr(ax, "blockers", lambda pid: [self.blocker] if self.blocker and pid == PID else [], raising=False)
+        mp.setattr(ax, "scene", lambda pid: ax.Scene(**vars(self.scene)))
+        mp.setattr(ax, "press_el", self.press_button)
+        mp.setattr(uistrings, "for_pid", lambda pid: None)
+        mp.setattr(menus, "_now", lambda: self.clock[0])
+
+        async def sleep(s):
+            self.clock[0] += s
+
+        mp.setattr(menus, "_sleep", sleep)
+        menus._menus.clear()
+
+    def press_item(self, item) -> str:
+        assert id(item.ref) not in self.system, "pressed a system-menu item"
+        self.pressed.append(item.where())
+        if (b := self.sheets.get(item.title)) is not None:
+            self.blocker = b
+            self.scene.sheet = f"a sheet “{b.title}”"
+            self.scene.focus = "PopUpButton"
+        return f"Chose {item.where()}"
+
+    def press_button(self, e) -> str:
+        self.pressed.append(e.title)
+        self.blocker, self.scene.sheet, self.scene.title = None, "", "Round 2"
+        return f"Pressed {e.id}"
+
+
+def item(*path: str, enabled: bool = True, key: str = "", mods: int = 0, pid: int = PID) -> menus.Item:
+    return menus.Item(path[-1], tuple(path), enabled, key, mods, ref=object(), pid=pid)
+
+
+def game_menus() -> list[menus.Item]:
+    return [
+        item("", "About This Mac"),  # the system (Apple) menu: its items carry an empty first path part here
+        item("", "Restart…"),
+        item("", "Shut Down…"),
+        item(APP, "About Game Box"),
+        item(APP, "Services", "Make Sticky Note"),
+        item(APP, "Quit Game Box", key="q"),
+        item("File", "New Window", key="n"),
+        item("File", "Close", key="w"),
+        item("File", "Export", "PDF"),
+        item("Game", "New Game", key="n", mods=menus._MENU_SHIFT),
+        item("Game", "Delete Round…"),
+        item("Game", "Close Round"),
+        item("Game", "Take Back Move", enabled=False),
+        item("Game", "Connect"),
+        item("Window", "Close"),
+    ]
+
+
+@pytest.fixture
+def world(monkeypatch):
+    confirm.cancel("test setup")
+    w = World(monkeypatch, game_menus())
+    w.sheets["New Game"] = Blocker("sheet", "Start a New Game?", [button("Start", 41), button("Cancel", 42), button("Players", 43, "AXPopUpButton")])
+    yield w
+    confirm.cancel("test over")
+
+
+def user(text: str) -> ToolContext:
+    return ToolContext(user_text=text, origin="user")
+
+
+async def run(a: dict, c: ToolContext) -> ToolOutput:
+    return await menus.menu_command(a, c)
+
+
+# ---- the flow that broke: "start a new game" --------------------------------------------------------------
+
+
+async def test_start_a_new_game_chooses_the_command_then_answers_its_sheet(world):
+    out = await menus.by_utterance("start a new game", user("start a new game"))
+    assert world.pressed == ["Game › New Game", "Start"]
+    assert out.ok and "answered its sheet with “Start”" in out.text and "closed" in out.text
+
+
+@pytest.mark.parametrize("said", ["please start a new game", "can you start a new game in game box", "new game, start"])
+async def test_the_same_in_other_words(world, said):
+    out = await menus.by_utterance(said, user(said))
+    assert out is not None and world.pressed == ["Game › New Game", "Start"], said
+
+
+async def test_a_translated_button_word_is_not_the_users_word(world):
+    """"shuru karo" means start, but the sheet's "Start" isn't literally in the words: asked."""
+    out = await menus.by_utterance("new game shuru karo", user("new game shuru karo"))
+    assert world.pressed == ["Game › New Game"] and out.halt and "“Start”" in out.text
+
+
+async def test_a_sheet_that_says_something_will_be_lost_is_asked_about(world):
+    world.sheets["New Game"].text = "The current game will be lost."
+    out = await menus.by_utterance("start a new game", user("start a new game"))
+    assert world.pressed == ["Game › New Game"] and out.halt and out.text.startswith("NEEDS_USER")
+    assert "“Start” or “Cancel”?" in out.text  # its buttons: not the Players popup
+
+
+async def test_without_the_buttons_word_in_the_request_the_user_is_asked(world):
+    out = await run({"item": "New Game", "menu": "Game"}, user("choose New Game from the Game menu"))
+    assert world.pressed == ["Game › New Game"] and out.halt and "Which one should I press?" in out.text
+
+
+async def test_a_models_call_gets_the_sheets_controls_as_ids(world):
+    c = ToolContext(user_text="start a new game")  # origin agent
+    out = await run({"item": "New Game"}, c)
+    assert world.pressed == ["Game › New Game"] and out.ok and not out.halt
+    assert "e41" in out.text and "e43" in out.text and '<untrusted source="screen">' in out.text
+    assert "screen" in c.taint  # its words were read: what follows is asked again
+
+
+async def test_live_and_sdk_words_never_answer_a_sheet(world):
+    for origin in ("live", "agent", "approval"):
+        world.pressed.clear()
+        world.blocker, world.scene.sheet = None, ""
+        await run({"utterance": "start a new game"}, ToolContext(user_text="start a new game", origin=origin))
+        assert world.pressed == ["Game › New Game"], origin
+    assert await menus.by_utterance("start a new game", ToolContext(user_text="start a new game", origin="live")) is None
+
+
+async def test_a_committing_button_is_never_pressed_by_itself(world):
+    world.sheets["Close Round"] = Blocker("sheet", "Save changes to this round?", [button("Don’t Save", 51), button("Cancel", 52), button("Save", 53)])
+    said = "choose Close Round from the Game menu, don't save"
+    out = await run({"item": "Close Round", "menu": "Game"}, user(said))
+    assert world.pressed == ["Game › Close Round"] and out.halt
+
+
+async def test_another_apps_dialog_is_never_answered(world):
+    world.sheets["Connect"] = Blocker("dialog", "Connect?", [button("Connect", 61), button("Cancel", 62)], owner_pid=OTHER_PID)
+    out = await menus.by_utterance("connect", user("connect"))
+    assert world.pressed == ["Game › Connect"] and out.halt
+
+
+async def test_a_request_that_says_more_is_left_to_the_model(world):
+    for said in ("start a new game with two players", "start a new game as white", "what does new game do?", "is new game safe"):
+        assert await menus.by_utterance(said, user(said)) is None, said
+    assert world.pressed == []
+
+
+# ---- never the system menu; every press gated -------------------------------------------------------------
+
+
+async def test_the_system_menu_is_never_pressed(world):
+    assert await menus.by_utterance("restart", user("restart")) is None or world.pressed == []
+    out = await run({"item": "Restart…"}, ToolContext(user_text="restart the game"))
+    assert not out.ok and "system menu" in out.text and world.pressed == []
+    out = await run({"item": "Shut Down"}, ToolContext())
+    assert world.pressed == [] and not out.ok
+
+
+def test_the_fallback_reader_never_lists_the_first_bar_item(monkeypatch):
+    class El:
+        def __init__(self, role, title="", kids=(), **kw):
+            self.a = {"AXRole": role, "AXTitle": title, "AXChildren": list(kids), **kw}
+
+    def menu(*items):
+        return El("AXMenu", kids=items)
+
+    apple = El("AXMenuBarItem", "", [menu(El("AXMenuItem", "Restart…"), El("AXMenuItem", "Shut Down…"))])
+    game = El("AXMenuBarItem", "Game", [menu(El("AXMenuItem", "New Game", AXMenuItemCmdChar="N"), El("AXMenuItem", ""))])
+    bar = El("AXMenuBar", kids=[apple, game])
+    root = El("AXApplication", AXMenuBar=bar)
+    monkeypatch.setattr(ax, "_app_el", lambda pid: root)
+    monkeypatch.setattr(ax, "_attr", lambda el, name, default=None: el.a.get(name, default) if el is not None else default)
+    got = menus._read_fallback(PID)
+    assert [i.where() for i in got] == ["Game › New Game"] and got[0].key == "N"
+
+
+async def test_services_and_submenu_titles_are_not_commands(world):
+    names = [i.where() for i in menus._commands(PID)]
+    assert "Game Box › Services › Make Sticky Note" not in names
+    assert "File › Export" not in names and "File › Export › PDF" in names
+
+
+async def test_a_committing_command_asks_first_then_runs_on_yes(world):
+    out = await run({"item": "Delete Round"}, ToolContext())
+    assert out.halt and out.text.startswith("NEEDS_CONFIRM") and world.pressed == []
+    with confirm.approved(out.staged):
+        out = await run({"item": "Delete Round"}, ToolContext(origin="approval"))
+    assert out.ok and world.pressed == ["Game › Delete Round…"]
+
+
+async def test_a_command_is_gated_like_its_keyboard_shortcut(world, monkeypatch):
+    seen = []
+
+    async def keys(a, chord, app, c, pid=0):
+        seen.append((chord, app, pid))
+        return confirm.ask_user("that shortcut sends something")
+
+    monkeypatch.setattr(comp, "_ask_before_keys", keys)
+    out = await run({"item": "New Game"}, ToolContext())
+    assert seen == [("cmd+shift+n", APP, PID)] and out.halt and world.pressed == []
+
+
+async def test_words_neo_cant_read_in_english_are_asked_about_first(monkeypatch):
+    confirm.cancel("test setup")
+    w = World(monkeypatch, [item("गेम", "नया गेम"), item("गेम", "सब मिटाएँ")])
+    before = uistrings._system
+    uistrings.install(None)
+    try:
+        out = await menus.by_utterance("नया गेम शुरू करो", user("नया गेम शुरू करो"))
+        assert out is not None and out.halt and w.pressed == []  # no index: asked, never pressed
+        confirm.cancel("next")
+        uistrings.install(uistrings.Index.of({"New Game": ["नया गेम"], "Erase All": ["सब मिटाएँ"], "Game": ["गेम"]}))
+        out = await menus.by_utterance("नया गेम शुरू करो", user("नया गेम शुरू करो"))
+        assert out.ok and w.pressed == ["गेम › नया गेम"]
+        out = await run({"item": "सब मिटाएँ"}, ToolContext())
+        assert out.halt and w.pressed == ["गेम › नया गेम"]  # read as "Erase All": gated
+    finally:
+        uistrings.install(before)
+        confirm.cancel("test over")
+
+
+async def test_neos_own_and_protected_apps_are_refused(monkeypatch):
+    confirm.cancel("test setup")
+    w = World(monkeypatch, game_menus(), front=("NEO", NEO_PID))
+    out = await run({"item": "New Game"}, ToolContext())
+    assert not out.ok and w.pressed == []
+    w = World(monkeypatch, game_menus())
+    monkeypatch.setenv("NEO_PROTECTED_APPS", json.dumps([APP]))
+    monkeypatch.setattr(config, "_settings", None)
+    out = await run({"item": "New Game"}, ToolContext())
+    assert not out.ok and w.pressed == []
+    assert await menus.by_utterance("start a new game", user("start a new game")) is None
+    confirm.cancel("test over")
+
+
+async def test_a_greyed_out_command_says_so(world):
+    out = await run({"item": "Take Back Move"}, ToolContext())
+    assert not out.ok and "greyed out" in out.text and world.pressed == []
+
+
+async def test_the_same_title_in_two_menus_is_a_question_unless_the_menu_is_named(world):
+    out = await run({"item": "Close"}, ToolContext())
+    assert not out.ok and "several" in out.text and "File › Close" in out.text and "Window › Close" in out.text
+    if hasattr(out, "handoff"):
+        assert len(out.handoff) == 2
+    out = await run({"path": "Window > Close"}, ToolContext())
+    assert out.ok and world.pressed == ["Window › Close"]
+
+
+async def test_a_destructive_request_never_lands_on_a_harmless_command(world):
+    out = await run({"utterance": "delete the new game"}, user("delete the new game"))
+    assert not out.ok and world.pressed == []
+
+
+async def test_a_command_nothing_matches_names_the_menus(world):
+    out = await run({"item": "Flip Board"}, ToolContext())
+    assert not out.ok and "Game" in out.text and world.pressed == []
+
+
+# ---- words: explicit forms and fast paths ------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "said,item,menu",
+    [
+        ("choose New Window from the File menu", "New Window", "File"),
+        ("click Save As… in the File menu", "Save As…", "File"),
+        ("File > New Window", "New Window", "File"),
+        ("choose File › Export › PDF", "PDF", "File"),
+        ("open the File menu and choose New Window", "New Window", "File"),
+        ("click File then New Window", "New Window", "File"),
+        ("File menu se New Window chuno", "New Window", "File"),
+        ("Game menu mein New Game pe click karo", "New Game", "Game"),
+        ("गेम मेनू से नया गेम चुनो", "नया गेम", "गेम"),
+    ],
+)
+def test_explicit_menu_words(said, item, menu):
+    got = menus._ask_of({"utterance": said}, user(said))
+    assert (got.item, got.menu) == (item, menu), said
+
+
+@pytest.mark.parametrize(
+    "said,claims",
+    [
+        ("choose New Window from the File menu", True),
+        ("File > New Window", True),
+        ("open the File menu and choose New Window", True),
+        ("File menu se New Window chuno", True),
+        ("गेम मेनू में नया गेम पर क्लिक करो", True),
+        ("click the Start button", False),
+        ("click Alpha then Bravo", False),
+        ("what's in the File menu", False),
+        ("start a new game", False),  # no menu named: the by-meaning lane's, not a fast path's
+    ],
+)
+def test_fast_paths_claim_only_words_that_name_a_menu(said, claims):
+    hit = any(re.search(p, said, re.I) for p, _ in menus.FAST_PATHS)
+    assert hit is claims, said
+
+
+async def test_a_path_through_submenus(world):
+    out = await run({"path": "File > Export > PDF"}, ToolContext())
+    assert out.ok and world.pressed == ["File › Export › PDF"]
+
+
+# ---- the shadow log ---------------------------------------------------------------------------------------
+
+
+async def test_the_shadow_log_keeps_no_words(world):
+    await menus.by_utterance("start a new game", user("start a new game"))
+    log = Path(os.environ["NEO_DATA_DIR"]) / "decide_shadow.log"
+    lines = [json.loads(x) for x in log.read_text(encoding="utf-8").splitlines()]
+    assert {x["kind"] for x in lines} == {"ui_resolve"} and {x["want"] for x in lines} == {"menu", "sheet"}
+    assert "new game" not in log.read_text(encoding="utf-8").lower() and "start" not in json.dumps(lines[0])
+
+
+async def test_the_os_strings_stage_runs_in_shadow_until_promoted(world, monkeypatch):
+    before = uistrings._system
+    uistrings.install(uistrings.Index.of({"New Game": ["नया गेम"], "Start": ["शुरू करें"]}))
+    try:
+        said = "नया गेम शुरू करो"
+        assert await menus.by_utterance(said, user(said)) is None and world.pressed == []
+        monkeypatch.setattr(menus, "_resolver_mode", lambda: "live")
+        out = await menus.by_utterance(said, user(said))
+        # promoted: the command is chosen; its English sheet's "Start" isn't in the user's words, so asked
+        assert world.pressed == ["Game › New Game"] and out.halt
+    finally:
+        uistrings.install(before)
+
+
+# ---- typing into a named field --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "said,want",
+    [
+        ("type hello in the search field", ("hello", "search")),
+        ("please enter 42 into the amount box", ("42", "amount")),
+        ("type I live in the city in the search box", ("I live in the city", "search")),
+        ("fill the subject field with Lunch on Friday", ("Lunch on Friday", "subject")),
+        ("type 'hello world' in the To field", ("hello world", "To")),
+        ("search box mein cats likho", ("cats", "search")),
+        ("सर्च बॉक्स में बिल्ली लिखो", ("बिल्ली", "सर्च")),
+        ("type hello", None),
+        ("write a poem about the sea", None),
+    ],
+)
+def test_parse_field(said, want):
+    assert menus.parse_field(said) == want
+
+
+@pytest.fixture
+def form(monkeypatch):
+    fields = [
+        ax.Element("w1", "AXSearchField", "", "", 10, 10, 200, 24, ref="r1"),
+        ax.Element("w2", "AXTextField", "Subject", "", 10, 40, 200, 24, ref="r2"),
+        ax.Element("w3", "AXSecureTextField", "Password", "", 10, 70, 200, 24, ref="r3"),
+        ax.Element("w4", "AXTextField", "Name", "", 10, 100, 200, 24, ref="r4"),
+        ax.Element("w5", "AXTextField", "Name", "", 10, 130, 200, 24, ref="r5"),
+    ]
+    typed = []
+    monkeypatch.setattr(ax, "working_app", lambda: (APP, PID))
+    monkeypatch.setattr(ax, "is_neo", lambda pid, name="": False)
+    monkeypatch.setattr(ax, "regular", lambda pid: True)
+    monkeypatch.setattr(ax, "app_names", lambda pid: {APP})
+    monkeypatch.setattr(ax, "window_elements", lambda app=None: (APP, (0, 0, 800, 600), list(fields)))
+    monkeypatch.setattr(ax, "secure", lambda ref: ref == "r3")
+    monkeypatch.setattr(ax, "set_el_value", lambda e, v: typed.append((e.id, v)) or f"Set {e.id} to “{v}”.")
+    return typed
+
+
+async def test_typing_into_the_named_field_keeps_the_place(form):
+    out = await menus.fill_field("hello", "search", ToolContext())
+    assert out.ok and form == [("w1", "hello")]
+    out = await menus.fill_field("Lunch", "subject", ToolContext())
+    assert out.ok and form[-1] == ("w2", "Lunch")
+
+
+async def test_a_password_field_is_never_filled(form):
+    out = await menus.fill_field("hunter2", "password", ToolContext())
+    assert not out.ok and "password" in out.text and form == []
+
+
+async def test_two_fields_of_that_name_are_a_question_and_none_is_an_error(form):
+    out = await menus.fill_field("Ada", "name", ToolContext())
+    assert not out.ok and "several" in out.text and form == []
+    out = await menus.fill_field("x", "coupon", ToolContext())
+    assert not out.ok and "no field" in out.text
+
+
+# ---- no app names in the decisions ---------------------------------------------------------------------------
+
+
+def test_no_app_names_or_bundle_ids_in_the_decision_code():
+    names = r"\b(?:chess|safari|finder|mail|notes|textedit|chrome|terminal|xcode|spotify|slack|whatsapp|music)\b|com\.apple\."
+    for mod in (menus, uistrings):
+        src = Path(mod.__file__).read_text(encoding="utf-8")
+        assert not re.search(names, src, re.I), (mod.__name__, re.search(names, src, re.I))
+
+
+# ---- measured -------------------------------------------------------------------------------------------------
+
+
+def test_grounding_a_big_menu_bar_is_fast(capsys):
+    """Hermetic: 1,500 commands in 15 menus (the AX core's read limit); lexical grounding per request."""
+    items = [item(f"Menu{m}", f"Command {m} {k} Thing{k % 7}") for m in range(15) for k in range(100)]
+    items.append(item("Game", "New Game"))
+    asks = [menus._Ask(text="start a new game"), menus._Ask(item="Command 3 42 Thing0"), menus._Ask(text="open command 9 99 thing1")]
+    t0 = time.perf_counter()
+    n = 60
+    for _ in range(n):
+        picks = [menus._ground(a, items) for a in asks]
+    per = (time.perf_counter() - t0) / (n * len(asks)) * 1000
+    assert [p.item.title if p.item else None for p in picks] == ["New Game", "Command 3 42 Thing0", "Command 9 99 Thing1"]
+    with capsys.disabled():
+        print(f"\n[bench] menu grounding over {len(items)} commands: {per:.2f} ms per request")
+    assert per < 250  # generous: a shared machine; measured ~10 ms
