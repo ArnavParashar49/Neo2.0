@@ -24,8 +24,11 @@ PYVER="$("$ROOT/.venv/bin/python" -c 'import platform; print(platform.python_ver
 mkdir -p "$RUNTIME"
 uv venv --quiet --allow-existing --python "$PYVER" "$RUNTIME/.venv"
 uv pip install --quiet --python "$RUNTIME/.venv/bin/python" -r "$ROOT/requirements.lock"
+# setuptools builds in the checkout and ships whatever is in build/lib: clear an earlier build's
+# copy first (it could hold the pre-2.1 top-level neo/), and its own scratch copy afterwards.
+rm -rf "$ROOT/build"
 uv pip install --quiet --python "$RUNTIME/.venv/bin/python" --no-deps --reinstall "$ROOT"  # neo2: the app runs -m neo2
-rm -rf "$ROOT/build"  # setuptools' scratch copy of the package
+rm -rf "$ROOT/build"
 mkdir -p "$HOME/.neo" && chmod 700 "$HOME/.neo"
 if [ ! -f "$HOME/.neo/.env" ] && [ -f "$ROOT/.env" ]; then
   install -m 600 "$ROOT/.env" "$HOME/.neo/.env"
@@ -60,6 +63,7 @@ sys.exit(0 if (m.metadata("neo")["Summary"] or "").startswith("NEO") else 1)' 2>
   CORE_PID="$(cat "$HOME/.neo/core.pid" 2>/dev/null || true)"  # it saves its session as it stops
   case "$CORE_PID" in ''|*[!0-9]*) ;; *) for _ in $(seq 1 30); do kill -0 "$CORE_PID" 2>/dev/null || break; sleep 0.5; done ;; esac
   uv pip uninstall --quiet --python "$RUNTIME/.venv/bin/python" neo
+  rm -rf "$ROOT/build"
   uv pip install --quiet --python "$RUNTIME/.venv/bin/python" --no-deps --reinstall "$ROOT"
   rm -rf "$ROOT/build"
 fi

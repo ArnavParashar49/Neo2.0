@@ -40,3 +40,19 @@ def test_python_m_neo2_imports_nothing_until_it_runs(tmp_path):
     for flag in ("--text", "--doctor", "--local", "--forget-all"):  # every entry the old name had
         assert flag in run.stdout
     assert not (tmp_path / ".neo").exists()
+
+
+def test_importing_neo2_core_main_starts_nothing(tmp_path):
+    """Something that imports every module of neo2 (a doc generator, --doctest-modules, a plugin
+    scan) mustn't start NEO.app's core: only `python -m neo2.core` runs it."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("NEO_", "PYTEST"))}
+    env.update(HOME=str(tmp_path), PYTHONPATH=str(ROOT), NEO_NO_EFFECTS="1")
+    code = "import sys\nsys.argv = ['host', '--help']\nimport neo2.core.__main__\nprint('imported, not run')\n"
+    with effects.allow("process"):
+        out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, cwd=str(tmp_path), env=env, timeout=60)
+        run = subprocess.run(
+            [sys.executable, "-m", "neo2.core", "--help"], capture_output=True, text=True, cwd=str(tmp_path), env=env, timeout=120
+        )
+    assert out.returncode == 0 and out.stdout == "imported, not run\n", (out.stdout, out.stderr[-2000:])
+    assert run.returncode == 0 and "--text" in run.stdout, run.stderr[-2000:]
+    assert not (tmp_path / ".neo").exists()

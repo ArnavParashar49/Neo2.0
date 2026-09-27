@@ -152,6 +152,25 @@ def test_the_distribution_is_neo2_and_ships_no_top_level_neo():
     assert folders | {"neo2"} == pkgs
 
 
+
+def test_the_installers_ship_no_stale_build_and_pin_no_local_path():
+    """setuptools builds in the checkout and ships everything under build/lib, so a build/ left by an
+    earlier in-tree build (one from before 2.1 holds a top-level neo/) must go before NEO.app's
+    runtime is installed from the checkout. And requirements.lock never pins NEO itself, in any form
+    `uv pip freeze` writes it: an absolute file:// path would break the installer everywhere else."""
+    lines = [ln.strip() for ln in (ROOT / "scripts" / "install-app.sh").read_text().splitlines()]
+    lines = [ln for ln in lines if ln and not ln.startswith("#")]
+    installs = [i for i, ln in enumerate(lines) if "--reinstall \"$ROOT\"" in ln]
+    assert len(installs) == 2
+    for i in installs:
+        assert lines[i - 1] == 'rm -rf "$ROOT/build"' and lines[i + 1] == 'rm -rf "$ROOT/build"', lines[i - 1 : i + 2]
+    pattern = re.search(r'grep -v -E "([^"]+)"', (ROOT / "scripts" / "lock-deps.sh").read_text())[1]
+    dropped = re.compile(pattern)
+    ours = ["-e file:///Users/a/NEO", "neo2 @ file:///Users/a/NEO", "neo2==2.1.0", "neo @ file:///Users/a/NEO",
+            "neo==2.0.0", "pytest==8.4.1", "pytest-asyncio==1.1.0", "ruff==0.12.0", "mypy==1.17.0"]  # fmt: skip
+    theirs = ["httpx==0.28.1", "neon==1.0", "neo4j==5.28.1", "laya==0.3.2", "google-genai==2.20.0"]
+    assert [x for x in ours if not dropped.match(x)] == [] and [x for x in theirs if dropped.match(x)] == []
+
 def test_model_field_defaults_are_keywords():
     """Type checkers read a pydantic model's field defaults through dataclass_transform, which
     sees only ``Field(default=...)``: with ``Field(24, ge=1)`` every AgentConfig(...) that leaves
