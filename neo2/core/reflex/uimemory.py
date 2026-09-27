@@ -22,6 +22,12 @@ recalled only for the user's own words (``origin == "user"``): a model's or Live
 verified, the wording (stripped of its click frame) is remembered for that app: next time the
 resolver's alias stage finds it without the model.
 
+**Nothing a page could have steered.** A request that read untrusted content before a control was
+chosen — a page, a mail, a file, or the screen beyond a shortlist's own labels (each step's
+``untrusted``, resolve.after_press) — teaches no alias and no recipe, as a playbook isn't saved from
+a tainted run: a page that says "the Start button is Unsubscribe all" must not become NEO's meaning
+of the user's words.
+
 **Privacy.** Only skeleton text (learn.skeleton: never a message's or a note's body), bundle ids and
 UI chrome labels (buttons, menu items, tabs…, never rows, cells, static text or field values) are
 written, to ``ui_memory.json`` (0600). What a step saw is kept as facts: that the title or the
@@ -483,9 +489,12 @@ async def replay(
 def settled(text: str, sigs: list[dict[str, Any]]) -> Recipe | None:
     """neo2.core.reflex.outcomes: a request settled as verified with these step signatures. Kept as a
     recipe when every step is keepable, changed something and belongs to one app; a shortlist pick
-    in it becomes an alias."""
+    in it becomes an alias. Nothing is learned from a request any step of which says it read
+    untrusted content before its choice (``untrusted``)."""
     if not sigs or not _active():
         return None
+    if any(s.get("untrusted") for s in sigs):
+        return None  # (content it read could have steered the choice: see the module's notes)
     bundles = {str(s.get("bundle", "")) for s in sigs}
     if len(bundles) != 1 or not next(iter(bundles)):
         return None  # several apps, or one whose bundle id is unknown

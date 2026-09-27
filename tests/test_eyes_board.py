@@ -37,12 +37,12 @@ def _fresh_boards():
     B.forget()
 
 
-@functools.cache
+@functools.lru_cache(maxsize=8)  # (bounded: each render is kept as its small picture, a few at a time)
 def _flat(**kw):
     return flat_screen(**kw)
 
 
-@functools.cache
+@functools.lru_cache(maxsize=8)
 def _tilted(**kw):
     return tilted_screen(**kw)
 

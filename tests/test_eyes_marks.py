@@ -163,7 +163,7 @@ def fake_ax(monkeypatch):
     monkeypatch.setattr(ax, "_app_el", lambda pid: root)
     monkeypatch.setattr(ax, "_attr", lambda el, name, default=None: attrs.get((el, name), default))
     monkeypatch.setattr(ax, "_point_size", lambda el: (0.0, 25.0, 1000.0, 700.0))
-    monkeypatch.setattr(ax, "_sheet_of", lambda w: sheet if w is win else None)
+    monkeypatch.setattr(ax, "_sheet_of", lambda el, kids=None, w=None: sheet if el is win else None)  # (w: the look's limits)
     monkeypatch.setattr(ax, "_expose_web", lambda pid, r: False)
     monkeypatch.setattr(ax, "working_app", lambda: (APP, PID))
     monkeypatch.setattr(ax, "is_neo", lambda pid, name="": pid == 900)

@@ -165,6 +165,11 @@ _LONG_KIDS = 48  # a list longer than this is entered where it is on screen, not
 _CANVAS_SHARE = 0.35  # a childless, unpressable leaf this big is a board or a canvas
 _DIALOG_SUBROLES = {"AXDialog", "AXSystemDialog"}
 _AX_ERROR_TYPE = 5  # kAXValueAXErrorType: what a batched read puts where a value failed
+# An element's text (its value, its title) as kept: every reader shows far less (a line 80 characters,
+# a mark 50, the gate's context 2000 in all). A terminal's scrollback or a long file in an editor is
+# never copied whole into every look.
+_TEXT_MAX = 2000
+_SHEET_KIDS = 16  # a sheet is added last among a window's children: only this many, from the last, are asked
 
 # One element's whole look, in one round trip (the role first: the per-attribute fallback asks it
 # first, and a hung app is noticed on it).
@@ -284,6 +289,7 @@ _last_tree_app = ""
 _last_tree_pid = 0
 _issued: dict[str, Element] = {}
 _ISSUED_MAX = 4000
+_ISSUED_CHARS = 2_000_000  # …and at most this much of their text (the oldest ids go first)
 _ids = itertools.count(1)
 _walks = itertools.count(1)
 _latest_walk = 0
@@ -454,6 +460,7 @@ class _Walk:
         self.cancel = cancel
         self.stopped = ""
         self.quick = 0  # quick -25204s in a row
+        self.timed_out = False  # a call waited out the timeout: the app isn't answering (asking more costs as much)
         self.blockers: list[_Within] = []
         self.canvas: list[tuple[Any, str, tuple[float, float, float, float], Element | None]] = []
         self.canvas_min = 0.0  # a childless leaf at least this big (35% of the window) is a candidate
@@ -472,6 +479,7 @@ class _Walk:
     def refused(self, took: float) -> None:
         if took >= _REAL_TIMEOUT * _AX_TIMEOUT_S:
             self.stopped = self.stopped or "hung"
+            self.timed_out = True
             return
         self.quick += 1
         if self.quick >= _HUNG_AFTER:
@@ -500,6 +508,96 @@ def _read(el, names, w: _Walk | None = None) -> dict[str, Any] | None:
     if w is not None:
         w.quick = 0
     return vals
+
+
+# ---- long texts -----------------------------------------------------------------------------------------
+# An element found holding a long text once (a terminal's scrollback, a big file in an editor) is
+# asked from then on for everything but its value, and for the value's first _TEXT_MAX characters on
+# their own (AXStringForRange): its whole text isn't copied across on every look.
+_BIG_TEXT = 1 << 15  # characters: a value longer than this is read in part from then on
+_BIG_KEEP = 64
+_big: dict[int, Any] = {}  # hash → the element itself (CFEqual tells it apart from another with that hash)
+_big_lock = threading.Lock()
+
+
+def _clip_text(s: str) -> str:
+    return s if len(s) <= _TEXT_MAX else s[:_TEXT_MAX]
+
+
+def _big_key(el: Any) -> int | None:
+    try:
+        return hash(el)
+    except TypeError:
+        return None
+
+
+def _known_big(el: Any) -> bool:
+    k = _big_key(el)
+    if k is None:
+        return False
+    with _big_lock:
+        ref = _big.get(k)
+    return ref is not None and _same(ref, el)
+
+
+def _mark_big(el: Any, big: bool) -> None:
+    k = _big_key(el)
+    if k is None:
+        return
+    with _big_lock:
+        _big.pop(k, None)
+        if big:
+            _big[k] = el
+            while len(_big) > _BIG_KEEP:
+                _big.pop(next(iter(_big)))
+
+
+def _head(el: Any, count: Any, w: _Walk | None) -> str:
+    """The first _TEXT_MAX characters of a long text, in a read that can't be longer. '' when it
+    can't be read in part (a text this long shows only its first words anyway)."""
+    fn = getattr(AS, "AXUIElementCopyParameterizedAttributeValue", None)
+    make, kind = getattr(AS, "AXValueCreate", None), getattr(AS, "kAXValueCFRangeType", None)
+    try:
+        n = max(0, min(int(count), _TEXT_MAX)) if count is not None else _TEXT_MAX
+    except (TypeError, ValueError):
+        n = _TEXT_MAX
+    if fn is None or make is None or kind is None or n == 0 or (w is not None and w.over()):
+        return ""
+    span = AS.CFRangeMake(0, n) if hasattr(AS, "CFRangeMake") else (0, n)
+    t0 = wait.now()
+    try:
+        err, got = fn(el, "AXStringForRange", make(kind, span), None)
+    except Exception:  # noqa: BLE001 - not readable in part
+        err, got = -1, None
+    if err == _CANNOT_COMPLETE and w is not None:
+        w.refused(wait.now() - t0)
+    return str(got[:_TEXT_MAX]) if not err and isinstance(got, str) else ""
+
+
+def _read_text(el: Any, names: tuple[str, ...], w: _Walk | None = None) -> dict[str, Any] | None:
+    """:func:`_read`, with a long AXValue kept to its first _TEXT_MAX characters — and, for an element
+    known to hold a long text, never read whole (its head alone, in part)."""
+    if "AXValue" not in names:
+        return _read(el, names, w)
+    if _known_big(el):
+        v = _read(el, (*(n for n in names if n != "AXValue"), "AXNumberOfCharacters"), w)
+        if v is None:
+            return None
+        count = v.pop("AXNumberOfCharacters", None)
+        v["AXValue"] = _head(el, count, w)
+        try:
+            if count is not None and int(count) <= _BIG_TEXT:
+                _mark_big(el, False)  # (it got short: read whole from now on)
+        except (TypeError, ValueError):
+            pass
+        return v
+    v = _read(el, names, w)
+    raw = v.get("AXValue") if v is not None else None
+    if isinstance(raw, str) and len(raw) > _TEXT_MAX:
+        if len(raw) > _BIG_TEXT:
+            _mark_big(el, True)
+        v["AXValue"] = str(raw[:_TEXT_MAX])  # type: ignore[index]
+    return v
 
 
 def _seq(v: Any) -> list:
@@ -770,7 +868,7 @@ def _walk(
     if skip is not None and _same(el, skip):
         return
     try:
-        v = _read(el, _WALK_ATTRS, w)
+        v = _read_text(el, _WALK_ATTRS, w)
         if v is None:
             return
         role = _str(v.get("AXRole"))
@@ -786,8 +884,8 @@ def _walk(
         seen = _clip(box, frame) if fw > 0 and fh > 0 else None
         if clip and role in _CLIPS and fw > 0 and fh > 0:
             box = _clip(box, frame)
-        title = _label_words(v)
-        value = _str(v.get("AXValue"))
+        title = _clip_text(_label_words(v))
+        value = _clip_text(_str(v.get("AXValue")))
         subrole = _str(v.get("AXSubrole"))
         shown = fw > 0 and fh > 0
         interesting = role in _INTERACTIVE and (title or value or role in _ALWAYS_SHOW) and shown
@@ -968,13 +1066,18 @@ def _child_count(el) -> int:
     return len(_seq(_attr(el, AS.kAXChildrenAttribute)))
 
 
-def _find_role(start, role: str, max_nodes: int = 60, max_depth: int = 8):
-    """The first ``role`` under ``start``, breadth first, within a few dozen elements."""
+def _find_role(start, role: str, max_nodes: int = 60, max_depth: int = 8, w: _Walk | None = None):
+    """The first ``role`` under ``start``, breadth first, within a few dozen elements — and within
+    ``w``'s limits (its deadline; an app that stopped answering ends the search)."""
     todo, seen = [(start, 0)], 0
     while todo and seen < max_nodes:
+        if w is not None and w.over():
+            return None
         node, d = todo.pop(0)
         seen += 1
-        v = _attrs(node, ("AXRole", "AXChildren"))
+        v = _read(node, ("AXRole", "AXChildren"), w)
+        if v is None:
+            continue
         if _str(v.get("AXRole")) == role:
             return node
         if d < max_depth:
@@ -984,16 +1087,27 @@ def _find_role(start, role: str, max_nodes: int = 60, max_depth: int = 8):
 
 def _web_settle(start, cancel: threading.Event | None = None) -> None:
     """After a Chromium or Electron app's web tree was switched on: wait until its web area has
-    something in it — at most _WEB_SETTLE_S, instead of always that long."""
+    something in it — at most _WEB_SETTLE_S (one AX call already asked may run past it), instead of
+    always that long; an app that stops answering ends the wait."""
     if start is None:
         return
     area: list[Any] = [None, 0.0]
+    w = _Walk(_WEB_SETTLE_S, cancel)
 
     def ready() -> bool:
+        if w.over():
+            return True  # (out of time, or the app isn't answering: go on without waiting)
         if area[0] is None and wait.now() >= area[1]:
-            area[0] = _find_role(start, "AXWebArea")
+            area[0] = _find_role(start, "AXWebArea", w=w)
             area[1] = wait.now() + 0.1  # (not found: looked for again in a moment, not every poll)
-        return area[0] is not None and _child_count(area[0]) > 0
+        if area[0] is None or w.over():
+            return w.over()
+        t0 = wait.now()
+        if _child_count(area[0]) > 0:
+            return True
+        if wait.now() - t0 >= _REAL_TIMEOUT * _AX_TIMEOUT_S:
+            w.refused(wait.now() - t0)  # (the count waited out the timeout: the app isn't answering)
+        return w.over()
 
     wait.until_sync(ready, _WEB_SETTLE_S, every=0.03, stop=cancel)
 
@@ -1028,12 +1142,26 @@ AX_TREE_PARAMS = {
 
 
 def _issue(els: list[Element]) -> None:
-    """These elements' ids resolve to them from now on (a look that isn't the tree ax_find reads)."""
+    """These elements' ids resolve to them from now on (a look that isn't the tree ax_find reads).
+    The oldest ids are let go past _ISSUED_MAX of them, or past _ISSUED_CHARS of their text."""
     with _lock:
         for e in els:
+            _issued.pop(e.id, None)
             _issued[e.id] = e
-        while len(_issued) > _ISSUED_MAX:
-            _issued.pop(next(iter(_issued)))
+        _trim_issued()
+
+
+def _text_size(e: Any) -> int:
+    return len(getattr(e, "title", "") or "") + len(getattr(e, "value", "") or "")
+
+
+def _trim_issued() -> None:
+    """(Under _lock.) The registry back within its count and its size, the oldest ids first."""
+    while len(_issued) > _ISSUED_MAX:
+        _issued.pop(next(iter(_issued)))
+    total = sum(_text_size(e) for e in _issued.values())
+    while _issued and total > _ISSUED_CHARS:
+        total -= _text_size(_issued.pop(next(iter(_issued))))
 
 
 def _register(els: list[Element], walk: int, name: str, pid: int) -> None:
@@ -1055,8 +1183,8 @@ def _menu_bar(bar, new_id, w: _Walk, open_menus: list[Element]) -> list[Element]
     items = _seq(v.get("AXChildren")) if v else []
     out: list[Element] = []
     for i, it in enumerate(items):
-        if (i == 0 and len(items) >= 2) or w.over():
-            continue
+        if i == 0 or w.over():
+            continue  # (the system menu, however many items the bar has)
         iv = _read(it, ("AXRole", "AXTitle", "AXPosition", "AXSize", "AXEnabled", "AXSelected", "AXChildren"), w)
         if iv is None or _str(iv.get("AXRole")) != "AXMenuBarItem":
             continue
@@ -1344,6 +1472,16 @@ def _keep(pid: int, win, gen: int | None, text: str, els: list[Element], name: s
         _cache.pop(int(pid), None)
         return
     _cache[int(pid)] = (win, gen, text, els, time.monotonic(), name.lower(), (tuple(c.owner_pid for c in covering), _events_sent()), blind)
+    _let_go(_cache, 4)
+
+
+def _let_go(cache: dict, at: int) -> None:
+    """Kept looks too old to be used again (older than _CACHE_MAX_S: ``at`` is where an entry says
+    when it was kept) are let go — never a look per app ever looked at, each holding its elements."""
+    now = time.monotonic()
+    for pid, kept in list(cache.items()):
+        if now - kept[at] > _CACHE_MAX_S:
+            cache.pop(pid, None)
 
 
 def _cached(pid: int, win, name: str, walk: int, blind: bool) -> str | None:
@@ -1444,7 +1582,10 @@ def in_system_menu(el) -> bool:
 
 def _menu_place(el) -> str:
     """"system": the system menu or in it; "app": anywhere else (an app's own menu, a popup or
-    context menu, not in a menu at all); "unknown": its menus or menu bar didn't say."""
+    context menu, not in a menu at all); "unknown": its menus or menu bar didn't say. The first item
+    of any menu bar is the system menu, however many items the bar has (a bar holding the Apple menu
+    alone is no app's): as gates._in_system_menu tells it. A status-bar menu's first item (an app's
+    AXExtrasMenuBar) is refused the same way — never pressed on a guess that it isn't."""
     p = el
     for _ in range(12):
         if p is None:
@@ -1463,7 +1604,7 @@ def _menu_place(el) -> str:
             items = _seq(bv.get("AXChildren"))
             if berr or not items:
                 return "unknown"
-            return "system" if len(items) >= 2 and _same(items[0], p) else "app"
+            return "system" if _same(items[0], p) else "app"
         if role not in ("AXMenu", "AXMenuItem"):
             return "app"  # not (or no longer) in a menu
         p = v.get("AXParent")
@@ -1627,6 +1768,7 @@ def window_elements(
     frame = _point_size(win)
     if early_exit is None and not w.stopped and gen is not None and _watch_gen(pid) == gen:
         _win_cache[int(pid)] = (win, gen, _events_sent(), time.monotonic(), frame, els)
+        _let_go(_win_cache, 3)
     elif pid and (gen is None or _watch_gen(pid) != gen):
         _win_cache.pop(int(pid), None)  # what was kept from this app is older than this walk
     return name, frame, els
@@ -1708,16 +1850,20 @@ def work_window_frame() -> tuple[float, float, float, float] | None:
 
 def visible_frame(el) -> tuple[float, float, float, float] | None:
     """The part of an element that is on screen: its frame cut to the scroll areas and window
-    around it (a text area or a web area reports its whole document). None when none of it is."""
-    v = _attrs(el, ("AXPosition", "AXSize", "AXParent"))
+    around it (a text area or a web area reports its whole document). None when none of it is.
+    Within a look's limits: an app that stops answering on the way up ends it there."""
+    w = _Walk(_LOOK_S)
+    v = _read(el, ("AXPosition", "AXSize", "AXParent"), w) or {}
     box = _frame_of(v)
     if box[2] <= 0 or box[3] <= 0:
         return None
     p = v.get("AXParent")
     for _ in range(12):
-        if p is None:
+        if p is None or w.over():
             break
-        pv = _attrs(p, ("AXRole", "AXPosition", "AXSize", "AXParent"))
+        pv = _read(p, ("AXRole", "AXPosition", "AXSize", "AXParent"), w)
+        if pv is None:
+            break
         role = _str(pv.get("AXRole"))
         if role in _FLOATING:
             break  # an open menu or popover floats over its window: the window doesn't cut it
@@ -1805,13 +1951,13 @@ def _element_at(x: float, y: float):
 _LABEL_ATTRS = ("AXTitle", "AXDescription", "AXValue", "AXParent")
 
 
-def _label_of(el, v: dict[str, Any] | None = None) -> str:
+def _label_of(el, v: dict[str, Any] | None = None, w: _Walk | None = None) -> str:
     """What an element says, and its parent's (text inside a button: the button's too)."""
     parts: list[str] = []
     for _ in range(2):
-        if el is None:
+        if el is None or (w is not None and w.over()):
             break
-        v = v if v is not None else _attrs(el, _LABEL_ATTRS)
+        v = v if v is not None else (_read_text(el, _LABEL_ATTRS, w) or dict.fromkeys(_LABEL_ATTRS))
         for a in ("AXTitle", "AXDescription", "AXValue"):
             s = _str(v.get(a))
             if s:
@@ -1877,15 +2023,18 @@ _WORDS_ATTRS = ("AXRole", "AXTitle", "AXDescription", "AXValue", "AXChildren")
 
 
 def _words(el, limit: int = 3) -> tuple[list[str], list[str]]:
-    """(texts, button titles) inside a sheet or dialog: what it says and what it offers."""
+    """(texts, button titles) inside a sheet or dialog: what it says and what it offers — within
+    _WORDS_BUDGET_S, and never past an app that stopped answering."""
     texts: list[str] = []
     buttons: list[str] = []
     todo, seen = [(el, 0)], 0
-    stop = wait.now() + _WORDS_BUDGET_S
-    while todo and seen < 120 and wait.now() < stop:
+    w = _Walk(_WORDS_BUDGET_S)
+    while todo and seen < 120 and not w.over():
         node, d = todo.pop(0)
         seen += 1
-        v = _attrs(node, _WORDS_ATTRS)
+        v = _read_text(node, _WORDS_ATTRS, w)
+        if v is None:
+            continue
         role = _str(v.get("AXRole"))
         if role == "AXButton":
             t = _str(v.get("AXTitle")) or _str(v.get("AXDescription"))
@@ -1902,7 +2051,10 @@ def _words(el, limit: int = 3) -> tuple[list[str], list[str]]:
 
 def summary(el) -> str:
     """A sheet or dialog in a few words: “Start a New Game?” (buttons: Start, Cancel)."""
+    t0 = wait.now()
     title = _str(_attr(el, AS.kAXTitleAttribute))
+    if not title and wait.now() - t0 >= _REAL_TIMEOUT * _AX_TIMEOUT_S:
+        return "(no text)"  # (its app isn't answering: asking for its words would wait as long again)
     texts, buttons = _words(el)
     said = " ".join(f"“{t}”" for t in ([title] if title else []) + texts[:2])
     return (said or "(no text)") + (f" (buttons: {', '.join(buttons)})" if buttons else "")
@@ -1949,10 +2101,15 @@ def _shown(el) -> bool:
 
 def _sheet_of(win, kids: list | None = None, w: _Walk | None = None) -> Any:
     """The sheet open on a window (one with a size: a closed one lingering in the tree isn't).
-    Its children are looked at from the last (where a sheet is added)."""
+    Its last _SHEET_KIDS children are looked at, from the last (where a sheet is added), within
+    ``w``'s limits (default: a look's, _LOOK_S): an app that stopped answering ends the check."""
+    w = w if w is not None else _Walk(_LOOK_S)
     if kids is None:
-        kids = _seq(_attr(win, AS.kAXChildrenAttribute))
-    for c in reversed(kids):
+        got = _read(win, ("AXChildren",), w)
+        kids = _seq(got.get("AXChildren")) if got else []
+    for c in reversed(kids[-_SHEET_KIDS:]):
+        if w.over():
+            return None
         v = _read(c, ("AXRole", "AXSize"), w)
         if v and _str(v.get("AXRole")) == "AXSheet":
             size = _pair(v.get("AXSize"), False) or (0.0, 0.0)
@@ -1974,15 +2131,17 @@ def _inside(x: float, y: float, f: tuple[float, float, float, float]) -> bool:
     return f[0] <= x < f[0] + f[2] and f[1] <= y < f[1] + f[3]
 
 
-def _blocked(pid: int, win, x: float, y: float, kids: list | None = None) -> str:
+def _blocked(pid: int, win, x: float, y: float, kids: list | None = None, w: _Walk | None = None) -> str:
     """What blocks a point on ``win`` (None: a point Accessibility can't see, on the app's front
     window): a sheet open on that window, or a modal window of the app's in front of it — its words;
-    '' when nothing does. A point on the sheet or the modal window itself is never blocked by it."""
-    fv = _attrs(_app_el(pid), ("AXFocusedWindow",)) if pid else {}
+    '' when nothing does. A point on the sheet or the modal window itself is never blocked by it.
+    Within ``w``'s limits (default: a look's): an app that stopped answering says nothing more."""
+    w = w if w is not None else _Walk(_LOOK_S)
+    fv = (_read(_app_el(pid), ("AXFocusedWindow",), w) or {}) if pid else {}
     focused = fv.get("AXFocusedWindow")
     f = (0.0, 0.0, 0.0, 0.0)
-    if focused is not None and (win is None or not _same(focused, win)):
-        mv = _attrs(focused, ("AXModal", "AXPosition", "AXSize"))
+    if focused is not None and (win is None or not _same(focused, win)) and not w.over():
+        mv = _read(focused, ("AXModal", "AXPosition", "AXSize"), w) or {}
         f = _frame_of(mv)
         if mv.get("AXModal") is True and f[2] > 0 and f[3] > 0 and not _inside(x, y, f):
             return summary(focused)  # an app-modal alert blocks every other window of its app
@@ -1991,8 +2150,12 @@ def _blocked(pid: int, win, x: float, y: float, kids: list | None = None) -> str
         return ""
     if win is None and f[2] > 0 and f[3] > 0 and not _inside(x, y, f):
         return ""  # a point on another window of the app (a board beside the document): not its sheet's
-    sheet = _sheet_of(target, kids)
-    if sheet is not None and not _inside(x, y, _point_size(sheet)):
+    if w.over():
+        return ""
+    sheet = _sheet_of(target, kids, w)
+    if sheet is None or w.over():
+        return ""
+    if not _inside(x, y, _frame_of(_read(sheet, ("AXPosition", "AXSize"), w))):
         return summary(sheet)
     return ""
 
@@ -2019,21 +2182,22 @@ def hit(x: float, y: float) -> Hit:
         return h
     pid = pid_of(el)
     app = _running(pid)
-    v = _attrs(el, _HIT_ATTRS)
+    w = _Walk(_LOOK_S)  # (one look's limits for all of it: an app that stopped answering is asked no more)
+    v = _read_text(el, _HIT_ATTRS, w) or dict.fromkeys(_HIT_ATTRS)
     h = Hit(
         pid=pid,
         app=str(app.localizedName() or "") if app is not None else "",
-        label=_label_of(el, v),
+        label=_label_of(el, v, w),
         role=_str(v.get("AXRole")),
         regular=app is not None and int(app.activationPolicy()) == 0,
         el=el,
     )
     win = v.get("AXWindow")
     h.window = win
-    if win is not None:
-        wv = _attrs(win, ("AXRole", "AXChildren"))
-        if _str(wv.get("AXRole")) != "AXSheet":
-            h.sheet = _blocked(pid, win, x, y, _seq(wv.get("AXChildren")))
+    if win is not None and not w.over():
+        wv = _read(win, ("AXRole", "AXChildren"), w) or {}
+        if _str(wv.get("AXRole")) != "AXSheet" and not w.timed_out:
+            h.sheet = _blocked(pid, win, x, y, _seq(wv.get("AXChildren")), w)
     return h
 
 
@@ -2082,19 +2246,22 @@ def scene(pid: int, front: tuple[str, int] | None = None) -> Scene:
     s = Scene(front=name, front_pid=fpid, known=True)
     if not pid:
         return s
-    rv = _attrs(_app_el(pid), ("AXFocusedWindow", "AXFocusedUIElement"))
+    # One look's limits for all of it (it is polled every few dozen ms while a press is watched): a
+    # bounded number of elements, a deadline, and nothing more asked of an app that stopped answering.
+    w = _Walk(_LOOK_S)
+    rv = _read(_app_el(pid), ("AXFocusedWindow", "AXFocusedUIElement"), w) or {}
     win = rv.get("AXFocusedWindow")
-    if win is not None:
-        wv = _attrs(win, ("AXTitle", "AXSubrole", "AXChildren"))
+    if win is not None and not w.timed_out:
+        wv = _read(win, ("AXTitle", "AXSubrole", "AXChildren"), w) or {}
         s.title = _str(wv.get("AXTitle"))
-        sheet = _sheet_of(win, _seq(wv.get("AXChildren")))
+        sheet = _sheet_of(win, _seq(wv.get("AXChildren")), w) if not w.timed_out else None
         if sheet is not None:
             s.sheet = "a sheet " + summary(sheet)
         elif _str(wv.get("AXSubrole")) in _DIALOG_SUBROLES:
             s.sheet = "a dialog " + summary(win)
     f = rv.get("AXFocusedUIElement")
-    if f is not None:
-        fv = _attrs(f, ("AXRole", "AXTitle", "AXDescription"))
+    if f is not None and not w.timed_out:
+        fv = _read(f, ("AXRole", "AXTitle", "AXDescription"), w) or {}
         role = _str(fv.get("AXRole")).removeprefix("AX")
         label = _str(fv.get("AXTitle")) or _str(fv.get("AXDescription"))
         s.focus = f"{role} “{label[:40]}”" if label else role
@@ -2373,7 +2540,8 @@ def menu_items(
     pid: int, *, deadline_s: float = _LOOK_S, cancel: threading.Event | None = None, limit: int = 1500
 ) -> list[MenuItem]:
     """Every command in the app's menu bar, without opening a menu — never the system (Apple) menu,
-    the bar's first item, which is in every app's menu bar (Restart…, Shut Down…)."""
+    the bar's first item, which is in every app's menu bar (Restart…, Shut Down…), however many items
+    the bar has."""
     if not pid:
         return []
     w = _Walk(deadline_s, cancel)
@@ -2385,8 +2553,8 @@ def menu_items(
     items = _seq(bv.get("AXChildren"))
     out: list[MenuItem] = []
     for i, it in enumerate(items):
-        if (i == 0 and len(items) >= 2) or w.over():
-            continue
+        if i == 0 or w.over():
+            continue  # (the system menu, however many items the bar has)
         iv = _read(it, ("AXRole", "AXTitle", "AXChildren"), w)
         if iv is None or _str(iv.get("AXRole")) != "AXMenuBarItem":
             continue

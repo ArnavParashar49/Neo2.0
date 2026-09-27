@@ -246,11 +246,13 @@ def test_one_odd_element_never_fails_the_whole_tree(fake):
 
 def test_closed_menus_are_not_listed_and_menu_bar_items_are(fake):
     bar = El("AXMenuBar", frame=(0, 0, 1512, 24), children=[
+        El("AXMenuBarItem", "Apple", frame=(10, 0, 30, 24), actions=["AXPress"], children=[El("AXMenu", frame=(0, 0, 0, 0))]),
         El("AXMenuBarItem", "Game", frame=(60, 0, 50, 24), actions=["AXPress"], children=[El("AXMenu", frame=(0, 0, 0, 0))]),
     ])  # fmt: skip
     fake.add_app("Chess", 1, El("AXApplication", children=[window("Chess"), bar]))
     tree = ax.snapshot("Chess")
     assert "MenuBarItem \"Game\"" in tree and "Menu @(0,0 0x0)" not in tree
+    assert "Apple" not in tree  # (the bar's first item is the system menu: never listed)
 
 
 def test_an_open_menu_below_its_window_is_listed_and_counts_as_on_screen(fake):
