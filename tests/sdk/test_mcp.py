@@ -8,6 +8,7 @@ Only fake brains and host tools run here: nothing reaches a real model, app, dia
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import importlib.util
 import sys
 import unicodedata
@@ -336,6 +337,78 @@ async def test_elicit_an_answer_from_another_client_is_refused():
             )
     assert calls == [] and _status(r) == "denied"
     assert audit[-1]["via"]["note"] == "answered by another client"
+
+
+# ---- cancellation: a client that gives up on a call ----------------------------------------------
+
+
+async def _cancel_once(task: asyncio.Task, *, until: asyncio.Event) -> None:
+    async with asyncio.timeout(10):
+        await until.wait()
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+
+async def _eventually(check, what: str) -> None:
+    try:
+        async with asyncio.timeout(10):
+            while not check():
+                await asyncio.sleep(0.01)
+    except TimeoutError:
+        raise AssertionError(what) from None
+
+
+@pytest.mark.parametrize("era", ERAS)
+async def test_a_cancelled_call_stops_its_host_tool_and_the_next_call_works(era):
+    started = asyncio.Event()
+    seen: list = []
+
+    @neo2.host_tool(read_only=True)
+    async def slow_lookup(q: str) -> str:
+        """Look something up, slowly."""
+        started.set()
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            seen.append("cancelled")
+            raise
+        seen.append("finished")
+        return "late"
+
+    slow = Turn(tool_calls=[ToolCall("0", "slow_lookup", {"q": "x"})])
+    async with _neo([], turns=(slow, "Paris."), extra=[slow_lookup]) as neo, Client(neo.server, mode=era) as c:
+        call = asyncio.create_task(c.call_tool(TASK_TOOL, {"goal": "look it up"}))
+        await _cancel_once(call, until=started)
+        await _eventually(lambda: seen, "the host tool never heard that its call was cancelled")
+        async with asyncio.timeout(10):
+            r = await c.call_tool(TASK_TOOL, {"goal": "capital of France?"})
+    assert seen == ["cancelled"]
+    assert _status(r) == "done" and _text(r) == "Paris."
+
+
+@pytest.mark.parametrize("era", ERAS)
+async def test_a_call_cancelled_while_its_approval_is_asked_runs_nothing(era):
+    calls: list = []
+    audit: list = []
+    asked = asyncio.Event()
+
+    async def slow_answer(ctx, params):
+        asked.set()
+        await asyncio.sleep(60)  # the user never answers: the client gives up on the call
+        return types.ElicitResult(action="accept", content=YES)
+
+    neo = _neo(calls, turns=(PAY, "Paris."), audit=audit, approve="elicit", trust_clients=["trusted-app"])
+    async with neo, Client(neo.server, mode=era, client_info=TRUSTED, elicitation_callback=slow_answer) as c:
+        call = asyncio.create_task(c.call_tool(TASK_TOOL, {"goal": "pay mallory"}))
+        await _cancel_once(call, until=asked)
+        async with asyncio.timeout(10):
+            r = await c.call_tool(TASK_TOOL, {"goal": "capital of France?", "conversation": "next"})
+        assert _status(r) == "done" and _text(r) == "Paris."
+        assert calls == []  # the card never ran: it waits (or lapses) unanswered
+        assert [a["status"] for a in audit] == ["staged"]
+    assert calls == [] and not any(a["status"] == "confirmed" for a in audit)
+    assert audit[-1]["status"].startswith("cancelled")  # closing the server closed the card
 
 
 # ---- taint: what NEO wrote after reading third-party content -----------------------------------

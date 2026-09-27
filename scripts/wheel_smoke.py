@@ -9,7 +9,8 @@ sentence-transformers, laya, mlx, a vendor SDK, mcp or langchain-core is install
 `--extra web`: that ddgs, trafilatura and pypdf are); that an agent with a scripted brain
 answers, with and without NEO's web tools; and that web_search and web_fetch are given only with
 the web extra (without it the "web" preset leaves them out, and asking for one by name names the
-extra). No key, no network, and nothing written to ~/.neo.
+extra). On macOS without the mac extra (no pyobjc), asking for a Mac tool names that extra and "all"
+leaves the Mac tools out. No key, no network, and nothing written to ~/.neo.
 """
 
 from __future__ import annotations
@@ -79,11 +80,24 @@ def main() -> int:
             await AsyncAgent(neo2.AgentConfig(tools=("web_search",)), provider=ScriptedBrain()).aclose()
         except neo2.UnsupportedPlatform as e:
             refused.append(str(e))
+        if sys.platform == "darwin" and not installed("AppKit"):  # the real thing, not a faked find_spec
+            try:
+                await AsyncAgent(neo2.AgentConfig(tools="mac_read"), provider=ScriptedBrain()).aclose()
+                mac.append("mac_read was given without pyobjc")
+            except neo2.UnsupportedPlatform as e:
+                if "[mac] extra" not in str(e):
+                    mac.append(f"mac_read refused without naming the extra: {e}")
+            async with AsyncAgent(neo2.AgentConfig(tools="all"), provider=ScriptedBrain()) as agent:
+                given = [t.name for t in agent.tools if "macos" in t.requires]
+            if given:
+                mac.append(f'"all" gave Mac tools without pyobjc: {given}')
         return out
 
     web_tools: list[str] = []
     refused: list[str] = []
+    mac: list[str] = []
     asks = asyncio.run(ask())
+    problems.extend(mac)
     if asks != ["done", "done:clock"]:
         problems.append(f"the scripted agent didn't answer: {asks}")
     if extra == "web" and (web_tools != ["web_fetch", "web_search"] or refused):
