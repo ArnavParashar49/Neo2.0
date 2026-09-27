@@ -989,11 +989,29 @@ def from_corners(pic: Picture, corners, *, rows: int | None = None, cols: int | 
     region = (float(x0), float(y0), float(x1 - x0), float(y1 - y0))
 
     def fits(b: Board, reach: float) -> bool:
+        """Every corner within ``reach`` squares (of the board's mean size) of the one the model gave."""
         got = _apply(np.linalg.inv(pic.to_screen), b.corners())
         return all(np.min(np.linalg.norm(got - q, axis=1)) <= reach * square for q in quad)
 
+    def edges(b: Board) -> float:
+        """How far the model's corners put the board's edges from this board's, in its squares (as
+        seen, so a far row counts as a row): each edge by the mean of its two corners — a model's
+        slips at single corners average out, a row or a column too few or too many doesn't."""
+        uv = _apply(np.linalg.inv(np.linalg.inv(pic.to_screen) @ b.H), quad)
+        W = np.array([(0, 0), (b.cols, 0), (b.cols, b.rows), (0, b.rows)], float)
+        pick = np.argmin(np.linalg.norm(W[:, None, :] - uv[None, :, :], axis=2), axis=1)
+        if len(set(pick.tolist())) < 4 or not np.all(np.isfinite(uv)):
+            return math.inf
+        d = uv[pick] - W
+        return float(max(abs(d[0, 1] + d[1, 1]), abs(d[1, 0] + d[2, 0]), abs(d[2, 1] + d[3, 1]), abs(d[3, 0] + d[0, 0])) / 2)
+
+    def sized(b: Board) -> bool:
+        """The size the model gave (8×8 when it gave none), unless it gave none and the squares make
+        another square board: a board short of the corners by a row isn't the board they enclose."""
+        return (b.rows, b.cols) == (n_r, n_c) or (rows is None and cols is None and b.rows == b.cols)
+
     own = find_tilted(pic, region, square=square)  # (NEO's own grid, where the corners say: kept when they agree)
-    if own is not None and fits(own, 1.0) and ((rows is None and cols is None) or (own.rows, own.cols) == (n_r, n_c)):
+    if own is not None and sized(own) and fits(own, 1.0) and edges(own) <= 0.5:
         own.source = "vision"
         return own, ""
     g, f, ox, oy = _work(pic, region, _scales(pic, region, square)[0])
@@ -1004,9 +1022,9 @@ def from_corners(pic: Picture, corners, *, rows: int | None = None, cols: int | 
     b, why = _settle(pic, L @ H, np.array(list(lat), float), source="vision")
     if b is None:
         return None, why
-    if (rows or cols or b.rows != b.cols) and (b.rows != n_r or b.cols != n_c):
+    if not sized(b):
         return None, f"the squares there make a {b.rows}×{b.cols} board, not {n_r}×{n_c}"
-    if not fits(b, 0.75):
+    if not fits(b, 0.75) or edges(b) > 0.5:
         return None, "the board NEO found there doesn't have those corners — check them"
     return b, ""
 
