@@ -180,7 +180,7 @@ def failure_words(name: str, e: ProviderError) -> str:
     """One brain's failure as a short spoken clause: "Gemini is out of free quota until 9:00"."""
     import time as _time
 
-    who = _SPOKEN_NAME.get(name, name.capitalize())
+    who = spoken_name(name)
     kind = getattr(e, "kind", "error")
     if kind == "quota":
         until = getattr(e, "until", 0.0)
@@ -209,6 +209,11 @@ _SPOKEN_NAME = {
     "local": "the local model",
     "claude": "Claude",
 }
+
+
+def spoken_name(name: str) -> str:
+    """A brain as the user hears it named ("gemini_lite" → "Gemini Lite")."""
+    return _SPOKEN_NAME.get(name, name.capitalize())
 
 
 class AllBrainsFailed(ProviderError):

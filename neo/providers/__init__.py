@@ -21,6 +21,7 @@ from neo.providers.base import (
     RateLimited,
     ToolSpec,
     Turn,
+    spoken_name,
 )
 
 __all__ = ["AllBrainsFailed", "Chain", "ProviderError", "RateLimited", "brain", "make"]
@@ -60,7 +61,10 @@ def make(name: BrainName) -> Provider:
 
 
 _DEMOTE_S = 300.0  # a brain that just failed goes to the back of the line for this long
-_WAIT_MAX_S = 30.0  # every brain failed but one only asked for a short wait: wait, then ask it again
+# Every brain failed but one only asked for a short wait: wait, then ask it again. A per-minute
+# limit is always clear within the minute, and on Groq's 8K a step of 4–6K tokens is ~30–45s of it:
+# the one brain left carries a long task through that wait rather than ending it.
+_WAIT_MAX_S = 65.0
 
 # Shared across chains: once Gemini has fallen over in one request, the next request (a fresh
 # Chain each time) should not pay the same failed round trips before reaching Groq.
@@ -150,7 +154,8 @@ class Chain:
             self._demote(p.name, e)
         from neo.events import bus
 
-        await bus().note(f"{p.name.capitalize()} unavailable, switching brain")
+        who = spoken_name(p.name)  # "Gemini Lite", "the local model"
+        await bus().note(f"{who[:1].upper()}{who[1:]} unavailable, switching brain")
 
     @staticmethod
     def _short_wait(failures: list[tuple[str, ProviderError]]) -> tuple[float, str] | None:
@@ -191,7 +196,7 @@ class Chain:
             print(f"[brain] every brain failed; waiting {secs:.0f}s for {name}")
             from neo.events import bus
 
-            await bus().note(f"Waiting {secs:.0f}s for {name.capitalize()}'s rate limit")
+            await bus().note(f"Waiting {secs:.0f}s for {spoken_name(name)}'s rate limit")
             await asyncio.sleep(secs + 0.5)
             try:
                 turn = await p.complete(

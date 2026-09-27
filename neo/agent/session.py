@@ -24,7 +24,15 @@ from neo.config import settings
 from neo.events import NeoState, bus
 from neo.providers import brain
 from neo.providers.base import ImagePart, Message, ToolResult
-from neo.providers.history import continues_request
+from neo.providers.history import (
+    OBSERVATIONS,
+    continues_request,
+    halted,
+    naming,
+    request_quote,
+    request_start,
+    request_turns,
+)
 from neo.reflex import Reflex, is_bare_stop, outcomes
 from neo.reflex.schema import Decision
 
@@ -115,6 +123,9 @@ class Session:
     # Who asked the pending question: an agent run of this session (the answer's result goes back
     # to a model to finish the job) or a direct command (the answer's result is the reply).
     _pending_origin: Literal["agent", "direct"] = "agent"
+    # The request (the user's words) the pending question belongs to: the follow-up after a yes
+    # names it, so whatever else was asked in the meantime can't pass for it.
+    _pending_request: str = ""
     _answer_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     _summarized: int = 0  # history[:_summarized] is already in a session summary
     _chunk_started: float = field(default_factory=time.time)
@@ -351,7 +362,7 @@ class Session:
             # The question is this session's to answer, like an agent's (the answer runs it, and no
             # model finishes the job afterwards); the orb keeps asking until then. Only that card:
             # one another job staged meanwhile was never this request's question.
-            self._adopt(p, taint, "direct")
+            self._adopt(p, taint, "direct", text)
             await bus().set_state(NeoState.CONFIRMING, job=job)
         else:
             await bus().end_job(job)
@@ -415,7 +426,7 @@ class Session:
             self.jobs.pop(job, None)
         await self._remember(*res.messages[len(snapshot) :])  # only this job's new turns
         _learn_from(job, res)
-        if res.stopped == "needs_confirm" and self._stage_pending(res, ctx.taint):
+        if res.stopped == "needs_confirm" and self._stage_pending(res, ctx.taint, text):
             await bus().say(res.question, final=True, job=job)
             return Reply(res.question, "confirm", d, res, job=job, taint=tuple(ctx.taint))
         if res.stopped == "done" and not ctx.taint:
@@ -482,25 +493,32 @@ class Session:
             print(f"[playbook] save failed: {str(e)[:80]}")
 
     # ---- confirmation ------------------------------------------------------------------
-    def _stage_pending(self, res: AgentResult, taint: list[str] | None = None) -> bool:
-        """Remember exactly which staged action the agent's question refers to."""
+    def _stage_pending(self, res: AgentResult, taint: list[str] | None = None, request: str = "") -> bool:
+        """Remember exactly which staged action the agent's question refers to, and for which
+        request."""
         p = confirm.peek()
         if not p or (res.pending_action and p.action_id != res.pending_action):
             confirm.cancel("stale")
             self._drop_pending()
             return False
-        self._adopt(p, taint or [], "agent")
+        self._adopt(p, taint or [], "agent", request)
         return True
 
-    def _adopt(self, p: confirm.Pending, taint: list[str] | tuple[str, ...], origin: Literal["agent", "direct"]) -> None:
-        """The question the user now hears is this staged action, asked by `origin`."""
+    def _adopt(
+        self,
+        p: confirm.Pending,
+        taint: list[str] | tuple[str, ...],
+        origin: Literal["agent", "direct"],
+        request: str = "",
+    ) -> None:
+        """The question the user now hears is this staged action, asked by `origin` for `request`."""
         self._pending_tool, self._pending_args, self._pending_action = p.tool, dict(p.params), p.action_id
-        self._pending_taint, self._pending_origin = list(taint), origin
+        self._pending_taint, self._pending_origin, self._pending_request = list(taint), origin, request
         asyncio.create_task(self._expire_confirm(p.action_id))
 
     def _drop_pending(self) -> None:
         self._pending_tool, self._pending_args, self._pending_action = "", {}, ""
-        self._pending_taint, self._pending_origin = [], "agent"
+        self._pending_taint, self._pending_origin, self._pending_request = [], "agent", ""
 
     async def _handle_confirmation(self, text: str, job: str) -> Reply:
         """The user's own words while a question is pending."""
@@ -546,6 +564,7 @@ class Session:
             ours = staged_here and self._pending_origin == "agent"  # an agent job of this session asked it
             # The card was built with the request's taint: the approved call rebuilds it the same.
             taint = list(self._pending_taint) if staged_here else []
+            request = self._pending_request if staged_here else ""
             tool, args, aid = p.tool, dict(p.params), p.action_id
             self._drop_pending()
             await self._clear_confirming()
@@ -566,7 +585,7 @@ class Session:
             if restaged is not None:
                 if episode:
                     outcomes.step(episode, tool, out.ok, halt=True)
-                self._adopt(restaged, taint, "agent" if ours else "direct")
+                self._adopt(restaged, taint, "agent" if ours else "direct", request)
                 # Worded as its owner asks: an agent's question the way the agent loop words it.
                 q = f"{restaged.summary} — Should I go ahead?" if ours else out.text
                 await bus().set_state(NeoState.CONFIRMING, job=job)
@@ -582,8 +601,13 @@ class Session:
         # Let the agent see the outcome and finish whatever it was doing.
         t = registry().get(tool)
         result = fence(tool, out.text[:800]) if t and t.untrusted and out.ok else out.text[:800]
-        follow = f"[User confirmed. {tool} result: {result}] Continue and finish the task, or report the result."
-        snapshot = self._trimmed()
+        # The note names the request it carries on: another request may have been asked and
+        # answered in the meantime (relayed by Gemini Live, a parallel job finishing).
+        follow = (
+            f"[User confirmed{naming(request)}. {tool} result: {result}] Continue and finish the task, "
+            "or report the result."
+        )
+        snapshot = self._trimmed(continuing=request)
         ctx = ToolContext(user_text=text or "yes", taint=taint)
         try:
             res = await run_agent(
@@ -596,7 +620,7 @@ class Session:
         await self._remember(*res.messages[len(snapshot) :])
         if episode:  # how the job the user said yes to actually ended (maybe at another question)
             _learn_from(episode, res)
-        if res.stopped == "needs_confirm" and self._stage_pending(res, ctx.taint):
+        if res.stopped == "needs_confirm" and self._stage_pending(res, ctx.taint, request):
             await bus().say(res.question, final=True, job=job)
             return Reply(res.question, "confirm", None, res, job=job, taint=tuple(ctx.taint))
         # Shown in the overlay either way; spoken only if it didn't go as approved.
@@ -655,15 +679,14 @@ class Session:
                     self._spawn(self._summarize(gone, self._chunk_started))
                     self._chunk_started = time.time()
                 kept = self.history[cut:]
-                ask = _request_of(self.history, cut)
-                if ask is not None:
-                    # Cut at "[User confirmed …]" deep in a long approval chain: the request it
-                    # continues stays, or every later follow-up says "continue the task" about
-                    # a task nobody remembers. (It's summarised either way.)
-                    kept = [ask, *kept]
-                    cut -= 1
-                self.history = kept
-                self._summarized = max(1 if ask is not None else 0, self._summarized - cut)
+                ask = _request_index(self.history, cut)
+                # Cut at "[User confirmed …]" deep in a long approval chain: the request it
+                # continues stays, with its last look at each thing it observed — or every later
+                # follow-up says "continue the task" about a task nobody remembers, on a board
+                # nobody can see. (It's summarised either way.)
+                held = [] if ask is None else [self.history[ask], *_carried(self.history, ask, cut)]
+                self.history = [*held, *kept]
+                self._summarized = len(held) + max(0, self._summarized - cut)
 
     def _spawn(self, coro) -> None:
         t = asyncio.create_task(coro)
@@ -691,24 +714,33 @@ class Session:
             self._chunk_started = time.time()
         return await self._summarize(chunk, started, budget_s)
 
-    def _trimmed(self) -> list[Message]:
+    def _trimmed(self, continuing: str = "") -> list[Message]:
         """Recent history for the model. Tool results older than the last two turns are stubbed —
         they were consumed when fresh and are the bulk of the tokens otherwise.
 
         The window opens at a user turn. Cut anywhere else — inside an agent run, which is where a
         long confirm-by-confirm task puts the cut after a few approvals — and the transcript would
         begin with a tool call whose result, or a result whose call, lies outside it: Gemini
-        refuses that with a 400, and the task dies."""
+        refuses that with a 400, and the task dies.
+
+        `continuing`: the request a follow-up after the user's yes carries on. It stays in view
+        with its last look at each thing it observed, and its turns come last, after anything
+        else asked while the user was deciding."""
         hist = self.history
         start = max(0, len(hist) - _MAX_HISTORY)
         cut = next((i for i in range(start, len(hist)) if hist[i].role == "user"), None)
         if cut is None:  # one turn longer than the window: keep that turn whole
             cut = next((i for i in range(start - 1, -1, -1) if hist[i].role == "user"), len(hist))
         h = hist[cut:]
-        if (ask := _request_of(hist, cut)) is not None:
+        want = request_quote(continuing) if continuing else ""
+        ask = _named(hist, want) if want else _request_index(hist, cut)
+        if ask is not None and ask < cut:
             # Opened on "[User confirmed …]" after many approvals: the request itself stays in view,
-            # or the model is told to "continue the task" without being told which.
-            h = [ask, *h]
+            # or the model is told to "continue the task" without being told which — and so does
+            # its last look at the board, or it has to ask the user to approve another look.
+            h = [hist[ask], *_carried(hist, ask, cut), *h]
+        if want:
+            h = _last_in_view(h, want)
         # Results of the last two *requests* stay: an approval note carries a request on, it doesn't
         # start one — counting those, the only look at the board went after two approvals.
         keep_from = _last_request_index(h, 2)
@@ -728,22 +760,66 @@ class Session:
 
 
 def _last_request_index(h: list[Message], n: int) -> int:
-    """Index of the n-th most recent user message that starts a request (0 if fewer)."""
-    seen = 0
-    for i in range(len(h) - 1, -1, -1):
-        if h[i].role == "user" and not continues_request(h[i]):
-            seen += 1
-            if seen == n:
-                return i
-    return 0
+    """Index of the n-th most recent request's turn in the user's words (0 if fewer), counting
+    from the one being worked on (see neo.providers.history.request_start)."""
+    if not any(m.role == "user" and not continues_request(m) for m in h):
+        return 0
+    i = request_start(h)
+    for _ in range(n - 1):
+        i = next((j for j in range(i - 1, -1, -1) if h[j].role == "user" and not continues_request(h[j])), -1)
+        if i < 0:
+            return 0
+    return i
 
 
-def _request_of(hist: list[Message], cut: int) -> Message | None:
+def _request_index(hist: list[Message], cut: int) -> int | None:
     """When hist[cut:] opens on one of NEO's notes carrying a request on ("[User confirmed …]"),
-    the request it continues: the latest user turn before the cut in the user's own words."""
+    where the request it continues is: the one it names, else the latest before it in the
+    user's own words."""
     if cut >= len(hist) or not continues_request(hist[cut]):
         return None
-    return next((m for m in reversed(hist[:cut]) if m.role == "user" and not continues_request(m)), None)
+    i = request_start(hist[: cut + 1])
+    return i if i < cut and not continues_request(hist[i]) else None
+
+
+def _carried(hist: list[Message], ask: int, cut: int) -> list[Message]:
+    """What the request at hist[ask] last saw of each thing it observed, when that lies before
+    hist[cut] with no newer look after it: each such result with its call, oldest first."""
+    mine = request_turns(hist, ask)
+    later = {
+        r.name for i in mine if i >= cut for r in hist[i].tool_results if r.name in OBSERVATIONS and not halted(r)
+    }
+    newest: dict[str, int] = {}
+    for i in reversed([i for i in mine if ask < i < cut]):
+        for r in hist[i].tool_results:
+            if r.name in OBSERVATIONS and not halted(r) and r.name not in later:
+                newest.setdefault(r.name, i)
+    out: list[Message] = []
+    for i in sorted(set(newest.values())):
+        if hist[i - 1].role == "assistant" and hist[i - 1].tool_calls:
+            out += [hist[i - 1], hist[i]]
+    return out
+
+
+def _named(h: list[Message], want: str) -> int | None:
+    """Where the latest request a note would name `want` (see history.request_quote) is."""
+    return next(
+        (i for i in range(len(h) - 1, -1, -1)
+         if h[i].role == "user" and not continues_request(h[i]) and request_quote(h[i].text) == want),
+        None,
+    )  # fmt: skip
+
+
+def _last_in_view(h: list[Message], want: str) -> list[Message]:
+    """The window with the turns of the request named `want` last: another request asked while
+    the user was deciding on its question goes before it, whole, not between its steps."""
+    at = _named(h, want)
+    if at is None:
+        return h
+    mine = set(request_turns(h, at))
+    if len(mine) == len(h) - at:
+        return h
+    return h[:at] + [h[i] for i in range(at, len(h)) if i not in mine] + [h[i] for i in sorted(mine)]
 
 
 def _with_conversation(text: str) -> str:

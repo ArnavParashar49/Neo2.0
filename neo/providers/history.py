@@ -24,10 +24,25 @@ messages:
 from __future__ import annotations
 
 import json
+import re
 
 from neo.providers.base import Message, ToolCall, ToolResult
 
 NO_RESULT = "(no result: this step was cut short)"
+
+# Tools whose result is a look at something as it is now (the screen, an app's UI, a page, a
+# file): each goes stale the moment the next look at it is taken, and the newest is what the model
+# is working from.
+OBSERVATIONS = frozenset({
+    "ax_tree", "ax_find", "screenshot", "apps_running", "page_read", "read_file",
+    # NEO's browser: each of these returns a page as it is now (or a picture of it)
+    "browser_read", "browser_open", "browser_click", "browser_type", "browser_back", "browser_tabs",
+    "browser_screenshot",
+})  # fmt: skip
+# A step that only asked the user (or was skipped) holds no result worth keeping in view.
+_HALTS = ("NEEDS_CONFIRM", "NEEDS_USER", "skipped: ")
+# "[User confirmed (request: “play chess as white”). …]": the request a note carries on, named.
+_NAMED = re.compile(r"^\s*\[[^\[\]“”]{0,40}\(request: “([^”]*)”\)")
 
 
 def normalize(messages: list[Message]) -> list[Message]:
@@ -102,6 +117,70 @@ def continues_request(m: Message) -> bool:
     """A user turn NEO wrote to carry a request on ("[User confirmed. …]", "[verify] …"), not
     one that starts a request in the user's own words."""
     return m.role == "user" and m.text.lstrip().startswith("[")
+
+
+def halted(r: ToolResult) -> bool:
+    """A step that stopped to ask the user (or was skipped), not one with a result."""
+    return r.content.lstrip().startswith(_HALTS)
+
+
+def request_quote(text: str) -> str:
+    """How a note names the request it carries on: the request's first line, as the user said it
+    (the conversation quoted after it isn't part of the name)."""
+    line = next((ln for ln in text.splitlines() if ln.strip()), "")
+    return " ".join(line.split()).replace("“", '"').replace("”", '"')[:120]
+
+
+def naming(request: str) -> str:
+    """The tag a note carries to say which request it continues: ' (request: “…”)'."""
+    return f" (request: “{request_quote(request)}”)" if request.strip() else ""
+
+
+def named_request(m: Message) -> str | None:
+    """The request a note names (see `naming`), None for any other turn."""
+    g = _NAMED.match(m.text) if continues_request(m) else None
+    return g.group(1) if g else None
+
+
+def request_start(msgs: list[Message]) -> int:
+    """Where the request being worked on begins: its turn in the user's words. NEO's notes
+    ("[User confirmed …]", "[verify] …") carry a request on rather than start one, and a note
+    that names its request belongs to that one even when another was asked in between (a request
+    Gemini Live relayed, a parallel job that finished while the user was deciding)."""
+    want: str | None = None
+    for i in range(len(msgs) - 1, -1, -1):
+        m = msgs[i]
+        if m.role != "user":
+            continue
+        if continues_request(m):
+            if want is None:
+                want = named_request(m)
+            continue
+        if want is None or request_quote(m.text) == want:
+            return i
+    if want is not None:  # the named request isn't in view: the latest one in the user's words
+        own = [i for i, m in enumerate(msgs) if m.role == "user" and not continues_request(m)]
+        if own:
+            return own[-1]
+    return next((i for i, m in enumerate(msgs) if m.role == "user"), 0)
+
+
+def request_turns(msgs: list[Message], start: int) -> list[int]:
+    """The positions of the request that begins at msgs[start]: its own turns and those of every
+    note carrying it on — not those of another request asked in between, or of that one's notes.
+    A note that names no request goes with the turns before it (it was written in that run)."""
+    want = request_quote(msgs[start].text)
+    ours, out = True, []
+    for i in range(start, len(msgs)):
+        m = msgs[i]
+        if i > start and m.role == "user":
+            if not continues_request(m):
+                ours = False
+            elif (named := named_request(m)) is not None:
+                ours = named == want
+        if ours:
+            out.append(i)
+    return out
 
 
 def flatten(messages: list[Message]) -> list[Message]:

@@ -1239,3 +1239,301 @@ def test_a_learned_size_is_capped_and_comes_back_down(monkeypatch):
     for _ in range(8):
         asyncio.run(p.complete(msgs, max_tokens=256))
     assert p._scale < 1.1
+
+
+# ---- second review: what a small brain keeps whole, and in which order it goes --------------------
+
+
+def test_a_small_brain_keeps_the_board_whole_before_stale_results_of_other_tools():
+    from neo.agent.toolselect import MORE_TOOLS
+    from neo.providers.fit import fit
+
+    board = ("AXButton “Board” " * 400)[:6000]
+    msgs = [
+        Message.user("play chess as white, look up the opening first"),
+        *_pair("a", "open_app", "Opened Chess."),
+        *_pair("b", "web_search", ("result about openings " * 300)[:4000]),
+        *_pair("c", "web_fetch", ("page text about e4 " * 400)[:6000]),
+        *_pair("d", "read_file", ("notes file " * 700)[:6000]),
+        *_pair("e", "hotkey", "Pressed cmd+n."),
+        *_pair("f", "ax_tree", board),
+    ]
+    approval = [
+        Message.assistant("", [ToolCall("g", "applescript", {"script": "get name of windows"})]),
+        Message.tool(
+            [ToolResult("g", "applescript", "NEEDS_CONFIRM: run an AppleScript — Should I go ahead?")]
+        ),
+        Message.user("[User confirmed. applescript result: Chess] Continue and finish the task."),
+    ]
+    tools = [*registry().specs(), MORE_TOOLS]
+    for request in (msgs, msgs + approval):  # a step of the run, and the follow-up after a yes
+        f = fit(request, system="You are NEO. " * 200, tools=tools, budget=8000, max_tokens=4096,
+                vision=False, name="groq")  # fmt: skip
+        got = {r.name: r.content for m in f.messages for r in m.tool_results}
+        assert got["ax_tree"] == board  # the board the model is playing on, whole
+        # Web results it already read went first; the file (a look at something) only as far as needed.
+        assert len(got["web_search"]) < 400 and len(got["web_fetch"]) < 400
+        assert len(got["read_file"]) > 4000
+
+
+def test_cutting_what_was_kept_whole_frees_room_for_it_not_for_tools():
+    from neo.agent.toolselect import MORE_TOOLS
+    from neo.providers.fit import estimate, fit
+
+    board = "AXButton “Board” " * 1500  # far more than Groq's 8K takes whole
+    msgs = [Message.user("play chess as white"), *_pair("a", "open_app", "Opened Chess."),
+            *_pair("b", "ax_tree", board)]  # fmt: skip
+    tools = [*registry().specs(), MORE_TOOLS]
+    system = "You are NEO. " * 200
+    f = fit(msgs, system=system, tools=tools, budget=8000, max_tokens=4096, vision=False, name="groq")
+    tree = next(r.content for m in f.messages for r in m.tool_results if r.name == "ax_tree")
+    assert 2000 < len(tree) < len(board)  # cut only as far as it had to be…
+    assert {s.name for s in f.tools} == {"open_app", "ax_tree", "more_tools"}  # …and tools didn't get it back
+    total = estimate(f.messages, system, f.tools, vision=False) + f.max_tokens
+    assert int(8000 * 0.9) - 60 < total <= int(8000 * 0.9)
+
+
+def test_a_per_minute_brain_gets_back_the_first_tools_but_not_a_prompt_of_its_whole_budget():
+    from neo.agent.loop import all_tools
+    from neo.agent.toolselect import MORE_TOOLS, SCREEN
+    from neo.providers.fit import estimate, fit
+
+    msgs = _chess_follow_up()
+    tools = [*all_tools(registry()), MORE_TOOLS]  # the follow-up after a yes: every tool
+    system = "You are NEO. " * 100
+    kw = dict(system=system, tools=tools, budget=8000, max_tokens=4096, vision=False, name="groq")
+    rate = fit(msgs, per_minute=True, **kw)
+    context = fit(msgs, **kw)
+    # Groq's 8K is per minute: each step pays its prompt back before the next can go (a 5K prompt
+    # is ~40s of waiting per step). The observe/act tools still come back first.
+    assert estimate(rate.messages, system, rate.tools, vision=False) <= 8000 * 0.5
+    assert {"click", "type_text", "ax_press", "more_tools"} <= {s.name for s in rate.tools}
+    # (whichever module registered its tools first: the observe/act ones are what comes back)
+    assert {t.name for t in all_tools(registry())[: len(SCREEN)]} == SCREEN
+    assert estimate(context.messages, system, context.tools, vision=False) > 8000 * 0.5
+    assert len(context.tools) > len(rate.tools)
+
+
+def test_the_one_brain_left_is_waited_on_through_a_per_minute_limit(chain, monkeypatch):
+    # Groq on its 8K a minute, the step after a 5.5K prompt: "try again in 41.3s".
+    groq = FakeBrain("groq", RateLimited("429 try again in 41.3s", retry_after=41.3))
+    local = FakeBrain("local", Unavailable("local model server not running"))
+    c = chain(groq=groq, local=local)
+    waits: list[float] = []
+    real_sleep = asyncio.sleep
+
+    async def sleep(secs, *a, **kw):  # (no real waiting in a test: the minute passes at once)
+        waits.append(secs)
+        groq.error = None
+        await real_sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", sleep)
+    assert asyncio.run(c.complete([Message.user("hi")])).text == "ok" and groq.asked == 2
+    assert len(waits) == 1 and 41.3 <= waits[0] < 45
+
+
+def test_the_chain_names_brains_the_way_the_user_hears_them(chain, monkeypatch):
+    from neo.events import bus
+
+    notes: list[str] = []
+
+    async def note(text):
+        notes.append(text)
+
+    monkeypatch.setattr(bus(), "note", note)
+    lite = FakeBrain("gemini_lite", RateLimited("429 try again in 0.01s", retry_after=0.01))
+    local = FakeBrain("local", Unavailable("local model server not running"))
+    c = chain(gemini_lite=lite, local=local)
+
+    async def go():
+        async def later():
+            await asyncio.sleep(0)
+            lite.error = None
+
+        asyncio.get_running_loop().create_task(later())
+        return await c.complete([Message.user("hi")])
+
+    assert asyncio.run(go()).text == "ok"
+    assert "Gemini Lite unavailable, switching brain" in notes
+    assert "The local model unavailable, switching brain" in notes
+    assert "Waiting 0s for Gemini Lite's rate limit" in notes
+
+
+# ---- second review: a yes continues the request it was asked for ------------------------------------
+
+
+def _fake_every_tool(monkeypatch):
+    """Every tool NEO has, replaced by a stand-in: nothing real can run whatever a test reaches."""
+    for n, t in list(registry()._tools.items()):
+        monkeypatch.setitem(
+            registry()._tools, n, RegisteredTool(n, t.description, t.parameters, lambda a, c: "done (fake)")
+        )
+
+
+def test_a_yes_after_another_request_continues_the_request_it_was_asked_for(monkeypatch):
+    from neo.providers.fit import fit
+
+    _fake_every_tool(monkeypatch)
+    ran: list[str] = []
+    _chess_tools(monkeypatch, ran)
+    board = ("AXButton “e2” " * 300).strip()
+    monkeypatch.setitem(
+        registry()._tools, "ax_tree",
+        RegisteredTool("ax_tree", "test tool", _OBJ, lambda a, c: board, parallel_safe=True),
+    )  # fmt: skip
+    monkeypatch.setattr(sess_mod.fastpath, "plan", lambda text: None)
+
+    class Reflex:
+        async def decide(self, t):
+            if "weather" in t:
+                return Decision("chat", 0.95, False, 0.0, False, 0.0, "laya+head", reply=True, reply_p=0.9)
+            return Decision("agent_task", 0.95, False, 0.0, False, 0.0, "laya+head", reply=False, reply_p=0.1)
+
+    class Brain(ChessBrain):
+        async def complete(self, messages, **kw):
+            self.last = list(messages)
+            return await super().complete(messages, **kw)
+
+        async def stream(self, messages, **kw):
+            yield "Sunny, 24 degrees."
+
+    b = Brain()
+    monkeypatch.setattr(sess_mod, "brain", lambda purpose="agent": b)
+
+    async def go():
+        s = Session(reflex=Reflex())
+        r = await s.handle("play chess as white", from_user=True)
+        assert r.route == "confirm", r.text
+        # While the card waits, Gemini Live relays another question of the user's: it's answered,
+        # and the card still waits for the user.
+        w = await s.handle("what's the weather like", from_user=False, origin="user")
+        assert w.route == "chat" and confirm.peek() is not None
+        r = await s.answer(True, action_id=confirm.peek().action_id)
+        return s, r
+
+    s, r = asyncio.run(go())
+    assert r.route == "confirm" and len(ran) == 1 and not b.bad, b.bad[:2]
+    msgs = b.last  # the follow-up after the yes
+    asks = [m.text for m in msgs if m.role == "user"]
+    assert asks[-1].startswith("[User confirmed (request: “play chess as white”).")
+    # The other request came before the one being continued, not between its steps.
+    assert asks.index("what's the weather like") < asks.index("play chess as white")
+    from neo.providers.history import request_start
+
+    assert msgs[request_start(msgs)].text == "play chess as white"
+    from neo.agent.toolselect import MORE_TOOLS
+
+    tools = [*registry().specs(), MORE_TOOLS]  # (what the follow-up after a yes offers)
+    f = fit(msgs, system="You are NEO. " * 200, tools=tools, budget=8000, max_tokens=4096, vision=False,
+            name="groq")  # fmt: skip
+    assert "earlier requests" in f.trimmed and f.messages[0].text == "play chess as white"
+    assert board in [r.content for m in f.messages for r in m.tool_results]
+    # The session's own history keeps what happened in the order it happened.
+    hist = [m.text for m in s.history if m.role == "user"]
+    assert hist.index("play chess as white") < hist.index("what's the weather like")
+
+
+def test_the_window_opening_on_a_note_finds_the_request_it_names():
+    s = Session(reflex=_agent_reflex())
+    s.history = [
+        Message.user("play chess as white"),
+        *_pair("t", "ax_tree", "board"),
+        Message.assistant("", [ToolCall("s", "applescript", {"script": "x"})]),
+        Message.tool([ToolResult("s", "applescript", "NEEDS_CONFIRM: run an AppleScript — go ahead?")]),
+        Message.user("what's the weather like"),
+        Message.assistant("Sunny."),
+    ]
+    note = "[User confirmed (request: “play chess as white”). applescript result: ok] Continue and finish the task."
+    s.history.append(Message.user(note))
+    for k in range(20):  # the follow-up run: the window opens on its note
+        s.history += list(_pair(f"r{k}", "applescript", "window 1"))
+    h = s._trimmed()
+    assert h[0].text == "play chess as white" and h[len(h) - 41].text == note
+    assert [r.content for m in h for r in m.tool_results if r.name == "ax_tree"] == ["board"]
+
+
+# ---- second review: the board stays in view through a long approval chain ---------------------------
+
+
+def _approvals(board: str, n: int) -> list[Message]:
+    """A board read once, then n approvals: each a note, a long AppleScript read, a new staged one."""
+    msgs = [Message.user("play chess as white"), *_pair("t", "ax_tree", board)]
+    for k in range(n + 1):
+        if k:
+            msgs += [
+                Message.user(f"[User confirmed. applescript result: ok {k}] Continue and finish the task."),
+                *_pair(f"r{k}", "applescript", "window 1, " * 150),
+            ]
+        msgs += [
+            Message.assistant("", [ToolCall(f"s{k}", "applescript", {"script": "x"})]),
+            Message.tool(
+                [ToolResult(f"s{k}", "applescript", "NEEDS_CONFIRM: run an AppleScript — go ahead?")]
+            ),
+        ]
+    return msgs
+
+
+def test_the_only_look_at_the_board_stays_in_view_when_the_window_opens_on_a_note():
+    from neo.providers.fit import fit
+
+    board = "AXButton “e2” " * 300
+    s = Session(reflex=_agent_reflex())
+    for n in range(1, 13):
+        s.history = _approvals(board, n)
+        h = s._trimmed()
+        assert h[0].text == "play chess as white" and not wire_violations(h), n
+        assert [r.content for m in h for r in m.tool_results if r.name == "ax_tree"] == [board], n
+        f = fit([*h, Message.user("[User confirmed. applescript result: ok] Continue.")], system="sys",
+                budget=8000, max_tokens=4096, vision=False, name="groq")  # fmt: skip
+        assert board in [r.content for m in f.messages for r in m.tool_results], n
+    assert len(s.history) > sess_mod._MAX_HISTORY + 10  # the window did open on a note
+
+
+def test_the_memory_cap_keeps_the_last_look_at_the_board_with_the_request(monkeypatch):
+    async def no_summary(msgs, started, budget_s=8.0):
+        return ""
+
+    monkeypatch.setattr(Session, "_summarize", staticmethod(no_summary))
+    board = "AXButton “e2” " * 300
+
+    async def go():
+        s = Session(reflex=_agent_reflex())
+        s.history = _approvals(board, 0)
+        for k in range(1, 45):
+            await s._remember(*_approvals(board, k)[-5:])
+        return s
+
+    s = asyncio.run(go())
+    assert len(s.history) <= sess_mod._HISTORY_CAP and s.history[0].text == "play chess as white"
+    assert [r.content for m in s.history for r in m.tool_results if r.name == "ax_tree"] == [board]
+    assert not wire_violations(s.history) and board in [
+        r.content for m in s._trimmed() for r in m.tool_results
+    ]
+
+
+# ---- second review: a 403 about one model isn't a refused key ---------------------------------------
+
+
+def test_a_403_for_one_model_leaves_that_keys_other_models_to_answer(gem):
+    denied = _err(
+        403,
+        "Permission denied on resource project for model gemini-3.8-flash.",
+        [{"@type": "type.googleapis.com/google.rpc.ErrorInfo", "reason": "IAM_PERMISSION_DENIED",
+          "metadata": {"consumer": "projects/1"}}],
+    )  # fmt: skip
+    gem.rules["gemini-3.8-flash"] = denied
+    gem.rules["*"] = _reply(text="ok")
+    assert asyncio.run(gem.p.complete([Message.user("hi")])).text == "ok"
+    asked = [(m, k) for m, k, _c in gem.sent]
+    assert asked == [("gemini-3.8-flash", 0), ("gemini-3.8-flash", 1), ("gemini-3.7-flash", 0)]
+    gem.sent.clear()
+    assert asyncio.run(gem.p.complete([Message.user("hi")])).text == "ok"
+    assert [(m, k) for m, k, _c in gem.sent] == [("gemini-3.7-flash", 0)]  # not asked again
+
+    gem.sent.clear()
+    gem.p._denied.clear()
+    gem.rules.clear()
+    gem.rules["*"] = denied  # every model refused: said as such, not as a bad key
+    with pytest.raises(Unavailable) as e:
+        asyncio.run(gem.p.complete([Message.user("hi")]))
+    assert "permission denied" in str(e.value) and "API key" not in str(e.value)

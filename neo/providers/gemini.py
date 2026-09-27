@@ -9,7 +9,9 @@ alone for the rest of its quota window — until the daily reset for a per-day q
 server names for a per-minute one — and once every pair is out, a request fails at once with
 QuotaExhausted instead of paying a round trip per pair on every agent step. That state follows the
 key itself (a short hash of it), not its place in the list: a key the user adds after hearing
-"out of quota" is asked at once. A key Gemini says isn't valid is skipped for the next one.
+"out of quota" is asked at once. A key Gemini refuses outright (not valid, suspended, the API off
+for its project) is skipped for the next one; a refusal of one model only (a 403 that names
+neither the key nor its project) leaves that key's other models to answer.
 
 Gemini 3 requires the ``thought_signature`` of every function call to be echoed back when the
 history is replayed. A signature is only good for the model that wrote it: calls that came from
@@ -71,6 +73,11 @@ _TOO_LONG = ("exceeds the maximum number of tokens", "input token count", "too m
 # A key the server won't take at all (revoked, expired, suspended, the API off for its project):
 # no model will answer on it, so it is skipped for the next key rather than failing the request.
 _BAD_KEY = re.compile(r"api[ _]key[ _](?:not[ _]valid|invalid|expired)", re.I)
+# …which a 403 says in its ErrorInfo reason or its message (not the metadata: every Google 403
+# names the "consumer" project there). A 403 that says neither is about one model ("Permission
+# denied … for model X"): only that (model, key) pair is left alone.
+_KEY_REASONS = re.compile(r"^(?:API_KEY_\w+|SERVICE_DISABLED|CONSUMER_\w+|BILLING_DISABLED)$")
+_KEY_WORDS = re.compile(r"api[ _]?key|suspended|has not been used in project|billing", re.I)
 _BAD_KEY_COOLDOWN_S = 3600.0
 _ANY_KEY = "*"  # a model's own trouble (overload), whichever key asked
 _SAVED = re.compile(r"\|(?:[0-9a-f]{12}|\*)$")  # "model|<key id>": older files named the key's place
@@ -81,9 +88,25 @@ def _key_id(key: str) -> str:
     return hashlib.sha256(key.encode()).hexdigest()[:12]
 
 
-def _bad_key(e: Exception) -> bool:
+def _reasons(e: Exception) -> list[str]:
+    info = getattr(e, "details", None)
+    err = info.get("error", info) if isinstance(info, dict) else {}
+    details = (err.get("details") if isinstance(err, dict) else None) or []
+    return [str(d.get("reason", "")) for d in details if isinstance(d, dict) and d.get("reason")]
+
+
+def _refused(e: Exception) -> Literal["key", "model"] | None:
+    """Whether the server refused the key itself (no model will answer on it), only this model
+    on it, or neither."""
     code = _code(e)
-    return code in (401, 403) or (code == 400 and bool(_BAD_KEY.search(str(e))))
+    if code == 401 or (code == 400 and _BAD_KEY.search(str(e))):
+        return "key"
+    if code != 403:
+        return None
+    message = getattr(e, "message", None) or str(e)
+    if any(_KEY_REASONS.match(r) for r in _reasons(e)) or _KEY_WORDS.search(message):
+        return "key"
+    return "model"
 
 
 def _signature(c: ToolCall, model: str) -> bytes:
@@ -253,6 +276,7 @@ class GeminiProvider:
         # (model, key id | _ANY_KEY) → when it may be asked again
         self._exhausted: dict[tuple[str, str], float] = {}
         self._bad_keys: dict[str, float] = {}  # key id → when to try a key the server refused again
+        self._denied: dict[tuple[str, str], float] = {}  # (model, key id) refused: when to try again
         self._load_cooldowns()
 
     # ---- cooldown persistence -------------------------------------------------------------
@@ -307,6 +331,7 @@ class GeminiProvider:
             self._exhausted.get((model, _ANY_KEY), 0.0),
             self._exhausted.get((model, kid), 0.0),
             self._bad_keys.get(kid, 0.0),
+            self._denied.get((model, kid), 0.0),
         )
 
     def _blocked(self, model: str, ki: int, now: float) -> bool:
@@ -326,13 +351,15 @@ class GeminiProvider:
     def _all_blocked_error(self) -> ProviderError:
         """Nothing left to try: say whether that's quota (for how long), overload or the keys."""
         now = time.time()
-        quota, busy, refused = [], [], 0
+        quota, busy, refused, denied = [], [], 0, 0
         for model in self.models:
             over = self._exhausted.get((model, _ANY_KEY), 0.0)
             for ki in range(len(self._clients)):
                 q = self._exhausted.get((model, self._kid(ki)), 0.0)
                 if self._bad_keys.get(self._kid(ki), 0.0) > now:
                     refused += 1
+                elif self._denied.get((model, self._kid(ki)), 0.0) > now:
+                    denied += 1
                 elif q > now:
                     quota.append(q)
                 elif over > now:
@@ -343,6 +370,8 @@ class GeminiProvider:
             return QuotaExhausted("429 gemini: every key is out of quota", until=min(quota))
         if refused:
             return Unavailable("API key not valid")
+        if denied:
+            return Unavailable("gemini: permission denied for these models")
         if not self.models or not self._clients:
             return ProviderError("gemini: no models")
         return RateLimited(
@@ -351,8 +380,9 @@ class GeminiProvider:
 
     async def _call(self, fn, **kw):
         """Walk model × key. 5xx → short backoff then next model; 429 → next key for this model
-        (free-tier quota is per key *and* per model); a key the server refuses (not valid, 401,
-        403) → the next key, for every model; other errors raise immediately. Pairs known to be
+        (free-tier quota is per key *and* per model); a key the server refuses (not valid, 401, a
+        403 about the key) → the next key, for every model; a 403 about this model only → the next
+        key for it; other errors raise immediately. Pairs known to be
         out of quota or overloaded, and refused keys, are skipped without a round trip; when none
         is left, the error says which (QuotaExhausted with its reset time, Overloaded, or
         Unavailable for keys that don't work)."""
@@ -374,10 +404,16 @@ class GeminiProvider:
                         took = time.time() - t0
                         if code in _RETRY_CODES and i < len(_BACKOFF_S) and took < _SLOW_FAIL_S:
                             continue  # a quick blip is worth one retry; a slow 5xx is not
-                        if _bad_key(e):
+                        refused = _refused(e)
+                        if refused == "key":
                             self._bad_keys[self._kid(ki)] = time.time() + _BAD_KEY_COOLDOWN_S
                             print(f"[gemini] key#{ki + 1} refused ({code}: {str(e)[:80]}); trying next key")
                             await _note(f"Gemini key {ki + 1} isn't accepted, trying next")
+                            break
+                        if refused == "model":
+                            self._denied[(model, self._kid(ki))] = time.time() + _BAD_KEY_COOLDOWN_S
+                            print(f"[gemini] {model} refused on key#{ki + 1} ({str(e)[:80]}); trying next")
+                            await _note(f"{_pretty(model)} not allowed on key {ki + 1}, trying next")
                             break
                         if code == 429:
                             window, per = _quota_window(e)

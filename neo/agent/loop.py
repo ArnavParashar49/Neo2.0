@@ -21,6 +21,7 @@ from neo.config import settings
 from neo.events import EventBus, NeoState
 from neo.events import bus as default_bus
 from neo.providers.base import AllBrainsFailed, Message, Provider, ToolCall, ToolResult, ToolSpec, Turn
+from neo.providers.history import OBSERVATIONS
 
 Stopped = Literal["done", "max_steps", "needs_confirm", "needs_user", "thrash", "error"]
 
@@ -77,6 +78,15 @@ def _truncate(text: str, limit: int) -> str:
     return text[:head] + f"\n…[{len(text) - limit} chars trimmed]…\n" + text[-(limit - head) :]
 
 
+def all_tools(reg: Registry) -> list[ToolSpec]:
+    """Every tool, the ones that look at and act on the screen first. A brain too small to be
+    shown them all gets back as many as fit in the order given (neo.providers.fit), and the order
+    tools were registered in is only the order their modules happened to be imported in."""
+    from neo.agent.toolselect import SCREEN
+
+    return sorted(reg.specs(), key=lambda t: t.name not in SCREEN)
+
+
 def _model_trouble(e: Exception, steps: list[Step]) -> str:
     """What the user hears when no brain could take the next step: which brain, and whether it's
     out of quota, can't take a request this long, isn't running — not a raw stack of errors."""
@@ -109,12 +119,7 @@ async def _settle(ev: EventBus, idle: bool, job: str = "") -> None:
 
 # Screen observations go stale the moment the next one is taken; keeping every ax_tree dump of a
 # run in the prompt is pure token cost (and on an 8K-TPM brain, pure waiting).
-_OBSERVATIONS = {
-    "ax_tree", "ax_find", "screenshot", "apps_running", "page_read", "read_file",
-    # NEO's browser: each of these returns a page as it is now (or a picture of it)
-    "browser_read", "browser_open", "browser_click", "browser_type", "browser_back", "browser_tabs",
-    "browser_screenshot",
-}  # fmt: skip
+_OBSERVATIONS = OBSERVATIONS
 _SUPERSEDED_KEEP = 200
 # A browsing job compares pages ("the cheapest of these three"): the latest view of this many
 # different pages stays whole; a newer view of the same page, or more pages than this, trims it.
@@ -266,7 +271,7 @@ async def run_agent(
     last_key, repeats = "", 0
     from neo.agent.toolselect import MORE_TOOLS
 
-    tools = list(tools) if tools is not None else reg.specs()
+    tools = list(tools) if tools is not None else all_tools(reg)
     if strict:
         tools = [t if t.essential else replace(t, essential=True) for t in tools]
     elif not any(t.name == MORE_TOOLS.name for t in tools):

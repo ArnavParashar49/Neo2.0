@@ -5,7 +5,8 @@ protocol with tool calling; Groq also honours ``reasoning_effort`` for gpt-oss m
 
 Both have little room per request (Groq's free tier: ~8K tokens a minute, prompt and answer
 together; the local server: its context), so every request is fitted to ``token_budget`` first
-(neo.providers.fit). When the server still says it's too large, it also says how large it
+(neo.providers.fit) — Groq's as the per-minute rate it is, which every step pays back before the
+next one goes. When the server still says it's too large, it also says how large it
 really was: the estimate is corrected from that and the request fitted again. The correction is
 capped, and every request that goes through reports its real size, so one odd refusal (a prompt of
 dense digits, a 413 with no numbers) doesn't leave every later request over-trimmed.
@@ -147,11 +148,13 @@ class OpenAICompatProvider:
         supports_vision: bool = False,
         reasoning_effort: bool = False,
         token_budget: int = _LOCAL_CONTEXT_TOKENS,
+        per_minute: bool = False,
     ) -> None:
         self.name = name
         self.model = model
         self.supports_vision = supports_vision
         self.token_budget = token_budget
+        self.per_minute = per_minute  # the budget is tokens per minute, not a context window
         self._scale = 1.0  # real tokens / estimated, learned from the server's own 413
         self._cool_until = 0.0  # a 429 that said how long to wait
         self._reasoning = reasoning_effort
@@ -187,6 +190,7 @@ class OpenAICompatProvider:
             vision=self.supports_vision,
             name=self.name,
             scale=self._scale,
+            per_minute=self.per_minute,
         )
 
     def _learn_size(self, e: APIStatusError, f: Fitted) -> None:
@@ -318,6 +322,7 @@ def groq(model: str | None = None) -> OpenAICompatProvider:
         model=model,
         reasoning_effort=True,
         token_budget=_GROQ_REQUEST_TOKENS.get(model, _GROQ_DEFAULT_TOKENS),
+        per_minute=True,
     )
 
 
