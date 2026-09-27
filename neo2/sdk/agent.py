@@ -91,7 +91,9 @@ class _Req:
         untrusted = bool(t and t.untrusted)
         rec = StepRecord(name, MappingProxyType(dict(args)), ok and not halted, summary[:300])
         self.steps.append(rec)
-        if untrusted and rec.ok and name not in self.untrusted:
+        # read: what it returned, or what it said failing when that was fenced (a host tool's)
+        read = rec.ok or (not halted and f'<untrusted source="{name}">' in summary[:300])
+        if untrusted and read and name not in self.untrusted:
             self.untrusted.append(name)
         return rec
 

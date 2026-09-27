@@ -12,7 +12,10 @@
   those arguments. `detail` (default: the arguments as JSON) is what the approval UI shows.
 - Output is third-party content by default (`untrusted=True`): it's fenced for the model and the
   request counts as having read something untrusted (memory writes and data-carrying links ask
-  first afterwards). Pass untrusted=False for output the host vouches for.
+  first afterwards) — whatever it says, and when the function fails too (an exception's message,
+  or a ToolOutput(ok=False) the host built, can carry the text it read). Only a raise or ok=False
+  is a failure: returned text that starts with "Error" is still the tool's output. Pass
+  untrusted=False for output the host vouches for.
 - A model can't pass `confirm`, `cancel` or `_`-prefixed arguments (NEO drops them), so a tool
   can't declare them. Nor can a host tool take a built-in tool's name.
 """
@@ -34,7 +37,7 @@ import pydantic
 
 from neo.agent import confirm as _confirm
 from neo.agent.confirm import Halt
-from neo.agent.registry import RegisteredTool, ToolContext, ToolOutput
+from neo.agent.registry import RegisteredTool, ToolContext, ToolOutput, fence
 
 __all__ = ["HostTool", "host_tool", "RESERVED_NAMES"]
 
@@ -44,6 +47,9 @@ _NAME = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")  # what every model API accepts as 
 # Never a tool's name: they read as an approval channel, or are NEO's own meta-tool.
 RESERVED_NAMES = frozenset({"approve", "confirm", "cancel", "deny", "more_tools"})
 _DROPPED_ARGS = ("confirm", "cancel")  # neo.agent.registry.Registry.invoke drops these (and "_…")
+# What a failing untrusted tool said, at most: its fenced error stays whole where NEO cuts a result
+# short (800 characters after an approval, neo.agent.session).
+_ERROR_CHARS = 600
 
 
 def builtin_names() -> frozenset[str]:
@@ -143,8 +149,25 @@ class HostTool:
             if isinstance(released, str):
                 return released  # NEO's own question (a Halt): the run stops here
             call, _ = self.binding.prepare(released)  # exactly what the human approved
-        r = await self._run(call, ctx)
-        return _output(r)
+        try:
+            out = _output(await self._run(call, ctx))
+        except Exception as e:  # noqa: BLE001 — a failure is data for the model, like NEO's own
+            out = ToolOutput(f"Error: {self.name} failed: {e}", ok=False)
+            return self._failed(out, str(e), ctx)
+        if isinstance(out, ToolOutput) and not out.ok and not out.halt:
+            return self._failed(out, out.text, ctx)
+        return out
+
+    def _failed(self, out: ToolOutput, said: str, ctx: ToolContext) -> ToolOutput:
+        """The host's function ran and failed. From an untrusted tool, what it said can be the
+        third-party text it read: fenced, and the request has read it (NEO's registry and loop
+        fence and taint a result only when it's ok)."""
+        if not self.untrusted:
+            return out
+        body = said if len(said) <= _ERROR_CHARS else said[:_ERROR_CHARS] + " …"
+        if self.name not in ctx.taint:
+            ctx.taint.append(self.name)
+        return dataclasses.replace(out, text=f"Error: {self.name} failed:\n{fence(self.name, body)}")
 
     async def _run(self, call: Any, ctx: ToolContext) -> Any:
         b = self.binding
@@ -365,7 +388,9 @@ def _is_args(p: inspect.Parameter, ann: Mapping[str, Any]) -> bool:
 
 def _output(r: Any) -> str | ToolOutput:
     """A host function's return value as NEO's tool output. Only NEO's own code stops a run to ask
-    something (a Halt its gate produced): a ToolOutput a host builds never halts, whatever it says."""
+    something (a Halt its gate produced): a ToolOutput a host builds never halts, whatever it says.
+    Anything returned is a success (a ToolOutput: never NEO's guess from how its text starts, so
+    third-party text beginning with "Error" is still fenced and still taints)."""
     if isinstance(r, Halt):
         return r
     if isinstance(r, ToolOutput):
@@ -373,16 +398,18 @@ def _output(r: Any) -> str | ToolOutput:
             return r
         return dataclasses.replace(r, text=str(r.text), halt=False, staged="")
     if r is None:
-        return "Done."
-    if isinstance(r, str):
-        return str(r)  # a plain str, never a subclass that could pass for NEO's own
-    if isinstance(r, pydantic.BaseModel):
-        return r.model_dump_json()
-    if isinstance(r, (bytes, bytearray)):
-        return bytes(r).decode("utf-8", "replace")
-    if isinstance(r, (dict, list, tuple)):
-        return json.dumps(r, ensure_ascii=False, default=str)
-    return str(r)
+        text = "Done."
+    elif isinstance(r, str):
+        text = (str(r) or "Done.").strip()  # a plain str, never a subclass that could pass for NEO's own
+    elif isinstance(r, pydantic.BaseModel):
+        text = r.model_dump_json()
+    elif isinstance(r, (bytes, bytearray)):
+        text = bytes(r).decode("utf-8", "replace")
+    elif isinstance(r, (dict, list, tuple)):
+        text = json.dumps(r, ensure_ascii=False, default=str)
+    else:
+        text = str(r)
+    return ToolOutput(text, ok=True)
 
 
 def _brief(e: pydantic.ValidationError) -> str:
