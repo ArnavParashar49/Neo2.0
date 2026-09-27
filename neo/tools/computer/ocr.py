@@ -443,9 +443,15 @@ def plan_for(text: str = "", *, want_fast: bool = True) -> Plan | None:
         if pool:
             chosen = _pick(pool, [*_preferred_languages(), "en"]) or pool[:1]
             return Plan(True, tuple(chosen[:3]))
-        chosen = [c for c in _pick(acc, [*_preferred_languages(), "en"]) if need <= _lang_scripts(c)]
-        chosen += [c for c in acc if need <= _lang_scripts(c) and c not in chosen]
-        return Plan(False, tuple(chosen[:4])) if chosen else None
+        # Accurate, in languages written in the words' scripts (the Mac's own first): one per script at
+        # least, so words mixing two scripts are read in both.
+        ranked = _pick(acc, [*_preferred_languages(), "en"]) + [c for c in acc]
+        chosen: list[str] = []
+        for s in sorted(need):
+            chosen += [c for c in ranked if s in _lang_scripts(c) and c not in chosen][:1]
+        chosen += [c for c in ranked if _lang_scripts(c) & need and c not in chosen]
+        covered = set().union(*(_lang_scripts(c) for c in chosen)) if chosen else set()
+        return Plan(False, tuple(chosen[: max(4, len(need))])) if need <= covered else None
     # Whatever is there: the languages this Mac's apps show (its preferred ones), English too.
     mine = _pick(acc, [*_preferred_languages(), "en"])
     latin_only = all(_lang_scripts(c) == frozenset({"LATIN"}) for c in mine)

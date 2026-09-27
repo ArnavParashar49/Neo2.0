@@ -186,6 +186,8 @@ def test_latin_words_are_read_fast_other_scripts_accurately_and_devanagari_not_a
     assert ocr.plan_for("नया खेल") is None and ocr.unreadable("नया खेल") == "Devanagari"
     assert ocr.unreadable("Start 2") == "" and ocr.plan_for("42").fast  # digits: any language reads them
     assert ocr.plan_for("Start", want_fast=False).fast is False
+    p = ocr.plan_for("Save Сохранить")  # two scripts: accurate, in a language of each
+    assert not p.fast and "en-US" in p.languages and {"ru-RU", "uk-UA"} & set(p.languages)
 
 
 def test_reading_whatever_is_there_follows_the_macs_languages(monkeypatch):
