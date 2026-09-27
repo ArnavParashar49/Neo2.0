@@ -97,6 +97,7 @@ def game_menus() -> list[menus.Item]:
         item("File", "New Window", key="n"),
         item("File", "Close", key="w"),
         item("File", "Export", "PDF"),
+        item("File", "Share", "Nearby Devices"),
         item("Game", "New Game", key="n", mods=menus._MENU_SHIFT),
         item("Game", "Delete Round…"),
         item("Game", "Close Round"),
@@ -239,6 +240,11 @@ async def test_a_committing_command_asks_first_then_runs_on_yes(world):
     with confirm.approved(out.staged):
         out = await run({"item": "Delete Round"}, ToolContext(origin="approval"))
     assert out.ok and world.pressed == ["Game › Delete Round…"]
+
+
+async def test_a_command_under_a_committing_submenu_asks_first(world):
+    out = await run({"path": "File > Share > Nearby Devices"}, ToolContext())
+    assert out.halt and world.pressed == []
 
 
 async def test_a_command_is_gated_like_its_keyboard_shortcut(world, monkeypatch):

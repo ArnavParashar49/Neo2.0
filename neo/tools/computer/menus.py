@@ -576,11 +576,13 @@ async def _gate_item(item: Any, name: str, pid: int, a: dict, c: ToolContext, pi
         gate = confirm.gated("menu_command", a, f"choose “{where[:80]}” in {name}")
         if isinstance(gate, str):
             return gate
-    if gate := await g._ask_first("menu_command", a, item.title, name, []):  # sends, deletes, quits…
+    # sends, deletes, quits…: the item with its submenus ("Share › AirDrop"), not the top menu's name
+    label = " › ".join(item.path[1:]) or item.title
+    if gate := await g._ask_first("menu_command", a, label, name, []):
         return gate
     if (chord := _chord(item)) and (gate := await g._ask_before_keys(a, chord, name, c, pid)):
         return gate  # the same question its keyboard shortcut would ask
-    if ask.user and pick.stage != "exact" and _sounds_destructive(ask.user) and not policy.commits(item.title):
+    if ask.user and pick.stage != "exact" and _sounds_destructive(ask.user) and not policy.commits(label):
         # "remove …" grounded on a title that removes nothing: not what was meant
         return ToolOutput(f"Error: “{where}” doesn't sound like what was asked — which command?", ok=False)
     return None
