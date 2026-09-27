@@ -541,16 +541,25 @@ async def _only_the_web(route) -> None:
 async def _local_page(page) -> str:
     """Embedded: the page is on this machine or its network (a redirect, a click or a script led
     there) → leave it, and say so instead of reading it. "" = fine (and always, in NEO.app)."""
+    url = str(getattr(page, "url", "") or "")
+    if not (why := await _local_tab(page)):
+        return ""
+    with suppress(Exception):
+        await page.goto("about:blank")
+    return f"Error: the page went to {_host(url)} — {why}, which NEO's browser doesn't open here."
+
+
+async def _local_tab(page) -> str:
+    """Embedded: why NEO's browser doesn't show this page ("" = it does; always, in NEO.app) - it is
+    on this machine or its network. The tab itself is left as it is."""
     if not runtime.library_bound():
         return ""
     from neo.security import policy
 
     url = str(getattr(page, "url", "") or "")
-    if not url.startswith(("http:", "https:")) or not (why := await asyncio.to_thread(policy.private_host, url)):
+    if not url.startswith(("http:", "https:")):
         return ""
-    with suppress(Exception):
-        await page.goto("about:blank")
-    return f"Error: the page went to {_host(url)} — {why}, which NEO's browser doesn't open here."
+    return await asyncio.to_thread(policy.private_host, url)
 
 
 def _no_fragment(url: str) -> str:
@@ -843,6 +852,18 @@ def _handoff(kind: str, url: str) -> confirm.Halt:
             "payment": f"Please enter your payment details on {host} yourself in NEO's browser in the chat, then hand it back.",
         }.get(kind, f"Please take over in NEO's browser in the chat on {host}, then hand it back.")
         return confirm.ask_user(msg)
+    if runtime.library_bound() and _headless():
+        # An embedded agent's browser has no window unless its host asked for one: nobody can step in.
+        need = {
+            "login": f"{host} wants someone to log in",
+            "captcha": f"{host} wants a human check (a CAPTCHA)",
+            "code": f"{host} wants a verification code",
+            "payment": f"{host} wants payment details",
+        }.get(kind, f"The page on {host} needs a person to take over")
+        return confirm.ask_user(
+            f"{need}, which only a person can do - and NEO's browser runs headless here, with no window to "
+            "do it in. (An agent shows its browser in a window with browser_headless=False.)"
+        )
     msg = {
         "login": f"Please log in to {host} in NEO's browser window, then say continue.",
         "captcha": f"{host} wants a human check (a CAPTCHA). Please do it in NEO's browser window, then say continue.",
@@ -1720,11 +1741,15 @@ async def browser_tabs(a: dict, c: ToolContext) -> str | ToolOutput:
     if action == "list":
         rows = []
         for i, p in enumerate(pages, 1):
+            current = " (current)" if p is _browser().current else ""
+            if why := await _local_tab(p):  # embedded: its address and title are the local page's words
+                rows.append(f"[{i}] (a page on {_host(p.url)}, {why}: NEO's browser doesn't show it here){current}")
+                continue
             try:
                 title = await p.title()
             except Exception:  # noqa: BLE001
                 title = ""
-            rows.append(f"[{i}] {title[:80]} — {p.url[:100]}{' (current)' if p is _browser().current else ''}")
+            rows.append(f"[{i}] {title[:80]} — {p.url[:100]}{current}")
         return "\n".join(rows) or "No tabs are open."
     try:
         i = int(a.get("index") or 0)
@@ -1738,6 +1763,8 @@ async def browser_tabs(a: dict, c: ToolContext) -> str | ToolOutput:
         await page.close()
         live.done()
         return f"Closed tab {i}. {len(_browser().pages())} left."
+    if err := await _local_page(page):  # embedded: a tab a page opened, on this machine or its network
+        return ToolOutput(err, ok=False)
     if stop := await _keep_off(page, c, _browser().shown.get(id(page), ""), leave="none"):
         return stop
     await live.intent("navigate", f"Switched to tab {i}", caption=f"Switching to tab {i}", present=False)
@@ -1745,7 +1772,7 @@ async def browser_tabs(a: dict, c: ToolContext) -> str | ToolOutput:
     await _front(page)
     await live.bind(page)
     live.done()
-    return _then(f"Switched to tab {i}.", await _read(page))
+    return _then(f"Switched to tab {i}.", await _show(page, c, _browser().shown.get(id(page), ""), leave="none"))
 
 
 @tool(

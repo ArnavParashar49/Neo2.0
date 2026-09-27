@@ -64,7 +64,9 @@ def agent(tmp_path, monkeypatch):
     monkeypatch.setattr(br, "_read", read)
     monkeypatch.setattr(br, "_shot", shot)
     monkeypatch.setattr(br, "_settle", settle)
-    rt = make_runtime(tmp_path / "a", "a", ["browser_open", "browser_read", "browser_screenshot"])
+    rt = make_runtime(
+        tmp_path / "a", "a", ["browser_open", "browser_read", "browser_screenshot", "browser_tabs", "browser_handoff"]
+    )
     return rt
 
 
@@ -186,3 +188,110 @@ async def test_nothing_it_loads_goes_to_a_local_address(tmp_path, monkeypatch):
     monkeypatch.setattr(br, "_b", br._Browser())
     await br._browser().page()
     assert len(routes) == 1  # NEO.app's browser: unchanged
+
+
+# ---- tabs: another way onto a page ------------------------------------------------------------------
+
+
+class _Tab(_Page):
+    def __init__(self, url: str, title: str) -> None:
+        super().__init__()
+        self.url, self._title = url, title
+
+    async def title(self):
+        return self._title
+
+    async def bring_to_front(self):
+        pass
+
+
+class _Tabs(_Browser):
+    def __init__(self, tabs: list[_Tab]) -> None:
+        super().__init__(tabs[0])
+        self.tabs = tabs
+        self.current = tabs[0]
+
+    def pages(self):
+        return list(self.tabs)
+
+
+def _two_tabs() -> tuple[_Tab, _Tab]:
+    # A popup the public page opened, redirected to the metadata address (Playwright doesn't route
+    # a redirect's next hop, so it got there).
+    return _Tab(PUBLIC, "Example"), _Tab(METADATA + "iam/security-credentials/role?token=t0k", "meta-title")
+
+
+@pytest.mark.parametrize("source", ["user", "model"])
+async def test_switching_to_a_tab_on_a_local_address_reads_nothing(agent, source):
+    """browser_tabs switch reads the tab it lands on: the same check as browser_read, untainted or not."""
+    pub, meta = _two_tabs()
+    agent.browser = _Tabs([pub, meta])
+    ctx = ToolContext(taint=["caller"] if source == "model" else [])
+    with runtime.bind(agent.scope()):
+        out = await registry().invoke("browser_tabs", {"action": "switch", "index": 2}, ctx)
+        assert confirm.peek() is None
+    assert out.text.startswith("Error") and "AKIA" not in out.text and "169.254.169.254" in out.text
+    assert agent.browser.current is pub and meta.url == "about:blank"  # left unread, not switched to
+
+
+async def test_the_tab_list_shows_nothing_of_a_local_page(agent):
+    pub, meta = _two_tabs()
+    agent.browser = _Tabs([pub, meta])
+    with runtime.bind(agent.scope()):
+        out = await registry().invoke("browser_tabs", {"action": "list"}, ToolContext())
+    lines = out.text.splitlines()
+    assert lines[0] == f"[1] Example — {PUBLIC} (current)"
+    assert lines[1].startswith("[2] ") and "meta-title" not in out.text and "security-credentials" not in out.text
+    assert "t0k" not in out.text
+
+
+async def test_neo_apps_tab_list_and_switch_are_unchanged(monkeypatch):
+    """NEO.app's own browser is the user's, on their own Mac: its tabs are listed and read as before."""
+    import neo.tools.browser as br
+    from neo.agent.registry import ToolOutput
+    from neo.tools import load_all
+
+    load_all()
+
+    async def read(page, **kw):
+        return ToolOutput(await _read(page))
+
+    monkeypatch.setattr(br, "_read", read)
+    monkeypatch.setenv("NEO_BROWSER_VIEW", "window")  # NEO.app's separate window (the chat card is its own test)
+    from neo import config
+
+    monkeypatch.setattr(config, "_settings", None)
+    pub, meta = _two_tabs()
+    monkeypatch.setattr(br, "_b", _Tabs([pub, meta]))
+    out = await registry().invoke("browser_tabs", {"action": "list"}, ToolContext())
+    assert "meta-title" in out.text and "security-credentials" in out.text
+    out = await registry().invoke("browser_tabs", {"action": "switch", "index": 2}, ToolContext())
+    assert out.text.startswith("Switched to tab 2.") and "AKIA" in out.text
+
+
+# ---- handing the page to a person -------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("kind", ["login", "captcha", "code", "payment", "other"])
+async def test_a_headless_agents_handoff_says_there_is_no_window(agent, kind):
+    """An embedded agent's browser is headless unless its host asked for a window: nobody can take
+    it over, so the question says so (and how a host shows one) instead of pointing at a window."""
+    page = _Tab("https://shop.example/checkout", "Checkout")
+    agent.browser = _Tabs([page])
+    with runtime.bind(agent.scope()):
+        out = await registry().invoke("browser_handoff", {"kind": kind, "detail": "x"}, ToolContext())
+    assert out.halt and out.text.startswith(confirm.NEEDS_USER)
+    assert "NEO's browser window" not in out.text and "say continue" not in out.text and "headless" in out.text
+    assert "browser_headless=False" in out.text and "shop.example" in out.text
+
+
+async def test_an_agent_with_a_window_hands_it_over_as_neo_app_does(tmp_path, monkeypatch):
+    import neo.tools.browser as br
+
+    rt = make_runtime(tmp_path / "w", "w", ["browser_handoff"], browser_headless=False)
+    page = _Tab("https://shop.example/login", "Log in")
+    rt.browser = _Tabs([page])
+    with runtime.bind(rt.scope()):
+        assert not br._headless()
+        out = await registry().invoke("browser_handoff", {"kind": "login"}, ToolContext())
+    assert out.text == f"{confirm.NEEDS_USER}: Please log in to shop.example in NEO's browser window, then say continue."
