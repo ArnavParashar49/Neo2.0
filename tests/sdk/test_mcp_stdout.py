@@ -175,3 +175,22 @@ def test_sigterm_stops_it_cleanly(tmp_path):
     assert code == 0, srv.stderr()[-2000:]
     assert list(srv.tmp.glob("neo-agent-*")) == []
     _only_json_rpc(srv)
+
+
+def test_the_entry_point_imports_only_the_standard_library(tmp_path):
+    """`python -m neo2.mcp` runs neo2/__init__ and neo2/mcp/__init__ before main() claims fd 1:
+    neither may import anything that could write to stdout first."""
+    code = (
+        "import json, sys\n"
+        "before = set(sys.modules)\n"
+        "import neo2.mcp\n"
+        "new = {m.split('.')[0] for m in set(sys.modules) - before}\n"
+        "print(json.dumps(sorted(m for m in new if m not in sys.stdlib_module_names)))\n"
+    )
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("NEO_", "PYTEST"))}
+    env.update(HOME=str(tmp_path), PYTHONPATH=str(ROOT))
+    out = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, cwd=str(tmp_path), env=env, timeout=120
+    )
+    assert out.returncode == 0, out.stderr[-2000:]
+    assert json.loads(out.stdout.strip().splitlines()[-1]) == ["neo2"]
