@@ -784,6 +784,31 @@ def test_the_exact_events_for_a_click_a_drag_and_typing(mac):
 # ---- what the report catches ------------------------------------------------------------------
 
 
+def _failed(said: str) -> controls.Check:
+    c = controls.Check("first_click", "First click on a window that isn't in front").fail("nothing arrived")
+    c.said = said
+    return c
+
+
+def test_the_feedback_gate_fails_an_answer_that_sounded_like_success():
+    """The run of 2026-09-27: the board never saw the click, and the tool said it clicked."""
+    got = controls._feedback([_failed("Left-clicked at (255, 186) in python.")])
+    assert got.status == "fail" and "first click" in got.arrived
+
+
+def test_the_feedback_gate_takes_only_neos_own_words_that_the_click_only_brought_the_app_forward():
+    from neo2.core.agent.registry import fence
+    from neo2.core.tools.computer import pointer
+
+    for label in ("only brought", "The click only brought python to the front"):  # words read off the screen
+        liar = "Dragged (105, 336) → (195, 246) in python. Changed: the window changed.\n" + fence("screen", f"under the pointer: Button “{label}”")
+        assert controls._feedback([_failed(liar)]).status == "fail", label
+    for looked in (True, False):
+        honest = "Left-clicked at (255, 186) in python. " + pointer.brought_only("python", looked=looked).said
+        assert controls._feedback([_failed(honest)]).status == "pass"
+    assert controls._feedback([_failed("Error: python didn't come to the front")]).status == "pass"
+
+
 def test_a_first_click_that_only_activates_the_window_is_caught_and_the_tool_says_so(mac):
     """Chess: the board ignores the click that brings its window forward. NEO brings the window
     forward first — but when macOS only put it in front by LaunchServices' word and never made it

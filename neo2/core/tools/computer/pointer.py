@@ -294,14 +294,19 @@ async def bring(t: Target, pts: list[tuple[float, float]], *, want_pid: int = 0)
             if (again.pid or again.app) and await _protected(again, *pts[0]):
                 raise _off_limits()
             _check_first(again, pid, want_pid, name)
+            if mine and await asyncio.to_thread(ax.same_window, first, again) is False:
+                raise _other_window(name)  # (unlabeled content — a board, a canvas — looks the same in any window)
             here = again if again.pid else first
-        if (not cold or t.brought) and here.pid == pid and await asyncio.to_thread(ax.raise_window, here):
-            t.raised = True  # (never another app's window)
-            if not await wait.until(lambda: asyncio.to_thread(ax.is_key, here), KEY_S):
-                t.cold = True
-                t.window = t.window or await _own_window(here, pid, pts[0])
-        if (not cold or t.brought or front_pid == pid) and here.app and here.pid == pid:
-            apps.set_target(here.app)  # "click the field, then type": the typing goes here too
+        if here.pid == pid and (not cold or t.brought or front_pid == pid):
+            # Only the app's own normal window is raised: never an overlay, a panel or a menu of the
+            # app in front, nor a window another process owns.
+            own = t.window if cold else await _own_window(here, pid, pts[0])
+            if own is not None and (not cold or t.brought) and await asyncio.to_thread(ax.raise_window, here):
+                t.raised = True
+                if not await wait.until(lambda: asyncio.to_thread(ax.is_key, here), KEY_S):
+                    t.cold, t.window = True, own
+            if here.app and (own is not None or here.regular):
+                apps.set_target(here.app)  # "click the field, then type": the typing goes here too
     if t.brought or t.raised:
         await _look_again(t, pts, pid, want_pid)
     final = t.hits[0]
@@ -356,6 +361,13 @@ def _stayed_behind(name: str, front: str) -> Refused:
         f"Error: {name} didn't come to the front ({front or 'another app'} stayed there), so I "
         f"didn't touch it — a click on a window in the background may only bring it forward. "
         f"Ask the user to click {name} once, then try again."
+    )
+
+
+def _other_window(name: str) -> Refused:
+    return Refused(
+        f"Error: bringing {name} forward put another of its windows over that spot, so I didn't do it. "
+        "Look again (screenshot) before trying again."
     )
 
 
@@ -434,20 +446,25 @@ async def outcome(
     target: Target | None = None,
 ) -> Outcome:
     """What the input changed: looked at once, and again a moment later if nothing had yet. With a
-    click's ``target``: a click that itself brought its app forward and did nothing else anyone can
-    see only activated it, most likely (:func:`brought_only`) — not "Changed: … is now in front"."""
+    click's or a drag's ``target``: an input that itself brought its app forward and did nothing else
+    anyone can see only activated it, most likely (:func:`brought_only`) — not "Changed: … is now in
+    front"."""
     if before.pixels is None and not before.scene.known:
         return compare(before, None, where)
+    judged = target is not None and not only_at_points
     await asyncio.sleep(LOOK_S)
     now = await look(pid, pts)
     out = compare(before, now, where, only_at_points)
-    woke = target is not None and not only_at_points and await _woke(target, pid, before, now)
+    woke = judged and await _woke(target, pid, before, now)
     if out.changed is False or (woke and not _did_more(before, now, pts, target)):
         await asyncio.sleep(LOOK_AGAIN_S)
         now = await look(pid, pts)
         out = compare(before, now, where, only_at_points)
+        woke = woke or (judged and await _woke(target, pid, before, now))  # (a busy app shows it only now)
     if woke and target is not None and not _did_more(before, now, pts, target):
-        return brought_only(target.hits[0].app or now.scene.front or "the app", out.details)
+        pictured = before.pixels is not None and now.pixels is not None  # (else nothing showed what the view did)
+        what = "drag" if len(pts) > 1 else "click"
+        return brought_only(target.hits[0].app or now.scene.front or "the app", out.details, pictured, what)
     return out
 
 
@@ -517,22 +534,33 @@ def _content_only(now, before, pt: tuple[float, float], frame: tuple[float, floa
     return out
 
 
-def brought_only(app: str, details: str = "", looked: bool = True) -> Outcome:
-    """A click that itself brought its app forward and did nothing else anyone can see (``looked``:
-    NEO looked at the point before and after; else it didn't look at all): unknown, not a miss — and
-    never clicked again by NEO (had it registered, a second click would do it twice)."""
+def brought_only(app: str, details: str = "", looked: bool = True, what: str = "click") -> Outcome:
+    """A click (or a drag: ``what``) that itself brought its app forward and did nothing else anyone
+    can see (``looked``: NEO compared the pictures at the points before and after; else it couldn't):
+    unknown, not a miss — and never made again by NEO (had it registered, a second would do it twice)."""
+    where = "at the point" if what == "click" else "at either end"
     said = (
-        f"The click {ONLY_BROUGHT} {app} to the front, it seems — it wasn't active with that window key before "
-        "the click, and nothing else changed at the point (a first click on such a window often just activates it)."
+        f"The {what} {ONLY_BROUGHT} {app} to the front, it seems — it wasn't active with that window key before "
+        f"the {what}, and nothing else changed {where} (a first click on such a window often just activates it)."
         if looked
-        else f"The click may have {ONLY_BROUGHT} {app} to the front — it wasn't active with that window key before "
-        "the click, and a first click on such a window often just activates it."
+        else f"The {what} may have {ONLY_BROUGHT} {app} to the front — it wasn't active with that window key before "
+        f"the {what}, and a first click on such a window often just activates it."
     )
+    again = "clicking" if what == "click" else "dragging"
     return Outcome(
-        said + " Take a screenshot to check before clicking again: if it did register, a second click would do it twice.",
+        said + f" Take a screenshot to check before {again} again: if it did register, a second {what} would do it twice.",
         details,
         None,
     )
+
+
+_SAID_ONLY_BROUGHT = re.compile(rf"\bThe (?:click|drag) (?:may have )?{ONLY_BROUGHT}\b")
+
+
+def said_only_brought(text: str) -> bool:
+    """Does a tool's answer say, in NEO's own words (before any fence of words read off the screen),
+    that its input only brought the app forward (:func:`brought_only`)?"""
+    return bool(_SAID_ONLY_BROUGHT.search(text.split("<untrusted", 1)[0]))
 
 
 async def scene_change(before: Look, pid: int) -> Outcome:

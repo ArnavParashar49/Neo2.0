@@ -246,12 +246,15 @@ async def drag(a: dict, c: ToolContext) -> str | ToolOutput:
         head += f" (pixels of {shot.id})"
     if src.app:
         head += f" in {src.app}" + (f" onto {dst.app}" if dst.app and dst.pid != src.pid else "")
-    if t.brought:
+    if t.brought and not t.cold:
         head += f" (brought {t.brought} to the front first)"
     head += "."
     if before is None:
+        if await pointer.woke(t, pid):  # nothing looked at, but the button press itself brought its app forward
+            said = pointer.brought_only(src.app or t.brought or "the app", looked=False, what="drag").said
+            return ToolOutput(f"{head} {said}{gates._input_doubt()}")
         return head + gates._input_doubt()
-    out = await pointer.outcome(before, pid, pts, [f"the start {_at(*pts[0])}", f"the end {_at(*pts[1])}"], between_apps)
+    out = await pointer.outcome(before, pid, pts, [f"the start {_at(*pts[0])}", f"the end {_at(*pts[1])}"], between_apps, target=t)
     if between_apps and out.changed is False:
         out.said += (
             f" (Neither app was brought forward for a drag between two apps; if {src.app or 'the app it starts in'} "

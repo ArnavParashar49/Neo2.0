@@ -1256,6 +1256,15 @@ def is_key(h: Hit) -> bool:
     return _same(_on(key_window(h.pid)), _on(h.window))
 
 
+@pooled
+def same_window(a: Hit, b: Hit) -> bool | None:
+    """Are two points in the same window (a sheet counts as the window it is on)? None: one of them
+    has no window to tell by."""
+    if a.window is None or b.window is None:
+        return None
+    return _same(_on(a.window), _on(b.window))
+
+
 def app_names(pid: int) -> set[str]:
     """Every name the app with this pid goes by: its own, its bundle id, its executable's."""
     try:

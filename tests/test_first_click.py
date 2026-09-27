@@ -48,6 +48,7 @@ class Desk:
         self.bring_activates = True  # bring_pid_front makes it active (else: frontmost by LaunchServices' word only)
         self.force_activates = True
         self.first_mouse = False  # the view takes the click that activates its window
+        self.lag, self.pending = 0, 0  # a busy app: activated by a click, it shows so only at the lag-th look after
         self.layer, self.role, self.owner = 0, "AXGroup", TEST  # the window server's word on the window at the point
         self.win, self.claude_win = object(), object()  # the two windows' AX elements
         self.clicks: list[tuple[float, float]] = []  # clicks the test window's view got
@@ -99,13 +100,23 @@ class Desk:
         self.log.append(("click", round(x), round(y)))
         if inside(FRAME, x, y):
             if not self.active:
-                self._activate()  # the click is spent activating the window…
+                self._wake()  # the click is spent activating the window…
                 if not self.first_mouse:
                     return  # …and the view never sees it
             self.clicks.append((x, y))
 
+    def _wake(self):
+        if self.lag:
+            self.pending = self.lag
+        else:
+            self._activate()
+
     # what NEO looks at
     def scene(self, pid):
+        if self.pending:
+            self.pending -= 1
+            if not self.pending:
+                self._activate()
         mine = pid == TEST and self.active
         return ax.Scene(
             front=self.front[0], front_pid=self.front[1], title="NEO controls self-test" if mine else "",
@@ -186,6 +197,7 @@ def test_an_app_already_active_with_its_window_key_is_left_alone(desk):
     out = click(BOARD)
     assert desk.order() == ["click"] and desk.clicks == [BOARD] and out.ok
     assert "brought" not in out.text
+    assert apps.target() == "python"  # its own normal window: the typing goes there next
 
 
 @pytest.mark.parametrize(
@@ -235,6 +247,38 @@ def test_a_window_that_covers_the_point_once_the_app_is_in_front_is_still_refuse
     assert not out.ok and "still over that spot" in out.text and desk.clicks == []
 
 
+def test_another_window_of_the_app_that_comes_over_the_point_is_not_clicked(desk, monkeypatch):
+    """Coming forward, the app put another of its own windows over the point (its main window, the
+    one activation brings forward; a space switch). Neither has a label — a board, a canvas — so only
+    the window tells them apart: that one isn't clicked, nor raised."""
+    other = object()
+    base = desk.bring
+
+    async def bring(pid):
+        monkeypatch.setattr(ax, "hit", lambda x, y: ax.Hit(pid=TEST, app="python", label="", role="AXGroup", regular=False, window=other))
+        return await base(pid)
+
+    raised = []
+    monkeypatch.setattr(apps, "bring_pid_front", bring)
+    monkeypatch.setattr(ax, "raise_window", lambda h: raised.append(h) or True)
+    out = click(BOARD)
+    assert not out.ok and desk.order() == ["bring"] and raised == []
+    assert "another of its windows" in out.text
+
+
+def test_an_overlay_of_the_app_in_front_is_neither_raised_nor_typed_into_next(desk, monkeypatch):
+    """The app in front is active, but what is at the point is an overlay of it (Spotlight's panels
+    are on layer 23), not a normal window: it isn't raised, and "click, then type" doesn't make it
+    the app to type in — the next typing would bring it forward by name."""
+    desk._activate()
+    desk.layer = 23
+    raised = []
+    monkeypatch.setattr(ax, "raise_window", lambda h: raised.append(h) or True)
+    click(BOARD)
+    assert desk.clicks == [BOARD]
+    assert raised == [] and apps.target() is None
+
+
 def test_the_wait_for_the_app_is_a_deadline_not_a_fixed_sleep(desk, monkeypatch, fake_clock):
     monkeypatch.setattr(pointer, "KEY_S", 1.0, raising=False)
     desk.bring_activates = False
@@ -269,6 +313,53 @@ def test_the_title_bar_redrawing_as_the_window_becomes_key_is_no_effect_of_the_c
     desk.bring_activates = False
     out = click(UNDER_TITLE)  # the look around the point takes in the title bar, which darkens
     assert "only brought python to the front" in out.text and "the screen changed" not in out.text
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "frontmost by LaunchServices' word, the switch didn't take",  # bring() knew: t.cold
+        "a floating panel of an app in the background",  # never brought forward (layer 3): the click activates it
+    ],
+)
+def test_an_activation_that_shows_only_at_the_second_look_is_still_no_success(desk, case):
+    """A busy app: the click only activated it, and that shows only at the second look."""
+    if case.startswith("frontmost"):
+        desk.front, desk.force_activates = ("python", TEST), False
+    else:
+        desk.layer = 3
+    desk.lag = 2
+    out = click(BOARD)
+    assert desk.clicks == [] and desk.active  # (it did come forward, at the second look)
+    assert "only brought python to the front" in out.text
+    assert "Changed" not in out.text and "brought python to the front first" not in out.text
+
+
+def test_without_pictures_a_click_that_woke_its_app_isnt_said_to_have_changed_nothing_at_the_point(desk, monkeypatch):
+    """No Screen Recording: nothing shows whether the view took the click (here it did), so the
+    answer is that the click may have only brought the app forward — not that nothing changed there."""
+    desk.bring_activates, desk.first_mouse = False, True
+    monkeypatch.setattr(screen, "sample_points", lambda pts, r=60: None)
+    out = click(BOARD)
+    assert desk.clicks == [BOARD]
+    assert "may have only brought python to the front" in out.text
+    assert "nothing else changed" not in out.text
+
+
+@pytest.mark.parametrize("origin, says", [("agent", "The drag only brought"), ("user", "The drag may have only brought")])
+def test_a_drag_whose_mouse_down_only_activated_the_window_is_not_called_done(desk, monkeypatch, origin, says):
+    """The same for a drag on the board: its button press only activated the window. The answer
+    doesn't say the app was brought forward first (it wasn't seen to be), nor that anything changed."""
+    desk.bring_activates = False
+    monkeypatch.setattr(inp, "drag", lambda x1, y1, x2, y2, **kw: desk.click(x1, y1))
+    monkeypatch.setattr(ax, "window_words", lambda h: "", raising=False)
+    ctx = ToolContext(user_text="play on the board", origin=origin)
+    out = asyncio.run(registry().invoke("drag", {"x1": BOARD[0], "y1": BOARD[1], "x2": 300, "y2": 250}, ctx))
+    text = out.text if isinstance(out, ToolOutput) else str(out)
+    assert desk.clicks == []
+    assert "brought python to the front first" not in text
+    assert f"{says} python to the front" in text and "Changed" not in text
+    assert "before dragging again" in text
 
 
 def test_a_first_click_that_did_register_is_reported_as_its_change(desk):
@@ -336,3 +427,11 @@ def test_a_window_is_key_only_while_its_app_is_active_and_a_sheet_counts_as_its_
     assert not is_key(ax.Hit(pid=TEST, window="other")) and not is_key(ax.Hit(pid=TEST))
     attrs[("app", "AXFrontmost")] = False  # frontmost by LaunchServices' word, perhaps — not active by its own
     assert ax.key_window(TEST) is None and not is_key(ax.Hit(pid=TEST, window="win"))
+
+
+def test_two_points_are_in_the_same_window_when_one_is_on_a_sheet_of_it(monkeypatch):
+    attrs = {("sheet", "AXRole"): "AXSheet", ("sheet", "AXParent"): "win", ("win", "AXRole"): "AXWindow", ("other", "AXRole"): "AXWindow"}
+    monkeypatch.setattr(ax, "_attr", lambda el, name, default=None: attrs.get((el, name), default))
+    assert ax.same_window(ax.Hit(pid=TEST, window="win"), ax.Hit(pid=TEST, window="sheet")) is True
+    assert ax.same_window(ax.Hit(pid=TEST, window="win"), ax.Hit(pid=TEST, window="other")) is False
+    assert ax.same_window(ax.Hit(pid=TEST, window="win"), ax.Hit(pid=TEST)) is None  # (nothing to tell by)
