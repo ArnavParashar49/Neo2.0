@@ -15,11 +15,15 @@ import io
 import pytest
 import test_v2_computer_controls as base
 from PIL import Image
-from test_v2_computer_controls import CHESS, NEO, run, shots, world  # noqa: F401 (fixtures)
+from test_v2_computer_controls import CHESS, run
 
 from neo.agent.registry import ToolContext, registry
 from neo.providers.base import ImagePart
 from neo.tools.computer import ax, marks, pointer, screen
+
+# The fake Mac of the pointer tests (its fixtures, by the same names).
+world = base.world
+shots = base.shots
 
 
 @pytest.fixture(autouse=True)
