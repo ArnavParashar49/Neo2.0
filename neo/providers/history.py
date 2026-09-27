@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import replace
 
 from neo.providers.base import Message, ToolCall, ToolResult
 
@@ -34,7 +35,7 @@ NO_RESULT = "(no result: this step was cut short)"
 # file): each goes stale the moment the next look at it is taken, and the newest is what the model
 # is working from.
 OBSERVATIONS = frozenset({
-    "ax_tree", "ax_find", "screenshot", "apps_running", "page_read", "read_file",
+    "ax_tree", "ax_find", "screenshot", "look", "apps_running", "page_read", "read_file",
     # NEO's browser: each of these returns a page as it is now (or a picture of it)
     "browser_read", "browser_open", "browser_click", "browser_type", "browser_back", "browser_tabs",
     "browser_screenshot",
@@ -62,7 +63,7 @@ def normalize(messages: list[Message]) -> list[Message]:
             if r is None:
                 r = ToolResult(c.id, c.name, NO_RESULT, ok=False)
             elif (r.call_id, r.name) != (c.id, c.name):
-                r = ToolResult(c.id, c.name, r.content, r.ok, list(r.images))
+                r = replace(r, call_id=c.id, name=c.name, images=list(r.images))
             results.append(r)
         out.append(Message.tool(results))
         pending, slots, got = None, {}, {}

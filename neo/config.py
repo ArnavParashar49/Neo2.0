@@ -37,7 +37,7 @@ def _env_files(root: Path) -> tuple[Path, ...]:
 
 _ENV_FILES = _env_files(PROJECT_ROOT)
 
-BrainName = Literal["gemini", "gemini_lite", "groq", "local", "claude"]
+BrainName = Literal["gemini", "gemini_lite", "groq", "local", "claude", "groq_vision"]
 VoiceBackend = Literal["auto", "live", "local", "off"]
 DecideMode = Literal["legacy", "shadow", "on", "off"]
 
@@ -79,6 +79,8 @@ class Settings(BaseSettings):
     gemini_lite_model: str = "gemini-3.5-flash-lite"
     gemini_live_model: str = "gemini-3.8-live"
     groq_model: str = "openai/gpt-oss-120b"
+    # Groq's model that sees pictures: the last seeing fallback (neo.providers.EYES). "" = none.
+    groq_vision_model: str = "qwen/qwen3.8-27b"
     local_model: str = "mlx-community/gemma-4-12B-it-4bit"
     claude_model: str = "claude-opus-5"
 
@@ -138,6 +140,11 @@ class Settings(BaseSettings):
     # ---- agent -----------------------------------------------------------------------
     max_steps: int = 24
     max_seconds: float = 180.0  # wall-clock budget for one agent run
+    # How hard the brain thinks when a task works on the screen: the level it starts at (then one up
+    # after a miss, back down after a success — neo.providers.effort). "high" is the level every
+    # agent task has used; "low" answers in ~1–2 s instead of ~10–24 s. The default changes only
+    # after the A/B on the self-test window (≥10 runs per arm).
+    screen_effort: Literal["minimal", "low", "medium", "high"] = "high"
     max_tool_result_chars: int = 6000
     confirm_destructive: bool = True
     # Apps NEO's input tools never click, press, drag, scroll or type into (NEO's own overlay
@@ -146,6 +153,13 @@ class Settings(BaseSettings):
     # '["com.example.myapp"]' in NEO_PROTECTED_APPS. The bundle id is the one that can't drift.
     protected_apps: list[str] = []
     fast_paths: bool = True  # zero-LLM regex commands (neo.agent.fastpath)
+
+    @field_validator("screen_effort", mode="before")
+    @classmethod
+    def _screen_effort(cls, v):
+        """A typo must not stop NEO from starting: anything unknown is today's level."""
+        s = str(v or "").strip().lower()
+        return s if s in ("minimal", "low", "medium", "high") else "high"
 
     # ---- memory & prompt ---------------------------------------------------------------
     embeddings: Literal["local", "off"] = "local"  # off: keyword-only recall, no local model

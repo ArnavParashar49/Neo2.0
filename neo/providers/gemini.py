@@ -17,6 +17,11 @@ The brains NEO builds from settings keep that state in their data dir (NEO.app's
 agent's own). One a host builds from its own keys (neo2.providers.Gemini) keeps it in memory, in
 the object: nothing is written for it.
 
+How hard it thinks is the chain's choice per step (neo.providers.effort). "minimal" is asked only of
+a model that takes it: one that says it doesn't (a 400 naming the thinking level) is asked at
+"low" from then on. A picture's ImagePart.detail sets its media resolution (Gemini bills 280 /
+560 / 1,120 / 2,240 tokens a picture); "auto" leaves the model's own default.
+
 Gemini 3 requires the ``thought_signature`` of every function call to be echoed back when the
 history is replayed. A signature is only good for the model that wrote it: calls that came from
 another brain (Groq, Claude) — or from another Gemini model before a quota/overload switch — get
@@ -43,6 +48,7 @@ from google.genai import types as gt
 from neo.config import Settings, settings
 from neo.providers.base import (
     BadRequest,
+    Level,
     Message,
     Overloaded,
     ProviderError,
@@ -60,7 +66,24 @@ from neo.providers.history import flatten, normalize
 
 log = logging.getLogger(__name__)
 
-_LEVEL = {"low": gt.ThinkingLevel.LOW, "medium": gt.ThinkingLevel.MEDIUM, "high": gt.ThinkingLevel.HIGH}
+_LEVEL = {
+    "minimal": gt.ThinkingLevel.MINIMAL,
+    "low": gt.ThinkingLevel.LOW,
+    "medium": gt.ThinkingLevel.MEDIUM,
+    "high": gt.ThinkingLevel.HIGH,
+}
+# A 400 that says the model won't take the thinking level it was sent ("minimal" on a model that
+# dropped it): that model is asked at "low" from then on.
+_NO_MINIMAL = re.compile(r"thinking[ _]?level|thinking_config|\bminimal\b", re.I)
+# ImagePart.detail → Gemini's per-picture media resolution ("auto": not sent, the model's default).
+_RESOLUTION = {
+    "low": gt.PartMediaResolutionLevel.MEDIA_RESOLUTION_LOW,
+    "medium": gt.PartMediaResolutionLevel.MEDIA_RESOLUTION_MEDIUM,
+    "high": gt.PartMediaResolutionLevel.MEDIA_RESOLUTION_HIGH,
+    "ultra": gt.PartMediaResolutionLevel.MEDIA_RESOLUTION_ULTRA_HIGH,
+}
+# A 400 about the per-picture resolution (a model that doesn't take it): sent again without it.
+_NO_RESOLUTION = re.compile(r"media[ _]?resolution", re.I)
 _SKIP_SIGNATURE = b"skip_thought_signature_validator"
 _RETRY_CODES = {500, 502, 503, 504}
 _QUOTA_COOLDOWN_S = 600.0  # a (model, key) that 429'd without saying which quota: skipped this long
@@ -119,9 +142,18 @@ def _signature(c: ToolCall, model: str) -> bytes:
     return _SKIP_SIGNATURE
 
 
-def _to_contents(messages: list[Message], model: str = "") -> list[gt.Content]:
+def _picture(im, detail: bool = True) -> gt.Part:
+    """A picture as a Gemini part, at the media resolution its detail asks for."""
+    res = _RESOLUTION.get(getattr(im, "detail", "auto")) if detail else None
+    if res is None:
+        return gt.Part.from_bytes(data=im.data, mime_type=im.mime)
+    return gt.Part.from_bytes(data=im.data, mime_type=im.mime, media_resolution=res)
+
+
+def _to_contents(messages: list[Message], model: str = "", *, detail: bool = True) -> list[gt.Content]:
     """The history as Gemini contents for `model` (whose own signatures are echoed; any other
-    brain's calls get the bypass). Normalized first: see neo.providers.history."""
+    brain's calls get the bypass). Normalized first: see neo.providers.history. `detail`: send each
+    picture's media resolution (off for a model that refused it)."""
     out: list[gt.Content] = []
     for m in normalize(messages):
         if m.role == "user":
@@ -129,7 +161,7 @@ def _to_contents(messages: list[Message], model: str = "") -> list[gt.Content]:
             if m.text:
                 parts.append(gt.Part.from_text(text=m.text))
             for im in m.images:
-                parts.append(gt.Part.from_bytes(data=im.data, mime_type=im.mime))
+                parts.append(_picture(im, detail))
             out.append(gt.Content(role="user", parts=parts or [gt.Part.from_text(text="")]))
         elif m.role == "assistant":
             parts = []
@@ -155,7 +187,7 @@ def _to_contents(messages: list[Message], model: str = "") -> list[gt.Content]:
                     )
                 )
                 for im in r.images:
-                    parts.append(gt.Part.from_bytes(data=im.data, mime_type=im.mime))
+                    parts.append(_picture(im, detail))
             out.append(gt.Content(role="user", parts=parts))
     return out
 
@@ -173,6 +205,14 @@ def _tools(specs: list[ToolSpec] | None) -> list[gt.Tool] | None:
             ]
         )
     ]
+
+
+def _pictures_with_detail(messages: list[Message]) -> bool:
+    return any(
+        getattr(im, "detail", "auto") in _RESOLUTION
+        for m in messages
+        for im in (*m.images, *(i for r in m.tool_results for i in r.images))
+    )
 
 
 def _pretty(model: str) -> str:
@@ -259,6 +299,7 @@ class GeminiProvider:
     supports_vision = True
     supports_tools = True
     token_budget = _TOKEN_BUDGET
+    efforts = frozenset({"minimal", "low", "medium", "high"})  # (minimal: where the model takes it)
 
     def __init__(
         self,
@@ -303,6 +344,8 @@ class GeminiProvider:
         self._exhausted: dict[tuple[str, str], float] = {}
         self._bad_keys: dict[str, float] = {}  # key id → when to try a key the server refused again
         self._denied: dict[tuple[str, str], float] = {}  # (model, key id) refused: when to try again
+        self._no_minimal: set[str] = set()  # models that said they don't take the "minimal" level
+        self._no_detail: set[str] = set()  # models that refused a per-picture media resolution
         # Where the quota state is kept: the data dir of the settings it was built from (NEO.app's,
         # or the embedded agent's whose pool built it — fixed now, so no other agent's call can
         # move it). A host's own provider: nowhere, it stays in this object.
@@ -471,44 +514,73 @@ class GeminiProvider:
                     break
         raise self._all_blocked_error()
 
+    def _level(self, model: str, effort: str) -> Level:
+        """The thinking level to ask `model` at: `effort`, but "low" for "minimal" on a model that
+        doesn't take it (and "medium" for anything unknown)."""
+        if effort == "minimal" and model in self._no_minimal:
+            return "low"
+        return effort if effort in _LEVEL else "medium"  # type: ignore[return-value]
+
     async def complete(
         self,
         messages: list[Message],
         *,
         system: str = "",
         tools: list[ToolSpec] | None = None,
-        effort: Literal["low", "medium", "high"] = "medium",
+        effort: Level = "medium",
         max_tokens: int = 4096,
     ) -> Turn:
         f = fit(
             messages, system=system, tools=tools, budget=self.token_budget, max_tokens=max_tokens,
             vision=True, name=self.name,
         )  # fmt: skip
-        cfg = gt.GenerateContentConfig(
-            system_instruction=system or None,
-            tools=_tools(f.tools),
-            thinking_config=gt.ThinkingConfig(thinking_level=_LEVEL[effort]),
-            max_output_tokens=f.max_tokens,
-        )
-        answered = {"model": self.model}
+        answered = {"model": self.model, "level": ""}
+
+        def config(model: str) -> gt.GenerateContentConfig:
+            level = self._level(model, effort)
+            answered["level"] = level
+            return gt.GenerateContentConfig(
+                system_instruction=system or None,
+                tools=_tools(f.tools),
+                thinking_config=gt.ThinkingConfig(thinking_level=_LEVEL[level]),
+                max_output_tokens=f.max_tokens,
+            )
 
         def request(msgs: list[Message]):
             async def fn(client, model: str):
                 answered["model"] = model
                 return await client.aio.models.generate_content(
-                    model=model, contents=_to_contents(msgs, model), config=cfg
+                    model=model,
+                    contents=_to_contents(msgs, model, detail=model not in self._no_detail),
+                    config=config(model),
                 )
 
             return fn
 
-        try:
-            resp = await self._call(request(f.messages))
-        except BadRequest as e:
-            if isinstance(e, RequestTooLarge) or not any(k in str(e).lower() for k in _TURN_SHAPE):
-                raise
-            # A shape rule nothing above foresaw: the task goes on with the tool turns as text.
-            log.warning(f"[gemini] history rejected ({str(e)[:100]}); retrying with tool turns as text")
-            resp = await self._call(request(flatten(f.messages)))
+        msgs = f.messages
+        for _ in range(3):  # a model's refusal of "minimal" or of a picture's resolution is learned once
+            try:
+                resp = await self._call(request(msgs))
+                break
+            except BadRequest as e:
+                if isinstance(e, RequestTooLarge):
+                    raise
+                said, model = str(e), answered["model"]
+                if answered["level"] == "minimal" and model not in self._no_minimal and _NO_MINIMAL.search(said):
+                    log.warning(f"[gemini] {model} doesn't take thinking level minimal; asking at low from now on")
+                    self._no_minimal.add(model)
+                    continue
+                if model not in self._no_detail and _pictures_with_detail(msgs) and _NO_RESOLUTION.search(said):
+                    log.warning(f"[gemini] {model} refused a picture's media resolution; sending without it")
+                    self._no_detail.add(model)
+                    continue
+                if not any(k in said.lower() for k in _TURN_SHAPE) or msgs is not f.messages:
+                    raise
+                # A shape rule nothing above foresaw: the task goes on with the tool turns as text.
+                log.warning(f"[gemini] history rejected ({said[:100]}); retrying with tool turns as text")
+                msgs = flatten(f.messages)
+        else:
+            resp = await self._call(request(msgs))
 
         turn = Turn()
         cand = (resp.candidates or [None])[0]
