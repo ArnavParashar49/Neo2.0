@@ -194,6 +194,15 @@ async def screenshot(a: dict, c: ToolContext) -> ToolOutput:
             return ToolOutput("Error: region width and height must be positive", ok=False)
     shown = await asyncio.to_thread(screen.displays)
     display = shown[0]
+    if region:
+        # Only the part on a screen exists in the picture: cut the region to the display it starts on,
+        # so its pixels always span exactly the region the note names.
+        home = next((d for d in shown if d.contains(region[0], region[1])), None)
+        if home is None:
+            return ToolOutput(f"Error: ({region[0]}, {region[1]}) is off every screen ({'; '.join(d.words() for d in shown)})", ok=False)
+        w = int(min(region[2], home.x + home.w - region[0]))
+        h = int(min(region[3], home.y + home.h - region[1]))
+        region = (region[0], region[1], w, h)
     if a.get("display") not in (None, "") and not region:
         try:
             want = int(a["display"])
@@ -281,6 +290,8 @@ async def ax_press(a: dict, c: ToolContext) -> str:
         return gate
     before = await _watch(c, pid, [])
     out = await asyncio.to_thread(ax.press_el, e)
+    if not out.startswith("Error") and owner and await asyncio.to_thread(ax.regular, pid):
+        apps.set_target(owner)  # "press the field, then type": the typing goes to that app
     if before is not None and not out.startswith("Error"):
         out += await _changes(before, pid, c)
     return out
@@ -331,8 +342,10 @@ _CLICK_ARGS = {
 }
 
 
-async def _gate_click(a: dict, labels: list[str], owner: str, verb: str = "click") -> str | None:
-    for label in dict.fromkeys(x for x in labels if x):
+async def _gate_click(a: dict, labels: list[tuple[str, str]], verb: str = "click") -> str | None:
+    """Ask before a click on any of these (label, its app): the element meant, and what is really
+    under the point."""
+    for label, owner in dict.fromkeys((lb, app) for lb, app in labels if lb):
         if gate := await _ask_first(verb, a, label, owner):
             return gate
     return None
@@ -383,17 +396,17 @@ async def click(a: dict, c: ToolContext) -> str | ToolOutput:
                 )
             pts = [(frame[0] + frame[2] / 2, frame[1] + frame[3] / 2)]
             t = await pointer.probe(pts)
-            labels, where = [e.title or e.value, t.hits[0].label], owner or t.hits[0].app
-            head = f"Clicked {e.id} ({e.role.removeprefix('AX')}) at {_at(*pts[0])}"
+            labels = [(e.title or e.value, owner), (t.hits[0].label, t.hits[0].app or owner)]
+            head = f"{pointer.click_word(button, count)} {e.id} ({e.role.removeprefix('AX')}) at {_at(*pts[0])}"
         else:
             pid = 0
             pts, shot = pointer.points(a, ("x", "y"), c)
             t = await pointer.probe(pts)
-            labels, where = [t.hits[0].label], t.hits[0].app
+            labels = [(t.hits[0].label, t.hits[0].app)]
             head = f"{pointer.click_word(button, count)} at {_at(*pts[0])}"
             if shot is not None:
                 head += f" (pixel ({float(a['x']):g}, {float(a['y']):g}) of {shot.id})"
-        if gate := await _gate_click(a, labels, where):
+        if gate := await _gate_click(a, labels):
             return gate
         await pointer.bring(t, pts, want_pid=pid)
     except pointer.Refused as r:
@@ -862,14 +875,25 @@ async def _type(text: str) -> None:
     quiet=True,
     payload=True,
 )
-async def type_text(a: dict, c: ToolContext) -> str:
+async def type_text(a: dict, c: ToolContext) -> str | ToolOutput:
     if err := _needs_input():
         return err
     text = str(a["text"])
     err, created = await _ensure_text_focus()
     if err:
         return err
+    # A model's typing is checked: the text where the cursor is should have changed.
+    watch = c.origin == "agent" and not created
+    before = await asyncio.to_thread(ax.focused_element_text) if watch else ""
     await _type(text)
+    if watch and before:
+        await asyncio.sleep(0.1)
+        if await asyncio.to_thread(ax.focused_element_text) == before:
+            return ToolOutput(
+                f"Typed “{text[:80]}”, but the text where the cursor is didn't change — it may have gone "
+                "somewhere else. Look before typing again.",
+                ok=False,
+            )
     return f"Typed “{text[:80]}”" + (" into a new note." if created else ".")
 
 

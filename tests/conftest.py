@@ -129,10 +129,20 @@ def _no_real_screen(monkeypatch):
     monkeypatch.setattr(ax, "hit", lambda x, y: ax.Hit())
     monkeypatch.setattr(ax, "scene", lambda pid: ax.Scene())
     monkeypatch.setattr(ax, "raise_window", lambda h: False)
+    monkeypatch.setattr(ax, "focused_element_text", lambda: "")
     monkeypatch.setattr(screen, "sample_points", lambda pts, r=60: None)
     monkeypatch.setattr(screen, "displays", lambda: [screen.Display(1, 0.0, 0.0, 1512.0, 982.0)])
     monkeypatch.setattr(pointer, "LOOK_S", 0.0)
     monkeypatch.setattr(pointer, "SETTLE_S", 0.0)
+    # The app NEO works in is per test, and no test brings a real app to the front.
+    from neo.tools.computer import apps, focus
+
+    def no_switching(*a, **k):
+        raise AssertionError("a test tried to bring a real app to the front")
+
+    monkeypatch.setattr(apps, "_target", None)
+    monkeypatch.setattr(focus, "force_front", no_switching)
+    monkeypatch.setattr(apps, "bring_pid_front", no_switching)
 
 
 @pytest.fixture(autouse=True)

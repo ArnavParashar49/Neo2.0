@@ -229,6 +229,22 @@ def test_closed_menus_are_not_listed_and_menu_bar_items_are(fake):
     assert "MenuBarItem \"Game\"" in tree and "Menu @(0,0 0x0)" not in tree
 
 
+def test_an_open_menu_below_its_window_is_listed_and_counts_as_on_screen(fake):
+    item = El("AXMenuItem", "Large", frame=(100, 950, 120, 20), actions=["AXPress"])
+    menu = El("AXMenu", frame=(100, 900, 140, 80), children=[item])
+    popup = El("AXPopUpButton", "Size", frame=(100, 880, 120, 20), actions=["AXPress"], children=[menu])
+    fake.add_app("Pages", 1, El("AXApplication", children=[window("Doc", popup, frame=(0, 25, 800, 880))]))
+    tree = ax.snapshot("Pages")
+    assert '"Large"' in tree and ax.visible_frame(item) == (100, 950, 120, 20)
+
+
+def test_typing_that_never_reached_the_field_is_not_reported_as_typed(monkeypatch):
+    events = _typing(monkeypatch, focus_takes=True, visible=(300, 100, 800, 800))
+    monkeypatch.setattr(ax, "focused_element_text", lambda: "Dear Sam,")  # the same before and after
+    out = asyncio.run(registry().invoke("type_text", {"text": "hello"}, ToolContext()))
+    assert not out.ok and "didn't change" in out.text and ("type", "hello") in events
+
+
 def test_a_hung_app_is_asked_briefly_and_said_to_be_busy(fake):
     root = fake.add_app("Stuck", 1, El("AXApplication", children=[window("W")]))
     root.hung = True

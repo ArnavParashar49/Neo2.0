@@ -424,6 +424,13 @@ def test_a_region_screenshot_maps_its_pixels_from_its_origin(shots, world):
     assert [e for e in world.log if e[0] == "post"][0][2] == (612.0, 540.0)  # the 38-pt origin added by NEO
 
 
+def test_a_region_running_off_the_screen_is_cut_to_what_exists(shots):
+    shots.size["px"] = (1024, 1000)
+    out = run("screenshot", {"x": 1000, "y": 0, "w": 1000, "h": 500})
+    assert shots.grabbed[-1] == ["-R", "1000,0,512,500"] and "region 512×500 pt" in out.text
+    assert not run("screenshot", {"x": 3000, "y": 0, "w": 100, "h": 100}).ok
+
+
 def test_other_displays_are_named_and_can_be_captured(shots, monkeypatch):
     two = [screen.Display(1, 0.0, 0.0, 1512.0, 982.0), screen.Display(2, 1512.0, -200.0, 1920.0, 1080.0)]
     monkeypatch.setattr(screen, "displays", lambda: two)

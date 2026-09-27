@@ -57,6 +57,8 @@ _READ_ONLY_ROLES = {"AXStaticText", "AXImage", "AXHeading"}
 # Frames that clip what's inside them: an element wholly outside its window or scroll area is
 # scrolled out of view (a web area or a long list reports its whole document's frame).
 _CLIPS = {"AXWindow", "AXSheet", "AXDrawer", "AXScrollArea"}
+# …except what floats over its window: an open menu or popup list, a popover, a drawer beside it.
+_FLOATING = {"AXMenu", "AXPopover", "AXDrawer"}
 _FIND_MAX_AGE_S = 30.0  # ax_find reuses the last tree (and its ids) unless it is older than this
 _MAX_ELEMENTS = 400
 _MAX_NODES = 6000  # elements visited in one walk, listed or not
@@ -325,6 +327,8 @@ def _walk(el, depth: int, out: list[Element], new_id, *, box=None, budget: list[
         role = _str(_attr(el, AS.kAXRoleAttribute))
         if role in _SKIP_ROLES:
             return
+        if role in _FLOATING:
+            box = None
         x, y, w, h = _point_size(el)
         if _outside((x, y, w, h), box):
             return
@@ -726,7 +730,10 @@ def visible_frame(el) -> tuple[float, float, float, float] | None:
         p = _attr(p, "AXParent")
         if p is None:
             break
-        if _str(_attr(p, AS.kAXRoleAttribute)) in _CLIPS:
+        role = _str(_attr(p, AS.kAXRoleAttribute))
+        if role in _FLOATING:
+            break  # an open menu or popover floats over its window: the window doesn't cut it
+        if role in _CLIPS:
             clip = _point_size(p)
             if clip[2] > 0 and clip[3] > 0:
                 box = _clip(box, clip)
@@ -766,7 +773,13 @@ def _element_at(x: float, y: float):
         err, el = AS.AXUIElementCopyElementAtPosition(AS.AXUIElementCreateSystemWide(), float(x), float(y), None)
     except Exception:  # noqa: BLE001
         return None
-    return None if err or el is None else el
+    if err or el is None:
+        return None
+    try:  # its app answers the questions that follow briefly, even when hung
+        AS.AXUIElementSetMessagingTimeout(el, _AX_TIMEOUT_S)
+    except Exception:  # noqa: BLE001
+        pass
+    return el
 
 
 def _label_of(el) -> str:
