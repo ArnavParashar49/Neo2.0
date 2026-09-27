@@ -861,7 +861,7 @@ def _handoff(kind: str, url: str) -> confirm.Halt:
             "payment": f"{host} wants payment details",
         }.get(kind, f"The page on {host} needs a person to take over")
         return confirm.ask_user(
-            f"{need}, which only a person can do - and NEO's browser runs headless here, with no window to "
+            f"{need}, which only a person can do — and NEO's browser runs headless here, with no window to "
             "do it in. (An agent shows its browser in a window with browser_headless=False.)"
         )
     msg = {
