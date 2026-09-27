@@ -133,7 +133,10 @@ def _reaches_real(api: object, seen: set[int], depth: int) -> bool:
     if depth > 6 or id(api) in seen:
         return False
     seen.add(id(api))
-    return _real(api) or any(_reaches_real(held, seen, depth + 1) for held in _held(api))
+    try:
+        return _real(api) or any(_reaches_real(held, seen, depth + 1) for held in _held(api))
+    except Exception:  # noqa: BLE001 - an object that won't be looked into (a lazy proxy): not the real API
+        return False
 
 
 def _held(api: object) -> list[object]:
@@ -170,7 +173,8 @@ _OSA_FLAGS = frozenset({"-x", "-s", "-u", "-d"})
 # AppleScript that runs as it compiles: a property's first value and a script object's, a `use` (loads
 # a library or a framework's code) and an app named in the text (loading its dictionary can launch it).
 _OSA_RUNS = re.compile(
-    r"^\s*(?:property|prop|script|use)\b|\b(?:application|app)\s+(?:id\s+)?\"|\bterms\s+from\b", re.I | re.M
+    r"^\s*(?:property|prop|script|use)\b|\b(?:application|app)\s+(?:id\s+)?[\"“]|«class capp»|\bterms\s+from\b",
+    re.I | re.M,
 )
 
 _SPAWN = frozenset({"subprocess.Popen", "os.posix_spawn", "os.posix_spawnp", "os.exec", "os.spawn"})
@@ -287,15 +291,18 @@ def _outside(sock: Any, address: Any) -> bool:
     return not _loopback(str(address[0]).partition("%")[0]) or not _ours(address[1])
 
 
+_GONE = -1  # no such process (any more)
+
+
 def _parent(pid: int) -> int | None:
-    """The parent of process ``pid``: 0 when there's no such process, None when it can't be told.
-    An exited child not yet reaped (a zombie) still has its parent."""
+    """The parent of process ``pid`` (launchd's is 0): _GONE when there's no such process, None when
+    it can't be told. An exited child not yet reaped (a zombie) still has its parent."""
     if sys.platform != "darwin":
         try:
             with open(f"/proc/{pid}/stat", encoding="ascii") as f:
                 return int(f.read().rpartition(")")[2].split()[1])
         except FileNotFoundError:
-            return 0
+            return _GONE
         except (OSError, ValueError, IndexError):
             return None
     import ctypes
@@ -305,7 +312,7 @@ def _parent(pid: int) -> int | None:
     if _sysctl()(mib, 4, info, ctypes.byref(size), None, 0) != 0:
         return None
     if size.value == 0:
-        return 0
+        return _GONE
     return int.from_bytes(info.raw[_E_PPID : _E_PPID + 4], sys.byteorder) if size.value == _KINFO_PROC else None
 
 
@@ -327,7 +334,7 @@ def _signal(pid: int, sig: int, group: bool) -> tuple[str, str] | None:
     (or a group one leads): anything else could stop an app, or the shell running the suite."""
     if sig == 0 or (pid == os.getpid() and not group):
         return None
-    if pid > 0 and _parent(pid) in (os.getpid(), 0):  # this process's child, or no process at all
+    if pid > 0 and _parent(pid) in (os.getpid(), _GONE):  # this process's child, or no process at all
         return None
     whom = f"process group {pid}" if group else ("every process" if pid == -1 else f"process {pid}")
     return "process", f"send signal {sig} to {whom} (not a child of this process)"

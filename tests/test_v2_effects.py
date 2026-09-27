@@ -847,6 +847,7 @@ def test_a_signal_only_reaches_this_processs_own_children():
         ("os.kill", (-1, signal.SIGKILL)),
         ("os.kill", (0, signal.SIGTERM)),
         ("os.killpg", (os.getpgid(0), signal.SIGTERM)),
+        ("os.kill", (1, signal.SIGTERM)),  # launchd, whose own parent is 0
     ):
         with pytest.raises(effects.EffectRefused, match="signal"):
             effects._audit(event, args)
@@ -1029,6 +1030,7 @@ _OSA_RUNS_AS_IT_COMPILES = (
     'use script "Helpers"',
     'tell application "Finder" to activate',  # loads its dictionary: may launch it
     'using terms from app id "com.apple.mail"\nend using terms from',
+    'tell «class capp» "Finder" to activate',
 )
 
 
