@@ -49,7 +49,7 @@ def load_all() -> list[str]:
 # ---- presets, for embedded agents ----------------------------------------------------------------
 
 _COMPUTER = (
-    "ax_tree", "ax_find", "screenshot", "apps_running", "ax_press", "ax_set_value", "click", "drag", "scroll",
+    "ax_tree", "ax_find", "screenshot", "look", "apps_running", "ax_press", "ax_set_value", "click", "drag", "scroll",
     "type_text", "dictate", "hotkey", "click_text", "open_app", "activate_app", "quit_app", "close",
     "applescript", "open_url", "page_read", "safari_read", "finder_reveal", "shell", "read_file", "write_file",
     "edit_file", "trash",
@@ -68,7 +68,7 @@ PLANNED: dict[str, str] = {"menu_command": "mac", "look": "mac_read"}
 PRESETS: dict[str, tuple[str, ...]] = {
     "web": ("web_search", "web_fetch", "weather", "clock"),
     "browser": _BROWSER,
-    "mac_read": ("ax_tree", "ax_find", "screenshot", "apps_running", "mail_unread", "calendar_today", "page_read", "read_file"),
+    "mac_read": ("ax_tree", "ax_find", "screenshot", "look", "apps_running", "mail_unread", "calendar_today", "page_read", "read_file"),
     "mac": _COMPUTER + _TASKS + ("volume", "brightness", "sleep_display", "timer", "search_site"),
     "memory": ("memory",),
     "none": (),

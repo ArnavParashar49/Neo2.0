@@ -86,3 +86,37 @@ def test_a_zoom_around_a_point(shots):
     out = _run({"zoom": True, "x": 300, "y": 200})
     assert shots == [("zoom", 300.0, 200.0, float(screen.ZOOM_W), float(screen.ZOOM_H))] and "zoom" in out.text
     assert not _run({"zoom": True, "x": 300}).ok  # a zoom needs its point
+
+
+def test_a_click_on_a_part_of_a_window_picture_another_window_covered_is_refused():
+    s = pointer.remember(100.0, 100.0, 1.0, 400, 300, covered=((150.0, 150.0, 50.0, 50.0),))
+    with pytest.raises(pointer.Refused, match="under another window"):
+        pointer.numeric({"x": 60, "y": 60, "shot": s.id}, ToolContext(), "click")
+    assert pointer.numeric({"x": 10, "y": 10, "shot": s.id}, ToolContext(), "click").point == (110.0, 110.0)
+
+
+def test_a_screenshot_lists_the_controls_in_it(shots, monkeypatch):
+    from neo2.core.tools.computer import marks
+
+    seen = []
+
+    async def collect(area, ctx=None, *, pid=0, deadline_s=0.8):
+        seen.append((area, pid))
+        return marks.Collected(app="Pages", pid=pid)
+
+    monkeypatch.setattr(marks, "collect", collect)
+    monkeypatch.setattr(marks, "for_shot", lambda col, s, c: "\n(marks of " + col.app + ")")
+    monkeypatch.setattr(apps, "target", lambda: "Pages")
+    out = _run({})
+    assert seen == [(None, 4321)] and out.text.endswith("(marks of Pages)")  # the window's own app, walked alongside
+    _run({"x": 0, "y": 0, "w": 50, "h": 40})
+    assert seen[-1] == ((0.0, 0.0, 50.0, 40.0), 0)
+
+
+def test_a_blind_brains_screenshot_says_no_numbers(shots, monkeypatch):
+    import re
+
+    monkeypatch.setattr(apps, "target", lambda: None)
+    for a in ({}, {"x": 10, "y": 20, "w": 300, "h": 200}, {"zoom": True, "x": 300, "y": 200}):
+        out = asyncio.run(tools_pointer.screenshot(a, ToolContext(origin="agent", extras={"blind": True})))
+        assert out.ok and not re.search(r"\d", out.text), out.text

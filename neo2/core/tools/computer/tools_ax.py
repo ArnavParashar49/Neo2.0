@@ -6,7 +6,7 @@ from __future__ import annotations
 import asyncio
 
 from neo2.core.agent.registry import Effect, ToolContext, ToolOutput, fence
-from neo2.core.tools.computer import apps, ax, gates, wait
+from neo2.core.tools.computer import apps, ax, gates, observe, wait
 from neo2.core.tools.computer._catalog import _p, tool
 
 
@@ -25,6 +25,20 @@ async def ax_tree(a: dict, c: ToolContext) -> str:
         return err
     # (stopped with the call: a cancelled look ends its walk; a blind brain's has no coordinates)
     return await ax.tree(a.get("app"), a.get("window"), blind=bool(c.get("blind")))
+
+
+@tool(
+    observe.LOOK_NAME,
+    observe.LOOK_DESCRIPTION,
+    observe.LOOK_PARAMETERS,
+    category="computer",
+    slow=True,
+    untrusted=True,
+    read_only=True,
+)
+async def look(a: dict, c: ToolContext) -> ToolOutput:
+    """One look at an app: its window, what blocks it, its controls with ids (and, asked, a picture)."""
+    return await observe.look_tool(a, c)
 
 
 @tool(

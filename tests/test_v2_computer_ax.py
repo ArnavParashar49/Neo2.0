@@ -18,6 +18,7 @@ OK, NO_VALUE, UNSUPPORTED, CANNOT_COMPLETE = 0, -25212, -25205, -25204
 _REAL_HIT = ax.hit  # (the suite's conftest swaps it for "nothing there" in every test)
 _REAL_HOSTS_SHELL = focus.hosts_shell  # (and this for "no shell")
 _REAL_FOCUSED_TEXT = ax.focused_element_text  # (and this for "no text")
+_REAL_WORKING_APP = ax.working_app  # (and this for "no app")
 
 
 class El:
@@ -446,7 +447,7 @@ def test_with_neo_in_front_a_look_is_at_the_app_behind_it(monkeypatch):
         {"kCGWindowOwnerPID": 4242, "kCGWindowOwnerName": "Chess", "kCGWindowLayer": 0},
     ]
     monkeypatch.setattr(Quartz, "CGWindowListCopyWindowInfo", lambda opts, wid: wins)
-    assert ax.working_app() == ("Chess", 4242)
+    assert _REAL_WORKING_APP() == ("Chess", 4242)
 
 
 def test_an_app_running_a_shell_is_told_by_its_processes(monkeypatch):

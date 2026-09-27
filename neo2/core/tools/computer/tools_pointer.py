@@ -9,8 +9,7 @@ import math
 
 from neo2.core.agent import confirm
 from neo2.core.agent.registry import ToolContext, ToolOutput
-from neo2.core.tools.computer import apps, ax, focus, gates, phrases, pointer, screen, tools_ax
-from neo2.core.tools.computer import input as inp
+from neo2.core.tools.computer import apps, ax, focus, gates, marks, phrases, pointer, screen, tools_ax
 from neo2.core.tools.computer._catalog import _p, tool
 
 SCREENSHOT_PARAMS = _p(
@@ -31,12 +30,9 @@ SCREENSHOT_PARAMS = _p(
 
 @tool(
     "screenshot",
-    "Take a screenshot: the front window of the app NEO works in (or of app), a whole display (display: its "
-    "number, 1 = main), a region x,y,w,h in screen points, or a zoom (zoom with x,y and optionally w,h) for "
-    "small things. Use when ax_tree is not enough (game boards, maps, drawing and other canvas "
-    "apps, Electron apps, images, layout questions). Its note gives the image size and a shot id: to "
-    "click, drag or scroll at something in the picture, pass its pixel position in the image with that "
-    "shot id and NEO maps it to the screen.",
+    pointer.SCREENSHOT_DESCRIPTION
+    + " By default it is the front window of the app NEO works in (app: another app's); zoom with x,y (and "
+    "w,h) for a close look at small things.",
     SCREENSHOT_PARAMS,
     category="computer",
     slow=True,
@@ -90,6 +86,14 @@ async def screenshot(a: dict, c: ToolContext) -> ToolOutput:
     # The app NEO works in, when one is known and nothing else was asked for: its front window (fewer
     # of other apps' pixels, more detail per token). Never NEO's own or a protected app's window.
     win = None if (region or zoom or display_asked) else await _working_window(str(a.get("app") or ""))
+    # The controls in the picture, from Accessibility, walked while the picture is taken (no wait).
+    if zoom:
+        area = (zx - zw / 2, zy - zh / 2, zw, zh)
+    elif region:
+        area = tuple(float(v) for v in region)
+    else:
+        area = None if win is not None else (display.x, display.y, display.w, display.h)
+    walk = asyncio.ensure_future(marks.collect(area, c, pid=win[2] if win is not None else 0))
     try:
         if zoom:
             cap = await asyncio.to_thread(screen.zoom, zx, zy, zw, zh, display=home)
@@ -98,7 +102,11 @@ async def screenshot(a: dict, c: ToolContext) -> ToolOutput:
         else:
             cap = await asyncio.to_thread(screen.shot, region, None if region else display)
     except PermissionError as e:
+        walk.cancel()
         return ToolOutput(confirm.ask_user(str(e)), ok=False)
+    except BaseException:
+        walk.cancel()
+        raise
     if zoom:
         what = f"a zoom on {cap.w}×{cap.h} px of {zw:g}×{zh:g} pt around screen ({zx:g},{zy:g})"
         others: list = []
@@ -111,6 +119,16 @@ async def screenshot(a: dict, c: ToolContext) -> ToolOutput:
     else:
         what = f"all of {display.words()}"
         others = [d for d in shown if d.index != display.index]
+    collected = await walk
+    if c.get("blind"):
+        # A brain that can't see gets no picture's numbers in any form (no mapping, no sizes, no
+        # places): what the picture holds, by element id only.
+        text = (
+            "Screenshot taken, but you can't see it (this model has no vision), and NEO gives no coordinates to "
+            "act on: use the element ids below, or ax_tree's (click id=…, ax_press), or tell the user the model "
+            "that can see the screen is busy."
+        )
+        return ToolOutput(text + marks.for_shot(collected, None, c), images=[cap.part], fence=False)
     if not cap.clickable:
         # The window server's bounds didn't match the picture (a shadow, a window that moved, one
         # off screen): no mapping to click through — for looking at only.
@@ -118,10 +136,12 @@ async def screenshot(a: dict, c: ToolContext) -> ToolOutput:
             f"Screenshot attached ({what}, for looking only: its pixels can't be mapped to the screen — for a "
             "place to click, take a screenshot of the display or a region)."
         )
-        return ToolOutput(text, images=[cap.part], fence=False)
-    shot = pointer.remember(cap.x0, cap.y0, cap.ppp, cap.w, cap.h)
-    # NEO's own words (the mapping) aren't fenced; the picture is what came from the screen.
-    return ToolOutput(pointer.note(shot, what, others), images=[cap.part], fence=False)
+        return ToolOutput(text + marks.for_shot(collected, None, c), images=[cap.part], fence=False)
+    shot = pointer.remember(cap.x0, cap.y0, cap.ppp, cap.w, cap.h, covered=getattr(cap, "covered", ()))
+    # NEO's own words (the mapping) aren't fenced; the picture is what came from the screen, and so
+    # are the controls' labels (fenced by marks.for_shot, which taints the request).
+    text = pointer.note(shot, what, others) + marks.for_shot(collected, shot, c)
+    return ToolOutput(text, images=[cap.part], fence=False)
 
 
 async def _working_window(asked: str) -> tuple[int, str, int] | None:
@@ -163,217 +183,32 @@ async def _element_spot(eid: str, verb: str = "click") -> tuple[ax.Element, int,
     return e, pid, owner, at
 
 
-_CLICK_ARGS = {
-    "x": {"type": "number"},
-    "y": {"type": "number"},
-    "shot": {"type": "string", "description": "screenshot id: x,y are pixels of that image"},
-    "id": {"type": "string", "description": "element id from ax_tree, instead of x,y"},
-    "button": {"type": "string", "enum": ["left", "right", "middle"]},
-    "count": {"type": "integer", "description": "1, 2 (double-click) or 3"},
-    "modifiers": {"type": "array", "items": {"type": "string", "enum": ["cmd", "shift", "alt", "ctrl"]}},
-}
-
-
 def _at(x: float, y: float) -> str:
     return f"({int(round(x))}, {int(round(y))})"
 
 
-@tool(
-    "click",
-    "Click on an element id from ax_tree, or at a point: pixels of a screenshot with its shot id, or "
-    "screen points. Brings the app there to the front first, never clicks NEO's own window, and "
-    "says what changed. button: left|right|middle; count: 1-3; modifiers: cmd, shift, alt, ctrl.",
-    _p(_CLICK_ARGS),
-    category="computer",
-    quiet=True,
-)
+# click, drag and scroll: pointer.py holds them whole (one checked function for every form of a
+# place — an element id, a board square, a helper's mark, pixels, 0–1000 of a shot, screen points —
+# snapped, gated again, brought forward and looked at after), calling the gates through this package.
+
+
+@tool("click", pointer.CLICK_DESCRIPTION, pointer.CLICK_PARAMETERS, category="computer", quiet=True)
 async def click(a: dict, c: ToolContext) -> str | ToolOutput:
-    if err := gates._needs_input():
-        return err
-    button, count, mods = str(a.get("button") or "left"), a.get("count", 1), a.get("modifiers") or []
-    try:
-        inp.mods_flags(mods)
-        if button not in ("left", "right", "middle"):
-            raise ValueError(f"button must be left, right or middle, not {button!r}")
-        count = inp.click_count(1 if count in (None, "") else count)
-    except ValueError as e:
-        return f"Error: {e}"
-    try:
-        shot = None
-        if a.get("id"):
-            got = await _element_spot(a["id"])
-            if isinstance(got, (str, ToolOutput)):
-                return got
-            e, pid, owner, at = got
-            pts = [at]
-            t = await pointer.probe(pts)
-            labels = [(e.title or e.value, owner), (t.hits[0].label, t.hits[0].app or owner)]
-            head = f"{pointer.click_word(button, count)} {e.id} ({e.role.removeprefix('AX')}) at {_at(*pts[0])}"
-        else:
-            pid = 0
-            pts, shot = pointer.points(a, ("x", "y"), c)
-            t = await pointer.probe(pts)
-            labels = [(t.hits[0].label, t.hits[0].app)]
-            head = f"{pointer.click_word(button, count)} at {_at(*pts[0])}"
-            if shot is not None:
-                head += f" (pixel ({float(a['x']):g}, {float(a['y']):g}) of {shot.id})"
-        if gate := await gates._gate_click(a, labels):
-            return gate
-        await pointer.bring(t, pts, want_pid=pid)
-        # A point nothing could be told about before now shows something: judged like the rest.
-        if t.relabeled and (gate := await gates._gate_click(a, [(t.hits[0].label, t.hits[0].app)])):
-            return gate
-    except pointer.Refused as r:
-        return gates._refused(c, r)
-    h = t.hits[0]
-    pid = pid or h.pid
-    if h.app:
-        head += f" in {h.app}"
-    if t.brought:
-        head += f" (brought {t.brought} to the front first)"
-    head += "."
-    before = await gates._watch(c, pid, pts, hover=pts[0])
-    await asyncio.to_thread(inp.click, *pts[0], button=button, count=count, mods=mods)
-    if before is None:
-        return head + gates._input_doubt()
-    out = await pointer.outcome(before, pid, pts, [_at(*pts[0])])
-    if not pointer.at_the_point(h, shot is not None):
-        out = pointer.maybe_elsewhere(out, _at(*pts[0]))
-    under = [pointer.words(h)] if not a.get("id") else []
-    text, ok = pointer.report(head, out, under, gates._input_doubt())
-    if any(under) or out.details:
-        gates._taint(c, "screen")
-    return ToolOutput(text, ok=ok)
+    return await pointer.click_tool(a, c)
 
 
-@tool(
-    "drag",
-    "Drag from one point to another: each end an element id from ax_tree (id1, id2), or x1,y1 / x2,y2 — "
-    "pixels of a screenshot with its shot id, or screen points. Brings the app there to the front "
-    "first (not when the ends are in two different apps) and says what changed at both ends.",
-    _p(
-        {
-            "x1": {"type": "number"},
-            "y1": {"type": "number"},
-            "x2": {"type": "number"},
-            "y2": {"type": "number"},
-            "id1": {"type": "string", "description": "element id from ax_tree to drag from, instead of x1,y1"},
-            "id2": {"type": "string", "description": "element id from ax_tree to drop on, instead of x2,y2"},
-            "shot": {"type": "string", "description": "screenshot id: the points are pixels of that image"},
-        }
-    ),
-    category="computer",
-    quiet=True,
-)
+@tool("drag", pointer.DRAG_DESCRIPTION, pointer.DRAG_PARAMETERS, category="computer", quiet=True)
 async def drag(a: dict, c: ToolContext) -> str | ToolOutput:
-    if err := gates._needs_input():
-        return err
-    try:
-        ends: list[tuple[float, float] | None] = [None, None]
-        for i, n in enumerate(("1", "2")):
-            if a.get(f"id{n}"):
-                got = await _element_spot(a[f"id{n}"], "drag")
-                if isinstance(got, (str, ToolOutput)):
-                    return got
-                ends[i] = got[3]
-        keys = tuple(k for i, n in enumerate(("1", "2")) if ends[i] is None for k in (f"x{n}", f"y{n}"))
-        coords, shot = pointer.points(a, keys, c, "drag") if keys else ([], None)
-        pts = [e if e is not None else coords.pop(0) for e in ends]
-        t = await pointer.probe(pts)
-        if gate := await gates._gate_drop(a, t):
-            return gate
-        src, dst = t.hits
-        # Two apps: neither is brought forward — raising one could put its window over the other
-        # end (the usual drag goes from a window behind to one in front), and file views let a drag
-        # start in a background window. One app (a board, a list): it comes forward, and both ends
-        # are looked at again.
-        between_apps = bool(src.pid and dst.pid and src.pid != dst.pid)
-        if not between_apps:
-            await pointer.bring(t, pts)
-            if t.relabeled and (gate := await gates._gate_drop(a, t)):
-                return gate
-    except pointer.Refused as r:
-        return gates._refused(c, r)
-    src, dst = t.hits
-    pid = src.pid
-    before = await gates._watch(c, pid, pts, hover=pts[1])  # the drop leaves the pointer at the end
-    await asyncio.to_thread(inp.drag, *pts[0], *pts[1])
-    head = f"Dragged {_at(*pts[0])} → {_at(*pts[1])}"
-    if shot is not None:
-        head += f" (pixels of {shot.id})"
-    if src.app:
-        head += f" in {src.app}" + (f" onto {dst.app}" if dst.app and dst.pid != src.pid else "")
-    if t.brought:
-        head += f" (brought {t.brought} to the front first)"
-    head += "."
-    if before is None:
-        return head + gates._input_doubt()
-    out = await pointer.outcome(before, pid, pts, [f"the start {_at(*pts[0])}", f"the end {_at(*pts[1])}"], between_apps)
-    if between_apps and out.changed is False:
-        out.said += (
-            f" (Neither app was brought forward for a drag between two apps; if {src.app or 'the app it starts in'} "
-            "only came forward, bring it to the front yourself, look again, and drag again.)"
-        )
-    under = [f"start {pointer.words(src)}" if pointer.words(src) else "", f"end {pointer.words(dst)}" if pointer.words(dst) else ""]
-    text, ok = pointer.report(head, out, under, gates._input_doubt())
-    if any(under) or out.details:
-        gates._taint(c, "screen")
-    return ToolOutput(text, ok=ok)
+    return await pointer.drag_tool(a, c)
 
 
 @tool(
     "scroll",
-    "Scroll the content under the pointer, or at an element id from ax_tree (a list, a pane), or at "
-    "x,y: screenshot pixels with its shot id, or screen points. dy<0 scrolls down, dy>0 up (lines).",
-    _p(
-        {
-            "x": {"type": "number"},
-            "y": {"type": "number"},
-            "id": {"type": "string", "description": "element id from ax_tree to scroll, instead of x,y"},
-            "shot": {"type": "string", "description": "screenshot id: x,y are pixels of that image"},
-            "dy": {"type": "integer"},
-            "dx": {"type": "integer"},
-            "at_pointer": {"type": "boolean"},
-        }
-    ),
+    pointer.SCROLL_DESCRIPTION,
+    pointer.SCROLL_PARAMETERS,
     category="computer",
     fast_path=phrases._SCROLL,
     quiet=True,
 )
 async def scroll(a: dict, c: ToolContext) -> str | ToolOutput:
-    if err := gates._needs_input():
-        return err
-    try:
-        dy = int(float(a.get("dy", -5) if a.get("dy") not in (None, "") else -5))
-        dx = int(float(a.get("dx", 0) or 0))
-    except (TypeError, ValueError):
-        return "Error: dy and dx must be whole numbers (lines)."
-    try:
-        if not a.get("at_pointer") and a.get("id"):
-            got = await _element_spot(a["id"], "scroll")
-            if isinstance(got, (str, ToolOutput)):
-                return got
-            pts = [got[3]]
-        elif not a.get("at_pointer") and a.get("x") is not None and a.get("y") is not None:
-            pts, _shot = pointer.points(a, ("x", "y"), c, "scroll")
-        else:
-            pts = [await asyncio.to_thread(inp.mouse_position)]  # "scroll down": wherever the pointer is
-            h = await asyncio.to_thread(ax.hit, *pts[0])
-            if h.pid and ax.is_neo(h.pid, h.app):
-                # The pointer rests on NEO's window (the user just clicked the orb): scroll the app
-                # they're working in, not NEO's chat.
-                frame = await asyncio.to_thread(ax.work_window_frame)
-                if frame is None:
-                    return ToolOutput("Error: the pointer is over NEO's own window, and no other window is in front to scroll.", ok=False)
-                pts = [(frame[0] + frame[2] / 2, frame[1] + frame[3] / 2)]
-        t = await pointer.probe(pts)
-    except pointer.Refused as r:
-        return gates._refused(c, r)
-    pid = t.hits[0].pid
-    before = await gates._watch(c, pid, pts, hover=pts[0])
-    text = await asyncio.to_thread(inp.scroll, pts[0][0], pts[0][1], dy, dx)
-    if before is None:
-        return str(text) + gates._input_doubt()
-    out = await pointer.outcome(before, pid, pts, [_at(*pts[0])])
-    text, ok = pointer.report(str(text) + (f" in {t.hits[0].app}." if t.hits[0].app else "."), out, [], gates._input_doubt())
-    return ToolOutput(text, ok=ok)
+    return await pointer.scroll_tool(a, c)
