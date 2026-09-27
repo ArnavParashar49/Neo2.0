@@ -139,7 +139,7 @@ class Candidate:
     id: str = ""
 
     @property
-    def chrome(self) -> bool:
+    def ui_chrome(self) -> bool:
         return self.role in CHROME_ROLES
 
     def describe(self) -> str:
@@ -843,7 +843,7 @@ def resolve(
     if live is not None:
         return done(live)
     short = [cands[i] for i in meaning.top] if meaning is not None else _shortlist(run)
-    reason = "unsure" if run.picks else ("several" if lex == "several" else "no_match")
+    reason = "unsure" if (run.picks or (meaning is not None and meaning.top)) else ("several" if lex == "several" else "no_match")
     return done(Ambiguous(short[:SHORTLIST], reason))
 
 
@@ -974,14 +974,14 @@ def _log(run: _Run, res: Result) -> None:
         }
         if isinstance(res, Resolved):
             facts.update(acted=res.stage, p=round(res.p, 3), commits=res.commits, ask=res.ask)
-            if res.candidate.chrome:
+            if res.candidate.ui_chrome:
                 facts["label"] = res.candidate.label[:40]
         else:
             facts.update(acted="", reason=res.reason, shortlist=len(res.shortlist))
         for stage, i in run.picks.items():
             c = run.cands[i] if i is not None else None
             facts[f"{stage}_pick"] = bool(c)
-            if c is not None and c.chrome:
+            if c is not None and c.ui_chrome:
                 facts[f"{stage}_label"] = c.label[:40]
         for k in ("meaning_how", "meaning_p", "laya", "laya_p", "agree", "margin", "abstain", "lexical", "os_strings", "meaning"):
             if k in run.notes and isinstance(run.notes[k], (str, int, float, bool)):

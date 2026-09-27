@@ -350,6 +350,11 @@ def ground_eval(
             stage = res.stage if acted else ""
             for key in ("all", f"script {row['script']}", f"size {size}", f"source {row['source']}", f"lang {row['lang']}"):
                 add(key, acted, right)
+            # what the stages in shadow would have pressed (the cascade's later stages, MiniLM alone)
+            for sh, lab in (res.shadow.get("picks") or {}).items():
+                if lab is not None and sh != stage:
+                    add(f"shadow {sh}", True, lab in set(row["gold"]))
+                    add(f"shadow {sh} {row['script']}", True, lab in set(row["gold"]))
             if acted:
                 add(f"stage {stage}", True, right)
                 add(f"stage {stage} {row['script']}", True, right)
@@ -464,7 +469,8 @@ def _ground_models():
     from neo import effects
 
     os.environ.setdefault("HF_HUB_OFFLINE", "1")
-    with effects.allow("model"):
+    # (tqdm, inside the loaders, starts Python's multiprocessing resource tracker: a process)
+    with effects.allow("model", "process"):
         from sentence_transformers import SentenceTransformer
 
         from neo import models

@@ -124,6 +124,9 @@ class Episode:
     resolved: tuple[str, str] | None = None  # the verified label this episode ended up with
     resolved_tools: tuple[str, ...] = ()  # every tool behind that label, along the chain of fixes
     settled: bool = False
+    # What each UI step did, for the per-app flow memory (neo.reflex.uimemory): kind, role, UI chrome
+    # label, menu path or keys, the owning app's bundle id, what it changed. RAM only, like the rest.
+    sigs: list[dict] = field(default_factory=list)
 
 
 def _safe(fn: Callable) -> Callable:
@@ -343,6 +346,15 @@ class Ledger:
                 else:
                     ep.steps.append((tool, bool(ok)))
                 self._touch(ep, self._clock())
+
+    def signature(self, key: str, sig: dict) -> None:
+        """What a UI step just did (see Episode.sigs): the flow memory keeps the request's steps
+        only if the request settles as verified. ``sig``: {kind: menu|press|key, role, label,
+        path, keys, bundle, expect: {...}, changed: bool, alias: bool (the model picked it from the
+        resolver's shortlist)}."""
+        with self._lock:
+            if (ep := self._get(key)) is not None and isinstance(sig, dict) and len(ep.sigs) < 12:
+                ep.sigs.append(dict(sig))
 
     def reply(self, key: str, text: str) -> None:
         """NEO's chat route answered (the words are judged, never kept)."""
@@ -612,6 +624,8 @@ class Ledger:
             label, verified = out
             ep.resolved = label if verified else None
             self._emit(ep, label, verified)
+            if verified and ep.sigs and ep.confirm is not False:
+                _flow_learned(ep.text, ep.sigs)
         if ep.corrected:
             learn.count("corrections")
         ep.fix = None  # nothing further needs it; don't keep a chain of old requests alive
@@ -649,6 +663,16 @@ class Ledger:
         return len(self._eps)
 
 
+def _flow_learned(text: str, sigs: list[dict]) -> None:
+    """A verified request's UI steps → the per-app flow memory (best effort)."""
+    try:
+        from neo.reflex import uimemory
+
+        uimemory.settled(text, sigs)
+    except Exception as e:  # noqa: BLE001 - learning never breaks a request
+        log.info(f"[outcomes] flow not kept ({str(e)[:60]})")
+
+
 _ledger = Ledger()
 
 
@@ -661,6 +685,7 @@ begin = _safe(lambda *a, **kw: _ledger.begin(*a, **kw))
 route = _safe(lambda *a, **kw: _ledger.route(*a, **kw))
 brain = _safe(lambda *a, **kw: _ledger.brain(*a, **kw))
 step = _safe(lambda *a, **kw: _ledger.step(*a, **kw))
+signature = _safe(lambda *a, **kw: _ledger.signature(*a, **kw))
 reply = _safe(lambda *a, **kw: _ledger.reply(*a, **kw))
 agent_done = _safe(lambda *a, **kw: _ledger.agent_done(*a, **kw))
 end = _safe(lambda *a, **kw: _ledger.end(*a, **kw))

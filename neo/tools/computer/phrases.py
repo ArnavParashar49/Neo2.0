@@ -96,8 +96,7 @@ _KEY = (
 )
 _KEY_NAME = re.compile(rf"^(?:the\s+)?{_KEY}(?:\s+(?:key|button))?(?:\s*(?:\+|and)\s*{_KEY})*$", re.I)
 _VAGUE = frozenset(
-    "it this that these those them here there on in the a an one none me us you him her something anything "
-    "everything nothing again away around through twice once text all yes no ok okay".split()
+    ["it", "this", "that", "these", "those", "them", "here", "there", "on", "in", "the", "a", "an", "one", "none", "me", "us", "you", "him", "her", "something", "anything", "everything", "nothing", "again", "away", "around", "through", "twice", "once", "text", "all", "yes", "no", "ok", "okay"]
 )
 _QUESTION = re.compile(
     r"\?\s*$|^\s*(?:what|what's|whats|which|where|why|how|who|when|is|are|does|do|did|can|could|should|will|would)\b"
@@ -108,13 +107,10 @@ _CLAUSES = re.compile(r"\s*(?:,|;|\band\s+then\b|\bthen\b|\band\b|\bafter\s+that
 
 # Words that carry no name: verb endings and particles (Hindi), and English function words.
 _HI_AUX = frozenset(
-    "करो करें करे कर करना कीजिए कीजिये करिए दो दें दे दीजिए जाओ जाएँ जाएं जाए लो लें ले है हैं को में पर पे से का की के "
-    "यह ये इस वाला वाली वाले बटन दबाओ दबाएँ दबाएं दबाइए दबा चुनो चुनें चुनिए चुन खोलो खोलें दिखाओ दिखाएँ दिखाएं ज़रा "
-    "जरा कृपया प्लीज़ प्लीज अभी".split()
+    ["करो", "करें", "करे", "कर", "करना", "कीजिए", "कीजिये", "करिए", "दो", "दें", "दे", "दीजिए", "जाओ", "जाएँ", "जाएं", "जाए", "लो", "लें", "ले", "है", "हैं", "को", "में", "पर", "पे", "से", "का", "की", "के", "यह", "ये", "इस", "वाला", "वाली", "वाले", "बटन", "दबाओ", "दबाएँ", "दबाएं", "दबाइए", "दबा", "चुनो", "चुनें", "चुनिए", "चुन", "खोलो", "खोलें", "दिखाओ", "दिखाएँ", "दिखाएं", "ज़रा", "जरा", "कृपया", "प्लीज़", "प्लीज", "अभी"]
 )
 _EN_FUNCTION = frozenset(
-    "the a an to my me please and of in on for that this is it i you your now just can could would will "
-    "button link tab icon click tap press hit select choose pe par karo dabao wala wali kar do".split()
+    ["the", "a", "an", "to", "my", "me", "please", "and", "of", "in", "on", "for", "that", "this", "is", "it", "i", "you", "your", "now", "just", "can", "could", "would", "will", "button", "link", "tab", "icon", "click", "tap", "press", "hit", "select", "choose", "pe", "par", "karo", "dabao", "wala", "wali", "kar", "do"]
 )
 
 
