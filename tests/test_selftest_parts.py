@@ -1025,6 +1025,19 @@ def test_bringing_another_app_forward_is_refused_before_it_happens(monkeypatch):
     assert apps._raise is raise_app and focus.force_front is force_front
 
 
+def test_every_function_the_watch_guards_still_exists():
+    """The watch wraps these by name and skips a name it can't find — so a rename (the computer
+    module's split) must fail here, not quietly leave an Accessibility action or an app switch
+    unwatched in the live self-test."""
+    import importlib
+
+    for table in (watch_mod.AX_ACTIONS, watch_mod.BRINGS):
+        for mod_name, fns in table.items():
+            mod = importlib.import_module(mod_name)
+            for name in fns:
+                assert callable(getattr(mod, name, None)), f"{mod_name}.{name}"
+
+
 # ---- a local grounder, scored on a saved picture ------------------------------------------------------------
 
 

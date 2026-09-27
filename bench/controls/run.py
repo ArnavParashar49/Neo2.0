@@ -486,19 +486,28 @@ def menu_zero_ready(feats: dict[str, Any]) -> bool:
 
 def _after_look() -> bool:
     """Does a model's click (origin agent, a brain that sees) come back with a picture of what it did?
-    Found by clicking a checkbox on a fake form."""
+    Found the way the scripted brain clicks: a screenshot, then a click at a pixel of it (a checkbox
+    on a fake form)."""
     from bench.controls import scenarios as S
     from bench.controls.fakes import install
-    from neo.tools.computer import apps
+    from neo.tools.computer import apps, pointer
+
+    async def click() -> Any:
+        shot = await _tool("screenshot")
+        m = S._SHOT.search(getattr(shot, "text", "") or "")
+        s = pointer.get_shot(m.group(1)) if m else None
+        if s is None:
+            return await _tool("click", x=430, y=341)
+        return await _tool("click", x=round((430 - s.x0) / s.ppp, 1), y=round((341 - s.y0) / s.ppp, 1), shot=m.group(1))
 
     w = S.world(lambda w: S.form_app(), front="Accounts")
     try:
         with install(w) as env:
             env.patches.set(apps, "_target", None)
-            out = asyncio.run(_tool("click", x=430, y=341))
+            out = asyncio.run(click())
     except Exception:  # noqa: BLE001 - a click that breaks here offers no picture
         return False
-    return bool(getattr(out, "images", None))
+    return bool(getattr(out, "images", None)) and w.named("Accounts").root.find(lambda e: e.role == "AXCheckBox").attrs.get("AXValue") == 1
 
 
 def features() -> dict[str, Any]:
