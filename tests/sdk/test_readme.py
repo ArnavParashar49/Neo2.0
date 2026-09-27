@@ -27,7 +27,7 @@ import neo2
 import neo2.providers
 from neo2.testing import ScriptedBrain, ToolCall, Turn
 
-pytestmark = pytest.mark.portable  # no macOS or extra needed: CI's sdk-core job runs it on Linux too
+pytestmark = pytest.mark.portable  # Linux or macOS, any install (what needs an extra skips): CI's sdk-core job
 
 ROOT = Path(__file__).resolve().parents[2]
 SECTION = (ROOT / "README.md").read_text().split("\n## Use NEO from your own app\n", 1)[1].split("\n## ", 1)[0]

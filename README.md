@@ -250,7 +250,7 @@ uv pip install -e ".[web,openai]"      # or from a checkout
 | `embeddings` | local embeddings for memory recall |
 | `app` | everything NEO.app runs. `all` is `app` plus `mcp` and `langchain`. |
 
-The package also installs the top-level `neo` package that NEO.app runs. Until the rename, don't install it next to NeuralEnsemble's `neo`, which uses the same folder name.
+It also installs `neo`, the package NEO.app runs, as a top-level package. Until the rename, don't install it next to NeuralEnsemble's `neo`, which uses the same folder name.
 
 The snippets below use top-level `await`: run them inside an `async def`, or in `python -m asyncio`.
 
@@ -271,7 +271,7 @@ async with neo2.AsyncAgent(neo2.AgentConfig(tools="web"), provider=brain) as neo
             print(e.text, end="")
 ```
 
-`AgentConfig` takes the tools as presets, globs and names: `"web"`, `"browser"`, `"mac_read"`, `"mac"`, `"memory"`, `"all"`, `"none"`, `("web", "browser_*")`. It also takes `data_dir`, `memory=True` or `MemoryConfig(path=...)`, `persona`, `instructions`, `protected_apps`, `extra_secret_paths` and the step and time limits. `AgentConfig.from_env()` reads keys and settings from the environment, but only when you call it. Each `conversation=` is its own thread with its own gate. `pending()`, `cancel()`, `history()`, `reset()` and `forget_all()` work per agent; `forget_all()` deletes only files NEO made in the agent's folder.
+`AgentConfig` takes the tools as presets, globs and names: `"web"`, `"browser"`, `"mac_read"`, `"mac"`, `"memory"`, `"all"`, `"none"`, `("web", "browser_*")`. It also takes `data_dir`, `memory=True` or `MemoryConfig(path=...)`, `persona`, `instructions`, `protected_apps`, `extra_secret_paths` and the step and time limits. `AgentConfig.from_env()` reads keys and settings from the environment, but only when you call it. Each `conversation=` is its own thread with its own gate. The agent also has `pending(conversation)`, `cancel()`, `history(conversation)`, `reset(conversation)` and `forget_all()`, which deletes only files NEO made in the agent's folder.
 
 The sync twin needs no event loop:
 
@@ -322,7 +322,7 @@ The rules:
 - **An approval runs exactly what the card showed, once.** It must come within 120 s, in the conversation that staged it. An unknown, superseded, expired or other agent's id gives `status="expired"` and runs nothing. A run that stages something new after an approval comes back as a new `needs_approval`.
 - **An approver is a person's answer.** Calling `ask()` or `stream()` from an approver raises `ApprovalReentryError`.
 - **Say where a request came from.** Pass `source="model"` when another model wrote the task; the adapters and the MCP server always do. Such a request, like one with `context=` or one that read a web page, asks first before saving to memory, opening links that could carry data out, or submitting in a chat app.
-- **Everything is audited.** Each staged, approved, denied or expired action is recorded with the agent's name and `via`, in `<data_dir>/audit.log` (mode 0600). An agent without a `data_dir` sends the records to `on_audit=` and the `neo.audit` logger.
+- **Everything is audited.** Each staged, approved, denied or expired action is recorded with the agent's name and `via`. The record goes to `on_audit=` if you pass one, and to `<data_dir>/audit.log` (mode 0600), or to the `neo.audit` logger when the agent has no `data_dir`.
 
 Host tools are plain functions. The schema comes from the typed signature (or `parameters=`, a JSON schema or a pydantic model). A parameter typed `neo2.ToolContext` gets the request's `tool_context` as `ctx.extras`. Output counts as third-party content unless you pass `untrusted=False`: the model sees it fenced, and the request then asks before memory writes and data-carrying links. Parameters named `confirm`, `cancel` or `_…` are refused, because NEO drops those from model calls.
 
@@ -335,7 +335,7 @@ The recommended way is the whole agent as one tool. NEO keeps its own prompt, sa
 - `The user's OK is required and was not given: <summary>. Nothing was done; don't retry.`
 - `NEEDS_USER: <question>`
 
-Anything NEO wrote after reading third-party content comes back inside `<untrusted source="...">`.
+Anything NEO wrote after reading third-party content comes back inside `<untrusted source="...">`. Every call is a request from a model (`source="model"`), and `agent_tool(..., on_result=...)` hands your code each full `Result`, card included.
 
 <!-- snippet: openai -->
 ```python
@@ -415,7 +415,7 @@ async with neo.turn() as t:  # one turn of your loop: what one call read counts 
     messages += neo2.adapters.openai.tool_message(out, "call_1")
 ```
 
-The other helpers are `neo2.adapters.openai.function_call_output`, `neo2.adapters.anthropic.tool_result`, `neo2.adapters.gemini.function_response` and `neo2.adapters.langchain.tool_message`.
+The other helpers are `neo2.adapters.openai.tool_messages` (a whole turn of Chat calls, tool messages first), `neo2.adapters.openai.function_call_output`, `neo2.adapters.anthropic.tool_result`, `neo2.adapters.gemini.function_response` and `neo2.adapters.langchain.tool_message`.
 
 ### Use NEO from an MCP client
 

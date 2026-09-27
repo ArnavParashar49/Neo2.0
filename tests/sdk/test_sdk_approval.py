@@ -15,7 +15,7 @@ from neo.agent import confirm
 from neo.agent.registry import ToolContext
 from neo2.testing import ScriptedBrain, ToolCall, Turn
 
-pytestmark = pytest.mark.portable  # no macOS or extra needed: CI's sdk-core job runs it on Linux too
+pytestmark = pytest.mark.portable  # Linux or macOS, any install (what needs an extra skips): CI's sdk-core job
 
 PAY = Turn(tool_calls=[ToolCall("1", "wire_money", {"to": "mallory", "amount": 1000})])
 

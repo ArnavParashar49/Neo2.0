@@ -31,7 +31,7 @@ from neo2.sdk.approval import ApprovalRequest
 from neo2.sdk.results import ToolOutcome
 from neo2.testing import ScriptedBrain, ToolCall, Turn
 
-pytestmark = pytest.mark.portable  # no macOS or extra needed: CI's sdk-core job runs it on Linux too
+pytestmark = pytest.mark.portable  # Linux or macOS, any install (what needs an extra skips): CI's sdk-core job
 
 ROOT = Path(__file__).resolve().parents[2]
 NAME = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")

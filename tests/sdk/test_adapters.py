@@ -23,7 +23,7 @@ from neo2.sdk.approval import ApprovalRequest
 from neo2.sdk.results import Result, ToolOutcome
 from neo2.testing import ScriptedBrain, ToolCall, Turn
 
-pytestmark = pytest.mark.portable  # no macOS or extra needed: CI's sdk-core job runs it on Linux too
+pytestmark = pytest.mark.portable  # Linux or macOS, any install (what needs an extra skips): CI's sdk-core job
 
 REFUND = Turn(tool_calls=[ToolCall("1", "refund", {"order_id": "812"})])
 CONFIRM = (
