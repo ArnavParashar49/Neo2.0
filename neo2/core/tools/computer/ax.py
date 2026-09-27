@@ -2400,7 +2400,10 @@ class Blocker:
     """Something to deal with before the app's window can be used: a sheet on it ("sheet"), a modal
     dialog of the app ("modal"), a dialog window in front ("dialog"), or another app's window over
     it ("covering"). ``buttons``: its controls, with ids (press them by id); ``text``: what it says
-    (read off the screen)."""
+    (read off the screen), in short. ``texts``: each of its texts, whole and apart (at most
+    _BLOCKER_TEXTS of them, _BLOCKER_CHARS in all); ``complete``: that is all it says - its walk
+    ended by itself (no deadline, no app that stopped answering, no element cap) and nothing was
+    left out for those caps. Anything that decides on its words treats an incomplete one as unread."""
 
     kind: str
     title: str
@@ -2409,13 +2412,28 @@ class Blocker:
     text: str = ""
     frame: tuple[float, float, float, float] | None = None
     ref: Any = None
+    texts: list[str] = field(default_factory=list)
+    complete: bool = False
 
 
-def _as_blocker(b: _Within, pid: int) -> Blocker:
+_BLOCKER_TEXTS = 60  # a sheet's texts kept one by one, at most this many…
+_BLOCKER_CHARS = 8000  # …and this many characters in all (more: it isn't read whole)
+
+
+def _as_blocker(b: _Within, pid: int, whole: bool = False) -> Blocker:
     ctl = [e for e in b.els if e.role not in _READ_ONLY_ROLES and e.role not in ("AXGroup", "AXScrollArea")]
     texts = [e.value or e.title for e in b.els if e.role == "AXStaticText" and (e.value or e.title)]
     title = b.title or (texts[0] if texts else "")
-    return Blocker(b.kind, title, ctl, pid, " ".join(" ".join(t.split()) for t in texts)[:400], b.frame, b.ref)
+    kept: list[str] = []
+    size = 0
+    for raw in texts:
+        t = " ".join(raw[:_BLOCKER_CHARS].split())
+        size += len(t)
+        if len(raw) > _BLOCKER_CHARS or len(kept) >= _BLOCKER_TEXTS or size > _BLOCKER_CHARS:
+            whole = False
+            break
+        kept.append(t)
+    return Blocker(b.kind, title, ctl, pid, " ".join(" ".join(t.split()) for t in texts)[:400], b.frame, b.ref, kept, whole)
 
 
 def _layer_at(pid: int, x: float, y: float) -> int | None:
@@ -2474,7 +2492,8 @@ def blockers(pid: int, *, deadline_s: float = _LOOK_S, cancel: threading.Event |
         _walk(sheet, 2, els, _new_id, w=w)
     _issue(els)  # (its controls can be pressed by id)
     found = sorted(w.blockers, key=lambda b: b.kind != "sheet")
-    return [_as_blocker(b, pid) for b in found] + _covering(pid, frame)
+    whole = not w.stopped and len(els) < _MAX_ELEMENTS  # (a walk cut short: its words weren't all read)
+    return [_as_blocker(b, pid, whole) for b in found] + _covering(pid, frame)
 
 
 # ---- menus -------------------------------------------------------------------------------------------------

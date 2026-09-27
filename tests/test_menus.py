@@ -31,6 +31,8 @@ class Blocker:  # as the AX core reports a sheet or dialog in the way
     buttons: list = field(default_factory=list)
     owner_pid: int = PID
     text: str = ""
+    texts: list | None = None  # (None: its words are ``text``)
+    complete: bool = True  # its walk read it whole
 
 
 def button(label: str, n: int, role: str = "AXButton", enabled: bool = True) -> ax.Element:
@@ -320,23 +322,43 @@ def test_explicit_menu_words(said, item, menu):
     assert (got.item, got.menu) == (item, menu), said
 
 
+def _claims(said: str) -> bool:
+    """Does a menu_command fast path take these words (its pattern, then its check - as
+    neo2.core.agent.fastpath.match applies them)?"""
+    for pattern, args, *check in menus.FAST_PATHS:
+        m = re.search(pattern, said, re.I)
+        if m is None:
+            continue
+        got = {k: m.group(v[1:-1]) if isinstance(v, str) and v.startswith("<") else v for k, v in args.items()}
+        if not check or check[0](got):
+            return True
+    return False
+
+
 @pytest.mark.parametrize(
     "said,claims",
     [
         ("choose New Window from the File menu", True),
         ("File > New Window", True),
+        ("choose File › Export › PDF", True),
         ("open the File menu and choose New Window", True),
         ("File menu se New Window chuno", True),
         ("गेम मेनू में नया गेम पर क्लिक करो", True),
+        ("फ़ाइल > नई विंडो", True),
         ("click the Start button", False),
         ("click Alpha then Bravo", False),
         ("what's in the File menu", False),
         ("start a new game", False),  # no menu named: the by-meaning lane's, not a fast path's
+        # arrows that name no menu (probe: main left them to the reflex)
+        ("usd -> inr", False),
+        ("celsius -> fahrenheit", False),
+        ("10 > 5", False),
+        ("home > settings > wifi", False),
+        ("open settings > privacy", False),
     ],
 )
 def test_fast_paths_claim_only_words_that_name_a_menu(said, claims):
-    hit = any(re.search(p, said, re.I) for p, _ in menus.FAST_PATHS)
-    assert hit is claims, said
+    assert _claims(said) is claims, said
 
 
 async def test_a_path_through_submenus(world):
@@ -465,7 +487,7 @@ def test_grounding_a_big_menu_bar_is_fast(capsys):
 
 
 async def test_a_by_meaning_stage_plugs_in_but_never_answers_a_sheet(world, monkeypatch):
-    monkeypatch.setattr(menus, "meaning", lambda request, titles: titles.index("New Game") if "another game" in request else None)
+    monkeypatch.setattr(menus, "meaning", lambda request, titles, origin="": titles.index("New Game") if "another game" in request else None)
     said = "begin another game"
     assert await menus.by_utterance(said, user(said)) is None and world.pressed == []  # the resolver in shadow
     monkeypatch.setattr(menus, "_resolver_mode", lambda: "live")
@@ -761,3 +783,136 @@ async def test_a_field_label_beyond_the_models_words_reaches_it_fenced(form, mon
     c = user("type SAVE10 in the coupon field")
     out = await menus.fill_field("SAVE10", "coupon", c)  # the user hears it as it is
     assert out.ok and "untrusted" not in out.text
+
+
+# ---- review fixes: the sheet's button gated, whose words, one line -----------------------------------------
+
+
+async def test_the_confirmation_gate_judges_the_sheets_button_too(world, monkeypatch):
+    """Probe F1b: the frozen gate sees the button pressed on the sheet, with the sheet's words."""
+    seen: list[tuple[str, list[str]]] = []
+    real = comp._ask_first
+
+    async def ask_first(tool, a, label, app="", els=None):
+        seen.append((label, [getattr(e, "value", "") or getattr(e, "title", "") for e in els or []]))
+        return await real(tool, a, label, app, els)
+
+    monkeypatch.setattr(comp, "_ask_first", ask_first)
+    world.sheets["New Game"].text = "Choose the players."
+    out = await menus.by_utterance("start a new game", user("start a new game"))
+    assert world.pressed == ["Game › New Game", "Start"] and out.ok
+    assert [label for label, _ in seen] == ["New Game", "Start"]
+    assert "Choose the players." in seen[1][1] and "Start a New Game?" in seen[1][1]
+
+
+async def test_a_yes_to_the_gates_card_answers_that_sheet_and_never_repeats_the_command(world, monkeypatch):
+    real = comp._ask_first
+
+    async def stricter(tool, a, label, app="", els=None):  # a gate that asks about "Start" (it may only get stricter)
+        if label == "Start":
+            gate = confirm.gated(tool, a, f"click “{label}” in {app}")
+            return gate if isinstance(gate, str) else None
+        return await real(tool, a, label, app, els)
+
+    monkeypatch.setattr(comp, "_ask_first", stricter)
+    out = await menus.by_utterance("start a new game", user("start a new game"))
+    assert world.pressed == ["Game › New Game"] and out.halt and out.text.startswith("NEEDS_CONFIRM")
+    p = confirm.peek()
+    assert p is not None and p.params.get("_sheet") == "Start"
+    with confirm.approved(out.staged):
+        out = await run(dict(p.params), ToolContext(user_text="yes", origin="approval"))
+    assert world.pressed == ["Game › New Game", "Start"] and out.ok and "closed" in out.text
+    # a yes whose sheet has gone presses nothing (and never the command again)
+    world.pressed.clear()
+    out = await run(dict(p.params), ToolContext(user_text="yes", origin="approval"))
+    assert world.pressed == [] and not out.ok
+
+
+@pytest.mark.parametrize("origin", ["agent", "live", "approval"])
+async def test_a_models_words_never_reach_the_by_meaning_stages(world, monkeypatch, origin):
+    """Probe F2: "meaning" promoted; a model's (or Live's) words that match no title word for word."""
+    asked: list[str] = []
+
+    def meaning(request, titles, origin=""):
+        asked.append(origin)
+        return titles.index("Close Round")
+
+    monkeypatch.setattr(menus, "meaning", meaning)
+    monkeypatch.setattr(menus, "_promoted", lambda stage: True)  # (live and promoted: decision 40)
+    out = await run({"item": "wrap up this round"}, ToolContext(user_text="wrap up this round", origin=origin))
+    assert world.pressed == [] and not out.ok and asked == []
+    said = "wrap up this round"
+    out = await run({"utterance": said}, user(said))  # the user's own words: the stage reads them
+    assert world.pressed == ["Game › Close Round"] and asked == ["user"]
+
+
+async def test_an_embedding_hosts_words_never_get_the_by_meaning_stages_or_a_sheet_answered(world, monkeypatch):
+    """Probe F7: an embedded agent's "user" text is its host's."""
+    from neo2.core import runtime
+
+    monkeypatch.setattr(runtime, "library_bound", lambda: True)
+    monkeypatch.setattr(runtime, "library_mode", lambda: True)
+    monkeypatch.setattr(menus, "meaning", lambda request, titles, origin="": titles.index("Close Round"))
+    monkeypatch.setattr(menus, "_promoted", lambda stage: True)
+    assert await menus.by_utterance("start a new game", user("start a new game")) is None and world.pressed == []
+    said = "open the Game menu and then New Game start"
+    assert _claims(said)  # the host's words the fast path turns into menu_command(item="New Game start", menu="Game")
+    out = await run({"item": "New Game start", "menu": "Game"}, user(said))
+    assert world.pressed == ["Game › New Game"] and out.halt  # its sheet: asked about, never answered
+    world.pressed.clear()
+    world.blocker, world.scene.sheet = None, ""
+    out = await run({"utterance": "wrap up this round"}, user("wrap up this round"))
+    assert world.pressed == [] and not out.ok
+
+
+def test_the_menu_meaning_seam_passes_on_who_chose_the_words(monkeypatch):
+    from neo2.core.tools.computer import resolve, tools_label
+
+    got: list[str] = []
+    monkeypatch.setattr(resolve, "resolve", lambda request, cands, **k: got.append(k.get("origin")) or resolve.Ambiguous([], "nothing"))
+    assert tools_label._menu_meaning("wrap up", ["Close Round"], origin="agent") is None
+    assert tools_label._menu_meaning("wrap up", ["Close Round"]) is None  # (not said: never the user's)
+    assert got == ["agent", "agent"] and menus.meaning is tools_label._menu_meaning
+
+
+async def test_after_a_yes_a_by_meaning_pick_is_the_command_pressed(world, monkeypatch):
+    """An approval gets no by-meaning stage: the command resolved when the card was staged is pinned."""
+    monkeypatch.setattr(menus, "meaning", lambda request, titles, origin="": titles.index("Delete Round…") if "rid" in request else None)
+    monkeypatch.setattr(menus, "_resolver_mode", lambda: "live")
+    monkeypatch.setattr(menus, "_promoted", lambda stage: True)
+    said = "get rid of this round"
+    out = await menus.by_utterance(said, user(said))
+    assert out.halt and out.text.startswith("NEEDS_CONFIRM") and world.pressed == []
+    p = confirm.peek()
+    assert p is not None and p.params.get("_path") == ["Game", "Delete Round…"]
+    with confirm.approved(out.staged):
+        out = await run(dict(p.params), ToolContext(user_text="yes", origin="approval"))
+    assert world.pressed == ["Game › Delete Round…"] and out.ok
+
+
+async def test_a_models_field_name_is_never_read_through_the_os_strings(form, monkeypatch, hindi):
+    monkeypatch.setattr(menus, "_promoted", lambda stage: True)  # (live and promoted: decision 40)
+    fields = [ax.Element("w6", "AXTextField", "Message", "", 10, 70, 400, 24, ref="r6")]
+    monkeypatch.setattr(ax, "window_elements", lambda app=None: (APP, (0, 0, 800, 600), list(fields)))
+    out = await menus.fill_field("hi", "संदेश", ToolContext())  # "संदेश" is the OS's "Message"
+    assert not out.ok and form == []
+    out = await menus.fill_field("hi", "संदेश", user("संदेश फ़ील्ड में hi लिखो"))
+    assert out.ok and form == [("w6", "hi")]
+
+
+async def test_a_line_break_never_runs_a_field_named_by_its_label(form, monkeypatch):
+    """Probe F4: ax_set_value's one-line rule holds when the field is named instead of its id."""
+    from neo2.core.tools.computer import focus, gates, tools_ax
+
+    async def no_command_line(pid):
+        return False
+
+    monkeypatch.setattr(gates, "_command_line", no_command_line)
+    monkeypatch.setattr(focus, "hosts_shell", lambda pid: "")
+    monkeypatch.setattr(ax, "window_elements", lambda app=None: (APP, (0, 0, 800, 600), [
+        ax.Element("w8", "AXTextField", "Command", "", 10, 40, 400, 24, ref="r8"),
+        ax.Element("w9", "AXTextArea", "Notes", "", 10, 70, 400, 200, ref="r9")]))  # fmt: skip
+    out = await menus.fill_field("ls\nrm -rf ~/Documents", "command", ToolContext())
+    assert out.ok and form == [("w8", "ls rm -rf ~/Documents")] and tools_ax._JOINED in out.text
+    out = await menus.fill_field("line one\r\nline two", "notes", ToolContext())  # a note's lines stay lines
+    assert out.ok and form[-1] == ("w9", "line one\nline two") and tools_ax._JOINED not in out.text
