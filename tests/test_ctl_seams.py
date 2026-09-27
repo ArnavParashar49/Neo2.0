@@ -257,37 +257,70 @@ def test_an_in_process_capture_is_an_effect_of_its_own():
 
 # ---- every tool that acts is one of neo2's INPUT_TOOLS ---------------------------------------------------
 
-_COMPUTER_DIR = Path(runtime.__file__).resolve().parent / "tools" / "computer"
-_SCANNED = ("gates", "tools_ax", "tools_pointer", "tools_keys", "tools_label", "tools_apps", "pointer", "ax", "input",
-            "apps", "focus", "screen")  # fmt: skip
-# What makes a tool one that acts: an input event, or an Accessibility press, value, focus or text.
-# (Bringing an app forward and switching a browser's web tree on for reading are not input.)
-_ACTUATORS = {
-    ("input", n) for n in ("click", "drag", "scroll", "type_text", "hotkey", "_post")
-} | {("ax", n) for n in ("press", "press_el", "press_element", "set_value", "set_el_value", "focus_el")} | {
-    ("axkit", n) for n in ("perform", "set_text", "set_search", "clear_text", "post_return")
-}
+_NEO = Path(runtime.__file__).resolve().parent
+# Where a tool's handler can lead: the tools, the computer package, and the task kinds with the
+# Accessibility kit they share (neo.decide: axkit, media, the kinds).
+_SCANNED_DIRS = ("tools", "tools/computer", "decide", "decide/kinds")
+# What makes a tool one that acts: an input event (to the front app or to one app), or an
+# Accessibility press, value, focus or text. (Bringing an app forward — its window raised through
+# the AX door — and switching a browser's web tree on for reading are not input.)
+_ACTUATORS = (
+    {("neo.tools.computer.input", n) for n in ("click", "drag", "scroll", "type_text", "hotkey", "_post", "_post_to_pid")}
+    | {("neo.tools.computer.ax", n) for n in ("press", "press_el", "press_element", "set_value", "set_el_value", "focus_el")}
+    | {("neo.decide.axkit", n) for n in ("perform", "set_text", "set_search", "clear_text", "post_return", "_put", "_type")}
+    | {("neo.decide.media", n) for n in ("_perform", "_post_return", "_set_query")}
+)  # fmt: skip
+# A task kind's driver is its own module (run.run_best(sys.modules[__name__], …)): these are called.
+_DRIVER_HOOKS = ("attempt", "fallback", "accepts")
+
+
+def _modules() -> dict[str, Path]:
+    out = {}
+    for d in _SCANNED_DIRS:
+        for path in sorted((_NEO / d).glob("*.py")):
+            rel = path.relative_to(_NEO).with_suffix("")
+            parts = ["neo", *rel.parts] if rel.name != "__init__" else ["neo", *rel.parts[:-1]]
+            out[".".join(parts)] = path
+    return out
 
 
 def _call_graph() -> dict[tuple[str, str], set[tuple[str, str]]]:
+    """(module, top-level function) -> what it names: its module's functions, and the functions
+    of the scanned modules it imports (``from neo.decide.kinds import site as sk`` … ``sk.search``,
+    ``from neo.decide.media import play_best``), called or handed on (a worker, a driver)."""
+    mods = _modules()
     graph: dict[tuple[str, str], set[tuple[str, str]]] = {}
-    for mod in _SCANNED:
-        tree = ast.parse((_COMPUTER_DIR / f"{mod}.py").read_text())
-        alias: dict[str, str] = {}
+    for mod, path in mods.items():
+        tree = ast.parse(path.read_text())
+        alias: dict[str, str] = {}  # name -> a scanned module
+        func: dict[str, tuple[str, str]] = {}  # name -> (a scanned module, its function)
         for n in ast.walk(tree):
-            if isinstance(n, ast.ImportFrom) and n.module in ("neo.tools.computer", "neo.decide"):
+            if isinstance(n, ast.ImportFrom) and n.module:
                 for a in n.names:
-                    alias[a.asname or a.name] = a.name
-        for fn in tree.body:
-            if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    if f"{n.module}.{a.name}" in mods:
+                        alias[a.asname or a.name] = f"{n.module}.{a.name}"
+                    elif n.module in mods:
+                        func[a.asname or a.name] = (n.module, a.name)
+            elif isinstance(n, ast.Import):
+                for a in n.names:
+                    if a.asname and a.name in mods:
+                        alias[a.asname] = a.name
+        for top in tree.body:
+            if isinstance(top, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                name = top.name
+            elif isinstance(top, ast.Assign) and len(top.targets) == 1 and isinstance(top.targets[0], ast.Name):
+                name = top.targets[0].id  # a table of workers or methods
+            else:
                 continue
             refs: set[tuple[str, str]] = set()
-            for n in ast.walk(fn):
+            for n in ast.walk(top):
                 if isinstance(n, ast.Name):
-                    refs.add((mod, n.id))
+                    refs.add(func.get(n.id, (mod, n.id)))
                 elif isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) and n.value.id in alias:
                     refs.add((alias[n.value.id], n.attr))
-            graph[(mod, fn.name)] = refs
+                elif isinstance(n, ast.Subscript) and ast.unparse(n) == "sys.modules[__name__]":
+                    refs |= {(mod, h) for h in _DRIVER_HOOKS}
+            graph[(mod, name)] = refs
     return graph
 
 
@@ -304,20 +337,29 @@ def _acts(start: tuple[str, str], graph) -> bool:
     return False
 
 
-def test_every_computer_tool_that_acts_is_an_input_tool():
+def test_every_tool_that_acts_is_an_input_tool():
+    """Every registered tool that posts an event or takes an Accessibility action — the computer
+    tools, and the task tools whose kinds act in an app's own UI (a site's search box, a new note)
+    — is one of neo2's INPUT_TOOLS, so an MCP server asking its client for approvals (--approve
+    elicit) can't hand them out without the client's app protected."""
     from neo.agent.registry import catalog
-    from neo.tools import load_all
+    from neo.tools import PRESETS, load_all
     from neo2.mcp.server import INPUT_TOOLS
 
     load_all()
     graph = _call_graph()
-    mine = [t for t in catalog().all() if t.handler.__module__.startswith("neo.tools.computer.")]
-    acting = {t.name for t in mine if _acts((t.handler.__module__.rsplit(".", 1)[1], t.handler.__name__), graph)}
+    tools = catalog().all()
+    acting = {t.name for t in tools if _acts((t.handler.__module__, t.handler.__name__), graph)}
     assert acting >= {"click", "drag", "scroll", "type_text", "dictate", "hotkey", "click_text", "ax_press", "ax_set_value"}
-    assert acting <= INPUT_TOOLS, acting - INPUT_TOOLS
+    assert acting >= {"search_site", "notes_create"}  # a site's search box and Return; a new note's New and text
+    # NEO.app's own (never an embedded agent's: in no preset) need no entry — nor could they have one
+    embeddable = acting & set(PRESETS["all"])
+    assert embeddable <= INPUT_TOOLS, embeddable - INPUT_TOOLS
     # and by what a tool says of itself: a computer tool that isn't read-only acts
+    mine = [t for t in tools if t.handler.__module__.startswith("neo.tools.computer.")]
     declared = {t.name for t in mine if t.category == "computer" and not t.read_only}
     assert declared <= INPUT_TOOLS, declared - INPUT_TOOLS
+    assert not acting & {t.name for t in tools if t.read_only}  # (a look never acts)
 
 
 def test_input_tools_and_the_planned_tools_are_known_names():
