@@ -27,7 +27,8 @@ from neo.agent.registry import ToolContext, fence
 from neo.tools.computer import apps, ax, screen
 
 SETTLE_S = 0.12  # after bringing an app forward (or raising a window), before the input
-LOOK_S = 0.4  # after the input, before looking at what changed
+LOOK_S = 0.4  # after the input, before looking at what changed…
+LOOK_AGAIN_S = 0.6  # …and once more when nothing had yet (a page that loads, a slow redraw)
 
 
 class Refused(Exception):
@@ -256,6 +257,15 @@ async def after(before: Look, pid: int, pts: list[tuple[float, float]]) -> Look 
     return await look(pid, pts)
 
 
+async def outcome(before: Look, pid: int, pts: list[tuple[float, float]], where: list[str]) -> Outcome:
+    """What the input changed: looked at once, and again a moment later if nothing had yet."""
+    out = compare(before, await after(before, pid, pts), where)
+    if out.changed is False:
+        await asyncio.sleep(LOOK_AGAIN_S)
+        out = compare(before, await look(pid, pts), where)
+    return out
+
+
 @dataclass
 class Outcome:
     said: str  # NEO's own words: what changed, or that nothing visibly did
@@ -292,8 +302,8 @@ def compare(before: Look, now: Look | None, where: list[str]) -> Outcome:
     if before.pixels is None or now.pixels is None:
         return Outcome("I couldn't compare the screen (no Screen Recording), and nothing else changed.", "", None)
     return Outcome(
-        f"Nothing visibly changed there within {LOOK_S:g}s — it may have missed, been swallowed, or the app "
-        "needs something else first. Look (screenshot) before trying again; don't assume it worked.",
+        f"Nothing visibly changed there within {LOOK_S + LOOK_AGAIN_S:g}s — it may have missed, been swallowed, "
+        "or the app needs something else first. Look (screenshot) before trying again; don't assume it worked.",
         "",
         False,
     )

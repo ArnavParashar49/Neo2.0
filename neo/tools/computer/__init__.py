@@ -119,7 +119,8 @@ async def _ask_first(tool_name: str, a: dict, label: str, app: str = "", els=Non
     "Read the frontmost (or named) app's UI as a text tree of elements with ids, roles, titles, "
     "values and screen positions. Use this FIRST to see what's on screen — it's fast and exact. "
     "Element ids (e12) can be used with ax_press, ax_set_value, and click. When it shows little "
-    "(a game board like Chess, a map, a canvas), take a screenshot and click at x,y instead.",
+    "(a game board like Chess, a map, a canvas), take a screenshot and click at pixel positions in "
+    "it (with its shot id) instead.",
     _p({"app": {"type": "string", "description": "App name; omit for the frontmost app"}}),
     parallel_safe=True,
     category="computer",
@@ -422,7 +423,7 @@ async def click(a: dict, c: ToolContext) -> str | ToolOutput:
     await asyncio.to_thread(inp.click, *pts[0], button=button, count=count, mods=mods)
     if before is None:
         return head
-    out = pointer.compare(before, await pointer.after(before, pid, pts), [_at(*pts[0])])
+    out = await pointer.outcome(before, pid, pts, [_at(*pts[0])])
     under = [pointer.words(h)] if not a.get("id") else []
     text, ok = pointer.report(head, out, under)
     if any(under) or out.details:
@@ -478,7 +479,7 @@ async def drag(a: dict, c: ToolContext) -> str | ToolOutput:
     head += "."
     if before is None:
         return head
-    out = pointer.compare(before, await pointer.after(before, pid, pts), [f"the start {_at(*pts[0])}", f"the end {_at(*pts[1])}"])
+    out = await pointer.outcome(before, pid, pts, [f"the start {_at(*pts[0])}", f"the end {_at(*pts[1])}"])
     under = [f"start {pointer.words(src)}" if pointer.words(src) else "", f"end {pointer.words(dst)}" if pointer.words(dst) else ""]
     text, ok = pointer.report(head, out, under)
     if any(under) or out.details:
@@ -533,7 +534,7 @@ async def scroll(a: dict, c: ToolContext) -> str | ToolOutput:
     text = await asyncio.to_thread(inp.scroll, pts[0][0], pts[0][1], dy, dx)
     if before is None:
         return text
-    out = pointer.compare(before, await pointer.after(before, pid, pts), [_at(*pts[0])])
+    out = await pointer.outcome(before, pid, pts, [_at(*pts[0])])
     text, ok = pointer.report(str(text) + (f" in {t.hits[0].app}." if t.hits[0].app else "."), out, [])
     return ToolOutput(text, ok=ok)
 

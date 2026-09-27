@@ -96,6 +96,7 @@ class World:
         self.react = True  # the board redraws when a click reaches it
         self.version = 0
         self.sheet_after_keys = ""  # a sheet ⌘N opens
+        self.late = False
         self.sheet = ""
         self.samples = 0
 
@@ -117,6 +118,8 @@ class World:
 
     def sample(self, pts, r=60):
         self.samples += 1
+        if self.late and self.samples == 3:  # a page that redraws only after a moment
+            self.version += 1
         shade = 40 + 60 * self.version
         return [Image.new("L", (24, 24), shade) for _ in pts]
 
@@ -339,6 +342,12 @@ def test_a_click_after_which_nothing_changed_is_not_reported_as_done(world):
     assert not out.ok and "Nothing visibly changed" in out.text and len(world.events()) == 3
 
 
+def test_a_change_that_shows_a_moment_later_is_seen(world):
+    world.react, world.late = False, True
+    out = run("click", {"x": 612, "y": 540})
+    assert out.ok and "Changed" in out.text and world.samples == 3  # before, after, and once more
+
+
 def test_a_click_that_moved_something_says_so(world):
     out = run("click", {"x": 612, "y": 540})
     assert out.ok and "Changed: the screen changed around (612, 540)" in out.text
@@ -469,3 +478,17 @@ def test_an_unknown_modifier_or_key_presses_nothing(world, monkeypatch):
         out = run("hotkey", {"keys": combo})
         assert not out.ok and world.events() == []
     assert inp.hotkey("hyper+c").startswith("Error")
+
+
+def test_the_self_checks_say_when_macos_drops_neos_clicks_and_keys(monkeypatch):
+    import ApplicationServices
+
+    from neo import health, permissions
+
+    monkeypatch.setattr(ApplicationServices, "AXIsProcessTrusted", lambda: True)
+    monkeypatch.setattr(RealQ, "CGPreflightScreenCaptureAccess", lambda: True)
+    monkeypatch.setattr(inp, "can_post", lambda: False)
+    assert permissions.missing() == ["Input events"]
+    assert any("clicks or keystrokes" in p for p in health.problems())
+    monkeypatch.setattr(inp, "can_post", lambda: True)
+    assert permissions.missing() == []

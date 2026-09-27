@@ -133,6 +133,7 @@ def _no_real_screen(monkeypatch):
     monkeypatch.setattr(screen, "sample_points", lambda pts, r=60: None)
     monkeypatch.setattr(screen, "displays", lambda: [screen.Display(1, 0.0, 0.0, 1512.0, 982.0)])
     monkeypatch.setattr(pointer, "LOOK_S", 0.0)
+    monkeypatch.setattr(pointer, "LOOK_AGAIN_S", 0.0)
     monkeypatch.setattr(pointer, "SETTLE_S", 0.0)
     # The app NEO works in is per test, and no test brings a real app to the front.
     from neo.tools.computer import apps, focus

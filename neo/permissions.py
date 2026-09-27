@@ -24,6 +24,13 @@ def missing() -> list[str]:
 
         if not AS.AXIsProcessTrusted():
             out.append("Accessibility")
+        else:
+            # Trusted to read the UI, but macOS may still drop the clicks and keys NEO posts (its
+            # separate "control the computer" check): nothing would arrive, silently.
+            from neo.tools.computer.input import can_post
+
+            if not can_post():
+                out.append("Input events")
     except Exception:  # noqa: BLE001
         pass
     try:
@@ -60,6 +67,11 @@ def request_missing() -> list[str]:
             import Quartz as Q
 
             Q.CGRequestScreenCaptureAccess()
+        if "Input events" in gaps:
+            import Quartz as Q
+
+            if hasattr(Q, "CGRequestPostEventAccess"):
+                Q.CGRequestPostEventAccess()
     except Exception:  # noqa: BLE001
         pass
     return gaps

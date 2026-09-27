@@ -34,8 +34,14 @@ def problems() -> list[str]:
     try:
         from neo.permissions import missing
 
-        if "Accessibility" in missing():
+        gaps = missing()
+        if "Accessibility" in gaps:
             out.append("NEO can't click or type in other apps until you allow Accessibility (menu-bar icon → Allow Accessibility…).")
+        elif "Input events" in gaps:
+            out.append(
+                "macOS isn't letting NEO send clicks or keystrokes — in System Settings → Privacy & Security → "
+                "Accessibility, turn NEO off and on again, then restart NEO."
+            )
     except Exception:  # noqa: BLE001
         pass
     out.extend(_live.values())
