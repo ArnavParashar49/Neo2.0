@@ -388,6 +388,8 @@ def test_nothing_a_blind_brain_reads_about_a_board_carries_coordinates():
     with pytest.raises(B.BoardError) as e:
         B.points_for({"cell": "a2"}, ("cell",), blind=True, displays=[(0, 0, 1512, 982)])
     texts.append(str(e.value))
+    texts += [*B.act_words(["e2"], "Double-clicked")[:1], *B.act_words(["e2"])[1], *B.act_words(["e2", "e4"])[:1], *B.act_words(["e2", "e4"])[1]]
+    assert B.act_words(["e2", "e4"]) == ("Dragged e2 → e4", ["the start e2", "the end e4"])
     for t in texts:
         assert not _COORD.search(t), t
     assert "corners" not in B.hint_note("s1", blind=True)

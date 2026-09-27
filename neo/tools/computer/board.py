@@ -1867,6 +1867,15 @@ def points_for(
     return pts, b, names
 
 
+def act_words(names: list[str], verb: str = "Clicked") -> tuple[str, list[str]]:
+    """For the pointer tools' report on an input on squares: its head ("Clicked square e2",
+    "Dragged e2 → e4") and the labels for where the outcome was looked at — square names only,
+    never the points (a brain that can't see reads them)."""
+    if len(names) == 1:
+        return f"{verb} square {names[0]}", [f"square {names[0]}"]
+    return f"Dragged {names[0]} → {names[1]}", [f"the start {names[0]}", f"the end {names[1]}"]
+
+
 @dataclass
 class Move:
     """What a click or a drag on a board did, in NEO's words (square names only)."""
