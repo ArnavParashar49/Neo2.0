@@ -415,7 +415,7 @@ async with neo.turn() as t:  # one turn of your loop: what one call read counts 
     messages += neo2.adapters.openai.tool_message(out, "call_1")
 ```
 
-The other helpers are `neo2.adapters.openai.tool_messages` (a whole turn of Chat calls, tool messages first), `neo2.adapters.openai.function_call_output`, `neo2.adapters.anthropic.tool_result`, `neo2.adapters.gemini.function_response` and `neo2.adapters.langchain.tool_message`.
+The other helpers are `neo2.adapters.openai.tool_messages` (a whole turn of Chat calls, tool messages first), `neo2.adapters.openai.function_call_output`, `neo2.adapters.anthropic.tool_result`, `neo2.adapters.gemini.function_response` and `neo2.adapters.langchain.tool_message`. A Chat tool message can't hold images, so `tool_message` sends a tool's screenshots in a user message after it, labelled as that call's output and never the user's request. The model still reads them in the user's role, so for tools that see third-party content (the screen, pages) prefer the Responses API, whose `function_call_output` keeps them in the tool's output, or pass `images="omit"`.
 
 ### Use NEO from an MCP client
 
