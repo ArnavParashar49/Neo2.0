@@ -119,13 +119,13 @@ def description_for(agent: AsyncAgent | Agent, name: str, description: str | Non
         return description
     names = sorted(t.name for t in agent.tools)
     if not names:
-        can = "It answers from what it knows (it has no tools here)."
+        can = "an assistant (it has no tools here: it answers from what it knows)"
     else:
         shown = ", ".join(names[:_MAX_LISTED_TOOLS])
         more = f" and {len(names) - _MAX_LISTED_TOOLS} more" if len(names) > _MAX_LISTED_TOOLS else ""
-        can = f"Its tools: {shown}{more}."
+        can = f"an assistant with its own tools ({shown}{more})"
     return (
-        f"Hand a task to NEO, an assistant with its own tools. {can} Put the whole task in `task` and "
+        f"Hand a task to NEO, {can}. Put the whole task in `task` and "
         "any background it needs in `context`; it answers in text. NEO asks the user itself before "
         "anything risky. A reply starting NEEDS_CONFIRM means the user's decision is pending in the "
         "app: tell the user, and don't retry or work around it. A reply starting NEEDS_USER is a "
