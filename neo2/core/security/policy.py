@@ -15,6 +15,7 @@ import re
 import shlex
 import socket
 import unicodedata
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -1290,7 +1291,28 @@ _COMMIT = re.compile(
 )
 
 
-_GENERIC_OK = re.compile(r"^\s*(?:ok(?:ay)?|yes|continue|proceed|apply|done|confirm|i\s+agree|got\s+it|allow)\s*[.!]?\s*$", re.I)
+class _LocalizedMatch:
+    """A label regex whose ``match`` also reads a localized label through its back-translations (a
+    Hindi "ठीक है" is the OS's "OK"): the click gate asks ``_GENERIC_OK.match(label)`` whether to read
+    a dialog's words at all, and must get yes in any language the OS strings know. Everything else
+    (``search``, ``pattern``…) is the regex's own."""
+
+    def __init__(self, rx: re.Pattern[str]) -> None:
+        self.rx = rx
+
+    def match(self, text: str, *args: int) -> re.Match[str] | None:
+        m = self.rx.match(text, *args)
+        if m is not None or args or not text or text.isascii():
+            return m
+        return next((m for s in back_translations(text) if (m := self.rx.match(s)) is not None), None)
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self.rx, name)
+
+
+_GENERIC_OK = _LocalizedMatch(
+    re.compile(r"^\s*(?:ok(?:ay)?|yes|continue|proceed|apply|done|confirm|i\s+agree|got\s+it|allow)\s*[.!]?\s*$", re.I)
+)
 _CONSEQUENCE = re.compile(
     r"\b(?:delete|erase|remove|permanently|cannot\s+be\s+undone|can'?t\s+be\s+undone|overwrite|replace|"
     r"discard|send|pay|purchase|buy|order|transfer|uninstall|reset|wipe|format|sign\s+out|log\s+out|"
@@ -1299,12 +1321,164 @@ _CONSEQUENCE = re.compile(
 )
 
 
-def commits(label: str, context: str = "") -> bool:
-    """A button that sends, buys, deletes, grants or publishes something — or a plain "OK" /
-    "Continue" in a dialog whose text says it does."""
-    if _COMMIT.search(label or ""):
+# What a press in an app's own UI can't take back, that scripts and drops were never gated on: a
+# forward (it sends), ending the app, the session or the Mac (Quit, Restart…, Shut Down…, Log Off,
+# Force Quit), throwing work away (Revert, Don't Save, Clear History), giving a game up (Resign).
+# Labels only: commits() reads it; the AppleScript and drop checks don't. (Moving forward - a browser's
+# "Go Forward", a player's "Skip Forward" - is navigation, not a forward.)
+_UI_COMMIT = re.compile(
+    r"\b(?:(?<!go )(?<!skip )(?<!fast )(?<!fast-)(?<!move )forward|quit|restart|reboot|shut\s*down|power\s+off|log\s+off|sign\s+off|force\s+quit|kill|"
+    r"terminate|revert|don['’]?t\s+save|do\s+not\s+save|resign|forfeit|surrender|concede|abandon|"
+    r"end\s+(?:game|match|call|meeting|session)|clear\s+(?:all|history|browsing|everything|cache|cookies|data|recents?)|"
+    r"update\s+now)\b",
+    re.I,
+)
+# Words in a sheet or dialog saying that answering it ends, loses or throws away something (the
+# current game, unsaved changes): with them NEO never answers the sheet by itself, whatever button.
+_LOSS = re.compile(
+    r"\b(?:lose|loses|lost|losing|unsaved|not\s+(?:been\s+)?saved|won['’]?t\s+be\s+saved|will\s+not\s+be\s+saved|"
+    r"can(?:not|['’]?t)\s+be\s+(?:undone|recovered|restored|reversed)|irreversibl[ey]|permanent(?:ly)?|"
+    r"will\s+be\s+(?:closed|deleted|removed|erased|lost|replaced|overwritten|ended|reset|discarded|cancell?ed|stopped)|"
+    r"(?:current|unfinished|ongoing)\s+(?:game|match|document|changes|session|progress|call|download)|"
+    r"in\s+progress|resign|forfeit|quit|restart|shut\s*down|log\s+(?:out|off)|sign\s+out|end\s+(?:the|this|your))\b",
+    re.I,
+)
+
+# English source strings of a localized label or dialog text (a Hindi "भेजें" is the OS's "Send"):
+# registered by the Mac side (neo2.core.decide.uistrings, from the OS's own string tables). Data handed
+# in, never imported: this module stays pure stdlib. `_whole_lookup`: the same source, for a text
+# looked up exactly as it is (never pieced together from some of its sentences).
+_back_translate: Callable[[str], Iterable[str]] | None = None
+_whole_lookup: Callable[[str], Iterable[str]] | None = None
+# Where a text is read back piece by piece: a sentence, a line, a menu path's part ("File › Share").
+_PIECES = re.compile(r"(?<=[.!?।])\s+|\n+|\s*(?:›|→|»|->)\s*|\s+>\s+")
+
+
+def use_back_translations(
+    fn: Callable[[str], Iterable[str]] | None, *, whole: Callable[[str], Iterable[str]] | None = None
+) -> None:
+    """Register (None: drop) where a localized label's English source strings come from; `whole`
+    (optional): the lookup of a text exactly as it is."""
+    global _back_translate, _whole_lookup
+    _back_translate, _whole_lookup = fn, (whole if fn is not None else None)
+
+
+def _foreign(text: str) -> bool:
+    """Letters of a script other than Latin (Devanagari, say): words NEO reads only through the OS."""
+    if not text or text.isascii():
+        return False
+    return any(ch.isalpha() and not unicodedata.name(ch, "").startswith("LATIN") for ch in text)
+
+
+def _lookup(fn: Callable[[str], Iterable[str]], text: str) -> tuple[str, ...]:
+    try:
+        return tuple(s for s in fn(text) if isinstance(s, str) and s)[:32]
+    except Exception:  # noqa: BLE001 - a broken lookup adds nothing; today's checks still run
+        return ()
+
+
+def _pieces(text: str) -> list[str]:
+    return [p.strip() for p in _PIECES.split(text or "") if p.strip()][:20]
+
+
+def _parts(texts: str | Iterable[str] | None) -> list[str]:
+    """A dialog's words as the separate texts it shows (a title, each static text), or one text."""
+    if texts is None:
+        return []
+    if isinstance(texts, str):
+        return [texts] if texts.strip() else []
+    return [t for t in texts if isinstance(t, str) and t.strip()]
+
+
+def back_translations(text: str) -> tuple[str, ...]:
+    """The English source strings of a localized label or dialog text, from the registered source:
+    the text's own, and each of its pieces' (a joined menu path "निर्यात करें › हटाएँ" is no one
+    string the OS has, but "Export" and "Delete" are). () for plain ASCII (it is English already),
+    without a source, or when it fails."""
+    fn = _back_translate
+    if fn is None or not text or text.isascii():
+        return ()
+    found = list(_lookup(fn, text))
+    pieces = [p for p in _pieces(text) if _foreign(p)]
+    if pieces != [text.strip()]:
+        for p in pieces:
+            found.extend(_lookup(fn, p))
+    return tuple(dict.fromkeys(found))[:32]
+
+
+def unread(text: str, lookup: Callable[[str], Iterable[str]] | None = None) -> bool:
+    """Words in a script other than Latin that nothing reads back into English: not the whole text,
+    and not every such piece of it (a sentence, a line, a menu path's part). They could say anything,
+    so what acts or answers by itself treats them as saying the worst (fail closed). `lookup`: the
+    exact lookup to use instead of the registered one."""
+    if not _foreign(text):
+        return False
+    exact = lookup or _whole_lookup
+    fn = exact or _back_translate
+    if fn is None:
         return True
-    return bool(_GENERIC_OK.match(label or "") and _CONSEQUENCE.search(context or ""))
+    pieces = [p for p in _pieces(text) if _foreign(p)]
+    # (a lookup that isn't exact may answer for some sentences only: the whole counts only if exact)
+    if (exact is not None or len(pieces) <= 1) and _lookup(fn, text.strip()):
+        return False
+    return not pieces or any(not _lookup(fn, p) for p in pieces)
+
+
+def generic_ok(label: str, sources: Iterable[str] | None = None) -> bool:
+    """A plain "OK" / "Continue" / "Yes" (in any language the back-translations know): it says
+    nothing about what it confirms, so the dialog's own words decide."""
+    srcs = back_translations(label or "") if sources is None else tuple(sources)
+    return any(_GENERIC_OK.match(t or "") for t in (label or "", *srcs))
+
+
+def commits(
+    label: str,
+    context: str | Iterable[str] = "",
+    *,
+    sources: Iterable[str] | None = None,
+    context_sources: Iterable[str] | None = None,
+) -> bool:
+    """A button that sends, buys, deletes, grants or publishes something, or ends or throws away
+    something (Quit, Restart…, Don't Save, Resign) — or a plain "OK" / "Continue" in a dialog whose
+    text says it does. A localized label (or dialog text) also counts as its English source strings
+    (`sources` / `context_sources`; by default the registered back-translations, piece by piece):
+    they are only ever OR'd in, so the gate never gets looser. `context`: the dialog's text, or its
+    texts one by one (a title, each static text: each read back on its own). Behind a plain OK,
+    words in another script that nothing reads back count as saying it commits (fail closed)."""
+    label = label or ""
+    srcs = back_translations(label) if sources is None else tuple(sources)
+    if any(_COMMIT.search(t or "") or _UI_COMMIT.search(t or "") for t in (label, *srcs)):
+        return True
+    if not generic_ok(label, srcs):
+        return False
+    parts = _parts(context)
+    given = () if context_sources is None else tuple(context_sources)
+    if any(_CONSEQUENCE.search(t or "") for t in (*parts, *given)):
+        return True
+    for part in parts:
+        if context_sources is None and any(_CONSEQUENCE.search(t) for t in back_translations(part)):
+            return True
+        if unread(part):
+            return True
+    return False
+
+
+def sheet_consequence(text: str | Iterable[str], sources: Iterable[str] | None = None) -> bool:
+    """Does a sheet's or dialog's own text say that answering it commits, ends or loses something
+    ("the current game will be lost", "can't be undone", "send to 40 people")? Checked for every
+    button before NEO answers a sheet by itself, not only for a plain OK. `text`: its text, or its
+    texts one by one (each read back on its own). Words in another script that nothing reads back
+    count as yes: they could say anything (fail closed)."""
+    parts = _parts(text)
+    given = () if sources is None else tuple(sources)
+    if any(_CONSEQUENCE.search(t or "") or _LOSS.search(t or "") for t in (*parts, *given)):
+        return True
+    for part in parts:
+        if sources is None and any(_CONSEQUENCE.search(t) or _LOSS.search(t) for t in back_translations(part)):
+            return True
+        if unread(part):
+            return True
+    return False
 
 
 def drop_commits(label: str, window_words: str = "") -> bool:

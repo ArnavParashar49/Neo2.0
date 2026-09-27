@@ -282,6 +282,12 @@ async def run() -> None:
 
     asyncio.create_task(learn_loop(_idle))
     asyncio.create_task(teacher_loop(_idle))  # returns at once unless NEO_LEARN_TEACHER is on
+    if sys.platform == "darwin":
+        # The OS's own English↔Hindi UI strings, built once per macOS build when NEO is idle (paused
+        # while it is busy): what the gate reads a Hindi label by (decision 44). NEO.app only.
+        from neo2.core.decide import uistrings
+
+        asyncio.create_task(uistrings.idle_loop(_idle))
     asyncio.create_task(_checkpoint_loop(app, _idle))
     bus().subscribe(_log_activity)
     print("NEO is running. Say 'Neo', or type in the overlay.")

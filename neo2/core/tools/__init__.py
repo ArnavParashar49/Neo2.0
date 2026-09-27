@@ -50,7 +50,7 @@ def load_all() -> list[str]:
 
 _COMPUTER = (
     "ax_tree", "ax_find", "screenshot", "look", "apps_running", "ax_press", "ax_set_value", "click", "drag", "scroll",
-    "type_text", "dictate", "hotkey", "click_text", "open_app", "activate_app", "quit_app", "close",
+    "type_text", "dictate", "hotkey", "menu_command", "click_text", "open_app", "activate_app", "quit_app", "close",
     "applescript", "open_url", "page_read", "safari_read", "finder_reveal", "shell", "read_file", "write_file",
     "edit_file", "trash",
 )  # fmt: skip

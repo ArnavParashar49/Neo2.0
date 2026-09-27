@@ -290,8 +290,12 @@ def test_an_index_that_isnt_ready_counts_as_none():
 
 @pytest.mark.parametrize("label", ["Forward", "Restart", "Shut Down…", "Force Quit", "Quit", "Don't Save", "Revert"])
 def test_labels_with_consequences_the_gate_regex_misses_are_asked(label):
+    from neo2.core.security import policy
+
     res = rs.resolve(f"click {label}", cands(label, "Other"), log_it=False)
-    assert isinstance(res, rs.Resolved) and res.commits and res.ask == "commits"
+    # Asked either way: by the resolver, or — since commands-menus' _UI_COMMIT — by the frozen gate
+    # itself (then the resolver adds no second question).
+    assert isinstance(res, rs.Resolved) and res.commits and (res.ask == "commits" or policy.commits(label))
 
 
 def test_the_gate_still_decides_the_labels_it_reads():

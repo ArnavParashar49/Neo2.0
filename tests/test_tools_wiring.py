@@ -180,7 +180,6 @@ def _session_world(monkeypatch, intent="agent_task"):
     from neo2.core import config, events
     from neo2.core.agent import fastpath
     from neo2.core.agent import session as sess_mod
-    from neo2.core.agent.registry import registry
     from neo2.core.agent.session import Session
     from neo2.core.events import EventBus
     from neo2.core.reflex.schema import Decision
@@ -194,18 +193,21 @@ def _session_world(monkeypatch, intent="agent_task"):
         async def decide(self, text):
             return Decision(intent, 0.9, False, 0.0, False, 0.0, "fake")
 
-    ran: list[tuple[str, dict, str]] = []
-    real = registry().invoke
+    from neo2.core.agent.registry import Registry
 
-    async def invoke(name, args, ctx):
+    ran: list[tuple[str, dict, str]] = []
+    real = Registry.invoke
+
+    async def invoke(self, name, args, ctx):
         if name == "click_text":
             ran.append((name, dict(args), ctx.origin))
             from neo2.core.agent.registry import ToolOutput
 
             return ToolOutput("Clicked 'Start'")
-        return await real(name, args, ctx)
+        return await real(self, name, args, ctx)
 
-    monkeypatch.setattr(registry(), "invoke", invoke)
+    # (on the class: an instance attribute would outlive the test, shadowing later patches of the class)
+    monkeypatch.setattr(Registry, "invoke", invoke)
     monkeypatch.setattr(fastpath, "plan", lambda text, *a, **k: None)  # (no regex fast path covers it)
     agent_runs: list[str] = []
 
@@ -234,3 +236,62 @@ def test_the_lane_is_shut_when_the_resolver_is_off(monkeypatch):
     monkeypatch.setattr(config, "_settings", None)
     asyncio.run(s.handle("start wala button dabao", from_user=True))
     assert ran == [] and agent_runs == ["start wala button dabao"]
+
+
+# ---- commands-menus ----------------------------------------------------------------------------------
+
+
+def test_menu_command_is_registered_before_click_text_as_an_input_tool():
+    from neo2.core.agent.registry import catalog
+    from neo2.core.tools import PRESETS, load_all
+    from neo2.mcp.server import INPUT_TOOLS
+
+    load_all()
+    names = [t.name for t in catalog().all()]
+    assert names.index("menu_command") < names.index("click_text")  # (its fast paths win "… in the File menu")
+    t = catalog().get("menu_command")
+    assert t.by_utterance and not t.read_only and "menu_command" in INPUT_TOOLS
+    assert "menu_command" in PRESETS["mac"] and "menu_command" not in PRESETS["mac_read"]
+    assert "look" in PRESETS["mac_read"] and catalog().get("look").read_only
+
+
+def test_typing_into_a_named_field_goes_through_fill_field(monkeypatch):
+    from neo2.core.agent.registry import ToolOutput
+    from neo2.core.tools.computer import menus, tools_keys
+
+    got = []
+
+    async def fill(text, field, c, *, app="", replace=False):
+        got.append((text, field, app, replace))
+        return ToolOutput("Typed")
+
+    monkeypatch.setattr(menus, "fill_field", fill)
+    out = asyncio.run(tools_keys.type_text({"text": "cats", "field": "search"}, ToolContext(origin="user")))
+    assert out.text == "Typed" and got == [("cats", "search", "", False)]
+
+
+def test_the_users_words_naming_no_control_may_name_a_menu_command(monkeypatch):
+    from neo2.core.agent.registry import ToolOutput
+    from neo2.core.tools.computer import menus, ocr, tools_label
+
+    async def no_guard(want=""):
+        return None
+
+    monkeypatch.setattr(gates, "_guard_front", no_guard)
+    monkeypatch.setattr(ax, "window_elements", lambda app=None: ("Game", (0.0, 0.0, 800.0, 600.0), []))
+    asked = []
+
+    async def by_utterance(text, c):
+        asked.append((text, c.origin))
+        return ToolOutput("Chose Game › New Game")
+
+    async def no_ocr(*a, **k):
+        return None
+
+    monkeypatch.setattr(menus, "by_utterance", by_utterance)
+    monkeypatch.setattr(ocr, "click_text_fallback", no_ocr)
+    a = {"label": "start a new game", "utterance": "start a new game"}
+    out = asyncio.run(tools_label.click_text(a, ToolContext(origin="user")))
+    assert out.text == "Chose Game › New Game" and asked == [("start a new game", "user")]
+    out = asyncio.run(tools_label.click_text(a, ToolContext(origin="agent")))  # a model's label: no menu guess
+    assert len(asked) == 1 and "is called" in out

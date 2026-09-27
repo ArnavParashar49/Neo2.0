@@ -43,11 +43,12 @@ from neo2.core.tools.computer import input as inp  # noqa: F401
 
 # The catalog's order, which NEO.app has always had (the fast paths break ties by it, the tool
 # picker's keyword fallback too, and Gemini Live declares its tools in it). A new tool takes its
-# place here; one that doesn't comes after the rest. Names not defined yet are skipped (look and
-# menu_command are planned: their places are kept).
+# place here; one that doesn't comes after the rest. Names not defined yet are skipped. menu_command
+# comes before click_text: its fast paths claim only words that name a menu ("click New Window in the
+# File menu"), which click_text's generic "click X" would otherwise take.
 ORDER: tuple[str, ...] = (
     "ax_tree", "ax_find", "screenshot", "look", "apps_running", "ax_press", "ax_set_value", "click", "drag",
-    "scroll", "type_text", "dictate", "hotkey", "click_text", "menu_command", "open_app", "activate_app",
+    "scroll", "type_text", "dictate", "hotkey", "menu_command", "click_text", "open_app", "activate_app",
     "quit_app", "close", "applescript", "open_url", "page_read", "safari_read",
     # (the task tools, neo2/core/tools/tasks.py, come here)
     "finder_reveal", "shell", "read_file", "write_file", "edit_file", "trash",

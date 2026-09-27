@@ -8,7 +8,7 @@ import time
 
 from neo2.core.agent.registry import ToolContext, ToolOutput
 from neo2.core.config import decide_mode
-from neo2.core.tools.computer import apps, ax, gates, phrases, pointer
+from neo2.core.tools.computer import apps, ax, gates, menus, phrases, pointer
 from neo2.core.tools.computer import input as inp
 from neo2.core.tools.computer._catalog import _p, tool
 
@@ -137,16 +137,29 @@ async def _type(text: str) -> str:
 
 @tool(
     "type_text",
-    "Type text where the cursor is (dictation). Use for literal text the user wants typed.",
-    _p({"text": {"type": "string"}}, ["text"]),
+    "Type text where the cursor is (dictation). Use for literal text the user wants typed. field: a text "
+    "field's label to type into instead (found by its label in the front or named app's window).",
+    _p(
+        {
+            "text": {"type": "string"},
+            "field": {"type": "string", "description": "the label of the field to type into (optional)"},
+            "app": {"type": "string", "description": "the app whose field it is (optional; the front app)"},
+        },
+        ["text"],
+    ),
     category="computer",
-    fast_path=[(phrases._LITERAL_TYPE, {"text": "<text>"}), (phrases._LITERAL_WRITE, {"text": "<text>"})],
+    # (a named field first: "type hello in the search field" keeps the place it names)
+    fast_path=[*menus.FIELD_FAST_PATHS, (phrases._LITERAL_TYPE, {"text": "<text>"}), (phrases._LITERAL_WRITE, {"text": "<text>"})],
     quiet=True,
     payload=True,
 )
 async def type_text(a: dict, c: ToolContext) -> str | ToolOutput:
     if err := gates._needs_input():
         return err
+    if a.get("field"):  # a field by its label: found, gated, set through Accessibility and read back
+        return await menus.fill_field(
+            str(a["text"]), str(a["field"]), c, app=str(a.get("app") or ""), replace=bool(a.get("replace"))
+        )
     text = str(a["text"])
     err, created = await _ensure_text_focus()
     if err:

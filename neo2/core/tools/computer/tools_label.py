@@ -9,9 +9,26 @@ import re
 from neo2.core.agent import confirm
 from neo2.core.agent.registry import Choice, Effect, Handoff, ToolContext, ToolOutput, fence
 from neo2.core.reflex import outcomes
-from neo2.core.tools.computer import ax, gates, ocr, phrases, pointer, resolve, wait
+from neo2.core.tools.computer import ax, gates, menus, ocr, phrases, pointer, resolve, wait
 from neo2.core.tools.computer import input as inp
 from neo2.core.tools.computer._catalog import _p, tool
+
+# menu_command: a command of the front (or named) app's own menu bar, by its name — never the system
+# menu; a sheet it opens is answered only by the user's literal word (decision 46). menus.py holds it
+# whole, calling the gates through this package; it is an input tool (neo2's INPUT_TOOLS, the "mac"
+# preset). Its by-utterance lane: the reflex's pick of it, for the user's own words only.
+tool(**menus.TOOL, by_utterance=True)(menus.menu_command)
+
+
+def _menu_meaning(request: str, titles: list[str]) -> int | None:
+    """The resolver's pick among a menu's command titles (menus.meaning): only a stage that acts —
+    menus asks this only once "meaning" is promoted — and never a guess (None)."""
+    cands = [resolve.Candidate(t, "AXMenuItem", id=str(i)) for i, t in enumerate(titles)]
+    res = resolve.resolve(request, cands, want="menu", origin="user", log_it=False)
+    return int(res.candidate.id) if isinstance(res, resolve.Resolved) and res.stage == "meaning" else None
+
+
+menus.meaning = _menu_meaning
 
 
 @tool(
@@ -54,6 +71,11 @@ async def click_text(a: dict, c: ToolContext) -> str | ToolOutput:
     res = await resolve.ground(a, c, els, frame, bundle=bundle, skip=lambda e: id(e) not in allowed)
     if isinstance(res, resolve.Ambiguous):
         if res.reason in ("nothing", "no_match"):
+            # The user's own words that name no control on screen may name one of the app's menu
+            # commands ("start a new game": Game › New Game, and its sheet only by their literal word).
+            said = str(a.get("utterance") or "").strip() if c.origin == "user" else ""
+            if said and (out := await menus.by_utterance(said, c)) is not None:
+                return out
             # Nothing Accessibility names so: the window's words read off the screen (a canvas, a
             # board, a dialog the app draws itself), clicked through the same checks as any click.
             if (out := await ocr.click_text_fallback(a, c, app=app, window=frame, els=els)) is not None:
