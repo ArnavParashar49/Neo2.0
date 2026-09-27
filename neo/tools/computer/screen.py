@@ -148,12 +148,20 @@ def sample_points(points: list[tuple[float, float]], r: float = _SAMPLE_R) -> li
 
 
 def differs(a: Image.Image, b: Image.Image) -> bool:
-    """Do two samples of the same place show something different?"""
+    """Do two samples of the same place show something different? A text caret blinking near the
+    point — one thin upright strip of cells, nothing else — is not a change (a click that moved the
+    keyboard focus says so through Accessibility)."""
     if a.size != b.size:
         return True
     pa, pb = a.convert("L").tobytes(), b.convert("L").tobytes()
-    changed = sum(1 for u, v in zip(pa, pb, strict=True) if abs(int(u) - int(v)) > _CELL_DIFF)
-    return changed >= _CELLS_CHANGED
+    width = a.size[0]
+    cells = [i for i, (u, v) in enumerate(zip(pa, pb, strict=True)) if abs(int(u) - int(v)) > _CELL_DIFF]
+    if len(cells) < _CELLS_CHANGED:
+        return False
+    cols = {i % width for i in cells}
+    rows = {i // width for i in cells}
+    wide, tall = max(cols) - min(cols) + 1, max(rows) - min(rows) + 1
+    return not (wide <= 2 and tall >= 2 * wide)  # (a caret straddling two cells is two columns wide)
 
 
 _MIN_CUT = 50  # points: a part of a window smaller than this is no page to look at

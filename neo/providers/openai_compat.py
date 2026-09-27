@@ -161,6 +161,7 @@ class OpenAICompatProvider:
         self._reasoning = reasoning_effort
         self._base_url = base_url
         self._is_local = "127.0.0.1" in base_url or "localhost" in base_url
+        self.on_device = self._is_local  # nothing sent to it leaves the Mac
         self._client = AsyncOpenAI(
             base_url=base_url,
             api_key=api_key or "none",

@@ -180,10 +180,7 @@ class Chain:
         failures: list[tuple[str, ProviderError]] = []
         providers = self._providers()
         if _has_picture(messages):
-            # The request is working from a picture (a screenshot of a board): a brain that can see
-            # it goes first, however recently it failed — a text-only one would act blind.
-            now = _time.time()
-            providers.sort(key=lambda p: (_cooling(p) > now, not getattr(p, "supports_vision", False)))
+            providers = _eyes_first(providers)
         for p in providers:
             try:
                 turn = await p.complete(
@@ -233,6 +230,21 @@ class Chain:
                 if self.sticky:
                     self._demote(p.name, e)
         raise self._no_brain(failures)
+
+
+def _eyes_first(providers: list[Provider]) -> list[Provider]:
+    """For a request working from a picture (a screenshot of a board): a brain that can see it goes
+    first, however recently it failed — a text-only one would act blind. But never ahead of a brain
+    on this Mac that came before it: the user who put a local brain first keeps their screen on the
+    Mac, and a cloud brain gets the picture only when the local one can't answer."""
+    now = _time.time()
+    local_before = 0
+    order: list[tuple[int, bool, bool, int]] = []
+    for i, p in enumerate(providers):
+        order.append((local_before, _cooling(p) > now, not getattr(p, "supports_vision", False), i))
+        if getattr(p, "on_device", False):
+            local_before += 1
+    return [providers[k[-1]] for k in sorted(order)]
 
 
 def _has_picture(messages: list[Message]) -> bool:

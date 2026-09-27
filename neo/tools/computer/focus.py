@@ -188,8 +188,21 @@ class _BSDInfo(ctypes.Structure):
 
 
 _PROC_PIDTBSDINFO = 3
+_PROC_PIDLISTFDS = 1
+_PROC_PIDFDVNODEPATHINFO = 2
+_PROX_FDTYPE_VNODE = 1
+# struct vnode_fdinfowithpath (sys/proc_info.h): a proc_fileinfo (24 bytes), a vnode_info (152), then
+# the path (MAXPATHLEN).
+_VNODE_PATH_AT = 24 + 152
+_VNODE_INFO_SIZE = _VNODE_PATH_AT + 1024
 _NO_TTY = 0xFFFFFFFF
 _libproc: ctypes.CDLL | bool | None = None
+
+
+class _FDInfo(ctypes.Structure):
+    """struct proc_fdinfo: one open file of a process, and what kind it is."""
+
+    _fields_ = [("proc_fd", ctypes.c_int32), ("proc_fdtype", ctypes.c_uint32)]
 
 
 def _proclib():
@@ -201,6 +214,8 @@ def _proclib():
             lib.proc_listchildpids.restype = ctypes.c_int
             lib.proc_pidinfo.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_uint64, ctypes.c_void_p, ctypes.c_int]
             lib.proc_pidinfo.restype = ctypes.c_int
+            lib.proc_pidfdinfo.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_void_p, ctypes.c_int]
+            lib.proc_pidfdinfo.restype = ctypes.c_int
             _libproc = lib
         except (OSError, AttributeError):
             _libproc = False
@@ -227,12 +242,34 @@ def _proc(pid: int) -> tuple[str, bool]:
     return info.pbi_comm.decode(errors="replace"), info.e_tdev != _NO_TTY
 
 
-def hosts_shell(pid: int, depth: int = 3) -> bool:
-    """Does this app run an interactive shell — a terminal, an editor's terminal pane? Its own
-    processes say so: a shell this Mac lists in /etc/shells, on a terminal device, among the app's
-    children (or theirs). There, a Return runs whatever is on the command line."""
-    if not pid or pid <= 1:
+def _pty_master(path: str) -> bool:
+    """A pseudo-terminal's master side, as an open file's path shows it."""
+    return path == "/dev/ptmx" or (path.startswith("/dev/pty") and len(path) == len("/dev/ptyp0"))
+
+
+def _holds_pty(pid: int) -> bool:
+    """Does this process itself hold a pseudo-terminal's master side — the end a terminal draws
+    from and types into? (Read from its open files; this user's own processes only.)"""
+    lib = _proclib()
+    if lib is None or not pid or pid <= 1:
         return False
+    fds = (_FDInfo * 2048)()
+    n = lib.proc_pidinfo(int(pid), _PROC_PIDLISTFDS, 0, fds, ctypes.sizeof(fds))
+    for i in range(max(0, min(n // ctypes.sizeof(_FDInfo), 2048))):
+        if fds[i].proc_fdtype != _PROX_FDTYPE_VNODE:
+            continue
+        info = ctypes.create_string_buffer(_VNODE_INFO_SIZE)
+        if lib.proc_pidfdinfo(int(pid), fds[i].proc_fd, _PROC_PIDFDVNODEPATHINFO, info, _VNODE_INFO_SIZE) != _VNODE_INFO_SIZE:
+            continue
+        path = info.raw[_VNODE_PATH_AT:].split(b"\0", 1)[0].decode(errors="replace")
+        if _pty_master(path):
+            return True
+    return False
+
+
+def _shell_below(pid: int, depth: int) -> bool:
+    """A shell this Mac lists in /etc/shells, on a terminal device, among the process's children
+    (or theirs, ``depth`` levels down)."""
     shells = _shells()
     level = [pid]
     for _ in range(depth):
@@ -245,3 +282,19 @@ def hosts_shell(pid: int, depth: int = 3) -> bool:
                 nxt.append(child)
         level = nxt[:256]
     return False
+
+
+def hosts_shell(pid: int, depth: int = 3) -> str:
+    """Does this app run an interactive shell, where a Return runs whatever is on the command line?
+    Told by its own processes, never by its name:
+
+    "terminal" — the app itself holds a pseudo-terminal's master side: a terminal app, every view
+    of it a command line (iTerm2 too, whose shells run under a server that isn't its child);
+    "pane" — a shell on a terminal device runs under the app's helpers only: a terminal pane in an
+    editor or a chat app, a command line only while the keyboard is in it (ax.focused_terminal);
+    "" — neither."""
+    if not pid or pid <= 1:
+        return ""
+    if _holds_pty(pid):
+        return "terminal"
+    return "pane" if _shell_below(pid, depth) else ""

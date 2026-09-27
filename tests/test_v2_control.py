@@ -116,6 +116,7 @@ def test_scroll_fast_path_uses_the_pointer(monkeypatch):
     monkeypatch.setattr(comp.inp, "mouse_position", lambda: (640.0, 400.0))
     seen = {}
     monkeypatch.setattr(comp.inp, "scroll", lambda x, y, dy, dx: seen.update(x=x, y=y, dy=dy) or "ok")
+    monkeypatch.setattr(comp.inp, "move", lambda x, y: None)  # (a model's scroll: the pointer rests there first)
     tool, args = _match_fast_path("scroll down")
     asyncio.run(registry().invoke(tool, args, ToolContext(user_text="")))
     assert seen == {"x": 640.0, "y": 400.0, "dy": -8}

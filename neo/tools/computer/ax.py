@@ -10,6 +10,7 @@ look still means the element it was issued for (never whatever a newer walk numb
 from __future__ import annotations
 
 import itertools
+import re
 import threading
 import time
 from dataclasses import dataclass, field
@@ -131,6 +132,18 @@ def _attr(el, name: str, default=None):
     except Exception:  # noqa: BLE001 - an element that can't be asked has nothing to say
         return default
     return val if err == 0 else default
+
+
+def _system_wide():
+    """The system-wide AX element (whatever has the keyboard focus, whatever is under a point),
+    answering within _AX_TIMEOUT_S like every app element NEO makes. (macOS takes a timeout set on
+    the system-wide element as this process's default for every element.)"""
+    el = AS.AXUIElementCreateSystemWide()
+    try:
+        AS.AXUIElementSetMessagingTimeout(el, _AX_TIMEOUT_S)
+    except Exception:  # noqa: BLE001
+        pass
+    return el
 
 
 def _app_el(pid: int):
@@ -617,7 +630,7 @@ def set_value(eid: str, value: str) -> str:
 
 def focused_role() -> tuple[str, str]:
     """(role, subrole) of whatever has the keyboard focus, or ("", "")."""
-    el = _attr(AS.AXUIElementCreateSystemWide(), AS.kAXFocusedUIElementAttribute)
+    el = _attr(_system_wide(), AS.kAXFocusedUIElementAttribute)
     if el is None:
         return "", ""
     return _str(_attr(el, AS.kAXRoleAttribute)), _str(_attr(el, AS.kAXSubroleAttribute))
@@ -631,7 +644,7 @@ def focused_is_secure() -> bool:
 
 def focused_editable() -> bool:
     """Is the keyboard focus in something you can type into (never a password field)?"""
-    el = _attr(AS.AXUIElementCreateSystemWide(), AS.kAXFocusedUIElementAttribute)
+    el = _attr(_system_wide(), AS.kAXFocusedUIElementAttribute)
     if el is None:
         return False
     role = _str(_attr(el, AS.kAXRoleAttribute))
@@ -774,16 +787,35 @@ def press_element(e: Element) -> str:
 
 
 def focused_element_text() -> str:
-    sys_el = AS.AXUIElementCreateSystemWide()
-    el = _attr(sys_el, AS.kAXFocusedUIElementAttribute)
+    el = _attr(_system_wide(), AS.kAXFocusedUIElementAttribute)
     if el is None:
         return ""
     return _str(_attr(el, AS.kAXValueAttribute)) or _str(_attr(el, "AXSelectedText"))
 
 
+# What a terminal view says it is: an editor's terminal pane "Terminal 1, zsh", a web terminal's
+# input "Terminal input" (never a file named terminal.py).
+_TERMINAL = re.compile(r"\bterminal\b(?!\.\w)", re.I)
+
+
+def focused_terminal() -> bool:
+    """Is the keyboard focus in a terminal view — told by what the focused element, or the pane
+    around it, says it is? For an app that runs a shell in a pane (focus.hosts_shell: "pane"), a
+    Return runs a command only there; its chat box or editor is still a chat box or an editor."""
+    el = _attr(_system_wide(), AS.kAXFocusedUIElementAttribute)
+    for _ in range(2):
+        if el is None:
+            return False
+        said = " ".join(_str(_attr(el, a, "")) for a in ("AXDescription", "AXTitle", "AXHelp"))
+        if _TERMINAL.search(said):
+            return True
+        el = _attr(el, "AXParent")
+    return False
+
+
 def _element_at(x: float, y: float):
     try:
-        err, el = AS.AXUIElementCopyElementAtPosition(AS.AXUIElementCreateSystemWide(), float(x), float(y), None)
+        err, el = AS.AXUIElementCopyElementAtPosition(_system_wide(), float(x), float(y), None)
     except Exception:  # noqa: BLE001
         return None
     if err or el is None:
@@ -889,6 +921,38 @@ def summary(el) -> str:
     texts, buttons = _words(el)
     said = " ".join(f"“{t}”" for t in ([title] if title else []) + texts[:2])
     return (said or "(no text)") + (f" (buttons: {', '.join(buttons)})" if buttons else "")
+
+
+_WORDS_BUDGET_S = 0.5
+
+
+@pooled
+def window_words(h: Hit) -> str:
+    """What the part of the window under a point says it is for — the element's own description,
+    the texts beside it at each level up to its window, and the window's title (an AirDrop window:
+    "AirDrop lets you share instantly with people nearby" next to its recipients) — for judging
+    what dropping something there does. Not buttons: every window has some."""
+    said: list[str] = []
+    el = h.el
+    stop = time.monotonic() + _WORDS_BUDGET_S  # a busy app answers each question slowly: enough is enough
+    for _ in range(8):
+        if el is None or len(said) >= 16 or time.monotonic() > stop:
+            break
+        said += [v[:80] for a in ("AXDescription", "AXHelp") if (v := _str(_attr(el, a, "")).strip())]
+        if _str(_attr(el, AS.kAXRoleAttribute)) in ("AXWindow", "AXSheet"):
+            said.append(_str(_attr(el, AS.kAXTitleAttribute)))
+            break
+        for child in (_attr(el, AS.kAXChildrenAttribute) or [])[:30]:
+            if time.monotonic() > stop:
+                break
+            if _str(_attr(child, AS.kAXRoleAttribute)) == "AXStaticText":
+                text = _str(_attr(child, AS.kAXValueAttribute)) or _str(_attr(child, AS.kAXTitleAttribute))
+                if text.strip():
+                    said.append(" ".join(text.split())[:80])
+        el = _attr(el, "AXParent")
+    if h.el is None and h.window is not None:
+        said.append(_str(_attr(h.window, AS.kAXTitleAttribute)))
+    return " ".join(w for w in said if w)[:600]
 
 
 def _shown(el) -> bool:

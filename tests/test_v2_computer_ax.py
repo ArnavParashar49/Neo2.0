@@ -12,11 +12,12 @@ import pytest
 import neo.tools.computer as comp
 from neo.agent import confirm
 from neo.agent.registry import ToolContext, registry
-from neo.tools.computer import apps, ax, focus, pointer
+from neo.tools.computer import apps, ax, focus, pointer, policy
 
 OK, NO_VALUE, UNSUPPORTED, CANNOT_COMPLETE = 0, -25212, -25205, -25204
 _REAL_HIT = ax.hit  # (the suite's conftest swaps it for "nothing there" in every test)
 _REAL_HOSTS_SHELL = focus.hosts_shell  # (and this for "no shell")
+_REAL_FOCUSED_TEXT = ax.focused_element_text  # (and this for "no text")
 
 
 class El:
@@ -112,6 +113,10 @@ class FakeAS:
 
     def AXUIElementGetPid(self, el, _):
         return OK, el.pid
+
+    def AXUIElementCopyElementAtPosition(self, el, x, y, _):
+        self.asked_at = (el, x, y)
+        return (OK, self.at_point) if getattr(self, "at_point", None) is not None else (NO_VALUE, None)
 
 
 @pytest.fixture
@@ -260,7 +265,7 @@ def test_typing_that_never_reached_the_field_is_not_reported_as_typed(monkeypatc
     events = _typing(monkeypatch, focus_takes=True, visible=(300, 100, 800, 800))
     monkeypatch.setattr(ax, "focused_element_text", lambda: "Dear Sam,")  # the same before and after
     out = asyncio.run(registry().invoke("type_text", {"text": "hello"}, ToolContext()))
-    assert not out.ok and "didn't change" in out.text and ("type", "hello") in events
+    assert not out.ok and "couldn't confirm" in out.text and ("type", "hello") in events
 
 
 def test_a_hung_app_is_asked_briefly_and_said_to_be_busy(fake):
@@ -450,8 +455,11 @@ def test_an_app_running_a_shell_is_told_by_its_processes(monkeypatch):
     monkeypatch.setattr(focus, "_children", lambda pid: kids.get(pid, []))
     monkeypatch.setattr(focus, "_proc", lambda pid: procs.get(pid, ("", False)))
     monkeypatch.setattr(focus, "_shells", lambda: frozenset({"zsh", "bash"}))
+    monkeypatch.setattr(focus, "_holds_pty", lambda pid: False)
     real = _REAL_HOSTS_SHELL
     assert real(100) and not real(200) and not real(1)  # (never launchd, the parent of everything)
+    monkeypatch.setattr(focus, "_holds_pty", lambda pid: pid in (100, 1))  # a terminal draws its shells' output
+    assert real(100) == "terminal" and real(1) == ""
 
 
 def test_a_chromium_or_electron_apps_web_tree_is_switched_on_while_its_ids_are_used(monkeypatch):
@@ -538,3 +546,106 @@ def test_the_real_pointer_pipeline_never_brings_neo_forward(monkeypatch):
     monkeypatch.setattr(apps, "bring_pid_front", lambda pid: pytest.fail("brought NEO forward"))
     with pytest.raises(pointer.Refused):
         asyncio.run(pointer.probe([(10.0, 10.0)]))
+
+
+# ---- where a Return runs a command: the app's own processes, and where the keyboard is ------------------------
+
+
+def _procs(monkeypatch, kids, procs, pty_holders):
+    monkeypatch.setattr(focus, "_children", lambda p: kids.get(p, []))
+    monkeypatch.setattr(focus, "_proc", lambda p: procs.get(p, ("", False)))
+    monkeypatch.setattr(focus, "_shells", lambda: frozenset({"zsh", "bash"}))
+    monkeypatch.setattr(focus, "_holds_pty", lambda p: p in pty_holders)
+    monkeypatch.setattr(focus, "hosts_shell", _REAL_HOSTS_SHELL)
+    monkeypatch.setattr(comp, "_doc_like", lambda n, p: False)
+    monkeypatch.setattr(ax, "focused_role", lambda: ("AXTextArea", ""))
+    monkeypatch.setattr(ax, "focused_element_text", lambda: "me@mac ~ % rm -rf old")
+
+
+def test_a_terminal_whose_shells_run_under_a_server_is_still_a_terminal(monkeypatch):
+    # iTerm2 with session restoration (its default) runs every shell under a long-lived server whose
+    # parent is launchd, not iTerm2: no shell is iTerm2's descendant. iTerm2 itself holds each
+    # pseudo-terminal's master side (the server hands it over), and that is the evidence.
+    ITERM, SERVER, LOGIN, ZSH = 100, 200, 201, 202
+    _procs(monkeypatch, {ITERM: [], SERVER: [LOGIN], LOGIN: [ZSH]},
+           {SERVER: ("iTermServer-3.5", False), LOGIN: ("login", True), ZSH: ("-zsh", True)}, {ITERM})  # fmt: skip
+    assert _REAL_HOSTS_SHELL(ITERM) == "terminal"
+    assert asyncio.run(comp._line_break("iTerm2", ITERM, "AXTextArea")) == ("", comp._SHELL_JOINED)
+    gate = asyncio.run(comp._ask_before_keys({"keys": "return"}, "return", "iTerm2", ToolContext(), ITERM))
+    assert gate and gate.startswith(confirm.NEEDS_CONFIRM) and "rm -rf old" in confirm.peek().detail
+    confirm.cancel("t")
+
+
+def test_an_apps_terminal_pane_counts_only_while_the_keyboard_is_in_it(monkeypatch):
+    # A chat or editor app with a terminal pane: the shell runs under its helper, which holds the
+    # pseudo-terminal; the app itself doesn't. Its chat box is a chat box.
+    APP, HELPER, ZSH = 629, 1137, 1138
+    _procs(monkeypatch, {APP: [HELPER], HELPER: [ZSH]}, {HELPER: ("App Helper", False), ZSH: ("zsh", True)}, {HELPER})
+    assert _REAL_HOSTS_SHELL(APP) == "pane"
+    monkeypatch.setattr(ax, "focused_terminal", lambda: False)  # the keyboard is in its chat box
+    assert asyncio.run(comp._line_break("App", APP, "AXTextArea")) == ("shift+return", "")
+    assert asyncio.run(comp._ask_before_keys({"keys": "return"}, "return", "App", ToolContext(), APP)) is None
+    monkeypatch.setattr(ax, "focused_terminal", lambda: True)  # …and now in its terminal pane
+    assert asyncio.run(comp._line_break("App", APP, "AXTextArea")) == ("", comp._SHELL_JOINED)
+    gate = asyncio.run(comp._ask_before_keys({"keys": "return"}, "return", "App", ToolContext(), APP))
+    assert gate and "runs the command" in gate
+    confirm.cancel("t")
+
+
+def test_the_focused_element_says_whether_it_is_a_terminal(fake):
+    fake.system.attrs["AXFocusedUIElement"] = El("AXTextArea", AXDescription="Terminal input")
+    assert ax.focused_terminal()
+    fake.system.attrs["AXFocusedUIElement"] = El("AXTextArea", AXDescription="Write your prompt to Claude")
+    assert not ax.focused_terminal()
+    del fake.system.attrs["AXFocusedUIElement"]
+    assert not ax.focused_terminal()
+
+
+def test_a_pseudo_terminal_the_app_holds_is_read_from_its_open_files(monkeypatch):
+    import ctypes
+
+    files = {100: [(3, 1, "/dev/ptmx"), (4, 2, ""), (5, 1, "/Users/me/notes.txt")], 200: [(3, 1, "/dev/ttys003"), (4, 1, "/dev/null")]}
+
+    class Lib:
+        def proc_pidinfo(self, pid, flavor, arg, buf, size):
+            got = files.get(pid, [])
+            for i, (fd, kind, _path) in enumerate(got):
+                buf[i].proc_fd, buf[i].proc_fdtype = fd, kind
+            return len(got) * ctypes.sizeof(focus._FDInfo)
+
+        def proc_pidfdinfo(self, pid, fd, flavor, buf, size):
+            path = next(p for f, _k, p in files[pid] if f == fd).encode()
+            ctypes.memmove(ctypes.addressof(buf) + focus._VNODE_PATH_AT, path, len(path))
+            return size
+
+    monkeypatch.setattr(focus, "_proclib", lambda: Lib())
+    assert focus._holds_pty(100) and not focus._holds_pty(200) and not focus._holds_pty(300)
+
+
+def test_system_wide_lookups_answer_within_the_short_timeout(fake):
+    fake.system.attrs["AXFocusedUIElement"] = El("AXTextArea", value="hi")
+    fake.at_point = El("AXButton", "OK")
+    for call in (lambda: ax._element_at(10, 10), ax.focused_role, ax.focused_editable, _REAL_FOCUSED_TEXT, ax.focused_terminal):
+        fake.timeouts.clear()
+        call()
+        assert (fake.system, ax._AX_TIMEOUT_S) in fake.timeouts  # a hung app holds NEO 2 s, not ~6 s
+
+
+def test_the_words_around_a_drop_spot_are_what_its_part_of_the_window_says(fake):
+    # An AirDrop window: its recipients are just names; the text beside them says what a drop does.
+    # (Its sidebar comes first in the window and says nothing about it.)
+    person = El("AXImage", "Priya’s iPhone")
+    intro = El("AXStaticText", value="AirDrop lets you share instantly with people nearby.")
+    view = El("AXGroup", children=[intro, El("AXGroup", children=[person])])
+    sidebar = El("AXOutline", children=[El("AXRow", children=[El("AXStaticText", value=n)]) for n in ("Recents", "Desktop", "Documents", "Downloads")])
+    win = window("AirDrop", sidebar, view)
+    fake.add_app("Finder", 3, El("AXApplication", children=[win]))
+    said = ax.window_words(ax.Hit(pid=3, app="Finder", label="Priya’s iPhone", el=person, window=win))
+    assert "share instantly" in said and "AirDrop" in said
+    assert policy.drop_commits("Priya’s iPhone", said)
+    body = El("AXTextArea", value="See the attached notes.")
+    draft = window("New Message", El("AXStaticText", value="To:"), El("AXStaticText", value="Subject:"), El("AXScrollArea", children=[body]))
+    fake.add_app("Mail", 4, El("AXApplication", children=[draft]))
+    around = ax.window_words(ax.Hit(pid=4, app="Mail", label="See the attached notes.", el=body, window=draft))
+    assert "New Message" in around and not policy.drop_commits("See the attached notes.", around)
+    assert policy.drop_commits("Trash")  # onto the Trash: its own name says what a drop there does

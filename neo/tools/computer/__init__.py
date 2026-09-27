@@ -251,15 +251,53 @@ async def apps_running(a: dict, c: ToolContext) -> str:
 
 
 def _taint(c: ToolContext, name: str) -> None:
-    """Words read off the screen went into this result: the request has read untrusted content."""
+    """Words read off the screen went into this result (a label, a sheet's text, even in a
+    refusal): the request has read untrusted content, and a "yes for this task" given before
+    doesn't cover what follows it (grants.read_untrusted)."""
     if name not in c.taint:
         c.taint.append(name)
+    grants.read_untrusted(name)
 
 
-async def _watch(c: ToolContext, pid: int, pts: list[tuple[float, float]]) -> pointer.Look | None:
+def _read_from_screen(c: ToolContext, text: str) -> str:
+    """A reply that quotes the screen (a sheet in the way, fenced) counts as reading it."""
+    if '<untrusted source="screen">' in text:
+        _taint(c, "screen")
+    return text
+
+
+def _refused(c: ToolContext, r: pointer.Refused) -> ToolOutput:
+    if r.screen:
+        _taint(c, "screen")
+    return ToolOutput(str(r), ok=False)
+
+
+async def _watch(
+    c: ToolContext, pid: int, pts: list[tuple[float, float]], hover: tuple[float, float] | None = None
+) -> pointer.Look | None:
     """The look before an input a model chose (the user's own commands aren't second-guessed:
-    they are watching)."""
-    return await pointer.look(pid, pts) if c.origin == "agent" else None
+    they are watching), with the pointer already at ``hover``, where the input will leave it."""
+    return await pointer.before(pid, pts, hover) if c.origin == "agent" else None
+
+
+async def _element_spot(eid: str, verb: str = "click") -> tuple[ax.Element, int, str, tuple[float, float]] | str:
+    """(element, its app's pid, its app's name, where to act on it now) for an ax_tree id — the
+    middle of its part that is on screen now, not where the tree saw it — or why not."""
+    e = ax.get(str(eid))
+    if not e:
+        return f"Error: unknown element {eid} — call ax_tree first."
+    pid = await asyncio.to_thread(_element_pid, e)
+    owner = await asyncio.to_thread(ax.app_of, e.ref) if e.ref is not None else ""
+    if ax.is_neo(pid, owner):
+        return f"Error: that element is NEO's own window — NEO never {verb}s its own controls."
+    frame = await asyncio.to_thread(ax.visible_frame, e.ref) if e.ref is not None else (e.x, e.y, e.w, e.h)
+    at = await asyncio.to_thread(pointer.spot, frame) if frame is not None else None
+    if at is None:
+        return (
+            f"Error: {e.id} isn't on screen now (scrolled out of view, past the screen's edge, or gone) — scroll "
+            "to it or move its window, then look again (ax_tree)."
+        )
+    return e, pid, owner, at
 
 
 def _element_pid(e: ax.Element) -> int:
@@ -299,8 +337,7 @@ async def ax_press(a: dict, c: ToolContext) -> str:
 async def _changes(before: pointer.Look, pid: int, c: ToolContext) -> str:
     """What visibly followed a key press or an AX press — only what changed (a press may rightly
     change nothing anyone can see)."""
-    now = await pointer.after(before, pid, [])
-    out = pointer.compare(before, now, [])
+    out = await pointer.scene_change(before, pid)
     if out.changed is not True:
         return ""
     text = " " + out.said
@@ -375,21 +412,13 @@ async def click(a: dict, c: ToolContext) -> str | ToolOutput:
     except ValueError as e:
         return f"Error: {e}"
     try:
+        shot = None
         if a.get("id"):
-            e = ax.get(str(a["id"]))
-            if not e:
-                return f"Error: unknown element {a['id']} — call ax_tree first."
-            pid = await asyncio.to_thread(_element_pid, e)
-            owner = await asyncio.to_thread(ax.app_of, e.ref) if e.ref is not None else ""
-            if ax.is_neo(pid, owner):
-                return "Error: that element is NEO's own window — NEO never clicks its own buttons."
-            frame = await asyncio.to_thread(ax.visible_frame, e.ref) if e.ref is not None else (e.x, e.y, e.w, e.h)
-            if frame is None:
-                return (
-                    f"Error: {e.id} isn't on screen now (scrolled out of view, or gone) — scroll to it or look "
-                    "again (ax_tree)."
-                )
-            pts = [(frame[0] + frame[2] / 2, frame[1] + frame[3] / 2)]
+            got = await _element_spot(a["id"])
+            if isinstance(got, str):
+                return got
+            e, pid, owner, at = got
+            pts = [at]
             t = await pointer.probe(pts)
             labels = [(e.title or e.value, owner), (t.hits[0].label, t.hits[0].app or owner)]
             head = f"{pointer.click_word(button, count)} {e.id} ({e.role.removeprefix('AX')}) at {_at(*pts[0])}"
@@ -404,8 +433,11 @@ async def click(a: dict, c: ToolContext) -> str | ToolOutput:
         if gate := await _gate_click(a, labels):
             return gate
         await pointer.bring(t, pts, want_pid=pid)
+        # A point nothing could be told about before now shows something: judged like the rest.
+        if t.relabeled and (gate := await _gate_click(a, [(t.hits[0].label, t.hits[0].app)])):
+            return gate
     except pointer.Refused as r:
-        return ToolOutput(str(r), ok=False)
+        return _refused(c, r)
     h = t.hits[0]
     pid = pid or h.pid
     if h.app:
@@ -413,11 +445,13 @@ async def click(a: dict, c: ToolContext) -> str | ToolOutput:
     if t.brought:
         head += f" (brought {t.brought} to the front first)"
     head += "."
-    before = await _watch(c, pid, pts)
+    before = await _watch(c, pid, pts, hover=pts[0])
     await asyncio.to_thread(inp.click, *pts[0], button=button, count=count, mods=mods)
     if before is None:
         return head + _input_doubt()
     out = await pointer.outcome(before, pid, pts, [_at(*pts[0])])
+    if not pointer.at_the_point(h, shot is not None):
+        out = pointer.maybe_elsewhere(out, _at(*pts[0]))
     under = [pointer.words(h)] if not a.get("id") else []
     text, ok = pointer.report(head, out, under, _input_doubt())
     if any(under) or out.details:
@@ -427,17 +461,19 @@ async def click(a: dict, c: ToolContext) -> str | ToolOutput:
 
 @tool(
     "drag",
-    "Drag from (x1,y1) to (x2,y2): pixels of a screenshot with its shot id, or screen points. Brings "
-    "the app there to the front first and says what changed at both ends.",
+    "Drag from one point to another: each end an element id from ax_tree (id1, id2), or x1,y1 / x2,y2 — "
+    "pixels of a screenshot with its shot id, or screen points. Brings the app there to the front "
+    "first (not when the ends are in two different apps) and says what changed at both ends.",
     _p(
         {
             "x1": {"type": "number"},
             "y1": {"type": "number"},
             "x2": {"type": "number"},
             "y2": {"type": "number"},
+            "id1": {"type": "string", "description": "element id from ax_tree to drag from, instead of x1,y1"},
+            "id2": {"type": "string", "description": "element id from ax_tree to drop on, instead of x2,y2"},
             "shot": {"type": "string", "description": "screenshot id: the points are pixels of that image"},
-        },
-        ["x1", "y1", "x2", "y2"],
+        }
     ),
     category="computer",
     quiet=True,
@@ -446,34 +482,51 @@ async def drag(a: dict, c: ToolContext) -> str | ToolOutput:
     if err := _needs_input():
         return err
     try:
-        pts, shot = pointer.points(a, ("x1", "y1", "x2", "y2"), c)
+        ends: list[tuple[float, float] | None] = [None, None]
+        for i, n in enumerate(("1", "2")):
+            if a.get(f"id{n}"):
+                got = await _element_spot(a[f"id{n}"], "drag")
+                if isinstance(got, str):
+                    return got
+                ends[i] = got[3]
+        keys = tuple(k for i, n in enumerate(("1", "2")) if ends[i] is None for k in (f"x{n}", f"y{n}"))
+        coords, shot = pointer.points(a, keys, c, "drag") if keys else ([], None)
+        pts = [e if e is not None else coords.pop(0) for e in ends]
         t = await pointer.probe(pts)
+        if gate := await _gate_drop(a, t):
+            return gate
         src, dst = t.hits
-        # A drop can delete (onto the Trash) or send (onto a chat, AirDrop): the same gate as a click.
-        what = f"drag “{(src.label or 'that')[:40]}” onto “{(dst.label or 'that spot')[:40]}”"
-        commits = [lb for lb in (dst.label, src.label) if lb and policy.commits(lb)]
-        if commits:
-            where = f" in {dst.app}" if dst.app else ""
-            gate = confirm.gated("drag", a, what + where)
-            if isinstance(gate, str):
+        # Two apps: neither is brought forward — raising one could put its window over the other
+        # end (the usual drag goes from a window behind to one in front), and file views let a drag
+        # start in a background window. One app (a board, a list): it comes forward, and both ends
+        # are looked at again.
+        between_apps = bool(src.pid and dst.pid and src.pid != dst.pid)
+        if not between_apps:
+            await pointer.bring(t, pts)
+            if t.relabeled and (gate := await _gate_drop(a, t)):
                 return gate
-        await pointer.bring(t, pts)
     except pointer.Refused as r:
-        return ToolOutput(str(r), ok=False)
-    pid = t.hits[0].pid
-    before = await _watch(c, pid, pts)
+        return _refused(c, r)
+    src, dst = t.hits
+    pid = src.pid
+    before = await _watch(c, pid, pts, hover=pts[1])  # the drop leaves the pointer at the end
     await asyncio.to_thread(inp.drag, *pts[0], *pts[1])
     head = f"Dragged {_at(*pts[0])} → {_at(*pts[1])}"
     if shot is not None:
         head += f" (pixels of {shot.id})"
-    if t.hits[0].app:
-        head += f" in {t.hits[0].app}"
+    if src.app:
+        head += f" in {src.app}" + (f" onto {dst.app}" if dst.app and dst.pid != src.pid else "")
     if t.brought:
         head += f" (brought {t.brought} to the front first)"
     head += "."
     if before is None:
         return head + _input_doubt()
-    out = await pointer.outcome(before, pid, pts, [f"the start {_at(*pts[0])}", f"the end {_at(*pts[1])}"])
+    out = await pointer.outcome(before, pid, pts, [f"the start {_at(*pts[0])}", f"the end {_at(*pts[1])}"], between_apps)
+    if between_apps and out.changed is False:
+        out.said += (
+            f" (Neither app was brought forward for a drag between two apps; if {src.app or 'the app it starts in'} "
+            "only came forward, bring it to the front yourself, look again, and drag again.)"
+        )
     under = [f"start {pointer.words(src)}" if pointer.words(src) else "", f"end {pointer.words(dst)}" if pointer.words(dst) else ""]
     text, ok = pointer.report(head, out, under, _input_doubt())
     if any(under) or out.details:
@@ -481,14 +534,27 @@ async def drag(a: dict, c: ToolContext) -> str | ToolOutput:
     return ToolOutput(text, ok=ok)
 
 
+async def _gate_drop(a: dict, t: pointer.Target) -> str | None:
+    """A drop can delete (onto the Trash) or send (into an AirDrop window): the user's call, as a
+    click on such a button is. Judged by where it lands — never by the name of what is dragged."""
+    src, dst = t.hits
+    around = await asyncio.to_thread(ax.window_words, dst)
+    if not policy.drop_commits(dst.label, around):
+        return None
+    where = f" in {dst.app}" if dst.app else ""
+    gate = confirm.gated("drag", a, f"drag “{(src.label or 'that')[:40]}” onto “{(dst.label or 'that spot')[:40]}”{where}")
+    return gate if isinstance(gate, str) else None
+
+
 @tool(
     "scroll",
-    "Scroll the content under the pointer (or at x,y: screenshot pixels with its shot id, or screen "
-    "points). dy<0 scrolls down, dy>0 up (lines).",
+    "Scroll the content under the pointer, or at an element id from ax_tree (a list, a pane), or at "
+    "x,y: screenshot pixels with its shot id, or screen points. dy<0 scrolls down, dy>0 up (lines).",
     _p(
         {
             "x": {"type": "number"},
             "y": {"type": "number"},
+            "id": {"type": "string", "description": "element id from ax_tree to scroll, instead of x,y"},
             "shot": {"type": "string", "description": "screenshot id: x,y are pixels of that image"},
             "dy": {"type": "integer"},
             "dx": {"type": "integer"},
@@ -508,8 +574,13 @@ async def scroll(a: dict, c: ToolContext) -> str | ToolOutput:
     except (TypeError, ValueError):
         return "Error: dy and dx must be whole numbers (lines)."
     try:
-        if not a.get("at_pointer") and a.get("x") is not None and a.get("y") is not None:
-            pts, _shot = pointer.points(a, ("x", "y"), c)
+        if not a.get("at_pointer") and a.get("id"):
+            got = await _element_spot(a["id"], "scroll")
+            if isinstance(got, str):
+                return got
+            pts = [got[3]]
+        elif not a.get("at_pointer") and a.get("x") is not None and a.get("y") is not None:
+            pts, _shot = pointer.points(a, ("x", "y"), c, "scroll")
         else:
             pts = [await asyncio.to_thread(inp.mouse_position)]  # "scroll down": wherever the pointer is
             h = await asyncio.to_thread(ax.hit, *pts[0])
@@ -522,9 +593,9 @@ async def scroll(a: dict, c: ToolContext) -> str | ToolOutput:
                 pts = [(frame[0] + frame[2] / 2, frame[1] + frame[3] / 2)]
         t = await pointer.probe(pts)
     except pointer.Refused as r:
-        return ToolOutput(str(r), ok=False)
+        return _refused(c, r)
     pid = t.hits[0].pid
-    before = await _watch(c, pid, pts)
+    before = await _watch(c, pid, pts, hover=pts[0])
     text = await asyncio.to_thread(inp.scroll, pts[0][0], pts[0][1], dy, dx)
     if before is None:
         return str(text) + _input_doubt()
@@ -813,9 +884,9 @@ async def _ensure_text_focus() -> tuple[str | None, bool]:
     # (a long document's text area reports its whole length, most of it scrolled out of view).
     if area.ref is None or not await asyncio.to_thread(ax.focus_el, area.ref):
         frame = await asyncio.to_thread(ax.visible_frame, area.ref) if area.ref is not None else (area.x, area.y, area.w, area.h)
-        if frame is None:
+        spot = await asyncio.to_thread(pointer.spot, frame) if frame is not None else None
+        if spot is None:
             return f"Error: the text area in {app or 'the front app'} isn't on screen — click into it first.", created
-        spot = (frame[0] + frame[2] / 2, frame[1] + frame[3] / 2)
         try:
             await pointer.probe([spot])  # never NEO's own window
         except pointer.Refused as r:
@@ -828,19 +899,28 @@ async def _ensure_text_focus() -> tuple[str | None, bool]:
     return None, created
 
 
-_SHELL_JOINED = " (as one line: this app runs a shell, where a line break would run each line)"
+_SHELL_JOINED = " (as one line: the cursor is on a command line, where a line break would run each line)"
+
+
+async def _command_line(pid: int) -> bool:
+    """Is the keyboard on a command line, where a Return runs what's on it? A terminal app (its own
+    processes say so: focus.hosts_shell), or an app's terminal pane while the keyboard is in it."""
+    from neo.tools.computer.focus import hosts_shell
+
+    kind = await asyncio.to_thread(hosts_shell, pid)
+    if kind == "pane":
+        return await asyncio.to_thread(ax.focused_terminal)
+    return bool(kind)
 
 
 async def _line_break(app: str, pid: int, role: str) -> tuple[str, str]:
     """How a line break is typed where the cursor is — decided by what's there, never by the
-    app's name — and what to tell about it: "" joins the lines (a single-line field; an app running
-    a shell, where any Return runs the line), "return" in a document editor, else shift+return — a
+    app's name — and what to tell about it: "" joins the lines (a single-line field; a command
+    line, where any Return runs the line), "return" in a document editor, else shift+return — a
     new line in a chat box or a web editor, never a "send"."""
     if role in ax._SINGLE_LINE:
         return "", ""
-    from neo.tools.computer.focus import hosts_shell
-
-    if await asyncio.to_thread(hosts_shell, pid):
+    if await _command_line(pid):
         return "", _SHELL_JOINED
     if await asyncio.to_thread(_doc_like, app, pid):
         return "return", ""
@@ -881,17 +961,22 @@ async def type_text(a: dict, c: ToolContext) -> str | ToolOutput:
     text = str(a["text"])
     err, created = await _ensure_text_focus()
     if err:
-        return err
-    # A model's typing is checked: the text where the cursor is should have changed.
+        return _read_from_screen(c, err)
+    # A model's typing is checked: the text where the cursor is should have changed — looked at
+    # twice, since a web or Electron field reports its new text a moment after it shows it.
     watch = c.origin == "agent" and not created
     before = await asyncio.to_thread(ax.focused_element_text) if watch else ""
     note = await _type(text)
     if watch and before:
-        await asyncio.sleep(0.1)
-        if await asyncio.to_thread(ax.focused_element_text) == before:
+        for wait in (pointer.LOOK_S, pointer.LOOK_AGAIN_S):
+            await asyncio.sleep(wait)
+            if await asyncio.to_thread(ax.focused_element_text) != before:
+                break
+        else:
             return ToolOutput(
-                f"Typed “{text[:80]}”, but the text where the cursor is didn't change — it may have gone "
-                "somewhere else. Look before typing again.",
+                f"Typed “{text[:80]}”, but I couldn't confirm it arrived: the text where the cursor is looks "
+                f"the same after {pointer.LOOK_S + pointer.LOOK_AGAIN_S:g}s. Look (ax_tree or a screenshot) "
+                "before typing it again — typing twice would put it in twice.",
                 ok=False,
             )
     return f"Typed “{text[:80]}”{note}" + (" into a new note." if created else ".") + _input_doubt()
@@ -917,7 +1002,7 @@ async def dictate(a: dict, c: ToolContext) -> str:
     brief = str(a["brief"]).strip()
     err, created = await _ensure_text_focus()  # check before spending a model call
     if err:
-        return err
+        return _read_from_screen(c, err)
     turn = await brain("fast").complete([Message.user(brief)], system=_DICTATE_SYSTEM, max_tokens=400)
     text = (turn.text or "").strip().strip("\"“”")
     if not text:
@@ -990,7 +1075,7 @@ async def hotkey(a: dict, c: ToolContext) -> str:
     name, pid = ax.frontmost_app()
     if gate := await _ask_before_keys(a, keys, name, c, pid):
         return gate
-    before = await _watch(c, pid, [])
+    before = await _watch(c, pid, []) if _may_change_scene(keys) else None
     out = await asyncio.to_thread(inp.hotkey, keys)
     if before is not None and not out.startswith("Error"):
         out += await _changes(before, pid, c)  # ⌘N may open a window, or a sheet that waits for an answer
@@ -1015,6 +1100,20 @@ async def _new_note(c: ToolContext) -> str:
     return await asyncio.to_thread(inp.hotkey, "cmd+n")
 
 
+# Keys that only move the caret or edit the text where it is: no window, sheet or focus to wait for.
+_CARET_KEYS = frozenset({"left", "right", "up", "down", "home", "end", "pageup", "pagedown", "delete", "backspace", "forwarddelete"})
+
+
+def _may_change_scene(keys: str) -> bool:
+    """Could this key open or close a window or a sheet, or move the focus? (A ⌘ or ⌃ chord,
+    Return, Escape, Tab, a letter…: looked at afterwards. A caret move: not.)"""
+    try:
+        flags, key = inp.parse_chord(keys)
+    except ValueError:
+        return True
+    return bool(flags & (inp._MODS["cmd"] | inp._MODS["ctrl"])) or key not in _CARET_KEYS
+
+
 def _chord(keys: str) -> set[str]:
     """The modifiers and key of a chord, by name ({"cmd", "shift", "d"}), however it was written."""
     try:
@@ -1026,12 +1125,10 @@ def _chord(keys: str) -> set[str]:
 
 async def _return_runs_or_sends(pid: int, name: str) -> str:
     """What a Return does where the keyboard focus is, by evidence rather than the app's name:
-    "runs" in an app running an interactive shell (a terminal, an editor's terminal), "sends" in
-    a multi-line input outside a document editor (a chat box, a web composer), "" otherwise (a
-    document, an address or search field)."""
-    from neo.tools.computer.focus import hosts_shell
-
-    if await asyncio.to_thread(hosts_shell, pid):
+    "runs" on a command line (a terminal app, an app's terminal pane with the keyboard in it),
+    "sends" in a multi-line input outside a document editor (a chat box, a web composer), ""
+    otherwise (a document, an address or search field)."""
+    if await _command_line(pid):
         return "runs"
     role, _ = await asyncio.to_thread(ax.focused_role)
     multi = role == "AXTextArea" or (role not in ax._EDITABLE and role != "" and await asyncio.to_thread(ax.focused_editable))
@@ -1126,10 +1223,14 @@ async def click_text(a: dict, c: ToolContext) -> str:
             return f"Clicked '{name}' ({e.role.removeprefix('AX')}), but the app didn't answer in time — look before clicking again."
         if code and int(code.group(1)) not in ax._UNSUPPORTED:
             return f"Error: couldn't press '{name}' ({pressed.removeprefix('Error: ')})."
-    spot = e.center
+    spot = await asyncio.to_thread(pointer.spot, (e.x, e.y, e.w, e.h))
+    if spot is None:
+        return f"Error: '{name}' isn't on screen — scroll to it or move its window first."
     try:
         await pointer.probe([spot])  # never NEO's own window over it
     except pointer.Refused as r:
+        if r.screen:
+            _taint(c, "screen")
         return str(r)
     await asyncio.to_thread(inp.click, *spot)
     return f"Clicked '{name}' ({e.role.removeprefix('AX')}) at {tuple(map(int, spot))}" + _input_doubt()

@@ -97,6 +97,22 @@ def test_a_request_working_from_a_picture_goes_to_a_brain_that_can_see_it_first(
     assert turn.text == "blind" and turn.sees is False  # every brain that sees is busy: the reply says so
 
 
+def test_a_picture_never_jumps_a_local_brain_the_user_put_first(monkeypatch):
+    """Local-first: with brain=local the screen stays on the Mac — a cloud brain that can see is asked
+    about a screenshot only after the local one, as the user ordered them."""
+    import neo.providers as prov
+    from neo.providers.openai_compat import local as make_local
+
+    here, gemini, groq = Brain("local", False, answer="local"), Brain("gemini", True, answer="seen"), Brain("groq", False, answer="blind")
+    here.on_device = True
+    monkeypatch.setattr(prov, "make", lambda n: {"local": here, "gemini": gemini, "groq": groq}[n])
+    monkeypatch.setattr(prov, "_demoted", {})
+    assert asyncio.run(prov.Chain(["local", "gemini"]).complete(_shot_history())).text == "local" and gemini.asked == 0
+    # a cloud brain that can't see still yields to one that can, and a local brain the user put last stays last
+    assert asyncio.run(prov.Chain(["groq", "gemini", "local"]).complete(_shot_history())).text == "seen"
+    assert make_local().on_device and not Brain("groq", False).__dict__.get("on_device")
+
+
 class Script:
     """A brain that plays a fixed list of turns, and keeps what it was sent."""
 
@@ -118,6 +134,7 @@ class Script:
 def test_coordinates_from_a_brain_that_saw_nothing_are_refused_in_the_run(monkeypatch):
     clicked = []
     monkeypatch.setattr(inp, "click", lambda *a, **k: clicked.append(a) or "clicked")
+    monkeypatch.setattr(inp, "move", lambda x, y: None)  # (the pointer resting on the spot before the look)
     blind = Script([
         Turn(tool_calls=[ToolCall("t1", "click", {"x": 612, "y": 540})], sees=False),
         Turn(text="I couldn't see the board.", sees=False),
