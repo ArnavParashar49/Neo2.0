@@ -110,15 +110,10 @@ def _ax_front_pid() -> int:
     """The app Accessibility says has the focus (the system-wide AXFocusedApplication): one round
     trip; 0 when it can't say (a locked screen, no permission)."""
     try:
-        import ApplicationServices as AS
-
         from neo.tools.computer import ax
 
-        err, app = AS.AXUIElementCopyAttributeValue(ax._system_wide(), "AXFocusedApplication", None)
-        if err != 0 or app is None:
-            return 0
-        err, pid = AS.AXUIElementGetPid(app, None)
-        return int(pid) if err == 0 and pid else 0
+        app = ax._attr(ax._system_wide(), "AXFocusedApplication")
+        return ax.pid_of(app) if app is not None else 0
     except Exception:  # noqa: BLE001
         return 0
 

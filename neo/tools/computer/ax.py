@@ -1146,8 +1146,10 @@ def snapshot(
     if len(body) > len(shown):
         lines.append(f"  … {len(body) - len(shown)} more elements (use ax_find to search)")
     text = "\n".join(lines + tail)
-    if not compact and window is None and not w.stopped and budget[0] >= 0:
-        _keep(pid, win, gen, text, allx, name, covering)
+    if not w.stopped and budget[0] >= 0:
+        _maybe_watch(int(pid or 0))
+        if not compact and window is None:
+            _keep(pid, win, gen, text, allx, name, covering)
     return text
 
 
@@ -1174,6 +1176,24 @@ async def tree(app: str | None = None, window: str | None = None, *, compact: bo
 # in since the last look is that look again: the same text, the same ids, no walk.
 _CACHE_MAX_S = 5.0
 _cache: dict[int, tuple[Any, int, str, list[Element], float, str, tuple]] = {}
+
+
+def _maybe_watch(pid: int) -> None:
+    """NEO.app watches the notifications of the app it looks at, when that app sends them well (a
+    native one: Chromium and Electron apps send few, so they are always walked afresh)."""
+    try:
+        from neo.tools.computer import axwatch
+
+        if not pid or axwatch.watching() == pid or not axwatch.enabled():
+            return
+        app = _running(pid)
+        path = str(app.bundleURL().path()) if app is not None and app.bundleURL() is not None else ""
+        from neo.decide import axkit
+
+        if path and axkit.runtime(path) == "native":
+            axwatch.watch(pid)
+    except Exception:  # noqa: BLE001 - no watching: every look walks
+        pass
 
 
 def _watch_gen(pid: int) -> int | None:
@@ -1220,11 +1240,13 @@ def _cached(pid: int, win, name: str, walk: int) -> str | None:
 
 
 def forget(pid: int | None = None) -> None:
-    """Drop the kept look (of one app, or all): the next look walks again."""
+    """Drop the kept looks (of one app, or all): the next look walks again."""
     if pid is None:
         _cache.clear()
+        _win_cache.clear()
     else:
         _cache.pop(int(pid), None)
+        _win_cache.pop(int(pid), None)
 
 
 @pooled
@@ -1275,6 +1297,7 @@ def _perform(el, action: str, what: str, *, kind: str = "accessibility", timeout
     effects.guard(kind, what, via=AS.AXUIElementPerformAction)
     if timeout:
         _own_timeout(el, timeout)
+    forget(pid_of(el))
     return AS.AXUIElementPerformAction(el, action)
 
 
@@ -1283,6 +1306,7 @@ def _set(el, name: str, value, what: str, *, kind: str = "accessibility") -> int
     if _ax_watch is not None:
         _ax_watch("set", el, name, value)
     effects.guard(kind, what, via=AS.AXUIElementSetAttributeValue)
+    forget(pid_of(el))
     return AS.AXUIElementSetAttributeValue(el, name, value)
 
 
@@ -1439,6 +1463,9 @@ def window_elements(
     if win is None:
         return name, None, []
     pid = pid_of(win)
+    gen = _watch_gen(pid)
+    if early_exit is None and (kept := _kept_window(pid, win, gen)) is not None:
+        return name, kept[0], kept[1]
     if pid and _expose_web(pid, _app_el(pid)):
         _web_settle(win, cancel)
     els: list[Element] = []
@@ -1453,7 +1480,25 @@ def window_elements(
             return said == want and e.enabled and e.visible is not None and e.visible[2] > 0
         w.early = exact
     _walk(win, 0, els, lambda: f"w{next(n)}", budget=[_MAX_NODES], w=w)
-    return name, _point_size(win), els
+    frame = _point_size(win)
+    if early_exit is None and not w.stopped and gen is not None and _watch_gen(pid) == gen:
+        _win_cache[int(pid)] = (win, gen, _events_sent(), time.monotonic(), frame, els)
+    return name, frame, els
+
+
+# The focused window's elements, kept while nothing has changed in it (see _cached): the gate's and
+# click_text's walk of a window just looked at costs nothing.
+_win_cache: dict[int, tuple[Any, int, int, float, tuple[float, float, float, float], list[Element]]] = {}
+
+
+def _kept_window(pid: int, win, gen: int | None):
+    kept = _win_cache.get(int(pid or 0))
+    if kept is None or gen is None:
+        return None
+    kwin, kgen, sent, when, frame, els = kept
+    if kgen != gen or sent != _events_sent() or time.monotonic() - when > _CACHE_MAX_S or not _same(kwin, win):
+        return None
+    return frame, els
 
 
 def _text_areas(el, depth: int, out: list[Element], stop: float = 0.0) -> None:
