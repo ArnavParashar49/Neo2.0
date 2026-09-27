@@ -233,37 +233,87 @@ def _candidates(edge: np.ndarray, min_run: int) -> list[tuple[float, float, floa
     return out
 
 
+_SAME_EXTENT = 4.0  # px: lines whose runs start and end this close share an extent (for the counts below)
+_LINES_AT_ONE_EXTENT = 2 * (_MAX_CELLS + 1) + 2  # the most one board has (a drawn line has two edges)
+_FEW_LINES = 60  # up to this many: every pair of lines is tried; more (a texture): only a run's first line
+_WALK_BUDGET = 20000  # lines looked up in all walks together: past it the picture is a texture, no board
+
+
+def _textures(pos: np.ndarray, st: np.ndarray, en: np.ndarray) -> np.ndarray:
+    """Lines that belong to a texture rather than a board (True): in a run of stripes (a line of the
+    same extent closer than a square on each side: no board's squares are that small), or one of
+    more lines sharing an extent than any board has (a barcode, a striped banner)."""
+    same = (np.abs(st[:, None] - st[None, :]) <= _SAME_EXTENT) & (np.abs(en[:, None] - en[None, :]) <= _SAME_EXTENT)
+    d = pos[None, :] - pos[:, None]  # (row i: how far each other line is from line i)
+    close = same & (np.abs(d) < _MIN_SQUARE - 1)
+    dense = (close & (d < 0)).any(axis=1) & (close & (d > 0)).any(axis=1)
+    crowd = (same & ~dense[None, :]).sum(axis=1) > _LINES_AT_ONE_EXTENT
+    return dense | crowd
+
+
 def _progression(lines: list[tuple[float, float, float]], min_lines: int):
     """The longest run of equally spaced lines that share one extent, where that extent is a whole
-    number of spacings (a board's lines, not a column of buttons): (first, step, count, start, end)."""
+    number of spacings (a board's lines, not a column of buttons): (first, step, count, start, end).
+
+    Bounded, whatever the picture: stripes and crowds of equal lines are set aside first, a run
+    longer than any board's is dropped as soon as it is, lines are looked up by position, and when
+    many lines remain a run is walked only from its first line. (Every pair walked against every
+    line took seconds on a striped banner, and this runs on every screenshot.)"""
+    if len(lines) < min_lines:
+        return None
+    L = np.asarray(lines, float).reshape(-1, 3)
+    L = L[np.argsort(L[:, 0], kind="stable")]
+    L = L[~_textures(L[:, 0], L[:, 1], L[:, 2])]
+    n = len(L)
+    if n < min_lines:
+        return None
+    pos, st, en = L[:, 0], L[:, 1], L[:, 2]
+    few = n <= _FEW_LINES
     best = None
-    n = len(lines)
+    work = 0
     for i in range(n):
-        s0, e0 = lines[i][1], lines[i][2]
-        for j in range(i + 1, n):
-            step = lines[j][0] - lines[i][0]
-            if step < 8:
-                continue
-            slack = max(4.0, step * 0.15)
-            if abs(lines[j][1] - s0) > slack or abs(lines[j][2] - e0) > slack:
-                continue
-            tol = max(2.5, step * 0.05)
-            picked = [lines[i][0], lines[j][0]]
+        s0, e0 = st[i], en[i]
+        # the next line of a board is a square away: a square's size up to the whole extent
+        lo = int(np.searchsorted(pos, pos[i] + _MIN_SQUARE - 1.5, "left"))
+        hi = int(np.searchsorted(pos, pos[i] + (e0 - s0) * 1.2 + 4, "right"))
+        if hi <= lo:
+            continue
+        js = np.arange(lo, hi)
+        steps = pos[js] - pos[i]
+        slack = np.maximum(4.0, steps * 0.15)
+        ok = (np.abs(st[js] - s0) <= slack) & (np.abs(en[js] - e0) <= slack)
+        if not few and i and ok.any():  # (a line a step before this one, of this extent: the walk from there covers it)
+            prev = pos[i] - steps
+            k = np.searchsorted(pos[:i], prev)
+            for kk in (np.clip(k - 1, 0, i - 1), np.clip(k, 0, i - 1)):
+                ok &= ~((np.abs(pos[kk] - prev) <= np.maximum(2.5, steps * 0.05)) & (np.abs(st[kk] - s0) <= slack) & (np.abs(en[kk] - e0) <= slack))
+        for j, step, sl in zip(js[ok].tolist(), steps[ok].tolist(), slack[ok].tolist(), strict=True):
+            picked = [float(pos[i]), float(pos[j])]
+            too_many = False
             while True:
-                want = lines[i][0] + len(picked) * step
-                nxt = [ln for ln in lines if abs(ln[0] - want) <= tol and abs(ln[1] - s0) <= slack and abs(ln[2] - e0) <= slack]
-                if not nxt:
+                stp = (picked[-1] - picked[0]) / (len(picked) - 1)
+                want, tol = picked[-1] + stp, max(2.5, stp * 0.05)
+                a = int(np.searchsorted(pos, want - tol, "left"))
+                b = int(np.searchsorted(pos, want + tol, "right"))
+                work += 1 + b - a
+                near = [m for m in range(a, b) if abs(st[m] - s0) <= sl and abs(en[m] - e0) <= sl]
+                if not near:
                     break
-                picked.append(min(nxt, key=lambda ln: abs(ln[0] - want))[0])
+                picked.append(float(pos[min(near, key=lambda m: abs(pos[m] - want))]))
+                if len(picked) > _MAX_CELLS + 1:
+                    too_many = True  # more lines than any board has: stripes, not a board
+                    break
+            if work > _WALK_BUDGET:
+                return None
             k = len(picked)
-            if k < min_lines or (best is not None and k <= best[2]):
+            if too_many or k < min_lines or (best is not None and k <= best[2]):
                 continue
             fit = np.polyfit(np.arange(k), np.array(picked), 1)
             step_fit = float(fit[0])
             cells = (e0 - s0) / step_fit
             if abs(cells - round(cells)) > 0.2 or round(cells) < k - 1:
                 continue
-            best = (float(fit[1]), step_fit, k, s0, e0)
+            best = (float(fit[1]), step_fit, k, float(s0), float(e0))
     return best
 
 

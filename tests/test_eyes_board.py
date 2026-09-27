@@ -498,3 +498,323 @@ def test_a_board_that_left_its_window_is_forgotten():
     B.survey(B.Picture.of(a), shot="s2", window=win)
     with pytest.raises(B.BoardError, match="doesn't know a board"):
         B.points_for({"cell": "e2"}, ("cell",))
+
+
+# ---- review fixes: speed on striped screens, a board's true extent, scale-free changes, stale boards ----
+
+
+def _stripes(kind: str) -> np.ndarray:
+    """Screens with many long, equal straight edges and no board: a striped banner, bars, a barcode."""
+    a = np.full((982, 1512, 3), 240, np.uint8)
+    if kind == "band-900x120-3px":
+        for x in range(100, 1000, 6):
+            a[300:420, x : x + 3] = 110
+    elif kind == "band-1512x400-3px":
+        for x in range(0, 1512, 6):
+            a[300:700, x : x + 3] = 120
+    elif kind == "bars-8px":
+        a[:] = 30
+        for x in range(0, 1512, 8):
+            a[200:800, x : x + 4] = 200
+    elif kind == "stripes-5px":
+        for x in range(0, 1512, 5):
+            a[100:900, x : x + 2] = 90
+    elif kind == "grid-of-stripes":  # stripes both ways: a woven texture
+        for x in range(0, 1512, 6):
+            a[100:900, x : x + 3] = 120
+        for y in range(100, 900, 6):
+            a[y : y + 3, :] //= 2
+    return a
+
+
+@pytest.mark.parametrize("kind", ["band-900x120-3px", "band-1512x400-3px", "bars-8px", "stripes-5px", "grid-of-stripes"])
+def test_the_grid_search_stays_fast_on_stripes_and_bars(kind):
+    g = B.Picture.of(_stripes(kind)).gray
+    assert B.find_grid(g) is None
+    assert min(_timed(lambda: B.find_grid(g)) for _ in range(3)) < 0.035  # (was 0.6–7 s: cubic in the edges)
+
+
+def test_the_grid_search_stays_fast_on_a_retina_frame_of_stripes():
+    a = np.asarray(Image.fromarray(_stripes("band-1512x400-3px")).resize((3024, 1964), Image.NEAREST))
+    g = B.Picture.of(a).gray
+    assert B.find_grid(g) is None
+    assert min(_timed(lambda: B.find_grid(g)) for _ in range(2)) < 0.07  # (4× the pixels)
+
+
+def test_a_board_next_to_a_striped_banner_is_still_found():
+    img, tr = _flat()
+    a = np.asarray(img).copy()
+    for x in range(40, 400, 6):  # a striped strip beside the board, as tall as the board
+        a[150:758, x : x + 3] = 110
+    b = B.survey(B.Picture.of(a)).board
+    assert b is not None and (b.rows, b.cols) == (8, 8) and _worst(b, tr) <= 0.5
+
+
+FRAMES = [
+    ((78, 50, 30), (52, 54, 60)),
+    ((78, 50, 30), (235, 235, 235)),  # the default dark frame in a light-mode window
+    ((150, 110, 70), (235, 235, 235)),
+    ((200, 165, 115), (52, 54, 60)),
+    ((200, 165, 115), (120, 80, 45)),
+    ((230, 200, 150), (52, 54, 60)),  # a light wooden frame on a dark window
+    ((230, 200, 150), (120, 80, 45)),
+    ((245, 240, 230), (52, 54, 60)),
+    ((245, 240, 230), (235, 235, 235)),
+]
+
+
+def _true_cell(tr, pt) -> tuple[int, int]:
+    u, v = board_to_image(np.linalg.inv(tr["H"]), [pt])[0]
+    return int(np.floor(u)), int(np.floor(v))
+
+
+@pytest.mark.parametrize("frame,bg", FRAMES, ids=lambda v: "-".join(map(str, v)))
+def test_a_tilted_board_never_grows_into_its_frame_or_the_window_behind(frame, bg):
+    img, tr = _tilted(elev=60, frame=frame, background=bg)
+    b = B.survey(B.Picture.of(img), canvas=True, shot="s1").board
+    # 8×8 where it is, or nothing: never a ring of frame and background taken for squares
+    assert b is None or ((b.rows, b.cols) == (8, 8) and _worst(b, tr) <= 3.0), (b.rows, b.cols, _true_cell(tr, b.centre(0, 0)))
+    assert b is not None  # (and these boards are all plain to see)
+
+
+@pytest.mark.parametrize("frame,bg", [((230, 200, 150), (52, 54, 60)), ((78, 50, 30), (235, 235, 235))])
+def test_a_tilted_board_from_the_side_keeps_to_its_squares_too(frame, bg):
+    img, tr = _tilted(elev=45, yaw=-30, frame=frame, background=bg)
+    b = B.survey(B.Picture.of(img), canvas=True).board
+    assert b is not None and (b.rows, b.cols) == (8, 8) and _worst(b, tr) <= 3.0
+
+
+@pytest.mark.parametrize("k", [1280 / 1512, 1024 / 1512, 1600 / 1728])
+def test_a_move_is_judged_the_same_between_pictures_at_different_scales(k):
+    img, _ = _flat()
+    small = img.resize((round(1512 * k), round(982 * k)), Image.LANCZOS)
+    b = B.survey(B.Picture.of(small, ppp=1 / k), shot="s1").board
+    same = B.after_move(b, B.Picture.of(img), "", "e4")  # a click that took nothing, seen at 1 px per point
+    assert same.changed is False, same.said
+    B.forget()
+    b = B.survey(B.Picture.of(small, ppp=1 / k), shot="s1").board
+    after, _ = _flat(position=moved(START, "e2", "e4"))
+    m = B.after_move(b, B.Picture.of(after), "e2", "e4")
+    assert sorted(m.cells) == ["e2", "e4"], m.said
+    retina = after.resize((3024, 1964), Image.LANCZOS)  # …and back at 2 px per point: nothing more changed
+    assert B.after_move(b, B.Picture.of(retina, ppp=0.5), "", "").changed is False
+
+
+def test_small_squares_are_judged_the_same_at_different_scales():
+    img, _ = _flat(board_at=(600, 300), sq_pt=30)
+    k = 1280 / 1512
+    small = img.resize((1280, round(982 * k)), Image.LANCZOS)
+    b = B.survey(B.Picture.of(small, ppp=1 / k)).board
+    assert b is not None
+    same = B.after_move(b, B.Picture.of(img), "", "")
+    assert same.changed is False, same.said
+    after, _ = _flat(board_at=(600, 300), sq_pt=30, position=moved(START, "g1", "f3"))
+    assert sorted(B.after_move(b, B.Picture.of(after), "g1", "f3").cells) == ["f3", "g1"]
+
+
+def test_nothing_changed_since_the_last_look_when_only_the_scale_did():
+    img, _ = _flat()
+    k = 1280 / 1512
+    small = img.resize((1280, round(982 * k)), Image.LANCZOS)
+    B.survey(B.Picture.of(small, ppp=1 / k), shot="s1")
+    assert B.survey(B.Picture.of(img), shot="s2").since == []
+    reply, _ = _flat(position=moved(START, "e2", "e4"))
+    assert sorted(B.survey(B.Picture.of(reply.resize((1280, round(982 * k)), Image.LANCZOS), ppp=1 / k), shot="s3").since) == ["e2", "e4"]
+
+
+def test_a_board_seen_covered_after_a_move_is_dropped_and_stops_what_follows():
+    img, _ = _flat()
+    win = (300.0, 80.0, 950.0, 820.0)
+    b = B.survey(B.Picture.of(img), shot="s1", window=win, now=100.0).board
+    covered, _ = _flat(sheet=True)
+    m = B.after_move(b, B.Picture.of(covered), "e2", "e4", now=101.0)
+    assert m.changed is None and "isn't where it was" in m.said
+    for a in ({"cell": "e7"}, {"cell": "e7", "shot": "s1"}):
+        with pytest.raises(B.BoardError, match="screenshot"):
+            B.points_for(a, ("cell",), blind=True, now=102.0, window=win)
+
+
+def test_a_board_that_left_its_window_is_gone_by_its_shot_id_too():
+    img, _ = _flat()
+    win = (300.0, 80.0, 950.0, 820.0)
+    B.survey(B.Picture.of(img), shot="s1", window=win, now=10.0)
+    B.survey(B.Picture.of(img), shot="s0", window=(0.0, 0.0, 200.0, 200.0), now=10.0)  # (another window's)
+    a = np.asarray(img).copy()
+    a[140:770, 410:1040] = 250
+    B.survey(B.Picture.of(a), shot="s2", window=win, now=11.0)
+    with pytest.raises(B.BoardError):
+        B.points_for({"cell": "e2", "shot": "s1"}, ("cell",), blind=True, now=12.0, window=win)
+    assert B.points_for({"cell": "e2", "shot": "s0"}, ("cell",), now=12.0)[2] == ["e2"]
+
+
+def test_a_shot_with_no_board_is_an_error_not_another_board():
+    img, _ = _flat()
+    B.survey(B.Picture.of(img), shot="s1", now=10.0)
+    with pytest.raises(B.BoardError, match="no board"):
+        B.points_for({"cell": "e2", "shot": "no-such-shot"}, ("cell",), now=11.0)
+    blank = np.full((982, 1512, 3), 60, np.uint8)
+    B.survey(B.Picture.of(blank), shot="s2", canvas=True, now=11.0)  # (a canvas NEO found no grid in)
+    with pytest.raises(B.BoardError, match="no board"):
+        B.points_for({"cell": "e2", "shot": "s2"}, ("cell",), now=11.0)
+    assert B.points_for({"cell": "e2", "shot": "s1"}, ("cell",), now=11.0)[2] == ["e2"]
+
+
+def test_a_newer_look_at_the_same_window_replaces_its_older_boards():
+    win = (360.0, 90.0, 900.0, 800.0)
+    img, _ = _flat(board_at=(420, 150))
+    B.survey(B.Picture.of(img), shot="s1", window=win, now=10.0)
+    again = B.survey(B.Picture.of(img), shot="s2", window=win, now=11.0).board  # the same board again
+    assert B.for_shot("s1") is again  # (s1's names still work: they name the same squares, freshly seen)
+    scrolled, tr2 = _flat(board_at=(420, 302))
+    B.survey(B.Picture.of(scrolled), shot="s3", window=win, now=12.0)
+    for old in ("s1", "s2"):
+        with pytest.raises(B.BoardError):
+            B.points_for({"cell": "e2", "shot": old}, ("cell",), now=13.0, window=win)
+    (pt,), _, _ = B.points_for({"cell": "e2"}, ("cell",), now=13.0, window=win)
+    assert np.allclose(pt, _truth_centre(tr2, "e2"), atol=0.5)
+
+
+def test_a_board_scrolled_in_its_window_is_refused_before_the_input():
+    win = (360.0, 90.0, 900.0, 800.0)
+    img, _ = _flat(board_at=(420, 150))
+    b = B.survey(B.Picture.of(img), shot="s1", window=win, now=10.0).board
+    shifted, _ = _flat(board_at=(420, 150 + 152))  # the content scrolled two squares, the window didn't move
+    (pt,), _, _ = B.points_for({"cell": "e2"}, ("cell",), now=20.0, window=win)
+    with pytest.raises(B.BoardError, match="isn't where"):
+        B.before_move(b, B.Picture.of(shifted), now=20.0)
+    with pytest.raises(B.BoardError):  # …and it is forgotten: no square of it is acted on again
+        B.points_for({"cell": "e2"}, ("cell",), now=20.0, window=win)
+
+
+def test_the_look_just_before_the_input_is_what_the_move_is_judged_against():
+    img, _ = _flat()
+    k = 1280 / 1512
+    small = img.resize((1280, round(982 * k)), Image.LANCZOS)
+    b = B.survey(B.Picture.of(small, ppp=1 / k), shot="s1", now=10.0).board
+    B.before_move(b, B.Picture.of(img), now=11.0)  # the capture path the after-look uses
+    after, _ = _flat(position=moved(START, "e2", "e4"))
+    m = B.after_move(b, B.Picture.of(after), "e2", "e4", now=12.0)
+    assert sorted(m.cells) == ["e2", "e4"] and m.changed is True
+
+
+def test_scrolling_or_keys_in_a_window_forget_its_boards():
+    img, _ = _flat()
+    B.survey(B.Picture.of(img), shot="s1", window=(360.0, 90.0, 900.0, 800.0), now=10.0)
+    B.survey(B.Picture.of(img), shot="s2", window=(0.0, 0.0, 300.0, 300.0), now=10.0)
+    B.forget_window((360.0, 90.0, 900.0, 800.0))
+    with pytest.raises(B.BoardError):
+        B.points_for({"cell": "e2", "shot": "s1"}, ("cell",), now=11.0)
+    assert B.points_for({"cell": "e2", "shot": "s2"}, ("cell",), now=11.0)[2] == ["e2"]
+    B.forget_window(None)  # (the window isn't known: every board)
+    with pytest.raises(B.BoardError):
+        B.points_for({"cell": "e2", "shot": "s2"}, ("cell",), now=11.0)
+
+
+class _Display:
+    def __init__(self, x, y, w, h):
+        self.x, self.y, self.w, self.h = x, y, w, h
+
+    def contains(self, px, py):
+        return self.x <= px < self.x + self.w and self.y <= py < self.y + self.h
+
+
+def test_a_square_off_every_display_is_refused_without_coordinates():
+    img, _ = _flat()
+    crop = img.crop((300, 100, 1200, 900))
+    B.survey(B.Picture.of(crop, x0=-400, y0=100), shot="w1", now=5.0)  # a window hanging past the left edge
+    shown = [_Display(0, 0, 1512, 982)]
+    with pytest.raises(B.BoardError) as e:
+        B.points_for({"cell": "a2"}, ("cell",), blind=True, now=6.0, displays=shown)
+    assert "off" in str(e.value) and not _COORD.search(str(e.value))
+    assert B.points_for({"cell": "h2"}, ("cell",), blind=True, now=6.0, displays=shown)[2] == ["h2"]
+    with pytest.raises(B.BoardError):
+        B.points_for({"from": "h2", "to": "a2"}, ("from", "to"), now=6.0, displays=shown)
+
+
+def test_a_picture_that_cant_be_mapped_to_the_screen_registers_no_board():
+    img, _ = _flat()
+    s = B.survey(B.Picture.of(img), shot="w2", clickable=False)
+    assert s.board is None and B.latest() is None and B.for_shot("w2") is None
+    assert B.look(B.Picture.of(img), shot="w3", clickable=False) == ""
+    with pytest.raises(B.BoardError):
+        B.points_for({"cell": "e2"}, ("cell",))
+
+
+def test_corners_are_refused_when_the_squares_there_are_a_row_short():
+    img, tr = _tilted(elev=60, sheet=True)  # something over the far row that isn't an Accessibility sheet
+    true = board_to_image(tr["H"], [(0, 0), (8, 0), (8, 8), (0, 8)])
+    b, why = B.from_corners(B.Picture.of(img), true)
+    assert b is None or ((b.rows, b.cols) == (8, 8) and _worst(b, tr) <= 3.0), (b.rows, b.cols, _true_cell(tr, b.centre(0, 0)))
+    assert b is None and why
+
+
+def _photo(w: int, h: int) -> np.ndarray:
+    x = np.random.default_rng(0).normal(0, 1, (h // 16, w // 16, 3))
+    return np.asarray(Image.fromarray(((x - x.min()) / np.ptp(x) * 255).astype(np.uint8)).resize((w, h), Image.BICUBIC))
+
+
+def _wavy_tiles(w: int = 1512, h: int = 982) -> np.ndarray:
+    """Floor tiles in a photo, a map's warped grid: saddles everywhere, but no board's edge anywhere."""
+    yy, xx = np.mgrid[0:h, 0:w].astype(float)
+    v = np.sin(xx / 9 + np.sin(yy / 40)) * np.sin(yy / 9 + np.sin(xx / 50))
+    return np.repeat(((v > 0) * 120 + 70).astype(np.uint8)[..., None], 3, axis=2)
+
+
+def test_a_texture_of_tiles_with_no_edge_is_no_board():
+    s = B.survey(B.Picture.of(_wavy_tiles()), canvas=True, shot="s1")
+    assert s.board is None
+
+
+def test_a_canvas_with_no_board_is_searched_once_and_hinted_once():
+    pic = B.Picture.of(_photo(1512, 982))
+    win = (0.0, 0.0, 1512.0, 982.0)
+    first = B.look(pic, shot="s1", canvas=True, window=win)
+    assert "map_board" in first
+    again = B.Picture.of(np.asarray(pic.rgb).copy())  # the same canvas again, a new screenshot
+    t = _timed(lambda: B.look(again, shot="s2", canvas=True, window=win))
+    assert t < 0.01  # (the search found nothing there a moment ago: not searched again)
+    assert B.look(B.Picture.of(np.asarray(pic.rgb).copy()), shot="s3", canvas=True, window=win) == ""  # (the hint once)
+    B.forget()
+    img, _ = _flat()  # a board there now: found at once
+    assert B.look(B.Picture.of(img), shot="s4", canvas=True, window=win).startswith("NEO found a board")
+
+
+def test_a_transparency_checkerboard_is_given_up_on_quickly():
+    a = np.full((982, 1512, 3), 236, np.uint8)
+    yy, xx = np.mgrid[0:982, 0:1512]
+    a[:] = np.where((((yy // 10) + (xx // 10)) % 2 == 0)[..., None], 255, 204)
+    pic = B.Picture.of(a)
+    assert B.survey(pic, canvas=True).board is None
+    B.forget()
+    assert min(_timed(lambda: (B.forget(), B.survey(B.Picture.of(a), canvas=True))) for _ in range(2)) < 0.1  # (was 0.3 s)
+
+
+def test_an_orientation_kept_from_the_last_look_must_fit_the_pieces_now():
+    img, _ = _flat()
+    assert B.survey(B.Picture.of(img), now=1.0).board.orientation == "bottom"
+    # a mid-game position that doesn't show the sides, on the board turned round: not the same game
+    mid = ("........", "..k.....", ".p.P....", "..P.p...", "...p.P..", "....K...", "........", "........")
+    turned = tuple(row[::-1] for row in reversed(mid))
+    b2 = B.survey(B.Picture.of(_flat(position=turned)[0]), now=2.0).board
+    assert B.orientation(b2.occupancy) == ""
+    assert not b2.chess and b2.orientation == ""  # row and column names until the pieces or a model say
+    assert "judged from the pieces" not in B.note(b2)
+
+
+def test_an_orientation_is_kept_across_a_move_or_two_and_the_note_says_so():
+    one = ("....k...", "...ppp..", "........", "........", "........", "........", "...PPP..", "....K...")
+    b1 = B.survey(B.Picture.of(_flat(position=one)[0]), now=1.0).board
+    assert b1.orientation == "bottom" and b1.oriented_by == "pieces"
+    two = ("....k...", "...pp...", "........", ".....p..", "........", "........", "...PP...", "....K...")  # (3 light: unclear)
+    b2 = B.survey(B.Picture.of(_flat(position=two)[0]), now=2.0).board
+    assert B.orientation(b2.occupancy) == "" and b2.orientation == "bottom" and b2.oriented_by == "kept"
+    text = B.note(b2)
+    assert "judged from the pieces" not in text and "last look" in text
+
+
+def test_the_note_shows_how_to_name_squares_without_suggesting_a_move():
+    img, _ = _flat()
+    text = B.note(B.survey(B.Picture.of(img), shot="s1").board)
+    assert 'cell="<square>"' in text and 'from="<square>" to="<square>"' in text
+    assert not re.search(r'(cell|from|to)="[a-h][1-8]"', text)
+    assert not re.search(r'(cell|from|to)="[a-h][1-8]"', B.SCREENSHOT_WORDS)
