@@ -121,7 +121,9 @@ class Settings(BaseSettings):
     max_tool_result_chars: int = 6000
     confirm_destructive: bool = True
     # Apps NEO's input tools never click, press, drag, scroll or type into (NEO's own overlay
-    # never, always): a host's own approval dialog, for one. NEO_PROTECTED_APPS='["MyApp"]'
+    # never, always): a host's own approval dialog, for one. An entry is the app's name as the
+    # Dock shows it, its bundle id or its executable's name, any case: '["MyApp"]' or
+    # '["com.example.myapp"]' in NEO_PROTECTED_APPS. The bundle id is the one that can't drift.
     protected_apps: list[str] = []
     fast_paths: bool = True  # zero-LLM regex commands (neo.agent.fastpath)
 
