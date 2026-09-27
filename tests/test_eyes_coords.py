@@ -616,6 +616,10 @@ def test_the_tool_words_name_every_form_and_no_app():
         assert not re.search(r"\b(Chess|Safari|Chrome|Finder|Mail|Notes)\b", text)
     assert {"nx", "ny", "box_2d"} <= set(pointer.FORM_ARGS)
     assert {"nx1", "ny1", "nx2", "ny2", "box_2d1", "box_2d2"} <= set(pointer.DRAG_FORM_ARGS)
+    # the whole schemas keep every argument the tools took before, and add the forms
+    reg = registry()
+    for name, params in (("click", pointer.CLICK_PARAMETERS), ("drag", pointer.DRAG_PARAMETERS), ("scroll", pointer.SCROLL_PARAMETERS)):
+        assert set(reg.get(name).parameters["properties"]) < set(params["properties"])
 
 
 def test_a_helpers_own_marks_are_clicked_by_id_even_by_a_blind_brain(world, new_tools):

@@ -233,6 +233,51 @@ DRAG_FORM_ARGS = {
     "box_2d2": {"type": "array", "items": {"type": "number"}, "description": "end: [ymin, xmin, ymax, xmax] on 0–1000"},
 }
 
+# The pointer tools' whole parameter schemas (the registrations swap theirs for these).
+_SHOT_ARG = {"type": "string", "description": "screenshot id: x,y are pixels of that image; nx,ny and box_2d are 0–1000 of it"}
+CLICK_PARAMETERS = {
+    "type": "object",
+    "properties": {
+        "x": {"type": "number"},
+        "y": {"type": "number"},
+        **FORM_ARGS,
+        "shot": _SHOT_ARG,
+        "id": {"type": "string", "description": "element id (a look, ax_tree, a screenshot's list), instead of a place"},
+        "button": {"type": "string", "enum": ["left", "right", "middle"]},
+        "count": {"type": "integer", "description": "1, 2 (double-click) or 3"},
+        "modifiers": {"type": "array", "items": {"type": "string", "enum": ["cmd", "shift", "alt", "ctrl"]}},
+    },
+    "required": [],
+}
+DRAG_PARAMETERS = {
+    "type": "object",
+    "properties": {
+        "x1": {"type": "number"},
+        "y1": {"type": "number"},
+        "x2": {"type": "number"},
+        "y2": {"type": "number"},
+        **DRAG_FORM_ARGS,
+        "id1": {"type": "string", "description": "element id to drag from, instead of a place"},
+        "id2": {"type": "string", "description": "element id to drop on, instead of a place"},
+        "shot": _SHOT_ARG,
+    },
+    "required": [],
+}
+SCROLL_PARAMETERS = {
+    "type": "object",
+    "properties": {
+        "x": {"type": "number"},
+        "y": {"type": "number"},
+        **FORM_ARGS,
+        "id": {"type": "string", "description": "element id to scroll, instead of a place"},
+        "shot": _SHOT_ARG,
+        "dy": {"type": "integer"},
+        "dx": {"type": "integer"},
+        "at_pointer": {"type": "boolean"},
+    },
+    "required": [],
+}
+
 # A board's squares (neo.tools.computer.board registers the resolver): ``cell`` for a click or a
 # scroll, ``from`` / ``to`` for a drag's two ends.
 _CELL_KEYS = {"": "cell", "1": "from", "2": "to"}
