@@ -216,7 +216,7 @@ async def test_a_text_step_goes_through_with_low_effort_and_room_to_think(cset, 
     assert turn.sees is False  # text only: the loop refuses any coordinates from it
     body = fake.bodies[0]
     assert body["model"] == "gpt-oss-120b" and body["reasoning_effort"] == "low"
-    assert body["max_tokens"] >= cb.ROOM["low"]  # 64 would all go to thinking
+    assert body["max_tokens"] >= cb.ROOM  # 64 would all go to thinking
     assert str(fake.requests[0].url) == "https://api.cerebras.ai/v1/chat/completions"
     day = ledger_file(s)
     assert day["tokens"]["gpt-oss-120b"] == [1000, 200]
@@ -228,11 +228,12 @@ async def test_a_reply_that_spent_all_its_room_thinking_is_asked_again_once(cset
     fake.reply(payload=completion(None, finish="length", usage=(500, 1024)))
     fake.reply(payload=completion("Done."))
     p = cb.cerebras()
-    turn = await p.complete(ASK, effort="medium", max_tokens=1000)
+    turn = await p.complete(ASK, effort="high", max_tokens=1000)
     assert turn.text == "Done."
     first, second = fake.bodies
-    assert first["reasoning_effort"] == "medium" and second["reasoning_effort"] == "low"
-    assert second["max_tokens"] >= 2 * first["max_tokens"]
+    # An agent task's "high" starts low, with room to think: the retry (the whole prompt again) is rare.
+    assert first["reasoning_effort"] == "low" and first["max_tokens"] >= cb.ROOM >= 8192
+    assert second["reasoning_effort"] == "low" and second["max_tokens"] >= 2 * first["max_tokens"]
     assert ledger_file(s)["tokens"]["gpt-oss-120b"] == [1500, 1224]  # the empty reply was paid for too
 
     fake.reply(payload=completion(None, finish="length"))
@@ -494,7 +495,7 @@ async def test_a_streamed_answer_is_counted_even_without_usage(cset, fake):
     fake.reply(payload=f"data: {json.dumps(chunk)}\n\ndata: [DONE]\n\n")
     out = [c async for c in cb.cerebras().stream(ASK, max_tokens=64)]
     assert out == ["Hello there"]
-    assert fake.bodies[0]["reasoning_effort"] == "low" and fake.bodies[0]["max_tokens"] >= cb.ROOM["low"]
+    assert fake.bodies[0]["reasoning_effort"] == "low" and fake.bodies[0]["max_tokens"] >= cb.ROOM
     tin, tout = ledger_file(s)["tokens"]["gpt-oss-120b"]
     assert tin > 0 and tout >= 4  # estimated: the prompt as fitted, the text plus unseen thinking
 
@@ -503,7 +504,7 @@ async def test_a_streamed_answer_is_counted_even_without_usage(cset, fake):
         _ = [c async for c in cb.cerebras().stream(ASK)]
     # ...and was paid for all the same: the prompt, and the room it spent thinking
     tin2, tout2 = ledger_file(s)["tokens"]["gpt-oss-120b"]
-    assert tin2 >= 2 * tin and tout2 - tout >= cb.ROOM["low"]
+    assert tin2 >= 2 * tin and tout2 - tout >= cb.ROOM
 
 
 def _sse(*chunks: dict) -> str:

@@ -22,10 +22,12 @@ Cerebras is asked: first for chat ("fast"), after Gemini for an agent's steps. A
 while the prewarm is still connecting waits for its connection rather than open a second one.
 
 Thinking. Both models reason inside ``max_tokens`` (``max_tokens=16`` came back with no text and
-finish_reason "length"). A request always leaves room for that (:data:`ROOM`, by effort), passes
-``reasoning_effort`` (the effort the caller asked for: low for UI steps), and a reply that ran out of
-room anyway is asked once more with low effort and twice the room before it counts as a failure
-(Truncated: request-shaped, so the chain tries the next brain without benching this one).
+finish_reason "length"). Every request starts at ``reasoning_effort`` low, whatever effort the caller
+asked for, with :data:`ROOM` tokens of room — unused room costs nothing. (The chess log: an agent
+task's "high" ran qwen past 4096 tokens of thinking twice in one task, and each time the whole
+prompt was sent and paid for again.) A reply that runs out of room anyway is asked once more with
+twice the room before it counts as a failure (Truncated: request-shaped, so the chain tries the next
+brain without benching this one).
 
 Limits. Every response's ``x-ratelimit-*`` headers (limit / remaining / reset, per window) are kept
 per model; a request that would not fit a window is not sent: a wait of up to
@@ -111,8 +113,10 @@ DEFAULT_CONTEXT = 65_536
 MAX_PICTURES = 2
 MAX_REQUEST_BYTES = 10 * 1024 * 1024
 _REQUEST_SLACK = 64 * 1024  # JSON framing, tool schemas' escaping: the estimate is an estimate
-# Room a reply always gets, by effort: the reasoning is spent from max_tokens before the answer.
-ROOM: dict[str, int] = {"low": 1024, "medium": 2048, "high": 4096}
+# The effort every request starts at, and the room a reply always gets: the reasoning is spent from
+# max_tokens before the answer (low effort on a UI step: well under 2K).
+EFFORT = "low"
+ROOM = 8192
 MAX_ROOM = 32_768  # a retry's room never grows past this (paid-tier output limit: 40K)
 _STREAM_REASONING = 256  # a streamed answer's unseen reasoning, when the server reports no usage
 
@@ -683,14 +687,14 @@ class CerebrasProvider(OpenAICompatProvider):
         max_tokens: int = 4096,
         **extra: Any,  # whatever else the chain passes (brain-effort's seams): handed on as is
     ) -> Turn:
-        effort = effort if effort in ROOM else "low"  # (the values both models take)
+        effort = EFFORT
         try:
             messages = self._prepare(messages, system, tools)
             await self.account.join_prewarm()
             await self.account.admit(
                 self.model, estimate(messages, system, tools, vision=self.supports_vision), self.name
             )
-            room = max(max_tokens, ROOM.get(effort, ROOM["medium"]))
+            room = max(max_tokens, ROOM)
             retried: set[str] = set()
             while True:
                 try:
@@ -701,7 +705,7 @@ class CerebrasProvider(OpenAICompatProvider):
                     if "room" in retried:
                         raise
                     retried.add("room")
-                    effort, room = "low", min(max(room * 2, ROOM["high"]), MAX_ROOM)
+                    effort, room = "low", min(room * 2, MAX_ROOM)
                     log.info(
                         f"[brain] {self.name}: no room left for the answer; again with {room} tokens, low effort"
                     )
@@ -732,7 +736,7 @@ class CerebrasProvider(OpenAICompatProvider):
             await self.account.admit(
                 self.model, estimate(messages, system, None, vision=self.supports_vision), self.name
             )
-            room = max(max_tokens, ROOM["low"])
+            room = max(max_tokens, ROOM)
             produced = False
             try:
                 async for chunk in super().stream(messages, system=system, max_tokens=room):
