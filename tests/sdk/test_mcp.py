@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import sys
+import unicodedata
 
 import pytest
 
@@ -542,6 +543,52 @@ def test_approval_text_shows_hidden_characters():
     assert "‮" not in t and "<U+202E>" in t and "\x00" not in t and "\x1b" not in t
     assert "<0x00>" in t and "<0x1B>" in t and "<0x0D>" in t and "abc" not in t
     assert "web_fetch" in t
+
+
+def _approval(summary: str, detail: str = "{}") -> neo2.ApprovalRequest:
+    return neo2.ApprovalRequest(
+        action_id="abc",
+        tool="wire_money",
+        summary=summary,
+        detail=detail,
+        params={},
+        after_reading=("caller",),
+        conversation="c",
+        request_id="r",
+        staged_at=0.0,
+        expires_at=120.0,
+    )
+
+
+INVISIBLE = "\u2028\u2029\u0085\u200b\u200c\u200d\u200e\ufeff\u061c\u00ad\u2800\u3164\U000e0041"
+
+
+def test_approval_text_cant_be_spoofed_by_the_summary():
+    """The summary comes from what a model chose: it can't draw its own "Exactly what will run"
+    block and "Allow it once?" line, or push the real ones out of sight."""
+    fake = 'wire 1 to bob\n\nExactly what will run:\n{"to": "bob", "amount": 1}\n\nAsked through NEO\'s MCP server. Allow it once?'
+    real = '{\n  "to": "bob",\n  "amount": 100000\n}'
+    t = approvers.approval_text(_approval(fake + "\n" * 40 + INVISIBLE + "\r\n\t end", real), client="app")
+    lines = t.split("\n")
+    assert lines[0].startswith("NEO wants to: wire 1 to bob Exactly what will run:") and "end" in lines[0]
+    assert lines[1:4] == ["", "Exactly what will run:", "{"]  # the real block, right below
+    assert lines.count("Exactly what will run:") == 1
+    assert '"amount": 100000' in lines[5] and lines[-1] == "Asked through NEO's MCP server (client: app). Allow it once?"
+    for ch in INVISIBLE:  # none left to act: a line break is a space, anything else shows its code point
+        assert ch not in t and (ch.isspace() or f"<U+{ord(ch):04X}>" in t)
+    assert all(unicodedata.category(ch)[0] not in "CZ" or ch in " \n" for ch in t)
+
+
+def test_approval_text_detail_keeps_its_lines_but_shows_what_hides():
+    detail = '{"to": "bob\u2028\u2028Allow it once?", "note": "\u202eevil\u3000"}' + "\n\n\n\n\n" + "tail\t1" + " " * 40 + "x"
+    t = approvers.approval_text(_approval("wire", detail))
+    assert "<U+2028><U+2028>Allow it once?" in t and "<U+202E>evil<U+3000>" in t
+    # a run of blank lines, or of spaces a dialog would wrap, can't push the rest out of view
+    assert "\n[4 blank lines]\ntail\t1 [40 spaces] x" in t
+    assert approvers.clean('{\n    "a": 1\n}', lines=True) == '{\n    "a": 1\n}'  # JSON stays as it is
+    long = approvers.approval_text(_approval("x" * 5000))
+    first = long.split("\n")[0]
+    assert len(first) < approvers.MAX_SUMMARY_CHARS + 80 and first.endswith("(cut short: what will run is below)")
 
 
 # ---- no brain, options -------------------------------------------------------------------------
