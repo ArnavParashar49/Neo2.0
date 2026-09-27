@@ -10,9 +10,10 @@ the list stay outside the fence.
 
 What is listed: the visible interactive elements of the app's focused window — an open sheet or
 dialog's first (they block the rest) — capped (about 470 tokens per 40) and ranked: what can be
-pressed or typed into before what only shows, enabled before disabled, then in reading order. Never
-NEO's own window's, never a protected app's. The walk issues real ids (``click id=…`` resolves them),
-stops at a deadline, and starts nothing in library mode (no web-tree switch, no timers).
+pressed or typed into before what only shows, enabled before disabled among the same kind, then in
+reading order. Never NEO's own window's, never a protected app's. The walk issues real ids (``click
+id=…`` resolves them), stops at a deadline, and starts nothing in library mode (no web-tree switch,
+no timers).
 """
 
 from __future__ import annotations
@@ -147,7 +148,7 @@ def pick(
             continue
         seen.add(key)
         where = blocked.get(e.id, "")
-        found.append(((0 if where else 1, 0 if e.enabled else 1, rank, i), Mark(e.id, e.role, label, f, where, e.enabled)))
+        found.append(((0 if where else 1, rank, 0 if e.enabled else 1, i), Mark(e.id, e.role, label, f, where, e.enabled)))
     found.sort(key=lambda t: t[0])
     chosen = [m for _, m in found[:limit]]
     chosen.sort(key=lambda m: (0 if m.where else 1, round(m.frame[1] / 8), m.frame[0]))
@@ -189,6 +190,8 @@ def block(c: Collected, s: Shot | None, *, blind: bool) -> str:
             f"Elements NEO found in {c.app or 'the app'} by Accessibility (you can't see the picture, but these "
             "ids work: click id=…, ax_press):"
         )
+    elif s is None:
+        head = f"Controls NEO found in {c.app or 'the app'} by Accessibility (click id=…, ax_press):"
     else:
         head = (
             "Elements in this picture, from Accessibility — exact, so prefer click id=… over pixels when the target "
