@@ -292,6 +292,104 @@ def test_reading_a_page_switches_a_chromium_apps_web_tree_on_and_back(monkeypatc
     assert axkit.enable_web_reading(app, "chromium") == [] and fake.sets == []
 
 
+
+@pytest.fixture(autouse=True)
+def _no_held_switches():
+    """What one test's reads left switched on never counts as another's reader."""
+    yield
+    held = getattr(axkit, "_WEB_HELD", None)
+    if held is not None:
+        held.clear()
+
+
+def test_a_switch_already_on_is_never_joined_by_the_other(monkeypatch):
+    """AXManualAccessibility already on (a tool the user runs set it): the tree is there, and
+    AXEnhancedUserInterface (slow window animations while on) is not turned on as well."""
+    for rt in ("electron", "chromium"):
+        app = El("AXApplication", AXManualAccessibility=True)
+        fake = FakeAX(monkeypatch, app)
+        assert axkit.enable_web_reading(app, rt) == [] and fake.sets == []
+        assert "AXEnhancedUserInterface" not in app.attrs
+
+
+def test_two_reads_of_one_app_restore_its_switches_when_the_last_one_ends(monkeypatch):
+    """A second read (or a site search's watch) starts while the first holds the switches on: the
+    first one ending must not switch the tree off under the second."""
+    app = El("AXApplication")
+    FakeAX(monkeypatch, app)
+    first = axkit.enable_web_reading(app, "chromium")
+    second = axkit.enable_web_tree(app, "chromium")  # sees NEO's own switch on: changes nothing
+    assert first and second == []
+    axkit.restore_web_tree(app, first)
+    assert app.attrs["AXManualAccessibility"] is True and app.attrs["AXEnhancedUserInterface"] is True
+    axkit.restore_web_tree(app, second)
+    assert app.attrs["AXManualAccessibility"] is False and app.attrs["AXEnhancedUserInterface"] is False
+    # and a later read starts afresh
+    again = axkit.enable_web_reading(app, "chromium")
+    assert again == [("AXManualAccessibility", False), ("AXEnhancedUserInterface", False)]
+    axkit.restore_web_tree(app, again)
+    assert app.attrs["AXEnhancedUserInterface"] is False
+
+
+MORE = "Engineers will inspect the pillars on Monday; until then buses take the ring road and add twenty minutes."
+
+
+def _wrapped_page(wrapper_classes):
+    banner = P(T("Daily Planet"), AXSubrole="AXLandmarkBanner")
+    promo = P(T("Subscribe today and get the first three months of the Daily Planet for the price of one. " * 3))
+    main = P(El("AXHeading", [T("Floods close the bridge")], AXValue=1), P(T(STORY.strip())), P(T(MORE)), AXSubrole="AXLandmarkMain")
+    aside = P(T("Most read: a cat on a train"), AXSubrole="AXLandmarkComplementary")
+    return El("AXWebArea", [banner, promo, P(main, aside, AXDOMClassList=wrapper_classes)], AXURL=Url())
+
+
+@pytest.mark.parametrize("classes", [["content-sidebar-wrap"], ["no-ads", "has-nav"], ["nav-wrap"], ["sidebar"]])
+def test_a_container_named_like_furniture_never_hides_the_main_content(monkeypatch, classes):
+    """A wrapper whose class says sidebar/ads/nav (a theme's "content-sidebar-wrap", a state class
+    like "no-ads") holds the article: the article is read, first."""
+    page_app(monkeypatch, _wrapped_page(classes))
+    text = axkit.web_page(1)[2]
+    assert text.startswith(f"# Floods close the bridge\n{STORY.strip()}\n{MORE}\n\n[elsewhere on the page]\n")
+    assert "Subscribe today" in text
+    # a wrapper named only by state or by other words is no furniture: its sidebar is read, last
+    assert text.endswith("Most read: a cat on a train") == (classes[0] in ("content-sidebar-wrap", "no-ads"))
+
+
+def test_class_hints_take_whole_names_and_keep_a_title(monkeypatch):
+    """Without landmarks: "cookie-recipe" or "has-sidebar" is no page furniture, "site-footer"
+    is; a first-level heading inside furniture is still the page's title."""
+    recipe = "Chocolate chip cookies: cream the butter and sugar, fold in the chips, bake for twelve minutes. " * 2
+    plain = El("AXWebArea", [
+        P(El("AXHeading", [T("Cookie of the week")], AXValue=1), El("AXLink", [T("Home")]), AXDOMClassList=["top-nav"]),
+        P(P(T(recipe.strip()), AXDOMClassList=["cookie-recipe"]), AXDOMClassList=["has-sidebar"]),
+        P(T("Copyright the bakery, all rights reserved"), AXDOMClassList=["site-footer"]),
+    ])
+    page_app(monkeypatch, plain)
+    text = axkit.web_page(1)[2]
+    assert text == "# Cookie of the week\n" + recipe.strip()
+
+
+def test_a_read_stops_when_told(monkeypatch):
+    import threading
+
+    page_app(monkeypatch, article_page())
+    stop = threading.Event()
+    stop.set()
+    assert axkit.web_page(1, stop=stop)[2] == ""
+    assert axkit.web_page(1)[2].startswith("# Floods")
+
+
+def test_the_part_of_the_window_a_page_shows(monkeypatch):
+    """The web area's frame, cut to the scroll area it sits in (Safari's web area is the whole
+    document), for a screenshot of the page without the browser's tabs."""
+    FakeAX(monkeypatch, El("AXApplication"))
+    area = El("AXWebArea", AXPosition=(100.0, -1900.0), AXSize=(1200.0, 9000.0))
+    area.attrs["AXParent"] = El("AXScrollArea", [area], AXPosition=(100.0, 120.0), AXSize=(1200.0, 700.0))
+    assert axkit.web_view(area) == (100.0, 120.0, 1200.0, 700.0)
+    chrome = El("AXWebArea", AXPosition=(0.0, 88.0), AXSize=(1440.0, 780.0), AXParent=El("AXGroup"))
+    assert axkit.web_view(chrome) == (0.0, 88.0, 1440.0, 780.0)
+    assert axkit.web_view(El("AXWebArea")) is None  # no frame to tell
+    assert axkit.web_view(El("AXWebArea", AXPosition=(0.0, 0.0), AXSize=(0.0, 0.0))) is None
+
 def test_dock_badge(monkeypatch):
     items = El("AXList", [El("AXDockItem", AXSubrole="AXApplicationDockItem", AXTitle="Postbox", AXStatusLabel="3"),
                           El("AXDockItem", AXSubrole="AXApplicationDockItem", AXTitle="Notebook")])

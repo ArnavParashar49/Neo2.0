@@ -1123,6 +1123,7 @@ class LiveVoice:
         # Quiet = an action that just gets done. Its result goes back SILENT (no narration) unless
         # it failed, needs the user, or the user also asked something in the same breath.
         silent = False
+        started = self._taint  # this question's: a new one gets a fresh list meanwhile
         p = confirm.peek()
         heard = answer_of(asked) if (p is not None and asked and self._utt_started > p.staged_at) else None
         try:
@@ -1138,6 +1139,7 @@ class LiveVoice:
                 # action, or wrapping it in agent_task): answer it from their words.
                 reply = await self._agent_session.answer(heard, text=asked)
                 if reply is not None:
+                    self._count_read(reply, started)
                     self._last_answer = (time.time(), reply.text)
                     self._last_answer_silent = reply.silent
                     result, silent = reply.text, reply.silent  # done as approved: nothing to say
@@ -1167,7 +1169,7 @@ class LiveVoice:
                         taint=list(self._taint),
                         origin="user" if own else "live",
                     )
-                    result, silent = reply.text, reply.silent
+                    result, silent = self._count_read(reply, started), reply.silent
                     lab = self._call_labels.get(key)
                     if lab is not None and reply.route == "quick" and reply.tools:
                         lab["tools"] = [x for x in lab["tools"] if x != "agent_task"] + list(reply.tools)
@@ -1318,6 +1320,22 @@ class LiveVoice:
             # result, an agent's reply, NEO's re-ask) — and all the model is ever told.
             self._asked = (p.action_id, p.summary, time.time())
             self._voiced_action = None
+
+    def _count_read(self, reply, started: list[str]) -> str:
+        """What NEO's session read to answer (a page, a mail) counts as read here too: the list this
+        call started with and the one the model reads the result in, so a link or a send that
+        content asks for next is put to the user first. Returns the result for the model: a fast
+        path's answer from such content fenced as data (the session fences it already when the
+        model's own goal ran it), an agent's own words as they are."""
+        for taint in (started, self._taint):
+            for src in reply.taint:
+                if src not in taint:
+                    taint.append(src)
+        text = reply.text
+        read = next((x for x in reply.tools if (rt := registry().get(x)) is not None and rt.untrusted), "")
+        if reply.route == "quick" and read and not text.startswith(("<untrusted", "Error", "NEEDS_", "(content) NEEDS_")):
+            text = fence(read, text)
+        return text
 
     def _new_question(self) -> None:
         self._lookups, self._seen_calls = {}, {}

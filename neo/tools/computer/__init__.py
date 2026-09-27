@@ -924,8 +924,11 @@ async def open_url(a: dict, c: ToolContext) -> str:
 # summarize karo": the page in the user's own browser, which NEO then answers them from (page_read).
 _Q_TAIL = r"(?:\s+(?:for\s+me|please|pls|now))*\s*[.!?]*\s*$"
 _PAGE_NOUN = r"(?:web\s*)?(?:page|site|website|tab|article|post|blog(?:\s+post)?)"
-_THIS_PAGE = rf"(?:this|that|the|current|the\s+current)\s+{_PAGE_NOUN}"
-_THIS_ONLY = rf"(?:this|that|current|the\s+current)\s+{_PAGE_NOUN}"  # "the article" alone may be the conversation's
+# "this page", and "the page" / "the tab" (on screen, the one in front): the page the user is looking
+# at. "the article", "the post", "the site" alone may be one NEO fetched or the conversation named,
+# which only a model can tell.
+_THIS_PAGE = rf"(?:(?:this|that|current|the\s+current)\s+{_PAGE_NOUN}|the\s+(?:web\s*)?(?:page|tab))"
+# The comments and replies are a page's (the browser in front: page_read reads no other app).
 _COMMENTS = r"(?:comments?|replies)"  # a page's, wherever they are said
 _REPLIES = r"(?:comments?|replies|reviews?|responses)"  # a page's when the page is named
 _ON_PAGE = rf"\s+(?:on|in|under|of|below|from)\s+(?:this|that|the)\s+(?:{_PAGE_NOUN}|video)"
@@ -941,9 +944,10 @@ _PAGE_PATHS = [
     ),
     # what's on / in this page, what's this page about, what does this article say
     (
-        rf"{_LEAD}(?:what(?:'s|\s+is)\s+(?:on|in)\s+{_THIS_PAGE}|what(?:'s|\s+is)\s+{_THIS_ONLY}(?:\s+(?:all\s+)?about)?|"
-        rf"what(?:'s|\s+is)\s+the\s+{_PAGE_NOUN}\s+(?:all\s+)?about|what\s+does\s+{_THIS_PAGE}\s+say|"
-        rf"tell\s+me\s+(?:about|what(?:'s|\s+is)\s+(?:on|in))\s+{_THIS_ONLY}){_Q_TAIL}",
+        rf"{_LEAD}(?:what(?:'s|\s+is)\s+(?:on|in)\s+{_THIS_PAGE}|"
+        rf"what(?:'s|\s+is)\s+(?:this|that|current|the\s+current)\s+{_PAGE_NOUN}(?:\s+(?:all\s+)?about)?|"
+        rf"what(?:'s|\s+is)\s+{_THIS_PAGE}\s+(?:all\s+)?about|what\s+does\s+{_THIS_PAGE}\s+say|"
+        rf"tell\s+me\s+(?:about|what(?:'s|\s+is)\s+(?:on|in))\s+{_THIS_PAGE}){_Q_TAIL}",
         {},
     ),
     # read me this page, read this article out loud, read me the comments
@@ -993,11 +997,13 @@ _PAGE_PATHS = [
     "browser is in front): its URL, title and main text, or, when it has little text (a video, a "
     "picture, a PDF) or Accessibility is off, what a screenshot of it shows. Use it for 'summarize "
     "this page', 'what's on this page', 'read me the comments', 'what's the price here', then answer "
-    "from it. Not for NEO's own browser window, and not for a link the user isn't looking at (web_fetch).",
+    "from it. With another app in front it reads nothing and says so: look at that app instead. Not "
+    "for NEO's own browser window, and not for a link the user isn't looking at (web_fetch).",
     _OBJ,
     parallel_safe=True,
     category="web",
     untrusted=True,
+    slow=True,  # a wait for the page's tree, a walk of it, maybe a vision call: Live talks meanwhile
     chain=False,  # "open X and summarize it" would read the page before it loads
     fast_path=_PAGE_PATHS,
 )
