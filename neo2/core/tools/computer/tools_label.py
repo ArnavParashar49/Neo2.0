@@ -167,8 +167,15 @@ async def click_text(a: dict, c: ToolContext) -> str | ToolOutput:
     await asyncio.to_thread(inp.click, *spot)
     outcomes.signature("", resolve.after_press(res, verified=None, bundle=bundle, ctx=c))
     at = "" if blind else f" at {tuple(map(int, spot))}"  # (no coordinates for a brain that can't see)
-    brought = f" (brought {t.brought} to the front first)" if t.brought else ""
-    return f"Clicked '{name}' ({e.role.removeprefix('AX')}){at}{brought}" + gates._input_doubt()
+    brought = f" (brought {t.brought} to the front first)" if t.brought and not t.cold else ""
+    head = f"Clicked '{name}' ({e.role.removeprefix('AX')}){at}{brought}"
+    # An app never seen active with its window key before the click, and active now: the click itself
+    # may only have brought it forward (DECISIONS 59) — said so, never a success, never clicked again.
+    if await pointer.woke(t, mine or t.hits[0].pid):
+        only = pointer.brought_only(t.hits[0].app or t.brought or app or "the app", looked=False)
+        out = ToolOutput(f"{head}. {only.said}" + gates._input_doubt())
+        return pointer.with_effect(out, pointer.effect_of(only))
+    return head + gates._input_doubt()
 
 
 def _neo_in_front() -> bool:

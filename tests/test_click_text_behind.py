@@ -138,3 +138,38 @@ def test_the_ocr_fallback_behind_neos_window_clicks_only_once_the_app_is_in_fron
     desk.clicks.clear()
     out = fallback()  # not the app's own normal window there: the bring passes it over, NEO's stays in front
     assert not out.ok and desk.clicks == [] and "didn't come to the front" in out.text
+
+
+def test_a_mouse_click_that_only_activated_its_app_is_not_called_done(mac, monkeypatch):
+    """Mail frontmost by LaunchServices' word but not active with its window key (DECISIONS 59): the
+    mouse click on an element with no press may only activate it. Said so — never "Clicked" as a
+    success nor "brought to the front first" — and the effect is unknown (changed=None), with the
+    front app changed, so no batch runs on and no check calls it verified."""
+    from neo2.core.agent import batch
+    from neo2.core.providers.base import ToolResult
+    from neo2.core.tools.computer import pointer
+
+    mac.front = (MAIL, MAIL_PID)
+    active = {"now": False}
+    monkeypatch.setattr(
+        ax, "hit", lambda x, y: ax.Hit(pid=MAIL_PID, app=MAIL, label="Inbox", role="AXStaticText", regular=True, window="w")
+    )
+    monkeypatch.setattr(ax, "key_window", lambda pid: "w" if active["now"] else None)
+    monkeypatch.setattr(ax, "is_key", lambda h: active["now"])
+    monkeypatch.setattr(ax, "same_window", lambda a, b: True)
+    monkeypatch.setattr(focus, "force_front", lambda pid: None)
+    monkeypatch.setattr(pointer, "KEY_S", 0.0)
+
+    def click(x, y, **k):
+        mac.clicks.append(((x, y), mac.front[0]))
+        active["now"] = True  # the click itself activated Mail
+
+    monkeypatch.setattr(inp, "click", click)
+    ctx = ToolContext(user_text="click Inbox", origin="user")
+    out = asyncio.run(registry().invoke("click_text", {"label": "Inbox"}, ctx))
+    assert mac.clicks == [((130.0, 110.0), MAIL)]  # one click, never a second
+    assert isinstance(out, ToolOutput) and "may have only brought Mail to the front" in out.text
+    assert "brought Mail to the front first" not in out.text and "twice" in out.text
+    r = ToolResult("c1", "click_text", out.text)
+    r.effect = out.effect
+    assert out.effect.changed is None and out.effect.scene_changed and not batch.verified("click_text", r)
