@@ -11,6 +11,7 @@ import random
 from pathlib import Path
 
 from neo.config import settings
+from neo.reflex.schema import INTENT_CRITERIA
 
 APPS = [
     "Safari",
@@ -124,6 +125,13 @@ QUICK = [
     ("go to {site}", True),
     ("close {app}", True),
     ("quit {app}", True),
+    # short ones too: a sure "stop" of two words cancels every running job ("close it" was one)
+    ("close it", False),
+    ("close the app", True),
+    ("close this app", True),
+    ("close the window", True),
+    ("close this window", True),
+    ("quit the app", True),
     ("switch to {app}", True),
     ("bring up {app}", True),
     ("turn the volume up", True),
@@ -147,6 +155,12 @@ QUICK = [
     ("pause the music", True),
     ("next song", False),
     ("skip this track", True),
+    ("next", False),
+    ("next one", False),
+    ("skip", False),
+    ("skip it", False),
+    ("previous song", False),
+    ("go to the previous track", True),
     ("what's the weather", False),
     ("is it going to rain today", False),
     ("how cold is it outside", False),
@@ -318,6 +332,14 @@ STOP = [
     ("okay stop", False),
 ]
 
+# Short commands that aren't a stop, never trained on (split "validation": the calibration slice, which
+# the gate judges on): the false cancels it counts include these every time. The held-out data had
+# three short close/quit rows, and the multilingual head was sure "close it" meant stop.
+STOP_LOOKALIKES = [
+    "close this", "close that", "close window", "close WhatsApp", "quit Photos", "next track", "next please",
+    "skip this", "skip song", "previous track", "hide it", "minimise it", "agla gaana", "gaana badlo",
+]  # fmt: skip
+
 DESTRUCTIVE_HINTS = (
     "delete",
     "remove",
@@ -367,6 +389,8 @@ _TOOL_HINTS: list[tuple[str, str]] = [
 _HF_TOOLS = {"play_music": "play_music", "play_radio": "play_music", "play_podcasts": "play_music", "play_audiobook": "play_music"}
 # Optional per-row labels of reflex_hf.jsonl passed through as-is (see hf_data.py).
 _HF_LABELS = ("kind", "screen", "reply", "lang", "group", "split")
+# The benchmark's splits (hf_data.py writes them to reflex_eval.jsonl): never training data.
+EVAL_SPLITS = ("eval", "test")
 
 
 def tool_for(text: str) -> str:
@@ -418,7 +442,11 @@ def _fill(t: str, rnd: random.Random) -> str:
     )
 
 
-def build(n_per_class: int = 320, seed: int = 7) -> list[dict]:
+def build(n_per_class: int = 320, seed: int = 7, *, override: bool = True, own: bool = True) -> list[dict]:
+    """Every labelled row. `override` False leaves other sources' rows with your words as they are
+    (see _own_outcomes_win): finetune keeps those out of the head itself, and fits the head it falls
+    back to after an erase on them, so that head never learns your labels. `own` False: your
+    requests (reflex_extra.jsonl) aren't even read — learning is off."""
     rnd = random.Random(seed)
     rows: list[dict] = []
     seen: set[str] = set()
@@ -456,6 +484,8 @@ def build(n_per_class: int = 320, seed: int = 7) -> list[dict]:
     # LLM-generated + real-world extras + mapped Hugging Face rows live outside the repo
     # (see generate.py, hf_data.py, README). reflex_eval.jsonl is the benchmark: never trained on.
     for name in ("reflex_generated.jsonl", "reflex_extra.jsonl", "reflex_hf.jsonl"):
+        if name == "reflex_extra.jsonl" and not own:
+            continue
         extra = settings().data_dir / name
         if extra.exists():
             if name == "reflex_extra.jsonl":  # the user's own requests: deduped, within retention
@@ -465,8 +495,8 @@ def build(n_per_class: int = 320, seed: int = 7) -> list[dict]:
             else:
                 src = [json.loads(line) for line in extra.read_text().splitlines() if line.strip()]
             for r in src:
-                if not r or (name == "reflex_hf.jsonl" and r.get("split", "train") != "train"):
-                    continue
+                if not r or (name == "reflex_hf.jsonl" and r.get("split", "train") in EVAL_SPLITS):
+                    continue  # a validation split comes through: finetune calibrates on it
                 hf = name == "reflex_hf.jsonl"
                 gen = name == "reflex_generated.jsonl"  # focused generation labels kind/destructive too
                 label = r.get("hf_intent") or r.get("source", "").split(":", 1)[-1]
@@ -485,7 +515,13 @@ def build(n_per_class: int = 320, seed: int = 7) -> list[dict]:
                 if hf or gen:
                     out.update({k: r[k] for k in _HF_LABELS if k in r})
                 rows.append(out)
-    rows = _own_outcomes_win(rows)
+    rows = _own_outcomes_win(rows, override) if own else rows
+    said = {r["text"].lower() for r in rows}  # judged only as sentences nothing trains on
+    rows += [
+        {"text": t, "intent": "quick_action", "source": "template", "destructive": False, "tool": tool_for(t), "split": "validation"}
+        for t in STOP_LOOKALIKES
+        if t.lower() not in said
+    ]
     rnd.shuffle(rows)
     return rows
 
@@ -493,13 +529,14 @@ def build(n_per_class: int = 320, seed: int = 7) -> list[dict]:
 _OWN_FIELDS = ("w", "verified", "wrong", "conf", "margin", "script", "kind")
 
 
-def _own_outcomes_win(rows: list[dict]) -> list[dict]:
+def _own_outcomes_win(rows: list[dict], override: bool = True) -> list[dict]:
     """What actually happened beats a guess: a sentence the user said and verified overrides every
     other row with the same words (case and spacing aside) from any source. Their rows also carry
     the ledger's weight and flags through (w, verified, wrong…) so training can weight them.
 
     A template row isn't dropped but takes the user's intent and tool: templates carry the only
-    explicit destructive / needs_screen labels, and "delete this folder" must stay destructive."""
+    explicit destructive / needs_screen labels, and "delete this folder" must stay destructive.
+    `override` False: only the user's own rows get their flags; every other row stays as it was."""
     extra = settings().data_dir / "reflex_extra.jsonl"
     if not extra.exists():
         return rows
@@ -513,7 +550,7 @@ def _own_outcomes_win(rows: list[dict]) -> list[dict]:
         k = norm(r["text"])
         if r.get("source") == "reflex_extra.jsonl":
             r.update({f: own[k][f] for f in _OWN_FIELDS if k in own and f in own[k]})
-        elif k in verified:
+        elif k in verified and override:
             if r.get("source") != "template":
                 continue
             r = {**r, "intent": own[k]["intent"], "tool": own[k].get("tool", "")}
@@ -521,19 +558,26 @@ def _own_outcomes_win(rows: list[dict]) -> list[dict]:
     return out
 
 
-def benchmark(rows: list[dict] | None = None) -> tuple[list[dict], int]:
+def benchmark(rows: list[dict] | None = None, path: Path | None = None) -> tuple[list[dict], int]:
     """The benchmark (``reflex_eval.jsonl``, see hf_data.py) minus every sentence NEO trains on.
 
     hf_data holds the public train rows out of it, but NEO's own rows — the templates, generated
     and your own examples — are made without looking at it ("next song", "ruk jao" are in both), so
     whoever evaluates drops the overlap here. `rows`: what the head was trained on (default: build()).
-    Returns (benchmark rows, how many were dropped)."""
+    `path`: another benchmark file. Returns (benchmark rows, how many were dropped)."""
     from neo.reflex.sources import text_key
 
-    path = settings().data_dir / "reflex_eval.jsonl"
+    path = path or settings().data_dir / "reflex_eval.jsonl"
     if not path.exists():
         return [], 0
-    bench = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    bench = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        try:
+            r = json.loads(line)
+        except json.JSONDecodeError:
+            continue  # a cut-off line: not a row
+        if isinstance(r, dict) and r.get("text") and r.get("intent") in INTENT_CRITERIA:
+            bench.append(r)
     trained = {text_key(r["text"]) for r in (build() if rows is None else rows)}
     keep = [r for r in bench if text_key(r["text"]) not in trained]
     return keep, len(bench) - len(keep)

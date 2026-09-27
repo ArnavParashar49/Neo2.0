@@ -182,7 +182,7 @@ def test_a_retrain_overlapping_an_erase_writes_nothing(monkeypatch):
         def reload_head(self):
             raise AssertionError("must not swap in a head trained on erased data")
 
-    def train(args, agent=None, lock=None, cancelled=None):
+    def train(args, agent=None, lock=None, cancelled=None, own=True):
         learn.forget_examples()  # the user erases mid-training
         assert cancelled()
         return {"saved": False, "cancelled": True, "intent": 0.0}

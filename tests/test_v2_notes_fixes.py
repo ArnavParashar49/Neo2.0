@@ -167,7 +167,9 @@ def test_gemini_cooldowns_persist_and_slow_5xx_is_not_retried(monkeypatch, tmp_p
     # key 1 → 429, key 2 → one 503 (no retry), then the next model succeeds on its first key
     assert attempts == [("gemini-3.8-flash", 0), ("gemini-3.8-flash", 1), ("gemini-3.7-flash", 0)]
     saved = json.loads((tmp_path / gem._COOLDOWN_FILE).read_text())
-    assert "gemini-3.8-flash|0" in saved and "gemini-3.8-flash|-1" in saved
+    # (the key is saved as a hash of it — never the key itself — and a model's overload for any key)
+    assert f"gemini-3.8-flash|{gem._key_id('k1')}" in saved and "gemini-3.8-flash|*" in saved
+    assert not any("k1" in k or "k2" in k for k in saved)
     # a new provider (a restart) starts with the same knowledge and skips the dead pairs
     p2 = gem.GeminiProvider(model="gemini-3.8-flash")
     attempts.clear()

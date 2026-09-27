@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import signal
 import sys
@@ -10,7 +11,7 @@ import time
 from typing import Any
 
 from neo import health
-from neo.agent import confirm
+from neo.agent import confirm, grants
 from neo.agent.session import Session, answer_of
 from neo.config import settings
 from neo.events import NeoState, bus
@@ -68,6 +69,7 @@ class App:
                     await v._close_session()
         early().new_utterance()
         early()._claims.clear()
+        grants.reset()  # every "yes for this task" given so far ends with what it was given in
         counts = await forget_everything()  # bumps the erase generation before anything else
         self.session.history.clear()
         self.session._summarized = 0
@@ -75,6 +77,19 @@ class App:
         self.session.memory_context = ""
         print("[privacy] erased everything NEO kept about the user")
         return counts
+
+    async def resume_browsing(self, text: str) -> None:
+        """The user handed NEO's browser back after doing their part (a login, a code): the job
+        goes on, as if they had said so — they did, on the card."""
+        if self.voice and getattr(self.voice, "handles_text", False):
+            await bus().say(text, role="user")
+            await self.voice.send_text(text)
+        else:
+            await self.handle_text(text)
+
+    async def decline(self, action_id: str) -> None:
+        """The user took NEO's browser over while it waited for their OK: that's a no."""
+        await self.answer(False, action_id=action_id, said="no")
 
     def cancel_current(self) -> bool:
         """Stop everything in flight (the stop button / "stop")."""
@@ -85,9 +100,12 @@ class App:
                 n += 1
         return n > 0
 
-    async def answer(self, yes: bool, *, action_id: str = "", said: str = "") -> None:
-        """The user answered NEO's pending question (the card's buttons, or a typed yes/no)."""
-        reply = await self.session.answer(yes, action_id=action_id, text=said or ("yes" if yes else "no"))
+    async def answer(self, yes: bool, *, action_id: str = "", said: str = "", scope: str = "") -> None:
+        """The user answered NEO's pending question (the card's buttons, or a typed yes/no).
+        `scope` "task": the card's "yes for this task" (typed or said, the words carry it)."""
+        reply = await self.session.answer(
+            yes, action_id=action_id, text=said or ("yes" if yes else "no"), scope="task" if scope == "task" else None
+        )
         if reply is None:
             await bus().note("That question had already expired — nothing was done.")
             return
@@ -105,6 +123,9 @@ class App:
                 await bus().say(text, role="user")
                 await self.answer(ans, said=text)  # typed straight to the question, in any voice mode
             elif self.voice and getattr(self.voice, "handles_text", False):
+                from neo.tools.browser_live import live
+
+                live.user_said()  # the user's own words (a typed request has its job only in Live's calls)
                 await self.voice.send_text(text)  # Live answers aloud + in the transcript
             else:
                 await self.handle_text(text)
@@ -115,7 +136,7 @@ class App:
             if not action_id:
                 await bus().note("Couldn't tell which question that answer was for — nothing was done.")
                 return
-            await self.answer(bool(cmd.get("yes")), action_id=action_id)
+            await self.answer(bool(cmd.get("yes")), action_id=action_id, scope=str(cmd.get("scope") or ""))
         elif kind == "forget_all":
             # From the overlay's own "Erase everything?" confirmation, or `neo --forget-all`
             # while NEO runs — never a model's tool.
@@ -123,6 +144,9 @@ class App:
             await bus().publish("erased", counts=counts)
             await bus().note("Erased: " + ", ".join(f"{n} {k}" for k, n in counts.items()))
         elif kind == "stop":
+            from neo.tools.browser_live import live
+
+            live.user_stopped()  # the page NEO was on stays, and it's the user's now
             if self.voice:
                 await self.voice.interrupt()  # tells Laya's outcome ledger, knowing how long NEO spoke
             else:
@@ -223,6 +247,10 @@ async def run() -> None:
         print(f"[neo] missing: {', '.join(missing)} — allow NEO in System Settings → Privacy & Security (NEO's menu has shortcuts)")
     load_all()
     app = App()
+    from neo.tools.browser_live import live
+
+    live.hooks.resume = app.resume_browsing
+    live.hooks.decline = app.decline
     ui = UIServer(app.on_command)
     await ui.start()
     warmup(app.session.reflex)  # Laya, then the memory embedder, sequentially
@@ -265,9 +293,12 @@ async def run() -> None:
         except Exception:  # noqa: BLE001
             pass
     try:
+        from neo.tools import render
         from neo.tools.browser import shutdown as close_browser
 
         await asyncio.wait_for(close_browser(), 2)
+        with contextlib.suppress(Exception):  # the invisible page renderer (atexit would also do it)
+            await asyncio.wait_for(render.shutdown(), 2)
         if s := await asyncio.wait_for(app.session.checkpoint(final=True, budget_s=5.0), _SUMMARY_BUDGET_S):
             print(f"[memory] session saved ({len(s)} chars)")  # not what was said: logs stay content-free
     except TimeoutError:

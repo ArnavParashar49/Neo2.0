@@ -47,6 +47,8 @@ async def forget_everything() -> dict[str, int]:
     counts["learned requests"] = learn.forget_examples()
     memory.forget()  # the corrections' embeddings (RAM only)
     finetune.feature_cache().unlink(missing_ok=True)  # rebuilt from the public datasets on the next retrain
+    finetune.reset_to_base()  # the heads fit on your requests go; the one trained without them stays (never raises)
+    finetune.sweep_temporaries()  # and what a cut-off write of either left behind
     from neo.decide import engine as decide
     from neo.decide import eventkit, learned, media, run, shadow, sites
 
@@ -71,13 +73,14 @@ async def forget_everything() -> dict[str, int]:
     try:
         from neo.tools.browser import shutdown as close_browser
 
-        await close_browser()
+        await close_browser("erased")  # the card, its steps, thumbnails and poster go too
     except Exception:  # noqa: BLE001 — not open
         pass
     shutil.rmtree(s.data_dir / "browser", ignore_errors=True)
     if learn._training:
         # A retrain in flight notices the erase before it saves anything; if it was already
-        # saving, remove what it wrote once it's done.
+        # saving, remove what it wrote once it's done (its feature cache, and put the head
+        # trained without your requests back once more).
         asyncio.get_running_loop().create_task(_unlink_cache_after_retrain())
     return counts
 
@@ -90,3 +93,5 @@ async def _unlink_cache_after_retrain(limit_s: float = 1800.0) -> None:
         await asyncio.sleep(2.0)
         waited += 2.0
     finetune.feature_cache().unlink(missing_ok=True)
+    finetune.reset_to_base()
+    finetune.sweep_temporaries()

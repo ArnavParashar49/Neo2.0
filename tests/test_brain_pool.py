@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -155,16 +156,34 @@ def test_constructors_given_everything_read_no_settings(genai_clients):
         GeminiProvider()  # nothing passed: it would have to read settings
 
 
-def test_gemini_quota_memory_goes_to_the_agents_data_dir(tmp_path, genai_clients):
+def test_gemini_quota_memory_goes_to_the_agents_data_dir(tmp_path, genai_clients, monkeypatch):
+    """The brain an agent's pool built from its keys keeps its quota windows in that agent's data
+    dir — fixed when it was built, whoever's context saves them later. A host's own provider object
+    keeps them in itself: no file anywhere."""
     from neo.providers import gemini as gem
 
-    a = make_runtime(tmp_path / "a", "a")
-    make_runtime(tmp_path / "b", "b")
-    p = gem.GeminiProvider("gemini-x", keys=["k"], fallback_models=[])
-    p._exhausted[("gemini-x", 0)] = 9e18
+    monkeypatch.setattr(prov, "_cache", {})
+    a = make_runtime(tmp_path / "a", "a", gemini_api_key="k-a")
+    b = make_runtime(tmp_path / "b", "b", gemini_api_key="k-b")
     with runtime.bind(a.scope()):
+        p = prov.make("gemini")
+    p._exhausted[("gemini-x", gem._key_id("k-a"))] = 9e18
+    with runtime.bind(b.scope()):
         p._save_cooldowns()
-    assert (tmp_path / "a" / gem._COOLDOWN_FILE).exists() and not (tmp_path / "b" / gem._COOLDOWN_FILE).exists()
+    saved = json.loads((tmp_path / "a" / gem._COOLDOWN_FILE).read_text())
+    assert saved == {f"gemini-x|{gem._key_id('k-a')}": 9e18}
+    assert not (tmp_path / "b" / gem._COOLDOWN_FILE).exists()
+    with runtime.bind(b.scope()):  # B's own brain starts clean: A's quota state isn't B's
+        assert prov.make("gemini")._exhausted == {}
+
+    host = gem.GeminiProvider("gemini-x", keys=["k-host"], fallback_models=[])
+    host._exhausted[("gemini-x", gem._key_id("k-host"))] = 9e18
+    for rt in (a, b):
+        with runtime.bind(rt.scope()):
+            host._save_cooldowns()
+    assert json.loads((tmp_path / "a" / gem._COOLDOWN_FILE).read_text()) == saved
+    assert not (tmp_path / "b" / gem._COOLDOWN_FILE).exists()
+    assert not list(Path(os.environ["NEO_DATA_DIR"]).glob(gem._COOLDOWN_FILE))
 
 
 def test_neo_apps_pool_is_the_module_cache(monkeypatch, genai_clients):

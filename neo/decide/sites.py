@@ -285,9 +285,10 @@ async def resolve(word: str) -> SiteRes | None:
 # ---- the site's own search ------------------------------------------------------------------------
 
 
-async def _fetch(url: str, limit: int = MAX_PAGE) -> _Page | None:
+async def _fetch(url: str, limit: int = MAX_PAGE, *, partial: bool = False) -> _Page | None:
     """GET a public https page (every hop checked: never this Mac or the local network), within
-    FETCH_S and ``limit`` bytes, with no cookies kept."""
+    FETCH_S and ``limit`` bytes, with no cookies kept. ``partial``: a longer page is cut at
+    ``limit`` rather than refused (a results page lists its first items early)."""
     import httpx
 
     from neo.tools.computer import policy
@@ -315,7 +316,10 @@ async def _fetch(url: str, limit: int = MAX_PAGE) -> _Page | None:
             async for chunk in r.aiter_bytes():
                 body += chunk
                 if len(body) > limit:
-                    return None
+                    if not partial:
+                        return None
+                    del body[limit:]
+                    break
             return _Page(str(r.url), body.decode(r.encoding or "utf-8", errors="replace"))
     except (httpx.HTTPError, httpx.InvalidURL, UnicodeError, ValueError) as e:
         print(f"[decide] couldn't read {urlsplit(url).hostname} ({str(e)[:60]})")

@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
+from urllib.parse import urlsplit
 
 import httpx
 
 from neo.agent.registry import ToolContext, tool
 from neo.config import decide_mode
+from neo.tools import render
 
 # The table of known sites and their search pages: web_search's legacy, until the kind is on.
 from neo.tools.sites_legacy import _ENGINE_RE, _SITE_RE, site_search_url
@@ -22,6 +25,8 @@ _VAGUE_QUERY = (
 _VAGUE_QUERY_AFTER_FOR = r"(?!(?:for\s+)?(?:it|this|that|these|those|them|one|(?:the|this|that)\s+(?:\w+\s+)?one)\s*[.!?]*\s*$)"
 # a site as the user says it: a name or a domain, up to three words ("<brand> maps")
 _SITE = r"(?P<site>[\w.+-]+(?:\s+[\w.+-]+){0,2})"
+
+log = logging.getLogger(__name__)
 
 
 # While web_search is on, which site a search means is told by evidence (neo.decide.kinds.site):
@@ -160,7 +165,7 @@ async def web_search(a: dict, c: ToolContext) -> str:
 
 @tool(
     "web_fetch",
-    "Fetch a URL and return its main text content (articles, docs, pages).",
+    "Fetch a URL and return its main text content (articles, docs, pages — also ones built by JavaScript).",
     {
         "type": "object",
         "properties": {"url": {"type": "string"}, "max_chars": {"type": "integer"}},
@@ -215,12 +220,88 @@ async def web_fetch(a: dict, c: ToolContext) -> str:
 
         rd = PdfReader(io.BytesIO(r.content))
         return "\n".join((p.extract_text() or "") for p in rd.pages[:30])[:limit]
+    html = r.text if _is_html(ctype, r.text) else ""
+    if not html:
+        text = await asyncio.to_thread(_main_text, r.text) or await asyncio.to_thread(_plain_text, r.text)
+        return text[:limit] or "(no readable text)"
+    main, full, shell = await asyncio.to_thread(_judge, html)
+    text = main if main.strip() else full
+    # Built by its scripts: what the server sent is a shell. Never a link that carries data (a
+    # token…): the page's scripts would run, and could act on it.
+    if shell and not policy.url_carries_data(str(r.url)):
+        sent = max(len(main.strip()), len(full.strip()))
+        text = await _rendered(str(r.url), policy, sent=sent) or text
+    return text[:limit] or "(no readable text)"
+
+
+def _is_html(ctype: str, body: str) -> bool:
+    if "html" in ctype.lower():
+        return True
+    return not ctype and body.lstrip()[:200].lower().startswith(("<!doctype html", "<html"))
+
+
+def _main_text(html: str) -> str:
     import trafilatura
 
-    text = trafilatura.extract(r.text, include_links=False, include_tables=True, favor_recall=True) or ""
-    if not text.strip():
-        text = trafilatura.html2txt(r.text)
-    return text[:limit] or "(no readable text)"
+    return trafilatura.extract(html, include_links=False, include_tables=True, favor_recall=True) or ""
+
+
+def _plain_text(body: str) -> str:
+    import trafilatura
+
+    return trafilatura.html2txt(body) or ""
+
+
+def _texts(html: str) -> tuple[str, str]:
+    """The page's main text, and all of its text (only worked out when the main text is short —
+    that's when it's needed)."""
+    import trafilatura
+
+    main = _main_text(html)
+    full = (trafilatura.html2txt(html) or "") if len(main) < 4000 else main
+    return main, full
+
+
+def _judge(html: str) -> tuple[str, str, bool]:
+    """The page's main text, all of its text, and whether its scripts build it — all off NEO's
+    loop (a hostile page can be slow to read)."""
+    main, full = _texts(html)
+    return main, full, render.needs_render(html, main, full)
+
+
+async def _rendered(url: str, policy, *, sent: int) -> str:
+    """The text of `url` once its scripts have built it, from a headless browser nobody sees —
+    or "" when that's no better than the `sent` characters the server sent (it couldn't be
+    rendered, it ended on an error page, or it shows no more): then the page as sent stands."""
+    try:
+        page = await render.render(url, policy.private_host)
+    except render.RenderError as e:
+        why = re.sub(r"[a-z][\w+.-]*://\S+", "<url>", str(e))  # the log stays content-free
+        log.info(f"[web] a script-built page wasn't rendered: {why[:120]}")
+        return ""
+    except Exception as e:  # noqa: BLE001 — whatever went wrong, the page as sent stands
+        log.info(f"[web] a script-built page wasn't rendered: {type(e).__name__}")
+        return ""
+    log.info(f"[web] rendered a script-built page in {page.seconds:.1f} s")
+    if not 200 <= page.status < 400:  # a bot check, a server error…
+        return ""
+    main = (await asyncio.to_thread(_main_text, page.html)).strip() if page.html else ""
+    shown = page.text.strip()
+    if max(len(main), len(shown)) <= sent:  # a wall, a spinner: no more than the server sent
+        return ""
+    # The article extractor may find little in an app's markup (a feed, a thread): then what the
+    # page shows.
+    text = main if len(main) >= max(render.THIN_CHARS, len(shown) // 4) else shown
+    there = _site(page.url)
+    return f"Redirected to {there}:\n\n{text}" if there and there != _site(url) else text
+
+
+def _site(url: str) -> str:
+    try:
+        host = (urlsplit(url).hostname or "").lower()
+    except ValueError:
+        return ""
+    return host.removeprefix("www.")
 
 
 @tool(

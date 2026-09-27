@@ -171,7 +171,7 @@ class Registry:
         )
 
     async def invoke(self, name: str, args: dict[str, Any], ctx: ToolContext) -> ToolOutput:
-        from neo.agent import confirm
+        from neo.agent import confirm, grants
 
         # `confirm` / `cancel` belong to the user, not to a tool call: whatever a model passes is
         # dropped here (approval travels through confirm.approved()). So are NEO's own `_` args
@@ -183,9 +183,14 @@ class Registry:
             for k, v in (args or {}).items()
             if k not in ("confirm", "cancel") and (approving or not k.startswith("_"))
         }
-        out = await self._invoke(name, args, ctx)
+        with grants.call():
+            out = await self._invoke(name, args, ctx)
+            t = self.get(name)
+            if t and t.untrusted and not out.halt:
+                # Counted per task, every time (a failure too can quote what it read): a yes "for
+                # this task" ends at the next new reading, even from a tool used before.
+                grants.read_untrusted(name)
         self.last = (name, time.time(), out.ok)
-        t = self.get(name)
         # Only NEO's own code can stop a run to ask the user something (confirm.Halt). Anything
         # else that merely starts with those words — a page, a file printed by `cat`, an email
         # read by AppleScript — is content.

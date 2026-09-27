@@ -11,7 +11,10 @@ full command / script / path on the overlay's card. Only the user can approve:
 * the approval covers exactly what the card showed: the staged parameters *and* the summary and
   detail built from the screen at that moment. A call that differs in any of them — a longer
   command, another mail body, an element id that now points at a different button — asks again;
-* every staging gets a fresh random action id, so a stale card can't approve a later one.
+* every staging gets a fresh random action id, so a stale card can't approve a later one;
+* a yes "for this task" (neo.agent.grants) lets later calls of the same tool on the same app in
+  the same task through without a card — never a dangerous one, and never once the request has
+  read something new and untrusted. The card says when it can be answered that way (`scopes`).
 
 Only NEO's own code can halt a run with a question: :func:`stage` and :func:`ask_user` return a
 :class:`Halt` string, which a web page or an email that happens to start with "NEEDS_CONFIRM"
@@ -40,6 +43,7 @@ from pathlib import Path
 from typing import Any
 
 from neo import runtime
+from neo.agent import grants
 from neo.config import settings
 
 NEEDS_CONFIRM = "NEEDS_CONFIRM"
@@ -70,6 +74,8 @@ class Pending:
     detail: str = ""  # exactly what will run (command, script, path + content…), for the card
     staged_at: float = field(default_factory=time.time)
     key: str = ""  # hash of tool + params + summary + detail: what an approval covers
+    task: str = ""  # the task that asked (grants.current()); "" = a direct command
+    target: grants.Target | None = None  # what it acts on, when a yes for this task could cover it
 
 
 class Gate:
@@ -95,6 +101,9 @@ class Gate:
         self.audit_sink = audit_sink
         self.agent = agent
         self.app = app
+        # This conversation's tasks, their notes and untrusted-read counts (neo.agent.grants).
+        # Only NEO.app's own gate gives a yes "for this task": an embedded agent's stay one-off.
+        self.grants = grants.Book(grants_on=app)
 
     def ttl(self) -> float:
         return _TTL_S if self.ttl_s is None else self.ttl_s
@@ -141,6 +150,11 @@ def _scope_gate(sc: runtime.Scope) -> Gate:
 
 def current_gate() -> Gate:
     return _gate()
+
+
+def app_gate() -> Gate:
+    """NEO.app's own gate (whatever is bound)."""
+    return _default_gate
 
 
 def ttl_s() -> float:
@@ -307,14 +321,26 @@ def _announce(kind: str, **data: Any) -> None:
         pass  # no running loop (CLI tools, tests): nothing to show
 
 
-def card(p: Pending | None) -> dict[str, Any] | None:
-    """What the overlay shows for a pending question."""
+def card(p: Pending | None, *, gate: Gate | None = None) -> dict[str, Any] | None:
+    """What the overlay shows for a pending question. `scopes`: the ways beyond "just this once"
+    it may be answered — ["task"] when a yes for this task could cover the calls that follow
+    (never on an embedded agent's card: `gate`, the gate it waits in, gives no such yes)."""
     if not p:
         return None
-    return {"action_id": p.action_id, "tool": p.tool, "summary": p.summary, "detail": p.detail}
+    scopes = grants.offered(p.task, p.target, book=gate.grants if gate is not None else None)
+    return {
+        "action_id": p.action_id,
+        "tool": p.tool,
+        "summary": p.summary,
+        "detail": p.detail,
+        "scopes": scopes,
+        "app": p.target.app if p.target is not None and scopes else "",
+    }
 
 
-def stage(tool: str, params: dict[str, Any], summary: str, detail: str = "") -> Halt:
+def stage(
+    tool: str, params: dict[str, Any], summary: str, detail: str = "", *, target: grants.Target | None = None
+) -> Halt:
     """Stage an operation and return the halt sentinel + the question for the user."""
     g = _gate()
     params = clean(params)
@@ -327,10 +353,13 @@ def stage(tool: str, params: dict[str, Any], summary: str, detail: str = "") -> 
         audit(g.pending.action_id, g.pending.tool, g.pending.params, "superseded", gate=g)
         _announce("confirm_done", action_id=g.pending.action_id, outcome="superseded")
     aid = f"{tool}:{secrets.token_hex(8)}"
-    g.pending = Pending(action_id=aid, tool=tool, params=dict(params), summary=summary, detail=detail, key=key)
+    g.pending = Pending(
+        action_id=aid, tool=tool, params=dict(params), summary=summary, detail=detail, key=key,
+        task=grants.current(), target=target,
+    )
     audit(aid, tool, params, "staged", gate=g)
     _collect(aid)
-    _announce("confirm", **card(g.pending))  # type: ignore[arg-type]
+    _announce("confirm", **card(g.pending, gate=g))  # type: ignore[arg-type]
     try:  # close the card when nobody answers, even if nothing else asks in the meantime
         asyncio.get_running_loop().call_later(g.ttl() + 1, peek)  # carries this gate's context
     except RuntimeError:
@@ -419,14 +448,29 @@ def approval_active() -> bool:
     return a is not None and a.gate is _gate()
 
 
+def approving() -> str:
+    """The action id the user said yes to, inside :func:`approved` for this conversation's gate
+    ("" elsewhere)."""
+    a = _approved.get()
+    return a.action_id if a is not None and a.gate is _gate() else ""
+
+
 def gated(
-    tool: str, params: dict[str, Any], summary: str, detail: str = "", *, always: bool = False
+    tool: str,
+    params: dict[str, Any],
+    summary: str,
+    detail: str = "",
+    *,
+    always: bool = False,
+    target: grants.Target | None = None,
 ) -> dict[str, Any] | str:
     """One-liner for tool handlers.
 
     Returns the released params when the user approved this exact operation (or when
     confirmation is turned off), otherwise the ``NEEDS_CONFIRM`` string for the model.
     `always`: ask even with confirmation turned off — for what reaches another person (a send).
+    `target`: what the call acts on, from a tool whose calls a yes "for this task" may cover
+    (neo.agent.grants); without one, every call asks.
     """
     params = clean(params)
     # An embedded agent always asks: its confirmation is pinned on (config.LibrarySettings).
@@ -434,8 +478,13 @@ def gated(
         return params
     released = consume(op_key(tool, params, summary, detail))
     if released is not None:
+        grants.ran_under(grants.for_card(approving()))  # the card answered "for this task" itself
         return released
-    return stage(tool, params, summary, detail)
+    if target is not None and not always and (g := grants.covering(tool, target)) is not None:
+        audit(f"{tool}:{secrets.token_hex(8)}", tool, params, f"ran under the task grant of {g.action_id} ({g.app})")
+        grants.ran_under(g)
+        return params
+    return stage(tool, params, summary, detail, target=target)
 
 
 def ask_user(msg: str) -> Halt:

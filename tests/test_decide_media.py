@@ -233,6 +233,32 @@ def _fast_and_hermetic(monkeypatch):
         },
     )
     monkeypatch.setattr(media, "_last_open", None)
+    # These tests drive the choice among apps; the web-first default has its own tests below.
+    from neo import config
+
+    monkeypatch.setenv("NEO_PLAY_DEFAULT", "apps")
+    monkeypatch.setenv("NEO_PLAY_SITE", "")
+    monkeypatch.setattr(config, "_settings", None)
+
+    async def no_site(word):
+        return ""
+
+    monkeypatch.setattr(media, "_resolve_site", no_site)
+
+    def no_text_search(q, n=10):
+        raise AssertionError("no web search in this test")
+
+    monkeypatch.setattr(media, "_text_search", no_text_search)
+    from neo.decide import sites
+
+    async def no_discovery(host, prefix=""):
+        return []
+
+    async def no_fetch(url, limit=0, partial=False):
+        raise AssertionError("no page fetch in this test")
+
+    monkeypatch.setattr(sites, "discover", no_discovery)
+    monkeypatch.setattr(sites, "_fetch", no_fetch)
     monkeypatch.setattr(media, "automation", lambda bid, ask=False: media.AE_ALLOWED)  # never ask macOS
     monkeypatch.setattr(media, "audio_confirmable", lambda: True)
     words = {
@@ -907,3 +933,113 @@ async def test_the_erase_forgets_learned_items_and_a_request_in_flight_learns_no
     media._uri_store(BID, "505", "fixtureplayer:track:1", "505")
     media._record(BID, "script_search_play", True)
     assert media._uri_lookup(BID, "505") is None and engine.records == []
+
+
+# ---------------------------------------------------------------- web first (the default)
+@pytest.fixture
+def web_first(monkeypatch, audio):
+    from neo import config
+
+    monkeypatch.setenv("NEO_PLAY_DEFAULT", "web")
+    monkeypatch.setenv("NEO_PLAY_SITE", "vidzone")
+    monkeypatch.setattr(config, "_settings", None)
+
+    async def host(word):
+        return "vidzone.example" if word == "vidzone" else ""
+
+    monkeypatch.setattr(media, "_resolve_site", host)
+    monkeypatch.setitem(media.TIMEOUTS, "web", (6.0, 0.5, 0.3))  # room for all three searches
+    opened = []
+
+    async def open_app(url):
+        opened.append(url)
+        audio.browser_plays()
+        return "Opened"
+
+    monkeypatch.setattr(apps_mod, "open_app", open_app)
+    return opened
+
+
+def _vid_rows():
+    return [
+        {"content": "https://b.example/watch?v=1", "title": "505", "duration": "4:13"},
+        {"content": "https://www.vidzone.example/watch?v=abc", "title": "505 (Official)", "duration": "4:14"},
+    ]
+
+
+async def test_play_goes_to_the_preferred_site_and_opens_no_app(monkeypatch, engine, osa, web_first):
+    app = make_app(library_dict(), days_used_30=20)
+    engine.cands = [Candidate(app, 0.9, 0.0, "used 20 of last 30 days", ("script_search_play",)),
+                    Candidate(None, 0.5, 0.0, "fallback: web", ("web",))]
+    monkeypatch.setattr(media, "_video_search", lambda q, n=12: _vid_rows())
+    out = await media.play_best("505", text="play 505")
+    assert out == "Playing 505 (Official) in Fixture Browser"
+    assert web_first == ["https://www.vidzone.example/watch?v=abc"]
+    assert osa.calls == []  # no app was scripted, launched or even asked
+
+
+async def test_a_refused_video_search_falls_back_to_a_site_search(monkeypatch, engine, web_first):
+    engine.cands = [Candidate(None, 0.5, 0.0, "fallback: web", ("web",))]
+
+    def refused(q, n=12):
+        raise RuntimeError("202 Ratelimit")
+
+    monkeypatch.setattr(media, "_video_search", refused)
+    searched = []
+
+    def text(q, n=10):
+        searched.append(q)
+        return [{"href": "https://vidzone.example/", "title": "home"}, {"href": "https://vidzone.example/watch?v=xyz", "title": "505"}]
+
+    monkeypatch.setattr(media, "_text_search", text)
+    from neo.decide import sites
+
+    async def no_templates(host, prefix=""):
+        return []
+
+    monkeypatch.setattr(sites, "discover", no_templates)  # the site publishes no search
+    out = await media.play_best("505", text="play 505")
+    assert out.startswith("Playing 505") and web_first == ["https://vidzone.example/watch?v=xyz"]
+    assert searched == ["505 site:vidzone.example"]
+
+
+async def test_with_both_searches_down_the_sites_own_search_page_finds_it(monkeypatch, engine, web_first):
+    from neo.decide import sites
+
+    engine.cands = [Candidate(None, 0.5, 0.0, "fallback: web", ("web",))]
+
+    def down(*a, **k):
+        raise OSError("offline")
+
+    monkeypatch.setattr(media, "_video_search", down)
+    monkeypatch.setattr(media, "_text_search", down)
+    monkeypatch.setattr(sites, "learned_template", lambda host, prefix="": sites.Template("https://vidzone.example/results?q={searchTerms}", "learned"))
+    fetched = []
+
+    async def fetch(url, limit=0, partial=False):
+        fetched.append(url)
+        html = '<a href="/results?q=x">more</a> {"url":"/watch?v=first\\u0026pp=1"} <a href="https://other.example/watch?v=no">x</a>'
+        return sites._Page(url, html)
+
+    monkeypatch.setattr(sites, "_fetch", fetch)
+    out = await media.play_best("505", text="play 505")
+    assert out.startswith("Playing") and web_first == ["https://vidzone.example/watch?v=first"]
+    assert fetched == ["https://vidzone.example/results?q=505"]
+
+
+async def test_an_app_the_user_named_goes_first_and_a_fallback_is_said(monkeypatch, engine, osa, web_first):
+    app = make_app(library_dict())
+    engine.cands = [Candidate(app, 1.0, 0.0, "named by the user", ("script_search_play",)),
+                    Candidate(None, 0.5, 0.0, "fallback: web", ("web",))]
+    osa.on("«event hookSrch»", (1, "", "Not authorized to send Apple events to Fixture Player. (-1743)"))
+    monkeypatch.setattr(media, "_video_search", lambda q, n=12: _vid_rows())
+    out = await media.play_best("505 on Fixture Player", text="play 505 on Fixture Player")
+    assert out.say is True and out.ok
+    assert out.text.startswith("Playing 505 (Official) in Fixture Browser (Fixture Player couldn't:")
+
+
+def test_item_links_are_single_items_on_the_site_in_page_order():
+    html = ('<a href="/">home</a> {"url":"/watch?v=a1\\u0026list=x"} <a href="//vidzone.example/watch?v=b2">b</a>'
+            ' <a href="https://evil.example/watch?v=c3">c</a> <a href="/channel/abc">ch</a> "url":"/watch?v=a1"')
+    assert media._item_links(html, "vidzone.example") == [
+        "https://vidzone.example/watch?v=a1", "https://vidzone.example/watch?v=b2"]

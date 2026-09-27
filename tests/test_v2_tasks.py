@@ -280,7 +280,7 @@ def test_a_kind_shows_its_new_surface_only_while_on(decide_modes):
     assert props("calendar_today") == set() and props("reminder_add") == {"title", "due"}
     assert not registry().get("reminder_add").payload
     assert registry().get("calendar_add").parameters["required"] == ["title", "start", "end"]
-    assert registry().get("mail_unread").timeout == 50 and not shown("page_read") and shown("safari_read")
+    assert registry().get("mail_unread").timeout == 50 and shown("page_read") and not shown("safari_read")
     decide_modes(**dict.fromkeys(_DRIVEN, "on"))
     assert props("calendar_today") == {"day", "start", "end"}
     assert props("reminder_add") == {"title", "due", "list", "notes", "app"} and registry().get("reminder_add").payload
@@ -290,7 +290,8 @@ def test_a_kind_shows_its_new_surface_only_while_on(decide_modes):
     assert registry().get("mail_unread").timeout == 110 and "app" in props("mail_unread")
     assert "browser" in props("search_site") and shown("page_read") and not shown("safari_read")
     decide_modes(write_note="on")  # one kind at a time
-    assert "app" in props("notes_create") and props("calendar_today") == set() and shown("safari_read")
+    assert "app" in props("notes_create") and props("calendar_today") == set() and "browser" not in props("search_site")
+    assert shown("page_read") and not shown("safari_read")  # page_read reads any browser, in every mode
 
 
 @pytest.mark.parametrize(
@@ -326,9 +327,9 @@ def test_new_modules_name_no_app_or_site(path):
 # ---- the other tools of these kinds: open_app, search_site, page_read, "new document" ----------------------
 
 
-def test_open_app_and_page_read_in_shadow_answer_with_legacy_and_log_the_dry_run(monkeypatch, shadow_runs, real_handlers):
-    from neo.decide.kinds import launch, site
-    from neo.tools.computer import apps, legacy
+def test_open_app_in_shadow_answers_with_legacy_and_logs_the_dry_run(monkeypatch, shadow_runs, real_handlers):
+    from neo.decide.kinds import launch
+    from neo.tools.computer import apps
 
     async def opened(target):
         return f"Opened {target}"
@@ -336,46 +337,51 @@ def test_open_app_and_page_read_in_shadow_answer_with_legacy_and_log_the_dry_run
     async def launch_shadow(target, legacy=""):
         return {"how": "app", "key": "test.surfer", "agrees": legacy == "Opened surfer"}
 
-    async def url():
-        return "https://example.test/"
-
-    async def text():
-        return "page words"
-
-    async def page_shadow():
-        return {"key": "test.surfer", "running": True}
-
     monkeypatch.setattr(apps, "open_app", opened)
     monkeypatch.setattr(launch, "shadow", launch_shadow)
-    monkeypatch.setattr(legacy, "safari_current_url", url)
-    monkeypatch.setattr(legacy, "safari_page_text", text)
-    monkeypatch.setattr(site, "shadow_page_read", page_shadow)
     assert _settled("open_app", {"target": "surfer"}).text == "Opened surfer"
-    assert _settled("safari_read", {}).text == "URL: https://example.test/\n\npage words"  # the alias
-    log = _log()
-    assert log[0] == {**log[0], "kind": "open_app", "key": "test.surfer", "agrees": True, "legacy_ok": True}
-    assert log[1] == {**log[1], "kind": "web_search", "key": "test.surfer", "running": True}
+    (log,) = _log()
+    assert log == {**log, "kind": "open_app", "key": "test.surfer", "agrees": True, "legacy_ok": True}
 
 
-def test_with_web_search_on_page_read_reads_the_front_browser_and_a_search_carrying_data_asks(
-    decide_modes, monkeypatch, real_handlers
-):
+@pytest.mark.parametrize("mode", ["legacy", "shadow", "on"])
+def test_page_read_reads_the_browser_in_front_in_every_mode(decide_modes, monkeypatch, real_handlers, mode):
+    """A model's call gets the page itself; the user's own words (a fast path) get NEO's answer from
+    it. safari_read is the old name, hidden."""
+    from neo.decide import run
+    from neo.decide.kinds import site
+
+    decide_modes(web_search=mode)
+    asked: list = []
+
+    async def page_read(limit=site.PAGE_CHARS, ask=""):
+        asked.append(ask)
+        return run.Result(f"answer to {ask}" if ask else "URL: https://example.test/\n\nwords", True)
+
+    monkeypatch.setattr(site, "page_read", page_read)
+    assert _run("page_read", {}).text.startswith("URL: https://example.test/")
+    assert _run("safari_read", {}).text.startswith("URL: https://example.test/")
+    said = ToolContext(user_text="  summarize   this page ", origin="user")
+    assert _run("page_read", {}, said).text == "answer to summarize this page"
+    live = ToolContext(user_text="summarize this page", origin="live")
+    assert _run("page_read", {}, live).text.startswith("URL:")
+    assert asked == ["", "", "summarize this page", ""]
+    t = registry().get("page_read")
+    assert t.untrusted and not t.hidden and not t.chain and registry().get("safari_read").hidden
+
+
+def test_with_web_search_on_a_search_carrying_data_asks(decide_modes, monkeypatch, real_handlers):
     from neo.decide import run
     from neo.decide.kinds import site
 
     decide_modes(web_search="on")
     searched: list = []
 
-    async def page_read(limit=8000):
-        return run.Result("URL: https://example.test/\n\nwords", True)
-
     async def search(s, q, *, browser=""):
         searched.append((s, q, browser))
         return run.Result("Searched it", True)
 
-    monkeypatch.setattr(site, "page_read", page_read)
     monkeypatch.setattr(site, "search", search)
-    assert _run("page_read", {}).text.startswith("URL: https://example.test/")
     assert _run("search_site", {"site": "shopkart.in", "query": "2tb ssd", "browser": "Surfer"}).ok
     assert searched == [("shopkart.in", "2tb ssd", "Surfer")]
     secret = "x" * 80

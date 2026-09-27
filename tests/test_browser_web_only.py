@@ -30,20 +30,40 @@ class _Page:
     async def screenshot(self, **kw):
         return b"png"
 
+    def is_closed(self):
+        return False
+
 
 class _Browser:
     def __init__(self, page: _Page) -> None:
         self._page = page
+        self.shown: dict[int, str] = {}
+        self.links: dict[str, None] = {}
 
-    async def page(self):
+    async def page(self, *, new_tab: bool = False):
         return self._page
+
+    def saw(self, page) -> None:
+        self.shown[id(page)] = str(page.url)
 
 
 @pytest.fixture
 def agent(tmp_path, monkeypatch):
     import neo.tools.browser as br
+    from neo.agent.registry import ToolOutput
 
-    monkeypatch.setattr(br, "_snapshot", lambda page, n: _read(page))
+    async def read(page, **kw):
+        return ToolOutput(await _read(page))
+
+    async def shot(page):
+        return b"jpeg"
+
+    async def settle(page):
+        pass
+
+    monkeypatch.setattr(br, "_read", read)
+    monkeypatch.setattr(br, "_shot", shot)
+    monkeypatch.setattr(br, "_settle", settle)
     rt = make_runtime(tmp_path / "a", "a", ["browser_open", "browser_read", "browser_screenshot"])
     return rt
 
@@ -95,17 +115,29 @@ async def test_nothing_it_loads_goes_to_a_local_address(tmp_path, monkeypatch):
     through a check; NEO.app's own browser has none (the user's own Mac, as always)."""
     routes: list = []
 
+    class _NewPage:
+        url = "about:blank"
+
+        def is_closed(self):
+            return False
+
+        def on(self, *a):
+            pass
+
     class _Ctx:
         pages: list = []
 
         def set_default_timeout(self, ms):
             pass
 
+        def on(self, *a):
+            pass
+
         async def route(self, pattern, handler):
             routes.append((pattern, handler))
 
         async def new_page(self):
-            return "page"
+            return _NewPage()
 
         async def close(self):
             pass
@@ -144,6 +176,10 @@ async def test_nothing_it_loads_goes_to_a_local_address(tmp_path, monkeypatch):
         await handler(r)
         assert r.did == want, url
     runtime.set_library_mode(False)
+    monkeypatch.setenv("NEO_BROWSER_VIEW", "window")  # NEO.app's separate window (the chat card is its own test)
+    from neo import config
+
+    monkeypatch.setattr(config, "_settings", None)
     monkeypatch.setattr(br, "_b", br._Browser())
     await br._browser().page()
     assert len(routes) == 1  # NEO.app's browser: unchanged

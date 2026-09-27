@@ -19,7 +19,10 @@ from neo.runtime import UnsupportedPlatform
 
 log = logging.getLogger(__name__)
 
-_MODULES = ["neo.tools.system", "neo.tools.web", "neo.tools.weather", "neo.tools.memory_tool", "neo.tools.browser"]
+_MODULES = [
+    "neo.tools.system", "neo.tools.web", "neo.tools.weather", "neo.tools.memory_tool", "neo.tools.browser",
+    "neo.tools.browse",
+]  # fmt: skip
 _MAC_ONLY = ["neo.tools.media"]
 _MAC_MODULES = ["neo.tools.computer"]
 
@@ -47,20 +50,20 @@ def load_all() -> list[str]:
 
 _COMPUTER = (
     "ax_tree", "ax_find", "screenshot", "apps_running", "ax_press", "ax_set_value", "click", "drag", "scroll",
-    "type_text", "dictate", "hotkey", "click_text", "open_app", "activate_app", "quit_app", "applescript",
-    "open_url", "page_read", "safari_read", "finder_reveal", "shell", "read_file", "write_file", "edit_file",
-    "trash",
+    "type_text", "dictate", "hotkey", "click_text", "open_app", "activate_app", "quit_app", "close",
+    "applescript", "open_url", "page_read", "safari_read", "finder_reveal", "shell", "read_file", "write_file",
+    "edit_file", "trash",
 )  # fmt: skip
 _TASKS = ("mail_send", "mail_unread", "calendar_today", "calendar_add", "notes_create", "reminder_add")
 _BROWSER = (
     "browser_open", "browser_read", "browser_click", "browser_type", "browser_press", "browser_scroll",
-    "browser_back", "browser_screenshot", "browser_close",
+    "browser_back", "browser_tabs", "browser_screenshot", "browser_handoff", "browser_close",
 )  # fmt: skip
 
 PRESETS: dict[str, tuple[str, ...]] = {
     "web": ("web_search", "web_fetch", "weather", "clock"),
     "browser": _BROWSER,
-    "mac_read": ("ax_tree", "ax_find", "screenshot", "apps_running", "mail_unread", "calendar_today", "safari_read", "read_file"),
+    "mac_read": ("ax_tree", "ax_find", "screenshot", "apps_running", "mail_unread", "calendar_today", "page_read", "read_file"),
     "mac": _COMPUTER + _TASKS + ("volume", "brightness", "sleep_display", "timer", "search_site"),
     "memory": ("memory",),
     "none": (),
@@ -83,10 +86,13 @@ MACOS_ONLY: frozenset[str] = frozenset(PRESETS["mac"]) | frozenset(PRESETS["mac_
 
 # Never given to an embedded agent in this version, whatever the selection says: play_music is
 # always decided by neo.decide, whose choices, learning and duplicate-request memory are
-# process-wide (NEO.app's), not kept per agent yet.
+# process-wide (NEO.app's), not kept per agent yet; browse keeps the job it runs, and the one it
+# may pick up again, process-wide too (and drives NEO.app's own browser and chat card).
 REFUSED: dict[str, str] = {
     "play_music": "play_music isn't available to embedded agents yet: which app plays what is learned "
     "process-wide (NEO.app's), not per agent",
+    "browse": "browse isn't available to embedded agents yet: its jobs are NEO.app's (one browser, one "
+    "card, one job to pick up again); give the agent the browser tools and it browses itself",
 }
 
 

@@ -84,7 +84,8 @@ async def test_extras_reach_every_tool_through_the_approval_and_its_continuation
     assert (r2.brain, r2.model) == ("scripted", "script-1")  # the continuation says who answered
     assert brain.calls == 4
     # the run that continues after the approval offers the agent's own tools, never the catalog
-    assert set(brain.tools_seen[2]) == {"zz_refund", "zz_lookup", "zz_ping"}
+    # (more_tools, which every run offers, searches only the agent's own registry)
+    assert set(brain.tools_seen[2]) == {"zz_refund", "zz_lookup", "zz_ping", "more_tools"}
     lines = [json.loads(ln) for ln in rt.settings.audit_log.read_text().splitlines()]
     assert lines[-1]["status"] == "confirmed" and lines[-1]["via"] == {"channel": "web-ui", "approver": "user:42"}
 

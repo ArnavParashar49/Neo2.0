@@ -5,6 +5,10 @@ The constructors never read NEO's settings, the environment's NEO_* values or ~/
 is imported only when its provider is built (a missing one raises ProviderError naming the
 extra to install). Anything that implements :class:`Provider` works too — a host's own class,
 or ``neo2.testing.ScriptedBrain`` in tests.
+
+A provider object keeps what it learns while it works — a Gemini key's quota window, a server's
+real request size — in itself, in memory (never in a file, a global or ~/.neo). Hand each agent
+its own object when agents must not share that.
 """
 
 from __future__ import annotations
@@ -69,10 +73,13 @@ def OpenAICompatible(
     vision: bool = False,
     reasoning_effort: bool = False,
     name: str = "openai",
+    token_budget: int = 32_768,
 ) -> Provider:
     """Any chat-completions server: OpenAI, Groq, Together, vLLM, Ollama, LM Studio… Pass your own
     configured `client`, or `base_url` and `api_key` (unset: the openai SDK's own defaults — its
-    OPENAI_API_KEY — and, for a `base_url` server that takes no key, none)."""
+    OPENAI_API_KEY — and, for a `base_url` server that takes no key, none). `token_budget`: the
+    most one request may carry, prompt and answer together (the model's context window): longer
+    requests are trimmed to fit before they are sent."""
     mod = _need("neo.providers.openai_compat", "openai")
     if client is None:
         openai_mod = _need("openai", "openai")
@@ -84,7 +91,12 @@ def OpenAICompatible(
             # the host's own server (Ollama, LM Studio, a local vLLM…): it takes no key
             client = openai_mod.AsyncOpenAI(base_url=base_url, api_key="none")
     return mod.OpenAICompatProvider(
-        name=name, model=model, supports_vision=vision, reasoning_effort=reasoning_effort, client=client
+        name=name,
+        model=model,
+        supports_vision=vision,
+        reasoning_effort=reasoning_effort,
+        client=client,
+        token_budget=token_budget,
     )
 
 
@@ -113,6 +125,9 @@ def Groq(api_key: str, *, model: str = "openai/gpt-oss-120b") -> Provider:
         api_key=api_key,
         model=model,
         reasoning_effort=True,
+        # its free tier's tokens per minute, as NEO.app's Groq brain has it (a 413 teaches the rest)
+        token_budget=mod._GROQ_REQUEST_TOKENS.get(model, mod._GROQ_DEFAULT_TOKENS),
+        per_minute=True,
     )
 
 

@@ -69,9 +69,9 @@ TIMEOUTS: dict[str, tuple[float, float, float]] = {
     "script_search_play": (8.0, 6.0, 4.0),
     "ax_search_play": (10.0, 10.0, 8.0),
     "local_file": (5.0, 2.0, 4.0),
-    WEB: (5.0, 5.0, 10.0),
+    WEB: (12.0, 5.0, 10.0),  # finding the video may take up to three searches (see _find_videos)
 }
-OVERALL_S = 25.0  # the whole play_best loop
+OVERALL_S = 30.0  # the whole play_best loop
 MAX_ATTEMPTS = 8
 NOW_PLAYING_S = 3.0
 _POLL_S = 0.1  # CoreAudio poll interval while confirming
@@ -1604,6 +1604,126 @@ def _without_site(q: str, site: str) -> str:
     return re.sub(pat, "", q, flags=re.I).strip() or q
 
 
+def _text_search(query: str, n: int = 10) -> list[dict]:
+    from ddgs import DDGS
+
+    with DDGS() as d:
+        return list(d.text(query, max_results=n) or [])
+
+
+async def _resolve_site(word: str) -> str:
+    """The host a site word names ('youtube' -> its real host), by evidence (neo.decide.sites);
+    '' when it can't be told (offline): results are then matched by the word itself."""
+    try:
+        from neo.decide import sites
+
+        res = await sites.resolve(word)
+        return res.host if res else ""
+    except Exception as e:  # noqa: BLE001
+        print(f"[media] couldn't resolve the site {word!r} ({str(e)[:60]})")
+        return ""
+
+
+_RESULTS_BYTES = 2_000_000  # enough of a results page for its first items
+
+# A link to one playable item (a video, a track), not a listing: the shapes item pages take.
+_ITEM_PATH = re.compile(r"(?:[?&]v=|/watch\b|/video/|/videos/[\w-]|/v/|/embed/|/track/|/song/|/shorts/)", re.I)
+_LINK = re.compile(r'(?:href=|"url":|"href":|"canonicalBaseUrl":)\s*"((?:https?:)?//[^"\s<>]+|/[^"\s<>]+)"', re.I)
+
+
+def _item_links(html: str, host: str) -> list[str]:
+    """Links to single items on `host`, in the order a results page lists them: its hrefs and the
+    URLs inside its JSON ('/watch?v=…'). The one parameter that names the item (v=) is kept."""
+    out: dict[str, None] = {}
+    for m in _LINK.finditer(html or ""):
+        u = m.group(1).replace("\\u0026", "&").replace("&amp;", "&")
+        u = "https:" + u if u.startswith("//") else (f"https://{host}{u}" if u.startswith("/") else u)
+        if not _public_http(u) or not _on_site(_host(u), host) or not _ITEM_PATH.search(u):
+            continue
+        parts = urlsplit(u)
+        v = [p for p in parts.query.split("&") if p.startswith("v=")]
+        out[f"https://{parts.netloc}{parts.path}" + (f"?{v[0]}" if v else "")] = None
+    return list(out)
+
+
+async def _find_videos(what: str, site: str, budget: float) -> tuple[list[dict], str, str]:
+    """(result rows {content, title, duration?}, why nothing was found when it's the network's
+    fault, the site's host). Three independent ways, first that finds something wins — one search
+    service refusing a request (they rate-limit) doesn't fail the request:
+
+    1. the site's own search results page (its published search: :mod:`neo.decide.sites`,
+       learned after the first time), first item links on it — no third party to refuse;
+    2. an ordinary web search limited to the site (``site:<host>``);
+    3. a video search (retried once), which also knows each video's length.
+    Without a site, only the video search can look everywhere."""
+    deadline = time.monotonic() + budget
+    host = await _resolve_site(site) if site else ""
+    match = host or site
+    errors: list[str] = []
+
+    def left(cap: float) -> float:
+        return max(0.5, min(cap, deadline - time.monotonic()))
+
+    def on(rows: list[dict]) -> list[dict]:
+        if not match:
+            return rows
+        return [r for r in rows if _on_site(_host(str(r.get("content") or r.get("url") or r.get("href") or "")), match)]
+
+    async def site_search() -> list[dict]:
+        try:
+            rows = await asyncio.wait_for(asyncio.to_thread(_text_search, f"{what} site:{host}"), left(4.0))
+        except Exception as e:  # noqa: BLE001 - timeouts, network errors, rate limits
+            errors.append(f"web search: {str(e)[:60] or type(e).__name__}")
+            print(f"[media] web search failed ({errors[-1]})")
+            return []
+        hits = [
+            {"content": str(r.get("href") or ""), "title": str(r.get("title") or "")}
+            for r in rows or []
+            if _ITEM_PATH.search(str(r.get("href") or ""))
+        ]
+        return on(hits)
+
+    async def video_search() -> list[dict]:
+        for attempt in range(2):
+            try:
+                rows = await asyncio.wait_for(asyncio.to_thread(_video_search, f"{what} {site}".strip()), left(4.0))
+                return on(rows or [])  # it answered: whatever it found on the site
+            except Exception as e:  # noqa: BLE001
+                errors.append(f"video search: {str(e)[:60] or type(e).__name__}")
+                print(f"[media] video search failed ({errors[-1]})")
+                if attempt == 0 and time.monotonic() < deadline - 1:
+                    await asyncio.sleep(0.6)
+        return []
+
+    async def site_page() -> list[dict]:
+        try:
+            from neo.decide import sites
+
+            t = sites.learned_template(host)
+            if t is None:
+                found = await asyncio.wait_for(sites.discover(host), left(4.0))
+                t = found[0] if found else None
+            if t is None:
+                return []
+            page = await asyncio.wait_for(sites._fetch(sites.fill(t.url, what), _RESULTS_BYTES, partial=True), left(5.0))
+            links = await asyncio.to_thread(_item_links, page.text, host) if page is not None else []
+            if links and not _erased():
+                sites.learn_landing(site, host, t.url)  # this template works: no discovery next time
+            return [{"content": u, "title": what} for u in links[:6]]
+        except Exception as e:  # noqa: BLE001
+            errors.append(f"site search: {str(e)[:60] or type(e).__name__}")
+            print(f"[media] the site's own search failed ({errors[-1]})")
+            return []
+
+    ways = (site_page, site_search, video_search) if host else (video_search,)
+    for way in ways:
+        if time.monotonic() >= deadline - 0.25:
+            break
+        if rows := await way():
+            return rows, "", host
+    return [], ("couldn't reach a video search (" + "; ".join(errors) + ")") if errors else "", host
+
+
 async def _play_web(q: str, site: str = "", browser: Any | None = None) -> Outcome:
     """Search for a video and open it: in the default browser, or in `browser` when the user named
     one; only on `site` when they named a website."""
@@ -1615,16 +1735,9 @@ async def _play_web(q: str, site: str = "", browser: Any | None = None) -> Outco
     if browser is None:
         return _fail("there's no default browser")
     what = _without_site(q, site)
-    try:
-        rows = await asyncio.wait_for(asyncio.to_thread(_video_search, f"{what} {site}" if site else what), ready)
-    except TimeoutError:
-        return _fail("the video search didn't answer (offline?)", "offline")
-    except Exception as e:  # noqa: BLE001 - network errors, rate limits
-        return _fail(f"the video search failed ({str(e)[:60]})", "offline")
-    if site:
-        rows = [r for r in rows or [] if _on_site(_host(str(r.get("content") or r.get("url") or r.get("href") or "")), site)]
-        if not rows:
-            return _fail(f"no video on {site}", "not_found")
+    rows, why, site_host = await _find_videos(what, site, ready)
+    if not rows:
+        return _fail(why or (f"no video on {site}" if site else "no video found"), "offline" if why else "not_found")
     pick = _pick_video(rows, what)
     if pick is None:
         return _fail("no video found", "not_found")
@@ -1654,6 +1767,11 @@ async def _play_web(q: str, site: str = "", browser: Any | None = None) -> Outco
         return _fail(f"opened {title} in {name} but it didn't start playing", "timeout")
     if state != "started":
         return _fail(f"opened {title} in {name} but couldn't tell whether it started", "unconfirmed")
+    if site and site_host and not _erased():
+        with contextlib.suppress(Exception):  # it played there: next time the word needs no search
+            from neo.decide import sites
+
+            sites.learn_landing(site, site_host, None)
     return Outcome(True, f"Playing {title} in {name}")
 
 
@@ -1736,7 +1854,7 @@ def _late_start(tried: list[tuple[Any, str, str]], base: set[int]) -> tuple[Any,
     return None
 
 
-async def play_best(query: str, text: str = "") -> str:
+async def play_best(query: str, text: str = "") -> Any:
     """'Neo, play <query>': try the chosen apps in order (overall ~25 s), learn from each attempt,
     and say what happened. ``text`` is the user's own words when known (never the query or tool
     arguments): the decision reads them, and only they are reported for the reflex's learning."""
@@ -1753,6 +1871,16 @@ async def play_best(query: str, text: str = "") -> str:
         cands = []
     if not any(getattr(c, "app", None) is None for c in cands):
         cands.append(_Fallback())
+    named = [c for c in cands if getattr(c, "app", None) is not None and "named by the user" in str(getattr(c, "evidence", ""))]
+    if settings().play_default == "web":
+        # The user's choice: it plays in the browser unless they named an app ("… on Spotify").
+        # No other app is opened, not even to see whether it has the song.
+        cands = named + [c for c in cands if getattr(c, "app", None) is None][:1]
+    web = next((c for c in cands if getattr(c, "app", None) is None), None)
+    if web is not None and not getattr(web, "site", "") and settings().play_site:
+        web.site = settings().play_site  # the site they prefer, unless they named another
+    named_keys = {getattr(c, "key", "") for c in named}
+    named_failed: list[str] = []
     site = next((str(getattr(c, "site", "") or "") for c in cands if getattr(c, "app", None) is None), "")
     q = _without_site(q, site)  # '505 on <site>': the apps search for '505'
     try:
@@ -1804,7 +1932,14 @@ async def play_best(query: str, text: str = "") -> str:
                 res = _fail("took too long", "timeout")
             _record(key, m, res.ok, res.reason)
             if res.ok:
+                if named_failed and key not in named_keys:
+                    # They asked for an app and got another source: say so, and why.
+                    from neo.agent.registry import ToolOutput
+
+                    return ToolOutput(f"{res.text} ({'; '.join(named_failed)})", ok=True, say=True)
                 return res.text
+            if key in named_keys:
+                named_failed.append(f"{who} couldn't: {_one_line(res.text, 70)}")
             tried.append(f"{who} ({_LABELS.get(m, m)}: {_one_line(res.text, 70)})")
             if app is not None:
                 tried_apps.append((app, key, m))

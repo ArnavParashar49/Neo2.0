@@ -98,7 +98,8 @@ def test_the_loop_offers_and_runs_only_the_agents_tools(web_agent):
     brain = _Brain([Turn(tool_calls=[ToolCall("1", "shell", {"command": "id"})]), Turn(text="done")])
     with runtime.bind(web_agent.scope()):
         res = asyncio.run(run_agent("x", provider=brain, system="", ev=EventBus(), verify=False))
-    assert brain.tools_seen[0] == [t.name for t in web_agent.registry.all()]
+    # (and more_tools, which every run offers: it searches only the agent's own registry)
+    assert brain.tools_seen[0] == [t.name for t in web_agent.registry.all()] + ["more_tools"]
     assert res.steps[0].tool == "shell" and not res.steps[0].ok
     assert res.steps[0].result == "Unknown tool: shell"
 
@@ -133,16 +134,17 @@ def test_task_modes_rewrite_the_catalog_not_an_agent(web_agent, monkeypatch, tmp
     from neo.config import LibrarySettings
     from neo.tools import tasks
 
-    agent = runtime.Runtime("mac", LibrarySettings(data_dir=tmp_path / "mac"), catalog().subset(["page_read"]))
+    agent = runtime.Runtime("mac", LibrarySettings(data_dir=tmp_path / "mac"), catalog().subset(["search_site"]))
+    legacy = catalog().get("search_site").parameters
+    assert "browser" not in legacy["properties"]
     with runtime.bind(agent.scope()):
-        assert registry().get("page_read").hidden
         monkeypatch.setattr(tasks, "mode", lambda kind: "on")
         tasks.apply_modes()
-        assert registry().get("page_read").hidden  # the agent keeps what it was given
-    assert not catalog().get("page_read").hidden
+        assert registry().get("search_site").parameters == legacy  # the agent keeps what it was given
+    assert "browser" in catalog().get("search_site").parameters["properties"]
     monkeypatch.setattr(tasks, "mode", lambda kind: "legacy")
     tasks.apply_modes()
-    assert catalog().get("page_read").hidden
+    assert catalog().get("search_site").parameters == legacy
 
 
 def test_library_mode_unbound_registry_fails_closed():
@@ -171,7 +173,7 @@ def test_more_tools_in_a_run_enables_nothing_outside_the_agent(web_agent):
     )
     with runtime.bind(web_agent.scope()):
         res = asyncio.run(run_agent("x", provider=brain, system="", ev=EventBus(), verify=False, tools=[]))
-    assert set(brain.tools_seen[1]) <= set(WEB)
+    assert set(brain.tools_seen[1]) <= set(WEB) | {"more_tools"}
     assert res.steps[1].result == "Unknown tool: shell"
 
 
@@ -183,11 +185,11 @@ def test_an_agent_gets_the_as_registered_surface_whatever_the_app_runs(decide_mo
     from neo.tools import tasks
 
     decide_modes(web_search="on", add_event="on", read_calendar="on")
-    names = ["page_read", "safari_read", "search_site", "calendar_add", "calendar_today"]
-    assert catalog().get("page_read").hidden is False and catalog().get("safari_read").hidden  # the app's "on"
+    names = ["search_site", "calendar_add", "calendar_today"]
+    assert "browser" in catalog().get("search_site").parameters["properties"]  # the app's "on"
     rt = make_runtime(tmp_path / "a", "a", names, library=False)
     for name in names:
         mine = rt.registry.get(name)
         for k, v in tasks._AS_REGISTERED[name].items():
             assert getattr(mine, k) == v, (name, k)
-    assert rt.registry.get("page_read").hidden and not rt.registry.get("safari_read").hidden
+    assert "browser" not in rt.registry.get("search_site").parameters["properties"]

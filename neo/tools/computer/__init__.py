@@ -5,14 +5,17 @@ from __future__ import annotations
 import asyncio
 import functools
 import re
+import sys
 import time
+from pathlib import Path
 
-from neo.agent import confirm
+from neo import runtime
+from neo.agent import confirm, grants
 from neo.agent.registry import ToolContext, ToolOutput
 from neo.agent.registry import tool as _register
 from neo.config import decide_mode, settings
 from neo.security import policy
-from neo.tools.computer import apps, ax, legacy, screen, shell
+from neo.tools.computer import apps, ax, screen, shell
 from neo.tools.computer import input as inp
 
 # Every tool here drives this Mac.
@@ -23,6 +26,73 @@ _OBJ = {"type": "object", "properties": {}}
 
 def _p(props: dict, required: list[str] | None = None) -> dict:
     return {"type": "object", "properties": props, "required": required or []}
+
+
+# ---- Accessibility ------------------------------------------------------------------------
+# Seeing and acting in other apps (the AX tree, clicks, keys, typing, System Events' UI
+# scripting) all take the Accessibility permission. Without it every such call fails, and a
+# model that keeps getting failures tries its way around them (the Chess run: six AppleScripts,
+# each a card). So the first one in a task stops the run and tells the user how to turn it on.
+AX_OFF = (
+    "NEO needs Accessibility to see and click in apps — turn NEO on in System Settings › Privacy & "
+    "Security › Accessibility, then ask again"
+)
+_AX_STILL_OFF = (
+    "Error: Accessibility is still off for NEO, and the user has already been told how to turn it on. "
+    "Stop here and tell them; don't try AppleScript or any other way into the app."
+)
+# What osascript says when System Events may not drive another app's UI.
+_AX_DENIED = re.compile(r"assistive access|not allowed to send keystrokes|\(-1719\)|\(-25211\)", re.I)
+
+
+def _ax_trusted() -> bool:
+    try:
+        return bool(ax.is_trusted())
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _host_app() -> str:
+    """The app bundle this process runs from ("" = a bare executable, a script's interpreter)."""
+    try:
+        exe = Path(sys.executable).resolve()
+    except (OSError, RuntimeError):
+        return ""
+    return next((p.stem for p in (exe, *exe.parents) if p.suffix == ".app"), "")
+
+
+def _ax_off_texts() -> tuple[str, str]:
+    """(the question, the error after it) when Accessibility is off. Embedded in another app, it is
+    that app's process macOS must trust, not NEO.app: the texts name it."""
+    if not runtime.library_bound():
+        return AX_OFF, _AX_STILL_OFF
+    app = _host_app()
+    who = (
+        f"{app}, the app this agent runs in"
+        if app
+        else f"the app this agent runs in ({Path(sys.executable).name}: for a script, the terminal or app that started it)"
+    )
+    ask = (
+        f"Accessibility is off for {who} — turn it on in System Settings › Privacy & Security › "
+        "Accessibility, then ask again"
+    )
+    still = (
+        f"Error: Accessibility is still off for {app or 'the app this agent runs in'}, and the user has already "
+        "been told how to turn it on. Stop here and tell them; don't try AppleScript or any other way into the app."
+    )
+    return ask, still
+
+
+def _ax_off_reply() -> str:
+    """NEEDS_USER the first time in a task (the run stops, the user hears how to fix it); after
+    that an error that tells the model to stop rather than look for another way in."""
+    ask, still = _ax_off_texts()
+    return confirm.ask_user(ask) if grants.first("accessibility-off") else still
+
+
+def _needs_ax() -> str | None:
+    """None with Accessibility on, else what the tool answers instead of trying."""
+    return None if _ax_trusted() else _ax_off_reply()
 
 
 def _dialog_text(els=None, app: str = "") -> str:
@@ -53,7 +123,8 @@ def _ask_before_click(tool_name: str, a: dict, label: str, app: str = "", els=No
     "ax_tree",
     "Read the frontmost (or named) app's UI as a text tree of elements with ids, roles, titles, "
     "values and screen positions. Use this FIRST to see what's on screen — it's fast and exact. "
-    "Element ids (e12) can be used with ax_press, ax_set_value, and click.",
+    "Element ids (e12) can be used with ax_press, ax_set_value, and click. When it shows little "
+    "(a game board like Chess, a map, a canvas), take a screenshot and click at x,y instead.",
     _p({"app": {"type": "string", "description": "App name; omit for the frontmost app"}}),
     parallel_safe=True,
     category="computer",
@@ -61,6 +132,8 @@ def _ask_before_click(tool_name: str, a: dict, label: str, app: str = "", els=No
     read_only=True,
 )
 async def ax_tree(a: dict, c: ToolContext) -> str:
+    if err := _needs_ax():
+        return err
     return await asyncio.to_thread(ax.snapshot, a.get("app"))
 
 
@@ -74,6 +147,8 @@ async def ax_tree(a: dict, c: ToolContext) -> str:
     read_only=True,
 )
 async def ax_find(a: dict, c: ToolContext) -> str:
+    if err := _needs_ax():
+        return err
     return await asyncio.to_thread(ax.find, a["query"], a.get("app"))
 
 
@@ -93,9 +168,9 @@ _SCROLL = [
 
 @tool(
     "screenshot",
-    "Take a screenshot (whole screen, or a region x,y,w,h). Use only when ax_tree is not enough "
-    "(canvas/Electron apps, images, layout questions). Coordinates in the image equal screen "
-    "coordinates for click/drag.",
+    "Take a screenshot (whole screen, or a region x,y,w,h). Use when ax_tree is not enough "
+    "(game boards like Chess, maps, drawing and other canvas apps, Electron apps, images, layout "
+    "questions). Coordinates in the image equal screen coordinates for click/drag.",
     _p(
         {
             "x": {"type": "integer"},
@@ -164,6 +239,8 @@ async def apps_running(a: dict, c: ToolContext) -> str:
     quiet=True,
 )
 async def ax_press(a: dict, c: ToolContext) -> str:
+    if err := _needs_ax():
+        return err
     e = ax.get(a["id"])
     # The app that owns the element, not whatever is in front: clicking NEO's own card to
     # approve brings NEO forward, and the question must stay the same.
@@ -183,6 +260,8 @@ async def ax_press(a: dict, c: ToolContext) -> str:
     quiet=True,
 )
 async def ax_set_value(a: dict, c: ToolContext) -> str:
+    if err := _needs_ax():
+        return err
     e = ax.get(a["id"])
     if e and await _protected_at(ax.app_of(e.ref), *e.center):
         return _refuse_protected()
@@ -205,6 +284,8 @@ async def ax_set_value(a: dict, c: ToolContext) -> str:
     quiet=True,
 )
 async def click(a: dict, c: ToolContext) -> str:
+    if err := _needs_ax():
+        return err
     if "id" in a:
         e = ax.get(a["id"])
         if not e:
@@ -238,6 +319,8 @@ async def click(a: dict, c: ToolContext) -> str:
     quiet=True,
 )
 async def drag(a: dict, c: ToolContext) -> str:
+    if err := _needs_ax():
+        return err
     for x, y in ((a["x1"], a["y1"]), (a["x2"], a["y2"])):  # where it's picked up and where it lands
         if await _protected_at(await asyncio.to_thread(ax.app_at, x, y), x, y):
             return _refuse_protected()
@@ -261,6 +344,8 @@ async def drag(a: dict, c: ToolContext) -> str:
     quiet=True,
 )
 async def scroll(a: dict, c: ToolContext) -> str:
+    if err := _needs_ax():
+        return err
     x, y = a.get("x"), a.get("y")
     if a.get("at_pointer") or x is None or y is None:
         x, y = inp.mouse_position()  # "scroll down": wherever the pointer is
@@ -392,6 +477,41 @@ _HOTKEYS: list[tuple[str, dict]] = [
     (rf"{_LEAD}close\s+(?:this|the|that)\s+(?:window|tab|note|document)(?:\s+please)?{_TAIL}", {"keys": "cmd+w"}),
     (rf"{_LEAD}(?:go\s+to\s+the\s+)?next\s+tab{_TAIL}", {"keys": "ctrl+tab"}),
     (rf"{_LEAD}(?:go\s+to\s+the\s+)?(?:previous|last|prev)\s+tab{_TAIL}", {"keys": "ctrl+shift+tab"}),
+    # a browser's own undo for tabs: ⌘⇧T brings back what was closed, most recent first
+    (
+        rf"{_LEAD}(?:re-?open|bring\s+back|restore|undo\s+clos(?:e|ing))\s+(?:the\s+)?(?:last\s+|previous\s+|recently\s+)?"
+        rf"(?:closed\s+)?tab(?:\s+(?:i|you)\s+(?:just\s+)?closed)?{_TAIL}",
+        {"keys": "cmd+shift+t", "app": "browser"},
+    ),
+    *[
+        (rf"{_LEAD}(?:go\s+to|switch\s+to|open)\s+(?:the\s+)?(?:{w})\s+tab{_TAIL}", {"keys": f"cmd+{i}", "app": "browser"})
+        for i, w in enumerate(
+            ("first|1st", "second|2nd", "third|3rd", "fourth|4th", "fifth|5th", "sixth|6th", "seventh|7th", "eighth|8th"), 1
+        )
+    ],
+    *[
+        (rf"{_LEAD}(?:go\s+to|switch\s+to)\s+tab\s+(?:number\s+)?{i}{_TAIL}", {"keys": f"cmd+{i}", "app": "browser"})
+        for i in range(1, 9)
+    ],
+    (rf"{_LEAD}(?:open\s+)?(?:an?\s+)?(?:new\s+)?(?:private|incognito)\s+(?:window|tab){_TAIL}", {"keys": "cmd+shift+n", "app": "browser"}),
+    (rf"{_LEAD}close\s+(?:all\s+(?:the\s+)?tabs|the\s+whole\s+window|this\s+whole\s+window){_TAIL}", {"keys": "cmd+shift+w", "app": "browser"}),
+    (rf"{_LEAD}(?:go\s+to|focus|select|click)\s+(?:on\s+)?(?:the\s+)?(?:address|url|search)\s+bar{_TAIL}", {"keys": "cmd+l", "app": "browser"}),
+    (rf"{_LEAD}bookmark\s+(?:this|the)\s+(?:page|tab|site){_TAIL}", {"keys": "cmd+d", "app": "browser"}),
+    (
+        rf"{_LEAD}(?:hard\s+(?:reload|refresh)|(?:reload|refresh)\s+(?:the\s+page\s+)?without\s+(?:the\s+)?cache){_TAIL}",
+        {"keys": "cmd+shift+r", "app": "browser"},
+    ),
+    # Hinglish
+    (rf"{_LEAD}(?:ek\s+)?naya\s+tab\s+(?:kholo|khol\s+do|open\s+karo){_TAIL}", {"keys": "cmd+t", "app": "tabs"}),
+    (rf"{_LEAD}(?:ye|yeh|is|iss)\s+tab\s+(?:ko\s+)?(?:band\s+karo|band\s+kar\s+do|close\s+karo|close\s+kar\s+do){_TAIL}", {"keys": "cmd+w"}),
+    (
+        rf"{_LEAD}(?:(?:band|close)\s+(?:kiya\s+hua|hua)|pichla\s+band|last\s+closed)\s+tab\s+(?:wapas|phir\s+se)\s+"
+        rf"(?:kholo|khol\s+do|lao|le\s+aao){_TAIL}",
+        {"keys": "cmd+shift+t", "app": "browser"},
+    ),
+    (rf"{_LEAD}agla\s+tab(?:\s+(?:kholo|dikhao|pe\s+jao))?{_TAIL}", {"keys": "ctrl+tab"}),
+    (rf"{_LEAD}pichla\s+tab(?:\s+(?:kholo|dikhao|pe\s+jao))?{_TAIL}", {"keys": "ctrl+shift+tab"}),
+    (rf"{_LEAD}(?:page\s+)?(?:refresh|reload)\s+(?:karo|kar\s+do){_TAIL}", {"keys": "cmd+r", "app": "browser"}),
     (rf"{_LEAD}go\s+back(?:\s+a\s+page)?{_TAIL}", {"keys": "cmd+[", "app": "browser|finder"}),
     (rf"{_LEAD}go\s+forward(?:\s+a\s+page)?{_TAIL}", {"keys": "cmd+]", "app": "browser|finder"}),
     (rf"{_LEAD}(?:reload|refresh)(?:\s+(?:the|this)\s+page)?{_TAIL}", {"keys": "cmd+r", "app": "browser"}),
@@ -583,6 +703,8 @@ async def _type(text: str) -> None:
     payload=True,
 )
 async def type_text(a: dict, c: ToolContext) -> str:
+    if err := _needs_ax():
+        return err
     text = str(a["text"])
     err, created = await _ensure_text_focus()
     if err:
@@ -606,6 +728,8 @@ async def dictate(a: dict, c: ToolContext) -> str:
     from neo.providers import brain
     from neo.providers.base import Message
 
+    if ax_err := _needs_ax():
+        return ax_err
     brief = str(a["brief"]).strip()
     err, created = await _ensure_text_focus()  # check before spending a model call
     if err:
@@ -624,14 +748,24 @@ async def dictate(a: dict, c: ToolContext) -> str:
 
 @tool(
     "hotkey",
-    "Press a key or chord, e.g. 'return', 'cmd+s', 'cmd+shift+t', 'escape', 'tab'. Optional app: "
-    "bring that app to the front first.",
+    "Press a key or chord, e.g. 'return', 'cmd+s', 'escape', 'tab'. Optional app: bring that app to "
+    "the front first. The Mac's standard shortcuts - use them instead of clicking or scripting: "
+    "browser: new tab cmd+t, close tab cmd+w, reopen closed tab cmd+shift+t, next / previous tab "
+    "ctrl+tab / ctrl+shift+tab, tab 1-8 cmd+1..cmd+8, last tab cmd+9, address bar cmd+l, reload cmd+r "
+    "(hard reload cmd+shift+r), back / forward cmd+[ / cmd+], new window cmd+n, private window "
+    "cmd+shift+n, close window cmd+shift+w, bookmark cmd+d, find on page cmd+f, zoom cmd+= / cmd+- / "
+    "cmd+0; any app: select all cmd+a, copy / cut / paste cmd+c / cmd+x / cmd+v, undo / redo cmd+z / "
+    "cmd+shift+z, save cmd+s, new document cmd+n, close window cmd+w, quit app cmd+q, hide app cmd+h, "
+    "minimize cmd+m, full screen ctrl+cmd+f, switch app cmd+tab, Spotlight cmd+space, screenshot "
+    "cmd+shift+3 (an area cmd+shift+4).",
     _p({"keys": {"type": "string"}, "app": {"type": "string"}}, ["keys"]),
     category="computer",
     fast_path=_HOTKEYS,
     quiet=True,
 )
 async def hotkey(a: dict, c: ToolContext) -> str:
+    if err := _needs_ax():
+        return err
     keys, want = str(a["keys"]), str(a.get("app") or "")
     if a.get("after") == "input":
         from neo.agent.registry import registry as _reg
@@ -734,6 +868,8 @@ async def click_text(a: dict, c: ToolContext) -> str:
     label = " ".join(str(a["label"]).lower().split())
     if not label or len(label) < 2 or all(w in _VAGUE_LABELS for w in label.split()):
         return f"Error: click what? '{a['label']}' isn't a label I can find."
+    if err := _needs_ax():
+        return err
     if err := await _guard_front():
         return err
     app, frame, els = await asyncio.to_thread(ax.window_elements)
@@ -847,22 +983,47 @@ async def activate_app(a: dict, c: ToolContext) -> str:
     _p({"name": {"type": "string"}}, ["name"]),
     category="apps",
     quiet=True,
-    fast_path=[
-        (
-            r"^\s*(?:please\s+)?(?:quit|close|kill)\s+(?!(?:this|that|it|the|all|my|a|an|every)\b)"
-            r"(?P<name>[\w.+-]+(?:\s+[\w.+-]+){0,2}?)(?:\s+app)?\s*[.!]*\s*$",
-            {"name": "<name>"},
-        )
-    ],
 )
 async def quit_app(a: dict, c: ToolContext) -> str:
     return await apps.quit_app(a["name"])
 
 
 @tool(
+    "close",
+    "Close what the user names, no questions: a running app (quits it) or browser tabs by site or "
+    "title ('close YouTube' closes every YouTube tab). Use this for any 'close / quit X' - never "
+    "write AppleScript to close something.",
+    _p({"target": {"type": "string"}}, ["target"]),
+    category="apps",
+    quiet=True,
+    idempotent=True,
+    # "close youtube", "quit spotify", "close the netflix tab" — not "close this tab/window" or
+    # "close the app" (a key press on what's in front: see hotkey)
+    fast_path=[
+        (
+            r"^\s*(?:please\s+)?(?:quit|close|kill|exit)\s+(?!(?:this|that|it|all|every)\b)"
+            r"(?!(?:the|the\s+current)\s+(?:window|tab|note|document|app)\s*[.!]*\s*$)"
+            r"(?P<target>[\w.+'-]+(?:\s+[\w.+'-]+){0,3}?)\s*[.!]*\s*$",
+            {"target": "<target>"},
+        )
+    ],
+)
+async def close(a: dict, c: ToolContext) -> str:
+    from neo.decide.close import close_target
+
+    return await close_target(str(a.get("target") or ""))
+
+
+_SCRIPT_TRIES = 2  # failed scripts on one app in one task before NEO stops trying that way
+
+
+@tool(
     "applescript",
-    "Run AppleScript and return its result. Use for anything scriptable that has no dedicated tool. "
-    "Scripts that only read (get/count/exists) run straight away; the user approves anything else.",
+    "Run AppleScript and return its result. Only for what an app exposes to scripting that no "
+    "dedicated tool covers - not for seeing or clicking in an app's window (ax_tree, screenshot, "
+    "click, type_text and hotkey do that). Scripts that only read (get/count/exists/set a camelCase variable) "
+    "run straight away; the user approves anything else. After two failures on an app, stop "
+    "scripting it.",
     _p({"script": {"type": "string"}}, ["script"]),
     risk="destructive",
     category="apps",
@@ -870,14 +1031,32 @@ async def quit_app(a: dict, c: ToolContext) -> str:
     untrusted=True,  # file contents and app data it prints are content, never orders
 )
 async def applescript(a: dict, c: ToolContext) -> str:
-    from neo.agent import confirm
-
     script = str(a.get("script") or "")
-    if not policy.script_is_read_only(script):
-        gate = confirm.gated("applescript", a, "run an AppleScript", detail=script)
+    facts = policy.script_facts(script)
+    if facts.ui and (err := _needs_ax()):
+        return err  # System Events' UI scripting takes Accessibility too
+    failed = f"applescript-failed:{(facts.app or '?').casefold()}"
+    if grants.count(failed) >= _SCRIPT_TRIES:
+        return (
+            f"Error: AppleScript already failed {_SCRIPT_TRIES} times on {facts.app or 'this'} in this task, so I "
+            "didn't run another. Stop scripting it: look with screenshot and act with click, type_text or "
+            "hotkey, or tell the user what's in the way."
+        )
+    # A script that only reads runs straight away — unless this request has read something
+    # untrusted (a page, a mail, the screen), which could be what asked for it.
+    if not facts.read_only or c.tainted():
+        where = f" in {facts.app}" if facts.app else ""
+        what = f"read {facts.app} with an AppleScript" if facts.read_only and facts.app else f"run an AppleScript{where}"
+        target = grants.Target(facts.app, facts.danger, tuple(c.taint))
+        gate = confirm.gated("applescript", a, what, detail=script, target=target)
         if isinstance(gate, str):
             return gate
-    return await apps.osascript(script, timeout=60)
+    out = await apps.osascript(script, timeout=60)
+    if out.startswith("Error"):
+        if _AX_DENIED.search(out):
+            return _ax_off_reply()
+        grants.note(failed)
+    return out
 
 
 def _named_browser(name: str):
@@ -920,45 +1099,116 @@ async def open_url(a: dict, c: ToolContext) -> str:
     return await apps.open_url(url, app.bundle_id if app else "", app.name if app else "")
 
 
+# ---- the page the user is looking at -----------------------------------------------------------------
+# "summarize this page", "what's on this page", "read me the comments", "is page pe kya hai", "ye page
+# summarize karo": the page in the user's own browser, which NEO then answers them from (page_read).
+_Q_TAIL = r"(?:\s+(?:for\s+me|please|pls|now))*\s*[.!?]*\s*$"
+_PAGE_NOUN = r"(?:web\s*)?(?:page|site|website|tab|article|post|blog(?:\s+post)?)"
+# "this page", and "the page" / "the tab" (on screen, the one in front): the page the user is looking
+# at. "the article", "the post", "the site" alone may be one NEO fetched or the conversation named,
+# which only a model can tell.
+_THIS_PAGE = rf"(?:(?:this|that|current|the\s+current)\s+{_PAGE_NOUN}|the\s+(?:web\s*)?(?:page|tab))"
+# The comments and replies are a page's (the browser in front: page_read reads no other app).
+_COMMENTS = r"(?:comments?|replies)"  # a page's, wherever they are said
+_REPLIES = r"(?:comments?|replies|reviews?|responses)"  # a page's when the page is named
+_ON_PAGE = rf"\s+(?:on|in|under|of|below|from)\s+(?:this|that|the)\s+(?:{_PAGE_NOUN}|video)"
+_HI_PAGE = r"(?:ye|yeh|is|iss|isi)\s+(?:web\s*)?(?:page|site|website|tab|article|post)"
+_HI_DO = r"(?:karo|kar\s+do|kardo|kijiye|kar\s+dijiye|do|dijiye|batao|bata\s+do|sunao|suna\s+do)"
+_PAGE_PATHS = [
+    # summarize / sum up / recap / tl;dr this page, give me a summary of it, what's the gist of it
+    (
+        rf"{_LEAD}(?:summari[sz]e|sum\s+up|recap|tl;?\s*dr|give\s+me\s+(?:a\s+|the\s+)?(?:quick\s+|short\s+|brief\s+)?"
+        rf"(?:summary|gist|tl;?\s*dr|rundown|recap)\s+of|what(?:'s|\s+is)\s+the\s+gist\s+of)\s+"
+        rf"(?:{_THIS_PAGE}|(?:the\s+)?{_COMMENTS}(?:{_ON_PAGE})?|(?:the\s+)?{_REPLIES}{_ON_PAGE}){_Q_TAIL}",
+        {},
+    ),
+    # what's on / in this page, what's this page about, what does this article say
+    (
+        rf"{_LEAD}(?:what(?:'s|\s+is)\s+(?:on|in)\s+{_THIS_PAGE}|"
+        rf"what(?:'s|\s+is)\s+(?:this|that|current|the\s+current)\s+{_PAGE_NOUN}(?:\s+(?:all\s+)?about)?|"
+        rf"what(?:'s|\s+is)\s+{_THIS_PAGE}\s+(?:all\s+)?about|what\s+does\s+{_THIS_PAGE}\s+say|"
+        rf"tell\s+me\s+(?:about|what(?:'s|\s+is)\s+(?:on|in))\s+{_THIS_PAGE}){_Q_TAIL}",
+        {},
+    ),
+    # read me this page, read this article out loud, read me the comments
+    (
+        rf"{_LEAD}read\s+(?:me\s+|out\s+|aloud\s+)?"
+        rf"(?:{_THIS_PAGE}|(?:the\s+)?(?:top\s+)?{_COMMENTS}(?:{_ON_PAGE})?|(?:the\s+)?(?:top\s+)?{_REPLIES}{_ON_PAGE})"
+        rf"(?:\s+(?:to\s+me|out(?:\s+loud)?|aloud))?{_Q_TAIL}",
+        {},
+    ),
+    # what are people saying in the comments, what do the reviews on this page say
+    (
+        rf"{_LEAD}(?:what\s+are\s+(?:people|they)\s+saying\s+in\s+the\s+{_COMMENTS}(?:{_ON_PAGE})?|"
+        rf"what\s+(?:are|do)\s+the\s+{_COMMENTS}(?:{_ON_PAGE})?\s+(?:saying|say)|"
+        rf"what\s+(?:are|do)\s+the\s+{_REPLIES}{_ON_PAGE}\s+(?:saying|say)){_Q_TAIL}",
+        {},
+    ),
+    # what's the price here / on this page
+    (rf"{_LEAD}what(?:'s|\s+is)\s+the\s+(?:price|cost)\s+(?:here|on\s+{_THIS_PAGE}){_Q_TAIL}", {}),
+    # Hinglish: "is page pe kya hai", "is page mein kya likha hai", "ye page summarize karo", "is page
+    # ka summary do", "ye article padh ke sunao", "comments padh ke sunao", "comments mein kya likha hai"
+    (
+        rf"{_LEAD}{_HI_PAGE}\s+(?:pe|par|mein|me|main)\s+kya\s+(?:hai|likha\s+(?:hua\s+)?hai|chal\s+raha\s+hai|bola\s+hai)"
+        rf"{_Q_TAIL}",
+        {},
+    ),
+    (rf"{_LEAD}{_HI_PAGE}\s+(?:ko\s+|ka\s+|ki\s+)?(?:summari[sz]e|summary|saar|saransh)\s+{_HI_DO}{_Q_TAIL}", {}),
+    (
+        rf"{_LEAD}(?:{_HI_PAGE}|(?:is\s+page\s+(?:ke|ki)\s+)?{_COMMENTS})\s+(?:ko\s+)?"
+        rf"(?:padh\s+ke\s+sunao|padhkar\s+sunao|padh\s+kar\s+sunao|padho|padh\s+do|sunao){_Q_TAIL}",
+        {},
+    ),
+    (
+        rf"{_LEAD}(?:log\s+)?{_COMMENTS}\s+(?:mein|me|main)\s+kya\s+(?:likha\s+hai|hai|keh\s+rahe\s+hain|bol\s+rahe\s+hain)"
+        rf"{_Q_TAIL}",
+        {},
+    ),
+    (rf"{_LEAD}(?:yahan|yaha|{_HI_PAGE}\s+(?:pe|par))\s+(?:price|daam|keemat|kimat)\s+kya\s+hai{_Q_TAIL}", {}),
+    # Devanagari: "इस पेज पर क्या है", "ये पेज समराइज़ करो"
+    (r"^\s*(?:इस|ये|यह)\s+पेज\s+(?:पे|पर|में)\s+क्या\s+(?:है|लिखा\s+है)\s*[?।.!]*\s*$", {}),
+    (r"^\s*(?:इस|ये|यह)\s+पेज\s+(?:को\s+|का\s+)?(?:समराइज़|समराइज|सारांश)\s+(?:करो|कर\s+दो|बताओ)\s*[?।.!]*\s*$", {}),
+]
+
+
 @tool(
     "page_read",
-    "Read the visible text and URL of the front browser tab.",
+    "Read the web page the user is looking at in their own browser (the front tab of whichever "
+    "browser is in front): its URL, title and main text, or, when it has little text (a video, a "
+    "picture, a PDF) or Accessibility is off, what a screenshot of it shows. Use it for 'summarize "
+    "this page', 'what's on this page', 'read me the comments', 'what's the price here', then answer "
+    "from it. With another app in front it reads nothing and says so: look at that app instead. Not "
+    "for NEO's own browser window, and not for a link the user isn't looking at (web_fetch).",
     _OBJ,
     parallel_safe=True,
     category="web",
     untrusted=True,
-    hidden=True,  # shown once web_search is on (neo.tools.tasks.apply_modes),
+    slow=True,  # a wait for the page's tree, a walk of it, maybe a vision call: Live talks meanwhile
+    chain=False,  # "open X and summarize it" would read the page before it loads
+    fast_path=_PAGE_PATHS,
     read_only=True,
 )
 async def page_read(a: dict, c: ToolContext):
-    m = decide_mode("web_search")
-    if m == "on":
-        from neo.decide import run
-        from neo.decide.kinds import site
+    from neo.decide import run
+    from neo.decide.kinds import site
 
-        return run.to_output(await site.page_read())
-    out = f"URL: {await legacy.safari_current_url()}\n\n" + await legacy.safari_page_text()
-    if m == "shadow":
-        from neo.decide import shadow
-
-        with shadow.starting("web_search"):
-            from neo.decide.kinds import site
-
-            shadow.later("web_search", site.shadow_page_read())
-    return out
+    # The user's own words chose it (a fast path, or Laya's pick): no model is waiting to read the
+    # page, so NEO answers them from it. A model's call gets the page itself.
+    ask = " ".join(c.user_text.split()) if c.origin == "user" else ""
+    return run.to_output(await site.page_read(ask=ask))
 
 
 @tool(
     "safari_read",
-    "Read the visible text of Safari's current tab (and its URL).",
+    "Read the web page the user is looking at in their browser (the old name of page_read).",
     _OBJ,
     parallel_safe=True,
     category="web",
     untrusted=True,
+    hidden=True,  # page_read reads whichever browser is in front; this name stays for old playbooks
     read_only=True,
 )
 async def safari_read(a: dict, c: ToolContext):
-    """The old name of page_read (hidden once web_search is on; goes in R6)."""
     return await page_read(a, c)
 
 

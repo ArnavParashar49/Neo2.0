@@ -5,6 +5,7 @@ and erase — all hermetic (fake clock, fake tools, fake embeddings)."""
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import itertools
 import json
 import threading
@@ -569,6 +570,18 @@ def test_memory_overrides_only_a_real_repeat(angle, head, override):
         assert out is head
 
 
+def test_a_remembered_correction_brings_the_kind_that_goes_with_its_intent():
+    """A fix to chat drops the task kind; a fix to an action takes the kind head's word for the text."""
+    remember("open the pod bay doors", "chat", "")
+    task = dataclasses.replace(D("quick_action", 0.51), kind="open_app", kind_p=0.7)
+    out = memory.recall(task, "open the pod bay doors", emb(5), C, kind=("open_app", 0.7))
+    assert (out.intent, out.source, out.kind, out.kind_p) == ("chat", "laya+memory", "", 0.0)
+    memory.forget()
+    remember("organise my desktop", "agent_task", "")
+    out = memory.recall(D("chat", 0.6), "organise my desktop", emb(5), C, kind=("other", 0.8))
+    assert (out.intent, out.kind, out.kind_p) == ("agent_task", "other", 0.8)
+
+
 def test_memory_needs_the_same_script_and_centring():
     remember()
     head = D("chat", 0.7)
@@ -1072,7 +1085,7 @@ def _laya(tmp_path, monkeypatch, head, vec):
     path = tmp_path / "head.json"
     path.write_text(json.dumps(head))
     r = lr.LayaReflex.__new__(lr.LayaReflex)
-    r._agent, r._head = object(), lr._load_head(path)
+    r._agent, r._head, r.encoder = object(), lr._load_head(path), "multilingual"
     monkeypatch.setattr(feats, "embed", lambda agent, texts: np.array([vec for _ in texts], np.float32))
     return r
 

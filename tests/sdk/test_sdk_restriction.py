@@ -95,7 +95,7 @@ async def test_the_run_after_an_approval_offers_only_the_agents_tools(mac_catalo
         r = await agent.approve(r.approval.action_id, via=neo2.Approval("t", "u"))
     assert calls == ["x"] and mac_catalog == []
     after = brain.tools_seen[1]  # the continuation's first call: no tools= passed, the registry's own
-    assert set(after) == WEB | {"wire_money"}
+    assert set(after) == WEB | {"wire_money", "more_tools"}  # more_tools: the agent's own registry only
     assert r.steps[-1].summary == "Unknown tool: shell"
 
 

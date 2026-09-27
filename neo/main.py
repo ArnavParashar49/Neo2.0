@@ -60,9 +60,11 @@ async def text_repl(verbose: bool) -> None:
         reply = await sess.handle(text, from_user=True)
         print(f"neo> {reply.text}")
     from neo.memory.summarize import summarize_session
+    from neo.tools import render
     from neo.tools.browser import shutdown as close_browser
 
     await close_browser()
+    await render.shutdown()
     if summary := await summarize_session(sess.history, started):
         print(f"[memory] session saved: {summary[:120]}", file=sys.stderr)
 

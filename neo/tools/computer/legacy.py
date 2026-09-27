@@ -12,18 +12,6 @@ from neo.tools.computer.apps import _q, osascript
 # ---- AppleScripts (from apps.py) ------------------------------------------------------------
 
 
-async def safari_page_text(max_chars: int = 8000) -> str:
-    js = "document.body.innerText"
-    r = await osascript(f'tell application "Safari" to do JavaScript {_q(js)} in current tab of window 1')
-    if r.startswith("Error") and "JavaScript" in r:
-        return "Error: enable Safari → Develop → Allow JavaScript from Apple Events."
-    return r[:max_chars]
-
-
-async def safari_current_url() -> str:
-    return await osascript('tell application "Safari" to get URL of current tab of window 1')
-
-
 async def mail_send(to: str, subject: str, body: str, send: bool = False) -> str:
     script = f"""
 tell application "Mail"

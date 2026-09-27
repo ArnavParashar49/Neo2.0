@@ -8,10 +8,17 @@ overnight. Revisions here only change when NEO is updated and re-tested.
 
 from __future__ import annotations
 
+import os
+
 LAYA = "convaiinnovations/laya"
 LAYA_REVISION = "55cf4c4ebb4ebe31b2550e8bdf3bd21b99753851"
-# The files Laya's own loader fetches (the repo also holds sibling checkpoints NEO doesn't use).
+# The files of one checkpoint, as Laya's own loader fetches them. The repo holds several: English at
+# the root, the others in subfolders (settings.reflex_encoder -> subfolder).
 LAYA_FILES = ["rl_agent_config.json", "model.safetensors", "tokenizer/*", "encoder/*"]
+LAYA_SUBFOLDERS = {"english": "", "multilingual": "multilingual"}
+# What laya.load reads from a checkpoint's folder (a symlink into the hub's blobs counts only if
+# its blob is there), besides a non-empty tokenizer/.
+_LAYA_REQUIRED = ("rl_agent_config.json", "model.safetensors", "encoder/config.json")
 
 EMBEDDER = "sentence-transformers/all-MiniLM-L6-v2"
 EMBEDDER_REVISION = "1110a243fdf4706b3f48f1d95db1a4f5529b4d41"
@@ -28,11 +35,30 @@ def revision(repo: str) -> str | None:
     return {LAYA: LAYA_REVISION, EMBEDDER: EMBEDDER_REVISION, **REVISIONS}.get(repo)
 
 
-def laya_dir() -> str:
-    """Laya's checkpoint at the pinned revision (downloaded once; afterwards from the cache)."""
+def laya_dir(encoder: str = "english") -> str:
+    """One Laya checkpoint at the pinned revision (downloaded once; afterwards from the cache): only
+    its own files, so the multilingual reflex never pulls the 1.7 GB English weights.
+
+    Raises FileNotFoundError when the checkpoint's files aren't all there: offline,
+    snapshot_download hands back the cached revision's folder even when this checkpoint was never
+    fetched into it, and laya.load would then fail somewhere less clear."""
     from huggingface_hub import snapshot_download
 
-    return snapshot_download(LAYA, revision=LAYA_REVISION, allow_patterns=LAYA_FILES)
+    sub = LAYA_SUBFOLDERS[encoder]
+    patterns = [f"{sub}/{f}" if sub else f for f in LAYA_FILES]
+    root = snapshot_download(LAYA, revision=LAYA_REVISION, allow_patterns=patterns)
+    path = os.path.join(root, sub) if sub else root
+    missing = [f for f in _LAYA_REQUIRED if not os.path.isfile(os.path.join(path, f))]
+    tok = os.path.join(path, "tokenizer")
+    if not (os.path.isdir(tok) and any(os.path.isfile(os.path.join(tok, f)) for f in os.listdir(tok))):
+        missing.append("tokenizer/*")
+    if missing:
+        raise FileNotFoundError(
+            f"Laya's {encoder} checkpoint isn't on this Mac yet ({', '.join(missing)} missing under {path}): "
+            "connect to the internet once so it can download"
+        )
+    return path
+
 
 
 def local_path(repo: str) -> str:

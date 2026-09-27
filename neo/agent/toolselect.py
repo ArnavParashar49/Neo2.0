@@ -50,6 +50,7 @@ MORE_TOOLS = ToolSpec(
     "You only see a subset of NEO's tools. Call this with a short description of what you need "
     "(e.g. 'send an email', 'read a PDF', 'control the browser') to get more tools enabled.",
     {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]},
+    essential=True,  # a request fitted into a small brain keeps it: the way back to what was cut
 )
 
 _WORD = re.compile(r"[a-z0-9]+")

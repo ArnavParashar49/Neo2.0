@@ -327,17 +327,29 @@ def test_the_apps_erase_is_not_an_agents(two):
 def test_the_browser_follows_the_agents_settings(two, monkeypatch):
     launched = []
 
+    class _Page:
+        url = "about:blank"
+
+        def is_closed(self):
+            return False
+
+        def on(self, *a):
+            pass
+
     class _Ctx:
         pages: list = []
 
         def set_default_timeout(self, ms):
             pass
 
+        def on(self, *a):
+            pass
+
         async def route(self, pattern, handler):  # an agent's browser: the web only (test_browser_web_only)
             pass
 
         async def new_page(self):
-            return "page"
+            return _Page()
 
         async def close(self):
             pass
@@ -365,7 +377,7 @@ def test_the_browser_follows_the_agents_settings(two, monkeypatch):
     headed = make_runtime(a.settings.data_dir.parent / "c", "c", browser_headless=False)
     for rt in (a, headed):
         with runtime.bind(rt.scope()):
-            assert asyncio.run(_browser().page()) == "page"
+            assert isinstance(asyncio.run(_browser().page()), _Page)
     assert launched == [
         (str(a.settings.data_dir / "browser"), True),
         (str(headed.settings.data_dir / "browser"), False),

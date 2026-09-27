@@ -74,6 +74,9 @@ class Settings(BaseSettings):
 
     # ---- reflex ----------------------------------------------------------------------
     reflex: Literal["laya", "lite", "off"] = "laya"
+    # The Laya checkpoint under the reflex heads: multilingual also understands Hindi and Hinglish
+    # and embeds ~2x faster; english is the older one (its heads must be retrained after a switch).
+    reflex_encoder: Literal["multilingual", "english"] = "multilingual"
     laya_device: str = "mps"
     reflex_confidence_floor: float = 0.55  # below this, escalate to the lite model
     reflex_tool_floor: float = 0.85  # Laya may pick the tool itself above this confidence
@@ -104,6 +107,12 @@ class Settings(BaseSettings):
         runs when asked for (and a typo must never stop NEO from starting)."""
         s = str(v or "off").strip().lower()
         return s if s in ("local", "cloud") else "off"
+
+    @field_validator("reflex_encoder", mode="before")
+    @classmethod
+    def _reflex_encoder(cls, v):
+        """A typo must not stop NEO from starting: anything but english is the default."""
+        return "english" if str(v or "").strip().lower() in ("english", "en") else "multilingual"
 
     # ---- voice -----------------------------------------------------------------------
     voice: VoiceBackend = "auto"  # auto = Live if key + quota, else local cascade
@@ -146,6 +155,10 @@ class Settings(BaseSettings):
     decide_modes: Annotated[dict[str, DecideMode], NoDecode] = {}
     decide_kind_routing: bool = False  # Laya may name a task kind no fast path covered (after its eval)
     notes_dir: Path = Path.home() / "Documents" / "NEO Notes"  # a note no notes app could take
+    # "play …": "web" plays it in the browser (on play_site) unless the user names an app ("on
+    # Spotify"); "apps" lets NEO pick among the players on this Mac first. The user's choice.
+    play_default: Literal["web", "apps"] = "web"
+    play_site: str = "youtube"  # the site word the web prefers ("" = whichever video site the search finds)
 
     @field_validator("decide_modes", mode="before")
     @classmethod
@@ -163,6 +176,18 @@ class Settings(BaseSettings):
             return {}
         pairs = ((str(k).strip().lower(), str(m).strip().lower()) for k, m in v.items())
         return {k: m for k, m in pairs if k and m in get_args(DecideMode)}
+
+    # ---- NEO's own browser -------------------------------------------------------------
+    # "chat": it runs headless and shows live in the chat's browser card, where the user can watch
+    # it, take it over, or pop it out into its own window. "window": a visible Chromium window.
+    browser_view: Literal["chat", "window"] = "chat"
+
+    @field_validator("browser_view", mode="before")
+    @classmethod
+    def _browser_view(cls, v):
+        """A typo must not stop NEO from starting: anything but a visible window is the chat."""
+        s = str(v or "").strip().lower()
+        return "window" if s in ("window", "headed", "visible", "separate") else "chat"
 
     # ---- server / ui -----------------------------------------------------------------
     ws_host: str = "127.0.0.1"
@@ -231,7 +256,8 @@ class LibrarySettings(Settings):
     another live agent's (neo.runtime). `models_path` and `memory_path` are never in ~/.neo either.
     Pinned whatever is passed: confirmation on; every task kind runs its legacy script (the
     evidence-chosen drivers, their dry runs and their learning are process-wide, NEO.app's);
-    Laya's learning and its teacher off; notes that no notes app could take go under data_dir.
+    Laya's learning and its teacher off; notes that no notes app could take go under data_dir;
+    NEO's browser in a window of its own (headless by default), never the chat's browser card.
     """
 
     # frozen: the pins can't be switched off later (settings().confirm_destructive = False)
@@ -250,6 +276,7 @@ class LibrarySettings(Settings):
     learn: bool = False
     voice: VoiceBackend = "off"
     browser_headless: bool = True
+    browser_view: Literal["chat", "window"] = "window"  # no chat card: that's NEO.app's overlay
     include_username: bool = False
 
     def __init__(self, **values: Any) -> None:
@@ -288,6 +315,7 @@ class LibrarySettings(Settings):
             "learn": False,
             "learn_teacher": "off",
             "notes_dir": self.data_dir / "notes",
+            "browser_view": "window",
         }
 
     @model_validator(mode="after")

@@ -16,8 +16,8 @@ from neo.tools import MACOS_ONLY, MODULES_FOR, PRESETS, REFUSED, load, modules_f
 
 ROOT = Path(__file__).resolve().parents[1]
 
-# NEO.app's catalog order at 4764b73 (load_all): fast paths break ties by it, Live declares tools in it.
-APP_ORDER = ["ax_tree", "ax_find", "screenshot", "apps_running", "ax_press", "ax_set_value", "click", "drag", "scroll", "type_text", "dictate", "hotkey", "click_text", "open_app", "activate_app", "quit_app", "applescript", "open_url", "page_read", "safari_read", "mail_send", "mail_unread", "calendar_today", "calendar_add", "notes_create", "reminder_add", "finder_reveal", "shell", "read_file", "write_file", "edit_file", "trash", "volume", "brightness", "clock", "sleep_display", "timer", "web_search", "web_fetch", "search_site", "weather", "memory", "browser_open", "browser_read", "browser_click", "browser_type", "browser_press", "browser_scroll", "browser_back", "browser_screenshot", "browser_close", "play_music"]
+# NEO.app's catalog order on main at 7e11113 (load_all): fast paths break ties by it, Live declares tools in it.
+APP_ORDER = ["ax_tree", "ax_find", "screenshot", "apps_running", "ax_press", "ax_set_value", "click", "drag", "scroll", "type_text", "dictate", "hotkey", "click_text", "open_app", "activate_app", "quit_app", "close", "applescript", "open_url", "page_read", "safari_read", "mail_send", "mail_unread", "calendar_today", "calendar_add", "notes_create", "reminder_add", "finder_reveal", "shell", "read_file", "write_file", "edit_file", "trash", "volume", "brightness", "clock", "sleep_display", "timer", "web_search", "web_fetch", "search_site", "weather", "memory", "browser_open", "browser_read", "browser_click", "browser_type", "browser_press", "browser_scroll", "browser_back", "browser_tabs", "browser_screenshot", "browser_handoff", "browser_close", "browse", "play_music"]
 
 _NO_MACOS = textwrap.dedent(
     """
@@ -164,7 +164,7 @@ def test_every_catalog_tool_is_in_a_preset_with_its_module():
 
     load_all()
     names = {t.name for t in catalog().all()} - {"zz_declared_while_bound"}
-    assert names - set(PRESETS["all"]) == {"play_music"}
+    assert names - set(PRESETS["all"]) == {"play_music", "browse"} == set(REFUSED)
     assert set(PRESETS["all"]) <= set(MODULES_FOR)
     for n in PRESETS["all"]:
         assert catalog().get(n) is not None, n

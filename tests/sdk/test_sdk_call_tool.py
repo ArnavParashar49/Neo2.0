@@ -217,14 +217,14 @@ async def test_exported_specs_validate(tmp_path):
 )
 async def test_hidden_tools_are_never_exported_or_callable(tmp_path):
     async with neo2.AsyncAgent(neo2.AgentConfig(tools="mac_read", data_dir=tmp_path / "m"), provider=ScriptedBrain()) as agent:
-        assert agent._rt.registry.get("page_read") is None  # not in mac_read at all
-    async with neo2.AsyncAgent(neo2.AgentConfig(tools=("mac_read", "page_read")), provider=ScriptedBrain()) as agent:
-        assert agent._rt.registry.get("page_read").hidden  # registered hidden (web_search runs legacy)
+        assert agent._rt.registry.get("safari_read") is None  # not in mac_read at all (page_read is)
+    async with neo2.AsyncAgent(neo2.AgentConfig(tools=("mac_read", "safari_read")), provider=ScriptedBrain()) as agent:
+        assert agent._rt.registry.get("safari_read").hidden  # page_read's old name, registered hidden
         for fmt in ("openai_chat", "mcp"):
-            assert "page_read" not in json.dumps(agent.export_tools(fmt))
-        assert "page_read" not in {t.name for t in agent.tools}
-        out = await agent.call_tool("page_read", {})
-        assert out.status == "error" and out.text == "Unknown tool: page_read"
+            assert "safari_read" not in json.dumps(agent.export_tools(fmt))
+        assert "safari_read" not in {t.name for t in agent.tools}
+        out = await agent.call_tool("safari_read", {})
+        assert out.status == "error" and out.text == "Unknown tool: safari_read"
 
 
 async def test_the_sync_twin_runs_turns_too(tmp_path):

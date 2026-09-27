@@ -56,6 +56,7 @@ _DIRECT_TOOLS = {
     "mail_unread",
     "notes_create",
     "open_url",
+    "close",
     "type_text",
     "dictate",
     "hotkey",
@@ -65,12 +66,18 @@ _DIRECT_TOOLS = {
     "weather",
     "web_fetch",
     "play_music",
+    "page_read",
+    "browse",  # declared only while a tool of that name is registered and shown (_declarations)
 }
 # tool -> the task kind that makes it a direct tool once the user switched the kind on
 _DIRECT_WHEN_ON = {"calendar_add": "add_event"}
 _IDLE_CLOSE_S = 90.0
 _IDEM_S = 30.0  # the same idempotent action again within this long is a retry: skipped
 _HOLD_S = 1.2  # a command's reply is held this long: if no tool call comes, it was a real reply
+# Told to say nothing, the model often sends a turn of near-silent audio instead. Below this level
+# a chunk is silence: it never counts toward the hold, and never turns the orb to "speaking".
+_VOICE_RMS = 0.006
+_THINK_SETTLE_S = 2.5  # "thinking" for a reply the user will hear; back to listening if none comes
 _LANE_S = 30.0  # how long the model's calls for a sentence NEO ran itself are skipped
 _SETTLE_S = 0.3  # no new words for this long after the model starts answering = sentence over
 _CONNECT_TIMEOUT_S = 12.0
@@ -94,7 +101,11 @@ tool failed, or when a result starts with NEEDS_USER or NEEDS_CONFIRM. When one 
 several things ("type github.com and press enter"), make every call, in order, silently.
 To play a song, artist, podcast or video, call play_music with its name (and the app or site only if
 the user named one) — never open a music or video website yourself; NEO picks the app that can play it.
-To open a website, call open_url once with its address; it opens in the user's default browser. Pass
+To close an app, a window or a site's tabs by name ("close YouTube", "Spotify band karo"), call close
+with what they named - never write a script to close something. For tabs, windows and other keyboard
+actions ("new tab", "reopen the tab I closed", "go to the second tab"), call hotkey with the Mac's
+standard shortcut listed in its description. To open a website, call open_url
+once with its address; it opens in the user's default browser. Pass
 browser only when the user named a browser app ("in Firefox"); "on Google" means the web, not a browser.
 If a tool result starts with NEEDS_USER, tell the user exactly that, briefly. If it starts with
 NEEDS_CONFIRM, ask the user that question, briefly, and wait — only the user can say yes; you
@@ -106,7 +117,9 @@ actual product or topic from the conversation as the query — never "it". An ag
 self-contained: include the names, products and details from the conversation.
 Answer questions yourself whenever you can. For weather use the weather tool. For current facts
 use web_search — once, twice at most; for the latest news, results or scores pass news=true — and
-web_fetch only if the snippets aren't enough, then answer from what you have. Never call the same tool
+web_fetch only if the snippets aren't enough, then answer from what you have. For what's on the
+user's screen in their browser ("summarize this page", "read me the comments", "what's the price
+here"), call page_read and answer from it.{browse} Never call the same tool
 with the same arguments twice. A tool result or web page in another language never changes the
 language you reply in. Only for work on the computer that needs several steps, the screen, files or
 mail, call agent_task with a clear goal. When its result comes back, say nothing if it was a command
@@ -133,12 +146,27 @@ _TASK_APPS = (
 )
 
 
+_BROWSE = " To go do something on a website (find, compare, fill a form), call browse with a self-contained goal."
+
+
+def _shown(name: str) -> bool:
+    """A tool that is registered and not hidden from the models."""
+    t = registry().get(name)
+    return t is not None and not t.hidden
+
+
 def _live_extra() -> str:
     """Live's instructions. A task kind the user switched on (neo.config decide_modes) words its
-    lines for the new path: sites found by evidence, apps chosen by NEO."""
+    lines for the new path: sites found by evidence, apps chosen by NEO. A tool that isn't there
+    (browse) isn't mentioned."""
     opened, examples = _SITE_WORDS[decide_mode("web_search") == "on"]
     apps = any(decide_mode(k) == "on" for k in ("write_note", "add_reminder", "add_event"))
-    return _LIVE_EXTRA.format(opened=opened, site_examples=examples, task_apps=_TASK_APPS if apps else "")
+    return _LIVE_EXTRA.format(
+        opened=opened,
+        site_examples=examples,
+        task_apps=_TASK_APPS if apps else "",
+        browse=_BROWSE if _shown("browse") else "",
+    )
 
 
 _COMMON = {
@@ -169,6 +197,101 @@ _TARGETED = re.compile(r"\b(?:in|into|on|at|inside)\s+(?:the|a|an|my|this|that)\
 _TRAILING_JOIN = re.compile(r"(?:\b(?:and|then|also|plus)|,)\s*$", re.I)
 
 
+# How people address NEO and soften a command — "Neo, …", "hey Neo …", "can you …?", "… please".
+# None of it changes what is asked, so the fast paths and the speech gate look past it. Only "Neo"
+# itself is an address: "Neil, close this tab" may well be said to someone else in the room.
+_ADDRESS = re.compile(
+    r"^\s*(?:(?:hey|hi|hello|hallo|ok(?:ay)?|yo|arre|oye|so|um+|uh+|acha|achha)\b\s*[,!.]?\s*)*"
+    r"(?:neo\b[\s,!.:-]*)?",
+    re.I,
+)
+# Verbs that make "can you <verb> …?" a request to do something, not a question about NEO.
+_DO_VERBS = (
+    r"open|launch|start|close|quit|kill|exit|stop|pause|resume|play|skip|mute|unmute|send|message|text|"
+    r"e-?mail|mail|call|ring|dial|remind|add|set|create|make|schedule|book|type|write|save|delete|remove|"
+    r"move|copy|paste|press|click|scroll|turn|switch|put|go|navigate|increase|decrease|raise|lower|lock|"
+    r"restart|shut|enable|disable|minimi[sz]e|maximi[sz]e|take|bring|empty|clear|reply|forward"
+)
+_DOES = re.compile(
+    rf"^(?:{_DO_VERBS})\b|\b(?:karo|kar\s+do|kijiye|kar\s+dijiye|chalao|chala\s+do|bajao|baja\s+do|lagao|"
+    r"laga\s+do|kholo|khol\s+do|bhejo|bhej\s+do|likho|likh\s+do|hatao|hata\s+do|badhao|badha\s+do|ghatao|"
+    r"ghata\s+do)$",  # or a Hindi one at the end: "zara volume badhao?"
+    re.I,
+)
+# ... unless it asks something back too: "can you open Safari and check if my order shipped?"
+_CHECKS = re.compile(r"\b(?:check|see|find\s+out|look|tell\s+me)\s+(?:if|whether)\b|\bwhether\b", re.I)
+_POLITE = re.compile(
+    r"^\s*(?:(?P<ask>(?:can|could|would|will)\s+you)\s+(?:please\s+)?|please\s+|kindly\s+|"
+    rf"zara\s+(?!(?:{_DO_VERBS})\b))",  # "zara volume badhao" — but "Zara open YouTube" may be to Zara
+    re.I,
+)
+_POLITE_TAIL = re.compile(r"(?:[\s,]*\b(?:please|pls|for\s+me|na|yaar)\b)+\s*[.!?]*\s*$", re.I)
+# The argument that names what a step acts on: in "can you …?" it has to name something.
+_NAMED_ARG = {"open_app": "target", "quit_app": "name", "close": "target", "play_music": "query", "search_site": "query"}
+_SMALL_WORDS = {"of", "the", "a", "an", "and", "for", "to", "in", "on", "at", "by", "with", "from", "me", "my", "you", "your", "is", "it"}
+
+
+def _head(text: str) -> tuple[str, str]:
+    """(the request without how NEO was addressed or its polite lead, that lead: "ask" for "can
+    you …", "please" for "please …", "" for none): "Neo, can you open YouTube?" → ("open YouTube?",
+    "ask"). Nothing comes off the end, so a payload keeps every word the user said."""
+    t = _ADDRESS.sub("", text, count=1)
+    lead = ""
+    if m := _POLITE.match(t):
+        lead, t = ("ask" if m.group("ask") else "please"), t[m.end() :]
+    return (" ".join(t.split()) or " ".join(text.split())), lead
+
+
+def _core(text: str) -> tuple[str, bool]:
+    """(the request itself, whether it came in a polite frame): "Neo, can you open YouTube,
+    please?" → ("open YouTube", True). For judging what is asked — never a payload to run."""
+    head, lead = _head(text)
+    t = _POLITE_TAIL.sub("", head).strip().rstrip("?.!").strip()
+    return (t or head), bool(lead)
+
+
+def _names_something(value) -> bool:
+    """"YouTube", "VS Code", "github.com", "505", "Shape of You" — not "files", "PDFs", "time" or
+    "YouTube later": a name, the way a transcript writes names, not a kind of thing."""
+    words = [w for w in str(value or "").split() if w.lower() not in _SMALL_WORDS]
+    return bool(words) and all(
+        w[0].isdigit()
+        or "." in w.strip(".")
+        or re.match(r"[a-z]+[A-Z]", w) is not None  # iPhone, eBay
+        or (w[0].isupper() and not re.fullmatch(r"[A-Z]{2,}s", w))  # but not PDFs, URLs
+        for w in words
+    )
+
+
+def _plan(text: str) -> list[tuple[str, dict]] | None:
+    """The fast-path plan for what the user asked, looking past how they said it. A trailing
+    "please" comes off plain commands only ("open YouTube, please"); a payload (the words to type,
+    a song, a search) is never cut short — "play Pray for Me" is left to the model, not run as "Pray".
+    "Can you …?" runs here only when it names what to act on: "can you open YouTube?" asks for
+    YouTube, "can you open files?" may be a question about NEO — the model decides that one."""
+    from neo.agent import fastpath
+
+    head, lead = _head(text)
+    core = _core(text)[0]
+    if _TRAILING_JOIN.search(core):
+        return None  # "close this tab and please…": the sentence isn't over
+    steps = fastpath.plan(head)
+    if _POLITE_TAIL.search(head):
+        plain = fastpath.plan(core)
+        if any(fastpath.is_payload(t) for t, _ in (steps or []) + (plain or [])):
+            # "play bohemian rhapsody please", "play Please Please Please", "type thanks yaar":
+            # the last word is manners or part of the payload — the model, which hears it, knows.
+            return None
+        steps = plain or steps  # "open YouTube, please", "close Spotify yaar"
+    if steps and lead == "ask" and steps != fastpath.plan(_ADDRESS.sub("", text, count=1)):
+        # (A tool whose own pattern takes "can you …" — "can you type hello" — decided already.)
+        for tool, args in steps:
+            arg = _NAMED_ARG.get(tool)
+            if (arg and not _names_something(args.get(arg))) or (not arg and fastpath.is_payload(tool)):
+                return None
+    return steps
+
+
 def _command_steps(text: str, *, settled: bool = False) -> list[tuple[str, dict]] | None:
     """The fast-path plan for a sentence that is purely actions ("open notes and type hello",
     "search cat videos on youtube"), or None: a question, an answer tool, a reference like "it"
@@ -183,7 +306,7 @@ def _command_steps(text: str, *, settled: bool = False) -> list[tuple[str, dict]
     text = " ".join(text.split())
     if not text or _TRAILING_JOIN.search(text):
         return None
-    steps = fastpath.plan(text)
+    steps = _plan(text)
     if not steps:
         return None
     for tool, args in steps:
@@ -210,8 +333,28 @@ _HI_ASKS = re.compile(
 
 
 def _asks(text: str) -> bool:
-    """Does the user want to hear something back? ("search cats on youtube" opens a page: no.)"""
-    return (asks_something(text) or bool(_HI_ASKS.search(text))) and _command_steps(text) is None
+    """Does the user want to hear something back? ("search cats on youtube" opens a page: no;
+    "can you open YouTube?" is a command said politely: no; "can you hear me?" and "is it
+    raining?": yes.)"""
+    core, polite = _core(text)
+    request = polite and bool(_DOES.search(core)) and not _CHECKS.search(core)  # "could you send …?"
+    question = asks_something(core) or (text.strip().endswith("?") and not request) or bool(_HI_ASKS.search(text))
+    # A command the fast paths cover is no question, whether or not the lane may run it ("search
+    # youtube for cats please" is left to the model, but it still only opens a page).
+    return question and _command_steps(text) is None and _command_steps(core) is None
+
+
+def _answers(name: str, p) -> bool:
+    """Is the model's call really the user answering the question on the table? It re-asks for the
+    action, wraps it in agent_task, or calls browse again for a card a browse run is waiting on
+    (that card belongs to the inner browser step, not to browse)."""
+    if name in (p.tool, "agent_task"):
+        return True
+    if name == "browse":
+        from neo.tools import browse
+
+        return browse.asks(p)
+    return False
 
 
 def _is_action_call(fc) -> bool:
@@ -253,10 +396,11 @@ def _multi_step(text: str) -> bool:
     """Does the utterance ask for more than one thing?"""
     from neo.agent import fastpath
 
-    steps = fastpath.plan(text)
+    core = _core(text)[0]  # "Neo, open YouTube, please" is one thing, whatever its commas
+    steps = fastpath.plan(core)
     if steps is not None:
         return len(steps) > 1
-    return bool(re.search(r"\b(?:and|then|after\s+that)\b|,", text, re.I))
+    return bool(re.search(r"\b(?:and|then|after\s+that)\b|,", core, re.I))
 
 
 def _canon(text: str) -> str:
@@ -267,7 +411,7 @@ def _declarations() -> list[gt.FunctionDeclaration]:
     decls = []
     direct = _direct_tools()
     for t in registry().all():
-        if t.name in direct:
+        if t.name in direct and not t.hidden:
             decls.append(
                 gt.FunctionDeclaration(
                     name=t.name,
@@ -306,6 +450,7 @@ class LiveVoice:
     _result_pending = False  # a non-silent result went back and the model hasn't replied to it yet
     _pending_note: str | None = None  # an inform() held back while the user was mid-sentence
     _last_answer_silent = False
+    _think_seq = 0  # bumps with every "thinking": only the latest one's settle may end it
     # command lane (see _maybe_command_lane) — tied to sentences by number, never by their text
     _utt_id = 0  # bumps with every new sentence (spoken or typed)
     _calls_this_turn = 0  # model tool calls since the last turn_complete
@@ -345,7 +490,8 @@ class LiveVoice:
         # after one, tools that could leak data or plant memories ask the user first.
         self._taint: list[str] = []
         self._utt_started = 0.0  # when the user began their current sentence
-        self._held: list[bytes] = []  # audio held back while deciding whether a turn is a command
+        # audio held back while deciding whether a turn is a command: (chunk, has a voice in it)
+        self._held: list[tuple[bytes, bool]] = []
         self._last_answer: tuple[float, str] = (0.0, "")  # (when, result) of the latest yes/no
         # Called with (kind, why) when Live keeps failing — "quota" or "network" — so the app can
         # say so and switch to the on-device voice for a while.
@@ -755,7 +901,7 @@ class LiveVoice:
             if sc.turn_complete:
                 if self._gate == "hold":
                     # A spoken reply with no tool call at all ("you're welcome"): it was conversation.
-                    await self._open_gate(model_buf)
+                    await self._open_gate(model_buf, final=True)
                 spoke = self._gate == "open"
                 self._gate, self._held = None, []
                 if spoke and model_buf and self._asked and self._last_response_at >= self._asked[2]:
@@ -942,24 +1088,33 @@ class LiveVoice:
         gate = self._turn_gate(user_buf)
         if gate == "mute":
             return
+        voiced = rms(data) >= _VOICE_RMS
         if gate == "hold":
-            self._held.append(data)
-            if sum(len(d) for d in self._held) / 2 / 24000 < _HOLD_S:
+            if not voiced and not self._held:
+                return  # silence before any voice: nothing to hold (a silent turn never opens)
+            self._held.append((data, voiced))
+            # Only voice counts toward the hold: "Mm." and then the model's near-silence while it
+            # gets round to a call is no spoken reply. (A real one keeps its pauses when it plays.)
+            if sum(len(d) for d, v in self._held if v) / 2 / 24000 < _HOLD_S:
                 return
             await self._open_gate(model_buf)  # a real spoken reply, not a preamble to a call
             return
-        self._play(data)
+        self._play(data, voiced)
 
-    async def _open_gate(self, model_buf: list[str]) -> None:
+    async def _open_gate(self, model_buf: list[str], *, final: bool = False) -> None:
         held, self._held, self._gate = self._held, [], "open"
-        for d in held:
-            self._play(d)
+        while final and held and not held[-1][1]:
+            held.pop()  # the turn is over: the silence at its end has nothing to say
+        for d, v in held:
+            self._play(d, v)
         if model_buf:
             await bus().say("".join(model_buf), final=False)
         await self._refresh_state()
 
-    def _play(self, data: bytes) -> None:
+    def _play(self, data: bytes, voiced: bool) -> None:
         if not self._speaking:
+            if not voiced:
+                return  # silence isn't speaking: the orb only turns when there's a voice to hear
             self._speaking = True
             self._speaking_since = time.time()
             asyncio.create_task(self._refresh_state())
@@ -981,21 +1136,23 @@ class LiveVoice:
         # Quiet = an action that just gets done. Its result goes back SILENT (no narration) unless
         # it failed, needs the user, or the user also asked something in the same breath.
         silent = False
+        started = self._taint  # this question's: a new one gets a fresh list meanwhile
         p = confirm.peek()
         heard = answer_of(asked) if (p is not None and asked and self._utt_started > p.staged_at) else None
         try:
-            if heard is True and fc.name in (p.tool, "agent_task") and not self._voiced(p):
+            if heard is True and _answers(fc.name, p) and not self._voiced(p):
                 # A "yes" to something — but NEO never read this question out. It only counts once
                 # the user has heard what they're agreeing to.
                 result = (
                     f"NEEDS_CONFIRM: the user hasn't heard this question yet. Ask them exactly this, in "
                     f"their language, and wait for their answer: {p.summary} — should I go ahead?"
                 )
-            elif heard is not None and fc.name in (p.tool, "agent_task"):
+            elif heard is not None and _answers(fc.name, p):
                 # The user's own "yes"/"no" to the question on the table (the model re-asking for the
                 # action, or wrapping it in agent_task): answer it from their words.
                 reply = await self._agent_session.answer(heard, text=asked)
                 if reply is not None:
+                    self._count_read(reply, started)
                     self._last_answer = (time.time(), reply.text)
                     self._last_answer_silent = reply.silent
                     result, silent = reply.text, reply.silent  # done as approved: nothing to say
@@ -1025,7 +1182,7 @@ class LiveVoice:
                         taint=list(self._taint),
                         origin="user" if own else "live",
                     )
-                    result, silent = reply.text, reply.silent
+                    result, silent = self._count_read(reply, started), reply.silent
                     lab = self._call_labels.get(key)
                     if lab is not None and reply.route == "quick" and reply.tools:
                         lab["tools"] = [x for x in lab["tools"] if x != "agent_task"] + list(reply.tools)
@@ -1103,6 +1260,7 @@ class LiveVoice:
             response={"result": result[:4000]},
             scheduling=scheduling,
         )
+        heard = False  # will the user hear the model's reply to this result?
         if self._live is live:
             try:
                 failed_or_asks = result.startswith(("Error", "NEEDS_", "(content) NEEDS_")) or "didn't work" in result[:40]
@@ -1113,6 +1271,7 @@ class LiveVoice:
                     self._gate = "open" if failed_or_asks or not wrote else "mute"
                     self._held = []
                     self._note_question(result)
+                    heard = not silent and self._gate == "open"
                 elif scheduling is not gt.FunctionResponseScheduling.SILENT:
                     # The model will respond to this result in a later turn: may that be spoken?
                     # Yes for answers, failures and questions back; no for "step done, carry on".
@@ -1120,21 +1279,22 @@ class LiveVoice:
                     self._result_speech = self._result_speech or not sequencing or failed_or_asks
                     self._last_response_at = time.time()
                     self._note_question(result)
+                    heard = self._result_speech
                 await live.send_tool_response(function_responses=[resp])
                 self._last_turn_end = time.time()
                 if not silent:
                     self._turn_open = True  # the model owes a spoken reply for this result
             except Exception as e:  # noqa: BLE001
                 print(f"[live] tool response failed: {e}")
-            # The model now composes its spoken reply: show "thinking" until audio arrives
-            # instead of blinking through "listening" for the half-second in between. A silent
-            # result gets no reply at all — straight back to listening.
+            # The model now composes a reply the user will hear: show "thinking" until audio
+            # arrives instead of blinking through "listening" for the half-second in between. A
+            # result it answers unheard (SILENT, a step of a longer command, a memory write) is
+            # done — straight back to listening; the next step shows "working" when it starts.
             if not any(not x.done() for x in self._tool_tasks.values()):
-                if silent:
-                    await self._refresh_state()
+                if heard:
+                    await self._think()
                 else:
-                    await bus().set_state(NeoState.THINKING)
-                    asyncio.create_task(self._settle_if_quiet(2.5))
+                    await self._refresh_state()
         elif not silent and not sequencing:  # session went away mid-task: don't lose the result
             await bus().say(result[:600], final=True)
             await self._refresh_state()
@@ -1173,6 +1333,22 @@ class LiveVoice:
             # result, an agent's reply, NEO's re-ask) — and all the model is ever told.
             self._asked = (p.action_id, p.summary, time.time())
             self._voiced_action = None
+
+    def _count_read(self, reply, started: list[str]) -> str:
+        """What NEO's session read to answer (a page, a mail) counts as read here too: the list this
+        call started with and the one the model reads the result in, so a link or a send that
+        content asks for next is put to the user first. Returns the result for the model: a fast
+        path's answer from such content fenced as data (the session fences it already when the
+        model's own goal ran it), an agent's own words as they are."""
+        for taint in (started, self._taint):
+            for src in reply.taint:
+                if src not in taint:
+                    taint.append(src)
+        text = reply.text
+        read = next((x for x in reply.tools if (rt := registry().get(x)) is not None and rt.untrusted), "")
+        if reply.route == "quick" and read and not text.startswith(("<untrusted", "Error", "NEEDS_", "(content) NEEDS_")):
+            text = fence(read, text)
+        return text
 
     def _new_question(self) -> None:
         self._lookups, self._seen_calls = {}, {}
@@ -1240,7 +1416,15 @@ class LiveVoice:
             if k in self._tool_tasks
         )
 
-    async def _settle_if_quiet(self, after_s: float) -> None:
+    async def _think(self) -> None:
+        """The model is composing a reply the user will hear: "thinking" until its audio arrives,
+        or back to listening after a moment if none does."""
+        self._think_seq += 1
+        await bus().set_state(NeoState.THINKING)
+        asyncio.create_task(self._settle_if_quiet(_THINK_SETTLE_S, self._think_seq))
+
+    async def _settle_if_quiet(self, after_s: float, seq: int) -> None:
         await asyncio.sleep(after_s)
-        if not self._speaking and not self.spk.playing.is_set():
+        # A later "thinking" has its own settle: an earlier one never cuts it short.
+        if seq == self._think_seq and not self._speaking and not self.spk.playing.is_set():
             await self._refresh_state()
