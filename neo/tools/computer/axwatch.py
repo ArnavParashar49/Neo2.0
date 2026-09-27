@@ -62,7 +62,9 @@ class _RealBackend(Backend):
     def start(self, pid: int, on_note: OnNote) -> Any:
         box: dict[str, Any] = {"stop": False}
         ready = threading.Event()
-        t = threading.Thread(target=self._run, args=(pid, on_note, box, ready), name=f"neo-axwatch-{pid}", daemon=True)
+        t = threading.Thread(
+            target=self._run, args=(pid, on_note, box, ready), name=f"neo-axwatch-{pid}", daemon=True
+        )
         t.start()
         if not ready.wait(1.0) or not box.get("ok"):
             box["stop"] = True

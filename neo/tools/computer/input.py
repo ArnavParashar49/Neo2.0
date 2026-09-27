@@ -143,8 +143,6 @@ _SHIFTED = {
 # is posted: the watcher marks it as NEO's own and raises instead when it wouldn't reach the test
 # window, or when the user has taken over the mouse or keyboard. None the rest of the time.
 _watch: Callable[[Any], None] | None = None
-
-
 _sent = 0  # events posted by this process (a look taken before one may be out of date after it)
 _TIME = time  # (a test that skips the input pacing swaps this module's `time` for its own)
 
@@ -157,7 +155,6 @@ def _pause(s: float) -> None:
         time.sleep(s)
         return
     wait.precise_sleep(s)
-
 
 
 def _post(ev) -> None:

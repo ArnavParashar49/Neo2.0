@@ -132,7 +132,11 @@ async def _ask(pred: Callable[[], Any], thread: bool) -> Any:
 
 
 async def until(
-    pred: Callable[[], Any] | Callable[[], Awaitable[Any]], timeout: float, every: float = 0.02, *, thread: bool = False
+    pred: Callable[[], Any] | Callable[[], Awaitable[Any]],
+    timeout: float,
+    every: float = 0.02,
+    *,
+    thread: bool = False,
 ) -> Any:
     """Ask ``pred()`` until it answers something truthy — returned at once — or ``timeout`` seconds
     pass: then its last (falsy) answer. It is asked once even with no time at all, and once more at

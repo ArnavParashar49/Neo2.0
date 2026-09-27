@@ -38,7 +38,9 @@ class Err:
 
 
 class El:
-    def __init__(self, role, title="", value=None, frame=(0, 0, 0, 0), actions=(), children=(), pid=0, **extra):
+    def __init__(
+        self, role, title="", value=None, frame=(0, 0, 0, 0), actions=(), children=(), pid=0, **extra
+    ):
         self.attrs = {"AXRole": role, "AXEnabled": True, "AXFocused": False, **extra}
         if title:
             self.attrs["AXTitle"] = title
@@ -158,7 +160,10 @@ class FakeAS:
         if name in el.attrs:
             v = el.attrs[name]
             return (OK, v) if v is not None else (NO_VALUE, None)
-        if name in ("AXWindow", "AXTopLevelUIElement") and el.attrs.get("AXRole") not in ("AXApplication", "AXSystemWide"):
+        if name in ("AXWindow", "AXTopLevelUIElement") and el.attrs.get("AXRole") not in (
+            "AXApplication",
+            "AXSystemWide",
+        ):
             win, top = _window_of(el)
             v = win if name == "AXWindow" else top
             return (OK, v) if v is not None else (NO_VALUE, None)
@@ -271,11 +276,21 @@ def fake(monkeypatch):
 
     f.add_app = add
     f.names = names
-    monkeypatch.setattr(ax, "pid_for_app", lambda n: next((p for p, x in names.items() if x.lower() == n.lower()), None))
+    monkeypatch.setattr(
+        ax, "pid_for_app", lambda n: next((p for p, x in names.items() if x.lower() == n.lower()), None)
+    )
     monkeypatch.setattr(ax, "working_app", lambda: next(((x, p) for p, x in names.items()), ("", 0)))
     monkeypatch.setattr(ax, "frontmost_app", lambda: next(((x, p) for p, x in names.items()), ("", 0)))
     monkeypatch.setattr(ax, "app_of", lambda el: names.get(getattr(el, "pid", 0), ""))
-    monkeypatch.setattr(ax, "_running", lambda pid: SimpleNamespace(localizedName=lambda: names.get(pid, ""), activationPolicy=lambda: 0) if pid in names else None)
+    monkeypatch.setattr(
+        ax,
+        "_running",
+        lambda pid: (
+            SimpleNamespace(localizedName=lambda: names.get(pid, ""), activationPolicy=lambda: 0)
+            if pid in names
+            else None
+        ),
+    )
     monkeypatch.setattr(ax, "_expose_web", lambda pid, root: False)
     monkeypatch.setattr(ax, "is_neo", lambda pid, name="": False)
     for name in ("_last_tree", "_issued", "_cache", "_win_cache"):
@@ -306,8 +321,8 @@ def _ids(tree: str) -> dict[str, str]:
         for part in line.replace("·", "\n").splitlines():
             bits = part.split()
             for b in bits:
-                if b.startswith("e") and b[1:].isdigit() and '"' in part[part.index(b):]:
-                    out[part[part.index(b):].split('"')[1]] = b
+                if b.startswith("e") and b[1:].isdigit() and '"' in part[part.index(b) :]:
+                    out[part[part.index(b) :].split('"')[1]] = b
                     break
     return out
 
@@ -372,7 +387,13 @@ def test_an_elements_look_is_one_round_trip_and_error_placeholders_are_nothing(f
     el = button("Save", AXDescription="Save the file")
     fake.add_app("Doc", 1, app_root(window("Doc", el)))
     n, got = calls(fake, lambda: ax._attrs(el, ("AXRole", "AXTitle", "AXHelp", "AXValue", "AXDescription")))
-    assert n == 1 and got == {"AXRole": "AXButton", "AXTitle": "Save", "AXHelp": None, "AXValue": None, "AXDescription": "Save the file"}
+    assert n == 1 and got == {
+        "AXRole": "AXButton",
+        "AXTitle": "Save",
+        "AXHelp": None,
+        "AXValue": None,
+        "AXDescription": "Save the file",
+    }
 
 
 def test_a_batch_of_errors_only_is_read_again_one_attribute_at_a_time(fake):
@@ -417,7 +438,13 @@ def test_ax_tree_on_the_big_app_takes_a_few_hundred_round_trips_not_eight_thousa
     assert n <= 1000, n  # 7,879 before (the speed research's count on this app)
     # …and finds the same things: the toolbar, the sidebar rows in view, the paragraphs in view
     said = {e.title or e.value for e in ax._last_tree.values()}
-    assert {"Tool 11", "Folder 0", "Folder 30", "Paragraph 0 text about things", "Paragraph 20 text about things"} <= said
+    assert {
+        "Tool 11",
+        "Folder 0",
+        "Folder 30",
+        "Paragraph 0 text about things",
+        "Paragraph 20 text about things",
+    } <= said
     assert "Paragraph 30 text about things" not in said and "Folder 39" not in said  # scrolled out of view
     assert "Tool 11" in tree and "Action 20" in tree  # (what can be acted on is shown first)
     assert tree.count('Window "Back"') == 1 and "bg 5" not in tree  # a background window is one line
@@ -447,8 +474,19 @@ def test_action_names_are_asked_only_of_what_is_pressed(fake, demo):
 
 
 def test_a_long_list_is_entered_where_it_is_on_screen(fake):
-    rows = [El("AXGroup", frame=(0, 100 + 20 * i, 400, 20), children=[El("AXStaticText", value=f"line {i}", frame=(0, 100 + 20 * i, 400, 20))]) for i in range(500)]
-    area = El("AXScrollArea", frame=(0, 100, 400, 200), children=[El("AXGroup", frame=(0, 100, 400, 10000), children=rows)])
+    rows = [
+        El(
+            "AXGroup",
+            frame=(0, 100 + 20 * i, 400, 20),
+            children=[El("AXStaticText", value=f"line {i}", frame=(0, 100 + 20 * i, 400, 20))],
+        )
+        for i in range(500)
+    ]
+    area = El(
+        "AXScrollArea",
+        frame=(0, 100, 400, 200),
+        children=[El("AXGroup", frame=(0, 100, 400, 10000), children=rows)],
+    )
     fake.add_app("Log", 3, app_root(window("Log", area)))
     n, tree = calls(fake, ax.snapshot)
     shown = [i for i in range(500) if f"'line {i}'" in tree]
@@ -457,8 +495,14 @@ def test_a_long_list_is_entered_where_it_is_on_screen(fake):
 
 
 def test_a_list_not_laid_out_top_to_bottom_is_walked_whole(fake):
-    rows = [El("AXStaticText", value=f"cell {i}", frame=(0, 100 + (i * 37 % 50) * 5, 100, 5)) for i in range(60)]
-    area = El("AXScrollArea", frame=(0, 100, 400, 400), children=[El("AXGroup", frame=(0, 100, 400, 400), children=rows)])
+    rows = [
+        El("AXStaticText", value=f"cell {i}", frame=(0, 100 + (i * 37 % 50) * 5, 100, 5)) for i in range(60)
+    ]
+    area = El(
+        "AXScrollArea",
+        frame=(0, 100, 400, 400),
+        children=[El("AXGroup", frame=(0, 100, 400, 400), children=rows)],
+    )
     fake.add_app("Grid", 3, app_root(window("Grid", area)))
     tree = ax.snapshot()
     assert all(f"'cell {i}'" in tree for i in range(60))  # nothing lost to a wrong guess
@@ -467,7 +511,9 @@ def test_a_list_not_laid_out_top_to_bottom_is_walked_whole(fake):
 def test_a_table_says_which_rows_are_visible(fake):
     rows = [El("AXRow", f"Row {i}", frame=(0, 100 + 20 * i, 300, 20)) for i in range(200)]
     table = El("AXTable", frame=(0, 100, 300, 4000), children=rows, AXVisibleRows=rows[3:9])
-    fake.add_app("Mail", 4, app_root(window("Inbox", El("AXScrollArea", frame=(0, 100, 300, 400), children=[table]))))
+    fake.add_app(
+        "Mail", 4, app_root(window("Inbox", El("AXScrollArea", frame=(0, 100, 300, 400), children=[table])))
+    )
     tree = ax.snapshot()
     assert '"Row 3"' in tree and '"Row 8"' in tree and '"Row 2"' not in tree and '"Row 9"' not in tree
 
@@ -577,7 +623,9 @@ def test_the_tool_call_runs_the_look_off_the_event_loop(fake, demo):
 def front_world(monkeypatch, fake):
     """The system-wide focused app, the window server's front window, and lsappinfo — all fakes."""
     world = SimpleNamespace(ax_pid=10, cg=("Pages", 10), ls=("Pages", 10), runs=[])
-    fake.values[(id(fake.system), "AXFocusedApplication")] = lambda: El("AXApplication", pid=world.ax_pid) if world.ax_pid else None
+    fake.values[(id(fake.system), "AXFocusedApplication")] = lambda: (
+        El("AXApplication", pid=world.ax_pid) if world.ax_pid else None
+    )
     monkeypatch.setattr(focus, "_cg_front", lambda: world.cg)
     monkeypatch.setattr(focus, "_app_name", lambda pid: {10: "Pages", 11: "Keynote"}.get(pid, ""))
 
@@ -645,7 +693,9 @@ def test_pid_lookups_are_kept_a_moment_while_the_app_still_runs(monkeypatch):
     dead: set[int] = set()
     import AppKit
 
-    monkeypatch.setattr(AppKit, "NSRunningApplication", SimpleNamespace(runningApplicationWithProcessIdentifier_=Running))
+    monkeypatch.setattr(
+        AppKit, "NSRunningApplication", SimpleNamespace(runningApplicationWithProcessIdentifier_=Running)
+    )
     assert ax.pid_for_app("Notes") == 77 and ax.pid_for_app("notes") == 77 and asked == ["notes"]
     dead.add(77)  # it quit: asked afresh
     ax.pid_for_app("Notes")
@@ -662,7 +712,9 @@ def test_until_answers_at_the_first_change_and_honestly_at_the_deadline(clock):
     t0 = clock.now()
     asked = []
     assert asyncio.run(wait.until(lambda: asked.append(clock.now()) or False, 0.1, every=0.03)) is False
-    assert abs(clock.now() - t0 - 0.1) < 1e-9 and asked[-1] - t0 == pytest.approx(0.1)  # asked at the deadline too
+    assert abs(clock.now() - t0 - 0.1) < 1e-9 and asked[-1] - t0 == pytest.approx(
+        0.1
+    )  # asked at the deadline too
     assert wait.until_sync(lambda: 0, 0.0) == 0 and wait.until_sync(lambda: 5, 3.0) == 5
 
 
@@ -696,7 +748,11 @@ def test_a_file_opened_is_done_when_its_app_is_in_front_with_a_window(clock, mon
         return 0, "", ""
 
     monkeypatch.setattr(apps, "_run", run)
-    monkeypatch.setattr(apps, "front_name", lambda: "Viewer" if state["at"] is not None and clock.now() >= state["at"] else "Editor")
+    monkeypatch.setattr(
+        apps,
+        "front_name",
+        lambda: "Viewer" if state["at"] is not None and clock.now() >= state["at"] else "Editor",
+    )
     monkeypatch.setattr(apps, "_handler_for", lambda target: ("Viewer", 0))
     monkeypatch.setattr(apps, "_has_window", lambda name: True)
     t0 = clock.now()
@@ -709,7 +765,9 @@ def test_launch_waits_for_a_pid_by_polling(clock, monkeypatch):
     from neo.decide.kinds import launch
 
     t0 = clock.now()
-    monkeypatch.setattr(axkit, "pid_of", lambda bid: 55 if bid == "test.app" and clock.now() - t0 >= 0.12 else None)
+    monkeypatch.setattr(
+        axkit, "pid_of", lambda bid: 55 if bid == "test.app" and clock.now() - t0 >= 0.12 else None
+    )
     assert asyncio.run(launch.wait_pid("test.app")) == 55 and clock.now() - t0 <= 0.17  # (was a 0.2 s step)
     t1 = clock.now()
     assert asyncio.run(launch.wait_pid("test.none", 0.3)) is None and clock.now() - t1 == pytest.approx(0.3)
@@ -717,9 +775,13 @@ def test_launch_waits_for_a_pid_by_polling(clock, monkeypatch):
 
 def test_a_web_tree_switched_on_is_waited_for_only_until_it_fills_in(fake, clock, monkeypatch):
     area = El("AXWebArea", "Page", frame=(0, 60, 1000, 700))
-    fake.add_app("Browser", 11, app_root(window("Browser", El("AXGroup", frame=(0, 60, 1000, 700), children=[area]))))
+    fake.add_app(
+        "Browser", 11, app_root(window("Browser", El("AXGroup", frame=(0, 60, 1000, 700), children=[area])))
+    )
     t0 = clock.now()
-    fake.values[(id(area), "AXChildren")] = lambda: [button("Go", frame=(10, 100, 40, 20)).set_pid(11)] if clock.now() - t0 >= 0.1 else None
+    fake.values[(id(area), "AXChildren")] = lambda: (
+        [button("Go", frame=(10, 100, 40, 20)).set_pid(11)] if clock.now() - t0 >= 0.1 else None
+    )
     monkeypatch.setattr(ax, "_expose_web", lambda pid, root: True)
     tree = ax.snapshot("Browser")
     assert '"Go"' in tree and 0.1 <= clock.now() - t0 <= 0.2  # (a fixed 0.4 s before)
@@ -762,7 +824,9 @@ def test_a_field_that_shows_its_text_a_moment_later_is_not_typed_into_again(fiel
     from neo.decide import axkit
 
     t0 = clock.now()
-    assert axkit._put(object(), "hello", "return") and field.typed == []  # before: "didn't take", then typed twice
+    assert (
+        axkit._put(object(), "hello", "return") and field.typed == []
+    )  # before: "didn't take", then typed twice
     assert 0.06 <= clock.now() - t0 <= 0.09
 
 
@@ -797,7 +861,11 @@ def test_ax_tree_names_an_open_sheet_first_with_its_controls(fake):
     line = tree.splitlines()[1]
     assert line.startswith("A sheet “Start a New Game?” is open:") and line.endswith("answer it first.")
     ids = _ids(tree)
-    assert f"{ids['Start']} Start" in line and f"{ids['Cancel']} Cancel" in line and f"{ids['Players']} Players" in line
+    assert (
+        f"{ids['Start']} Start" in line
+        and f"{ids['Cancel']} Cancel" in line
+        and f"{ids['Players']} Players" in line
+    )
 
 
 def test_blockers_sheet_modal_dialog_and_another_apps_window(fake, monkeypatch):
@@ -819,7 +887,11 @@ def test_blockers_sheet_modal_dialog_and_another_apps_window(fake, monkeypatch):
     assert [b.kind for b in ax.blockers(52)] == ["modal"]
     # another process's window over the middle of this one (the window server's evidence)
     fake.add_app("Plain", 53, app_root(window("Plain", button("Go"))))
-    monkeypatch.setattr(ax, "window_owner_at", lambda x, y: ("Overlay", 900) if 500 < x < 1000 and 300 < y < 700 else ("Plain", 53))
+    monkeypatch.setattr(
+        ax,
+        "window_owner_at",
+        lambda x, y: ("Overlay", 900) if 500 < x < 1000 and 300 < y < 700 else ("Plain", 53),
+    )
     monkeypatch.setattr(ax, "_layer_at", lambda pid, x, y: 3)
     got = ax.blockers(53)
     assert [(b.kind, b.owner_pid) for b in got] == [("covering", 900)]
@@ -828,10 +900,16 @@ def test_blockers_sheet_modal_dialog_and_another_apps_window(fake, monkeypatch):
 
 def test_a_banner_in_a_corner_or_an_ordinary_window_in_front_is_not_in_the_way(fake, monkeypatch):
     fake.add_app("Plain", 53, app_root(window("Plain", button("Go"))))
-    monkeypatch.setattr(ax, "window_owner_at", lambda x, y: ("Banner", 901) if x > 1100 and y < 300 else ("Plain", 53))
+    monkeypatch.setattr(
+        ax, "window_owner_at", lambda x, y: ("Banner", 901) if x > 1100 and y < 300 else ("Plain", 53)
+    )
     assert ax.blockers(53) == []
-    monkeypatch.setattr(ax, "window_owner_at", lambda x, y: ("Editor", 902))  # another app's window, in front…
-    monkeypatch.setattr(ax, "_layer_at", lambda pid, x, y: 0)  # …an ordinary one: bringing this app forward uncovers it
+    monkeypatch.setattr(
+        ax, "window_owner_at", lambda x, y: ("Editor", 902)
+    )  # another app's window, in front…
+    monkeypatch.setattr(
+        ax, "_layer_at", lambda pid, x, y: 0
+    )  # …an ordinary one: bringing this app forward uncovers it
     assert ax.blockers(53) == []
     monkeypatch.setattr(ax, "_layer_at", lambda pid, x, y: 8)  # a floating panel
     assert [b.owner_pid for b in ax.blockers(53)] == [902]
@@ -855,10 +933,18 @@ def test_a_modal_dialog_blocks_a_point_accessibility_cannot_see(fake, monkeypatc
 def _menu_app(fake, pid=60):
     apple = El("AXMenuBarItem", "Apple", frame=(10, 0, 30, 24), actions=("AXPress",), children=[
         El("AXMenu", frame=(0, 0, 0, 0), children=[El("AXMenuItem", "Restart…", actions=("AXPress",))])])  # fmt: skip
-    new_game = El("AXMenuItem", "New Game", actions=("AXPress",), AXMenuItemCmdChar="N", AXMenuItemCmdModifiers=0)
+    new_game = El(
+        "AXMenuItem", "New Game", actions=("AXPress",), AXMenuItemCmdChar="N", AXMenuItemCmdModifiers=0
+    )
     export = El("AXMenu", frame=(0, 0, 0, 0), children=[
         El("AXMenuItem", "PDF…", actions=("AXPress",), AXMenuItemCmdChar="P", AXMenuItemCmdModifiers=3)])  # fmt: skip
-    lazy = El("AXMenu", frame=(0, 0, 0, 0), children=[El("AXMenuItem", "Hint", actions=("AXPress",), AXMenuItemCmdChar="H", AXMenuItemCmdModifiers=1)])
+    lazy = El(
+        "AXMenu",
+        frame=(0, 0, 0, 0),
+        children=[
+            El("AXMenuItem", "Hint", actions=("AXPress",), AXMenuItemCmdChar="H", AXMenuItemCmdModifiers=1)
+        ],
+    )
     lazy.lazy_kids = 1  # (filled in when first asked)
     game = El("AXMenuBarItem", "Game", frame=(60, 0, 50, 24), actions=("AXPress",), children=[
         El("AXMenu", frame=(0, 0, 0, 0), children=[
@@ -877,10 +963,18 @@ def test_menu_items_are_read_without_opening_a_menu_and_never_the_system_menu(fa
     _root, _apple, new_game = _menu_app(fake)
     items = ax.menu_items(60)
     paths = [i.where() for i in items]
-    assert paths == ["Game › New Game", "Game › Export", "Game › Export › PDF…", "Game › Undo Move", "Moves › Hint"]
+    assert paths == [
+        "Game › New Game",
+        "Game › Export",
+        "Game › Export › PDF…",
+        "Game › Undo Move",
+        "Moves › Hint",
+    ]
     by = {i.title: i for i in items}
     assert by["New Game"].chord == "cmd+n" and by["New Game"].ref is new_game and by["New Game"].enabled
-    assert by["PDF…"].chord == "cmd+shift+alt+p" and by["Hint"].chord == "cmd+shift+h"  # (a lazily built menu)
+    assert (
+        by["PDF…"].chord == "cmd+shift+alt+p" and by["Hint"].chord == "cmd+shift+h"
+    )  # (a lazily built menu)
     assert not by["Undo Move"].enabled and "Restart…" not in paths
     assert fake.performed == []  # nothing opened
 
@@ -890,7 +984,9 @@ def test_a_menu_command_is_pressed_through_the_one_door_and_never_a_system_one(f
     seen = []
     monkeypatch.setattr(ax, "_ax_watch", lambda kind, el, what, value: seen.append((kind, what)))
     items = {i.title: i for i in ax.menu_items(60)}
-    assert ax.press_menu_item(items["New Game"]) == "Chose Game › New Game" and seen == [("perform", "AXPress")]
+    assert ax.press_menu_item(items["New Game"]) == "Chose Game › New Game" and seen == [
+        ("perform", "AXPress")
+    ]
     assert "greyed out" in ax.press_menu_item(items["Undo Move"])
     restart = ax.MenuItem("Restart…", ("Apple", "Restart…"), True, ref=apple.children[0].children[0], pid=60)
     assert ax.press_menu_item(restart) == ax._SYSTEM_MENU
@@ -901,7 +997,9 @@ def test_the_system_menu_is_never_pressed_by_id_either(fake):
     _root, apple, _ng = _menu_app(fake)
     restart = apple.children[0].children[0]
     e = ax.Element("e9", "AXMenuItem", "Restart…", "", 0, 30, 100, 20, actions=["AXPress"], ref=restart)
-    assert ax.press_el(e) == ax._SYSTEM_MENU and ax.press_element(e) == ax._SYSTEM_MENU and fake.performed == []
+    assert (
+        ax.press_el(e) == ax._SYSTEM_MENU and ax.press_element(e) == ax._SYSTEM_MENU and fake.performed == []
+    )
 
 
 # ---- what's on screen, for marks ----------------------------------------------------------------------------------
@@ -935,7 +1033,13 @@ def test_the_tool_text_names_no_app_and_a_board_is_told_by_evidence(fake):
 
 
 def test_a_background_window_can_be_looked_inside_by_title(fake):
-    fake.add_app("Mail", 9, app_root(window("Inbox", button("Reply")), window("Draft", button("Send"), frame=(300, 300, 600, 400))))
+    fake.add_app(
+        "Mail",
+        9,
+        app_root(
+            window("Inbox", button("Reply")), window("Draft", button("Send"), frame=(300, 300, 600, 400))
+        ),
+    )
     tree = ax.snapshot("Mail")
     assert '"Send"' not in tree and 'ax_tree window="Draft"' in tree
     inside = ax.snapshot("Mail", window="draft")
@@ -944,7 +1048,15 @@ def test_a_background_window_can_be_looked_inside_by_title(fake):
 
 
 def test_compact_is_controls_only(fake):
-    fake.add_app("Doc", 9, app_root(window("Doc", El("AXStaticText", value="A long paragraph", frame=(10, 60, 300, 20)), button("Share"))))
+    fake.add_app(
+        "Doc",
+        9,
+        app_root(
+            window(
+                "Doc", El("AXStaticText", value="A long paragraph", frame=(10, 60, 300, 20)), button("Share")
+            )
+        ),
+    )
     compact = ax.snapshot("Doc", compact=True)
     assert '"Share"' in compact and "long paragraph" not in compact
 
@@ -1028,7 +1140,9 @@ def notes(monkeypatch):
 
 
 def test_generations_move_with_notifications_and_waits_end_at_the_first(notes):
-    assert axwatch.generation(5) is None and axwatch.wait_change(5, 0, 0.01) is None  # not watched: can't tell
+    assert (
+        axwatch.generation(5) is None and axwatch.wait_change(5, 0, 0.01) is None
+    )  # not watched: can't tell
     assert axwatch.watch(5) and notes.started == [5] and axwatch.generation(5) == 0
     notes.fire(5)
     assert axwatch.generation(5) == 1 and axwatch.wait_change(5, 0, 0.0) is True
@@ -1112,7 +1226,10 @@ def test_a_click_ends_with_its_last_event(posted):
     assert not isinstance(posted[-1], tuple)  # no pause after the button comes up (was 50 ms)
     posted.clear()
     inp.click(10, 20, count=2)
-    assert [p for p in posted if isinstance(p, tuple)] == [("sleep", inp._MOVE_SETTLE_S), ("sleep", inp._CLICK_GAP_S)]
+    assert [p for p in posted if isinstance(p, tuple)] == [
+        ("sleep", inp._MOVE_SETTLE_S),
+        ("sleep", inp._CLICK_GAP_S),
+    ]
 
 
 def test_text_goes_in_whole_characters_of_at_most_20_utf16_units(posted):
@@ -1215,7 +1332,6 @@ def test_the_choke_points_are_refused_while_effects_are_off(monkeypatch):
         ax._set(object(), "AXValue", "x", "write something")
 
 
-
 def test_a_labelled_look_ends_at_the_first_exact_match(fake, demo):
     n_all, (_n, _f, every) = calls(fake, ax.window_elements)
     n, (_n, _f, els) = calls(fake, lambda: ax.window_elements(early_exit="tool 2"))
@@ -1231,7 +1347,11 @@ def test_something_frontmost_for_a_moment_is_told_by_how_it_runs_not_its_name(mo
     monkeypatch.setattr(focus, "front_app", lambda: ("Banners", 31))
     monkeypatch.setattr(ax, "regular", lambda pid: pid != 31)
     bar = SimpleNamespace(localizedName=lambda: "Editor", processIdentifier=lambda: 8)
-    monkeypatch.setattr(AppKit, "NSWorkspace", SimpleNamespace(sharedWorkspace=lambda: SimpleNamespace(menuBarOwningApplication=lambda: bar)))
+    monkeypatch.setattr(
+        AppKit,
+        "NSWorkspace",
+        SimpleNamespace(sharedWorkspace=lambda: SimpleNamespace(menuBarOwningApplication=lambda: bar)),
+    )
     monkeypatch.setattr(ax, "NSWorkspace", AppKit.NSWorkspace)
     assert _REAL_FRONTMOST() == ("Editor", 8)
     panel.add(window("Search"))  # …unless the user is in a window of it
