@@ -84,9 +84,12 @@ def cset(monkeypatch):
         monkeypatch.setattr(config, "_settings", s)
         return s
 
+    from neo import health
+
     monkeypatch.setattr(cb, "_accounts", weakref.WeakKeyDictionary())
     monkeypatch.setattr(prov, "_cache", {})
     monkeypatch.setattr(prov, "_demoted", {})
+    monkeypatch.setattr(health, "_live", {})  # (NEO.app's problem list: process-wide)
     return make
 
 
@@ -348,7 +351,6 @@ async def test_an_invalid_key_is_refused_for_the_day_and_said_once(cset, fake, m
     from neo import health
 
     assert any("refused the API key" in x for x in health.problems())  # the overlay's problem list
-    health.report("cerebras", None)
     assert KEY not in json.dumps(ledger_file(s))  # the ledger keeps a fingerprint, never the key
 
     # a restart the same day: still refused, without a round trip
@@ -733,3 +735,36 @@ def test_a_damaged_or_unwritable_ledger_never_fails_an_answer(tmp_path, monkeypa
     assert led.add("gpt-oss-120b", 1000, 0) == []  # counted in memory; the answer isn't lost
     assert led.add("gpt-oss-120b", 1000, 0) == []
     assert led._state["tokens"]["gpt-oss-120b"][0] == 3000  # (not the file's stale 1000 again)
+
+
+async def test_each_embedded_agent_has_its_own_account_ledger_and_notes(tmp_path, fake, monkeypatch):
+    """Library mode: an agent's Cerebras spend, refusals and notes are its own (its pool, its data
+    dir, its conversation's bus) — never NEO.app's ~/.neo or another agent's."""
+    from neo import health, runtime
+    from neo.events import bus
+    from tests.neo_lib import make_runtime
+
+    monkeypatch.setattr(cb, "_accounts", weakref.WeakKeyDictionary())
+    monkeypatch.setattr(health, "_live", {})
+    a, b = make_runtime(tmp_path / "a", "a"), make_runtime(tmp_path / "b", "b")
+    heard: dict[str, list[str]] = {"a": [], "b": []}
+    fake.reply(401, {"message": "Wrong API Key"})
+    for rt in (a, b):
+        with runtime.bind(rt.scope()):
+            bus().subscribe(
+                lambda ev, n=rt.name: heard[n].append(ev.data.get("text")) if ev.type == "note" else None
+            )
+            c = cb.Conf(
+                api_key=KEY, data_dir=rt.settings.data_dir
+            )  # (the host's key, as its settings give it)
+            p = cb.CerebrasProvider(cb.account(c), model=cb.TEXT_MODEL, name=cb.TEXT_BRAIN, vision=False)
+            if rt is a:
+                with pytest.raises(cb.Refused):
+                    await p.complete(ASK)
+            else:
+                assert (await p.complete(ASK)).text == "ok"  # b's account isn't refused by a's 401
+    assert (tmp_path / "a" / spend.FILE).exists() and (tmp_path / "b" / spend.FILE).exists()
+    assert json.loads((tmp_path / "b" / spend.FILE).read_text())["tokens"]["gpt-oss-120b"][0] == 1000
+    assert "gpt-oss-120b" not in json.loads((tmp_path / "a" / spend.FILE).read_text())["tokens"]
+    assert any("API key" in t for t in heard["a"]) and not any("API key" in t for t in heard["b"])
+    assert not any("Cerebras" in x for x in health._live.values())  # never NEO.app's problem list
