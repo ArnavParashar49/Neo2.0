@@ -153,6 +153,9 @@ def _no_real_screen(monkeypatch):
 
     monkeypatch.setattr(apps, "_target", None)
     monkeypatch.setattr(focus, "hosts_shell", lambda pid, depth=3: False)
+    # NEO's early first look (neo.agent.prefetch) reads the front app and its window on its own: off,
+    # so no test that reaches Session._agent reads this Mac's screen. tests/test_early_look.py opts in.
+    monkeypatch.setenv("NEO_PREFETCH_LOOK", "0")
 
 
 @pytest.fixture(autouse=True)

@@ -12,16 +12,23 @@ model call. It is read-only, and it only happens where the model would look anyw
   the run must then be given the computer tools (else nothing leaves this Mac);
 * the app: the one in front, and only when it is the request's app — named in the request (by
   the installed apps' own names: evidence, no list of apps here), the game being played, or, when
-  the request names no app, the one NEO last worked in. Never NEO's own window, never a protected
-  app (the gate helpers decide, fail closed), never without Accessibility;
+  the request names no app, the one NEO last worked in. The front app is read only for a request
+  that names one, plays a game, or finds NEO has worked in an app lately. Never NEO's own window,
+  never a protected app (the gate helpers decide, fail closed), never without Accessibility;
 * what: the window's elements as a compact list — ids, roles, labels, no coordinates, so a brain
-  that can't see is never handed any — and a picture of that window alone (its own pixels, never
-  what another app's window puts over it) only when Laya says the screen itself is needed, the
-  brain can see, and Screen Recording is already allowed (it is never asked for from here);
-* how long: a hard deadline (``prefetch_look_s``); a look that isn't ready by then is dropped.
+  that can't see is never handed any — and a picture of that window only when Laya says the screen
+  itself is needed, the brain can see, and Screen Recording is already allowed (it is never asked
+  for from here). Its pixels are clicked by, so it shows what a click there hits: the window's own
+  pixels when nothing is in front of it; the screen's, cut to the window, when another window is
+  over part of it — and no picture when that is a protected app's (or the window server can't say);
+* how long: a hard deadline (``prefetch_look_s``); a look that isn't ready by then is dropped —
+  except that a Chromium or Electron app's first look in a while also waits out the moment its web
+  tree needs once switched on (a one-time cost, not a slow app).
 
 What is attached is fenced as untrusted, and taints the request exactly as the tools would —
-only when it is attached. The ``prefetch_look`` setting turns all of it off.
+only when it is attached. It goes stale as soon as the model looks again or an action changes the
+screen (:func:`supersede`), and a finished run keeps only a stub of it (:func:`forget`). The
+``prefetch_look`` setting turns all of it off.
 
 **Prewarm.** The resolver's zero-shot Laya checkpoint (neo.reflex.zeroshot, typed-decisions) is
 let go after ten idle minutes, and a question that finds it unloaded pays a 0.4-0.7 s load. The
@@ -36,7 +43,6 @@ import asyncio
 import contextlib
 import io
 import logging
-import os
 import re
 import threading
 import time
@@ -58,7 +64,9 @@ NEEDS_SCREEN_P = 0.5  # Laya's needs_screen at or above this: the screen itself 
 MARK = "[NEO's first look"  # opens the attached block (and nothing a user types)
 STUB = "[NEO looked at the screen here, before the first step.]"  # what a finished run keeps of it
 _SCREEN_CATEGORY = "computer"  # the tool family that reads and works the screen
-_OBSERVE = frozenset({"ax_tree", "screenshot"})  # a newer one of these makes the first look stale
+_OBSERVE = frozenset({"ax_tree", "ax_find", "screenshot"})  # a newer one of these makes the first look stale
+_CHANGED = "Changed: "  # NEO's own words, in an action's result, for what it changed on the screen
+_SHOT = re.compile(r'shot="([^"]+)"')
 SLOW_SKIP_S = 300.0  # an app whose look missed the deadline isn't waited for again for this long
 _slow_until: dict[int, float] = {}  # pid -> time.monotonic() until which it's skipped
 
@@ -66,24 +74,49 @@ _slow_until: dict[int, float] = {}  # pid -> time.monotonic() until which it's s
 # ---- settings -----------------------------------------------------------------------------------
 
 
+_KEYS = ("prefetch_look", "prefetch_look_s", "prewarm_resolver")  # the integrator adds them to neo.config
+_read_keys: tuple[Any, dict[str, Any]] | None = None  # (the settings object, its values of _KEYS)
+_with_keys: type | None = None
+
+
 def _setting(name: str, app_default: Any, library_default: Any) -> Any:
-    """A setting the integrator adds to neo.config (``prefetch_look``, ``prefetch_look_s``,
-    ``prewarm_resolver``). Until it's there: NEO.app reads ``NEO_<NAME>`` itself; an embedded agent
-    never reads the environment, and gets the library default."""
+    """A setting the integrator adds to neo.config (:data:`_KEYS`). Until it's there: NEO.app reads it
+    from where Settings reads every other one (:func:`_unlisted`); an embedded agent never reads the
+    environment or a file, and gets the library default."""
     v = getattr(settings(), name, None)
     if v is not None:
         return v
     if runtime.library_bound():
         return library_default
-    raw = os.environ.get(f"NEO_{name.upper()}")
-    if raw is None or not raw.strip():
-        return app_default
-    if isinstance(app_default, bool):
-        return raw.strip().lower() not in ("0", "false", "off", "no")
-    try:
-        return type(app_default)(raw)
-    except (TypeError, ValueError):
-        return app_default
+    v = _unlisted(name)
+    return app_default if v is None else v
+
+
+def _unlisted(name: str) -> Any:
+    """``NEO_<NAME>`` as neo.config would read it if it had the key: from the environment and NEO.app's
+    .env files (~/.neo/.env: never with effects off), parsed the same way — by Settings itself, with
+    the keys added. Once per settings object (a reload of NEO.app's settings is a new one)."""
+    global _read_keys, _with_keys
+    s = settings()
+    got = _read_keys
+    if got is None or got[0] is not s:
+        from neo.config import Settings
+
+        if _with_keys is None:
+
+            class _WithKeys(Settings):
+                prefetch_look: bool | None = None
+                prefetch_look_s: float | None = None
+                prewarm_resolver: bool | None = None
+
+            _with_keys = _WithKeys
+        try:
+            # the .env files Settings reads now (a test's, none, or NEO.app's)
+            values = _with_keys(_env_file=Settings.model_config.get("env_file")).model_dump(include=set(_KEYS))
+        except Exception:  # noqa: BLE001 - a value that doesn't parse: the defaults
+            values = {}
+        got = _read_keys = (s, values)
+    return got[1].get(name)
 
 
 def enabled() -> bool:
@@ -226,7 +259,8 @@ def named_apps(text: str) -> list[Any] | None:
 def target(text: str, *, game: Any = None) -> Target | None:
     """The app in front, if a first look at it is allowed for this request (see the module doc):
     it's the request's app — named in it, the game, or (none named) the one NEO last worked in —
-    and not NEO's own or a protected app. Reads the front app fresh; call it off the event loop."""
+    and not NEO's own or a protected app. Reads the front app fresh (for a game always: the game is
+    the app the request is about); call it off the event loop."""
     from neo.tools.computer import apps, ax
 
     # First what the request is about, from what NEO already knows (no AX, no process spawned):
@@ -319,17 +353,72 @@ def _window_bounds(window_id: int) -> tuple[float, float, float, float] | None:
     return float(b["X"]), float(b["Y"]), float(b["Width"]), float(b["Height"])
 
 
+def _windows_above(window_id: int) -> list[dict]:
+    """The windows on screen in front of this one, as the window server describes them."""
+    import Quartz as Q
+
+    return list(Q.CGWindowListCopyWindowInfo(Q.kCGWindowListOptionOnScreenAboveWindow, int(window_id)) or [])
+
+
+def _overlap(a: tuple[float, float, float, float], b: tuple[float, float, float, float]) -> bool:
+    """Do two rectangles (x, y, width, height) share an area (more than an edge)?"""
+    return min(a[0] + a[2], b[0] + b[2]) - max(a[0], b[0]) >= 1 and min(a[1] + a[3], b[1] + b[3]) - max(a[1], b[1]) >= 1
+
+
+def _in_front(window_id: int, bounds: tuple[float, float, float, float]) -> list[tuple[str, int]]:
+    """Whose windows are in front of any part of this one — where a click hits them, not it: (owner,
+    pid) of each. Not NEO's own (no screenshot shows it, and no click is ever made on it) and not a
+    fully transparent one (no screenshot shows that either). Raises when the window server can't say."""
+    from neo.tools.computer import ax
+
+    out = []
+    for w in _windows_above(window_id):
+        b = w.get("kCGWindowBounds") or {}
+        frame = (float(b.get("X", 0)), float(b.get("Y", 0)), float(b.get("Width", 0)), float(b.get("Height", 0)))
+        if int(w.get("kCGWindowNumber", 0)) == int(window_id) or float(w.get("kCGWindowAlpha", 1.0)) <= 0.0:
+            continue
+        if not _overlap(frame, bounds):
+            continue
+        owner, pid = str(w.get("kCGWindowOwnerName") or ""), int(w.get("kCGWindowOwnerPID", 0) or 0)
+        if pid and ax.is_neo(pid, owner):
+            continue
+        out.append((owner, pid))
+    return out
+
+
+def _on_screen(bounds: tuple[float, float, float, float]) -> tuple[int, int, int, int] | None:
+    """The part of a window on the display that shows most of it, in whole screen points (None: none
+    of it is on any display)."""
+    from neo.tools.computer import screen
+
+    x, y, w, h = bounds
+    best, most = None, 0.0
+    for d in screen.displays():
+        left, top = max(x, d.x), max(y, d.y)
+        right, bottom = min(x + w, d.x + d.w), min(y + h, d.y + d.h)
+        if right - left >= 1 and bottom - top >= 1 and (right - left) * (bottom - top) > most:
+            best, most = (left, top, right, bottom), (right - left) * (bottom - top)
+    if best is None:
+        return None
+    left, top, right, bottom = (round(v) for v in best)
+    return (left, top, right - left, bottom - top) if right > left and bottom > top else None
+
+
 @dataclass(frozen=True)
 class Picture:
     image: ImagePart
     shot: str  # the shot id its pixels are clicked by
     size: tuple[int, int]  # pixels
+    covered: bool = False  # another window is in front of part of it: the screen's pixels, not its own
 
 
 def _picture(pid: int) -> Picture | None:
-    """A picture of the app's front window and nothing else (its own pixels: a window of another app
-    over it is not in it), with a shot id so a seeing model can click by its pixels. None without
-    Screen Recording — which is never asked for from here."""
+    """A picture of the app's front window, with a shot id so a seeing model can click by its pixels —
+    so it shows what a click at each pixel hits. With nothing in front of the window: its own pixels
+    (nothing of another app). With another window over part of it: that part of the screen, as a
+    screenshot of it would show it — never when that window is a protected app's (or anyone's the
+    gate can't clear), and never when the window server can't say what is in front of it. None
+    without Screen Recording — which is never asked for from here."""
     from PIL import Image
 
     from neo.tools.computer import focus, pointer, screen
@@ -340,12 +429,28 @@ def _picture(pid: int) -> Picture | None:
     bounds = _window_bounds(wid) if wid else None
     if bounds is None:
         return None
-    img = screen.capture_window(wid)
+    try:
+        over = _in_front(wid, bounds)
+    except Exception:  # noqa: BLE001 - can't tell what a click would hit: no picture to click by
+        return None
+    if not over:
+        img = screen.capture_window(wid)
+        w, h = Image.open(io.BytesIO(img.data)).size
+        if not w or not h:
+            return None
+        shot = pointer.remember(bounds[0], bounds[1], bounds[2] / w, w, h)
+        return Picture(img, shot.id, (w, h))
+    if any(_protected(owner, opid) for owner, opid in over):
+        return None  # a protected app's window is in front of it: none of its pixels go anywhere
+    region = _on_screen(bounds)
+    if region is None:
+        return None
+    img, ppp = screen.capture(region)
     w, h = Image.open(io.BytesIO(img.data)).size
     if not w or not h:
         return None
-    shot = pointer.remember(bounds[0], bounds[1], bounds[2] / w, w, h)
-    return Picture(img, shot.id, (w, h))
+    shot = pointer.remember(region[0], region[1], ppp, w, h)
+    return Picture(img, shot.id, (w, h), covered=True)
 
 
 _OURS: weakref.WeakValueDictionary[int, ImagePart] = weakref.WeakValueDictionary()  # pictures attached
@@ -384,10 +489,17 @@ class Look:
         parts = [head, fence("ax_tree", self.elements)]
         if self.picture is not None:
             w, h = self.picture.size
+            what = (
+                "that window as the screen shows it (another window is in front of part of it)"
+                if self.picture.covered
+                else "that window alone"
+            )
+            # Conditional: a chain that could see when this was taken may answer with a blind brain.
             parts.append(
-                f"[A picture of that window alone is attached (screenshot {self.picture.shot}; the image "
-                f'is {w}×{h} px). To act on something only the picture shows, give its pixel position in '
-                f'this image with shot="{self.picture.shot}".]'
+                f"[A picture of {what} is attached (screenshot {self.picture.shot}; the image is {w}×{h} "
+                "px). If you can see it: to act on something only the picture shows, give its pixel "
+                f'position in this image with shot="{self.picture.shot}". If you can\'t see it, use the '
+                "element ids above — never coordinates.]"
             )
         return "\n".join(parts)
 
@@ -414,29 +526,34 @@ def _still_front(pid: int) -> bool:
     return ax.working_app()[1] == pid
 
 
-def look(text: str, want: Want, *, game: Any = None, sees: bool = False) -> Look | None:
-    """Take the first look now (blocking; see :func:`start`). None whenever any condition fails."""
-    t0 = time.perf_counter()
-    tgt = target(text, game=game)
-    if tgt is None:
-        return None
-    pic: Picture | None = None
-    if want.image and sees:
-        with contextlib.suppress(Exception):  # no picture: the list still stands
-            pic = _picture(tgt.pid)
-    els = _elements(tgt.app, tgt.pid)
-    if els is None or not _still_front(tgt.pid):
-        return None  # the app didn't answer, or another came to the front meanwhile
-    return Look(tgt.app, tgt.pid, tgt.why, els, pic, (time.perf_counter() - t0) * 1000)
+def _web_held(pid: int) -> bool:
+    """Is this app's web tree switched on (NEO holds it on for a while after a look at a Chromium or
+    Electron app: neo.tools.computer.ax)?"""
+    from neo.tools.computer import ax
+
+    held = getattr(ax, "_web_held", None)
+    return isinstance(held, dict) and pid in held
+
+
+def _web_settle_s() -> float:
+    """How long, at most, a web tree just switched on takes to fill in before a walk (ax)."""
+    from neo.tools.computer import ax
+
+    try:
+        return max(0.0, float(getattr(ax, "_WEB_SETTLE_S", 0.0) or 0.0))
+    except (TypeError, ValueError):
+        return 0.0
 
 
 async def _look(text: str, want: Want, game: Any, sees: bool, seen: dict[str, int]) -> Look | None:
-    """:func:`look` off the event loop, with the picture taken while the elements are walked.
-    `seen["pid"]`: the app it is looking at, once known."""
+    """The first look (None whenever any condition fails), off the event loop, with the picture
+    taken while the elements are walked. `seen`: "pid", the app it is looking at, once known; "web",
+    1 when that app's web tree was already on before this walk."""
     t0 = time.perf_counter()
     tgt = await asyncio.to_thread(target, text, game=game)
     if tgt is None:
         return None
+    seen["web"] = int(_web_held(tgt.pid))
     seen["pid"] = tgt.pid
     shot = asyncio.ensure_future(asyncio.to_thread(_picture, tgt.pid)) if want.image and sees else None
     els = await asyncio.gather(asyncio.to_thread(_elements, tgt.app, tgt.pid), return_exceptions=True)
@@ -506,6 +623,16 @@ def start(
     return Pending(want, task, time.monotonic() + _deadline_s(), seen=seen)
 
 
+def _settling(pending: Pending) -> float:
+    """Seconds more to give a look past its deadline: the moment its app's web tree needs to fill in
+    when this very look switched it on (a Chromium or Electron app's first look in a while) — once,
+    on top of the walk, and a look saves a whole model round trip. 0 otherwise."""
+    pid = pending.seen.get("pid")
+    if not pid or pending.seen.get("web", 1) or not _web_held(pid):
+        return 0.0
+    return _web_settle_s()
+
+
 async def collect(pending: Pending | None, tools: Iterable[ToolSpec | str]) -> Look | None:
     """The first look, when it's ready by its deadline and the run's `tools` can use it; else None
     (a look still being taken is left to finish on its own and thrown away)."""
@@ -514,22 +641,29 @@ async def collect(pending: Pending | None, tools: Iterable[ToolSpec | str]) -> L
     if not uses_screen(tools):
         pending.cancel()  # the run can't act on the screen: nothing it read goes anywhere
         return None
-    left = pending.deadline - time.monotonic()
-    try:
-        got = await asyncio.wait_for(asyncio.shield(pending.task), max(0.0, left))
-    except asyncio.CancelledError:
-        if not pending.task.cancelled():
-            pending.cancel()
-            raise  # the request itself was cancelled
-        return None
-    except TimeoutError:
-        if pid := pending.seen.get("pid"):
-            _slow_until[pid] = time.monotonic() + SLOW_SKIP_S  # its next requests don't wait for it
-        log.info(f"  ~ first look not ready in {int((time.monotonic() - pending.t0) * 1000)} ms: dropped")
-        return None
-    except Exception as e:  # noqa: BLE001 - the run looks for itself, as it always could
-        log.info(f"  ~ first look failed: {str(e)[:80]}")
-        return None
+    waited_out = False
+    while True:
+        left = pending.deadline - time.monotonic()
+        try:
+            got = await asyncio.wait_for(asyncio.shield(pending.task), max(0.0, left))
+            break
+        except asyncio.CancelledError:
+            if not pending.task.cancelled():
+                pending.cancel()
+                raise  # the request itself was cancelled
+            return None
+        except TimeoutError:
+            if not waited_out and (more := _settling(pending)) > 0:
+                waited_out = True  # a web tree switched on by this look: its one-time settle isn't slowness
+                pending.deadline += more
+                continue
+            if pid := pending.seen.get("pid"):
+                _slow_until[pid] = time.monotonic() + SLOW_SKIP_S  # its next requests don't wait for it
+            log.info(f"  ~ first look not ready in {int((time.monotonic() - pending.t0) * 1000)} ms: dropped")
+            return None
+        except Exception as e:  # noqa: BLE001 - the run looks for itself, as it always could
+            log.info(f"  ~ first look failed: {str(e)[:80]}")
+            return None
     if got is not None:
         log.info(
             f"  ~ first look at {got.app} ({got.why}): {got.elements.count(chr(10))} lines"
@@ -541,14 +675,26 @@ async def collect(pending: Pending | None, tools: Iterable[ToolSpec | str]) -> L
 # ---- keeping the history lean ---------------------------------------------------------------------
 
 
+def _let_go(shot: str) -> None:
+    """Nothing is clicked by the pixels of a picture the model no longer has: its shot id is let go
+    (a click that names it is told to take a new screenshot)."""
+    from neo.tools.computer import pointer
+
+    shots = getattr(pointer, "_shots", None)
+    if isinstance(shots, dict):
+        shots.pop(shot, None)
+
+
 def _stub(m: Message) -> bool:
     """Replace an attached first look in this goal message with a one-line stub (and drop its
-    picture). True when there was one."""
-    head, sep, _ = m.text.partition("\n\n" + MARK)
+    picture, and its shot id). True when there was one."""
+    head, sep, rest = m.text.partition("\n\n" + MARK)
     if not sep:
         return False
     m.text = f"{head}\n\n{STUB}"
     m.images = [im for im in m.images if _OURS.get(id(im)) is not im]
+    if found := _SHOT.search(rest.rsplit("</untrusted>", 1)[-1]):  # NEO's own note, after the fenced list
+        _let_go(found.group(1))
     return True
 
 
@@ -560,14 +706,23 @@ def forget(messages: Iterable[Message]) -> None:
             _stub(m)
 
 
+def _stale_after(r: Any) -> bool:
+    """Does this result make the first look stale: a newer look at the screen, or an action that
+    reports it changed something there?"""
+    if not getattr(r, "ok", True) or r.content.startswith(("Error", "NEEDS_")):
+        return False
+    return r.name in _OBSERVE or (_screen_tool(r.name) and _CHANGED in r.content)
+
+
 def supersede(messages: Sequence[Message], *, start: int = 0) -> None:
-    """In a run, once the model has looked again itself (a newer ax_tree or screenshot result),
-    the first look is stale: stub it, like the loop stubs every older observation."""
+    """In a run, once the model has looked again itself (ax_tree, ax_find, a screenshot) or an action
+    reports it changed the screen, the first look is stale: stub it, like the loop stubs every older
+    observation. The loop calls it before each model call (required wiring: neo.agent.loop)."""
     first = next((i for i in range(start, len(messages)) if messages[i].role == "user" and MARK in messages[i].text), None)
     if first is None:
         return
     for m in messages[first + 1 :]:
-        if m.role == "tool" and any(r.name in _OBSERVE and not r.content.startswith(("Error", "NEEDS_")) for r in m.tool_results):
+        if m.role == "tool" and any(_stale_after(r) for r in m.tool_results):
             _stub(messages[first])
             return
 
@@ -640,7 +795,6 @@ __all__ = [
     "compact",
     "enabled",
     "forget",
-    "look",
     "named_apps",
     "prewarm",
     "register_warmer",
