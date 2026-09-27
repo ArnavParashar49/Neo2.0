@@ -15,6 +15,7 @@ import copy
 import dataclasses
 import importlib.util
 import inspect
+import re
 import secrets
 import shutil
 import sys
@@ -279,11 +280,14 @@ class AsyncAgent:
         conversation: str = "default",
         source: Literal["user", "model"] = "user",
     ) -> Result:
-        """Handle one request. `context`: quoted to the model as context, never as instructions.
+        """Handle one request. `context`: the conversation it came from, quoted to the model as
+        context, never as instructions (it can't close its quote). It can carry text nobody vetted
+        (what a model said, a page it read), so a request with context counts as having read
+        something untrusted ("context"): memory writes and data-carrying links ask first.
         `tool_context`: handed to every tool this request calls (ToolContext.extras).
         `conversation`: a thread with its own history and its own confirmation gate. `source`:
         "model" when another model wrote `text` — the request starts as having read something
-        untrusted (memory writes and data-carrying links ask first). It never grants anything."""
+        untrusted ("caller"). Neither ever grants anything."""
         guard_reentry()
         self._check_open()
         return await self._ask(
@@ -332,9 +336,13 @@ class AsyncAgent:
             raise ValueError('source is "user" or "model"')
         if tool_context is not None and not isinstance(tool_context, Mapping):
             raise TypeError("tool_context must be a mapping")
+        if not isinstance(context, str):
+            raise TypeError("context must be a string")
         parts = [_image(i) for i in images]
         sc = self._scope(conversation)
         req = _Req(self, conversation, source, queue)
+        if context.strip():
+            req.untrusted.append("context")
         token = _req_var.set(req)
         try:
             with runtime.bind(sc):
@@ -348,10 +356,10 @@ class AsyncAgent:
                         reply = await session.handle(
                             text,
                             images=parts or None,
-                            conversation=context,
+                            conversation=_quoted(context) if context.strip() else "",
                             from_user=False,  # never the user's own words: can't answer a card
                             origin="user" if source == "user" else "live",
-                            taint=("caller",) if source == "model" else (),
+                            taint=tuple(req.untrusted),
                             extras=dict(tool_context or {}),
                         )
                         result = self._from_reply(req, sc, reply, sink)
@@ -395,6 +403,8 @@ class AsyncAgent:
         card = self._cards.get(action_id) if isinstance(action_id, str) else None
         conversation = card.conversation if card else ""
         req = _Req(self, conversation, "user", None)
+        if card is not None:  # the request it continues had read these: so has its result
+            req.untrusted.extend(dict.fromkeys(card.request.after_reading))
         token = _req_var.set(req)
         try:
             result = await self._resolve(req, action_id, yes=yes, via=via)
@@ -1031,6 +1041,15 @@ def _frozen(params: Mapping[str, Any]) -> Mapping[str, Any]:
     except Exception:  # noqa: BLE001
         d = dict(params)
     return MappingProxyType(d)
+
+
+_QUOTE_TAG = re.compile(r"<\s*(/?)\s*(recent_conversation)", re.IGNORECASE)
+
+
+def _quoted(context: str) -> str:
+    """The host's context, never able to close (or reopen) the quote NEO puts it in
+    (neo.agent.session._with_conversation), however the tag is spelled — as fence() does."""
+    return _QUOTE_TAG.sub(lambda m: f"<{m.group(1)} {m.group(2)}", context)
 
 
 def _unprefixed(text: str, prefix: str) -> str:
