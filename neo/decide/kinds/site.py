@@ -649,7 +649,7 @@ def _page(url: str, title: str, how: str, text: str) -> str:
     return "\n".join([*head, f"Read from: {how}", "", text])
 
 
-def _host() -> str:
+def _host_app() -> str:
     """Embedded in another app: that app's name, which macOS holds responsible for the agent's
     permissions ("" = NEO.app, or not embedded)."""
     from neo import runtime
@@ -662,7 +662,7 @@ def _host() -> str:
 
 
 def _no_screen() -> str:
-    if not _host():
+    if not _host_app():
         return _NO_SCREEN
     from neo.tools import computer
 
@@ -672,7 +672,7 @@ def _no_screen() -> str:
 def _cant_read(browser: App, trusted: bool, err: str) -> Result:
     """Neither the page's text nor a screenshot: why. Embedded, a permission that is off is a
     question for the host app's user, naming that app (as the ax tools ask)."""
-    if _host():
+    if _host_app():
         from neo.agent.confirm import ask_user
         from neo.tools import computer
 
@@ -713,7 +713,7 @@ async def page_read(limit: int = PAGE_CHARS, ask: str = "") -> Result:
             return await _answer(ask, page) if ask else Result(page, True)
         why = "the page has little text to read" if text.strip() else f"{browser.name} showed no page text"
     else:
-        why = f"Accessibility is off for {_host() or 'NEO'}"
+        why = f"Accessibility is off for {_host_app() or 'NEO'}"
     seen, err = await _look(pid, browser, ask, view)
     if seen:
         how = f"a screenshot of the {browser.name} window, as the vision brain saw it ({why})"

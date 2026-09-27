@@ -195,6 +195,12 @@ def covering(tool: str, target: Target | None) -> Grant | None:
     return None
 
 
+def fresh() -> None:
+    """In a new request's own context: outside any task or tool call of the code that started it."""
+    _task.set("")
+    _call.set(None)
+
+
 @contextmanager
 def call() -> Iterator[_Call]:
     """One tool call (registry.invoke): whether a grant let it through is noted on it, so what

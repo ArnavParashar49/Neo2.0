@@ -35,7 +35,7 @@ import logging
 import os
 import secrets
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -119,6 +119,9 @@ class _Approval:
     key: str = ""
     gate: Gate | None = None  # the gate whose card this approves: no other gate honours it
     via: dict[str, Any] | None = None  # who approved, through which channel (audited)
+    # Its approved() block is over. A task started inside the block still holds it (asyncio copies
+    # the context variable into every task): spent, it approves nothing there.
+    spent: bool = False
 
 
 _default_gate = Gate(app=True)  # NEO.app's
@@ -392,6 +395,7 @@ def approved(aid: str, *, via: dict[str, Any] | None = None) -> Iterator[None]:
     try:
         yield
     finally:
+        approval.spent = True  # for every task that copied it, too
         _approved.reset(token)
         if approval.released is None and g.pending and g.pending.action_id == aid:
             _consume_now(g, aid, via=via)
@@ -413,7 +417,7 @@ def _consume_now(g: Gate, aid: str, *, via: dict[str, Any] | None = None) -> dic
 def consume(key: str) -> dict[str, Any] | None:
     """Release the staged params — only inside :func:`approved` for the pending action, and only
     when the call rebuilt exactly the operation the card showed (same `op_key`)."""
-    approval = _approved.get()
+    approval = held()
     if approval is None:
         return None
     g = _gate()
@@ -444,15 +448,34 @@ def _cancel(g: Gate, reason: str, *, via: dict[str, Any] | None = None) -> str:
 def approval_active() -> bool:
     """True only inside :func:`approved` for this conversation's gate: the session re-invoking a
     staged action after the user's yes."""
-    a = _approved.get()
+    a = held()
     return a is not None and a.gate is _gate()
 
 
 def approving() -> str:
     """The action id the user said yes to, inside :func:`approved` for this conversation's gate
     ("" elsewhere)."""
-    a = _approved.get()
+    a = held()
     return a.action_id if a is not None and a.gate is _gate() else ""
+
+
+def held() -> _Approval | None:
+    """The approval the code running now is inside, whichever conversation's (None once its
+    :func:`approved` block is over, even in a task that still holds it)."""
+    a = _approved.get()
+    return a if a is not None and not a.spent else None
+
+
+def approving_in(gate: Gate | None, approvals: Iterable[_Approval | None]) -> bool:
+    """Whether any of `approvals` is still an approved call running in `gate`'s conversation."""
+    return gate is not None and any(a is not None and not a.spent and a.gate is gate for a in approvals)
+
+
+def fresh_request() -> None:
+    """In the context a new request starts in (neo2 starts each in one of its own): no approval,
+    task or tool call of the code that started it carries over — it is asked afresh."""
+    _approved.set(None)
+    grants.fresh()
 
 
 def gated(
