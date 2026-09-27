@@ -360,6 +360,82 @@ DESTRUCTIVE_HINTS = (
 )
 _PREFIX = ["can you ", "could you ", "please ", "hey neo, ", "neo, ", "hey neo ", "neo "]
 
+# ---- UI commands: the tool head's click_text class, and what isn't one ----------------------------
+# "click X" in many shapes is a one-tool quick action the resolver grounds without looking at the
+# screen (needs_screen False); a question about a control is conversation; a click on a label that
+# sends, deletes or buys stays destructive. Generic control names only, never an app's: when the OS
+# string index (neo.decide.uistrings) is built, its short English UI strings are sampled as well.
+UI_LABELS = [
+    "New Game", "Start", "Cancel", "Done", "Undo", "Redo", "Hint", "Settings", "Search", "Back", "Go Forward",
+    "Reload", "New Tab", "Close", "Minimize", "Full Screen", "Compose", "Reply", "Reply All", "Archive", "Junk",
+    "Flag", "Inbox", "Drafts", "Downloads", "Show Sidebar", "Bold", "Italic", "Zoom In", "Zoom Out", "Play",
+    "Pause", "Next Track", "Previous", "Mute", "Shuffle", "Repeat", "Sign In", "Create Account", "Help", "Print",
+    "Save", "Open", "New Folder", "Rename", "Copy", "Paste", "Reject All", "Next Page", "Today", "Add Event",
+    "Filter", "Sort By", "More Options", "Edit", "Attach", "Home", "Profile", "Continue", "Skip", "Details",
+    "Show All", "Options", "Apply", "Retry", "Got It", "Learn More", "View", "Add",
+]  # fmt: skip
+COMMIT_LABELS = ["Send", "Delete", "Move to Trash", "Buy Now", "Place Order", "Empty Trash", "Remove", "Pay", "Publish",
+                 "Accept All", "Unsubscribe", "Install", "Sign Out"]  # fmt: skip
+UI_FRAMES = [
+    "click {x}", "click on {x}", "tap {x}", "tap on {x}", "click the {x} button", "press the {x} button",
+    "hit the {x} button", "select {x}", "choose {x}", "click the {x} tab", "tap the {x} option",
+    "click the {x} link", "press {x}", "hit {x}", "please click {x}", "can you click {x}", "select the {x} option",
+]  # fmt: skip
+UI_QUESTIONS = [
+    "what does the {x} button do", "where is the {x} button", "what happens if i click {x}",
+    "should i press {x}", "is the {x} option safe to click", "why is the {x} button grey",
+    "what's the {x} option for", "how do i find the {x} button",
+]  # fmt: skip
+
+
+def _ui_label_pool() -> list[str]:
+    """UI_LABELS, plus the OS's own short English UI strings when that index is built (never
+    starting a build: training reads what is there)."""
+    pool = list(UI_LABELS)
+    try:
+        from neo.decide import uistrings
+
+        ready = getattr(uistrings, "ready", None)
+        short = getattr(uistrings, "short_strings", None)
+        if callable(ready) and ready() and callable(short):
+            extra = [x for x in short() if isinstance(x, str) and 0 < len(x.split()) <= 3 and x.isascii()]
+            pool += sorted(set(extra) - set(pool))[:400]
+    except Exception:  # noqa: BLE001 - no index: the generic list
+        pass
+    return pool
+
+
+def ui_rows(n: int = 160, n_questions: int = 48, seed: int = 13) -> list[dict]:
+    """English UI-command rows with explicit labels: click_text quick actions (needs_screen False;
+    destructive when the label commits) and questions about controls (chat)."""
+    rnd = random.Random(f"ui-rows:{seed}")
+    pool = _ui_label_pool()
+    out: list[dict] = []
+    seen: set[str] = set()
+
+    def add(row: dict) -> None:
+        if row["text"].lower() not in seen:
+            seen.add(row["text"].lower())
+            out.append(row)
+
+    tries = 0
+    while len(out) < n and tries < n * 20:
+        tries += 1
+        commit = rnd.random() < 0.15
+        label = rnd.choice(COMMIT_LABELS if commit else pool)
+        text = rnd.choice(UI_FRAMES).format(x=label if rnd.random() < 0.6 else label.lower())
+        add({"text": text, "intent": "quick_action", "tool": "click_text", "source": "template", "lang": "en",
+             "destructive": commit, "screen": False, "reply": False})  # fmt: skip
+    base = len(out)
+    tries = 0
+    while len(out) < base + n_questions and tries < n_questions * 20:
+        tries += 1
+        text = rnd.choice(UI_QUESTIONS).format(x=rnd.choice(pool).lower())
+        add({"text": text, "intent": "chat", "tool": "", "source": "template", "lang": "en", "destructive": False,
+             "reply": True})  # fmt: skip
+    return out
+
+
 # Which NEO tool a quick-action template means (the tool head learns these; "" = none/other).
 _TOOL_HINTS: list[tuple[str, str]] = [
     ("play|put on|listen to|chalao|bajao", "play_music"),
@@ -481,6 +557,8 @@ def build(n_per_class: int = 320, seed: int = 7, *, override: bool = True, own: 
     from neo.reflex.templates_hi import rows as hinglish_rows
 
     rows += [r for r in hinglish_rows() if r["text"].lower() not in seen]
+    seen |= {r["text"].lower() for r in rows}
+    rows += [r for r in ui_rows() if r["text"].lower() not in seen]  # UI commands (EN), labelled
     # LLM-generated + real-world extras + mapped Hugging Face rows live outside the repo
     # (see generate.py, hf_data.py, README). reflex_eval.jsonl is the benchmark: never trained on.
     for name in ("reflex_generated.jsonl", "reflex_extra.jsonl", "reflex_hf.jsonl"):

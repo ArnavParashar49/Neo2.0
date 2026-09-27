@@ -272,6 +272,76 @@ def _cycle(templates: list, n: int, rnd: random.Random, seen: set[str]):
         yield t, spec
 
 
+# ---- UI commands: clicking a control by its name, in Hinglish and in Hindi -------------------------
+# The resolver grounds these without the screen (screen False); a label that sends, deletes or buys
+# keeps destructive. Hindi labels are the OS's own Hindi forms of generic controls (macOS .loctable
+# strings), never an app's name.
+UI_LABELS = ["New Game", "Start", "Cancel", "Done", "Undo", "Hint", "Settings", "Search", "Back", "Reply",
+             "Reply All", "Archive", "Save", "Rename", "Copy", "Paste", "Next", "Previous", "Play", "Pause", "Mute",
+             "Sign In", "Help", "Print", "New Folder", "New Tab", "Close", "Continue", "Skip", "Filter", "Edit"]  # fmt: skip
+UI_COMMIT = ["Send", "Delete", "Move to Trash", "Buy Now", "Accept All", "Pay"]
+UI_FRAMES = ["{x} pe click karo", "{x} dabao", "{x} wala button dabao", "{x} pe tap karo", "{x} select karo",
+             "{x} par click kar do", "{x} button dabao", "zara {x} pe click karo", "{x} wala option chuno"]  # fmt: skip
+UI_QUESTIONS = ["{x} button kya karta hai", "{x} wala option kahan hai", "{x} dabane se kya hoga",
+                "{x} button kidhar hai", "{x} ka matlab kya hai"]  # fmt: skip
+# (Hindi form, commits): the OS's Hindi strings of generic controls
+UI_LABELS_HI = [
+    ("नया गेम", False), ("रद्द करें", False), ("सहेजें", False), ("खोजें", False), ("नाम बदलें", False),
+    ("कॉपी करें", False), ("पेस्ट करें", False), ("सहायता", False), ("प्रिंट करें", False), ("अगला", False),
+    ("पिछला", False), ("बंद करें", False), ("संपादित करें", False), ("नया फ़ोल्डर", False), ("नया टैब", False),
+    ("आज", False), ("फ़िल्टर", False), ("अधिक विकल्प", False), ("शुरू करें", False), ("जारी रखें", False),
+    ("भेजें", True), ("डिलीट करें", True), ("रद्दी में मूव करें", True), ("सभी स्वीकार करें", True), ("ख़रीदें", True),
+]  # fmt: skip
+UI_FRAMES_HI = ["{x} पर क्लिक करो", "{x} दबाओ", "{x} वाला बटन दबाओ", "{x} चुनो", "{x} पर क्लिक करें", "{x} बटन दबाएँ"]
+UI_QUESTIONS_HI = ["{x} बटन क्या करता है", "{x} वाला विकल्प कहाँ है", "{x} दबाने से क्या होगा"]
+
+
+def ui_rows(n_hinglish: int = 90, n_hindi: int = 60, n_questions: int = 30, seed: int = 11) -> list[dict]:
+    """Labelled UI-command rows: Hinglish and Devanagari clicks (click_text, screen False,
+    destructive when the label commits) and questions about controls (chat)."""
+    rnd = random.Random(f"ui-templates:{seed}")
+    out: list[dict] = []
+    seen: set[str] = set()
+
+    def add(text: str, lang: str, **labels) -> bool:
+        text = " ".join(text.split())
+        if text.lower() in seen:
+            return False
+        seen.add(text.lower())
+        out.append({"source": "template", "lang": lang, "text": text, **labels})
+        return True
+
+    def fill(n: int, make) -> None:
+        got = tries = 0
+        while got < n and tries < n * 20:
+            tries += 1
+            got += make()
+
+    def hinglish() -> bool:
+        commit = rnd.random() < 0.15
+        lab = rnd.choice(UI_COMMIT if commit else UI_LABELS)
+        text = rnd.choice(UI_FRAMES).format(x=lab if rnd.random() < 0.5 else lab.lower())
+        return add(text, "hinglish", intent="quick_action", tool="click_text", kind="other", destructive=commit,
+                   screen=False, reply=False)  # fmt: skip
+
+    def hindi() -> bool:
+        lab, commit = rnd.choice(UI_LABELS_HI)
+        return add(rnd.choice(UI_FRAMES_HI).format(x=lab), "hi", intent="quick_action", tool="click_text", kind="other",
+                   destructive=commit, screen=False, reply=False)  # fmt: skip
+
+    def question() -> bool:
+        if rnd.random() < 0.6:
+            text, lang = rnd.choice(UI_QUESTIONS).format(x=rnd.choice(UI_LABELS).lower()), "hinglish"
+        else:
+            text, lang = rnd.choice(UI_QUESTIONS_HI).format(x=rnd.choice(UI_LABELS_HI)[0]), "hi"
+        return add(text, lang, intent="chat", tool="", destructive=False, screen=False, reply=True)
+
+    fill(n_hinglish, hinglish)
+    fill(n_hindi, hindi)
+    fill(n_questions, question)
+    return out
+
+
 def rows(n_chat: int = 60, n_quick: int = 120, n_agent: int = 100, n_stop: int = 250, seed: int = 11) -> list[dict]:
     """Labelled Hinglish template rows (source "template"); Devanagari stop phrases come as lang "hi"."""
     rnd = random.Random(f"hinglish-templates:{seed}")
@@ -297,4 +367,8 @@ def rows(n_chat: int = 60, n_quick: int = 120, n_agent: int = 100, n_stop: int =
             seen.add(t)
             out.append({**base, "text": t, "intent": "stop", "tool": "", "destructive": False, "screen": False,
                         "reply": False, "lang": "hi"})
+    for r in ui_rows(seed=seed):  # clicking controls by name (Hinglish, Hindi) and asking about them
+        if r["text"].lower() not in seen:
+            seen.add(r["text"].lower())
+            out.append(r)
     return out

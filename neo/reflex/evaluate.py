@@ -40,6 +40,7 @@ from neo.reflex.finetune import (
 from neo.reflex.schema import INTENT_CRITERIA
 
 _INTENTS = list(INTENT_CRITERIA)
+_PER_CLASS_MIN = 10  # rows a tool class or script needs before its own accuracy is reported
 _STOP = _INTENTS.index("stop")
 
 
@@ -145,6 +146,14 @@ def _metrics(h: dict, X: np.ndarray, lab: dict, groups: dict, rules: dict) -> di
         classes = np.array(h[name]["classes"], dtype=object)
         P_k = head_probs(h[name], Xs[have])
         m[f"{name} acc"] = float((classes[P_k.argmax(1)] == lab[name][have]).mean())
+        if name == "tool":  # per class and per script: a UI class in Hinglish can drop behind the average
+            pred, gold, sc = classes[P_k.argmax(1)], lab[name][have], lab["script"][have]
+            for c in sorted(set(gold)):
+                if (sel := gold == c).sum() >= _PER_CLASS_MIN:
+                    m[f"tool acc {c}"] = float((pred[sel] == c).mean())
+            for s in sorted(set(sc)):
+                if (sel := sc == s).sum() >= _PER_CLASS_MIN:
+                    m[f"tool acc script {s}"] = float((pred[sel] == gold[sel]).mean())
         m[f"{name} ECE"] = ece(P_k, np.array([list(classes).index(c) if c in classes else -1 for c in lab[name][have]]))
         m[f"{name} n"] = float(have.sum())
     return m

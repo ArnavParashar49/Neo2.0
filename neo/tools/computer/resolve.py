@@ -15,7 +15,7 @@ Stages, in order (the first that answers wins):
    names a Hindi label's English source.
 4. **meaning** (Latin script) — MiniLM's top 6 by cosine, and Laya's typed-decisions checkpoint
    choosing among them (neo.reflex.zeroshot): acted on only when Laya picks MiniLM's top-1 with
-   p ≥ ``resolver_laya_p`` (0.7; 0.9 above 60 candidates). Laya only when it is loaded already:
+   p ≥ ``resolver_laya_p`` (0.9; 0.95 above 60 candidates). Laya only when it is loaded already:
    a cold or busy Laya is never waited for (MiniLM alone then needs a far bigger margin).
 5. **devanagari** — a trained Devanagari grounding head (not built yet: P2).
 6. Otherwise :class:`Ambiguous`: at most 6 candidates for the model as a multiple choice.
@@ -84,8 +84,13 @@ __all__ = [
 Want = Literal["press", "field", "menu"]
 STAGES = ("lexical", "alias", "os_strings", "meaning", "devanagari")
 SHORTLIST = 6  # at most this many choices in a handoff (the MindAct multiple choice)
-LAYA_P = 0.7  # Laya's probability for its pick, when it equals MiniLM's top-1
-LAYA_P_CROWDED = 0.9  # ...and above CROWDED candidates
+# Laya's probability for its pick, when it equals MiniLM's top-1. On the benchmark's 914 Latin rows
+# the lexical and OS stages leave (real MiniLM + typed-decisions, offline): p ≥ 0.7 acted on 47% at
+# 93.5% precision, 0.9 on 28% at 98.4% (100% / 97.5% / 96.5% at 12 / 50 / 200 elements); above
+# CROWDED candidates 0.95 gave 29/29. Chosen on the benchmark itself, so optimistic: the stage
+# stays in shadow until the user's own requests say the same (neo.reflex.evaluate.shadow_report).
+LAYA_P = 0.9
+LAYA_P_CROWDED = 0.95
 CROWDED = 60
 # MiniLM without Laya (Laya cold, busy or off). Held-out margin bars of 0.08-0.175 gave only
 # 0.95-0.97 precision offline, so alone it needs far more than that; it is logged in shadow.

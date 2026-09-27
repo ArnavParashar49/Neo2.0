@@ -324,8 +324,9 @@ def test_meaning_acts_only_when_laya_agrees_with_minilm_and_is_sure(live_meaning
     els = cands("Start", "New Game", "Resign", "Hint")
     ok = rs.resolve("start the new game", els, embed=fake_embed(TABLE), choose=fake_choose("New Game", 0.9), index=False, log_it=False)
     assert isinstance(ok, rs.Resolved) and ok.stage == "meaning" and ok.label == "New Game" and ok.p == 0.9
-    unsure = rs.resolve("start the new game", els, embed=fake_embed(TABLE), choose=fake_choose("New Game", 0.6), index=False, log_it=False)
-    assert isinstance(unsure, rs.Ambiguous) and unsure.reason == "unsure"
+    for p in (0.6, 0.8):  # 0.7 measured 93.5% precise: below the bar
+        unsure = rs.resolve("start the new game", els, embed=fake_embed(TABLE), choose=fake_choose("New Game", p), index=False, log_it=False)
+        assert isinstance(unsure, rs.Ambiguous) and unsure.reason == "unsure"
     other = rs.resolve("start the new game", els, embed=fake_embed(TABLE), choose=fake_choose("Start", 0.99), index=False, log_it=False)
     assert isinstance(other, rs.Ambiguous)
     assert [c.label for c in other.shortlist][0] == "New Game"  # MiniLM's order, for the model's multiple choice
@@ -334,9 +335,9 @@ def test_meaning_acts_only_when_laya_agrees_with_minilm_and_is_sure(live_meaning
 def test_a_crowded_window_needs_a_surer_laya(live_meaning):
     filler = [f"Row {i}" for i in range(70)]
     els = cands("New Game", "Start", *filler)
-    res = rs.resolve("start the new game", els, embed=fake_embed(TABLE), choose=fake_choose("New Game", 0.85), index=False, log_it=False)
-    assert isinstance(res, rs.Ambiguous)
     res = rs.resolve("start the new game", els, embed=fake_embed(TABLE), choose=fake_choose("New Game", 0.93), index=False, log_it=False)
+    assert isinstance(res, rs.Ambiguous)
+    res = rs.resolve("start the new game", els, embed=fake_embed(TABLE), choose=fake_choose("New Game", 0.96), index=False, log_it=False)
     assert isinstance(res, rs.Resolved)
 
 
