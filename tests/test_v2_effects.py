@@ -714,8 +714,8 @@ def test_the_real_calendar_and_contacts_are_refused(monkeypatch):
 
 
 def test_the_real_browser_opt_in_lets_playwrights_driver_run(monkeypatch):
-    """NEO_TEST_RENDER=1 (tests/conftest.py) allows the browser and the network: Playwright's own
-    driver may start then, and nothing else."""
+    """The tests run with NEO_TEST_RENDER=1 allow the browser and the network (tests/conftest.py's
+    `real_browser`): Playwright's own driver may start then, and nothing else."""
     node = "/venv/lib/python3.12/site-packages/playwright/driver/node"
     driver = ("subprocess.Popen", (node, [node, "package/cli.js", "run-driver"], None, None))
     monkeypatch.setattr(effects, "_allowed", set())
@@ -734,6 +734,18 @@ def test_allow_lets_one_kind_through(monkeypatch):
     effects.guard("input", "post a keyboard event")
     with pytest.raises(effects.EffectRefused, match="refused to play a sound: real effects are off"):
         effects.guard("audio", "play a sound")
+
+
+def test_allow_lasts_only_its_block():
+    with effects.allow("input"):
+        effects.guard("input", "post a keyboard event")
+        with effects.allow("audio"):
+            effects.guard("audio", "play a sound")
+        with pytest.raises(effects.EffectRefused):
+            effects.guard("audio", "play a sound")
+    with pytest.raises(effects.EffectRefused):
+        effects.guard("input", "post a keyboard event")
+    assert not effects._allowed
 
 
 @pytest.mark.parametrize(

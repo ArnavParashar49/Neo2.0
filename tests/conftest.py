@@ -1,5 +1,5 @@
 """Test-wide defaults: no model downloads, no GPU, no network, no real effects on the Mac (neo/effects.py
-refuses every one under pytest: a test fakes the step it needs instead)."""
+refuses every one in NEO's own test runs: a test fakes the step it needs instead)."""
 
 import os
 
@@ -11,7 +11,10 @@ from pathlib import Path
 import pytest
 
 from neo import effects
-from neo.config import Settings
+
+effects.for_neo_tests()  # first: nothing real happens in this process, whatever a test sets or embeds
+
+from neo.config import Settings  # noqa: E402
 
 # A scratch conftest doing `from tests.conftest import *` must get the underscore fixtures too —
 # without them a test runs against the user's real ~/.neo.
@@ -30,9 +33,6 @@ __all__ = [
 Settings.model_config["env_file"] = None
 for _k in ("GEMINI_API_KEY", "GEMINI_API_KEYS", "GROQ_API_KEY", "ANTHROPIC_API_KEY", "NEO_DECIDE_MODES"):
     os.environ.pop(_k, None)
-
-if os.environ.get("NEO_TEST_RENDER") == "1":  # the one real check: a headless Chromium reading a public page
-    effects.allow("browser", "network")
 
 from neo.decide import shadow as _shadow  # noqa: E402
 
@@ -132,6 +132,14 @@ def _no_task_grants():
     grants.reset()
     yield
     grants.reset()
+
+
+@pytest.fixture
+def real_browser():
+    """The one real check (NEO_TEST_RENDER=1, which skips the tests asking for this otherwise): a
+    headless Chromium and the public page it reads, for that test only."""
+    with effects.allow("browser", "network"):
+        yield
 
 
 @pytest.fixture

@@ -491,9 +491,9 @@ ruff check . && ruff format .
 cd ui && npx tsc --noEmit && (cd src-tauri && cargo check)
 ```
 
-The suite can't act on your Mac: under pytest, `neo/effects.py` refuses every real effect (opening apps or pages, AppleScript, keystrokes and clicks, Accessibility actions, sound, permission prompts, model and web requests…) with `EffectRefused`, so a test fakes the step it needs. A scratch script gets the same with `NEO_NO_EFFECTS=1` (plus `NEO_DATA_DIR` pointing somewhere temporary); NEO.app never sets it.
+The suite can't act on your Mac: in NEO's own test runs (`tests/conftest.py` turns the switch on first thing, and so does any pytest run of NEO from its source tree), `neo/effects.py` refuses every real effect (opening apps or pages, AppleScript, keystrokes and clicks, Accessibility actions, sound, permission prompts, model and web requests…) with `EffectRefused`, so a test fakes the step it needs. A scratch script gets the same with `NEO_NO_EFFECTS=1` in its environment (plus `NEO_DATA_DIR` pointing somewhere temporary); NEO.app never sets it.
 
-The switch is process-wide, so an app that embeds NEO sees it too. While one of its tests runs (pytest sets `PYTEST_CURRENT_TEST`), real effects are refused for that whole process. Fake them, or call `neo.effects.allow("network")` (or another kind) for the ones the test means to make. Outside a test run, an app with an agent keeps its effects even if pytest happens to be imported, so its agents' approved actions really happen. `NEO_NO_EFFECTS=1` turns them off anywhere.
+An app with NEO installed isn't one of NEO's test runs, even under its own pytest: its programs and connections, and the actions its users approve for its agents, happen for real. To refuse them in its tests, it starts the test process with `NEO_NO_EFFECTS=1`. That covers the whole process, the app's own programs and connections too, and it takes effect when NEO is first imported. Wrap each step a test really means to make in `with neo.effects.allow("network"):` (or another kind). The allowance is process-wide while the block runs and ends with it.
 
 ## Status and roadmap
 

@@ -5,7 +5,8 @@
   no grants at all (its cards offer no scope, every approval is one-off). NEO.app: as on main.
 * The brains' learned state (quota windows and their file, demotion, the request-size scale) is
   the agent's own pool's, in its own data dir — never NEO.app's globals or ~/.neo.
-* The effects switch refuses nothing an embedded agent does outside a test run.
+* The effects switch is NEO's own tests': a host with NEO installed keeps its effects, and its agents'
+  approved actions happen, even under its own pytest run.
 * Accessibility off, in a host: the halt names the host's process, not NEO.app, and comes back as
   the SDK's needs_user.
 """
@@ -254,74 +255,138 @@ def test_what_a_brain_learns_stays_in_the_agent_that_built_it(tmp_path, monkeypa
 # ---- (c) the effects switch in a host ---------------------------------------------------------------
 
 
-def test_outside_a_test_run_a_host_with_pytest_imported_keeps_its_effects(tmp_path, monkeypatch):
-    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+def test_the_suite_stays_off_whatever_a_test_does(tmp_path, monkeypatch):
+    """NEO's own test process has its effects off from its conftest on: no test's environment or
+    embedded agent turns them on, even for a moment (a thread another test left running could act)."""
     monkeypatch.delenv("NEO_NO_EFFECTS", raising=False)
-    assert effects.why_off() == "running under pytest"  # pytest loaded, nothing embedded: NEO's suite
-    make_runtime(tmp_path / "a", "a")  # a host made an agent
-    assert effects.why_off() == "" and effects.on()
-    effects.guard("input", "post a key")  # passes: nothing refused
-    monkeypatch.setenv("NEO_NO_EFFECTS", "1")
-    assert effects.why_off() == "NEO_NO_EFFECTS=1"
-    monkeypatch.delenv("NEO_NO_EFFECTS")
-    monkeypatch.setenv("PYTEST_CURRENT_TEST", "tests/x.py::test (call)")
-    assert effects.why_off() == "running under pytest"  # a test is running: off, embedded or not
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    make_runtime(tmp_path / "a", "a")
+    assert effects.why_off() == "running under pytest" and effects._hooked
+    with pytest.raises(effects.EffectRefused):
+        effects.guard("input", "post a key")
+    with pytest.raises(effects.EffectRefused):
+        effects._audit("subprocess.Popen", ("open", ["open", "-a", "Safari"], None, None))
 
 
 def test_the_suite_itself_runs_embedded_agents_with_effects_off(tmp_path):
     make_runtime(tmp_path / "a", "a")
-    assert effects.why_off() == "running under pytest"
+    assert effects.why_off()  # "running under pytest", or "NEO_NO_EFFECTS=1" when that is exported too
     with pytest.raises(effects.EffectRefused):
         effects.guard("input", "post a key")
 
 
-def test_a_host_process_that_imported_pytest_runs_its_agents_approved_actions(tmp_path):
-    """For real, not patched: a fresh process that imports pytest (no test running) and embeds an
-    agent. Before the agent, NEO counts as its own test suite; once embedded, the host's approved
-    action happens and nothing is refused. Nothing real is done: the checks are asked, not used."""
+def _installed(tmp_path: Path) -> Path:
+    """NEO as another app has it: installed into that app's environment (here its two packages,
+    linked into a folder of their own), not run from NEO's source tree."""
+    site = tmp_path / "site"
+    site.mkdir()
+    for pkg in ("neo", "neo2"):
+        (site / pkg).symlink_to(ROOT / pkg, target_is_directory=True)
+    return site
+
+
+_HOST = textwrap.dedent(
+    """
+    import asyncio, json, socket, sys
+    import pytest  # the host's own test run (or a notebook that has it loaded)
+    import neo2
+    from neo import effects
+    from neo2.testing import ScriptedBrain, ToolCall, Turn
+
+    assert "/site/neo/" in effects.__file__, effects.__file__  # the installed copy, not the source tree
+    before = [effects.why_off(), effects._hooked]
+    # The host's own program and its own service (a CI database): nothing of NEO's refuses them.
+    # (Asked of the check itself: nothing is started or connected.)
+    effects._audit("subprocess.Popen", ("/usr/bin/true", ["/usr/bin/true"], None, None))
+    effects._audit("socket.connect", (socket.socket(socket.AF_INET, socket.SOCK_STREAM), ("postgres", 5432)))
+
+    done = []
+
+    @neo2.host_tool(risk="destructive")
+    def refund(order: str) -> str:
+        \"\"\"Refund an order.\"\"\"
+        effects.guard("process", "stand-in for the host's own effect")  # refused if effects were off
+        done.append(order)
+        return "refunded"
+
+    async def main():
+        brain = ScriptedBrain([Turn(tool_calls=[ToolCall("1", "refund", {"order": "812"})]), "Refunded."])
+        cfg = neo2.AgentConfig(tools="none", fast_paths=False, data_dir=sys.argv[1])
+        async with neo2.AsyncAgent(cfg, provider=brain, host_tools=[refund]) as agent:
+            r = await agent.ask("refund 812")
+            r = await agent.approve(r.approval.action_id, via=neo2.Approval("test", "host"))
+            return effects.why_off(), r.status
+
+    after, status = asyncio.run(main())
+    print(json.dumps([before, after, status, done, effects._hooked]))
+    """
+)
+
+
+def _child(code: str, tmp_path: Path, *, pythonpath: Path, cwd: Path, **env: str):
     home = tmp_path / "home"
-    home.mkdir()
-    env = {k: v for k, v in os.environ.items() if k not in ("PYTEST_CURRENT_TEST", "NEO_NO_EFFECTS", "NEO_DATA_DIR")}
-    env.update(HOME=str(home), PYTHONDONTWRITEBYTECODE="1")
+    home.mkdir(exist_ok=True)
+    base = {k: v for k, v in os.environ.items() if k not in ("PYTEST_CURRENT_TEST", "NEO_NO_EFFECTS", "NEO_DATA_DIR")}
+    base.update(HOME=str(home), PYTHONDONTWRITEBYTECODE="1", PYTHONPATH=str(pythonpath), **env)
+    out = subprocess.run(
+        [sys.executable, "-c", code, str(tmp_path / "agent")], cwd=cwd, env=base, capture_output=True, text=True, timeout=120
+    )
+    assert out.returncode == 0, out.stderr[-3000:]
+    assert not (home / ".neo").exists()
+    return json.loads(out.stdout.strip().splitlines()[-1])
+
+
+@pytest.mark.parametrize("in_a_test", [True, False])
+def test_a_host_with_neo_installed_keeps_its_own_effects_and_its_agents(tmp_path, in_a_test):
+    """For real, not patched: a fresh process with NEO installed, pytest imported and — in_a_test —
+    one of the host's own tests running. NEO's switch is NEO's own tests': the host's programs and
+    connections, before any agent as after, and its agents' approved actions are its business."""
+    env = {"PYTEST_CURRENT_TEST": "host_tests/test_billing.py::test_refund (call)"} if in_a_test else {}
+    before, after, status, done, hooked = _child(_HOST, tmp_path, pythonpath=_installed(tmp_path), cwd=tmp_path, **env)
+    assert before == ["", False] and after == "" and not hooked  # no hook: nothing of the host's is refused
+    assert status == "done" and done == ["812"]
+
+
+def test_a_host_that_sets_neo_no_effects_gets_the_switch(tmp_path):
+    """NEO_NO_EFFECTS=1 in a host's environment: NEO's switch, for that whole process."""
+    code = textwrap.dedent(
+        """
+        import json
+        import neo2
+        from neo import effects
+        try:
+            effects._audit("subprocess.Popen", ("/usr/bin/true", ["/usr/bin/true"], None, None))
+            refused = False
+        except effects.EffectRefused:
+            refused = True
+        print(json.dumps([effects.why_off(), effects._hooked, refused]))
+        """
+    )
+    got = _child(code, tmp_path, pythonpath=_installed(tmp_path), cwd=tmp_path, NEO_NO_EFFECTS="1")
+    assert got == ["NEO_NO_EFFECTS=1", True, True]
+
+
+def test_neo_from_its_source_tree_under_pytest_is_neos_own_test_run(tmp_path):
+    """A scratch test run from NEO's source tree without the suite's conftest: pytest is loaded, so
+    it is one of NEO's own test runs — off, and it stays off once it embeds an agent."""
     code = textwrap.dedent(
         """
         import asyncio, json, sys
-        import pytest  # a host that happens to have it loaded
-        from neo import effects
-        before = effects.why_off()
+        import pytest
         import neo2
-        from neo2.testing import ScriptedBrain, ToolCall, Turn
-
-        done = []
-
-        @neo2.host_tool(risk="destructive")
-        def refund(order: str) -> str:
-            \"\"\"Refund an order.\"\"\"
-            effects.guard("process", "stand-in for the host's own effect")  # refused if effects were off
-            done.append(order)
-            return "refunded"
+        from neo import effects
+        from neo2.testing import ScriptedBrain
 
         async def main():
-            brain = ScriptedBrain([Turn(tool_calls=[ToolCall("1", "refund", {"order": "812"})]), "Refunded."])
-            cfg = neo2.AgentConfig(tools="none", data_dir=sys.argv[1])
-            async with neo2.AsyncAgent(cfg, provider=brain, host_tools=[refund]) as agent:
-                r = await agent.ask("refund 812")
-                after = effects.why_off()
-                r = await agent.approve(r.approval.action_id, via=neo2.Approval("test", "host"))
-                return after, r.status
+            cfg = neo2.AgentConfig(tools="none", fast_paths=False, data_dir=sys.argv[1])
+            async with neo2.AsyncAgent(cfg, provider=ScriptedBrain(["hi"])):
+                return effects.why_off()
 
-        after, status = asyncio.run(main())
-        print(json.dumps([before, after, status, done, effects._hooked]))
+        print(json.dumps([effects.why_off(), effects._hooked, asyncio.run(main())]))
         """
     )
-    out = subprocess.run(
-        [sys.executable, "-c", code, str(tmp_path / "agent")], cwd=ROOT, env=env, capture_output=True, text=True, timeout=120
-    )
-    assert out.returncode == 0, out.stderr[-3000:]
-    before, after, status, done, hooked = json.loads(out.stdout.strip().splitlines()[-1])
-    assert before == "running under pytest" and hooked  # (the hook is in; it refuses nothing now)
-    assert after == "" and status == "done" and done == ["812"]
-    assert not (home / ".neo").exists()
+    got = _child(code, tmp_path, pythonpath=ROOT, cwd=ROOT)
+    assert got == ["running under pytest", True, "running under pytest"]
 
 
 # ---- (d) Accessibility off, in a host ---------------------------------------------------------------

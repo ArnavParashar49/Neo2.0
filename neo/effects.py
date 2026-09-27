@@ -1,10 +1,16 @@
 """Real effects on the Mac, and the one switch that turns them all off.
 
 With effects off, anything NEO would do outside its own process is refused with
-:class:`EffectRefused` instead of done. They are off under pytest, and in any process started with
-``NEO_NO_EFFECTS=1`` (an agent's scratch script). NEO.app sets neither: every check passes there,
-the audit hook below is never installed, and nothing changes. Nor does another app that embeds NEO
-(neo2): outside a test run its agents' approved actions happen, even with pytest imported.
+:class:`EffectRefused` instead of done. They are off in NEO's own test runs (its suite, whose
+conftest says so first thing, and any pytest run of NEO from its source tree: a scratch test), and
+in any process started with ``NEO_NO_EFFECTS=1`` (an agent's scratch script). NEO.app is neither:
+every check passes there, the audit hook below is never installed, and nothing changes. Nor does
+another app with NEO installed (neo2): its own tests aren't NEO's, so what it and its agents do -
+its programs, its connections, the actions its users approved - is its own business, unless it
+sets NEO_NO_EFFECTS=1 itself (then the whole process is refused, its own effects too).
+
+The audit hook (programs, the network) goes in when NEO is first imported with effects off, or
+when NEO's suite says so: NEO_NO_EFFECTS=1 belongs in the environment the process starts with.
 
 Each check sits at the lowest layer of its path, so a test that fakes anything above it (or the very
 primitive) keeps working, while a path nobody faked is refused instead of acting:
@@ -23,10 +29,12 @@ primitive) keeps working, while a path nobody faked is refused instead of acting
 
 from __future__ import annotations
 
+import contextlib
 import ipaddress
 import os
 import socket
 import sys
+from collections.abc import Iterator
 from typing import Any
 
 
@@ -39,25 +47,39 @@ class EffectRefused(BaseException):
     def __init__(self, kind: str, what: str, why: str) -> None:
         super().__init__(
             f"refused to {what}: real effects are off ({why}). Fake this step - or, when the real "
-            f"thing is meant, neo.effects.allow({kind!r})."
+            f"thing is meant, run it inside `with neo.effects.allow({kind!r}):`."
         )
         self.kind, self.what = kind, what
 
 
+def _source_tree() -> bool:
+    """NEO runs from its own source tree (its tests beside it), not from a copy installed into
+    another app's environment."""
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return os.path.isfile(os.path.join(root, "tests", "conftest.py")) and os.path.isfile(
+        os.path.join(root, "pyproject.toml")
+    )
+
+
+_SOURCE_TREE = _source_tree()
+_suite = False  # NEO's own test suite runs in this process (for_neo_tests): off for good
+
+
+def for_neo_tests() -> None:
+    """NEO's own test suite (tests/conftest.py, before anything else): real effects are off in this
+    process from now on, whatever a test's environment says or whatever it embeds."""
+    global _suite
+    _suite = True
+    _install()
+
+
 def _under_pytest() -> bool:
-    """A test is running (pytest sets PYTEST_CURRENT_TEST around each one), or pytest is loaded in
-    a process that isn't another app embedding NEO. A host app that merely has pytest imported —
-    and has made an agent (neo.runtime's library mode) — isn't running a test: what its agents do
-    with the host's approval happens for real."""
-    if "PYTEST_CURRENT_TEST" in os.environ:
+    """One of NEO's own test runs: its suite said so, or pytest is loaded (or a test running) in a
+    process that runs NEO from its source tree - a scratch test borrowing NEO's code. Another app's
+    tests, with NEO installed in its environment, aren't NEO's: nothing here refuses them."""
+    if _suite:
         return True
-    return "pytest" in sys.modules and not _embedded()
-
-
-def _embedded() -> bool:
-    """An embedded agent exists in this process (read without importing: this module comes first)."""
-    rt = sys.modules.get("neo.runtime")
-    return bool(getattr(rt, "_library", False))
+    return _SOURCE_TREE and ("pytest" in sys.modules or "PYTEST_CURRENT_TEST" in os.environ)
 
 
 def why_off() -> str:
@@ -71,13 +93,21 @@ def on() -> bool:
     return not why_off()
 
 
-_allowed: set[str] = set()
+_allowed: frozenset[str] = frozenset()
 
 
-def allow(*kinds: str) -> None:
-    """Let these kinds of effect through even while effects are off, for a run that opts into the
-    real thing (NEO_TEST_RENDER=1: a headless Chromium and the public page it reads)."""
-    _allowed.update(kinds)
+@contextlib.contextmanager
+def allow(*kinds: str) -> Iterator[None]:
+    """Let these kinds of effect through while effects are off, until the block ends: for a test that
+    opts into the real thing (NEO_TEST_RENDER=1: a headless Chromium and the public page it reads).
+    Process-wide while it lasts; the kinds allowed before come back afterwards."""
+    global _allowed
+    before = _allowed
+    _allowed = frozenset(before) | frozenset(kinds)
+    try:
+        yield
+    finally:
+        _allowed = before
 
 
 def guard(kind: str, what: str, *, via: object = None) -> None:
