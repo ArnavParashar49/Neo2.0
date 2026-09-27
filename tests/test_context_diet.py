@@ -422,11 +422,12 @@ async def _game_after_game(monkeypatch) -> Replay:
 # ---- the measurement ---------------------------------------------------------------------------------------
 
 
-async def test_the_task_as_before_is_mains_own_numbers(monkeypatch):
+async def test_the_task_as_before_is_the_trees_own_numbers(monkeypatch):
     """The switched-off diet is the tree as it was: the same requests, token for token (this replica
     run on main 04757ee's providers: 21 requests of 139,317 input + 34,212 output tokens, two out of
-    room; as the second game of a session, 242,370 input — on fast-final's own prompt and tool list,
-    174,240 and 279,878)."""
+    room; as the second game of a session, 242,370 input — on this tree's own prompt and tool list,
+    174,240 and 279,878). The numbers are this tree's: re-pin them when the system prompt or the
+    tool list changes."""
     as_before(monkeypatch)
     r = await replay(monkeypatch, Brain())
     assert (len(r.brain.requests), r.input_tokens, r.output_tokens, r.retries) == (21, 174_240, 34_212, 2)

@@ -231,6 +231,12 @@ class Session:
             if own:
                 reset.append((_conversation, token))
         try:
+            # A paid Cerebras key's connection (~0.9 s cold) opens while this is routed: typed
+            # overlay input and an embedded agent's requests have no wake word to warm it. Nothing
+            # without a key or a running loop; never waits, never raises.
+            from neo2.core.providers.cerebras_hooks import prewarm_soon
+
+            prewarm_soon()
             reply = await self._handle(text, images=images, from_user=from_user, origin=origin)
             # What a paid brain has to say (Cerebras: 80% of the day's budget used, skipped until
             # midnight, a refused key) is heard with the reply — each once a day, this agent's only.

@@ -128,7 +128,8 @@ def with_cerebras(order: Sequence[str | None], purpose: str, s: Any = None) -> l
     seeing brains) — where a cloud brain may see this user's pictures (:func:`_cloud_may_see`).
     With NEO_BRAIN=cerebras (:func:`_theirs`) the "vision" order starts with the two: a screen task's
     text steps go to the text brain, its pictures to the seeing one (the chain asks a brain that
-    sees first for a picture). "offline" is left alone, and so is an order that already names them
+    sees first for a picture); in the other orders ("fast", "light") the text brain goes ahead of
+    Groq (:func:`_ahead_of_groq`). "offline" is left alone, and so is an order that already names them
     — and every order when Cerebras isn't :func:`enabled` (`s`: the settings, default the bound
     agent's)."""
     out = list(order)
@@ -142,6 +143,26 @@ def with_cerebras(order: Sequence[str | None], purpose: str, s: Any = None) -> l
     if purpose == "vision" and _theirs(s):
         head = [n for n in (TEXT_BRAIN, VISION_BRAIN) if n in out]
         out = head + [n for n in out if n not in head]
+    elif _theirs(s):
+        out = _ahead_of_groq(out)
+    return out
+
+
+def _ahead_of_groq(names: list[Any]) -> list[Any]:
+    """`names` with the text brain moved right ahead of Groq when it comes after it (the fast and
+    light orders put NEO_FAST_BRAIN, Groq by default, ahead of NEO_BRAIN): the user who named
+    Cerebras their brain gets gpt-oss for chat and single actions too (DECISIONS 70) — never ahead
+    of a brain on this Mac that comes before it (a local brain the user put first stays first)."""
+    if "groq" not in names or TEXT_BRAIN not in names:
+        return names
+    at, now = names.index("groq"), names.index(TEXT_BRAIN)
+    if now < at:
+        return names
+    for i in range(at, now):  # (after the last brain on this Mac between them)
+        if names[i] in _ON_THIS_MAC:
+            at = i + 1
+    out = [n for n in names if n != TEXT_BRAIN]
+    out.insert(at, TEXT_BRAIN)
     return out
 
 

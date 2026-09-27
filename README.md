@@ -171,7 +171,7 @@ Everything is an environment variable with the `NEO_` prefix (or a line in `.env
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `NEO_BRAIN` | `gemini` | primary agentic brain: `gemini` · `groq` · `local` · `claude` · `cerebras` (its text model; picture steps go to a brain that sees, Cerebras' own `qwen` among them) · `cerebras_vision` |
+| `NEO_BRAIN` | `gemini` | primary agentic brain: `gemini` · `groq` · `local` · `claude` · `cerebras` (its text model `gpt-oss-120b` for text steps, chat and single actions, ahead of Groq; steps that carry a screenshot go to Cerebras' own `qwen` first, then the other brains that see) · `cerebras_vision` |
 | `NEO_FAST_BRAIN` | `groq` | brain for chat-only turns |
 | `NEO_GROQ_VISION_MODEL` | `qwen/qwen3.8-27b` | Groq's model that sees: with a Groq key, the last model a screenshot goes to when Gemini (and Flash-Lite, Claude) can't answer; empty turns it off |
 | `NEO_CLOUD_EYES` | `auto` | with `NEO_BRAIN=local` and no cloud brain that sees named, pictures never go to a cloud fallback (the step stops and says so); `on` lets them |

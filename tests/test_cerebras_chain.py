@@ -383,12 +383,28 @@ async def test_neo_brain_cerebras_text_steps_on_gpt_oss_and_picture_steps_on_qwe
         assert (chain.last_used, chain.last_model, turn.sees) == (cb.VISION_BRAIN, cb.VISION_MODEL, True), purpose
     assert fake.models == [cb.TEXT_MODEL, cb.VISION_MODEL] * 2
     assert [_pictures(b) for b in fake.bodies] == [0, 1] * 2  # the picture only ever to qwen
+    # Chat and single actions too (DECISIONS 70): gpt-oss ahead of Groq in the fast and light orders
+    # (NEO_FAST_BRAIN, Groq by default, would otherwise answer first); Flash-Lite keeps light's lead.
+    assert prov.brain("fast").names == [cb.TEXT_BRAIN, "groq", "local"]
+    assert prov.brain("light").names == ["gemini_lite", cb.TEXT_BRAIN, "groq", "local"]
+    fake.default = (200, completion("a chat answer", model=cb.TEXT_MODEL), {})
+    chain = prov.brain("fast")
+    assert (await chain.complete(ASK)).text == "a chat answer" and chain.last_used == cb.TEXT_BRAIN
     assert not any(b.calls for b in brains.values())  # Gemini, Flash-Lite, Claude, Groq, local: never asked
     # qwen out for the day: the picture goes to the next brain that sees, never to gpt-oss blind
     fake.default = (402, {"message": "Payment required", "code": "payment_required"}, {})
     chain = prov.brain("agent")
     turn = await chain.complete(_screenshot_step())
     assert chain.last_used == "gemini" and turn.sees is True and fake.models[-1] == cb.VISION_MODEL
+
+
+def test_neo_brain_cerebras_never_goes_ahead_of_a_local_brain_the_user_put_first(mac):
+    """NEO_FAST_BRAIN=local: chat stays on this Mac first; gpt-oss comes after it, in every order."""
+    mac(NEO_BRAIN="cerebras", NEO_FAST_BRAIN="local")
+    assert prov.brain("fast").names == ["local", cb.TEXT_BRAIN]
+    assert prov.brain("light").names == ["gemini_lite", "local", cb.TEXT_BRAIN]
+    assert hooks._ahead_of_groq(["groq", "local", cb.TEXT_BRAIN]) == ["groq", "local", cb.TEXT_BRAIN]
+    assert hooks._ahead_of_groq(["local", "groq", cb.TEXT_BRAIN]) == ["local", cb.TEXT_BRAIN, "groq"]
 
 
 # ---- failing over past Cerebras, without long waits ---------------------------------------------------

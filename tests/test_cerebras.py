@@ -819,6 +819,35 @@ async def test_prewarm_soon_runs_in_the_background_and_only_with_a_key(cset, fak
     assert [r.url.path for r in fake.requests] == ["/v1/models"] and not hooks._warming
 
 
+async def test_a_typed_request_warms_cerebras_up_while_it_is_routed(cset, fake, monkeypatch):
+    """Typed overlay input and an embedded agent's requests have no wake word: Session.handle opens
+    the connection itself (a cold round trip is ~0.9 s), in the background — and nothing without a
+    key."""
+    from neo2.core.agent import session as sess_mod
+    from neo2.core.agent.session import Session
+    from neo2.core.reflex.schema import Decision
+
+    class Chat:
+        name, supports_vision, supports_tools = "fake", False, True
+
+        async def stream(self, messages, **kw):
+            yield "hello"
+
+    class Reflex:
+        async def decide(self, text):
+            return Decision("chat", 0.9, False, 0.0, False, 0.0, "fake")
+
+    monkeypatch.setattr(sess_mod, "brain", lambda purpose="agent", **kw: Chat())
+    monkeypatch.delenv("CEREBRAS_API_KEY", raising=False)
+    r = await Session(reflex=Reflex()).handle("how are you", from_user=True)
+    await asyncio.gather(*hooks._warming)
+    assert r.text == "hello" and fake.requests == []  # no key: nothing opened
+    cset()
+    r = await Session(reflex=Reflex()).handle("how are you", from_user=True)
+    await asyncio.gather(*hooks._warming)
+    assert r.text == "hello" and [q.url.path for q in fake.requests] == ["/v1/models"]
+
+
 def test_a_damaged_or_unwritable_ledger_never_fails_an_answer(tmp_path, monkeypatch, caplog):
     f = tmp_path / spend.FILE
     day = time.strftime("%Y-%m-%d")
