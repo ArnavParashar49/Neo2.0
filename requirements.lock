@@ -107,6 +107,7 @@ pyobjc-framework-coretext==12.2.2
 pyobjc-framework-eventkit==12.2.2
 pyobjc-framework-quartz==12.2.2
 pyparsing==3.3.3
+pypdf==6.19.0
 python-dateutil==2.9.0.post0
 python-dotenv==1.2.3
 pytz==2026.4
