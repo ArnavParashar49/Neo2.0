@@ -15,7 +15,7 @@ from neo.tools.computer._catalog import _p, tool
     "Read the frontmost (or named) app's UI as a text tree of elements with ids, roles, titles, "
     "values and screen positions. Use this FIRST to see what's on screen — it's fast and exact. "
     "Element ids (e12) can be used with ax_press, ax_set_value, and click. When it shows little "
-    "(a game board like Chess, a map, a canvas), take a screenshot and click at pixel positions in "
+    "(a game board, a map, a canvas), take a screenshot and click at pixel positions in "
     "it (with its shot id) instead.",
     _p({"app": {"type": "string", "description": "App name; omit for the frontmost app"}}),
     parallel_safe=True,

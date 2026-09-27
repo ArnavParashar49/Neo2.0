@@ -16,7 +16,7 @@ from neo.tools.computer._catalog import _p, tool
 @tool(
     "screenshot",
     "Take a screenshot: a whole display (display: its number, 1 = main), or a region x,y,w,h in screen "
-    "points. Use when ax_tree is not enough (game boards like Chess, maps, drawing and other canvas "
+    "points. Use when ax_tree is not enough (game boards, maps, drawing and other canvas "
     "apps, Electron apps, images, layout questions). Its note gives the image size and a shot id: to "
     "click, drag or scroll at something in the picture, pass its pixel position in the image with that "
     "shot id and NEO maps it to the screen.",

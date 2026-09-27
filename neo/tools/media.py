@@ -37,7 +37,7 @@ _VAGUE = {"it", "this", "that", "something", "anything", "some music", "music", 
     "this Mac can actually play it (the one the user uses, if it has it) and confirms it started. "
     "Put the app or site in the query only if the user named one ('505 on youtube'). Never open "
     "a streaming website for music yourself: call this. Not for a game installed on this Mac "
-    "('play chess' with a chess game app): open that app and play it there.",
+    "('play <game>' when that game is an app here): open that app and play it there.",
     {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]},
     category="apps",
     slow=True,
