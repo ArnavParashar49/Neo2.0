@@ -24,6 +24,7 @@ import os
 import re
 import sys
 import time
+import unicodedata
 from collections.abc import Awaitable, Callable, Sequence
 from contextvars import ContextVar
 from typing import Any
@@ -35,8 +36,10 @@ __all__ = [
     "ELICIT_CHANNEL",
     "ELICIT_KEY",
     "ELICIT_SCHEMA",
+    "MAX_SUMMARY_CHARS",
     "DialogApprover",
     "approval_text",
+    "clean",
     "current_client",
     "dialog_argv",
     "elicit_decision",
@@ -50,6 +53,7 @@ ELICIT_CHANNEL = "mcp-elicit"
 OSASCRIPT = "/usr/bin/osascript"  # by path: never whatever "osascript" PATH finds
 DIALOG_TITLE = "NEO: allow this action?"
 DIALOG_MAX_CHARS = 3000  # a dialog can't show more; a longer action is declined, never half-shown
+MAX_SUMMARY_CHARS = 300  # the summary's one line, at most (the exact detail below is never cut)
 GIVE_UP_EARLY_S = 10  # the dialog closes itself this long before the card would lapse
 
 # The MCP client this request came from (its clientInfo.name, as it names itself), for the text
@@ -98,23 +102,55 @@ _SOURCES = {
     "caller": "the task itself (another model wrote it)",
     "context": "the context passed with the task",
 }
-_BIDI = re.compile("[‎‏‪-‮⁦-⁩]")
-_CONTROL = re.compile("[\x00-\x08\x0b-\x1f\x7f]")
+# Shown as their code point wherever they are: control and format characters (text direction,
+# zero-width, invisible tags…), line and paragraph separators, private-use, surrogate and
+# unassigned code points — and letters or symbols that draw nothing at all.
+_HIDDEN = frozenset({"Cc", "Cf", "Zl", "Zp", "Co", "Cs", "Cn"})
+_BLANK_LOOKING = frozenset("\u115f\u1160\u3164\uffa0\u2800")
+_BLANK_RUN = re.compile(r"\n(?:[ \t]*\n){2,}")  # two blank lines or more
+_SPACE_RUN = re.compile(r"[ \t]{17,}")  # more than any indentation needs
 
 
-def clean(text: str) -> str:
-    """What a human is shown: control and text-direction characters made visible, so nothing in
-    the action can hide or reorder what the rest says."""
-    text = _BIDI.sub(lambda m: f"<U+{ord(m.group()):04X}>", str(text))
-    return _CONTROL.sub(lambda m: f"<0x{ord(m.group()):02X}>", text)
+def clean(text: str, *, lines: bool = False) -> str:
+    """What a human is shown, so nothing in the action can hide, reorder or draw over what the
+    rest says: every control, format, separator or blank-looking character made visible
+    (``<0x1B>``, ``<U+202E>``). Without `lines` (a summary, a name) it's one line: all whitespace
+    becomes single spaces. With `lines` (the exact detail) its line breaks, tabs and spaces stay
+    (any other space is shown as its code point), and a run of blank lines or of spaces is shown
+    as how long it was."""
+    text = str(text)
+    if not lines:
+        text = " ".join(text.split())
+    out = []
+    for ch in text:
+        if ch in " \n\t" and (lines or ch == " "):
+            out.append(ch)
+        elif ch in _BLANK_LOOKING or unicodedata.category(ch) in _HIDDEN or (lines and ch.isspace()):
+            o = ord(ch)
+            out.append(f"<0x{o:02X}>" if o < 0x80 else f"<U+{o:04X}>")
+        else:
+            out.append(ch)
+    text = "".join(out)
+    if lines:
+        text = _BLANK_RUN.sub(lambda m: f"\n[{m.group().count(chr(10)) - 1} blank lines]\n", text)
+        text = _SPACE_RUN.sub(lambda m: f" [{len(m.group())} spaces] ", text)
+    return text
+
+
+def _summary(text: str) -> str:
+    s = clean(text)
+    if len(s) > MAX_SUMMARY_CHARS:
+        s = s[:MAX_SUMMARY_CHARS].rstrip() + " … (cut short: what will run is below)"
+    return s
 
 
 def approval_text(req: ApprovalRequest, *, client: str | None = None) -> str:
-    """The question for the human: the card's summary, exactly what will run, and what untrusted
-    text NEO had read before asking."""
-    detail = clean(req.detail).strip()
+    """The question for the human: the card's summary (one line: it comes from what a model
+    chose, so it can't draw a block of its own), exactly what will run, and what untrusted text
+    NEO had read before asking."""
+    detail = clean(req.detail, lines=True).strip()
     lines = [
-        f"NEO wants to: {clean(req.summary)}",
+        f"NEO wants to: {_summary(req.summary)}",
         "",
         "Exactly what will run:",
         detail or "(nothing more than the line above)",

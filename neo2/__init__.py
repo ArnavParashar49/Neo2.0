@@ -14,6 +14,10 @@ Only host code can approve an action NEO staged: :meth:`AsyncAgent.approve` with
 :class:`Approval`, or an ``approver`` callback that returns one. Text passed to ``ask()``, a tool
 argument or a model's output never can.
 
+Other AI frameworks: ``neo2.adapters.openai``, ``.anthropic``, ``.gemini`` and ``.langchain`` give
+the whole agent as one tool of their loop; ``python -m neo2.mcp`` (the ``neo2-mcp`` script) serves it
+to MCP clients.
+
 Everything here is loaded on first use (PEP 562): ``import neo2`` loads only the standard
 library, and ``from neo2 import AsyncAgent`` loads NEO's core without any model, vendor SDK,
 macOS framework or browser.

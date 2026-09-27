@@ -27,7 +27,7 @@ import neo2
 import neo2.providers
 from neo2.testing import ScriptedBrain, ToolCall, Turn
 
-pytestmark = pytest.mark.portable  # no macOS or extra needed: CI's sdk-core job runs it on Linux too
+pytestmark = pytest.mark.portable  # Linux or macOS, any install (what needs an extra skips): CI's sdk-core job
 
 ROOT = Path(__file__).resolve().parents[2]
 SECTION = (ROOT / "README.md").read_text().split("\n## Use NEO from your own app\n", 1)[1].split("\n## ", 1)[0]
@@ -85,10 +85,24 @@ def hermetic(monkeypatch):
     monkeypatch.setattr(asyncio, "create_subprocess_shell", no_network)
 
 
+PROVIDERS = ("OpenAICompatible", "Gemini", "Claude", "Groq")
+
+
 def brain_is(monkeypatch, brain: ScriptedBrain) -> None:
-    """NEO's provider classes, as a snippet calls them, return `brain`."""
-    for name in ("OpenAICompatible", "Gemini", "Claude", "Groq"):
-        monkeypatch.setattr(neo2.providers, name, lambda *a, **kw: brain)
+    """NEO's provider classes, as a snippet calls them, return `brain` — once the call fits the
+    real signature (a README call that doesn't would fail for a reader too)."""
+    for name in PROVIDERS:
+        monkeypatch.setattr(neo2.providers, name, _checked(getattr(neo2.providers, name), brain))
+
+
+def _checked(real: Any, brain: ScriptedBrain) -> Any:
+    sig = inspect.signature(real)
+
+    def make(*a: Any, **kw: Any) -> ScriptedBrain:
+        sig.bind(*a, **kw)  # TypeError, as the real one would raise
+        return brain
+
+    return make
 
 
 async def run(name: str, ns: dict[str, Any]) -> dict[str, Any]:
@@ -152,6 +166,29 @@ async def test_quickstart(monkeypatch, capsys):
     assert ns["r"].status == "done" and ns["neo"].closed
     out = capsys.readouterr().out
     assert "done It's 24 °C and sunny in Lisbon" in out and "Porto: 21 °C and cloudy." in out
+
+
+def test_brain_is_holds_a_snippet_to_the_real_signatures(monkeypatch):
+    brain_is(monkeypatch, ScriptedBrain())
+    assert neo2.providers.OpenAICompatible(model="m", api_key="k") is not None
+    with pytest.raises(TypeError):
+        neo2.providers.OpenAICompatible(model="m", key="k")  # no such argument
+    with pytest.raises(TypeError):
+        neo2.providers.Groq()  # its key is required
+
+
+def test_the_providers_a_snippet_names_in_passing_take_those_arguments():
+    """"# or Gemini(key), Claude(key), Groq(key)": what a reader would type instead."""
+    named = [
+        (name, arg)
+        for lang, code in SNIPPETS.values()
+        if lang == "python"
+        for name, arg in re.findall(r"\b([A-Z]\w+)\((\w+)\)", " ".join(re.findall(r"#.*", code)))
+        if name in PROVIDERS
+    ]
+    assert {n for n, _ in named} >= {"Gemini", "Claude", "Groq"}
+    for name, arg in named:
+        inspect.signature(getattr(neo2.providers, name)).bind(arg)  # one positional: the key
 
 
 async def test_sync_twin(capsys):

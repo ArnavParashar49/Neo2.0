@@ -28,8 +28,11 @@ __all__ = [
     "Handler",
     "SyncHandler",
     "agent_parameters",
+    "answer_text",
+    "card_summary",
     "outcome_text",
     "result_text",
+    "shaped",
 ]
 
 Handler = Callable[..., Awaitable[str]]  # (args: str | Mapping) -> the text for the outer model
@@ -65,7 +68,8 @@ _PREFIX = {
     "thrash": "NEO stopped: it kept repeating a step without progress. ",
     "error": "Error: ",
 }
-# Sources a request "read" that aren't third-party content: the outer model's own words.
+# Sources a request "read" that aren't third-party content: the outer model's own words. No tool
+# can have either name (neo2.sdk.hosttools.RESERVED_NAMES), so a tool's output never passes as them.
 _OWN_SOURCES = frozenset({"caller", "context"})
 _HALT_WORDS = ("NEEDS_CONFIRM", "NEEDS_USER")
 
@@ -288,15 +292,13 @@ def result_text(result: Result, *, name: str = DEFAULT_NAME) -> str:
     elif st == "denied":
         text = _DENIED.format(summary=_summary(result.approval, read, name, end=True))
     elif st == "needs_user":
-        text = _NEEDS_USER.format(question=_shaped(result.text.strip() or "What should I do?", read, name))
+        text = _NEEDS_USER.format(question=shaped(result.text.strip() or "What should I do?", read, name))
     elif st == "expired":
         text = _EXPIRED
     elif st == "stopped":
         text = _STOPPED
     else:  # done, max_steps, thrash, error: NEO's own words about the run
-        body = _neutral(result.text.strip() or ("Done." if st == "done" else "No details."))
-        if _third_party(result.read_untrusted) and not _fenced(body):
-            body = _fence(name, body)
+        body = answer_text(result, name, default="Done." if st == "done" else "No details.")
         text = _PREFIX.get(st, "") + body
     return _scrub(text, result.approval)
 
@@ -374,17 +376,35 @@ def pairs(results: Iterable[tuple[ToolOutcome, str]]) -> list[tuple[ToolOutcome,
     return out
 
 
-def _summary(approval: ApprovalRequest | None, read: Iterable[str], name: str, *, end: bool = False) -> str:
-    """A card's summary for a model: NEO wrote it from what its model chose — after reading
-    third-party content, possibly shaped by it (fenced then)."""
+# ---- the same fencing on every surface: these adapters and neo2.mcp's server ----------------------
+
+
+def answer_text(result: Result, name: str, *, default: str) -> str:
+    """NEO's words about a run (its answer, or why it stopped): `default` when it said nothing;
+    text that merely starts like NEO's protocol lines marked as content; fenced as `name` when the
+    request read third-party content."""
+    body = _neutral(result.text.strip() or default)
+    return _fence(name, body) if _third_party(result.read_untrusted) and not _fenced(body) else body
+
+
+def card_summary(approval: ApprovalRequest | None, read: Iterable[str], name: str, *, end: bool = False) -> str:
+    """A card's summary for a model, on one line ("" without one): NEO wrote it from what its
+    model chose — after reading third-party content (`read`), possibly shaped by it: fenced as
+    `name` then. `end`: without a final period (it ends a sentence of ours)."""
     s = " ".join((approval.summary if approval is not None else "").split())
     if not s:
-        return "that action"
-    return _shaped(s.rstrip(".") if end else s, read, name)
+        return ""
+    return shaped(s.rstrip(".") if end else s, read, name)
 
 
-def _shaped(text: str, read: Iterable[str], name: str) -> str:
+def shaped(text: str, read: Iterable[str], name: str) -> str:
+    """`text` NEO wrote, fenced as `name` when the request had read third-party content (`read`:
+    its untrusted sources) — never twice."""
     return _fence(name, text) if _third_party(read) and not _fenced(text) else text
+
+
+def _summary(approval: ApprovalRequest | None, read: Iterable[str], name: str, *, end: bool = False) -> str:
+    return card_summary(approval, read, name, end=end) or "that action"
 
 
 def _neutral(text: str) -> str:

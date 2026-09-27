@@ -23,6 +23,16 @@ def home(tmp_path, monkeypatch):
     assert not (h / ".neo").exists(), "an embedded agent created ~/.neo"
 
 
+@pytest.fixture(autouse=True)
+def web_extra(monkeypatch):
+    """NEO's web tools as if its [web] extra were installed (CI's core-only job has no ddgs): tests
+    that give an agent web_search or web_fetch fake their handlers. test_sdk_config checks what an
+    agent does without the extra."""
+    from neo2.sdk import agent
+
+    monkeypatch.setattr(agent, "_WEB_MODULES", ())
+
+
 @pytest.fixture
 def brain():
     from neo2.testing import ScriptedBrain

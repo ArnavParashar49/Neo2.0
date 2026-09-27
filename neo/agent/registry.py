@@ -113,7 +113,7 @@ class RegisteredTool:
     # doing it twice in a row gives nothing more (opening the same page or app): a repeat of the
     # same call moments later is a model retry, not the user's intent — unlike a keystroke
     idempotent: bool = False
-    requires: frozenset[str] = frozenset()  # what it needs to run: "macos", "playwright"
+    requires: frozenset[str] = frozenset()  # what it needs to run: "macos", "playwright", "web"
     origin: Literal["builtin", "host"] = "builtin"  # NEO's own tool, or an embedding host's
     read_only: bool | None = None  # changes nothing (None: not declared; parallel_safe hints it)
 

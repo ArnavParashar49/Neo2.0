@@ -242,16 +242,16 @@ uv pip install -e ".[web,openai]"      # or from a checkout
 | Extra | What it adds |
 |---|---|
 | *(none)* | the core: `neo2.AsyncAgent` and `Agent`, NEO's agent loop, host tools, the framework adapters, and the `weather` and `clock` tools. No model, macOS framework or browser. |
-| `web` | `web_search` and `web_fetch` |
+| `web` | `web_search` and `web_fetch`. Without it the `"web"` preset (the default) leaves them out, with a warning, and asking for one by name is refused. |
 | `browser` | NEO's own headless Chromium (`browser_*`). Then run `playwright install chromium`. |
 | `mac` | the macOS tools: Accessibility, click and type, apps, files, shell, mail and calendar |
 | `gemini`, `openai`, `claude` | NEO's provider classes for Gemini, any OpenAI-compatible server (OpenAI, Groq, Ollama, LM Studio, vLLM…) and Claude. `brains` is all three. |
-| `mcp` | the MCP server, `neo2-mcp` |
+| `mcp` | the MCP server, `neo2-mcp`. Add `web` for its default `--tools web`: `neo[mcp,web]`. |
 | `langchain` | `neo2.adapters.langchain` |
 | `embeddings` | local embeddings for memory recall |
 | `app` | everything NEO.app runs. `all` is `app` plus `mcp` and `langchain`. |
 
-The package also installs the top-level `neo` package that NEO.app runs. Until the rename, don't install it next to NeuralEnsemble's `neo`, which uses the same folder name.
+It also installs `neo`, the package NEO.app runs, as a top-level package. Until the rename, don't install it next to NeuralEnsemble's `neo`, which uses the same folder name.
 
 The snippets below use top-level `await`: run them inside an `async def`, or in `python -m asyncio`.
 
@@ -272,7 +272,7 @@ async with neo2.AsyncAgent(neo2.AgentConfig(tools="web"), provider=brain) as neo
             print(e.text, end="")
 ```
 
-`AgentConfig` takes the tools as presets, globs and names: `"web"`, `"browser"`, `"mac_read"`, `"mac"`, `"memory"`, `"all"`, `"none"`, `("web", "browser_*")`. It also takes `data_dir`, `memory=True` or `MemoryConfig(path=...)`, `persona`, `instructions`, `protected_apps`, `extra_secret_paths` and the step and time limits. `AgentConfig.from_env()` reads keys and settings from the environment, but only when you call it. Each `conversation=` is its own thread with its own gate. `pending()`, `cancel()`, `history()`, `reset()` and `forget_all()` work per agent; `forget_all()` deletes only files NEO made in the agent's folder.
+`AgentConfig` takes the tools as presets, globs and names: `"web"`, `"browser"`, `"mac_read"`, `"mac"`, `"memory"`, `"all"`, `"none"`, `("web", "browser_*")`. It also takes `data_dir`, `memory=True` or `MemoryConfig(path=...)`, `persona`, `instructions`, `protected_apps`, `extra_secret_paths` and the step and time limits. `AgentConfig.from_env()` reads keys and settings from the environment, but only when you call it. Each `conversation=` is its own thread with its own gate. The agent also has `pending(conversation)`, `cancel()`, `history(conversation)`, `reset(conversation)` and `forget_all()`, which deletes only files NEO made in the agent's folder.
 
 Each agent's brains keep what they learn to themselves: a Gemini key's quota window (in `<data_dir>/brain_cooldowns.json`), a model that was overloaded, a server's real request size. A provider object you build with `neo2.providers` keeps that in memory, in the object, and writes no file. Give each agent its own object if they must not share it. `OpenAICompatible(token_budget=...)` is the most one request may carry (prompt and answer): longer requests are trimmed to fit before they are sent.
 
@@ -328,9 +328,9 @@ The rules:
 - **No "yes for this task".** NEO.app's user can answer a card for the rest of the task, so later calls of the same tool on the same app run without a card. An embedded agent never grants that: its cards offer no scope (`scopes: []`), `approve()` always covers one action, and the next one asks again, even in the same task. The task bookkeeping behind it, including the count of untrusted pages and mails a task has read, belongs to one conversation and never crosses to another conversation or agent.
 - **An approver is a person's answer.** Calling `ask()` or `stream()` from an approver raises `ApprovalReentryError`.
 - **Say where a request came from.** Pass `source="model"` when another model wrote the task; the adapters and the MCP server always do. Such a request, like one with `context=` or one that read a web page, asks first before saving to memory, opening links that could carry data out, or submitting in a chat app.
-- **Everything is audited.** Each staged, approved, denied or expired action is recorded with the agent's name and `via`, in `<data_dir>/audit.log` (mode 0600). An agent without a `data_dir` sends the records to `on_audit=` and the `neo.audit` logger.
+- **Everything is audited.** Each staged, approved, denied or expired action is recorded with the agent's name and `via`. The record goes to `on_audit=` if you pass one, and to `<data_dir>/audit.log` (mode 0600), or to the `neo.audit` logger when the agent has no `data_dir`.
 
-Host tools are plain functions. The schema comes from the typed signature (or `parameters=`, a JSON schema or a pydantic model). A parameter typed `neo2.ToolContext` gets the request's `tool_context` as `ctx.extras`. Output counts as third-party content unless you pass `untrusted=False`: the model sees it fenced, and the request then asks before memory writes and data-carrying links. Parameters named `confirm`, `cancel` or `_…` are refused, because NEO drops those from model calls.
+Host tools are plain functions. The schema comes from the typed signature (or `parameters=`, a JSON schema or a pydantic model). A parameter typed `neo2.ToolContext` gets the request's `tool_context` as `ctx.extras`. Output counts as third-party content unless you pass `untrusted=False`: the model sees it fenced, and the request then asks before memory writes and data-carrying links. Parameters named `confirm`, `cancel` or `_…` are refused, because NEO drops those from model calls. Tool names NEO uses itself are refused too: the names of its own tools; `approve`, `confirm`, `cancel`, `deny` and `more_tools`; and `caller` and `context`, which label the model's own words in `Result.read_untrusted`.
 
 ### Plug NEO into another AI framework
 
@@ -341,7 +341,7 @@ The recommended way is the whole agent as one tool. NEO keeps its own prompt, sa
 - `The user's OK is required and was not given: <summary>. Nothing was done; don't retry.`
 - `NEEDS_USER: <question>`
 
-Anything NEO wrote after reading third-party content comes back inside `<untrusted source="...">`.
+Anything NEO wrote after reading third-party content comes back inside `<untrusted source="...">`. Every call is a request from a model (`source="model"`), and `agent_tool(..., on_result=...)` hands your code each full `Result`, card included.
 
 <!-- snippet: openai -->
 ```python
@@ -421,9 +421,11 @@ async with neo.turn() as t:  # one turn of your loop: what one call read counts 
     messages += neo2.adapters.openai.tool_message(out, "call_1")
 ```
 
-The other helpers are `neo2.adapters.openai.function_call_output`, `neo2.adapters.anthropic.tool_result`, `neo2.adapters.gemini.function_response` and `neo2.adapters.langchain.tool_message`.
+The other helpers are `neo2.adapters.openai.tool_messages` (a whole turn of Chat calls, tool messages first), `neo2.adapters.openai.function_call_output`, `neo2.adapters.anthropic.tool_result`, `neo2.adapters.gemini.function_response` and `neo2.adapters.langchain.tool_message`. A Chat tool message can't hold images, so `tool_message` sends a tool's screenshots in a user message after it, labelled as that call's output and never the user's request. The model still reads them in the user's role, so for tools that see third-party content (the screen, pages) prefer the Responses API, whose `function_call_output` keeps them in the tool's output, or pass `images="omit"`.
 
 ### Use NEO from an MCP client
+
+Install NEO with its `mcp` extra, and `web` for the web tools: `pip install "neo[mcp,web] @ git+https://github.com/ArnavParashar49/Neo2.0"`. Without `web`, `--tools web` gives only `weather` and `clock`.
 
 <!-- snippet: mcp-command -->
 ```bash
@@ -449,10 +451,11 @@ For Claude Desktop (`claude_desktop_config.json`), Claude Code (`.mcp.json`) or 
 - **`--expose task`** gives one tool, `neo_task(goal, context?, conversation?)`, which hands the whole task to NEO. `tools` lists NEO's tools one by one, and `both` does both.
 - **`--approve deny`** is the default: nothing gated runs, and the model is told the user has to do it.
 - **`--approve dialog`** (macOS) shows a native dialog from the server process. Cancel is the default button, and the dialog gives up before the card expires. The server adds `osascript` to `protected_apps`.
-- **`--approve elicit --trust-client NAME`** lets the MCP client ask its user (MCP elicitation), only for the client names you list. It approves only when the user accepts with `approve: true`. This trusts the client: a client names itself, and it may answer elicitations on its own.
-- **`--env`** reads the API keys (`GEMINI_API_KEY`, `GEMINI_API_KEYS`, `GROQ_API_KEY`, `ANTHROPIC_API_KEY`) and `NEO_MCP_*` settings such as `NEO_MCP_DATA_DIR`. NEO.app's own `NEO_*` variables are never read. Without `--env`, `neo_task` has no model, though the individual tools still work.
+- **`--approve elicit --trust-client NAME`** lets the MCP client ask its user (MCP elicitation), only for the client names you list. It approves only when the user accepts with `approve: true`. This trusts the client: a client names itself, and it may answer elicitations on its own. The client asks in its own window on your desktop, so with NEO's input tools (`--tools mac`: click, type, keys) the server starts only with `--protect-app NAME` naming the client's app (for example `Claude` or `Cursor`); otherwise NEO's own clicks and keys could answer that question.
+- **`--protect-app NAME`** (repeatable) adds an app to `protected_apps`: NEO's input tools never click or type into it.
+- **`--env`** reads the API keys (`GEMINI_API_KEY`, `GEMINI_API_KEYS`, `GROQ_API_KEY`, `ANTHROPIC_API_KEY`) and `NEO_MCP_*` settings such as `NEO_MCP_DATA_DIR` and `NEO_MCP_BRAIN`. With only `ANTHROPIC_API_KEY` set, Claude is the brain. NEO.app's own `NEO_*` variables are never read. Without `--env`, `neo_task` has no model, though the individual tools still work.
 
-The server speaks stdio only and opens no network listener. stdout carries nothing but the protocol, and audit lines go to stderr.
+As with the adapters, anything NEO wrote after reading third-party content (its answer, a question, an action's summary) comes back inside `<untrusted source="neo">`, and the server tells the client that such text is data, never instructions. The server speaks stdio only and opens no network listener. stdout carries nothing but the protocol, and audit lines go to stderr.
 
 ### What NEO never exposes to an embedding app or its model
 

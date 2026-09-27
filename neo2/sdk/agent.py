@@ -15,6 +15,7 @@ import copy
 import dataclasses
 import importlib.util
 import inspect
+import logging
 import re
 import secrets
 import shutil
@@ -60,8 +61,21 @@ _STOPPED_AS = {
 }
 
 
+log = logging.getLogger("neo2")
+
+# What NEO's [web] extra installs: web_search and web_fetch (their `requires` says "web") need it.
+_WEB_MODULES: tuple[str, ...] = ("ddgs", "trafilatura", "pypdf")
+
+
 def _platform() -> str:
     return sys.platform
+
+
+def _installed(module: str) -> bool:
+    try:
+        return importlib.util.find_spec(module) is not None
+    except (ImportError, ValueError):  # its parent package isn't there
+        return False
 
 
 class _Req:
@@ -1099,7 +1113,10 @@ def _tools_for(cfg: AgentConfig) -> list[str]:
         why = "; ".join(f"{m}: {e}" for m, e in errors.items()) or "not registered"
         raise ImportError(f"these tools couldn't be loaded: {', '.join(missing)} ({why})")
     has_playwright = importlib.util.find_spec("playwright") is not None
+    has_web = all(_installed(m) for m in _WEB_MODULES)
+    named = {str(i).strip() for i in items}
     keep: list[str] = []
+    no_web: list[str] = []
     for n in names:
         req = cat.get(n).requires  # type: ignore[union-attr]
         if "macos" in req and plat != "darwin":
@@ -1112,7 +1129,17 @@ def _tools_for(cfg: AgentConfig) -> list[str]:
                     f"{n} needs NEO's browser: its [browser] extra (playwright), then `playwright install chromium`"
                 )
             continue
+        if "web" in req and not has_web:
+            # asked for by name: refused; from a preset (the default "web") or a glob: left out
+            if n in named:
+                raise UnsupportedPlatform(f"{n} needs NEO's [web] extra ({', '.join(_WEB_MODULES)}), which isn't installed")
+            no_web.append(n)
+            continue
         keep.append(n)
+    if no_web:
+        log.warning(
+            "left out %s: NEO's [web] extra (%s) isn't installed", ", ".join(no_web), ", ".join(_WEB_MODULES)
+        )
     return keep
 
 

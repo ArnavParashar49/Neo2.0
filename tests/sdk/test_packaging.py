@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-pytestmark = pytest.mark.portable  # no macOS or extra needed: CI's sdk-core job runs it on Linux too
+pytestmark = pytest.mark.portable  # Linux or macOS, any install (what needs an extra skips): CI's sdk-core job
 
 ROOT = Path(__file__).resolve().parents[2]
 PYPROJECT = tomllib.loads((ROOT / "pyproject.toml").read_text())
@@ -129,9 +129,26 @@ def test_console_scripts_and_typing_marker():
 
     assert PROJECT["scripts"] == {"neo": "neo.main:main", "neo2-mcp": "neo2.mcp:main"}
     assert callable(neo2.mcp.main)
-    assert (ROOT / "neo2" / "py.typed").is_file()
-    assert PYPROJECT["tool"]["setuptools"]["package-data"]["neo2"] == ["py.typed"]
+    for pkg in ("neo2", "neo"):  # neo too: neo2 re-exports ToolContext, SAFETY_RULES, ToolOutput…
+        assert (ROOT / pkg / "py.typed").is_file()
+        assert PYPROJECT["tool"]["setuptools"]["package-data"][pkg] == ["py.typed"]
     assert neo2.__version__ == PROJECT["version"]
+
+
+def test_model_field_defaults_are_keywords():
+    """Type checkers read a pydantic model's field defaults through dataclass_transform, which
+    sees only ``Field(default=...)``: with ``Field(24, ge=1)`` every AgentConfig(...) that leaves
+    the field out fails type-checking in the host's code."""
+    import ast
+
+    bad = []
+    for pkg in ("neo2", "neo"):
+        for f in sorted((ROOT / pkg).rglob("*.py")):
+            for node in ast.walk(ast.parse(f.read_text(), str(f))):
+                call = node.value if isinstance(node, ast.AnnAssign) else None
+                if isinstance(call, ast.Call) and getattr(call.func, "id", getattr(call.func, "attr", "")) == "Field" and call.args:
+                    bad.append(f"{f.relative_to(ROOT)}:{node.lineno}")
+    assert bad == []
 
 
 def test_the_portable_marker_is_registered():

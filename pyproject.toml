@@ -35,28 +35,28 @@ brains = ["neo[gemini,openai,claude]"]
 web = ["ddgs", "trafilatura", "pypdf"]  # web_search, web_fetch (pages and PDFs)
 browser = ["playwright"]  # NEO's own browser tool; then: playwright install chromium
 mac = [  # the macOS tools: see, click, type, apps, files, shell, mail, calendar, notes
-  "pyobjc-framework-Cocoa; sys_platform == 'darwin'",
-  "pyobjc-framework-Quartz; sys_platform == 'darwin'",
-  "pyobjc-framework-ApplicationServices; sys_platform == 'darwin'",
-  # calendars, reminders and contacts through the system stores (the same pyobjc release)
-  "pyobjc-framework-EventKit>=12.2,<13; sys_platform == 'darwin'",
-  "pyobjc-framework-Contacts>=12.2,<13; sys_platform == 'darwin'",
-  "pillow",
-  "tld",  # a site's registrable domain (neo.decide.sites)
-  "lxml",  # a site's own search form / OpenSearch description
-  "python-dateutil",  # recurring events (RRULE) when a calendar is read by script
-  "pypdf",  # read_file on a PDF
+    "pyobjc-framework-Cocoa; sys_platform == 'darwin'",
+    "pyobjc-framework-Quartz; sys_platform == 'darwin'",
+    "pyobjc-framework-ApplicationServices; sys_platform == 'darwin'",
+    # calendars, reminders and contacts through the system stores (the same pyobjc release)
+    "pyobjc-framework-EventKit>=12.2,<13; sys_platform == 'darwin'",
+    "pyobjc-framework-Contacts>=12.2,<13; sys_platform == 'darwin'",
+    "pillow",
+    "tld",  # a site's registrable domain (neo.decide.sites)
+    "lxml",  # a site's own search form / OpenSearch description
+    "python-dateutil",  # recurring events (RRULE) when a calendar is read by script
+    "pypdf",  # read_file on a PDF
 ]
 embeddings = ["sentence-transformers"]  # memory + tool-selection embeddings
 reflex = ["laya>=0.3", "torch"]  # Laya, NEO.app's local decision model
 voice = [  # local voice (Apple Silicon)
-  "mlx-audio; sys_platform == 'darwin'",
-  "misaki[en]; sys_platform == 'darwin'",
-  "vosk",
-  "sounddevice",
-  "soundfile",
-  "silero-vad",  # speech detection (5 s listening window)
-  "torch",  # silero
+    "mlx-audio; sys_platform == 'darwin'",
+    "misaki[en]; sys_platform == 'darwin'",
+    "vosk",
+    "sounddevice",
+    "soundfile",
+    "silero-vad",  # speech detection (5 s listening window)
+    "torch",  # silero
 ]
 local = ["mlx-lm; sys_platform == 'darwin'"]  # python -m neo --local: the offline brain
 server = ["websockets>=13"]  # the overlay's websocket
@@ -79,6 +79,7 @@ include = ["neo*"]
 
 [tool.setuptools.package-data]
 neo2 = ["py.typed"]
+neo = ["py.typed"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
