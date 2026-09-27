@@ -162,7 +162,7 @@ class Seeing:
 
     async def complete(self, messages, *, system="", tools=None, effort="medium", max_tokens=4096):
         if self.down:
-            # The Chess log: 3–8 s lost on an overloaded model; then, like GeminiProvider, it's
+            # The logged run: 3–8 s lost on an overloaded model; then, like GeminiProvider, it's
             # remembered for 90 s and fails at once.
             await _advance(0.0 if self.probed else 4.0)
             self.probed = True
@@ -177,7 +177,7 @@ class Seeing:
 
 
 class BlindGroq:
-    """Groq's text model in the Chess log: can't see, clicks at coordinates it made up."""
+    """Groq's text model in the logged run: can't see, clicks at coordinates it made up."""
 
     name = model = "groq"
     supports_vision, supports_tools = False, True
@@ -255,7 +255,7 @@ def thinking(miss_once: bool) -> dict:
 
 
 def overload(all_eyes_busy: bool) -> dict:
-    """The Chess log: every Flash model overloaded mid-task. Flash-Lite up (or not)."""
+    """The logged run: every Flash model overloaded mid-task. Flash-Lite up (or not)."""
     g = Seeing("gemini", [], LATENCY, down=True)
     lite = Seeing("gemini_lite", seeing_script(False), LITE_LATENCY, down=all_eyes_busy)
     gv = Seeing("groq_vision", seeing_script(False), {k: GROQ_STEP_S for k in LATENCY}, down=all_eyes_busy)

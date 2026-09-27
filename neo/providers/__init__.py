@@ -552,7 +552,7 @@ def _needs_eyes(messages: list[Message]) -> bool:
 
 # The brains that can see, in the order a step working from a picture asks them:
 # 1. Gemini Flash (3.8 → 3.7 → 3.5, its own model walk);
-# 2. Flash-Lite: a quota of its own, and it sees (the Chess run's Flash models were all overloaded
+# 2. Flash-Lite: a quota of its own, and it sees (in the logged board-game run every Flash model was overloaded
 #    and it was never asked);
 # 3. Claude, when set up;
 # 4. last, Groq's vision model: 8K tokens a minute, ~30–40 s a picture step — the run's budget

@@ -176,7 +176,7 @@ def test_the_same_action_twice_steps_up_even_when_it_said_ok():
 def test_looks_and_questions_to_the_user_are_neither_a_miss_nor_a_success():
     msgs = [Message.user("go")]
     msgs += _step("click", {"id": "e1"}, "Error: no such element", ok=False)
-    msgs += _step("ax_tree", {}, "window “Chess” …")  # only looked
+    msgs += _step("ax_tree", {}, "window “Board” …")  # only looked
     msgs += _step("click", {"id": "e9"}, "NEEDS_CONFIRM: press “Resign”?", ok=False)  # asked the user
     assert Effort("low").at(msgs) == "medium"
     assert trouble([ToolResult("x", "screenshot", "Screenshot s2 attached.")]) is None
@@ -368,7 +368,7 @@ def test_every_brain_that_sees_busy_stops_the_step_and_says_what_still_works(mon
 def test_a_blind_brains_refused_coordinates_make_the_next_step_a_pixel_step(monkeypatch):
     """Every brain that sees is down from the first step: the text-only brain may take the step with
     no picture — but once it tried coordinates and was refused, the task needs eyes: it isn't asked
-    again to repeat that (the Chess run's three blind clicks), the run stops and says why."""
+    again to repeat that (the logged run's three blind clicks), the run stops and says why."""
     b = _brains(monkeypatch, gemini=Brain("gemini", error=Overloaded("busy")), groq=Brain("groq", False, answer="x"))
     chain = prov.Chain(["gemini", "groq"], sticky=False)
     msgs = [Message.user("move e2 to e4")]
