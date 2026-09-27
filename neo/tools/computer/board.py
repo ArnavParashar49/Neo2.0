@@ -1183,6 +1183,7 @@ def survey(
     board of alternating squares is looked for in any case (finding one is its own evidence).
     ``sheet``: a sheet or dialog is open over the window (Accessibility says so): nothing is read
     under it. ``window``: the window's frame now, to notice later that it moved."""
+    global _latest
     now = time.monotonic() if now is None else now
     if sheet:
         return Survey(covered=True)
@@ -1195,6 +1196,8 @@ def survey(
     if b is None and canvas:
         b = find_tilted(pic, region)
     if b is None:
+        if _latest is not None and window is not None and _latest.window == window:
+            _latest = None  # the board that was in this window isn't there any more
         if canvas and shot:
             _pictures[shot] = pic
             while len(_pictures) > _KEEP_PICTURES:
@@ -1551,3 +1554,43 @@ def map_board(a: dict, *, blind: bool = False, picture: Picture | None = None, n
         b.orientation, b.oriented_by = side, "model"
     _remember(b)
     return note(b, since), True
+
+
+# ---- for the pointer tools: their arguments and words ----------------------------------------------
+
+CELL_ARG = {
+    "cell": {"type": "string", "description": "a board square's name from the screenshot note (e4, r3c5), instead of x,y: NEO computes the point"},
+}
+DRAG_CELL_ARGS = {
+    "from": {"type": "string", "description": "the board square to drag from, by its name in the screenshot note (e2, r7c5)"},
+    "to": {"type": "string", "description": "the board square to drop on (e4, r5c5)"},
+}
+SCREENSHOT_WORDS = (
+    "When a window shows a board or a grid (a large area with no accessible elements), the note says so and "
+    'names its squares: act on them by name — click cell="e4", drag from="e2" to="e4" — and NEO computes the points.'
+)
+MAP_BOARD_DESCRIPTION = (
+    "Map a board NEO couldn't find by itself (seen at an angle, textured): give the 4 corners of its playing area "
+    "once, in pixels of a screenshot (shot id) or as 0-1000 [y, x] points (corners_norm); NEO refines and checks "
+    "them and names every square. Or say which side White's pieces start on (orientation) when the note says it "
+    "isn't clear. Needs a model that can see."
+)
+MAP_BOARD_PARAMS = {
+    "type": "object",
+    "properties": {
+        "shot": {"type": "string", "description": "the screenshot id the corners are in"},
+        "corners": {
+            "type": "array",
+            "items": {"type": "array", "items": {"type": "number"}},
+            "description": "the playing area's 4 corners, each [x, y] in the screenshot's pixels, any order",
+        },
+        "corners_norm": {
+            "type": "array",
+            "items": {"type": "array", "items": {"type": "number"}},
+            "description": "or the 4 corners as [y, x] on a 0-1000 scale of the screenshot",
+        },
+        "rows": {"type": "integer", "description": "squares down (default 8)"},
+        "cols": {"type": "integer", "description": "squares across (default 8)"},
+        "orientation": {"type": "string", "enum": list(SIDES), "description": "the side White's (the light) pieces start on"},
+    },
+}

@@ -474,3 +474,27 @@ def test_orientation_is_kept_for_the_same_board_when_the_pieces_no_longer_say():
     few = ("....k...", "........", "........", "...q....", "....Q...", "........", "........", "....K...")
     later = B.survey(B.Picture.of(_flat(position=few)[0])).board
     assert B.orientation(later.occupancy) == "" and later.orientation == "bottom" and later.chess
+
+
+def test_squares_map_through_a_screenshots_shot_like_its_pixels_do():
+    from neo.tools.computer import pointer
+
+    img, tr = _flat()
+    k = 1280 / 1512
+    small = img.resize((1280, round(982 * k)), Image.LANCZOS)
+    shot = pointer.remember(0, 0, 1 / k, small.width, small.height)
+    s = B.survey(B.Picture.from_shot(small, shot), shot=shot.id)
+    assert s.board.shot == shot.id and B.for_shot(shot.id) is s.board
+    (pt,), _, _ = B.points_for({"cell": "e2", "shot": shot.id}, ("cell",))
+    assert np.allclose(pt, _truth_centre(tr, "e2"), atol=1.2)  # screen points, as the Shot maps pixels
+
+
+def test_a_board_that_left_its_window_is_forgotten():
+    img, _ = _flat()
+    win = (300.0, 80.0, 950.0, 820.0)
+    B.survey(B.Picture.of(img), shot="s1", window=win)
+    a = np.asarray(img).copy()
+    a[140:770, 410:1040] = 250  # the same window, the board gone
+    B.survey(B.Picture.of(a), shot="s2", window=win)
+    with pytest.raises(B.BoardError, match="doesn't know a board"):
+        B.points_for({"cell": "e2"}, ("cell",))
