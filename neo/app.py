@@ -86,9 +86,12 @@ class App:
                 n += 1
         return n > 0
 
-    async def answer(self, yes: bool, *, action_id: str = "", said: str = "") -> None:
-        """The user answered NEO's pending question (the card's buttons, or a typed yes/no)."""
-        reply = await self.session.answer(yes, action_id=action_id, text=said or ("yes" if yes else "no"))
+    async def answer(self, yes: bool, *, action_id: str = "", said: str = "", scope: str = "") -> None:
+        """The user answered NEO's pending question (the card's buttons, or a typed yes/no).
+        `scope` "task": the card's "yes for this task" (typed or said, the words carry it)."""
+        reply = await self.session.answer(
+            yes, action_id=action_id, text=said or ("yes" if yes else "no"), scope="task" if scope == "task" else None
+        )
         if reply is None:
             await bus().note("That question had already expired — nothing was done.")
             return
@@ -116,7 +119,7 @@ class App:
             if not action_id:
                 await bus().note("Couldn't tell which question that answer was for — nothing was done.")
                 return
-            await self.answer(bool(cmd.get("yes")), action_id=action_id)
+            await self.answer(bool(cmd.get("yes")), action_id=action_id, scope=str(cmd.get("scope") or ""))
         elif kind == "forget_all":
             # From the overlay's own "Erase everything?" confirmation, or `neo --forget-all`
             # while NEO runs — never a model's tool.

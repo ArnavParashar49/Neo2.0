@@ -16,7 +16,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Literal
 
-from neo.agent import confirm, fastpath
+from neo.agent import confirm, fastpath, grants
 from neo.agent.loop import AgentResult, run_agent
 from neo.agent.prompt import build as build_prompt
 from neo.agent.registry import Origin, ToolContext, ToolOutput, fence, registry, voiced
@@ -44,6 +44,21 @@ _NO = re.compile(
     r"|^\s*mat[\s.!।]*$"
     # Devanagari vowel signs aren't word characters, so \b can't mark where these words end.
     r"|(?<![\w\u0900-\u0963\u0971-\u097F])(?:नहीं|नही|मत|रुको|रहने\s+दो)(?![\w\u0900-\u0963\u0971-\u097F])",
+    re.I,
+)
+# A yes for the rest of the task (neo.agent.grants): "yes for this task", "yes to all", "haan sab
+# allow karo", "is task ke liye haan". It answers the question like any yes; the calls of the same
+# kind on the same app that follow in this task then run without asking (never a risky one).
+_YES_WORD = r"(?:yes|yeah|yep|yup|sure|ok(?:ay)?|go ahead|allow(?:\s+it)?|haan|haan?\s+ji|ji\s+haan?|th(?:ee|i)k\s+hai|हाँ|हां|जी\s+(?:हाँ|हां))"
+_TASK_YES = re.compile(
+    rf"^\s*(?:{_YES_WORD}[\s,]+)?(?:"
+    r"(?:for|to)\s+(?:this|the)\s+(?:whole\s+|entire\s+)?task|for\s+the\s+rest\s+of\s+(?:this|the)\s+task"
+    r"|to\s+(?:all|everything)|for\s+(?:all|everything)|allow\s+(?:all|everything)(?:\s+for\s+(?:this|the)\s+task)?"
+    r"|(?:sab|sabhi|sab\s+kuch)\s+(?:allow|ok)\s+(?:karo|kar\s+do|kardo|kar\s+dijiye)"
+    r"|(?:sab|sabhi)\s+ke\s+liye(?:\s+haan)?"
+    r"|(?:is|iss|poore|pure)\s+task\s+ke\s+liye(?:\s+(?:haan|haan?\s+ji|allow\s+karo|allow\s+kar\s+do))?"
+    r"|(?:इस|पूरे)\s+(?:टास्क|काम)\s+के\s+लिए(?:\s+(?:हाँ|हां))?|सब\s+के\s+लिए(?:\s+(?:हाँ|हां))?|सब\s+(?:allow|अलाउ)\s+(?:करो|कर\s+दो)"
+    r")(?:[\s,]+(?:please|thanks|ji|जी))*[\s.!।]*$",
     re.I,
 )
 # "kyun nahi" ("why not") agrees, but it's no pure yes: neither a yes nor, for its "nahi", a no.
@@ -82,9 +97,15 @@ def answer_of(text: str) -> bool | None:
     """True for a pure yes, False for a no, None for anything else."""
     if _NO.search(_WHY_NOT.sub(" ", text)):
         return False
-    if _YES.match(text):
+    if _YES.match(text) or _TASK_YES.match(text):
         return True
     return None
+
+
+def scope_of(text: str) -> Literal["once", "task"]:
+    """How far a yes reaches: "task" for "yes for this task" / "yes to all" / "haan sab allow
+    karo", else just the card it answers."""
+    return "task" if answer_of(text) is True and _TASK_YES.match(text) else "once"
 
 
 @dataclass
@@ -114,6 +135,7 @@ class Session:
     # Who asked the pending question: an agent run of this session (the answer's result goes back
     # to a model to finish the job) or a direct command (the answer's result is the reply).
     _pending_origin: Literal["agent", "direct"] = "agent"
+    _pending_task: str = ""  # the task (neo.agent.grants) the pending question belongs to
     _answer_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     _summarized: int = 0  # history[:_summarized] is already in a session summary
     _chunk_started: float = field(default_factory=time.time)
@@ -159,6 +181,7 @@ class Session:
                 await bus().end_job(job)
                 return Reply(msg, "confirm", job=job)
         elif self._pending_action:  # the staged question expired: drop it and the "confirming" orb
+            grants.end(self._pending_task)
             self._drop_pending()
             await self._clear_confirming()
 
@@ -222,7 +245,8 @@ class Session:
             if not t.done():
                 t.cancel()
                 n += 1
-        if confirm.peek() is not None:
+        if (p := confirm.peek()) is not None:
+            grants.end(self._pending_task or p.task)
             confirm.cancel("stopped")
             self._drop_pending()
             await self._clear_confirming()
@@ -368,6 +392,29 @@ class Session:
         only: list[str] | None = None,
         done_note: str = "",
     ) -> Reply:
+        """An agent run as one task (neo.agent.grants): from here until the job is done, across
+        every card the user answers on the way. It's what a yes "for this task" covers and what
+        the once-per-task notes count; a run that ends without a question to answer ends it."""
+        task = grants.new_task()
+        reply: Reply | None = None
+        try:
+            with grants.task(task):
+                reply = await self._agent_task(text, d, images, job, only=only, done_note=done_note)
+            return reply
+        finally:
+            if reply is None or reply.route != "confirm":
+                grants.end(task)
+
+    async def _agent_task(
+        self,
+        text: str,
+        d: Decision | None,
+        images: list[ImagePart] | None,
+        job: str,
+        *,
+        only: list[str] | None = None,
+        done_note: str = "",
+    ) -> Reply:
         # The single-tool lane ("dim my screen", "click Send") runs one tool, which looks for itself
         # if it must: the reflex's screen signal alone doesn't buy it the vision chain.
         needs_screen = bool(images or (d and d.needs_screen and not only))
@@ -415,8 +462,9 @@ class Session:
         await self._remember(*res.messages[len(snapshot) :])  # only this job's new turns
         _learn_from(job, res)
         if res.stopped == "needs_confirm" and self._stage_pending(res, ctx.taint):
-            await bus().say(res.question, final=True, job=job)
-            return Reply(res.question, "confirm", d, res, job=job, taint=tuple(ctx.taint))
+            q = self._with_scope_hint(res.question)
+            await bus().say(q, final=True, job=job)
+            return Reply(q, "confirm", d, res, job=job, taint=tuple(ctx.taint))
         if res.stopped == "done" and not ctx.taint:
             # A path learned while reading a page or an email could have been steered by it.
             await asyncio.to_thread(self._save_playbook, text, res)
@@ -494,18 +542,33 @@ class Session:
     def _adopt(self, p: confirm.Pending, taint: list[str] | tuple[str, ...], origin: Literal["agent", "direct"]) -> None:
         """The question the user now hears is this staged action, asked by `origin`."""
         self._pending_tool, self._pending_args, self._pending_action = p.tool, dict(p.params), p.action_id
-        self._pending_taint, self._pending_origin = list(taint), origin
+        self._pending_taint, self._pending_origin, self._pending_task = list(taint), origin, p.task
         asyncio.create_task(self._expire_confirm(p.action_id))
 
     def _drop_pending(self) -> None:
         self._pending_tool, self._pending_args, self._pending_action = "", {}, ""
-        self._pending_taint, self._pending_origin = [], "agent"
+        self._pending_taint, self._pending_origin, self._pending_task = [], "agent", ""
+
+    def _with_scope_hint(self, question: str) -> str:
+        """The second card of the same kind in one task says how to stop the questions: a yes
+        for this task (only where one could cover what follows)."""
+        p = confirm.peek()
+        target = p.target if p is not None else None
+        if p is None or target is None or p.action_id != self._pending_action or not grants.offered(p.task, target):
+            return question
+        with grants.task(p.task):
+            asked = grants.note(f"asked:{p.tool}:{target.app.casefold()}")
+        if asked < 2:
+            return question
+        return f"{question} (Say “yes for this task” and I won't ask again for {target.app} while I finish this.)"
 
     async def _handle_confirmation(self, text: str, job: str) -> Reply:
         """The user's own words while a question is pending."""
         ans = answer_of(text)
         if ans is None:
             # Not a yes/no — treat as a new request; drop the stale confirmation.
+            p = confirm.peek()
+            grants.end(self._pending_task or (p.task if p is not None else ""))
             confirm.cancel("superseded")
             self._drop_pending()
             await self._clear_confirming()
@@ -513,10 +576,21 @@ class Session:
             return await self.handle(text, from_user=True, taint=_request_taint.get())
         return await self.answer(ans, job=job, text=text) or Reply("", "confirm", job=job)
 
-    async def answer(self, yes: bool, *, action_id: str = "", job: str = "", text: str = "") -> Reply | None:
+    async def answer(
+        self,
+        yes: bool,
+        *,
+        action_id: str = "",
+        job: str = "",
+        text: str = "",
+        scope: Literal["once", "task"] | None = None,
+    ) -> Reply | None:
         """The user's answer to the pending question — their typed or spoken yes/no, or the
         overlay's button for `action_id`. Runs the staged action exactly as it was shown.
-        Returns None when there is nothing (any more) to answer."""
+        `scope` "task" (the card's "for this task" button, or words like "yes for this task" —
+        read from `text` when not given): the same tool on the same app runs without asking for
+        the rest of this task (neo.agent.grants). Returns None when there is nothing (any more)
+        to answer."""
         async with self._answer_lock:  # a spoken "yes" and a click on the card can't both run it
             _mark_job()
             job = job or f"j{next(_job_ids)}"
@@ -525,6 +599,7 @@ class Session:
                 await bus().end_job(job)
                 return None
             if not yes:
+                grants.end(p.task)
                 confirm.cancel()
                 outcomes.confirm(False)  # "no" at a confirmation: not what they wanted
                 self._drop_pending()
@@ -534,6 +609,8 @@ class Session:
                 return Reply("Cancelled.", "confirm", job=job, silent=True)  # the card closing says it
             if self._pending_action and p.action_id != self._pending_action and not action_id:
                 # Something else was staged after the question the user heard: don't guess.
+                grants.end(self._pending_task)
+                grants.end(p.task)
                 confirm.cancel("mismatch")
                 self._drop_pending()
                 msg = "That request changed underneath me, so I didn't do anything. Ask again and I'll confirm first."
@@ -545,13 +622,15 @@ class Session:
             ours = staged_here and self._pending_origin == "agent"  # an agent job of this session asked it
             # The card was built with the request's taint: the approved call rebuilds it the same.
             taint = list(self._pending_taint) if staged_here else []
-            tool, args, aid = p.tool, dict(p.params), p.action_id
+            tool, args, aid, task = p.tool, dict(p.params), p.action_id, p.task
+            if (scope or scope_of(text)) == "task":
+                grants.grant(task, tool, p.target, aid)  # nothing when the card can't be answered that way
             self._drop_pending()
             await self._clear_confirming()
             await bus().set_state(NeoState.WORKING, job=job)
             await bus().tool_start(tool, args, job=job)
             approval = ToolContext(user_text=text or "yes", taint=list(taint), origin="approval")
-            with confirm.approved(aid):
+            with grants.task(task), confirm.approved(aid):
                 out = await registry().invoke(tool, args, approval)
             await bus().tool_end(tool, out.ok, out.text, job=job)
             # The approved call may stage a new card ("<App> couldn't open Priya's chat. Send it
@@ -567,11 +646,12 @@ class Session:
                     outcomes.step(episode, tool, out.ok, halt=True)
                 self._adopt(restaged, taint, "agent" if ours else "direct")
                 # Worded as its owner asks: an agent's question the way the agent loop words it.
-                q = f"{restaged.summary} — Should I go ahead?" if ours else out.text
+                q = self._with_scope_hint(f"{restaged.summary} — Should I go ahead?") if ours else out.text
                 await bus().set_state(NeoState.CONFIRMING, job=job)
                 await bus().say(q, final=True, job=job)
                 return Reply(q, "confirm", job=job)
         if not ours:
+            grants.end(task)
             # Asked by a direct command: there's no agent run to hand the result back to.
             msg = out.text if out.ok else f"That didn't work: {out.text}"
             await bus().say(msg[:600], final=True, job=job)
@@ -585,19 +665,23 @@ class Session:
         snapshot = self._trimmed()
         ctx = ToolContext(user_text=text or "yes", taint=taint)
         try:
-            res = await run_agent(
-                follow, provider=brain("agent"), system=self._system(), history=snapshot, ctx=ctx, effort="medium", job=job
-            )
-        except asyncio.CancelledError:
-            if episode:
+            with grants.task(task):  # the same task goes on: its grants and notes still hold
+                res = await run_agent(
+                    follow, provider=brain("agent"), system=self._system(), history=snapshot, ctx=ctx, effort="medium", job=job
+                )
+        except BaseException as e:
+            grants.end(task)
+            if isinstance(e, asyncio.CancelledError) and episode:
                 outcomes.cancelled(episode)  # stopped before it finished: not what they wanted
             raise
         await self._remember(*res.messages[len(snapshot) :])
         if episode:  # how the job the user said yes to actually ended (maybe at another question)
             _learn_from(episode, res)
         if res.stopped == "needs_confirm" and self._stage_pending(res, ctx.taint):
-            await bus().say(res.question, final=True, job=job)
-            return Reply(res.question, "confirm", None, res, job=job, taint=tuple(ctx.taint))
+            q = self._with_scope_hint(res.question)
+            await bus().say(q, final=True, job=job)
+            return Reply(q, "confirm", None, res, job=job, taint=tuple(ctx.taint))
+        grants.end(task)
         # Shown in the overlay either way; spoken only if it didn't go as approved.
         await bus().say(res.text, final=True, job=job)
         await bus().end_job(job)
@@ -610,6 +694,7 @@ class Session:
         """If nobody answers, the question lapses and the orb stops asking."""
         await asyncio.sleep(confirm._TTL_S)
         if self._pending_action == action_id:
+            grants.end(self._pending_task)
             confirm.cancel("expired")
             self._drop_pending()
             await bus().note("No answer — I didn't do it.")

@@ -11,7 +11,10 @@ full command / script / path on the overlay's card. Only the user can approve:
 * the approval covers exactly what the card showed: the staged parameters *and* the summary and
   detail built from the screen at that moment. A call that differs in any of them — a longer
   command, another mail body, an element id that now points at a different button — asks again;
-* every staging gets a fresh random action id, so a stale card can't approve a later one.
+* every staging gets a fresh random action id, so a stale card can't approve a later one;
+* a yes "for this task" (neo.agent.grants) lets later calls of the same tool on the same app in
+  the same task through without a card — never a dangerous one, and never once the request has
+  read something new and untrusted. The card says when it can be answered that way (`scopes`).
 
 Only NEO's own code can halt a run with a question: :func:`stage` and :func:`ask_user` return a
 :class:`Halt` string, which a web page or an email that happens to start with "NEEDS_CONFIRM"
@@ -31,6 +34,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any
 
+from neo.agent import grants
 from neo.config import settings
 
 NEEDS_CONFIRM = "NEEDS_CONFIRM"
@@ -61,6 +65,8 @@ class Pending:
     detail: str = ""  # exactly what will run (command, script, path + content…), for the card
     staged_at: float = field(default_factory=time.time)
     key: str = ""  # hash of tool + params + summary + detail: what an approval covers
+    task: str = ""  # the task that asked (grants.current()); "" = a direct command
+    target: grants.Target | None = None  # what it acts on, when a yes for this task could cover it
 
 
 @dataclass
@@ -188,13 +194,23 @@ def _announce(kind: str, **data: Any) -> None:
 
 
 def card(p: Pending | None) -> dict[str, Any] | None:
-    """What the overlay shows for a pending question."""
+    """What the overlay shows for a pending question. `scopes`: the ways beyond "just this once"
+    it may be answered — ["task"] when a yes for this task could cover the calls that follow."""
     if not p:
         return None
-    return {"action_id": p.action_id, "tool": p.tool, "summary": p.summary, "detail": p.detail}
+    return {
+        "action_id": p.action_id,
+        "tool": p.tool,
+        "summary": p.summary,
+        "detail": p.detail,
+        "scopes": grants.offered(p.task, p.target),
+        "app": p.target.app if p.target is not None and grants.offered(p.task, p.target) else "",
+    }
 
 
-def stage(tool: str, params: dict[str, Any], summary: str, detail: str = "") -> Halt:
+def stage(
+    tool: str, params: dict[str, Any], summary: str, detail: str = "", *, target: grants.Target | None = None
+) -> Halt:
     """Stage an operation and return the halt sentinel + the question for the user."""
     global _pending
     params = clean(params)
@@ -206,7 +222,10 @@ def stage(tool: str, params: dict[str, Any], summary: str, detail: str = "") -> 
         audit(_pending.action_id, _pending.tool, _pending.params, "superseded")
         _announce("confirm_done", action_id=_pending.action_id, outcome="superseded")
     aid = f"{tool}:{secrets.token_hex(8)}"
-    _pending = Pending(action_id=aid, tool=tool, params=dict(params), summary=summary, detail=detail, key=key)
+    _pending = Pending(
+        action_id=aid, tool=tool, params=dict(params), summary=summary, detail=detail, key=key,
+        task=grants.current(), target=target,
+    )
     audit(aid, tool, params, "staged")
     _announce("confirm", **card(_pending))  # type: ignore[arg-type]
     try:  # close the card when nobody answers, even if nothing else asks in the meantime
@@ -282,13 +301,21 @@ def approval_active() -> bool:
 
 
 def gated(
-    tool: str, params: dict[str, Any], summary: str, detail: str = "", *, always: bool = False
+    tool: str,
+    params: dict[str, Any],
+    summary: str,
+    detail: str = "",
+    *,
+    always: bool = False,
+    target: grants.Target | None = None,
 ) -> dict[str, Any] | str:
     """One-liner for tool handlers.
 
     Returns the released params when the user approved this exact operation (or when
     confirmation is turned off), otherwise the ``NEEDS_CONFIRM`` string for the model.
     `always`: ask even with confirmation turned off — for what reaches another person (a send).
+    `target`: what the call acts on, from a tool whose calls a yes "for this task" may cover
+    (neo.agent.grants); without one, every call asks.
     """
     params = clean(params)
     if not settings().confirm_destructive and not always:
@@ -296,7 +323,10 @@ def gated(
     released = consume(op_key(tool, params, summary, detail))
     if released is not None:
         return released
-    return stage(tool, params, summary, detail)
+    if target is not None and not always and (g := grants.covering(tool, target)) is not None:
+        audit(f"{tool}:{secrets.token_hex(8)}", tool, params, f"ran under the task grant of {g.action_id} ({g.app})")
+        return params
+    return stage(tool, params, summary, detail, target=target)
 
 
 def ask_user(msg: str) -> Halt:

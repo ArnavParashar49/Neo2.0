@@ -2,7 +2,8 @@
 
 Server → UI  : every EventBus event as JSON {type, data, ts}
 UI → Server  : {"cmd": "text", "text": "..."}      send a typed request
-               {"cmd": "confirm", "yes": true}     answer a pending confirmation
+               {"cmd": "confirm", "yes": true, "action_id": "…"}   answer a pending confirmation
+                   (+ "scope": "task" — yes for this task, when the card's "scopes" offer it)
                {"cmd": "ptt", "on": true}          push-to-talk toggle
                {"cmd": "stop"}                     interrupt speech / cancel
                {"cmd": "wake"}                     arm the voice session
