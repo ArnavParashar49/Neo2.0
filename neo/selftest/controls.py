@@ -1,7 +1,8 @@
 """The controls self-test: NEO checks its own mouse, keyboard and screen controls on this Mac.
 
-How the user runs it: say "Neo, check your computer controls" (or type it in NEO's overlay). From a
-shell inside NEO.app's own process tree: ``python -m neo.selftest controls`` (neo/selftest/__main__.py).
+How the user runs it: say "Neo, check your computer controls" (or type it in NEO's overlay). A
+developer, from their own Terminal: ``python -m neo.selftest controls`` (neo/selftest/__main__.py,
+which never runs as a command NEO itself runs).
 
 What happens, in under a minute:
 
@@ -891,7 +892,6 @@ async def run(
     test takes the mouse (other NEO jobs at work)."""
     from neo.tools import computer
     from neo.tools.computer import apps
-    from neo.tools.computer import input as inp
 
     mac = mac or Mac()
     t0 = time.monotonic()

@@ -964,6 +964,7 @@ def test_without_a_tap_a_pointer_moved_after_neos_last_mouse_event_is_not_pulled
     report = _run(mac)
     assert desk.pointer == (1300.0, 500.0) and not _pointer_pulled_back(desk)
     assert desk.activations == []
+    assert "you were using the mouse or keyboard" in report.info["clean-up"]
 
 
 def test_a_keyboard_app_switch_a_mouse_only_tap_cannot_hear_is_left_alone(mac):

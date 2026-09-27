@@ -150,12 +150,17 @@ whether a click on a window that isn't in front gets through (Chess's board igno
 
 While it runs, keep your hands off the mouse and keyboard: the first move, click or key press of yours stops it
 at once. It never clicks, scrolls or types anywhere but its test window — every event is checked before it is
-sent — and it won't start if something covers that window. Afterwards it closes the window, puts the pointer
-back and brings back the app you were in. The reply lists what worked and what didn't, with what NEO sent,
-what its tool answered and what actually arrived; the full report is saved in `~/.neo/selftest/`. Only your
-own request starts it — no model can. From a shell running inside NEO.app (for instance NEO's own shell tool),
-`python -m neo.selftest controls` runs the same test; anywhere else it only tells you to ask NEO, because it
-needs NEO.app's permissions.
+sent — and it won't start if something covers that window, while another NEO job is still at work, or while a
+mouse button is held down. Afterwards it closes the window, puts the pointer back and brings back the app you
+were in — unless you've taken over the mouse or keyboard (even as it finishes) or gone to another app: then
+it leaves both as they are. The reply lists what worked and what didn't, with what NEO sent, what its tool
+answered and what actually arrived; the full report is saved in `~/.neo/selftest/`.
+
+Only your own words start it ("your computer controls", "NEO's", *apne* — "test the input controls" could be
+about a game), once per request: no model can, and a model handing your earlier words back doesn't run it
+again. For developers, `python -m neo.selftest controls` runs the same test from your own Terminal window, with
+that terminal's permissions (Accessibility; Screen Recording for the screenshot checks); it refuses to run as a
+command NEO itself runs (its shell tool) or without an interactive terminal.
 
 ## Configuration
 

@@ -1,11 +1,14 @@
-"""``python -m neo.selftest controls`` — NEO's controls self-test from a shell.
+"""``python -m neo.selftest controls`` — NEO's controls self-test from a developer's own Terminal.
 
 The usual way is to ask NEO: say "Neo, check your computer controls" (or type it in the overlay).
+Inside NEO only those words start it, never a model: so this command refuses to run inside NEO.app's
+process tree or from NEO's own shell tool (which runs a model's commands, behind one generic "run a
+command" card — and whose time limit would kill the test mid-drag, leaving nothing put back), and
+without an interactive terminal (a script or a tool, not a person at the keyboard).
 
-The test clicks and types with NEO.app's permissions (Accessibility, Screen Recording). macOS
-gives those to NEO.app's own processes — the core NEO.app starts, and whatever the core starts —
-so this command runs only inside NEO.app's process tree (for instance through NEO's own shell).
-Anywhere else (a Terminal window) it says so and does nothing.
+From a Terminal window it clicks and types with that terminal's permissions (Accessibility; Screen
+Recording for the screenshot checks), not NEO.app's: it tests NEO's tools, the way NEO.app would
+use them.
 
 Exit status: 0 every check passed, 1 something failed or the run stopped early, 2 it didn't run.
 """
@@ -21,6 +24,7 @@ import sys
 
 _APP_EXEC = "/NEO.app/Contents/MacOS/"
 _HOW = 'Say "Neo, check your computer controls" (or type it in NEO\'s overlay) and NEO runs it itself.'
+SHELL_MARK = "NEO_SHELL"  # set by NEO's shell tool on every command it runs (neo.tools.computer.shell)
 
 
 def process_table() -> dict[int, tuple[int, str]]:
@@ -54,15 +58,29 @@ def neo_app_ancestor(pid: int | None = None, table: dict[int, tuple[int, str]] |
     return ""
 
 
+def _interactive() -> bool:
+    try:
+        return bool(sys.stdin.isatty())
+    except (AttributeError, ValueError, OSError):
+        return False
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="python -m neo.selftest", description="NEO's self-tests.")
     p.add_argument("test", choices=["controls"], help="controls: NEO's mouse, keyboard and screen tools, in a test window")
     p.add_argument("--json", action="store_true", help="print the report as JSON")
     args = p.parse_args(argv)
-    if not neo_app_ancestor():
+    if os.environ.get(SHELL_MARK) or neo_app_ancestor():
         print(
-            "The controls self-test needs NEO.app's permissions (Accessibility, Screen Recording), so it runs "
-            f"only inside NEO.app. {_HOW}",
+            "Inside NEO the controls check starts only from your own request, never from a command NEO runs "
+            f"(a model could have asked for it). {_HOW}",
+            file=sys.stderr,
+        )
+        return 2
+    if not _interactive():
+        print(
+            "The controls check drives the mouse and keyboard, so this command runs only in an interactive "
+            f"terminal, with you at it. {_HOW}",
             file=sys.stderr,
         )
         return 2
@@ -70,7 +88,7 @@ def main(argv: list[str] | None = None) -> int:
     from neo.tools import computer  # noqa: F401 - registers NEO's own tools, which the test drives
 
     if computer._needs_ax() is not None:
-        print(f"Accessibility is off for NEO: {computer.AX_OFF}.", file=sys.stderr)
+        print("Accessibility is off for this terminal: turn it on in System Settings › Privacy & Security.", file=sys.stderr)
         return 2
     report = asyncio.run(controls.run(notify=lambda msg: print(msg, file=sys.stderr)))
     saved = controls.save(report)
