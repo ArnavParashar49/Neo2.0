@@ -1074,32 +1074,13 @@ def regular(pid: int) -> bool:
         return False
 
 
-def _window_owner_at(x: float, y: float) -> tuple[int, str]:
-    """(pid, name) owning the topmost visible window at a point — for apps that show nothing to
-    Accessibility there (a game drawn with Metal)."""
-    try:
-        import Quartz as Q
-
-        opts = Q.kCGWindowListOptionOnScreenOnly | Q.kCGWindowListExcludeDesktopElements
-        for w in Q.CGWindowListCopyWindowInfo(opts, Q.kCGNullWindowID) or []:  # front to back
-            b = w.get("kCGWindowBounds") or {}
-            if float(w.get("kCGWindowAlpha", 1.0) or 0.0) <= 0.01:
-                continue
-            bx, by, bw, bh = (float(b.get(k, 0)) for k in ("X", "Y", "Width", "Height"))
-            if bx <= x < bx + bw and by <= y < by + bh:
-                return int(w.get("kCGWindowOwnerPID", 0)), str(w.get("kCGWindowOwnerName", ""))
-    except Exception:  # noqa: BLE001
-        pass
-    return 0, ""
-
-
 @pooled
 def hit(x: float, y: float) -> Hit:
     """Who owns a screen point and what's there — one Accessibility lookup for the gate, for
     bringing the right app forward, for keeping off NEO's own window and for the report."""
     el = _element_at(x, y)
-    if el is None:
-        pid, name = _window_owner_at(x, y)
+    if el is None:  # an app that shows nothing to Accessibility there (a game drawn with Metal)
+        name, pid = window_owner_at(x, y) or ("", 0)  # (can't say: unnamed, and the gates fail closed)
         return Hit(pid=pid, app=name, regular=regular(pid)) if pid else Hit()
     pid = pid_of(el)
     app = _running(pid)

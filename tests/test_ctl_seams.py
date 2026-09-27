@@ -849,3 +849,37 @@ def test_click_texts_fallback_asks_first_when_the_spot_is_a_committing_control(m
     staged, clicked = _fallback_world(monkeypatch, ax.Hit(pid=0, app="Notes", label="Archive", role="AXStaticText"))
     asyncio.run(tools_label.click_text({"label": "archive"}, ToolContext(origin="agent")))
     assert staged == [] and clicked == [(130.0, 110.0)]  # the text meant: clicked
+
+
+# ---- one window-server lookup ------------------------------------------------------------------------
+
+
+def test_one_window_server_lookup_names_a_point_accessibility_cannot(monkeypatch):
+    """ax.hit and the protected check ask the window server the same way (window_owner_at): a board
+    drawn with Metal is named by one lookup; when the window server can't say, the point is unnamed
+    and nothing there is touched (fail closed)."""
+    import ApplicationServices as AS
+    import Quartz
+
+    from neo.tools.computer import ax, pointer
+
+    real = {name: old for obj, name, old in monkeypatch._setattr if obj is ax and name in ("hit", "window_owner_at")}
+    for name, fn in real.items():  # (the suite fakes both: the real ones here)
+        monkeypatch.setattr(ax, name, fn)
+    assert not hasattr(ax, "_window_owner_at")  # one lookup, one set of rules
+    lists = []
+    board = {"kCGWindowBounds": {"X": 0, "Y": 0, "Width": 800, "Height": 600}, "kCGWindowAlpha": 1.0,
+             "kCGWindowOwnerPID": 4242, "kCGWindowOwnerName": "Board"}  # fmt: skip
+    monkeypatch.setattr(AS, "AXUIElementCreateSystemWide", lambda: object())
+    monkeypatch.setattr(AS, "AXUIElementSetMessagingTimeout", lambda el, t: 0)
+    monkeypatch.setattr(AS, "AXUIElementCopyElementAtPosition", lambda el, x, y, _: (-25212, None))
+    monkeypatch.setattr(Quartz, "CGWindowListCopyWindowInfo", lambda o, w: lists.append(1) or [board])
+    monkeypatch.setattr(ax, "regular", lambda pid: True)
+    monkeypatch.setattr(ax, "is_neo", lambda pid, name="": False)
+    monkeypatch.setattr(ax, "app_names", lambda pid: {"board"})
+    t = asyncio.run(pointer.probe([(10.0, 10.0)]))
+    assert (t.hits[0].pid, t.hits[0].app, t.hits[0].regular) == (4242, "Board", True) and len(lists) == 1
+    monkeypatch.setattr(Quartz, "CGWindowListCopyWindowInfo", lambda o, w: None)  # it can't say
+    assert ax.hit(10, 10) == ax.Hit()
+    with pytest.raises(pointer.Refused):
+        asyncio.run(pointer.probe([(10.0, 10.0)]))
