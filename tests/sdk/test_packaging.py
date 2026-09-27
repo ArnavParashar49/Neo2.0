@@ -53,6 +53,12 @@ APP_BEFORE = {
     "python-dotenv",
     "websockets>=13",
 }
+# What NEO.app gained since (the user's decisions, 2026-09-27): screen capture in NEO's own process
+# (ScreenCaptureKit) and on-device text recognition (Vision), the same pyobjc release.
+APP_ADDED = {
+    "pyobjc-framework-ScreenCaptureKit>=12.2,<13; sys_platform == 'darwin'",
+    "pyobjc-framework-Vision>=12.2,<13; sys_platform == 'darwin'",
+}
 HEAVY = ("torch", "laya", "mlx", "pyobjc", "playwright", "sentence-transformers", "google-genai", "openai", "anthropic")
 
 
@@ -76,7 +82,8 @@ def _name(req: str) -> str:
 
 
 def test_neo_app_gets_exactly_the_dependencies_it_always_had():
-    assert set(PROJECT["dependencies"]) | _flat("app") == APP_BEFORE
+    assert set(PROJECT["dependencies"]) | _flat("app") == APP_BEFORE | APP_ADDED
+    assert set(EXTRAS["mac"]) >= APP_ADDED  # macOS frameworks: the mac extra, nothing else
 
 
 def test_the_core_is_small_and_nothing_heavy():

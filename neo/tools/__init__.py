@@ -60,6 +60,11 @@ _BROWSER = (
     "browser_back", "browser_tabs", "browser_screenshot", "browser_handoff", "browser_close",
 )  # fmt: skip
 
+# Tools the computer-controls work is adding, and the preset each joins the day it is registered
+# (a name in a preset must be a registered tool: an agent given one that isn't fails to load). Its
+# module is already known, and neo2's MCP server already counts menu_command among its input tools.
+PLANNED: dict[str, str] = {"menu_command": "mac", "look": "mac_read"}
+
 PRESETS: dict[str, tuple[str, ...]] = {
     "web": ("web_search", "web_fetch", "weather", "clock"),
     "browser": _BROWSER,
@@ -79,6 +84,7 @@ MODULES_FOR: dict[str, str] = {
     "memory": "neo.tools.memory_tool",
     **dict.fromkeys(_BROWSER, "neo.tools.browser"),
     **dict.fromkeys(_COMPUTER + _TASKS, "neo.tools.computer"),
+    **dict.fromkeys(PLANNED, "neo.tools.computer"),
 }
 
 # Tools that only work on macOS (their `requires` tag says "macos").

@@ -13,6 +13,7 @@ import itertools
 import re
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -21,6 +22,30 @@ from AppKit import NSWorkspace
 
 from neo import effects
 from neo.decide._objc import pooled
+
+# ---- the one door for Accessibility actions -------------------------------------------------------
+# Every AX action NEO takes in another app — a press, a value or the focus set, a window raised —
+# goes through perform_action / set_attribute, as every event goes through input._post. While the
+# controls self-test runs, its watcher (_watch) sees each first and raises instead when the action
+# wouldn't stay in its test window; then the effects switch (neo/effects.py) has its say.
+_watch: Callable[[str, Any, str, Any], None] | None = None
+
+
+def perform_action(el: Any, action: str, *, kind: str = "accessibility", what: str = "") -> int:
+    """AXUIElementPerformAction through the one door: the AX error code (0 = done)."""
+    if _watch is not None:
+        _watch("perform", el, action, None)
+    effects.guard(kind, what or f"press {action} in another app's UI", via=AS.AXUIElementPerformAction)
+    return AS.AXUIElementPerformAction(el, action)
+
+
+def set_attribute(el: Any, name: str, value: Any, *, kind: str = "accessibility", what: str = "") -> int:
+    """AXUIElementSetAttributeValue through the one door: the AX error code (0 = done)."""
+    if _watch is not None:
+        _watch("set", el, name, value)
+    effects.guard(kind, what or f"set {name} in another app's UI", via=AS.AXUIElementSetAttributeValue)
+    return AS.AXUIElementSetAttributeValue(el, name, value)
+
 
 # Roles worth showing to the model. Containers are walked but not listed unless titled.
 _INTERACTIVE = {
@@ -581,8 +606,7 @@ def press_el(e: Element) -> str:
     if not action:
         offers = ", ".join(a for a in e.actions) or "none"
         return f"Error: {e.id} can't be pressed (its actions: {offers}) — click it by id instead."
-    effects.guard("accessibility", f"press {action} in another app's UI", via=AS.AXUIElementPerformAction)
-    err = AS.AXUIElementPerformAction(e.ref, action)
+    err = perform_action(e.ref, action)
     if err == 0:
         return f"Pressed {what}"
     if err == _CANNOT_COMPLETE:
@@ -771,9 +795,8 @@ def visible_frame(el) -> tuple[float, float, float, float] | None:
 
 def focus_el(el) -> bool:
     """Give the element the keyboard focus through AX (no click), and say whether it took it."""
-    effects.guard("accessibility", "focus a text area in another app's UI", via=AS.AXUIElementSetAttributeValue)
     try:
-        if AS.AXUIElementSetAttributeValue(el, AS.kAXFocusedAttribute, True) != 0:
+        if set_attribute(el, AS.kAXFocusedAttribute, True, what="focus a text area in another app's UI") != 0:
             return False
     except Exception:  # noqa: BLE001
         return False
@@ -786,8 +809,7 @@ def press_element(e: Element) -> str:
     action = "AXPress" if "AXPress" in e.actions else ""
     if not action:
         return "Error: no press action"
-    effects.guard("accessibility", f"press {action} in another app's UI", via=AS.AXUIElementPerformAction)
-    err = AS.AXUIElementPerformAction(e.ref, action)
+    err = perform_action(e.ref, action)
     return "Pressed" if err == 0 else f"Error: AX action failed ({err})"
 
 
@@ -1055,10 +1077,10 @@ def raise_window(h: Hit) -> bool:
     focused = _attr(_app_el(h.pid), AS.kAXFocusedWindowAttribute)
     if focused is None or _same(focused, h.window) or _attr(focused, "AXModal") is True:
         return False  # (a modal window stays on top: never raise another over it)
-    effects.guard("focus", f"raise {h.app or 'an app'}'s window under the pointer", via=AS.AXUIElementPerformAction)
+    what = f"raise {h.app or 'an app'}'s window under the pointer"
     try:
-        AS.AXUIElementPerformAction(h.window, "AXRaise")
-        AS.AXUIElementSetAttributeValue(h.window, "AXMain", True)
+        perform_action(h.window, "AXRaise", kind="focus", what=what)
+        set_attribute(h.window, "AXMain", True, kind="focus", what=what)
     except Exception:  # noqa: BLE001
         return False
     return True

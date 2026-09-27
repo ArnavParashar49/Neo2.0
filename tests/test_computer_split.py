@@ -21,7 +21,7 @@ from neo.tools import computer
 from neo.tools.computer import gates
 
 ROOT = Path(__file__).resolve().parents[1]
-COMPUTER = ROOT / "neo" / "tools" / "computer"
+COMPUTER = Path(computer.__file__).resolve().parent
 TOOL_FILES = ("tools_ax.py", "tools_pointer.py", "tools_keys.py", "tools_label.py", "tools_apps.py", "phrases.py")
 
 # NEO.app's catalog as it was before the split (a fresh process, every module loaded).

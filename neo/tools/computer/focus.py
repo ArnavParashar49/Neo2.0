@@ -87,8 +87,9 @@ def force_front(pid: int) -> bool:
         app = AS.AXUIElementCreateApplication(pid)
         err, win = AS.AXUIElementCopyAttributeValue(app, "AXFocusedWindow", None)
         if err == 0 and win is not None:
-            effects.guard("focus", f"raise process {pid}'s window", via=AS.AXUIElementPerformAction)
-            AS.AXUIElementPerformAction(win, "AXRaise")
+            from neo.tools.computer import ax
+
+            ax.perform_action(win, "AXRaise", kind="focus", what=f"raise process {pid}'s window")
     except Exception:  # noqa: BLE001
         pass
     return True

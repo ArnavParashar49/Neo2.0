@@ -803,21 +803,19 @@ def _attr(el, name: str, default=None):
 
 
 def _set(el, name: str, value) -> bool:
-    import ApplicationServices as AS
-
-    effects.guard("accessibility", f"set {name} in another app's UI", via=AS.AXUIElementSetAttributeValue)
+    """Through the computer tools' one door for AX actions (ax.set_attribute)."""
+    set_attribute = _ax_mod().set_attribute  # (resolved first: effects off refuse the set, not this lookup)
     try:
-        return AS.AXUIElementSetAttributeValue(el, name, value) == 0
+        return set_attribute(el, name, value) == 0
     except Exception:  # noqa: BLE001
         return False
 
 
 def _perform(el, action: str) -> bool:
-    import ApplicationServices as AS
-
-    effects.guard("accessibility", f"press {action} in another app's UI", via=AS.AXUIElementPerformAction)
+    """Through the computer tools' one door for AX actions (ax.perform_action)."""
+    perform_action = _ax_mod().perform_action
     try:
-        return AS.AXUIElementPerformAction(el, action) == 0
+        return perform_action(el, action) == 0
     except Exception:  # noqa: BLE001
         return False
 

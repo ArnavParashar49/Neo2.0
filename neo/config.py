@@ -147,6 +147,37 @@ class Settings(BaseSettings):
     protected_apps: list[str] = []
     fast_paths: bool = True  # zero-LLM regex commands (neo.agent.fastpath)
 
+    # ---- computer controls (neo/tools/computer) -----------------------------------------
+    # The thinking level a step on the screen starts at. Today's is the agent's own ("high"); it
+    # changes only after a measured A/B on the controls self-test's window.
+    screen_effort: Literal["minimal", "low", "medium", "high"] = "high"
+    # A first look at the requested app, taken before the first model call — only when that app
+    # is already in front (or none is named and the front one is where NEO last worked), never a
+    # protected app's, with a picture only when the screen is needed. Off: the model looks itself.
+    prefetch_look: bool = True
+    shot_format: Literal["jpeg", "png"] = "jpeg"  # screenshots for a model: JPEG q85, or PNG
+    # Laya's UI resolver ("click the start button", "start wala button dabao"): "shadow" logs
+    # what it would press and acts only on an exact label; "live" lets every stage that passed
+    # its eval act; "off" leaves UI commands to the model. The confirmation gate asks either way.
+    resolver: Literal["live", "shadow", "off"] = "shadow"
+    resolver_laya_p: float = 0.7  # Laya's pick counts only this sure, and only agreeing with MiniLM
+    local_grounder: str = ""  # a local vision model for pointing at things ("" = none: the user picks one)
+    ground_port: int = 8081  # where that model is served, on this Mac only
+    sck_capture: bool = False  # ScreenCaptureKit one-shot captures instead of the screencapture tool
+    sck_stream: bool = False  # ScreenCaptureKit live frames during a pixel task
+
+    @field_validator("screen_effort", "shot_format", "resolver", mode="before")
+    @classmethod
+    def _controls_choice(cls, v, info):
+        """A typo must not stop NEO from starting, and never turns a feature on: an unknown value
+        is the default (today's behaviour)."""
+        s = str(v or "").strip().lower()
+        allowed = {"screen_effort": ("minimal", "low", "medium", "high"), "shot_format": ("jpeg", "png"),
+                   "resolver": ("live", "shadow", "off")}[info.field_name]  # fmt: skip
+        default = {"screen_effort": "high", "shot_format": "jpeg", "resolver": "shadow"}[info.field_name]
+        s = {"jpg": "jpeg"}.get(s, s)
+        return s if s in allowed else default
+
     # ---- memory & prompt ---------------------------------------------------------------
     embeddings: Literal["local", "off"] = "local"  # off: keyword-only recall, no local model
     memory_enabled: bool = True  # long-term memory (memory.sqlite3) at all

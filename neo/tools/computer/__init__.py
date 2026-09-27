@@ -9,7 +9,9 @@ Where things are:
   click, drag, scroll), ``tools_keys.py`` (type_text, dictate, hotkey), ``tools_label.py``
   (click_text), ``tools_apps.py`` (apps, pages, shell and files) — the tools; ``phrases.py`` — the
   words of their fast paths.
-- ``ax``, ``input``, ``pointer``, ``screen``, ``apps``, ``focus``, ``shell`` — the primitives.
+- ``ax``, ``input``, ``pointer``, ``screen``, ``apps``, ``focus``, ``shell``, ``wait`` — the primitives.
+  ``input._post`` is the one door for input events and ``ax.perform_action`` / ``ax.set_attribute``
+  the one door for Accessibility actions: the controls self-test's watchers hook both.
 
 Every name those files define reads here too (``neo.tools.computer.click``, ``._ask_first``), and
 a write to one here — a test's monkeypatch — lands in the file that defines it, where the tools

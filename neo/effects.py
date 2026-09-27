@@ -34,6 +34,9 @@ primitive) keeps working, while a path nobody faked is refused instead of acting
   front, permission prompts, the Calendar/Reminders and Contacts stores, the speaker and the
   microphone, Playwright's Chromium, the local model server, a note file in the user's Documents),
   and before loading a model into memory (Laya, the on-device voice, the memory's embedder).
+  Capturing the screen inside NEO's own process — ScreenCaptureKit, CGWindowListCreateImage, OCR
+  of a fresh capture — starts no program for the audit hook to see: it is ``guard("capture", …)``
+  (``CAPTURE``), right before the capture call (the ``screencapture`` program stays refused as one).
 """
 
 from __future__ import annotations
@@ -53,6 +56,9 @@ import weakref
 from collections.abc import Iterator
 from typing import Any
 from urllib.parse import urlsplit
+
+# The kind of effect a screen capture made in NEO's own process is (see the module doc).
+CAPTURE = "capture"
 
 
 class EffectRefused(BaseException):

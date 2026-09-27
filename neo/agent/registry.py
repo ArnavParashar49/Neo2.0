@@ -41,6 +41,38 @@ Risk = Literal["safe", "reversible", "destructive"]
 
 
 @dataclass
+class Effect:
+    """What an action visibly did, as NEO checked it (not what the tool meant to do). ``changed``:
+    something changed where it acted (None: couldn't tell); ``scene_changed``: the front app, its
+    window or a sheet changed — what follows was planned on a screen that is gone; ``sheet``: the
+    sheet or dialog now open ("" = none), as NEO's own words; ``looked``: the result carries a look
+    at the screen after the action (its picture, or the words of it), so no separate look is needed."""
+
+    changed: bool | None = None
+    scene_changed: bool = False
+    sheet: str = ""
+    looked: bool = False
+
+
+@dataclass(frozen=True)
+class Choice:
+    """One option of a :class:`Handoff`: an id the model answers with, and what it is."""
+
+    id: str
+    label: str
+
+
+@dataclass
+class Handoff:
+    """A tool that couldn't decide alone (two buttons match "Start"): the choice goes to a model as
+    a multiple choice of at most a handful of options — never free text, and never acted on
+    without it. ``reason``: why NEO didn't choose (NEO's own words)."""
+
+    reason: str
+    choices: list[Choice] = field(default_factory=list)
+
+
+@dataclass
 class ToolOutput:
     text: str
     images: list[ImagePart] = field(default_factory=list)
@@ -53,6 +85,9 @@ class ToolOutput:
     # An untrusted tool's text reaches the model fenced as data. False: the text is NEO's own words
     # only (a screenshot's note on how its pixels map to the screen — the picture is the untrusted part).
     fence: bool = True
+    # (fields below are appended with defaults: ToolOutput is neo2's public API)
+    effect: Effect | None = None  # what an action visibly did, when NEO checked (None: not an action / not checked)
+    handoff: Handoff | None = None  # a choice this tool leaves to a model (a multiple choice)
 
 
 def voiced(out: ToolOutput, quiet: bool) -> bool:
@@ -119,6 +154,10 @@ class RegisteredTool:
     requires: frozenset[str] = frozenset()  # what it needs to run: "macos", "playwright", "web"
     origin: Literal["builtin", "host"] = "builtin"  # NEO's own tool, or an embedding host's
     read_only: bool | None = None  # changes nothing (None: not declared; parallel_safe hints it)
+    # Takes the user's whole sentence as {"utterance": …} and grounds it itself (click_text, a menu
+    # command): the session may run it with no model filling in its arguments — only for the
+    # user's own words (see utterance_lane), never a model's, Live's or an approval's.
+    by_utterance: bool = False
 
     def spec(self) -> ToolSpec:
         return ToolSpec(self.name, self.description, self.parameters)
@@ -272,6 +311,7 @@ def tool(
     idempotent: bool = False,
     requires: Iterable[str] = (),
     read_only: bool | None = None,
+    by_utterance: bool = False,
 ) -> Callable[[Handler], Handler]:
     def deco(fn: Handler) -> Handler:
         # Always the process catalog — even when a module is imported while an agent is bound.
@@ -296,11 +336,20 @@ def tool(
                 idempotent=idempotent,
                 requires=frozenset(requires),
                 read_only=read_only,
+                by_utterance=by_utterance,
             )
         )
         return fn
 
     return deco
+
+
+def utterance_lane(t: RegisteredTool | None, origin: Origin) -> bool:
+    """May this tool run straight from the user's sentence (its by_utterance lane)? Only a
+    by_utterance tool, and only for the user's own words: text from a model — the agent loop, an
+    embedding host's model (neo2 always hands over a model's words), Gemini Live relaying — or an
+    approval replay never picks and presses on its own; those keep the exact fast paths."""
+    return bool(t is not None and t.by_utterance and origin == "user")
 
 
 def fence(name: str, text: str) -> str:

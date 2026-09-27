@@ -209,6 +209,15 @@ def library_bound() -> bool:
     return rt is not None and rt.library
 
 
+def process_wide_ok() -> bool:
+    """May NEO change something for the whole process or start work of its own in the background
+    here — a process-wide Accessibility timeout, an AX observer thread, an idle scan of the OS's
+    UI strings? Only as NEO.app: never inside another app's process (library mode, sticky once an
+    embedded agent exists) or while an embedded agent's request runs. There, such things are left
+    out (or asked for per call), and the host's process stays as the host set it."""
+    return not (_library or library_bound())
+
+
 def _refuse_shared_data_dir(rt: Runtime) -> None:
     """One live agent per data dir: two would share a memory, an audit log and a browser profile
     (its logins), and one nested in another's would be the other's secret. Under _live_lock."""
