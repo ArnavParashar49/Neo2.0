@@ -8,6 +8,7 @@ is read from the real screen, no picture is taken, no model is loaded, nothing l
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import io
 import re
 import threading
@@ -35,6 +36,17 @@ def _decision(*, screen_p: float = 0.0, tool: str = "", intent: str = "agent_tas
     return Decision(intent, 0.95, False, 0.0, screen_p >= 0.5, screen_p, source="laya+head", tool=tool, tool_p=0.6 if tool else 0.0)
 
 
+def _env(monkeypatch, key: str, value: str | None) -> None:
+    """Set (or clear) a NEO_ setting for this test, whether neo.config has the key yet or not."""
+    from neo import config
+
+    if value is None:
+        monkeypatch.delenv(key, raising=False)
+    else:
+        monkeypatch.setenv(key, value)
+    monkeypatch.setattr(config, "_settings", None)
+
+
 def _png(w: int, h: int) -> bytes:
     buf = io.BytesIO()
     Image.new("RGB", (w, h), (200, 200, 200)).save(buf, format="PNG")
@@ -45,9 +57,12 @@ def _png(w: int, h: int) -> bytes:
 def world(monkeypatch):
     """A Mac with four made-up apps. ``world.front``: the app in front; its window holds three
     elements; a picture of it is 800×600 px for a 400×300 pt window at (100, 50)."""
+    from neo import config
     from neo.tools import load_all
 
     load_all()
+    monkeypatch.setenv("NEO_PREFETCH_LOOK", "1")  # (whatever a suite-wide default says)
+    monkeypatch.setattr(config, "_settings", None)
     monkeypatch.setattr(inv, "_WORDS_FILE", str(FIX_WORDS / "words.txt"))
     monkeypatch.setattr(inv, "_CONNECTIVES_FILE", str(FIX_WORDS / "connectives.txt"))
     monkeypatch.setattr(inv, "_words_known", {})
@@ -87,6 +102,8 @@ def world(monkeypatch):
     monkeypatch.setattr(ax, "pid_for_app", lambda name: pids.get(name))
     monkeypatch.setattr(ax, "snapshot", snapshot)
     monkeypatch.setattr(inv, "snapshot", lambda: list(w.installed) if w.scanned else None)
+    by_pid = {pids[a.name]: a for a in installed}
+    monkeypatch.setattr(inv, "app_for_pid", lambda pid: by_pid.get(pid) if w.scanned else None)
 
     def no_scan(refresh=False):
         raise AssertionError("the early look must never start a scan of the installed apps")
@@ -102,6 +119,7 @@ def world(monkeypatch):
 
     monkeypatch.setattr(screen, "capture_window", capture_window)
     monkeypatch.setattr(prefetch, "_last_warm", float("-inf"))
+    monkeypatch.setattr(prefetch, "_slow_until", {})
     return w
 
 
@@ -127,6 +145,16 @@ def test_the_requests_own_evidence_decides_whether_a_look_is_worth_taking(world)
     assert prefetch.wanted(_decision(screen_p=0.9), images=[ImagePart(b"x")]).image is False
 
 
+def test_a_brain_that_cannot_be_asked_counts_as_blind():
+    class Broken:
+        @property
+        def supports_vision(self):
+            raise RuntimeError("no keys")
+
+    assert prefetch.sees(types.SimpleNamespace(supports_vision=True))
+    assert not prefetch.sees(Broken()) and not prefetch.sees(object())
+
+
 def test_only_a_run_given_the_screen_tools_can_use_it():
     assert prefetch.uses_screen(["memory", "ax_tree"])
     assert prefetch.uses_screen([registry().get("click").spec()])
@@ -146,8 +174,24 @@ def test_a_named_app_that_is_not_in_front_is_not(world):
     assert world.walks == 0
 
 
+def test_an_app_that_only_shares_the_named_apps_name_is_not(world, monkeypatch):
+    # another vendor's "Quillpad" is in front: the bundle id tells them apart
+    other = inv.App("test.other.quillpad", "Quillpad", "/B/Quillpad.app")
+    monkeypatch.setattr(inv, "app_for_pid", lambda pid: other)
+    assert prefetch.target("in quillpad, press new page") is None
+    monkeypatch.setattr(inv, "app_for_pid", lambda pid: None)  # not in the scan: its names decide
+    assert prefetch.target("in quillpad, press new page") is not None
+
+
 def test_a_request_about_two_apps_is_not(world):
     assert prefetch.target("copy this from quillpad into wayfarer") is None
+
+
+def test_the_front_app_is_not_even_read_when_nothing_points_at_one(world, monkeypatch):
+    monkeypatch.setattr(ax, "working_app", lambda: pytest.fail("read the front app"))
+    assert prefetch.target("press the new page button") is None  # none named, NEO worked in none
+    world.scanned = False
+    assert prefetch.target("in quillpad, press new page") is None
 
 
 def test_no_app_named_only_the_one_neo_last_worked_in(world, monkeypatch):
@@ -279,16 +323,26 @@ async def test_a_run_without_the_screen_tools_gets_nothing_and_nothing_is_tainte
 
 
 async def test_a_look_not_ready_by_its_deadline_is_dropped(world, monkeypatch):
-    monkeypatch.setenv("NEO_PREFETCH_LOOK_S", "0.05")
+    _env(monkeypatch, "NEO_PREFETCH_LOOK_S", "0.05")
     world.walk_s = 0.3
     t = time.monotonic()
     p = prefetch.start("in quillpad, press new page", _decision(tool="click_text"))
     assert await prefetch.collect(p, ["ax_tree"]) is None
     assert time.monotonic() - t < 0.25  # the first call never waits for a slow app
+    # …and that app's next requests don't wait for it at all, for a while
+    walks = world.walks
+    t = time.monotonic()
+    p = prefetch.start("in quillpad, press new page", _decision(tool="click_text"))
+    assert await prefetch.collect(p, ["ax_tree"]) is None and world.walks == walks
+    assert time.monotonic() - t < 0.04
+    monkeypatch.setattr(prefetch, "_slow_until", {})
+    world.walk_s = 0.0
+    p = prefetch.start("in quillpad, press new page", _decision(tool="click_text"))
+    assert await prefetch.collect(p, ["ax_tree"]) is not None
 
 
 async def test_the_setting_turns_it_off(world, monkeypatch):
-    monkeypatch.setenv("NEO_PREFETCH_LOOK", "0")
+    _env(monkeypatch, "NEO_PREFETCH_LOOK", "0")
     assert prefetch.start("in quillpad, what does this page say", _decision(screen_p=0.9)) is None
     assert world.walks == 0
 
@@ -296,11 +350,16 @@ async def test_the_setting_turns_it_off(world, monkeypatch):
 async def test_an_embedded_agent_gets_it_only_when_its_host_opts_in(world, monkeypatch):
     from neo import runtime
 
+    host = types.SimpleNamespace(reflex="off")  # an embedded agent's settings, without the key yet
+    monkeypatch.setattr(prefetch, "settings", lambda: host)
     monkeypatch.setattr(runtime, "library_bound", lambda: True)
-    monkeypatch.delenv("NEO_PREFETCH_LOOK", raising=False)
-    assert not prefetch.enabled()  # (never read from the environment there either)
-    monkeypatch.setenv("NEO_PREFETCH_LOOK", "1")
-    assert not prefetch.enabled()
+    _env(monkeypatch, "NEO_PREFETCH_LOOK", "1")
+    assert not prefetch.enabled()  # off, and never read from the environment there
+    host.prefetch_look = True  # the host turned it on (a LibrarySettings key)
+    assert prefetch.enabled()
+    host.prefetch_look = False
+    monkeypatch.setattr(runtime, "library_bound", lambda: False)
+    assert not prefetch.enabled()  # the setting, once neo.config has it, wins everywhere
 
 
 async def test_no_screen_tools_in_this_agent_no_look(world, monkeypatch):
@@ -513,9 +572,9 @@ def test_prewarm_is_rate_limited_and_never_blocks_on_a_busy_laya(laya):
 def test_no_prewarm_with_laya_off_the_setting_off_or_embedded(laya, monkeypatch):
     from neo import config, runtime
 
-    monkeypatch.setenv("NEO_PREWARM_RESOLVER", "0")
+    _env(monkeypatch, "NEO_PREWARM_RESOLVER", "0")
     assert not prefetch.prewarm("wake")
-    monkeypatch.delenv("NEO_PREWARM_RESOLVER")
+    _env(monkeypatch, "NEO_PREWARM_RESOLVER", None)
     monkeypatch.setattr(runtime, "library_bound", lambda: True)
     assert not prefetch.prewarm("wake")
     monkeypatch.setattr(runtime, "library_bound", lambda: False)
@@ -553,3 +612,70 @@ def test_the_early_actor_prewarms_on_listening_and_once_per_utterance(monkeypatc
     ea.feed("and then")
     ea.feed("and then save it")
     assert seen == ["wake", "speech"]  # an utterance nobody announced warms on its first words
+
+
+# ---- through the session (after the integrator wires neo/agent/session.py) ------------------------
+
+
+def _wired():
+    import inspect
+
+    from neo.agent import session as sess
+
+    if "prefetch.start" not in inspect.getsource(sess.Session._agent_task):
+        pytest.skip("session.py isn't wired to neo.agent.prefetch yet (the integrator does it after Step 0)")
+    return sess
+
+
+class _Chain:
+    supports_vision, supports_tools, name, last_used, last_model = True, True, "fake", "fake", "fake"
+
+    def __init__(self):
+        self.requests: list[list[Message]] = []
+
+    async def complete(self, messages, *, system="", tools=None, effort="medium", **kw):
+        # as sent: the session stubs the look afterwards, in these very messages
+        self.requests.append([dataclasses.replace(m, images=list(m.images)) for m in messages])
+        return Turn(text="Done.")
+
+
+async def _session_run(monkeypatch, text, d, **kw):
+    sess = _wired()
+    chain = _Chain()
+    monkeypatch.setattr(sess, "brain", lambda purpose="agent": chain)
+    s = sess.Session()
+    reply = await s._agent(text, d, None, "jlook", **kw)
+    return s, chain, reply
+
+
+async def test_the_session_hands_the_first_look_to_the_first_call_and_keeps_a_stub(world, monkeypatch):
+    s, chain, reply = await _session_run(monkeypatch, "in quillpad, what does this page say", _decision(screen_p=0.9))
+    goal = chain.requests[0][-1]
+    assert goal.role == "user" and prefetch.MARK in goal.text and len(goal.images) == 1
+    assert 'e1 Button "New Page"' in goal.text and not COORDS.search(goal.text)
+    assert set(reply.taint) == {"ax_tree", "screenshot"}  # the request read the screen: said so
+    kept = next(m for m in s.history if m.role == "user")
+    assert prefetch.STUB in kept.text and prefetch.MARK not in kept.text and kept.images == []
+
+
+async def test_the_session_takes_no_look_at_a_protected_app_and_taints_nothing(world, monkeypatch):
+    from neo import config
+
+    monkeypatch.setenv("NEO_PROTECTED_APPS", '["Quillpad"]')
+    monkeypatch.setattr(config, "_settings", None)
+    s, chain, reply = await _session_run(monkeypatch, "in quillpad, what does this page say", _decision(screen_p=0.9))
+    assert prefetch.MARK not in chain.requests[0][-1].text and not chain.requests[0][-1].images
+    assert reply.taint == () and world.walks == 0 and world.shots == 0
+
+
+async def test_the_session_takes_no_look_with_the_setting_off(world, monkeypatch):
+    _env(monkeypatch, "NEO_PREFETCH_LOOK", "off")
+    s, chain, reply = await _session_run(monkeypatch, "in quillpad, what does this page say", _decision(screen_p=0.9))
+    assert prefetch.MARK not in chain.requests[0][-1].text and reply.taint == ()
+
+
+async def test_the_session_looks_at_the_game_being_played(world, monkeypatch):
+    world.front = ("Tablero", 104)
+    d = _decision(screen_p=0.95)
+    s, chain, reply = await _session_run(monkeypatch, "make the first move", d, game=world.installed[3])
+    assert prefetch.MARK in chain.requests[0][-1].text and chain.requests[0][-1].images

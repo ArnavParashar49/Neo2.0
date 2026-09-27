@@ -59,6 +59,8 @@ MARK = "[NEO's first look"  # opens the attached block (and nothing a user types
 STUB = "[NEO looked at the screen here, before the first step.]"  # what a finished run keeps of it
 _SCREEN_CATEGORY = "computer"  # the tool family that reads and works the screen
 _OBSERVE = frozenset({"ax_tree", "screenshot"})  # a newer one of these makes the first look stale
+SLOW_SKIP_S = 300.0  # an app whose look missed the deadline isn't waited for again for this long
+_slow_until: dict[int, float] = {}  # pid -> time.monotonic() until which it's skipped
 
 
 # ---- settings -----------------------------------------------------------------------------------
@@ -181,15 +183,22 @@ def _ids(name: str, pid: int) -> set[str]:
     return {n.strip().lower() for n in ({name} | set(ax.app_names(pid))) if n and n.strip()}
 
 
-def _is(app: Any, ids: set[str]) -> bool:
-    """Is the inventory `app` the running app known by `ids`?"""
+def _same_app(app: Any, name: str, pid: int) -> bool:
+    """Is the inventory `app` (the one the request names, or the game) the front app `name`/`pid`?
+    By bundle id wherever the front app's is known (a name alone can be another app's too), else
+    by the app's own name, a name it goes by, or its bundle id among the front app's names."""
     from neo.decide import inventory
 
-    bundle = (getattr(app, "bundle_id", "") or "").lower()
-    if bundle and bundle in ids:
-        return True
-    names = {(getattr(app, "name", "") or "").lower(), *inventory.name_forms(app)}
-    return bool((names - {""}) & ids)
+    want = (getattr(app, "bundle_id", "") or "").strip().lower()
+    try:
+        front = inventory.app_for_pid(pid)
+    except Exception:  # noqa: BLE001 - not in the last scan: the names decide
+        front = None
+    if want and front is not None and front.bundle_id:
+        return front.bundle_id.strip().lower() == want
+    ids = _ids(name, pid)
+    names = {str(n).strip().lower() for n in (getattr(app, "name", ""), *getattr(app, "aliases", ()))}
+    return bool(want and want in ids) or bool((names - {""}) & ids)
 
 
 def named_apps(text: str) -> list[Any] | None:
@@ -220,21 +229,31 @@ def target(text: str, *, game: Any = None) -> Target | None:
     and not NEO's own or a protected app. Reads the front app fresh; call it off the event loop."""
     from neo.tools.computer import apps, ax
 
+    # First what the request is about, from what NEO already knows (no AX, no process spawned):
+    # most requests stop here without the front app ever being read.
+    named: list[Any] = []
+    last = ""
+    if game is None:
+        found = named_apps(text)
+        if found is None or len(found) > 1:
+            return None  # the apps aren't known yet, or the request is about more than one
+        named = found
+        if not named:
+            last = (apps.target() or "").strip().lower()
+            if not last:
+                return None  # no app named, and NEO hasn't worked in one lately
     if not ax.is_trusted():
         return None  # the model's own look says why, and how to fix it
     name, pid = ax.working_app()
     if not name or not pid or _protected(name, pid):
         return None
-    front = _ids(name, pid)
+    if _slow_until.get(pid, 0.0) > time.monotonic():
+        return None  # its last look missed the deadline: the model looks for itself a while
     if game is not None:
-        return Target(name, pid, "game") if _is(game, front) else None
-    named = named_apps(text)
-    if named is None or len(named) > 1:
-        return None  # the apps aren't known yet, or the request is about more than one
+        return Target(name, pid, "game") if _same_app(game, name, pid) else None
     if named:
-        return Target(name, pid, "named") if _is(named[0], front) else None
-    last = (apps.target() or "").strip().lower()
-    return Target(name, pid, "last") if last and last in front else None
+        return Target(name, pid, "named") if _same_app(named[0], name, pid) else None
+    return Target(name, pid, "last") if last in _ids(name, pid) else None
 
 
 # ---- the look -------------------------------------------------------------------------------------
@@ -408,12 +427,14 @@ def look(text: str, want: Want, *, game: Any = None, sees: bool = False) -> Look
     return Look(tgt.app, tgt.pid, tgt.why, els, pic, (time.perf_counter() - t0) * 1000)
 
 
-async def _look(text: str, want: Want, game: Any, sees: bool) -> Look | None:
-    """:func:`look` off the event loop, with the picture taken while the elements are walked."""
+async def _look(text: str, want: Want, game: Any, sees: bool, seen: dict[str, int]) -> Look | None:
+    """:func:`look` off the event loop, with the picture taken while the elements are walked.
+    `seen["pid"]`: the app it is looking at, once known."""
     t0 = time.perf_counter()
     tgt = await asyncio.to_thread(target, text, game=game)
     if tgt is None:
         return None
+    seen["pid"] = tgt.pid
     shot = asyncio.ensure_future(asyncio.to_thread(_picture, tgt.pid)) if want.image and sees else None
     els = await asyncio.gather(asyncio.to_thread(_elements, tgt.app, tgt.pid), return_exceptions=True)
     pic = (await asyncio.gather(shot, return_exceptions=True))[0] if shot is not None else None
@@ -436,6 +457,7 @@ class Pending:
     task: asyncio.Future
     deadline: float  # time.monotonic()
     t0: float = field(default_factory=time.monotonic)
+    seen: dict[str, int] = field(default_factory=dict)  # "pid": the app being looked at, once known
 
     def cancel(self) -> None:
         self.task.cancel()
@@ -446,6 +468,15 @@ def _retrieve(fut: asyncio.Future) -> None:
     if not fut.cancelled():
         with contextlib.suppress(BaseException):
             fut.exception()
+
+
+def sees(chain: Any) -> bool:
+    """Whether the run's brain can see a picture (a chain: any brain in it, the seeing ones first).
+    Never raises: a brain that can't be asked counts as blind, and gets no picture."""
+    try:
+        return bool(getattr(chain, "supports_vision", False))
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def start(
@@ -466,9 +497,10 @@ def start(
     want = wanted(d, only=only, game=game, images=images)
     if want is None or registry().get("ax_tree") is None:
         return None  # nothing says it will look, or this agent has no screen tools at all
-    task = asyncio.ensure_future(_look(text, want, game, bool(sees)))
+    seen: dict[str, int] = {}
+    task = asyncio.ensure_future(_look(text, want, game, bool(sees), seen))
     task.add_done_callback(_retrieve)
-    return Pending(want, task, time.monotonic() + _deadline_s())
+    return Pending(want, task, time.monotonic() + _deadline_s(), seen=seen)
 
 
 async def collect(pending: Pending | None, tools: Iterable[ToolSpec | str]) -> Look | None:
@@ -488,6 +520,8 @@ async def collect(pending: Pending | None, tools: Iterable[ToolSpec | str]) -> L
             raise  # the request itself was cancelled
         return None
     except TimeoutError:
+        if pid := pending.seen.get("pid"):
+            _slow_until[pid] = time.monotonic() + SLOW_SKIP_S  # its next requests don't wait for it
         log.info(f"  ~ first look not ready in {int((time.monotonic() - pending.t0) * 1000)} ms: dropped")
         return None
     except Exception as e:  # noqa: BLE001 - the run looks for itself, as it always could
@@ -607,6 +641,7 @@ __all__ = [
     "named_apps",
     "prewarm",
     "register_warmer",
+    "sees",
     "start",
     "supersede",
     "target",
