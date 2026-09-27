@@ -32,8 +32,12 @@
   --glow-1: #9ecbff;
   --glow-2: #b9a8ff;
   --glow-3: #8fe3d4;
-  --glow-halo: rgba(158, 203, 255, 0.38);
+  --glow-halo: rgba(158, 203, 255, 0.50);
   --glow-halo-2: rgba(185, 168, 255, 0.30);
+  /* inner light along the page's edges: a touch deeper than the accent, so it reads on white pages too */
+  --glow-edge: rgba(140, 190, 255, 0.65);
+  --glow-inner: rgba(110, 165, 255, 0.34);
+  --glow-inner-2: rgba(160, 130, 255, 0.14);
 
   /* browser card */
   --br-r: 16px;
@@ -83,6 +87,7 @@
   --bad-bg: rgba(196, 69, 58, 0.08); --bad-edge: rgba(196, 69, 58, 0.28);
   --glow-1: #4a90ff; --glow-2: #8b6cff; --glow-3: #22b8a0;
   --glow-halo: rgba(74, 144, 255, 0.30); --glow-halo-2: rgba(139, 108, 255, 0.24);
+  --glow-edge: rgba(74, 144, 255, 0.45); --glow-inner: rgba(74, 144, 255, 0.16); --glow-inner-2: rgba(139, 108, 255, 0.08);
   --br-card-bg: rgba(255, 255, 255, 0.55); --br-chrome-bg: rgba(0, 0, 0, 0.03); --br-canvas: #f2f2f4;
   --br-view-edge: rgba(0, 0, 0, 0.08); --br-user-edge: rgba(0, 0, 0, 0.20);
   --br-glass: rgba(255, 255, 255, 0.92); --br-glass-muted: rgba(28, 28, 31, 0.74); --br-glass-strong: rgba(250, 250, 252, 0.94);

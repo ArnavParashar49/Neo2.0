@@ -128,8 +128,16 @@ function NarrationPill({ item, y, reduced }: { item: Narr | null; y: number; red
     widthAnim.current?.cancel();
     const to = el.getBoundingClientRect().width;
     lastW.current = to;
+    delete el.dataset.growing;
     if (from > 0 && Math.abs(from - to) > 1 && !reduced) {
-      widthAnim.current = el.animate([{ width: `${from}px` }, { width: `${to}px` }], { duration: 200, easing: EASE_OUT });
+      const an = el.animate([{ width: `${from}px` }, { width: `${to}px` }], { duration: 200, easing: EASE_OUT });
+      widthAnim.current = an;
+      // While the pill widens to fit a longer line, the words fade at the edge instead of
+      // showing "…" for a few frames.
+      if (to > from) {
+        el.dataset.growing = "";
+        an.finished.then(() => { if (widthAnim.current === an) delete el.dataset.growing; }, () => {});
+      }
     }
   }, [cur?.key, reduced]);
 
@@ -175,6 +183,7 @@ export function BrowserView({ hub, snap, surface, connected, reduced, onTakeCont
   const [keepClear, setKeepClear] = useState<Rect | null>(null);
   const [failCap, setFailCap] = useState<Caption | null>(null);
   const [slowLoad, setSlowLoad] = useState(false);
+  const [keysChip, setKeysChip] = useState(0);
   const toast = useToast(hub);
 
   const userDriving = connected && st.controller === "user" && (st.status === "user" || st.status === "need_user");
@@ -192,6 +201,8 @@ export function BrowserView({ hub, snap, surface, connected, reduced, onTakeCont
     if (!c) return;
     const boxed = g.r.x > 1 || g.r.y > 1;
     c.classList.toggle("on", boxed && !!f);
+    const v = viewRef.current;
+    if (v) { if (boxed && f) v.dataset.boxed = ""; else delete v.dataset.boxed; }
     if (!boxed || !f) return;
     const now = performance.now();
     if (!force && now - g.bgAt < 250) return;
@@ -409,6 +420,12 @@ export function BrowserView({ hub, snap, surface, connected, reduced, onTakeCont
   const hintTimer = useRef<number | undefined>(undefined);
   const hintLeave = useRef<number | undefined>(undefined);
   const lastPtr = useRef({ x: 0, y: 0 });
+  /** The sink is being focused by a click on the page (not by Tab or a prompt). */
+  const ptrFocus = useRef(false);
+  /** "Click a field on the page first" has been said this turn. */
+  const nudged = useRef(false);
+  /** The sink lost focus because the whole window did. */
+  const winBlur = useRef(false);
   const hintable = neoDriving && !taking;
 
   const isChrome = (t: EventTarget | null) => !!(t as HTMLElement | null)?.closest?.("[data-noinput]");
@@ -435,6 +452,7 @@ export function BrowserView({ hub, snap, surface, connected, reduced, onTakeCont
     const m = mapNow();
     if (!m) return;
     viewRef.current?.setPointerCapture(e.pointerId);
+    ptrFocus.current = true;
     sinkRef.current?.focus({ preventScroll: true });
     if (inTauri && !document.hasFocus()) getCurrentWindow().setFocus().catch(() => {});
     moves.flush();
@@ -510,6 +528,13 @@ export function BrowserView({ hub, snap, surface, connected, reduced, onTakeCont
     const printable = isPrintable(ne);
     hub.input("keydown", { key: e.key, code: e.code, mods: modsOf(e), repeat: e.repeat, location: ne.location, ...(printable ? { text: e.key } : {}) });
     pressed.current.add(e.code);
+    // Letters with no field focused on the page usually vanish (pages may still use them as
+    // shortcuts, so they are sent anyway). Say so once per turn at the wheel — only when the core
+    // has said nothing is focused, and never for Space (it scrolls).
+    if (printable && e.key.trim() && !e.repeat && snap.hint?.focus === null && !nudged.current) {
+      nudged.current = true;
+      hub.toast("Click a field on the page first", 2200);
+    }
   };
   const onKeyUp = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (!pressed.current.has(e.code)) return;
@@ -521,17 +546,38 @@ export function BrowserView({ hub, snap, surface, connected, reduced, onTakeCont
     for (const code of pressed.current) hub.input("keyup", { key: "", code, mods: 0, repeat: false, location: 0 });
     pressed.current.clear();
   };
-  useEffect(() => { if (!userDriving) { releaseKeys(); setComposing(null); } }, [userDriving]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (!userDriving) { releaseKeys(); setComposing(null); composingRef.current = false; }
+    nudged.current = false;
+  }, [userDriving]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // IME, dead keys, emoji, dictation. Engines disagree on order: Chromium commits in
+  // compositionend after its last input event; WebKit fires the committing input event (with
+  // isComposing false) before compositionend. Either way the text is sent exactly once — at
+  // compositionend — and the sink is emptied after the engine has finished with it.
+  const composingRef = useRef(false);
+  const committed = useRef<{ text: string; at: number } | null>(null);
   const sendText = (text: string) => { if (text && drivingRef.current) hub.input("text", { text: text.slice(0, 2000) }); };
+  const clearSink = (sink: HTMLTextAreaElement) => { window.setTimeout(() => { if (!composingRef.current) sink.value = ""; }, 0); };
   const onInput = (e: React.FormEvent<HTMLTextAreaElement>) => {
     const ne = e.nativeEvent as InputEvent;
     const sink = e.currentTarget;
-    if (ne.isComposing || composing !== null) return;
-    if (ne.inputType === "insertText" || ne.inputType === "insertReplacementText" || ne.inputType === "insertFromDictation" || ne.inputType === "insertFromComposition") {
-      sendText(sink.value);
+    if (ne.isComposing || composingRef.current || ne.inputType === "insertCompositionText" || ne.inputType === "insertFromComposition") return;
+    if (ne.inputType === "insertText" || ne.inputType === "insertReplacementText" || ne.inputType === "insertFromDictation") {
+      // The same text a composition just committed (an engine that echoes it after
+      // compositionend): already sent.
+      const c = committed.current;
+      if (!(c && c.text === sink.value && performance.now() - c.at < 80)) sendText(sink.value);
     }
     sink.value = "";
+  };
+  const onCompositionStart = () => { composingRef.current = true; setComposing(""); };
+  const onCompositionEnd = (e: React.CompositionEvent<HTMLTextAreaElement>) => {
+    composingRef.current = false;
+    setComposing(null);
+    committed.current = { text: e.data, at: performance.now() };
+    sendText(e.data);
+    clearSink(e.currentTarget);
   };
   const onPaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
     e.preventDefault();
@@ -557,6 +603,23 @@ export function BrowserView({ hub, snap, surface, connected, reduced, onTakeCont
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [focusSignal]);
+
+  // Keys typed while the page has the keyboard go to the page, Tab included. Whenever the page
+  // takes the keyboard other than by a click (Tab into it, a login prompt, ⌘⇧U), say so and how
+  // to get out, so keyboard users never feel stuck.
+  const onSinkFocus = () => {
+    const byPointer = ptrFocus.current, returning = winBlur.current;
+    ptrFocus.current = false; winBlur.current = false;
+    // Not when focus merely comes back with the window (the user switched apps and back).
+    if (!byPointer && !returning && drivingRef.current) setKeysChip((n) => n + 1);
+  };
+  const onSinkBlur = () => { winBlur.current = !document.hasFocus(); releaseKeys(); };
+  useEffect(() => {
+    if (!keysChip) return;
+    const t = window.setTimeout(() => setKeysChip(0), 2600);
+    return () => clearTimeout(t);
+  }, [keysChip]);
+  useEffect(() => { if (!userDriving) setKeysChip(0); }, [userDriving]);
 
   // Keep keys with the page when the user takes control from the keyboard.
   useEffect(() => {
@@ -600,6 +663,11 @@ export function BrowserView({ hub, snap, surface, connected, reduced, onTakeCont
       <div className="sr-only" role="status" aria-live="polite">{toast?.text ?? ""}</div>
 
       {stalled && hasFrame && <div className="br-chip-tr" role="status"><span className="br-spin sm" />Live view is catching up…</div>}
+      {keysChip > 0 && userDriving && (
+        <div key={keysChip} className="br-chip-top" aria-hidden>
+          {I.keyboard(13)}<span>Keys go to the page</span><span className="br-chip-sep">·</span><kbd>⌃⇥</kbd><span className="br-chip-muted">to leave</span>
+        </div>
+      )}
 
       {starting && (
         <div className="br-panel starting" data-noinput>
@@ -645,12 +713,13 @@ export function BrowserView({ hub, snap, surface, connected, reduced, onTakeCont
         style={caret ? { left: caret.x, top: caret.y - Math.min(caret.h, 20) } : undefined}
         onKeyDown={onKeyDown}
         onKeyUp={onKeyUp}
-        onBlur={releaseKeys}
+        onFocus={onSinkFocus}
+        onBlur={onSinkBlur}
         onInput={onInput}
         onPaste={onPaste}
-        onCompositionStart={() => setComposing("")}
+        onCompositionStart={onCompositionStart}
         onCompositionUpdate={(e) => setComposing(e.data)}
-        onCompositionEnd={(e) => { setComposing(null); sendText(e.data); e.currentTarget.value = ""; }}
+        onCompositionEnd={onCompositionEnd}
       />
     </div>
   );

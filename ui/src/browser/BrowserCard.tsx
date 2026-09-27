@@ -134,22 +134,24 @@ function Address({ st, userDriving, editSignal, onNavigate, disabled }: {
 
   if (editing) {
     return (
-      <div className="br-addr editing" ref={boxRef}>
-        <span className="br-fav glyph" aria-hidden>{I.globe(14)}</span>
-        <input
-          ref={inputRef}
-          className="br-addr-input"
-          defaultValue={st.url}
-          aria-label="Address"
-          spellCheck={false}
-          autoCapitalize="off"
-          autoCorrect="off"
-          onKeyDown={(e) => {
-            if (e.key === "Enter") { e.preventDefault(); onNavigate(e.currentTarget.value); setEditing(false); }
-            else if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); setEditing(false); }
-          }}
-          onBlur={() => setEditing(false)}
-        />
+      <div className="br-addr-wrap" ref={boxRef}>
+        <div className="br-addr editing">
+          <span className="br-fav glyph" aria-hidden>{I.globe(14)}</span>
+          <input
+            ref={inputRef}
+            className="br-addr-input"
+            defaultValue={st.url}
+            aria-label="Address"
+            spellCheck={false}
+            autoCapitalize="off"
+            autoCorrect="off"
+            onKeyDown={(e) => {
+              if (e.key === "Enter") { e.preventDefault(); onNavigate(e.currentTarget.value); setEditing(false); }
+              else if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); setEditing(false); }
+            }}
+            onBlur={() => setEditing(false)}
+          />
+        </div>
       </div>
     );
   }
@@ -388,10 +390,7 @@ export function BrowserCard({ hub, snap, connected, surface, reduced, onExpand, 
           <div className="br-grow" {...drag} />
           <div className="br-top-actions">
             {isWindow ? (
-              <>
-                <button className="br-pill ghost sm" onClick={onPopout} title="Bring back to NEO's chat (⌘W)">{I.popin(14)}<span>Bring back</span></button>
-                <IconBtn label="Close browser" onClick={() => close()}>{I.close()}</IconBtn>
-              </>
+              <button className="br-pill ghost sm" onClick={onPopout} title="Bring back to NEO's chat (⌘W)">{I.popin(14)}<span>Bring back</span></button>
             ) : (
               <>
                 <IconBtn label="Pop out" title="Pop out (⌘⇧O)" disabled={off} onClick={onPopout}>{I.popout()}</IconBtn>
@@ -419,7 +418,7 @@ export function BrowserCard({ hub, snap, connected, surface, reduced, onExpand, 
             <div className="br-need-badge" aria-hidden>{needGlyph}</div>
             <div className="br-need-text" title={`${nu.title} ${needSub}`.trim()}>
               <span className="br-need-title">{nu.title}</span>
-              {needSub && <span className="br-need-sub"><span aria-hidden> · </span>{needSub}</span>}
+              {needSub && <span className="br-need-sub">{needSub}</span>}
             </div>
             <button key={nudge} className={"br-pill solid" + (nudge ? " nudge" : "")} onClick={release} aria-disabled={off || releasing || undefined} title="Hand back to NEO (⌘⇧U)">
               {releasing ? <span className="br-spin sm dark" /> : null}Done — hand back
@@ -440,7 +439,7 @@ export function BrowserCard({ hub, snap, connected, surface, reduced, onExpand, 
             <span className="br-grow" {...(isWindow ? drag : {})} />
             {st.status !== "error" && st.status !== "starting" && st.status !== "ended" && (
               userDriving ? (
-                <MorphPill variant="release" className="accent" reduced={reduced} disabled={off || releasing} onClick={release} title={job ? "Hand back to NEO (⌘⇧U)" : "Done (⌘⇧U)"}>
+                <MorphPill variant={job ? "release" : "done"} className={job ? "accent" : ""} reduced={reduced} disabled={off || releasing} onClick={release} title={job ? "Hand back to NEO (⌘⇧U)" : "Done (⌘⇧U)"}>
                   {releasing ? <span className="br-spin sm" /> : job ? I.sparkle() : I.check(14)}<span>{job ? "Hand back to NEO" : "Done"}</span>
                 </MorphPill>
               ) : (
@@ -450,6 +449,9 @@ export function BrowserCard({ hub, snap, connected, surface, reduced, onExpand, 
               )
             )}
             {job && st.status !== "ended" && <button className="br-pill bad" onClick={stop} aria-disabled={off || undefined} title="Stop NEO (⌘.)">{I.stop()}<span>Stop</span></button>}
+            {isWindow && st.status !== "ended" && (
+              <button className="br-pill ghost" onClick={() => close()} aria-disabled={off || undefined} title="Close NEO's browser (ends this session)">{I.close(13)}<span>Close browser</span></button>
+            )}
           </div>
         )}
       </div>
@@ -516,20 +518,33 @@ function SelectPopover({ hub, snap }: { hub: BrowserHub; snap: BrowserSnap }) {
   const typed = useRef({ s: "", t: 0 });
 
   useLayoutEffect(() => {
-    // Anchor to the <select> in view px: the canvas is placed at the frame rect.
+    // Anchor to the <select> in view px. The page canvas sits exactly on the frame rect (the
+    // blurred backdrop canvas behind a letterbox does not), and the page's own width at capture
+    // is what `rect` was measured in.
     const wrap = ref.current?.parentElement;
-    const canvas = wrap?.querySelector("canvas");
-    if (!wrap || !canvas || !snap.live) return;
-    const wb = wrap.getBoundingClientRect(), cb = canvas.getBoundingClientRect();
-    const sc = cb.width / (snap.live.viewport.w || 1);
-    const x = cb.left - wb.left + s.rect.x * sc;
-    const below = cb.top - wb.top + (s.rect.y + s.rect.h) * sc + 4;
-    const above = cb.top - wb.top + s.rect.y * sc - 4;
-    const room = wb.height - below - 8;
-    const maxH = Math.min(280, Math.max(room, above - 8));
-    const top = room >= Math.min(160, opts.length * 30 + 12) ? below : Math.max(8, above - Math.min(280, opts.length * 30 + 12));
-    setPos({ left: Math.max(8, Math.min(x, wb.width - 180)), top, minW: Math.max(140, s.rect.w * sc), maxH });
-  }, [s, snap.live, opts.length]);
+    const canvas = wrap?.querySelector<HTMLCanvasElement>(".br-canvas");
+    if (!wrap || !canvas) return;
+    const place = () => {
+      const wb = wrap.getBoundingClientRect(), cb = canvas.getBoundingClientRect();
+      const pageW = hub.frames.latest?.meta.vw || snap.live?.viewport.w || 1;
+      const sc = cb.width / pageW;
+      const x = cb.left - wb.left + s.rect.x * sc;
+      const below = cb.top - wb.top + (s.rect.y + s.rect.h) * sc + 4;
+      const above = cb.top - wb.top + s.rect.y * sc - 4;
+      const want = Math.min(280, opts.length * 30 + 10);
+      const room = wb.height - below - 8;
+      const fitsBelow = room >= Math.min(160, want);
+      const maxH = fitsBelow ? Math.min(280, room) : Math.min(280, above - 8);
+      const top = fitsBelow ? below : Math.max(8, above - Math.min(want, maxH));
+      const minW = Math.max(140, s.rect.w * sc);
+      setPos({ left: Math.max(8, Math.min(x, wb.width - minW - 8)), top, minW, maxH });
+    };
+    place();
+    const ro = new ResizeObserver(place);
+    ro.observe(wrap);
+    ro.observe(canvas);
+    return () => ro.disconnect();
+  }, [s, snap.live, opts.length, hub]);
 
   useEffect(() => { ref.current?.focus(); }, [s.select_id]);
   useEffect(() => { ref.current?.querySelector(`[data-i="${active}"]`)?.scrollIntoView({ block: "nearest" }); }, [active]);

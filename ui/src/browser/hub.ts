@@ -3,7 +3,9 @@
 // overlay), the frame pipe, and the commands the card sends back. React reads a snapshot via
 // useSyncExternalStore; frames and actions bypass React entirely.
 import { useSyncExternalStore } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { FramePipe, parseFrame, b64urlToBytes } from "./frames";
+import { inTauri } from "../win";
 import type {
   BrowserAction, BrowserClose, BrowserDialog, BrowserHelloSnapshot, BrowserHint, BrowserOpen, BrowserResult,
   BrowserSelect, BrowserState, BrowserStep, ControlAction, FrameMeta, NeedUser, Surface,
@@ -155,6 +157,10 @@ export class BrowserHub {
 
   /** Clear transcript / erase: rows, posters and thumbnails go with it. */
   clearEnded() { this.set({ ended: {} }); }
+
+  /** The ended session's card has folded away: let go of its last decoded frame (up to ~16 MB at
+   *  2560×1600). Never while a session is live — its frames are the ones on screen. */
+  releaseFrames() { if (!this.snap.live) this.frames.setSid(""); }
 
   // ---- inbound --------------------------------------------------------------------------
   /** Handles a `browser_*` JSON event. Returns false for anything else. */
@@ -332,6 +338,10 @@ export class BrowserHub {
       : { cmd: "browser_view", sid, surface: best!.surface, css_w: Math.round(best!.w), css_h: Math.round(best!.h), dpr: Math.min(devicePixelRatio || 1, 2), visible: true };
     const key = JSON.stringify(msg);
     if (key === this.lastViewSent) return;
+    // Nothing has been shown for this session yet (it just opened, or this socket just said
+    // hello): the core already treats us as not watching, so "hidden" would only stop and restart
+    // its screencast before the view mounts and delay the first frame.
+    if (!msg.visible && !this.lastView?.visible) { this.lastViewSent = key; return; }
     // While NEO waits for an approval, the page it measured must not change size under the
     // highlighted target: a view that only changed size (the confirm card came up) waits.
     const l = this.lastView;
@@ -345,18 +355,31 @@ export class BrowserHub {
   visibilityChanged() { this.lastViewSent = ""; this.flushView(); }
 }
 
+/** The copy reply arrives outside the user's keypress, so the web clipboard API usually refuses
+ *  it. Inside NEO the shell writes the pasteboard itself; the textarea fallback (dev tabs) gives
+ *  focus back afterwards, so the user's next keys still reach the page. */
 async function writeClipboard(text: string): Promise<boolean> {
+  if (inTauri) {
+    try { await invoke("clipboard_write", { text }); return true; } catch { /* older shell: fall through */ }
+  }
   try { await navigator.clipboard.writeText(text); return true; } catch { /* outside a user gesture: fall back */ }
+  const prev = document.activeElement as HTMLElement | null;
+  const ta = document.createElement("textarea");
   try {
-    const ta = document.createElement("textarea");
     ta.value = text;
-    ta.style.cssText = "position:fixed;opacity:0;left:-9999px";
+    ta.readOnly = true;
+    ta.tabIndex = -1;
+    ta.setAttribute("aria-hidden", "true");
+    ta.style.cssText = "position:fixed;opacity:0;left:-9999px;top:0";
     document.body.appendChild(ta);
     ta.select();
-    const ok = document.execCommand("copy");
+    return document.execCommand("copy");
+  } catch {
+    return false;
+  } finally {
     ta.remove();
-    return ok;
-  } catch { return false; }
+    if (prev && prev !== document.body && prev.isConnected) prev.focus({ preventScroll: true });
+  }
 }
 
 export function useBrowser(hub: BrowserHub): BrowserSnap {

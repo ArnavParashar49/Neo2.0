@@ -22,10 +22,15 @@ export function browserSizes(a: Area | null): BrowserSizes {
   return { browse, focus, compact };
 }
 
-/** The page's CSS viewport for a view of this size: desktop layouts at ≈0.8 scale, same aspect. */
+/** The page's CSS viewport for a view of this size: desktop layouts at ≈0.8 scale, and always the
+ *  view's own aspect, so the page fills the view with no bars. When the height hits its limits
+ *  (560–1600), the width follows it rather than the other way round. */
 export function pageViewport(viewW: number, viewH: number): { w: number; h: number } {
-  const w = clamp(Math.round(viewW / 0.8), 1024, Math.max(1440, viewW));
-  const h = clamp(Math.round((w * viewH) / Math.max(1, viewW)), 560, 1600);
+  const ar = Math.max(1, viewW) / Math.max(1, viewH);
+  let w = clamp(Math.round(viewW / 0.8), 1024, Math.max(1440, viewW));
+  let h = Math.round(w / ar);
+  if (h < 560) { h = 560; w = Math.round(560 * ar); }
+  else if (h > 1600) { h = 1600; w = Math.round(1600 * ar); }
   return { w, h };
 }
 

@@ -259,11 +259,12 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [liveSid]);
 
-  // Login / CAPTCHA / 2FA always surface — shown without stealing focus from other apps.
+  // Login / CAPTCHA / 2FA always surface — shown without stealing focus from other apps (the
+  // shell orders the window front without making it key; plain show() on older shells).
   const needUser = liveStatus === "need_user";
   useEffect(() => {
     if (!needUser) return;
-    if (inTauri) void getCurrentWindow().show().catch(() => {});
+    if (inTauri) void invoke("show_quiet").catch(() => getCurrentWindow().show()).catch(() => {});
     setExpanded(true);
     setBmode((m) => (m === "mini" ? "docked" : m));
     setViewFocus((n) => n + 1);
@@ -283,9 +284,17 @@ export default function App() {
     return () => { un.then((f) => f()).catch(() => {}); };
   }, []);
 
-  // Session over: fold the card into its row. A finished task waits while the pointer rests on it.
-  const hoverRef = useRef(false);
-  hoverRef.current = hover;
+  // Session over: fold the card into its row. A finished task waits while the user is still
+  // looking at the page: the pointer is on the browser card and has moved in the last 1.5 s (up
+  // to 6 s). A pointer that is merely inside the overlay — say, on the Yes button it just
+  // clicked — doesn't hold it.
+  const stagePtr = useRef({ inside: false, moved: 0 });
+  const onStagePointer = (e: React.PointerEvent) => {
+    const p = stagePtr.current;
+    if (e.type === "pointerleave") { p.inside = false; return; }
+    p.inside = true;
+    p.moved = performance.now();
+  };
   useEffect(() => {
     const prev = lastLive.current?.live;
     if (liveSid || !prev || foldedSid === prev.sid) return;
@@ -326,7 +335,8 @@ export default function App() {
       }, 160);
     };
     const wait = () => {
-      if (reason === "done" && hoverRef.current && performance.now() - t0 < 10_000) { timer = window.setTimeout(wait, 250); return; }
+      const p = stagePtr.current, now = performance.now();
+      if (reason === "done" && p.inside && now - p.moved < 1500 && now - t0 < 6000) { timer = window.setTimeout(wait, 250); return; }
       fly();
     };
     wait();
@@ -338,6 +348,9 @@ export default function App() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [liveSid]);
+
+  // Folded (the page's copy is on its way to the row): the last live frame isn't needed any more.
+  useEffect(() => { if (foldedSid && !liveSid) hub.releaseFrames(); }, [foldedSid, liveSid, hub]);
 
   // The fold lands: the chat layout is on screen, so the row's thumbnail has a place to fly to.
   useLayoutEffect(() => {
@@ -394,8 +407,10 @@ export default function App() {
   useEffect(() => {
     if (!live) return;
     const h = (e: KeyboardEvent) => {
-      if (!e.metaKey || !e.shiftKey || e.altKey || e.ctrlKey) return;
       const k = e.key.toLowerCase();
+      // ⌘W reads as "close tab" on a page; here it would close NEO's overlay window.
+      if (k === "w" && e.metaKey && !e.shiftKey && !e.altKey && !e.ctrlKey) { e.preventDefault(); return; }
+      if (!e.metaKey || !e.shiftKey || e.altKey || e.ctrlKey) return;
       if (k === "e") toggleFocus();
       else if (k === "m") toggleMini();
       else if (k === "o") { if (bmode === "popped") bringBack(); else void popOut(); }
@@ -621,7 +636,8 @@ export default function App() {
   ) : null;
 
   const stage = card && (layout === "docked" || layout === "focus") ? (
-    <div className={"stage" + (folding ? " folding" : "") + (layout === "focus" ? " focus" : "")}>
+    <div className={"stage" + (folding ? " folding" : "") + (layout === "focus" ? " focus" : "")}
+      onPointerEnter={onStagePointer} onPointerMove={onStagePointer} onPointerLeave={onStagePointer}>
       <BrowserCard
         hub={hub}
         snap={card}

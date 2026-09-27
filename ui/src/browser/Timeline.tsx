@@ -9,6 +9,8 @@ const STATUS_WORD: Record<BrowserStep["status"], string> = {
   running: "in progress", ok: "done", fail: "failed", waiting: "waiting for your OK", declined: "declined", skipped: "skipped",
 };
 
+const PREVIEW_H = 125;
+
 export function stepTime(s: BrowserStep, startedAt: number) {
   return fmtDuration((toSec(s.ts) - toSec(startedAt)) * 1000);
 }
@@ -37,13 +39,21 @@ export function Timeline({ steps, startedAt, variant, onClose, id }: {
     return () => window.removeEventListener("keydown", h, true);
   }, [variant, onClose]);
 
+  // The larger preview never covers the list it belongs to: in the drawer it floats just above
+  // the drawer (over the page), lined up with the thumbnails; under an ended row it sits to the
+  // right of the hovered row's thumbnail.
   const show = (s: BrowserStep, el: HTMLElement) => {
     if (!s.thumb) { setPreview(null); return; }
     const host = listRef.current?.parentElement;
     if (!host) return;
     const hb = host.getBoundingClientRect(), rb = el.getBoundingClientRect();
-    const above = rb.top - hb.top - 131;
-    setPreview({ src: s.thumb, top: above >= 4 ? above : rb.bottom - hb.top + 6, left: Math.max(6, rb.left - hb.left + 12) });
+    const tb = el.querySelector(".br-step-thumb")?.getBoundingClientRect() ?? rb;
+    if (variant === "drawer") {
+      setPreview({ src: s.thumb, top: -(PREVIEW_H + 8), left: Math.max(6, tb.left - hb.left) });
+    } else {
+      const top = rb.top - hb.top + rb.height / 2 - PREVIEW_H / 2;
+      setPreview({ src: s.thumb, top: Math.max(-PREVIEW_H / 2, top), left: tb.right - hb.left + 10 });
+    }
   };
 
   const list = (

@@ -132,7 +132,7 @@ export function browsingLine(s: BrowserState | null): string {
     case "starting": return "Starting the browser…";
     case "waiting": return "Waiting for your OK";
     case "need_user": return `Your turn on ${host}`;
-    case "user": return "You're in control";
+    case "user": return s.job ? `Paused · ${host}` : `Ready · ${host}`; // the footer says who's driving
     case "error": return `Browser problem · ${host}`;
     default: return s.controller === "neo" && !s.job ? `Done · ${host}` : `Browsing · ${host}`;
   }

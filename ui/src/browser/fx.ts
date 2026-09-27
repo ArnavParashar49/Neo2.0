@@ -152,7 +152,7 @@ export class Fx {
   /** Put the cursor somewhere without a story (late joiner: the last known action). */
   place(a: BrowserAction) {
     this.last = a;
-    const pt = pointOf(a);
+    const pt = a.gated && a.phase === "intent" && a.rect ? parkOf(a.rect) : pointOf(a);
     if (!pt) return;
     this.target = pt;
     if (this.mode === "off") return;
@@ -175,7 +175,10 @@ export class Fx {
         if (a.phase === "intent") {
           this.clearHls();
           if (a.rect && a.kind !== "move") this.showHl(a.aid, a.rect, a.gated ? "waiting" : a.kind === "select" ? "select" : "click", this.baseOf(a));
-          if (pt) this.moveTo(pt);
+          // Waiting for an approval: the cursor rests at the target's corner, so the label the
+          // user is asked about stays readable. On approval it moves in and clicks.
+          if (a.gated && a.rect) this.moveTo(parkOf(a.rect));
+          else if (pt) this.moveTo(pt);
         } else if (a.phase === "done") {
           const hl = this.hls.get(a.aid);
           if (hl && hl.kind === "waiting") { hl.el.classList.remove("waiting"); hl.kind = "click"; hl.el.querySelector(".fx-hl-chip")?.remove(); }
@@ -202,7 +205,9 @@ export class Fx {
         break;
       case "scroll":
         // Highlights are viewport rects: once the page moves under them they point at the wrong thing.
-        if (a.phase === "intent") { this.clearHls(); this.showScroll(a.dir ?? "down"); }
+        // "Scrolling to “X”" is a lead-in that often never shows as a caption (the action on X
+        // follows): its arrows would contradict the words on screen, so only plain scrolls get them.
+        if (a.phase === "intent") { this.clearHls(); if (!a.label) this.showScroll(a.dir ?? "down"); }
         break;
       case "navigate":
         if (a.phase === "intent") this.clearHls();
@@ -399,6 +404,12 @@ export class Fx {
     clearTimeout(this.scrollTimer);
     this.scrollTimer = window.setTimeout(() => p.classList.remove("on"), 700);
   }
+}
+
+/** Where the cursor waits on a target that needs the user's OK: its bottom-right corner (the
+ *  arrow then hangs outside the element, clear of its label). */
+function parkOf(r: Rect): Pt {
+  return { x: r.x + Math.max(r.w / 2, r.w - 12), y: r.y + Math.max(r.h / 2, r.h - 4) };
 }
 
 export function pointOf(a: BrowserAction): Pt | null {

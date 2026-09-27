@@ -13,6 +13,8 @@ import { makeFavicon } from "./draw";
 import type { MockSocket } from "./socket";
 
 const CANCEL = Symbol("cancelled");
+/** Seconds of history a jumped-to state (?state=…) pretends to have behind it. */
+const SEED_SPAN = 42;
 const DPR = 2;
 const now = () => Date.now() / 1000;
 const RECENT_TYPES = new Set(["transcript", "tool_start", "tool_end", "turn", "browser_open", "browser_close"]);
@@ -83,6 +85,10 @@ export class MockCore {
   private stateTimer: number | undefined;
   private caretTimer: number | undefined;
   private viewTimer: number | undefined;
+  /** When a view first asked for a size the page doesn't have yet (0 = nothing pending). */
+  private viewAskedAt = 0;
+  /** NEO's action in progress: re-aimed if the page is resized under it. */
+  private inflight: { aid: number; base: Omit<BrowserAction, "sid" | "aid" | "phase">; id?: string } | null = null;
   private built: Built | null = null;
   private stillNext = false;
   private closeTimer: number | undefined;
@@ -138,6 +144,7 @@ export class MockCore {
         const wasVisible = c.visible;
         c.view = { surface: m.surface, w: m.css_w, h: m.css_h, dpr: m.dpr, visible: !!m.visible };
         if (c.visible && !wasVisible) { this.stillNext = true; this.invalidate(true); }
+        if (!this.viewAskedAt) this.viewAskedAt = performance.now();
         clearTimeout(this.viewTimer);
         this.viewTimer = window.setTimeout(() => this.pickViewport(), 300);
         return;
@@ -244,6 +251,7 @@ export class MockCore {
     s.userStep = this.step({ kind: "user", label: "You took over", status: "running", by: "user" });
     this.setNeo("idle");
     this.emitState();
+    this.hintFocus(); // the core's 10 Hz hint: which field (if any) has the page's focus
   }
 
   private release() {
@@ -293,7 +301,7 @@ export class MockCore {
     return { sid: s.sid, job: s.job ?? "", reason, url: urlOf(s.page), title: titleOf(s.page), viewport: { w: s.page.vw, h: s.page.vh, dpr: DPR }, controller: s.controller, status: s.status, started_at: s.startedAt };
   }
 
-  private open(job: string, key: PageKey, status: Status = "starting", controller: Controller = "neo") {
+  private open(job: string, key: PageKey, status: Status = "starting", controller: Controller = "neo", startedAt = now()) {
     clearTimeout(this.closeTimer);
     if (!this.favicon) this.favicon = makeFavicon();
     const { sid, bytes } = randomSid();
@@ -301,7 +309,7 @@ export class MockCore {
     const page = freshPage(vp.w, vp.h);
     page.key = key;
     this.s = {
-      sid, sidBytes: bytes, job, startedAt: now(), controller, status, seq: 0, aid: 0, stepId: 0, steps: [], needUser: null, error: null,
+      sid, sidBytes: bytes, job, startedAt, controller, status, seq: 0, aid: 0, stepId: 0, steps: [], needUser: null, error: null,
       dialog: null, select: null, action: null, caption: null, popped: false, page, history: [{ key, genericUrl: "" }], hIndex: 0,
       loading: status === "starting", progress: null, alive: true, ended: false, userStep: null, userSince: now(),
     };
@@ -358,7 +366,7 @@ export class MockCore {
     const s = this.s!;
     const id = p.step_id ?? ++s.stepId;
     const i = s.steps.findIndex((x) => x.step_id === id);
-    const st: BrowserStep = { ...(i >= 0 ? s.steps[i] : {}), ...p, sid: s.sid, step_id: id, ts: i >= 0 ? s.steps[i].ts : now(), url: urlOf(s.page) } as BrowserStep;
+    const st: BrowserStep = { ...(i >= 0 ? s.steps[i] : {}), ...p, sid: s.sid, step_id: id, ts: i >= 0 ? s.steps[i].ts : now(), url: p.url ?? urlOf(s.page) } as BrowserStep;
     if (i >= 0) s.steps[i] = st; else s.steps.push(st);
     this.bcastBrowser("browser_step", st);
     return id;
@@ -387,15 +395,26 @@ export class MockCore {
   private pickViewport() {
     const s = this.s;
     if (!s || s.ended) return;
-    // Never mid-action, and never while an approval is pending: the highlighted target must stay put.
-    if (this.lock || s.status === "waiting") { this.viewTimer = window.setTimeout(() => this.pickViewport(), 250); return; }
     const vp = this.largestView();
-    if (vp.w === s.page.vw && vp.h === s.page.vh) return;
+    if (vp.w === s.page.vw && vp.h === s.page.vh) { this.viewAskedAt = 0; return; }
+    // Never while an approval is pending: the highlighted target must stay put. Mid-action, wait
+    // for the action to finish — but not past 600 ms (a long type action would leave bars on
+    // screen for seconds): resize, then re-aim the action at where its target now is.
+    const waited = this.viewAskedAt ? performance.now() - this.viewAskedAt : 0;
+    if (s.status === "waiting" || (this.lock && waited < 600)) { clearTimeout(this.viewTimer); this.viewTimer = window.setTimeout(() => this.pickViewport(), this.lock ? 100 : 250); return; }
+    this.viewAskedAt = 0;
     s.page.vw = vp.w; s.page.vh = vp.h;
     this.clampScroll();
     this.stillNext = true;
     this.invalidate(true);
     this.emitState();
+    const f = this.inflight;
+    const e = f?.id ? this.el(f.id) : null;
+    if (f && e && this.lock) {
+      const rect = this.vrect(e);
+      f.base = { ...f.base, rect, x: rect.x + rect.w / 2, y: rect.y + rect.h / 2 };
+      f.aid = this.action({ ...f.base, phase: "intent" }).aid;
+    }
   }
 
   private clampScroll() {
@@ -481,10 +500,10 @@ export class MockCore {
     for (const c of this.conns) if (c.credits <= 0 && performance.now() - c.lastAck > 2000) { c.credits = 1; this.trySend(c); }
   }
 
-  private async snapshot(width: number, q: number): Promise<string | null> {
+  private async snapshot(width: number, q: number, page?: PState): Promise<string | null> {
     const s = this.s;
     if (!s) return null;
-    const st = s.page;
+    const st = page ?? s.page;
     const h = Math.round((width * st.vh) / st.vw);
     const c = typeof OffscreenCanvas !== "undefined" ? new OffscreenCanvas(width, h) : Object.assign(document.createElement("canvas"), { width, height: h });
     const ctx = c.getContext("2d") as CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
@@ -684,6 +703,16 @@ export class MockCore {
   }
   private selAll = false;
 
+  /** Like the core before a login / 2FA handover: the first empty field has the page's focus. */
+  private focusField(id: string) {
+    const s = this.s!;
+    if (s.page.values[id]) return;
+    s.page.focus = id;
+    this.caret();
+    this.invalidate(true);
+    this.hintFocus();
+  }
+
   private hintFocus() {
     const s = this.s!;
     const f = s.page.focus;
@@ -741,6 +770,8 @@ export class MockCore {
         key: o.key, dir: o.dir, amount: o.amount, button: o.kind === "click" ? "left" : undefined, clicks: o.kind === "click" ? 1 : undefined, caption: o.caption,
       };
       const a = this.action({ ...base, phase: "intent", gated: o.gated });
+      const live = { aid: a.aid, base: { ...base, gated: o.gated }, id: o.id };
+      this.inflight = live;
       const stepId = this.step({ kind: o.kind, label: o.step, status: "running", by: "neo" });
       // Presentation delay: long enough for the cursor to arrive.
       await this.wait(gen, o.kind === "read" || o.kind === "scroll" || o.kind === "key" ? 120 : 520);
@@ -762,7 +793,7 @@ export class MockCore {
         this.lock = true;
         s.needUser = null;
         if (!yes) {
-          this.action({ ...base, aid: a.aid, phase: "fail", reason: "declined" }, false);
+          this.action({ ...live.base, aid: live.aid, phase: "fail", reason: "declined" }, false);
           this.step({ step_id: stepId, kind: "confirm", label: `Didn't click “${o.label}”`, status: "declined", by: "neo" });
           if (s.controller !== "user") { s.status = "thinking"; }
           this.emitState(true);
@@ -770,6 +801,7 @@ export class MockCore {
           return false;
         }
         s.status = "working";
+        live.base = { ...live.base, gated: false };
         this.emitState(true);
         this.step({ step_id: stepId, kind: "click", label: `Approved · Clicked “${o.label}”`, status: "running", by: "neo" });
         await this.wait(gen, 160);
@@ -777,13 +809,14 @@ export class MockCore {
       if (o.kind === "click" && e) { s.page.pressed = e.id; this.invalidate(true); await this.wait(gen, 110); s.page.pressed = null; }
       if (o.perform) await o.perform();
       else if (e && o.kind === "click") this.activate(e, "neo");
-      this.action({ ...base, aid: a.aid, phase: "done" }, false);
+      this.action({ ...live.base, aid: live.aid, phase: "done" }, false);
       this.step({ step_id: stepId, kind: o.kind, label: o.gated ? `Approved · Clicked “${o.label}”` : o.step, status: "ok", by: "neo" });
       this.thumb(stepId);
       this.bcast("tool_end", { name: tool, ok: true, summary: o.step, job });
       return true;
     } finally {
       this.lock = false;
+      this.inflight = null;
       if (this.s && this.s.controller === "neo" && gen === this.gen) { this.s.status = "thinking"; this.emitState(); }
     }
   }
@@ -871,6 +904,7 @@ export class MockCore {
         ss.controller = "user";
         ss.status = "need_user";
         ss.userSince = now();
+        this.focusField("email");
         ss.needUser = { reason: "login", site: "Northwind", title: "Log in to Northwind here, then hand back.", sub: "NEO won't see what you type.", rect: this.vrect(this.el("email")!) };
         ss.userStep = this.step({ kind: "user", label: "Your turn to log in", status: "waiting", by: "user" });
         this.bcastBrowser("browser_need_user", { ...ss.needUser, sid: ss.sid });
@@ -915,7 +949,7 @@ export class MockCore {
     const job = "j" + gen;
     const setup = async (key: PageKey, status: Status, controller: Controller = "neo", jobbed = true) => {
       this.say("user", "(mock) Show me the “" + state + "” state", job);
-      this.open(jobbed ? job : "", key, status, controller);
+      this.open(jobbed ? job : "", key, status, controller, now() - SEED_SPAN);
       const s = this.s!;
       if (!jobbed) s.job = null;
       s.page.loaded = 1; s.loading = false;
@@ -963,7 +997,7 @@ export class MockCore {
           this.closeTimer = window.setTimeout(() => { if (this.s && this.s.controller === "neo" && !this.s.needUser && !this.running) void this.endSession("done"); }, 1500);
           break;
         }
-        case "user": { const s = await setup("product", "user", "user"); s.userStep = this.step({ kind: "user", label: "You took over", status: "running", by: "user" }); this.running = true; await this.waitRelease(); break; }
+        case "user": { const s = await setup("product", "user", "user"); s.userStep = this.step({ kind: "user", label: "You took over", status: "running", by: "user" }); this.hintFocus(); this.running = true; await this.waitRelease(); break; }
         case "login": case "captcha": case "2fa": case "other": {
           const s = await setup("signin", "need_user", "user");
           this.running = true;
@@ -974,6 +1008,7 @@ export class MockCore {
             other: ["other", "NEO needs you to finish a step on this page, then hand back.", "", "Pick a delivery slot that works for you"],
           };
           const [reason, title, sub, detail] = texts[state];
+          if (reason === "login" || reason === "2fa") this.focusField("email");
           s.needUser = { reason, site: "Northwind", title, sub, detail, rect: this.vrect(this.el("email")!) };
           s.userStep = this.step({ kind: "user", label: "Your turn", status: "waiting", by: "user" });
           this.bcastBrowser("browser_need_user", { ...s.needUser, sid: s.sid });
@@ -1027,16 +1062,26 @@ export class MockCore {
     }
   }
 
+  /** The steps a jumped-to state would have behind it, timed from the (backdated) start, each
+   *  with a thumbnail of the page it happened on — not of the page the jump lands on. */
   private seedSteps() {
     const s = this.s!;
-    const t = now();
-    const seed: [BrowserStep["kind"], string][] = [["navigate", "Opened northwind.store"], ["type", "Typed “wireless earbuds” in Search and pressed Enter"], ["read", "Read the results"], ["scroll", "Scrolled down"]];
-    seed.forEach(([kind, label], i) => {
+    const p = s.page;
+    const at = (key: PageKey, extra: Partial<PState> = {}): PState => ({ ...p, key, scrollY: 0, hover: null, pressed: null, focus: null, values: {}, loaded: 1, banner: false, ...extra });
+    const seed: [BrowserStep["kind"], string, PState][] = [
+      ["navigate", "Opened northwind.store", at("home")],
+      ["type", "Typed “wireless earbuds” in Search and pressed Enter", at("home", { values: { q: "wireless earbuds" }, focus: "q" })],
+      ["read", "Read the results", at("search")],
+      ["scroll", "Scrolled down", at("search", { scrollY: 420 })],
+    ];
+    const gap = SEED_SPAN / (seed.length + 1);
+    seed.forEach(([kind, label, page], i) => {
       const id = ++s.stepId;
-      s.steps.push({ sid: s.sid, step_id: id, ts: t - (seed.length - i) * 9, kind, label, status: "ok", by: "neo", url: urlOf(s.page) });
+      const st: BrowserStep = { sid: s.sid, step_id: id, ts: s.startedAt + gap * (i + 1), kind, label, status: "ok", by: "neo", url: urlOf(page) };
+      s.steps.push(st);
+      this.bcastBrowser("browser_step", st);
+      void this.snapshot(400, 0.55, page).then((thumb) => { if (this.s === s && thumb) this.step({ ...st, thumb }); });
     });
-    for (const st of s.steps) this.bcastBrowser("browser_step", st);
-    for (const st of [...s.steps]) this.thumb(st.step_id, true); // seeded history, captured "before" the jump
   }
 
   setSpeed(x: number) { this.speed = x; }

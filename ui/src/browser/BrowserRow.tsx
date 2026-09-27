@@ -73,7 +73,7 @@ export function MiniRow({ hub, snap, onExpand, onStop }: { hub: BrowserHub; snap
         </span>
       </button>
       <span className="br-row-actions">
-        <button className="br-icon" aria-label="Show browser" title="Show browser (⌘⇧M)" onClick={onExpand}>{I.popin()}</button>
+        <button className="br-icon" aria-label="Show browser" title="Show browser (⌘⇧M)" onClick={onExpand}>{I.expand()}</button>
         {st.job && <button className="br-icon bad boxed" aria-label="Stop NEO" title="Stop NEO (⌘.)" onClick={onStop}>{I.stop()}</button>}
       </span>
     </div>
@@ -86,18 +86,19 @@ export function PoppedRow({ hub, snap, onShow, onBringBack }: { hub: BrowserHub;
   const acting = st.controller === "neo" && (st.status === "working" || st.status === "thinking") && !!st.job;
   const need = st.status === "need_user" || st.status === "waiting";
   const cap = rowCaption(snap);
+  // The window shows what NEO is doing; the row speaks up only when something needs the user.
+  const line2 = st.status === "working" || st.status === "thinking" ? "In its own window" : cap;
   return (
     <div className={"br-row live sticky popped" + (acting ? " acting" : "") + (need ? " need" : "")}>
       <button className="br-row-main" onClick={onShow} aria-label={`NEO's browser on ${displayHost(st.url)} is in its own window: ${cap}. Show window`}>
         <span className="br-row-thumb"><LiveThumb hub={hub} /><Fav src={st.favicon} /></span>
         <span className="br-row-text">
           <span className="br-row-l1"><span className="br-row-host">{displayHost(st.url)}</span><span className="br-live"><span className="br-live-dot" />Live</span></span>
-          <span className="br-row-l2" dir="auto" title={cap}>In its own window · {cap}</span>
+          <span className="br-row-l2" dir="auto" title={cap}>{line2}</span>
         </span>
       </button>
-      <span className="br-row-actions">
-        <button className="br-icon" aria-label="Show window" title="Show window" onClick={onShow}>{I.popout()}</button>
-        <button className="br-icon" aria-label="Bring back to the chat" title="Bring back (⌘⇧O)" onClick={onBringBack}>{I.popin()}</button>
+      <span className="br-row-actions text">
+        <button className="br-pill sm" title="Bring back to the chat (⌘⇧O)" onClick={onBringBack}>{I.popin(13)}<span>Bring back</span></button>
       </span>
     </div>
   );
