@@ -798,10 +798,15 @@ def focused_element_text() -> str:
 _TERMINAL = re.compile(r"\bterminal\b(?!\.\w)", re.I)
 
 
-def focused_terminal() -> bool:
+@pooled
+def focused_terminal(pid: int = 0) -> bool:
     """Is the keyboard focus in a terminal view — told by what the focused element, or the pane
     around it, says it is? For an app that runs a shell in a pane (focus.hosts_shell: "pane"), a
-    Return runs a command only there; its chat box or editor is still a chat box or an editor."""
+    Return runs a command only there; its chat box or editor is still a chat box or an editor.
+    ``pid``: that app, whose web tree is switched on first if it is a Chromium or Electron app (an
+    editor's terminal pane is a web view: without it, nothing in it can be seen)."""
+    if pid and _expose_web(pid, _app_el(pid)):
+        time.sleep(_WEB_SETTLE_S)
     el = _attr(_system_wide(), AS.kAXFocusedUIElementAttribute)
     for _ in range(2):
         if el is None:

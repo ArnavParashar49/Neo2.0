@@ -582,19 +582,22 @@ def test_an_apps_terminal_pane_counts_only_while_the_keyboard_is_in_it(monkeypat
     APP, HELPER, ZSH = 629, 1137, 1138
     _procs(monkeypatch, {APP: [HELPER], HELPER: [ZSH]}, {HELPER: ("App Helper", False), ZSH: ("zsh", True)}, {HELPER})
     assert _REAL_HOSTS_SHELL(APP) == "pane"
-    monkeypatch.setattr(ax, "focused_terminal", lambda: False)  # the keyboard is in its chat box
+    seen: list = []
+    monkeypatch.setattr(ax, "focused_terminal", lambda pid=0: seen.append(pid) or False)  # the keyboard is in its chat box
     assert asyncio.run(comp._line_break("App", APP, "AXTextArea")) == ("shift+return", "")
     assert asyncio.run(comp._ask_before_keys({"keys": "return"}, "return", "App", ToolContext(), APP)) is None
-    monkeypatch.setattr(ax, "focused_terminal", lambda: True)  # …and now in its terminal pane
+    monkeypatch.setattr(ax, "focused_terminal", lambda pid=0: True)  # …and now in its terminal pane
     assert asyncio.run(comp._line_break("App", APP, "AXTextArea")) == ("", comp._SHELL_JOINED)
     gate = asyncio.run(comp._ask_before_keys({"keys": "return"}, "return", "App", ToolContext(), APP))
-    assert gate and "runs the command" in gate
+    assert gate and "runs the command" in gate and seen[0] == APP  # (asked about that app's own focus)
     confirm.cancel("t")
 
 
-def test_the_focused_element_says_whether_it_is_a_terminal(fake):
+def test_the_focused_element_says_whether_it_is_a_terminal(fake, monkeypatch):
+    exposed: list = []
+    monkeypatch.setattr(ax, "_expose_web", lambda pid, root: exposed.append(pid) or False)
     fake.system.attrs["AXFocusedUIElement"] = El("AXTextArea", AXDescription="Terminal input")
-    assert ax.focused_terminal()
+    assert ax.focused_terminal(7) and exposed == [7]  # an editor's web view is switched on to be seen
     fake.system.attrs["AXFocusedUIElement"] = El("AXTextArea", AXDescription="Write your prompt to Claude")
     assert not ax.focused_terminal()
     del fake.system.attrs["AXFocusedUIElement"]

@@ -268,7 +268,7 @@ async def bring(t: Target, pts: list[tuple[float, float]], *, want_pid: int = 0)
         if here.pid == pid and await asyncio.to_thread(ax.raise_window, here):  # (never another app's window)
             t.raised = True
             await asyncio.sleep(SETTLE_S)
-        if here.app:
+        if here.app and here.pid == pid:
             apps.set_target(here.app)  # "click the field, then type": the typing goes here too
     if t.brought or t.raised:
         await _look_again(t, pts, pid, want_pid)

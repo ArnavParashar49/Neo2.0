@@ -291,6 +291,7 @@ def test_a_click_by_id_on_a_covered_element_is_refused(world, monkeypatch):
     world.front = ("Chess", CHESS)  # Chess is in front, and still Mail's floating window covers it
     out = run("click", {"id": "e7"})
     assert not out.ok and "covers that element" in out.text and world.events() == []
+    assert apps.target() != "Mail"  # "…then type" never goes to the window that was in the way
 
 
 def test_a_click_by_id_on_neos_own_element_is_refused(world, monkeypatch):

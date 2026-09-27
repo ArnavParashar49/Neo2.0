@@ -909,7 +909,7 @@ async def _command_line(pid: int) -> bool:
 
     kind = await asyncio.to_thread(hosts_shell, pid)
     if kind == "pane":
-        return await asyncio.to_thread(ax.focused_terminal)
+        return await asyncio.to_thread(ax.focused_terminal, pid)
     return bool(kind)
 
 
