@@ -160,6 +160,8 @@ class OpenAICompatProvider:
     raise_truncated = False
     # reasoning_effort for streamed chat answers (None: the model's default), for brains with one
     stream_effort: str | None = None
+    # Ask a stream for its token usage (stream_options.include_usage): a paid brain counts it
+    stream_usage = False
 
     def __init__(
         self,
@@ -337,10 +339,13 @@ class OpenAICompatProvider:
         f = self._fit(messages, system, None, max_tokens)
         said: list[str] = []
         usage: Any = None
+        st: Any = None
         try:
             extra: dict[str, Any] = {}
             if self._reasoning and self.stream_effort:
                 extra["reasoning_effort"] = self.stream_effort
+            if self.stream_usage:
+                extra["stream_options"] = {"include_usage": True}
             st = await self.client().chat.completions.create(
                 model=self.model,
                 messages=_to_messages(f.messages, system, self.supports_vision),
@@ -357,7 +362,7 @@ class OpenAICompatProvider:
         except Exception as e:  # noqa: BLE001
             raise self._error(e) from e
         finally:
-            if said or usage is not None:
+            if st is not None:  # accepted: paid for, even when it said nothing (its thinking used the room)
                 self._spent(usage, f, "".join(said))
 
 

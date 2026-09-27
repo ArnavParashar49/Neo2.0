@@ -675,6 +675,26 @@ def _fallback_eyes(s: Any) -> tuple[BrainName, ...]:
     return ()
 
 
+# The seeing model of a brain the user named that can't see (DECISIONS 65: NEO_BRAIN=cerebras is
+# gpt-oss for the text steps, and qwen for the ones that carry a screenshot).
+_SEES_FOR: Mapping[str, BrainName] = {"cerebras": "cerebras_vision"}
+
+
+def _theirs_first(names: Sequence[Any], s: Any, *, after: str = "") -> list[Any]:
+    """`names` with the seeing model of the user's own brain (:data:`_SEES_FOR`) moved first: the user
+    who chose that brain chose it for the steps with a screenshot too, ahead of the free seeing
+    fallbacks — or right after `after` when that comes first (the vision chain keeps Gemini first:
+    gemini > cerebras_vision > cerebras > groq > local). Only a brain already there moves: one not
+    set up (no key, a $0 cap) or that may not see this user's pictures stays out."""
+    out = list(names)
+    mine = _SEES_FOR.get(str(getattr(s, "brain", "") or ""))
+    if mine is None or mine not in out:
+        return out
+    out.remove(mine)
+    out.insert(1 if after and out[:1] == [after] else 0, mine)
+    return out
+
+
 def brain(purpose: Purpose = "agent", *, effort: Effort | None = None) -> Chain:
     """The chain for `purpose`. `effort`: the run's thinking policy (neo2.core.providers.effort)."""
     if own := _hosts(purpose):
@@ -684,8 +704,9 @@ def brain(purpose: Purpose = "agent", *, effort: Effort | None = None) -> Chain:
     s = settings()
     eyes = _fallback_eyes(s)
     # Cerebras (a paid key, DECISIONS 49): its seeing brain ahead of Groq's among the seeing
-    # fallbacks — only where cloud fallbacks may see at all (a local-first user's pictures stay here)
-    eyes = with_cerebras_eyes(eyes, s) if eyes else eyes
+    # fallbacks — only where cloud fallbacks may see at all (a local-first user's pictures stay here);
+    # first of them for a user whose brain is Cerebras's text model (DECISIONS 65)
+    eyes = _theirs_first(with_cerebras_eyes(eyes, s), s) if eyes else eyes
     if purpose == "fast":
         order: list[BrainName | None] = [s.fast_brain, s.brain, s.offline_brain]
     elif purpose == "vision":
@@ -696,8 +717,10 @@ def brain(purpose: Purpose = "agent", *, effort: Effort | None = None) -> Chain:
             n for n in (s.brain, *EYES) if n not in _TEXT_ONLY and (n == s.brain or n not in _EYES_ONLY)
         ]
         order = vision + [n for n in (s.brain, s.fast_brain, s.offline_brain) if n not in vision]
-        # (Cerebras: its text brain ahead of Groq; its seeing one after the seeing brains, when enabled)
-        return Chain(_dedupe(with_cerebras(_dedupe(order), purpose, s)), sticky=False, eyes=eyes, effort=effort)
+        # (Cerebras: its text brain ahead of Groq; its seeing one after the seeing brains, when enabled
+        # — right after Gemini for a user whose brain is Cerebras's text model)
+        order = _theirs_first(with_cerebras(_dedupe(order), purpose, s), s, after="gemini")
+        return Chain(_dedupe(order), sticky=False, eyes=eyes, effort=effort)
     elif purpose == "offline":
         return Chain(_dedupe([s.offline_brain]), effort=effort)  # (no cloud eyes: offline means here)
     elif purpose == "light":

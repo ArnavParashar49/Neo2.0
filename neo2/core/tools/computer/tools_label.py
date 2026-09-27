@@ -117,7 +117,10 @@ async def click_text(a: dict, c: ToolContext) -> str | ToolOutput:
             text = f"Clicked '{name}' ({e.role.removeprefix('AX')})"
             if watch is not None:
                 ch = await wait.in_thread(ax.press_change, watch, e)
-                effect = Effect(changed=ch.changed, scene_changed=ch.scene_changed, sheet=ch.sheet)
+                # (pressed and watched through Accessibility: the one click_text that checked itself)
+                effect = Effect(
+                    changed=ch.changed, scene_changed=ch.scene_changed, sheet=ch.sheet, verified=ch.changed is True
+                )
                 if ch.changed and c.origin == "agent":
                     text += " " + ch.said
                     if ch.details:
