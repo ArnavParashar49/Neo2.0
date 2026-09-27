@@ -276,6 +276,9 @@ def test_a_window_picture_that_doesnt_match_its_bounds_is_for_looking_only(cli, 
     cli.picture = lambda extra: Image.new("RGB", (2600, 1600), "white")  # (a shadow, or another window)
     monkeypatch.setattr(screen, "_window_bounds", lambda wid: (100.0, 50.0, 1200.0, 800.0))
     assert not screen.window_shot(77).clickable
+    moving = iter([(100.0, 50.0, 1300.0, 800.0), (140.0, 50.0, 1300.0, 800.0)])  # dragged while captured
+    monkeypatch.setattr(screen, "_window_bounds", lambda wid: next(moving))
+    assert not screen.window_shot(77).clickable
     monkeypatch.setattr(screen, "_window_bounds", lambda wid: None)
     c = screen.window_shot(77)
     assert not c.clickable and max(c.w, c.h) <= 1600
@@ -678,6 +681,49 @@ def bench() -> None:  # pragma: no cover - run by hand: python tests/test_eyes_c
     after = _med(lambda: screen.render(frame, "after", rect=(100.0, 100.0, 800.0, 600.0), fmt="jpeg"), 15)
     samples = _med(lambda: screen.samples_from(frame, [(400.0, 300.0), (900.0, 500.0)]), 30)
     print(f"zoom 320×200 pt → 768×480: {zoom:.1f} ms · after-look 800×600 pt: {after:.1f} ms · 2 change samples: {samples:.2f} ms")
+    _bench_cli_file()
+    _bench_sck()
+
+
+def _imageio_write(cg, uti: str, path: str) -> None:
+    """What screencapture does with its picture: ImageIO writes it to the file (the CLI's own cost)."""
+    from Foundation import NSURL
+
+    dest = Q.CGImageDestinationCreateWithURL(NSURL.fileURLWithPath_(path), uti, 1, None)
+    Q.CGImageDestinationAddImage(dest, cg, None)
+    assert Q.CGImageDestinationFinalize(dest)
+
+
+def _bench_cli_file() -> None:  # pragma: no cover
+    """screencapture -t png vs -t tiff, hermetically: ImageIO's encode + the file + PIL's decode."""
+    import tempfile
+
+    tmp = tempfile.mkdtemp()
+    print("CLI file (ImageIO encode + write + PIL decode to RGB), 3024×1964:")
+    for kind in ("ui", "mixed", "board"):
+        cg, _keep = cgimage(synthetic_screen(kind), "bgra")
+        row = []
+        for fmt, uti in (("png", "public.png"), ("tiff", "public.tiff")):
+            path = os.path.join(tmp, f"shot.{fmt}")
+            enc = _med(lambda uti=uti, path=path: _imageio_write(cg, uti, path), 5)
+            dec = _med(lambda path=path: Image.open(path).convert("RGB"), 5)
+            row.append(f"-t {fmt}: {enc:5.1f} + {dec:5.1f} = {enc + dec:6.1f} ms ({os.path.getsize(path) / 1e6:5.2f} MB)")
+        print(f"  {kind:6} " + " | ".join(row))
+
+
+def _bench_sck() -> None:  # pragma: no cover
+    """The in-process path's Python work: a BGRA CGImage → RGB → a points-sized JPEG."""
+    for kind in ("ui", "mixed"):
+        cg, _keep = cgimage(synthetic_screen(kind), "bgra")
+        conv = _med(lambda cg=cg: sck.to_pil(cg), 9)
+        img = sck.to_pil(cg)
+        total = _med(lambda cg=cg: screen.render(screen.Frame(sck.to_pil(cg), 0.0, 0.0, 0.5), "full", fmt="jpeg"), 9)
+        small, _k = cgimage(img.reduce(2), "bgra")
+        at_points = _med(lambda small=small: screen.render(screen.Frame(sck.to_pil(small), 0.0, 0.0, 1.0), "full", fmt="jpeg"), 9)
+        print(
+            f"ScreenCaptureKit {kind:5}: CGImage→RGB {conv:4.1f} ms; + reduce + JPEG {total:4.1f} ms at Retina, "
+            f"{at_points:4.1f} ms when captured at points"
+        )
 
 
 if __name__ == "__main__":  # pragma: no cover

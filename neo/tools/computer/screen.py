@@ -20,8 +20,9 @@ screen points (``screen = origin + pixel × ppp``), which is what a shot id reme
   (compress level 1) as the A/B switch back. Never PNG ``optimize=True`` (101–292 ms).
 
 Where the pixels come from: ScreenCaptureKit in process (sck.py) when ``settings().sck_capture`` is
-on and the framework is there, else the ``screencapture`` CLI writing an uncompressed TIFF (encoded
-in about 5 ms and decoded in about 6, against PNG's 37–121 and 23–62). One capture at a time.
+on and the framework is there, else the ``screencapture`` CLI writing an uncompressed TIFF (ImageIO
+encodes a Retina frame in about 5 ms and PIL decodes it in about 6, against PNG's 38–125 and 22–66).
+One capture at a time. Everything after the capture takes about 10 ms (it took 145–380 ms).
 """
 
 from __future__ import annotations
@@ -556,6 +557,7 @@ def window_shot(
     when the picture matches them). ``region`` (screen points, x y width height): only that part of it
     — a page without the browser's tabs — when at least _MIN_CUT points of it are in the window."""
     _need_permission()
+    was = _window_bounds(window_id)
     t = time.perf_counter()
     img, backend = _grab_window(window_id)
     grab_ms = (time.perf_counter() - t) * 1000
@@ -564,7 +566,8 @@ def window_shot(
     clickable = False
     if bounds is not None and bounds[2] > 0 and bounds[3] > 0:
         kx, ky = img.width / bounds[2], img.height / bounds[3]
-        clickable = abs(kx - ky) <= 0.02 * max(kx, ky)  # (a picture with a shadow or of another size: no mapping)
+        # (a picture with a shadow, of another size, or of a window that moved meanwhile: no mapping)
+        clickable = was == bounds and abs(kx - ky) <= 0.02 * max(kx, ky)
         frame = Frame(img, bounds[0], bounds[1], bounds[2] / img.width, **got)
     else:
         frame = Frame(img, 0.0, 0.0, 1.0 / _main_scale(), **got)
