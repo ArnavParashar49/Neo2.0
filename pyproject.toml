@@ -89,6 +89,7 @@ testpaths = ["tests"]
 asyncio_mode = "auto"
 markers = [
   "portable: runs with the core install alone, on Linux as on macOS (CI's sdk-core job: pytest -m portable)",
+  "bench: controls-bench regression thresholds (bench/controls; hermetic)",
 ]
 
 [tool.ruff]

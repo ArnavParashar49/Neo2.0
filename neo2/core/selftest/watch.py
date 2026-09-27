@@ -27,10 +27,24 @@ the test stops there.
 After the checks it keeps listening while NEO cleans up (`disarm`, then `stop_listening`): the user
 grabbing the mouse as the window closes is still seen, so the pointer and the front app are left to
 them (`took_over`, `active_after_run`).
+
+Accessibility actions (a press, a set value, focusing or raising) post no events, so the event hook
+never sees them: `ax_hook` is shown each one instead, before it is made, and refuses (raises `Stop`)
+any whose element isn't the test window's — or any once the user has taken over. It is installed at
+NEO's one AX-action choke point when the code has it (``AX_CHOKE``), and around each function that
+acts through Accessibility today (``AX_ACTIONS``), for as long as the watch is armed.
+
+Bringing an app forward posts no event either, and happens before the click that needed it: the
+WindowServer switch (with an AXRaise of the app's window), activation, an AppleScript activate. So
+`bring_hook` is shown each way NEO does it (``BRINGS``: by pid, by name as NEO resolves it, by the
+running app) before it happens, and refuses any app but the test window's — the user's app is never
+activated to be refused only at the mouse-down after.
 """
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 import os
 import secrets
 import threading
@@ -64,6 +78,32 @@ def _kinds() -> tuple[dict[int, str], dict[int, str]]:
     return mouse, keys
 
 
+# Where Accessibility actions are made. AX_CHOKE: the watcher attribute of NEO's one AX door
+# (ax.perform_action / ax.set_attribute), called before every press, set, focus and raise as
+# hook(kind, element, name, value). AX_ACTIONS: each function that acts through Accessibility,
+# and how to find what it acts on (an element, or a hit's pid) — watched too, should one of them
+# ever act around the door.
+AX_CHOKE = ("neo2.core.tools.computer.ax", "_watch")
+AX_ACTIONS: dict[str, dict[str, tuple[str, str]]] = {
+    "neo2.core.tools.computer.ax": {
+        "press_el": ("element", "press"),
+        "press_element": ("element", "press"),
+        "set_el_value": ("element", "set value"),
+        "focus_el": ("ref", "focus"),
+        "raise_window": ("hit", "raise"),
+    },
+    "neo2.core.decide.media": {"_perform": ("ref", "perform"), "_set": ("ref", "set")},
+}
+
+# Each way NEO brings an app forward, and what names the app: "pid" (the argument), "name" (the app
+# that name resolves to, as apps.bring_front resolves it), "app" (a running application's pid).
+# apps._raise is where bring_front and bring_pid_front both end; force_front is the WindowServer
+# switch itself (with its AXRaise), which apps._raise and the self-test's own clean-up call.
+BRINGS: dict[str, dict[str, str]] = {
+    "neo2.core.tools.computer.apps": {"bring_pid_front": "pid", "bring_front": "name", "_raise": "app"},
+    "neo2.core.tools.computer.focus": {"force_front": "pid"},
+}
+
 _DOWN_UP = {"down": "up", "rdown": "rup", "odown": "oup"}
 _GESTURE_REST = {"up", "rup", "oup", "dragged", "rdragged", "odragged"}
 _POINTER_SLACK = 3.0  # points: the pointer is "still where NEO put it"
@@ -93,6 +133,10 @@ class Watch:
         self._run_over: int | None = None  # len(self.foreign) when the checks ended (disarm)
         self._lock = threading.RLock()
         self._mouse, self._keyk = _kinds()
+        self.ax_seen: list[dict] = []  # every Accessibility action NEO made during the run
+        self.brought: list[dict] = []  # every time NEO brought an app (the test window's) forward
+        self._ax_undo: list[tuple[Any, str, Any, bool]] = []
+        self._ax_depth = threading.local()  # .n: depth of watched AX_ACTIONS calls on this thread
 
     # ---- life ------------------------------------------------------------------------------
     def arm(self, start: tuple[float, float], *, calibrate_s: float = 0.6) -> str:
@@ -102,6 +146,7 @@ class Watch:
 
         self._last = self.mac.pointer()
         inp._watch = self
+        self._install_ax()
         self._tap = self.mac.tap(self._seen)
         self._calibrating = self._tap is not None
         inp.move(*start)  # checked like any other event: it must land in the test window
@@ -132,6 +177,7 @@ class Watch:
             self.release()
             if inp._watch is self:
                 inp._watch = None
+            self._uninstall_ax()
             self._run_over = len(self.foreign)
 
     def stop_listening(self) -> None:
@@ -158,6 +204,134 @@ class Watch:
         if self._tap is not None and self._run_over is not None:
             return len(self.foreign) > self._run_over
         return self.pointer_moved()
+
+    # ---- Accessibility actions ---------------------------------------------------------------
+    def ax_hook(self, target: Any, action: str = "", value: Any = None, *, pid: int | None = None) -> None:
+        """Shown every Accessibility action before it is made: only the test window's elements,
+        and nothing at all once the user has taken over. (Armed only: a watch left behind by a run
+        that ended is no one's.)"""
+        from neo2.core.tools.computer import input as inp
+
+        if inp._watch is not self:
+            return
+        with self._lock:
+            if self.stopped or self.refused:
+                raise Stop(self.stopped or self.refused)
+            owner = int(pid) if pid is not None else int(self.mac.element_pid(target) or 0)
+            if owner != self.test_pid:
+                self._refuse(f"an Accessibility {action or 'action'} would have acted on another app (pid {owner or '?'})")
+            self.ax_seen.append({"action": action, "pid": owner})
+
+    def bring_hook(self, pid: int, via: str = "") -> None:
+        """Shown every time NEO is about to bring an app forward: only the test window's app, and
+        nothing at all once the user has taken over. (Armed only, like `ax_hook`.)"""
+        from neo2.core.tools.computer import input as inp
+
+        if inp._watch is not self:
+            return
+        with self._lock:
+            if self.stopped or self.refused:
+                raise Stop(self.stopped or self.refused)
+            if int(pid or 0) != self.test_pid:
+                self._refuse(f"NEO would have brought another app forward (pid {pid or '?'}, {via})")
+            self.brought.append({"via": via, "pid": int(pid)})
+
+    def _install_ax(self) -> None:
+        import importlib
+
+        mod_name, attr = AX_CHOKE
+        try:
+            choke = importlib.import_module(mod_name)
+        except ImportError:
+            choke = None
+        if choke is not None and hasattr(choke, attr):
+            self._ax_undo.append((choke, attr, getattr(choke, attr), True))
+            setattr(choke, attr, self._door)
+        for mod_name, fns in AX_ACTIONS.items():
+            try:
+                mod = importlib.import_module(mod_name)
+            except ImportError:
+                continue
+            for name, (kind, what) in fns.items():
+                fn = getattr(mod, name, None)
+                if fn is None:
+                    continue
+                self._ax_undo.append((mod, name, fn, True))
+                setattr(mod, name, self._watched(fn, kind, what))
+        for mod_name, fns in BRINGS.items():
+            try:
+                mod = importlib.import_module(mod_name)
+            except ImportError:
+                continue
+            for name, kind in fns.items():
+                fn = getattr(mod, name, None)
+                if fn is None:
+                    continue
+                self._ax_undo.append((mod, name, fn, True))
+                setattr(mod, name, self._bring_watched(fn, kind, f"{mod_name.rsplit('.', 1)[-1]}.{name}"))
+
+    def _bring_watched(self, fn: Any, kind: str, via: str) -> Any:
+        def pid_of(target: Any) -> int | None:
+            """The pid this call would bring forward (None: a name no running app has — nothing to
+            bring; apps._raise is watched should one appear)."""
+            try:
+                if kind == "pid":
+                    return int(target or 0)
+                if kind == "app":
+                    return int(target.processIdentifier())
+                from neo2.core.tools.computer import apps
+
+                a = apps._running(str(target))
+                return int(a.processIdentifier()) if a is not None else None
+            except Exception:  # noqa: BLE001 - an app that can't be named is not the test window
+                return 0
+
+        if inspect.iscoroutinefunction(fn):
+
+            async def watched(target: Any, *a: Any, **k: Any) -> Any:
+                pid = await asyncio.to_thread(pid_of, target) if kind == "name" else pid_of(target)
+                if pid is not None:
+                    self.bring_hook(pid, via)
+                return await fn(target, *a, **k)
+
+        else:
+
+            def watched(target: Any, *a: Any, **k: Any) -> Any:  # type: ignore[misc]
+                pid = pid_of(target)
+                if pid is not None:
+                    self.bring_hook(pid, via)
+                return fn(target, *a, **k)
+
+        watched.__wrapped__ = fn  # type: ignore[attr-defined]
+        return watched
+
+    def _door(self, kind: str, el: Any, name: str, value: Any) -> None:
+        """NEO's AX door calls this (ax._watch) before each action. Inside a call already shown to
+        the watch (an AX_ACTIONS function, on this thread) it was checked there: shown once."""
+        if getattr(self._ax_depth, "n", 0):
+            return
+        self.ax_hook(el, f"{kind} {name}".strip(), value)
+
+    def _watched(self, fn: Any, kind: str, what: str) -> Any:
+        def watched(target: Any, *a: Any, **k: Any) -> Any:
+            if kind == "hit":
+                self.ax_hook(None, what, pid=int(getattr(target, "pid", 0) or 0))
+            else:
+                ref = getattr(target, "ref", None) if kind == "element" else target
+                self.ax_hook(ref, (a[0] if a and isinstance(a[0], str) and kind == "ref" else what))
+            self._ax_depth.n = getattr(self._ax_depth, "n", 0) + 1
+            try:
+                return fn(target, *a, **k)
+            finally:
+                self._ax_depth.n -= 1
+
+        watched.__wrapped__ = fn  # type: ignore[attr-defined]
+        return watched
+
+    def _uninstall_ax(self) -> None:
+        while self._ax_undo:
+            obj, name, old, _present = self._ax_undo.pop()
+            setattr(obj, name, old)
 
     # ---- the hook: every event NEO is about to post --------------------------------------------
     def __call__(self, ev: Any) -> None:

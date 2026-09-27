@@ -1,5 +1,16 @@
 """``python -m neo2.core.selftest controls`` — NEO's controls self-test from a developer's own Terminal.
 
+    python -m neo2.core.selftest controls [--bench [N]] [--ax-walk [APP]] [--save-shot] [--json]
+    python -m neo2.core.selftest agent                     # 3 real requests through the brain chain
+    python -m neo2.core.selftest ab [--runs 10] [--arms effort,batch]
+    python -m neo2.core.selftest grounding --grounder pkg.module:function [--shot PATH]
+
+``--bench``: each primitive's check N times (default 5) for p50/p90 timings, within 90 s more.
+``--ax-walk``: first a read-only timing walk of an app's Accessibility tree (the one in front, or
+APP). ``--save-shot``: keep the test window's picture and targets (for ``grounding``). ``agent`` and
+``ab`` use your model quota (neo2/core/selftest/agent.py); ``ab`` is the measurement the thinking-level and
+batching defaults change on.
+
 The usual way is to ask NEO: say "Neo, check your computer controls" (or type it in the overlay).
 Inside NEO only those words start it, never a model: so this command refuses to run inside NEO.app's
 process tree or from NEO's own shell tool (which runs a model's commands, behind one generic "run a
@@ -67,8 +78,19 @@ def _interactive() -> bool:
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="python -m neo2.core.selftest", description="NEO's self-tests.")
-    p.add_argument("test", choices=["controls"], help="controls: NEO's mouse, keyboard and screen tools, in a test window")
+    p.add_argument(
+        "test", choices=["controls", "agent", "ab", "grounding"],
+        help="controls: NEO's mouse, keyboard and screen tools, in a test window; agent / ab: real requests "
+        "through the brain chain there (your model quota); grounding: score a local grounder on a saved picture",
+    )  # fmt: skip
     p.add_argument("--json", action="store_true", help="print the report as JSON")
+    p.add_argument("--bench", nargs="?", type=int, const=5, default=None, metavar="N", help="repeat the primitives N times (5)")
+    p.add_argument("--ax-walk", nargs="?", const="front", default=None, metavar="APP", help="time an app's Accessibility reads first")
+    p.add_argument("--save-shot", action="store_true", help="keep the test window's picture and targets")
+    p.add_argument("--runs", type=int, default=10, help="ab: runs per arm (10)")
+    p.add_argument("--arms", default="effort,batch", help="ab: effort, batch or both")
+    p.add_argument("--grounder", default="", help="grounding: module:function")
+    p.add_argument("--shot", default="", help="grounding: a saved window picture (default: the latest)")
     args = p.parse_args(argv)
     if os.environ.get(SHELL_MARK) or neo_app_ancestor():
         print(
@@ -84,13 +106,39 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 2
+    if args.test == "grounding":
+        from pathlib import Path
+
+        from neo2.core.selftest import grounding
+
+        if not args.grounder:
+            print("grounding needs --grounder module:function", file=sys.stderr)
+            return 2
+        out = grounding.run(args.grounder, Path(args.shot) if args.shot else None)
+        print(json.dumps(out, ensure_ascii=False, indent=1))
+        return 0 if "error" not in out else 1
     from neo2.core.selftest import controls
     from neo2.core.tools import computer  # noqa: F401 - registers NEO's own tools, which the test drives
 
     if computer._needs_ax() is not None:
         print("Accessibility is off for this terminal: turn it on in System Settings › Privacy & Security.", file=sys.stderr)
         return 2
-    report = asyncio.run(controls.run(notify=lambda msg: print(msg, file=sys.stderr)))
+    if args.test in ("agent", "ab"):
+        from neo2.core.selftest import agent
+
+        arms = [a for k in args.arms.split(",") for a in agent.ARMS.get(k.strip(), ())] if args.test == "ab" else None
+        runs = max(1, args.runs) if args.test == "ab" else len(agent.REQUESTS)
+        result = asyncio.run(agent.run(arms=arms, runs=runs, notify=lambda msg: print(msg, file=sys.stderr)))
+        saved = agent.save(result, args.test)
+        print(json.dumps(result.to_json(), ensure_ascii=False, indent=1) if args.json else result.text(), end="")
+        if saved is not None:
+            print(f"(saved to {saved})")
+        return 2 if result.report.refused else 0
+    report = asyncio.run(
+        controls.run(
+            notify=lambda msg: print(msg, file=sys.stderr), reps=args.bench or 1, ax_walk=args.ax_walk, save_shot=args.save_shot,
+        )
+    )  # fmt: skip
     saved = controls.save(report)
     if args.json:
         print(json.dumps(report.to_json(), ensure_ascii=False, indent=1))

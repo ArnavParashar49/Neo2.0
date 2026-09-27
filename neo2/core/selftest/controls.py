@@ -27,7 +27,15 @@ It doesn't start while another NEO job is at work or a mouse button is down: it 
 and keyboard to itself.
 
 The report gives each check as passed or failed with what was sent, what NEO's tool answered and
-what actually arrived; it is saved in NEO's data folder (``selftest/``).
+what actually arrived, how long each tool took against its target, and two scores (success, and
+the share of tools meeting their speed target: neo2/core/selftest/bench.py); it is saved in NEO's data
+folder (``selftest/``). ``--bench`` (the developer's CLI) repeats the checks of each primitive N
+times within 90 s for p50/p90 timings.
+
+Checks for abilities NEO is still gaining (clicking a board square by name, on a flat and on a tilted
+board; a mark id from a screenshot; zoom; menus by meaning; the after-look; Effect fields) skip —
+never fail — until the tool offers them, and say so. Accessibility actions go through the watch too
+(neo2.core.selftest.watch: only the test window's elements).
 """
 
 from __future__ import annotations
@@ -47,11 +55,13 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from neo2.core.selftest import bench
+from neo2.core.selftest import geometry as G
 from neo2.core.selftest import layout as L
 from neo2.core.selftest.mac import Child, Mac, Rect, contains
 from neo2.core.selftest.watch import Stop, Watch
 
-_BUDGET_S = 45.0  # no check starts after this; with one check's limit and the clean-up, < 60 s in all
+_BUDGET_S = 50.0  # no check starts after this; with one check's limit and the clean-up, about a minute
 _CHECK_S = 8.0
 _READY_S = 12.0  # a cold Python + AppKit start
 _WAIT_S = 1.0  # for a click to arrive
@@ -75,6 +85,7 @@ class Check:
     arrived: str = ""  # what the test window received
     why: str = ""  # what a failure means
     ms: int = 0
+    rep: int = 0  # which repetition (--bench): 0 is the first run
 
     def ok(self, arrived: str) -> Check:
         self.status, self.arrived = "pass", arrived
@@ -107,6 +118,16 @@ class Report:
     stopped: str = ""  # stopped part-way: why
     info: dict[str, Any] = field(default_factory=dict)
     seconds: float = 0.0
+    repeats: list[Check] = field(default_factory=list)  # --bench: the primitives' checks again
+    timings: list[tuple[str, float, dict]] = field(default_factory=list)  # (tool, ms, args) of every call
+
+    @property
+    def timing(self) -> dict[str, dict[str, Any]]:
+        return bench.summarize(self.timings)
+
+    @property
+    def scores(self) -> dict[str, Any]:
+        return bench.scores([c.status for c in self.checks + self.repeats if c.name != "feedback"], self.timing)
 
     @property
     def passed(self) -> list[Check]:
@@ -142,6 +163,8 @@ class Report:
         skipped = [c for c in self.checks if c.status == "skip"]
         if skipped:
             parts.append("Skipped: " + "; ".join(f"{c.title.lower()} ({c.arrived})" for c in skipped) + ".")
+        if said := bench.words(self.scores):
+            parts.append(said)
         if saved is not None:
             parts.append(f"Full report: {_home(saved)}")
         return "\n".join(parts)
@@ -151,8 +174,24 @@ class Report:
         for k, v in self.info.items():
             lines.append(f"{k}: {v}")
         lines.append(f"took: {self.seconds:.1f} s")
+        sc = self.scores
+        if sc["success"] is not None:
+            lines.append(
+                f"scores: success {sc['success']} ({sc['passed']} passed, {sc['failed']} failed, {sc['skipped']} skipped); "
+                f"latency {sc['latency']} of {sc['timed']} timed tools meet P0 ({sc['latency_p1']} meet P1)"
+            )
         lines.append("")
         lines += [c.line() for c in self.checks]
+        if self.timing:
+            lines += ["", "tool timings (ms: p50 / p90 of n; target P0/P1):"]
+            for name, t in self.timing.items():
+                tgt = f"{t['target_ms'].get('p0', '-')}/{t['target_ms'].get('p1', '-')}"
+                met = "" if t["met_p0"] is None else (" ok" if t["met_p0"] else " SLOW")
+                lines.append(f"  {name}: {t['p50_ms']} / {t['p90_ms']} of {t['n']}; {tgt}{met}")
+        if self.repeats:
+            bad = [c for c in self.repeats if c.status == "fail"]
+            lines.append(f"repeats: {len(self.repeats)} checks, {len(bad)} failed")
+            lines += ["  " + c.line().replace("\n", "\n  ") for c in bad]
         return "\n".join(lines) + "\n"
 
     def to_json(self) -> dict[str, Any]:
@@ -164,6 +203,9 @@ class Report:
             "seconds": round(self.seconds, 2),
             "info": self.info,
             "checks": [asdict(c) for c in self.checks],
+            "repeats": [asdict(c) for c in self.repeats],
+            "timings": self.timing,
+            "scores": self.scores,
         }
 
 
@@ -244,6 +286,10 @@ class _Run:
         self.ids: dict[str, str] = {}
         self.taint: list[str] = []
         self.can_capture = False
+        self.timings: list[tuple[str, float, dict]] = []  # (tool, ms inside it, args) of every call
+        self.outputs: dict[str, list[Any]] = {}  # each tool's answers, in order
+        self.rep = 0  # the repetition running (--bench)
+        self.last_shot: tuple[bytes, str, tuple] | None = None  # (png, note, region) of the window's picture
 
     # the window
     def center(self, name: str) -> tuple[float, float]:
@@ -306,6 +352,11 @@ class _Run:
 
     # NEO's tools, the way the agent calls them
     async def tool(self, tool_name: str, /, **args: Any):
+        return await self.tool_as(tool_name, args)
+
+    async def tool_as(self, tool_name: str, args: dict, *, origin: str = "user", user_text: str = _ASKED):
+        """A tool call with its context said: whose it is (the user's words by default; "agent" for
+        a model that can see) and the words it answers."""
         from neo2.core.agent import confirm
         from neo2.core.agent.registry import ToolContext, ToolOutput, registry
 
@@ -317,7 +368,11 @@ class _Run:
             if pid != self.child.pid:
                 self.watch.refused = f"keys would have gone to {name or 'another app'}, which is in front"
                 return ToolOutput(f"Error: {self.watch.refused} — not sent.", ok=False)
-        out = await registry().invoke(tool_name, args, ToolContext(user_text=_ASKED, taint=self.taint, origin="user"))
+        t0 = time.monotonic()
+        out = await registry().invoke(tool_name, args, ToolContext(user_text=user_text, taint=self.taint, origin=origin))  # type: ignore[arg-type]
+        if out.ok:  # (a refusal's time says nothing about how fast the tool acts)
+            self.timings.append((tool_name, (time.monotonic() - t0) * 1000, dict(args)))
+        self.outputs.setdefault(tool_name, []).append(out)
         if out.staged and (p := confirm.peek()) is not None and p.action_id == out.staged:
             confirm.cancel("the controls self-test never presses anything that needs a yes")
         return out
@@ -432,6 +487,7 @@ async def _ax_tree(r: _Run) -> Check:
         name = (
             "button_a" if e.role == "AXButton" and e.title == L.BUTTON_A
             else "button_b" if e.role == "AXButton" and e.title == L.BUTTON_B
+            else "hindi" if e.role == "AXButton" and e.title == L.HINDI_BUTTON
             else "field" if e.role == "AXTextField"
             else "area" if e.role == "AXTextArea"
             else ""
@@ -519,6 +575,8 @@ async def _type_field(r: _Run) -> Check:
         return c.skip("ax_tree gave no id for the text field")
     await r.tool("click", id=eid)  # the caret goes into the field
     await asyncio.sleep(0.15)
+    if r.rep:  # (a repetition: what the first run typed is selected, and typed over)
+        await r.tool("hotkey", keys="cmd+a")
     n = len(r.watch.sent)
     out = await r.tool("type_text", text=L.TYPE_TEXT)
     c.said = out.text
@@ -593,8 +651,8 @@ async def _scroll(r: _Run) -> Check:
 
 async def _drag_board(r: _Run) -> Check:
     c = Check("drag_board", "Drag a piece on a board")
-    piece = r.state().get("piece") or r.ready.get("piece") or [1, 6]
-    end = [4, 3]
+    piece = r.state().get("piece") or r.ready.get("piece") or list(L.PIECE)
+    end = [4, 3] if piece != [4, 3] else list(L.PIECE)  # (a repetition drags it back)
     (x1, y1), (x2, y2) = r.cell(*piece), r.cell(*end)
     m = r.mark()
     out = await r.tool("drag", x1=x1, y1=y1, x2=x2, y2=y2)
@@ -650,6 +708,22 @@ def find_marker(png: bytes, size_px: float | None = None) -> tuple[float, float,
 
     a = np.asarray(Image.open(io.BytesIO(png)).convert("RGB"), dtype=np.int16)
     mask = (a[..., 0] > 170) & (a[..., 2] > 170) & (a[..., 1] < 110) & (np.abs(a[..., 0] - a[..., 2]) < 70)
+    return _square_in(mask, size_px)
+
+
+def find_square(png: bytes, rgb: tuple[int, int, int], size_px: float | None = None, tol: int = 40) -> tuple[float, float, float, float] | None:
+    """A flat square of this colour (the 12-pt button), as :func:`find_marker` finds the marker."""
+    import numpy as np
+    from PIL import Image
+
+    a = np.asarray(Image.open(io.BytesIO(png)).convert("RGB"), dtype=np.int16)
+    mask = (np.abs(a - np.array(rgb, dtype=np.int16)) <= tol).all(axis=-1)
+    return _square_in(mask, size_px)
+
+
+def _square_in(mask, size_px: float | None) -> tuple[float, float, float, float] | None:
+    import numpy as np
+
     count = int(mask.sum())
     if count == 0 or count > 250_000:
         return None
@@ -718,6 +792,8 @@ async def _shot(r: _Run, c: Check, region: tuple[int, int, int, int] | None) -> 
     c.said = out.text
     if not out.ok or not out.images:
         return c.fail(f"no screenshot: {_one_line(out.text)}")
+    if region:
+        r.last_shot = (out.images[0].data, out.text, region)
     sid = note_shot(out.text)
     if sid is None:
         return c.fail("the screenshot's note gives no shot id to click by", "a model can't click what a screenshot shows")
@@ -798,6 +874,315 @@ async def _activate(r: _Run) -> Check:
     return c.fail("it stayed behind" + (" (the app saw an activation)" if r.since(m, "focus", active=True) else ""))
 
 
+# ---- what NEO is still gaining: each skips until its tool offers it ------------------------------
+
+
+def _params(tool_name: str) -> set[str]:
+    from neo2.core.agent.registry import registry
+
+    t = registry().get(tool_name)
+    return set((t.parameters or {}).get("properties", {})) if t is not None else set()
+
+
+def _param_type(tool_name: str, name: str) -> str:
+    from neo2.core.agent.registry import registry
+
+    t = registry().get(tool_name)
+    return str(((t.parameters or {}).get("properties", {}).get(name) or {}).get("type", "")) if t is not None else ""
+
+
+def _resolver_live() -> bool:
+    """The resolver's stages past the exact label act (not only shadow): settings.resolver."""
+    try:
+        from neo2.core.config import settings
+
+        return str(getattr(settings(), "resolver", "") or "").lower() in ("live", "on", "all")
+    except Exception:  # noqa: BLE001
+        return False
+
+
+async def _answer_sheet(r: _Run, label: str) -> dict | None:
+    """Answer the open sheet with one of its buttons, as a model would: ax_tree, then ax_press by id."""
+    tree = await r.tool("ax_tree")
+    for line in tree.text.splitlines():
+        m = _ID_LINE.match(line)
+        if m and f'"{label}"' in line and "Button" in line:
+            m0 = r.mark()
+            await r.tool("ax_press", id=m.group(1))
+            return await r.wait(m0, lambda e: e.get("ev") == "sheet_answer" and e.get("button") == label, _TEXT_WAIT_S)
+    return None
+
+
+async def _sheet_blocks(r: _Run) -> Check:
+    c = Check("sheet_blocks", "A sheet over the window: a click behind it is refused and said")
+    if "round" not in r.ready:
+        return c.skip("this test window has no sheet")
+    m = r.mark()
+    await r.tool("hotkey", keys=L.ROUND_KEYS)
+    if await r.wait(m, lambda e: e.get("ev") == "sheet_open", _TEXT_WAIT_S) is None:
+        return c.fail(f"Test › {L.ROUND_MENU} ({L.ROUND_KEYS}) didn't open its sheet")
+    x, y = r.cell(3, 3)
+    m2 = r.mark()
+    click = await r.tool("click", x=x, y=y)
+    c.sent = f"hotkey {L.ROUND_KEYS} (Test › {L.ROUND_MENU}), a click on the board behind the sheet, then {L.SHEET_CANCEL}"
+    c.said = click.text
+    await asyncio.sleep(0.2)
+    landed = r.since(m2, "board_down")
+    said = not click.ok and bool(re.search(r"sheet|dialog", click.text, re.I))
+    closed = await _answer_sheet(r, L.SHEET_CANCEL)
+    if landed:
+        return c.fail("the click went through to the board under the sheet")
+    if not said:
+        return c.fail("nothing was clicked, but NEO's answer didn't say a sheet was in the way", "a model would think it clicked the board")
+    if closed is None:
+        return c.fail(f"NEO named the sheet, but pressing {L.SHEET_CANCEL} by its id didn't close it")
+    return c.ok(f"the click was refused with the sheet's words; {L.SHEET_CANCEL} closed it")
+
+
+async def _menu_sheet(r: _Run) -> Check:
+    from neo2.core.agent.registry import registry
+
+    c = Check("menu_sheet", "A menu command by meaning, and the sheet it opens")
+    if registry().get("menu_command") is None:
+        return c.skip("there's no menu_command tool yet")
+    if "round" not in r.ready:
+        return c.skip("this test window has no sheet")
+    params = _params("menu_command")
+    key = next((k for k in ("command", "item", "request", "text", "title", "name", "path") if k in params), None)
+    if key is None:
+        return c.skip(f"menu_command's arguments aren't known here ({', '.join(sorted(params)) or 'none'})")
+    words = "start a new round"
+    m = r.mark()
+    out = await r.tool_as("menu_command", {key: words}, user_text=words)
+    c.sent, c.said = f"menu_command {key}={words!r} (the user's words)", out.text
+    if await r.wait(m, lambda e: e.get("ev") == "sheet_open", _TEXT_WAIT_S) is None:
+        return c.fail(f"Test › {L.ROUND_MENU} wasn't chosen")
+    got = await r.wait(m, lambda e: e.get("ev") == "sheet_answer", 1.0)
+    how = "NEO answered the sheet itself"
+    if got is None:
+        how = "the sheet was handed back, and answered by its id"
+        got = await _answer_sheet(r, L.SHEET_START)
+    if got is None or got.get("button") != L.SHEET_START:
+        return c.fail(f"the sheet was answered {got.get('button') if got else 'not at all'}, not {L.SHEET_START}")
+    if not r.since(m, "round"):
+        return c.fail("the sheet closed but no new round started")
+    return c.ok(f"{L.ROUND_MENU} chosen from the words; {how}; a new round started")
+
+
+async def _click_meaning(r: _Run) -> Check:
+    c = Check("click_meaning", "Click by meaning: a Hindi-titled button, in Hindi, Hinglish and English")
+    if "hindi" not in r.targets:
+        return c.skip("this test window has no Hindi-titled button")
+    live = _resolver_live()
+    asks = [("its Hindi title", L.HINDI_BUTTON)] + ([(k, v) for k, v in L.HINDI_PHRASES.items()] if live else [])
+    done, bad, said = [], [], []
+    for what, phrase in asks:
+        m = r.mark()
+        out = await r.tool_as("click_text", {"label": phrase}, user_text=phrase)
+        said.append(out.text)
+        hit = await r.wait(m, lambda e: e.get("ev") == "button" and e.get("name") == L.HINDI_BUTTON)
+        (done if hit is not None else bad).append(what)
+    c.sent = "click_text " + "; ".join(repr(p) for _, p in asks)
+    c.said = " / ".join(said)
+    if bad:
+        return c.fail(f"the button wasn't pressed for {', '.join(bad)}")
+    rest = "" if live else "; by meaning (English, Hinglish, Hindi phrases) skipped: the resolver's later stages run in shadow"
+    return c.ok(f"pressed for {', '.join(done)}{rest}")
+
+
+async def _type_named(r: _Run) -> Check:
+    c = Check("type_named", "Type into a field named by its label")
+    key = next((k for k in ("field", "into", "target", "label") if k in _params("type_text")), None)
+    if key is None:
+        return c.skip("type_text can't be pointed at a field by its name yet")
+    words = " named ✓"
+    out = await r.tool("type_text", text=words, **{key: L.FIELD_HINT})
+    c.sent, c.said = f"type_text {words!r} {key}={L.FIELD_HINT!r}", out.text
+    if await r.wait_state(lambda s: str(s.get("field", "")).endswith(words)):
+        return c.ok(f"the field named {L.FIELD_HINT!r} got the text")
+    return c.fail(f"the field reads {r.state().get('field', '')!r}")
+
+
+async def _picture_of(r: _Run, frame: list | tuple) -> str | None:
+    """A screenshot of one part of the window (a board): its shot id, for clicks by square."""
+    x, y, w, h = (int(round(v)) for v in frame)
+    out = await r.tool("screenshot", x=x - 4, y=y - 4, w=w + 8, h=h + 8)
+    return note_shot(out.text) if out.ok else None
+
+
+def _changed_squares(out: Any, *squares: str) -> bool:
+    """Does the answer say which squares changed (its words, or its Effect)?"""
+    eff = getattr(out, "effect", None)
+    said = " ".join(str(v) for v in (out.text, getattr(eff, "cells", ""), getattr(eff, "squares", ""), getattr(eff, "changed", "")))
+    return all(re.search(rf"\b{sq}\b", said, re.I) for sq in squares)
+
+
+async def _board_cells(r: _Run) -> Check:
+    c = Check("board_cells", "Click and drag on the board by square names")
+    cp = _params("click")
+    if "cell" not in cp:
+        return c.skip("click takes no square names yet (cell=)")
+    shot = await _picture_of(r, r.targets["board"]) if r.can_capture else None
+    extra = {"shot": shot} if shot and "shot" in cp else {}
+    m = r.mark()
+    out = await r.tool("click", cell="g7", **extra)
+    hit = await r.wait(m, lambda e: e.get("ev") == "board_down")
+    c.sent, c.said = "click cell=g7" + (f" shot={shot}" if extra else ""), out.text
+    if hit is None or hit.get("cell") != G.cell_of("g7"):
+        return c.fail(f"g7 was clicked at {_cell_str(hit.get('cell')) if hit else 'nothing'}", "a named square lands off target")
+    dp = _params("drag")
+    pair = next((p for p in (("cell1", "cell2"), ("from_cell", "to_cell"), ("from", "to"), ("cell_from", "cell_to")) if set(p) <= dp), None)
+    if pair is None:
+        return c.ok("g7 by name (drag takes no square names yet)")
+    m = r.mark()
+    out = await r.tool("drag", **{pair[0]: "c2", pair[1]: "c4"}, **({"shot": shot} if shot and "shot" in dp else {}))
+    c.sent += f"; drag {pair[0]}=c2 {pair[1]}=c4"
+    c.said += f" / {out.text}"
+    moved = await r.wait(m, lambda e: e.get("ev") == "piece_moved", _DRAG_WAIT_S)
+    if moved is None or (moved.get("start"), moved.get("end")) != (G.cell_of("c2"), G.cell_of("c4")):
+        return c.fail("the piece on c2 didn't move to c4" + (f" (it went {moved.get('squares')})" if moved else ""))
+    if not _changed_squares(out, "c2", "c4"):
+        return c.fail("the piece moved, but NEO's answer doesn't say which squares changed", "a model can't tell the move happened")
+    return c.ok("g7 by name; c2→c4 by name, and the answer names both squares")
+
+
+async def _tilted_board(r: _Run) -> Check:
+    c = Check("tilted_board", "A square on a tilted, textured board")
+    quad = r.ready.get("tilt_quad")
+    if "tilt" not in r.targets or not quad:
+        return c.skip("this test window has no tilted board")
+    if "cell" not in _params("click"):
+        return c.skip("click takes no square names yet (cell=)")
+    if not r.can_capture:
+        return c.skip("Screen Recording is off for NEO")
+    shot = await _picture_of(r, r.targets["tilt"])
+    m = r.mark()
+    out = await r.tool("click", cell="e2", **({"shot": shot} if shot else {}))
+    c.sent, c.said = f"screenshot of the tilted board, then click cell=e2 shot={shot}", out.text
+    hit = await r.wait(m, lambda e: e.get("ev") == "tilt_down")
+    if hit is None:
+        return c.fail("nothing arrived on the tilted board")
+    cx, cy = G.cell_center([tuple(p) for p in quad], *G.cell_of("e2"))
+    off = ((hit["at"][0] - cx) ** 2 + (hit["at"][1] - cy) ** 2) ** 0.5 if hit.get("at") else float("nan")
+    if hit.get("square") != "e2":
+        return c.fail(f"it landed on {hit.get('square') or 'the edge'} instead of e2", "the board's perspective is read wrong")
+    return c.ok(f"e2 on the tilted board, {off:.1f} pt from the square's centre")
+
+
+async def _zoom_tiny(r: _Run) -> Check:
+    c = Check("zoom_tiny", "Zoom in, then click a 12-pt button")
+    if "tiny" not in r.targets:
+        return c.skip("this test window has no 12-pt button")
+    if "zoom" not in _params("screenshot"):
+        return c.skip("screenshot takes no zoom yet")
+    if not r.can_capture:
+        return c.skip("Screen Recording is off for NEO")
+    x, y, w, h = r.targets["tiny"]
+    region = {"x": int(x - 30), "y": int(y - 20), "w": 72, "h": 52}
+    zoom = True if _param_type("screenshot", "zoom") == "boolean" else 4
+    out = await r.tool("screenshot", zoom=zoom, **region)
+    sid = note_shot(out.text)
+    if not out.ok or not out.images or sid is None:
+        return c.fail(f"no zoomed picture: {_one_line(out.text)}")
+    found = find_square(out.images[0].data, L.TINY_RGB)
+    if found is None:
+        return c.fail("the 12-pt button isn't in the zoomed picture")
+    m = r.mark()
+    click = await r.tool("click", x=round(found[0], 1), y=round(found[1], 1), shot=sid)
+    c.sent, c.said = f"screenshot zoom={zoom} of {region}; click shot={sid} at the button", f"{out.text} / {click.text}"
+    hit = await r.wait(m, lambda e: e.get("ev") == "tiny_down")
+    if hit is None:
+        return c.fail("the click didn't reach the 12-pt button")
+    off = ((hit["at"][0] - (x + w / 2)) ** 2 + (hit["at"][1] - (y + h / 2)) ** 2) ** 0.5
+    if off > _POINT_SLACK:
+        return c.fail(f"it landed {off:.1f} pt from the button's centre (≤ {_POINT_SLACK} wanted)", "zoomed clicks land off small targets")
+    return c.ok(f"it landed {off:.1f} pt from the 12-pt button's centre")
+
+
+_MARK_LINE = re.compile(r"\b([em]\d+)\b[^\n]*?" + re.escape(L.BUTTON_B) + r"|" + re.escape(L.BUTTON_B) + r"[^\n]*?\b([em]\d+)\b")
+
+
+async def _click_mark(r: _Run) -> Check:
+    c = Check("click_mark", "Click by the element id a screenshot lists")
+    if not r.can_capture:
+        return c.skip("Screen Recording is off for NEO")
+    x, y, w, h = r.bounds
+    out = await r.tool("screenshot", x=int(x), y=int(y), w=int(w), h=int(h))
+    m = _MARK_LINE.search(out.text or "")
+    if m is None:
+        return c.skip("screenshots don't list the elements with ids yet")
+    eid = m.group(1) or m.group(2)
+    key = "mark" if eid.startswith("m") and "mark" in _params("click") else "id"
+    m0 = r.mark()
+    click = await r.tool("click", **{key: eid})
+    c.sent, c.said = f"screenshot of the window; click {key}={eid} (Bravo, as the picture's note lists it)", click.text
+    if await r.wait(m0, lambda e: e.get("ev") == "button" and e.get("name") == L.BUTTON_B):
+        return c.ok(f"Bravo was pressed by the id the screenshot gave ({eid})")
+    return c.fail("Bravo wasn't pressed")
+
+
+async def _after_look(r: _Run) -> Check:
+    c = Check("after_look", "A seeing model's click comes back with the picture after it")
+    eid = r.ids.get("button_a")
+    if not eid:
+        return c.skip("ax_tree gave no id for the Alpha button")
+    if not r.can_capture:
+        return c.skip("Screen Recording is off for NEO")
+    m = r.mark()
+    out = await r.tool_as("click", {"id": eid}, origin="agent")
+    c.sent, c.said = f"click id={eid} (Alpha) as a model that can see", out.text
+    await r.wait(m, lambda e: e.get("ev") == "button" and e.get("name") == L.BUTTON_A)
+    eff = getattr(out, "effect", None)
+    if out.images:
+        return c.ok("the answer carried the picture after the click")
+    if eff is not None and getattr(eff, "looked", False):
+        return c.fail("its Effect says it looked, but no picture came back")
+    return c.skip("no after-look picture yet")
+
+
+def _has_effect() -> bool:
+    """Do tool results carry an Effect (Step 0's ToolOutput.effect)?"""
+    import dataclasses
+
+    from neo2.core.agent.registry import ToolOutput
+
+    return "effect" in {f.name for f in dataclasses.fields(ToolOutput)}
+
+
+async def _effect_fields(r: _Run) -> Check:
+    c = Check("effect_fields", "Click, drag and scroll say what changed (Effect)")
+    if not _has_effect():
+        return c.skip("tool results carry no Effect yet")
+    if not any(getattr(o, "effect", None) is not None for outs in r.outputs.values() for o in outs):
+        # Step 0 gave ToolOutput the field; until a tool fills it, nothing here can say what changed
+        return c.skip("no tool fills in its Effect yet")
+    missing = []
+    for tool_name in ("click", "drag", "scroll"):
+        outs = [o for o in r.outputs.get(tool_name, []) if o.ok]
+        if not outs:
+            missing.append(f"{tool_name} (didn't run)")
+        elif getattr(getattr(outs[-1], "effect", None), "changed", None) is None:
+            missing.append(tool_name)
+    if missing:
+        return c.fail(f"no Effect.changed on {', '.join(missing)}", "a batch can't stop at a step that changed nothing")
+    return c.ok("click, drag and scroll each set Effect.changed")
+
+
+async def _ax_watched(r: _Run) -> Check:
+    c = Check("ax_watched", "Presses through Accessibility were checked like clicks")
+    made = sum(1 for t in ("ax_press", "ax_set_value") for o in r.outputs.get(t, []) if o.ok)
+    if not made:
+        return c.skip("nothing was pressed or set through Accessibility")
+    seen = r.watch.ax_seen
+    others = [e for e in seen if e.get("pid") != r.pid]
+    if others:
+        return c.fail(f"{len(others)} Accessibility action(s) reached another app", "an Accessibility press could act outside the test window")
+    if len(seen) < made:
+        return c.fail(f"{made - len(seen)} of {made} Accessibility actions were never shown to the watch",
+                      "an Accessibility press could reach another app unchecked")  # fmt: skip
+    return c.ok(f"all {len(seen)} Accessibility actions were checked, each the test window's")
+
+
 CHECKS: tuple[Callable[[_Run], Awaitable[Check]], ...] = (
     _first_click,
     _click_point,
@@ -818,6 +1203,34 @@ CHECKS: tuple[Callable[[_Run], Awaitable[Check]], ...] = (
     _shot_full,
     _second_display,
     _activate,
+    _sheet_blocks,
+    _menu_sheet,
+    _click_meaning,
+    _type_named,
+    _board_cells,
+    _tilted_board,
+    _zoom_tiny,
+    _click_mark,
+    _after_look,
+    _effect_fields,
+    _ax_watched,
+)
+
+# --bench: the checks of NEO's primitives, repeated for p50/p90 timings (each safe to run again).
+REPEAT: tuple[Callable[[_Run], Awaitable[Check]], ...] = (
+    _click_point,
+    _right_click,
+    _double_click,
+    _ax_tree,
+    _click_id,
+    _ax_press,
+    _ax_set_value,
+    _type_field,
+    _hotkey_menu,
+    _scroll,
+    _drag_board,
+    _shot_region,
+    _shot_full,
 )
 
 
@@ -836,15 +1249,16 @@ def _feedback(checks: list[Check]) -> Check:
     return c.ok("every step that failed also said so" if failed else "nothing failed")
 
 
-async def _one(fn: Callable[[_Run], Awaitable[Check]], r: _Run) -> Check:
+async def _one(fn: Callable[[_Run], Awaitable[Check]], r: _Run, check_s: float = _CHECK_S) -> Check:
     t0 = time.monotonic()
+    mark = len(r.timings)
     name = fn.__name__.lstrip("_")
     try:
-        c = await asyncio.wait_for(fn(r), _CHECK_S)
+        c = await asyncio.wait_for(fn(r), check_s)
     except Stop as e:
         c = Check(name, name.replace("_", " ").capitalize(), "stopped", arrived=str(e))
     except TimeoutError:
-        c = Check(name, name.replace("_", " ").capitalize()).fail(f"no answer within {_CHECK_S:.0f} s")
+        c = Check(name, name.replace("_", " ").capitalize()).fail(f"no answer within {check_s:.0f} s")
     except Exception as e:  # noqa: BLE001 - one broken check must not stop the clean-up
         c = Check(name, name.replace("_", " ").capitalize()).fail(f"the check broke: {e!r}"[:200])
     if (r.watch.stopped or r.watch.refused) and c.status in ("pass", "fail"):
@@ -853,6 +1267,9 @@ async def _one(fn: Callable[[_Run], Awaitable[Check]], r: _Run) -> Check:
         c.status, c.why = "stopped", ""
         c.arrived = f"stopped: {r.watch.stopped or r.watch.refused}"
     c.ms = int((time.monotonic() - t0) * 1000)
+    c.rep = r.rep
+    if c.status != "pass":
+        del r.timings[mark:]  # (only what worked is timed: a failure's time says nothing about speed)
     return c
 
 
@@ -902,6 +1319,8 @@ def _points(ready: dict) -> list[tuple[float, float]]:
     bx, by, _, _ = t.get("board", (0, 0, 0, 0))
     cell = float(ready.get("cell", L.CELL))
     pts += [(bx + (c + 0.5) * cell, by + (r + 0.5) * cell) for c, r in ((6, 1), (2, 2), (5, 5), (1, 6), (4, 3))]
+    if quad := ready.get("tilt_quad"):
+        pts += [G.cell_center([tuple(p) for p in quad], *G.cell_of(sq)) for sq in ("e2", "a8", "h1")]
     if ready.get("second"):
         x, y, w, h = ready["second"]["target"]
         pts.append((x + w / 2, y + h / 2))
@@ -914,10 +1333,20 @@ async def run(
     budget_s: float = _BUDGET_S,
     notify: Callable[[str], Any] | None = None,
     busy: Callable[[], str] | None = None,
+    reps: int = 1,
+    bench_budget_s: float = bench.BENCH_BUDGET_S,
+    ax_walk: str | None = None,
+    save_shot: bool = False,
+    checks: tuple[Callable[[_Run], Awaitable[Check]], ...] | None = None,
+    check_s: float = _CHECK_S,
 ) -> Report:
     """Run the controls self-test (see the module doc). Never raises for what happens on screen:
     everything ends up in the report. `busy`: why not now ("" = go), asked again right before the
-    test takes the mouse (other NEO jobs at work)."""
+    test takes the mouse (other NEO jobs at work). `reps` > 1 (--bench): the primitives' checks run
+    that many times in all, within `bench_budget_s` more. `ax_walk`: first time Accessibility reads
+    of this app ("front": the one in front), read-only. `save_shot`: keep the window's picture and
+    its targets in the data folder (for scoring a local grounder: neo2/core/selftest/grounding.py).
+    `checks` (neo2.core.selftest.agent): run these instead of the controls checks, each within `check_s`."""
     from neo2.core.tools import computer
     from neo2.core.tools.computer import apps
 
@@ -931,6 +1360,11 @@ async def run(
     pointer0 = await asyncio.to_thread(mac.pointer)
     saved_target = apps._target
     report.info["in front before"] = f"{prev_name or '?'} (pid {prev_pid})"
+    if ax_walk is not None:
+        try:
+            report.info["ax walk"] = await asyncio.to_thread(bench.ax_walk, "" if ax_walk in ("", "front") else ax_walk)
+        except Exception as e:  # noqa: BLE001 - the walk is extra: the check goes on without it
+            report.info["ax walk"] = {"error": repr(e)[:160]}
     started = time.time()
     tmp = Path(tempfile.mkdtemp(prefix="neo-selftest-"))
     log = tmp / "events.jsonl"
@@ -993,11 +1427,11 @@ async def run(
             return report
         apps.set_target("")  # keys go to the test window only, never an app NEO opened earlier
         with computer.allow_test_window(child.pid):
-            for fn in CHECKS:
+            for fn in checks if checks is not None else CHECKS:
                 if time.monotonic() - t0 > budget_s:
                     report.stopped = "it was taking too long"
                     break
-                check = await _one(fn, r)
+                check = await _one(fn, r, check_s)
                 report.checks.append(check)
                 if watch.stopped:
                     report.stopped = f"{watch.stopped}; nothing else was clicked or typed"
@@ -1008,8 +1442,24 @@ async def run(
                 if not child.alive():
                     report.stopped = "the test window closed"
                     break
-        if report.checks:
+            for rep in range(1, max(1, reps) if checks is None else 1):
+                r.rep = rep
+                for fn in REPEAT:
+                    if report.stopped or watch.stopped or watch.refused or not child.alive():
+                        break
+                    if time.monotonic() - t0 > budget_s + bench_budget_s:
+                        report.info["repeats"] = f"cut at repetition {rep + 1} of {reps}: the {bench_budget_s:.0f} s budget ran out"
+                        break
+                    report.repeats.append(await _one(fn, r))
+                if watch.stopped:
+                    report.stopped = f"{watch.stopped}; nothing else was clicked or typed"
+                if watch.refused:
+                    report.stopped = f"{watch.refused}, so I didn't send it"
+        if report.checks and checks is None:
             report.checks.append(_feedback(report.checks))
+        report.timings = list(r.timings)
+        if save_shot and r.last_shot is not None:
+            report.info["window picture"] = await asyncio.to_thread(_save_shot, r)
         return report
     except Exception as e:  # noqa: BLE001 - a broken test is a report too, never a crash of the request
         if report.checks:
@@ -1091,6 +1541,26 @@ _WATCHING = {
     "tap-mouse": "your mouse (an event tap; keys you press can't be noticed without Input Monitoring)",
     "pointer": "pointer only (no event tap: keys you press can't be noticed)",
 }
+
+
+def _save_shot(r: _Run) -> str:
+    """The window's picture and where everything in it is (screen points), in NEO's data folder."""
+    try:
+        from neo2.core.config import settings
+
+        assert r.last_shot is not None
+        png, note, region = r.last_shot
+        folder = settings().data_dir / "selftest"
+        folder.mkdir(parents=True, exist_ok=True)
+        stem = folder / time.strftime("window-%Y%m%d-%H%M%S")
+        stem.with_suffix(".png").write_bytes(png)
+        meta = {"region": list(region), "scale": note_scale(note), "targets": r.targets, "tilt_quad": r.ready.get("tilt_quad")}
+        stem.with_suffix(".json").write_text(json.dumps(meta), encoding="utf-8")
+        for p in (stem.with_suffix(".png"), stem.with_suffix(".json")):
+            p.chmod(0o600)
+        return str(stem.with_suffix(".png"))
+    except (OSError, AssertionError) as e:
+        return f"not saved ({e!r:.80})"
 
 
 def _forget_test_tree(since: float) -> None:
