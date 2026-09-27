@@ -232,6 +232,189 @@ def test_one_run_at_a_time(monkeypatch, tmp_path):
     assert first.text.startswith("Controls check: 1 of 1 passed.")
 
 
+def test_one_run_per_request_of_the_users(monkeypatch):
+    """The same words handed over again with nothing new from the user (a model retrying after the
+    report, Gemini Live mapping its own call onto the user's last sentence) never start a second run.
+    The user asking again does."""
+    from neo.events import bus
+
+    ran = []
+
+    async def fake_run(**kw):
+        ran.append(1)
+        return _fake_report()
+
+    monkeypatch.setattr(controls, "run", fake_run)
+    monkeypatch.setattr(controls, "save", lambda report: None)
+    bus().new_user_turn()  # the user said it
+    first = asyncio.run(registry().invoke("selftest_controls", {}, _ctx("user")))
+    again = asyncio.run(registry().invoke("selftest_controls", {}, _ctx("user")))
+    assert ran == [1] and first.text.startswith("Controls check:")
+    assert again.ok and again.say is True and "already answered that request" in again.text
+    bus().new_user_turn()  # "check your computer controls again"
+    third = asyncio.run(registry().invoke("selftest_controls", {}, _ctx("user")))
+    assert ran == [1, 1] and third.text.startswith("Controls check:")
+
+
+def test_it_does_not_start_while_another_neo_job_is_running(monkeypatch):
+    """Another job (an agent task, a Live tool call) may be clicking or typing: the test would take the
+    mouse and keyboard from under it. It says so instead, and runs once that job is done."""
+    from neo.events import NeoState, bus
+
+    ran = []
+
+    async def fake_run(**kw):
+        ran.append(kw.get("busy"))
+        return _fake_report()
+
+    monkeypatch.setattr(controls, "run", fake_run)
+    monkeypatch.setattr(controls, "save", lambda report: None)
+
+    async def scenario():
+        other_started, other_done = asyncio.Event(), asyncio.Event()
+
+        async def other_job():
+            await bus().set_state(NeoState.WORKING, job="j1")
+            other_started.set()
+            await other_done.wait()
+            await bus().end_job("j1")
+
+        async def ask(job):  # the way the session runs the fast path: its own job, announced
+            bus().new_user_turn()
+            await bus().set_state(NeoState.WORKING, job=job)
+            await bus().tool_start("selftest_controls", {}, job=job)
+            out = await registry().invoke("selftest_controls", {}, _ctx("user"))
+            await bus().end_job(job)
+            return out
+
+        t = asyncio.create_task(other_job())
+        await other_started.wait()
+        busy = await ask("j2")
+        other_done.set()
+        await t
+        # that request is answered: its words handed over again (a model's retry) don't run it later
+        stale = await registry().invoke("selftest_controls", {}, _ctx("user"))
+        free = await ask("j3")
+        return busy, stale, free
+
+    busy, stale, free = asyncio.run(scenario())
+    assert busy.ok and busy.say is True and "in the middle of something else (another NEO job" in busy.text
+    assert "already answered" in stale.text
+    assert len(ran) == 1 and free.text.startswith("Controls check:")
+    assert callable(ran[0]) and ran[0]() == ""  # checked again right before the mouse is taken
+
+
+def _live_voice(said, *, utt=3):
+    """A Gemini Live voice layer between sentences: the user's last one is over and answered (its
+    words are only in the label now), and the session is a fake that records what it is handed."""
+    import neo.voice.live as live_mod
+    from neo.agent.session import Reply
+
+    calls = []
+
+    class S:
+        async def handle(self, text, **kw):
+            calls.append((text, kw.get("origin")))
+            return Reply("done", "quick")
+
+    class Socket:  # Gemini Live's end: the results NEO sends back
+        async def send_tool_response(self, **kw):
+            pass
+
+    v = live_mod.LiveVoice.__new__(live_mod.LiveVoice)
+    v._agent_session, v._tool_tasks, v._goals, v._server_cancelled = S(), {}, {}, set()
+    v._live, v._ui_lock, v._dialog, v._call_labels = Socket(), asyncio.Lock(), [], {}
+    v._taint, v._utt_started, v._last_answer = [], 0.0, (0.0, "")
+    v._lookups, v._seen_calls = {}, {}
+    v._last_activity, v._utt_id, v._calls_this_turn = 0.0, utt, 0
+    v._gate, v._held, v._result_pending, v._result_speech = None, [], False, False
+    v._last_response_at, v._last_heard_at = 0.0, 0.0
+    v._utterance = ""
+    v._label = {"text": said, "tools": [], "spoke": True, "open": False, "id": ""}
+
+    async def _noop(*a, **k):
+        return None
+
+    v._refresh_state = v._think = _noop
+    return v, calls
+
+
+def _model_calls(v, goal, n=1):
+    """Gemini Live makes an agent_task call of its own (no new words from the user)."""
+    fc = types.SimpleNamespace(id=f"c{n}", name="agent_task", args={"goal": goal})
+    msg = types.SimpleNamespace(
+        server_content=None, tool_call=types.SimpleNamespace(function_calls=[fc]), tool_call_cancellation=None, go_away=None
+    )
+
+    async def drive():
+        await v._on_message(msg, [], [], v._live)
+        await asyncio.gather(*list(v._tool_tasks.values()), return_exceptions=True)
+
+    asyncio.run(drive())
+
+
+def test_a_live_model_call_after_the_lane_ran_the_sentence_is_the_models_own(monkeypatch):
+    """The user said "check your computer controls"; NEO's command lane ran it (well past the lane's
+    30 s claim: the test takes about that long). The report goes to the model, which then calls
+    agent_task itself (a retry, or a goal it read somewhere): that is the model's goal, never the
+    user's old sentence run again as the user's own request."""
+    from neo.agent import fastpath
+
+    said = "check your computer controls"
+    monkeypatch.setattr(fastpath, "plan", lambda text, **k: [("selftest_controls", {})] if phrases.is_request(text) else None)
+    v, calls = _live_voice(said)
+    v._lane_utt, v._lane_at = 3, 0.0  # the lane did sentence 3, long ago
+    _model_calls(v, "open notes")
+    assert calls == [("open notes", "live")]
+
+
+def test_a_live_model_maps_onto_the_users_words_once_per_sentence(monkeypatch):
+    """The model wrapping the user's command in agent_task runs the user's own words (fast) — once.
+    A second call of its own for the same sentence is its goal; a new sentence maps again."""
+    from neo.agent import fastpath
+
+    said = "check your computer controls"
+    monkeypatch.setattr(fastpath, "plan", lambda text, **k: [("selftest_controls", {})] if phrases.is_request(text) else None)
+    v, calls = _live_voice(said)
+    v._lane_utt, v._lane_at = -1, 0.0  # the model got there first: the lane stayed out
+    _model_calls(v, said, 1)
+    assert calls == [(said, "user")]
+    _model_calls(v, "open notes", 2)
+    assert calls[-1] == ("open notes", "live")
+    v._new_sentence()  # the user says it again
+    v._label["text"] = said
+    _model_calls(v, said, 3)
+    assert calls[-1] == (said, "user")
+
+
+def test_every_new_sentence_is_a_new_user_turn(monkeypatch):
+    import neo.voice.live as live_mod
+    from neo.agent import session as sess_mod
+    from neo.events import bus
+
+    v = live_mod.LiveVoice.__new__(live_mod.LiveVoice)
+    n = bus().user_turns
+    v._new_sentence()
+    assert bus().user_turns == n + 1
+    monkeypatch.setattr(sess_mod.fastpath, "plan", lambda text, **k: None)
+
+    async def chat(self, text, d, job):
+        return sess_mod.Reply("hi", "chat")
+
+    monkeypatch.setattr(sess_mod.Session, "_chat", chat)
+
+    class Chat:
+        async def decide(self, text):
+            from neo.reflex.schema import Decision
+
+            return Decision("chat", 0.99, True, 0.99, False, 0.0, "rules")
+
+    asyncio.run(sess_mod.Session(reflex=Chat()).handle("hello", from_user=True))  # typed, or local speech
+    assert bus().user_turns == n + 2
+    asyncio.run(sess_mod.Session(reflex=Chat()).handle("hello", origin="live"))  # a model's words
+    assert bus().user_turns == n + 2
+
+
 # ---- the session: the user's words go straight to it -------------------------------------------
 
 

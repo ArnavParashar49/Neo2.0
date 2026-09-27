@@ -70,6 +70,9 @@ class EventBus:
         self._state = NeoState.IDLE
         self._tasks: dict[str, asyncio.Task] = {}  # the task each job runs in (for a scoped stop)
         self._job_end: list[Callable[[str], None]] = []
+        # Bumps when the user starts a new sentence or sends a request (spoken or typed) — never for
+        # words a model hands over. "Has the user said anything since?" is a comparison of two counts.
+        self.user_turns = 0
 
     @property
     def state(self) -> NeoState:
@@ -78,6 +81,20 @@ class EventBus:
     @property
     def active_jobs(self) -> list[str]:
         return list(self._jobs)
+
+    def running_jobs(self, *, besides: str = "") -> list[str]:
+        """Jobs still at work: their task hasn't finished (a job whose task ended without saying so,
+        or that only waits for the user's yes, isn't doing anything)."""
+        out = []
+        for job, st in self._jobs.items():
+            t = self._tasks.get(job)
+            if job != besides and st != NeoState.CONFIRMING and (t is None or not t.done()):
+                out.append(job)
+        return out
+
+    def new_user_turn(self) -> None:
+        """The user started a new sentence, or sent a request."""
+        self.user_turns += 1
 
     def subscribe(self, fn: Subscriber) -> Callable[[], None]:
         self._subs.append(fn)

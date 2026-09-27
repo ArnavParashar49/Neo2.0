@@ -461,6 +461,7 @@ class LiveVoice:
     _lane_tried_utt = -1  # the sentence the lane last looked at
     _lane_utt = -1  # the sentence the lane is doing
     _lane_at = 0.0
+    _own_utt = -1  # the sentence whose words an agent_task call already ran as the user's own
     # voice confirmations (see _voiced)
     _asked: tuple[str, str, float] | None = None  # (action_id, question text handed to the model, when)
     _voiced_action: tuple[str, str, float] | None = None  # (action_id, what the model then said, when)
@@ -971,7 +972,7 @@ class LiveVoice:
                 if self._label is not None:
                     self._label["tools"].append(fc.name)
                     self._call_labels[fc.id or fc.name] = self._label
-                task = asyncio.create_task(self._run_tool(live, fc, asked))
+                task = asyncio.create_task(self._run_tool(live, fc, asked, utt=self._utt_id))
                 self._tool_tasks[fc.id or fc.name] = task
             await self._refresh_state()
         if msg.tool_call_cancellation:
@@ -993,6 +994,7 @@ class LiveVoice:
         """The user started a new sentence (spoken or typed)."""
         self._utt_id += 1
         self._utt_started = time.time()
+        bus().new_user_turn()
 
     def _maybe_command_lane(self, text: str, *, settled: bool) -> None:
         """Look at a finished sentence once; run it here if it's purely a command NEO covers."""
@@ -1131,7 +1133,10 @@ class LiveVoice:
             self._speaking = False
             await self._refresh_state()
 
-    async def _run_tool(self, live, fc, asked: str = "") -> None:
+    async def _run_tool(self, live, fc, asked: str = "", *, utt: int | None = None) -> None:
+        """Run one of the model's calls. `asked`: the user's words it answers (their last sentence,
+        which may be over); `utt`: that sentence's number."""
+        utt = self._utt_id if utt is None else utt
         args = dict(fc.args or {})
         key = fc.id or fc.name
         t = registry().get(fc.name)
@@ -1175,11 +1180,17 @@ class LiveVoice:
                     self._goals[key] = goal
                     # The model often wraps a plain command ("new note") in agent_task. If the
                     # user's own words are fully covered by fast paths, run those (≈1 s) instead
-                    # of the model's paraphrase through the agent loop (seconds to a minute).
+                    # of the model's paraphrase through the agent loop (seconds to a minute) —
+                    # once per sentence: after they ran (here or in the command lane), a later
+                    # call with nothing new from the user is the model's own goal, never the
+                    # user's last sentence run again as their request.
                     from neo.agent import fastpath
 
-                    steps = fastpath.plan(asked) if asked else None
+                    unused = utt not in (self._own_utt, self._lane_utt)
+                    steps = fastpath.plan(asked) if asked and unused else None
                     own = bool(steps) and not any(_vague(v) for _, a in steps for v in a.values())
+                    if own:
+                        self._own_utt = utt
                     reply = await self._agent_session.handle(
                         asked if own else goal,
                         conversation=self._conversation(asked),

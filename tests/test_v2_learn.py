@@ -178,7 +178,7 @@ def test_a_partial_transcript_at_tool_time_and_the_final_one_make_one_label():
     class FC:
         id, name, args = "c1", "weather", {"place": "Paris"}
 
-    async def fake_run_tool(live, fc, asked=""):
+    async def fake_run_tool(live, fc, asked="", **kw):
         return None
 
     v._run_tool = fake_run_tool
