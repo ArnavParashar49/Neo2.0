@@ -610,6 +610,13 @@ class ImageLimit:
             s = min(s, (self.pixels / (width * height)) ** 0.5)
         return s
 
+    def box(self, width: int, height: int) -> tuple[int, int]:
+        """The size a width × height picture is scaled to, to fit (its own size when it does)."""
+        s = self.scale(width, height)
+        if s >= 1.0:
+            return width, height
+        return max(1, int(width * s)), max(1, int(height * s))
+
     def tighter(self, other: ImageLimit | None) -> ImageLimit:
         """The stricter of the two, limit by limit."""
         if other is None:
@@ -644,21 +651,25 @@ def _claude_limit(model: str) -> ImageLimit:
 
 
 def limit_of(p: Any) -> ImageLimit | None:
-    """One seeing brain's picture limit: its own (`image_limit`), else what is known of its kind."""
+    """One seeing brain's picture limit: its own (`image_limit`), else what is known of its kind —
+    and, for a brain that says how big one request may be (`max_request_bytes`, base64 pictures
+    included), no picture larger than fits in it."""
+    lim: ImageLimit | None = None
     own = getattr(p, "image_limit", None)
     if isinstance(own, ImageLimit):
-        return own
-    if callable(own):
-        got = own()
-        if got is None or isinstance(got, ImageLimit):
-            return got
-    name, model = str(getattr(p, "name", "")), str(getattr(p, "model", ""))
-    if name.startswith("claude") or model.startswith("claude"):
-        return _claude_limit(model)
-    for prefix, lim in IMAGE_LIMITS.items():
-        if name.startswith(prefix):
-            return lim
-    return None
+        lim = own
+    elif callable(own) and isinstance(got := own(), ImageLimit):
+        lim = got
+    else:
+        name, model = str(getattr(p, "name", "")), str(getattr(p, "model", ""))
+        if name.startswith("claude") or model.startswith("claude"):
+            lim = _claude_limit(model)
+        else:
+            lim = next((v for k, v in IMAGE_LIMITS.items() if name.startswith(k)), None)
+    per_request = getattr(p, "max_request_bytes", None)
+    if isinstance(per_request, int) and not isinstance(per_request, bool) and per_request > 0:
+        lim = ImageLimit(bytes=per_request * 3 // 4).tighter(lim)  # (base64: 4 bytes per 3)
+    return lim
 
 
 def image_limit(purpose: Purpose = "vision") -> ImageLimit | None:

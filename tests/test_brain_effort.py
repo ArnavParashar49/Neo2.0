@@ -552,9 +552,21 @@ def test_a_hosts_own_brain_gives_its_own_limit(monkeypatch):
     assert prov.image_limit() == ImageLimit(1024, None, None)
 
 
+def test_a_brain_that_says_its_request_size_caps_one_picture_at_it():
+    from neo.providers import ImageLimit, limit_of
+
+    b = Brain("cerebras_vision", True)
+    b.max_request_bytes = 10 * 1024 * 1024  # base64 pictures included
+    assert limit_of(b) == ImageLimit(bytes=10 * 1024 * 1024 * 3 // 4)
+    b.name = "groq_vision"  # a known kind too: the stricter of each
+    assert limit_of(b) == ImageLimit(None, 33_177_600, 3 * 1024 * 1024)
+
+
 def test_image_limit_scale_and_tighter():
     from neo.providers import ImageLimit
 
+    assert ImageLimit(1568).box(3024, 1964) == (1568, int(1964 * 1568 / 3024))
+    assert ImageLimit(1568).box(800, 600) == (800, 600)
     assert ImageLimit(1568).scale(3024, 1964) == pytest.approx(1568 / 3024)
     assert ImageLimit(None, 1_150_000).scale(3024, 1964) == pytest.approx((1_150_000 / (3024 * 1964)) ** 0.5)
     assert ImageLimit(4000).scale(800, 600) == 1.0
