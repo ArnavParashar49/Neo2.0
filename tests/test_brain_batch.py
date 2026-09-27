@@ -1,6 +1,6 @@
 """Brain batch: several actions per model turn stopping at the first that went wrong, no separate
-check turn when the model already saw the result, finishing on the model's own words after actions
-NEO verified, quiet only when nothing was a miss, an evidence-only lean screen prompt and tool list.
+check turn when the model already saw the result, finishing with `finish` after actions NEO
+verified, quiet only when nothing was a miss, an evidence-only lean screen prompt and tool list.
 
 Hermetic: fake brains, fake tools in their own registries (never the Mac), no model calls."""
 
@@ -299,55 +299,90 @@ def test_a_look_that_fails_leaves_the_plain_note(monkeypatch):
 # ---- finishing without one more model call ------------------------------------------------------------
 
 
-def _finish_run(*outs, calls, text="Filled in your name.", **kw):
+def _fin(i=99, answer="Filled in your name."):
+    return _call(i, "finish", answer=answer)
+
+
+def _finish_run(*outs, calls, text="", then=(), **kw):
     w = World()
     for tool, out in outs:
         w.answer(tool, out)
-    b = Brain(Turn(text=text, tool_calls=calls), Turn(text="(the model again)"), Turn(text="(and again)"))
-    res = _run(_reg(w), b, **kw)
-    return res, b
+    b = Brain(Turn(text=text, tool_calls=calls), *then, Turn(text="(the model again)"), Turn(text="(and again)"))
+    reg = _reg(w)
+    tools = [t.spec() for t in reg.all()]
+    res = asyncio.run(run_agent("do it", provider=b, system="s", reg=reg, ev=EventBus(), tools=tools, **kw))
+    return res, b, w
 
 
-def test_the_model_s_own_final_words_end_the_run_when_neo_verified_every_action():
-    res, b = _finish_run(
+def test_finish_with_actions_neo_verified_ends_the_run_without_another_model_call():
+    res, b, w = _finish_run(
         ("ax_set_value", _out("Set e3 to “Arnav”.")), ("ax_press", _out("Pressed e9.", effect=_eff(True))),
-        calls=[_call(1, "ax_set_value", id="e3", value="Arnav"), _call(2, "ax_press", id="e9")], finish_verified=True,
+        calls=[_call(1, "ax_set_value", id="e3", value="Arnav"), _call(2, "ax_press", id="e9"), _fin()],
+        finish_verified=True,
     )  # fmt: skip
     assert res.stopped == "done" and res.text == "Filled in your name." and len(b.seen) == 1
+    assert [n for n, _ in w.ran] == ["ax_set_value", "ax_press"]  # `finish` is never a tool that runs
     assert res.messages[-1].role == "assistant" and res.messages[-1].text == "Filled in your name."
-    assert res.messages[-2].role == "tool"  # every call answered before the run's answer
+    assert res.messages[-2].role == "tool" and len(res.messages[-2].tool_results) == 3  # every call answered
+    assert [st.tool for st in res.steps] == ["ax_set_value", "ax_press"]  # the ending is not a step
+
+
+class _ToolsSeen(Brain):
+    def __init__(self, *turns):
+        super().__init__(*turns)
+        self.offered: list[list[str]] = []
+
+    async def complete(self, messages, *, tools=None, **k):
+        self.offered.append([t.name for t in tools or []])
+        return await super().complete(messages, tools=tools, **k)
 
 
 @pytest.mark.parametrize(
-    "outs, calls, kw",
+    "kw, offered", [({"finish_verified": True}, True), ({}, False), ({"finish_verified": True, "strict": True}, False)]
+)
+def test_finish_is_offered_only_to_a_run_that_may_end_that_way(kw, offered):
+    reg = _reg(World())
+    b = _ToolsSeen(Turn(text="ok"))
+    asyncio.run(run_agent("x", provider=b, system="s", reg=reg, ev=EventBus(), tools=[t.spec() for t in reg.all()], **kw))
+    assert ("finish" in b.offered[0]) is offered
+
+
+@pytest.mark.parametrize(
+    "outs, calls",
     [
-        # off unless the session asks for it
-        ([("ax_press", _out("Pressed.", effect=_eff(True)))], [_call(1, "ax_press", id="e9")], {}),
         # a click at pixels: NEO can't verify it through Accessibility
-        ([("click", _out("Clicked.", effect=_eff(True, looked=True), images=[PNG]))], [_call(1, "click", x=1, y=1)],
-         {"finish_verified": True}),
+        ([("click", _out("Clicked.", effect=_eff(True, looked=True), images=[PNG]))], [_call(1, "click", x=1, y=1)]),
         # a press whose effect NEO couldn't tell
-        ([("ax_press", _out("Pressed."))], [_call(1, "ax_press", id="e9")], {"finish_verified": True}),
+        ([("ax_press", _out("Pressed."))], [_call(1, "ax_press", id="e9")]),
         # a sheet opened: there is more to do
-        ([("ax_press", _out("Pressed.", effect=_eff(True, scene=True, sheet="a sheet")))], [_call(1, "ax_press", id="e9")],
-         {"finish_verified": True}),
-        # a look in the same turn: the words were written before its answer
-        ([("ax_press", _out("Pressed.", effect=_eff(True)))], [_call(1, "ax_press", id="e9"), _call(2, "ax_tree")],
-         {"finish_verified": True}),
-        # a strict run (a fenced job) always hears back from its model
-        ([("ax_press", _out("Pressed.", effect=_eff(True)))], [_call(1, "ax_press", id="e9")],
-         {"finish_verified": True, "strict": True}),
+        ([("ax_press", _out("Pressed.", effect=_eff(True, scene=True, sheet="a sheet")))], [_call(1, "ax_press", id="e9")]),
+        # a look in the same reply: the answer was written before its result
+        ([("ax_press", _out("Pressed.", effect=_eff(True)))], [_call(1, "ax_press", id="e9"), _call(2, "ax_tree")]),
+        # a failed action, and the one after it skipped
+        ([("ax_press", _out("Error: gone", ok=False))], [_call(1, "ax_press", id="e9"), _call(2, "ax_press", id="e8")]),
     ],
 )  # fmt: skip
-def test_no_early_finish_otherwise(outs, calls, kw):
-    res, b = _finish_run(*outs, calls=calls, **kw)
+def test_finish_is_refused_when_neo_couldnt_verify_every_action(outs, calls):
+    res, b, _w = _finish_run(*outs, calls=[*calls, _fin()], finish_verified=True)
     assert len(b.seen) >= 2 and res.text != "Filled in your name."
+    [r] = [r for m in b.seen[1] if m.role == "tool" for r in m.tool_results if r.name == "finish"]
+    assert r.content == batch.NOT_FINISHED  # the model hears why and carries on
 
 
-def test_no_early_finish_without_final_words():
-    res, b = _finish_run(("ax_press", _out("Pressed.", effect=_eff(True))), calls=[_call(1, "ax_press", id="e9")],
-                         text="", finish_verified=True)  # fmt: skip
-    assert len(b.seen) == 2
+def test_a_narrating_model_never_ends_a_run_by_its_words():
+    res, b, _w = _finish_run(("ax_press", _out("Pressed.", effect=_eff(True))),
+                             calls=[_call(1, "ax_press", id="e9")], text="I'll press Start, then Continue.",
+                             finish_verified=True)  # fmt: skip
+    assert len(b.seen) == 2 and res.text == "(the model again)"
+
+
+def test_finish_alone_is_the_answer_after_the_same_check_as_text():
+    # after an action NEO couldn't verify, `finish` alone gets the check note first, like text would
+    res, b, _w = _finish_run(("hotkey", _out("Pressed cmd+s.")), calls=[_call(1, "hotkey", keys="cmd+s")],
+                             then=[Turn(tool_calls=[_fin(5, "Saved.")]), Turn(tool_calls=[_fin(6, "Saved, checked.")])],
+                             finish_verified=True)  # fmt: skip
+    assert res.text == "Saved, checked." and len(_verify_notes(b)) == 1
+    assert res.messages[-1].text == "Saved, checked." and res.messages[-2].tool_results[0].content == "Noted."
 
 
 # ---- quiet only when nothing was a miss ------------------------------------------------------------------
@@ -418,7 +453,6 @@ def test_several_actions_per_reply_are_invited_only_with_the_setting(monkeypatch
     p = " ".join(prompt.persona().split())
     assert batch.enabled() and _BATCH_WORDS.search(p) and "make one move" not in p
     assert "stops at the first that fails, changes nothing or changes the screen" in p
-    assert "write your short final answer in the same reply" in p
 
 
 def test_an_embedded_agent_never_reads_the_batch_switch_from_the_environment(monkeypatch, tmp_path):

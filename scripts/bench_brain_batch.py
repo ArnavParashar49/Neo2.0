@@ -4,8 +4,8 @@ fixed tokens every call pays (the system prompt and the tool list of a screen ru
 
 Nothing leaves the Mac and nothing on it is touched: the brain is a scripted fake that follows
 what it is offered (it sends several actions per reply only when the prompt invites it, looks
-again after a move only when the result didn't show it, resends what was skipped, writes its final
-answer with its last actions only when invited), every tool is a fake, NEO_NO_EFFECTS=1 and a
+again after a move only when the result didn't show it, resends what was skipped, calls `finish`
+with its last actions only when that is offered), every tool is a fake, NEO_NO_EFFECTS=1 and a
 throwaway data dir. Seconds are MODELED: round trips × a published first-token median per reply
 (low 1.5 s, high 12 s) — informational only.
 
@@ -58,7 +58,6 @@ IMG_TOKENS = 1120  # Gemini 3's default per picture
 MODEL_S = {"low": 1.5, "high": 12.0}
 PNG = ImagePart(b"\x89PNG bench", "image/png")
 _BATCH_WORDS = re.compile(r"\b(?:several|multiple|a batch of)\s+(?:actions|tool calls|calls|steps)\s+in\s+one\s+(?:turn|reply|step)", re.I)
-_FINAL_WORDS = "final answer in the same reply"
 _PIXEL = {"x", "y", "shot", "cell"}
 
 
@@ -129,7 +128,7 @@ class Brain:
             self.state = {"looked": [], "phase": 0, "pending": [], "need_look": False, "checked": False}
         st = self.state
         batch = bool(_BATCH_WORDS.search(system))
-        final_ok = batch and _FINAL_WORDS in " ".join(system.split())
+        final_ok = batch and any(t.name == "finish" for t in specs)  # offered: end with the last actions
         last = messages[-1]
         if last.role == "user" and last.text.startswith("[verify]"):
             if "NEO looked at the screen" in last.text or st["checked"]:
@@ -166,8 +165,9 @@ class Brain:
         if not batch:
             st["pending"] = todo[1:] + st["pending"]
             todo = todo[:1]
-        finishing = final_ok and st["phase"] >= len(self.sc.phases) and not st["pending"]
-        return Turn(text="Done." if finishing else "", tool_calls=todo)
+        if final_ok and st["phase"] >= len(self.sc.phases) and not st["pending"]:
+            todo.append(self._tc("finish", {"answer": "Done."}))
+        return Turn(tool_calls=todo)
 
     def _tc(self, name, args) -> ToolCall:
         self.state["n"] = self.state.get("n", 0) + 1

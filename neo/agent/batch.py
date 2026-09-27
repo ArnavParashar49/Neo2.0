@@ -13,8 +13,9 @@ enough:
   result carried a picture of it (an after-look), or NEO checked it through Accessibility (a value
   read back, a press whose element or window visibly changed). When a check is still needed, a
   look is attached to the note, so it costs one round trip instead of two;
-* **finishing without another model call**: the model wrote its final answer in the same reply as
-  its last actions, and NEO confirmed through Accessibility that every one of them worked;
+* **finishing without another model call**: the model called ``finish`` with its final answer in
+  the same reply as its last actions, and NEO confirmed through Accessibility that every one of
+  them worked;
 * whether several actions per reply are invited at all (``batch_actions``, off until the user's
   A/B on the self-test window says otherwise — DECISIONS 47).
 
@@ -33,7 +34,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from neo import runtime
-from neo.providers.base import ImagePart, Message, ToolCall, ToolResult
+from neo.providers.base import ImagePart, Message, ToolCall, ToolResult, ToolSpec
 
 log = logging.getLogger(__name__)
 
@@ -147,10 +148,26 @@ def at_pixels(c: ToolCall) -> bool:
     return bool(_PIXEL_ARGS & set(c.args or {}))
 
 
+# The model says its last actions finish the task, in the same reply as those actions. An explicit
+# call, never text: a model that narrates ("I'll press Start…") alongside a call can't end a run.
+FINISH = ToolSpec(
+    "finish",
+    "Call this in the same reply as your last actions when they complete the task, with your short "
+    "final answer. NEO runs the actions first: when it confirms each one worked, this is the answer "
+    "and the task ends there; if not, you get their results and carry on.",
+    {"type": "object", "properties": {"answer": {"type": "string"}}, "required": ["answer"]},
+    essential=True,
+)
+NOT_FINISHED = (
+    "Not finished: NEO couldn't confirm that every action in this reply worked (their results say "
+    "why). Check them, then carry on or answer."
+)
+
+
 def finished(calls: Sequence[ToolCall], results: Sequence[ToolResult]) -> bool:
-    """Can the run end on the model's own final words written with these calls? Only when every
-    call was an action NEO verified through Accessibility (none skipped, none asked the user, no
-    look whose answer the words couldn't have known, no sheet left open)."""
+    """Can the run end with these actions? Only when every one was an action NEO verified through
+    Accessibility (none skipped, none asked the user, no look whose answer the model couldn't have
+    known, no sheet left open)."""
     if not calls or len(calls) != len(results):
         return False
     by_id = {r.call_id: r for r in results}

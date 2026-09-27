@@ -293,9 +293,9 @@ async def run_agent(
     run's tools are all essential — nothing could get one back. Any other run always offers
     `more_tools`, which hands back what that brain wasn't shown.
 
-    `finish_verified`: a command nobody waits to hear an answer to — when the model writes its
-    final answer in the same reply as its last actions and NEO verified every one of them through
-    Accessibility (neo.agent.batch.finished), the run ends there, without one more model call."""
+    `finish_verified`: a command nobody waits to hear an answer to — the model is offered `finish`
+    (neo.agent.batch.FINISH): called in the same reply as its last actions, and NEO verified every
+    one of them through Accessibility, the run ends there, without one more model call."""
     s = settings()
     reg = reg or default_registry()
     ev = ev or default_bus()
@@ -318,6 +318,10 @@ async def run_agent(
         tools = [t if t.essential else replace(t, essential=True) for t in tools]
     elif not any(t.name == MORE_TOOLS.name for t in tools):
         tools.append(MORE_TOOLS)
+    # `finish` is answered here like `more_tools` (never by the registry, never a strict run's).
+    finishing = finish_verified and not strict and batch.FINISH.name not in reg
+    if finishing and not any(t.name == batch.FINISH.name for t in tools):
+        tools.append(batch.FINISH)
     enabled = {t.name for t in tools}
     effectful = False  # a side-effect tool ran this run
     last_readonly = True  # the model has seen the state after the most recent call that ran
@@ -347,6 +351,18 @@ async def run_agent(
 
         messages.append(Message.assistant(turn.text, turn.tool_calls, raw=turn.raw))
         sees = getattr(turn, "sees", True)
+        fin = [c for c in turn.tool_calls if c.name == batch.FINISH.name] if finishing else []
+        if fin and len(fin) == len(turn.tool_calls):
+            # `finish` alone: the final answer, as if it came as text (its call answered first).
+            answer = str(fin[0].args.get("answer") or turn.text or "").strip()
+            messages.append(Message.tool([ToolResult(c.id, c.name, "Noted.") for c in fin]))
+            if verify and effectful and not last_readonly and not verified:
+                verified = True
+                messages.append(await batch.verify_message(reg, enabled, ctx, last_action, sees=sees))
+                continue
+            messages.append(Message.assistant(answer))
+            await _settle(ev, idle_on_finish, job)
+            return AgentResult(answer, "done", steps, messages)
         if not turn.tool_calls:
             # Acted without seeing the state afterwards? Make it check its work once before
             # reporting — with a look at the screen attached when it acted there.
@@ -387,7 +403,7 @@ async def run_agent(
 
         # `more_tools` is answered here, not by the registry: it grows this run's tool list.
         meta = [] if strict else [c for c in turn.tool_calls if c.name == "more_tools"]
-        real = [c for c in turn.tool_calls if strict or c.name != "more_tools"]
+        real = [c for c in turn.tool_calls if (strict or c.name != "more_tools") and c not in fin]
         meta_results: list[ToolResult] = []
         # What the brain was shown: a small one may have been sent only some of `tools`, and a
         # tool it wasn't shown is one it can ask for — named here, the next fitted request keeps it.
@@ -413,9 +429,15 @@ async def run_agent(
             if real
             else []
         )
+        # `finish` with actions: the task ends here only if NEO saw every one of them work.
+        real_ids = {c.id for c in real}
+        done = bool(fin) and not meta and batch.finished(real, [r for r in results if r.call_id in real_ids])
+        results += [ToolResult(c.id, c.name, "Finished." if done else batch.NOT_FINISHED) for c in fin]
         results.sort(key=lambda r: [c.id for c in turn.tool_calls].index(r.call_id))
         messages.append(Message.tool(results))
         for c, r in zip(turn.tool_calls, results, strict=False):
+            if c in fin:
+                continue  # the run's own ending, not a step
             steps.append(Step(c.name, c.args, r.content, r.ok, batch.effect(r)))
             if batch.halted(r):
                 continue  # skipped, or stopped to ask: nothing ran that the model hasn't seen
@@ -446,18 +468,13 @@ async def run_agent(
                     pending_action=p.action_id if p else "",
                 )
 
-        # The model's final words came with these actions, and NEO saw each one work: done, with
-        # no model call just to say so. Never for a strict run (a job fenced off, like `browse`).
-        if (
-            finish_verified
-            and not strict
-            and turn.text.strip()
-            and not meta
-            and batch.finished(turn.tool_calls, results)
-        ):
-            messages.append(Message.assistant(turn.text))  # the run's answer, after its results
+        # The model finished with these actions, and NEO saw each one work: done, with no model
+        # call just to say so. (Never a strict run's: a job fenced off, like `browse`.)
+        if done:
+            answer = str(fin[0].args.get("answer") or turn.text or "Done.").strip()
+            messages.append(Message.assistant(answer))  # the run's answer, after its results
             await _settle(ev, idle_on_finish, job)
-            return AgentResult(turn.text.strip(), "done", steps, messages)
+            return AgentResult(answer, "done", steps, messages)
 
     await _settle(ev, idle_on_finish, job)
     summary = "; ".join(f"{st.tool}: {'ok' if st.ok else 'failed'}" for st in steps[-4:])

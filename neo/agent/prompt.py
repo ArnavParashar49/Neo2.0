@@ -60,15 +60,13 @@ _SCREEN_STEPS = (
     "  or squares in your latest picture), send several actions in one reply: NEO runs them in order and\n"
     "  stops at the first that fails, changes nothing or changes the screen (a sheet, a window, another\n"
     "  app), and shows you that result. Don't batch past what you can't see yet (a menu that must open,\n"
-    "  a sheet, a page that must load). If those actions finish the task, write your short final answer\n"
-    "  in the same reply: when NEO has confirmed each one worked, that answer is given without asking\n"
-    "  you again. Each click, drag or scroll result says what was under the pointer and whether anything\n"
-    "  changed; a picture of the area after it, when one comes with it, is your new look. On a board or\n"
-    "  canvas, \"nothing visibly changed\" means the move didn't land: look again and correct it. \"No\n"
-    "  change was seen near\" a button or link means NEO couldn't see its effect: take a screenshot\n"
-    "  before clicking it again (it may have worked elsewhere and would happen twice). Never report\n"
-    "  either as done. Answer a sheet or dialog that opened first. If a result says you can't see the\n"
-    "  screen, don't guess coordinates: use ax_tree ids or tell the user.\n",
+    "  a sheet, a page that must load). Each click, drag or scroll result says what was under the\n"
+    "  pointer and whether anything changed; a picture of the area after it, when one comes with it, is\n"
+    "  your new look. On a board or canvas, \"nothing visibly changed\" means the move didn't land: look\n"
+    "  again and correct it. \"No change was seen near\" a button or link means NEO couldn't see its\n"
+    "  effect: take a screenshot before clicking it again (it may have worked elsewhere and would happen\n"
+    "  twice). Never report either as done. Answer a sheet or dialog that opened first. If a result says\n"
+    "  you can't see the screen, don't guess coordinates: use ax_tree ids or tell the user.\n",
 )
 
 # (line, tools it's about): None = a safety rule, always there.
