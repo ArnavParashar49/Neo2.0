@@ -5,7 +5,10 @@ from __future__ import annotations
 import importlib
 import sys
 
-_MODULES = ["neo.tools.system", "neo.tools.web", "neo.tools.weather", "neo.tools.memory_tool", "neo.tools.browser"]
+_MODULES = [
+    "neo.tools.system", "neo.tools.web", "neo.tools.weather", "neo.tools.memory_tool", "neo.tools.browser",
+    "neo.tools.browse",
+]  # fmt: skip
 _MAC_ONLY = ["neo.tools.media"]
 _MAC_MODULES = ["neo.tools.computer"]
 

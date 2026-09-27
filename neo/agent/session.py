@@ -736,6 +736,7 @@ def _learn_from(job: str, res: AgentResult) -> None:
 # however the request was phrased ("John ki unread emails mein kya likha hai").
 _INFO_TOOLS = {
     "web_search", "web_fetch", "weather", "clock", "calendar_today", "mail_unread", "page_read", "safari_read",
+    "browse", "browser_read",
 }  # fmt: skip
 
 
