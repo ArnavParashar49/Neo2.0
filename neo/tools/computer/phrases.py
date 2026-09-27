@@ -4,6 +4,10 @@ Hindi. A language table, never app names or sites.
 * :func:`strip_frame` — the control's name inside a request: "click on the Start button" →
   "Start", "new game pe click karo" → "new game", "नया गेम वाला बटन दबाओ" → "नया गेम". Generous: the
   resolver (neo.tools.computer.resolve) only acts on what then matches a real on-screen label.
+* :func:`frames` — the same name at each depth of stripping, the words as said first: a label can
+  hold a frame word ("New Tab", "Copy Link", "Try Again", "Select All"), so the resolver tries the
+  least stripped form that names a control before the bare name ("click new tab" is "New Tab" when
+  there is one, "New" only when there isn't).
 * :func:`pointing` — strict: the request *is* "press that control" (a click / tap / press verb, a
   Hinglish "… pe click karo / dabao", a Hindi "… पर क्लिक करो / दबाओ / चुनो"), one clause, not a
   question and not a key ("press enter" is the hotkey tool's). The reflex tool lane
@@ -23,8 +27,11 @@ import unicodedata
 __all__ = [
     "DEVANAGARI",
     "content_words",
+    "frames",
+    "is_question",
     "is_key_name",
     "latin_only",
+    "nameable",
     "norm",
     "pointing",
     "script",
@@ -86,6 +93,22 @@ _HI_POINT = re.compile(
     rf"\s*(?:{_HI_WALA}\s+)?(?:{_HI_NOUN}\s+)?(?:{_HI_ON}\s+)?(?:{_HI_CLICK}\s+{_HI_DO}|{_HI_PRESS}){_HI_STOP}"
 )
 _LEFTOVER = re.compile(rf"\s+(?:{_HING_WALA}|{_HI_WALA})\s*$", re.I)
+
+# ---- the words around a name that are never part of one (for :func:`frames`) ---------------------
+# A trailing click verb (Hinglish, Hindi) with a "wala" and a plain "button" / "बटन" before it, an
+# English "button" / "btn", and please-like fillers. Never a control noun that labels hold ("tab",
+# "link", "item", "menu"…) or a filler that can end a label ("now", "again", "here").
+_ARTICLE = re.compile(r"^(?:the|that|this)\s+", re.I)
+_FRAME_FILLER = r"(?:[\s,]+(?:please|pls|plz|for\s+me|na|yaar))*\s*[.!।]*\s*$"
+_TAIL_HI_VERB = re.compile(
+    rf"\s*(?:{_HI_WALA}\s+)?(?:बटन\s+)?(?:{_HI_ON}\s+)?(?:{_HI_CLICK}\s+{_HI_DO}|{_HI_PRESS}|{_HI_DO}){_HI_STOP}"
+)
+_TAIL_HING_VERB = re.compile(
+    rf"\s+(?:{_HING_WALA}\s+)?(?:(?:button|btn)\s+)?(?:{_HING_ON}\s+)?(?:{_HING_ACT}\s+)?{_HING_DO}{_END_FILLER}", re.I
+)
+_TAIL_BUTTON = re.compile(rf"\s+(?:button|btn){_FRAME_FILLER}", re.I)
+_TAIL_FRAME_FILLER = re.compile(_FRAME_FILLER, re.I)
+_PUNCT = " ,.!?।\"'“”‘’"
 
 # ---- what is never a control's name --------------------------------------------------------------
 # Keys belong to the hotkey tool ("press enter", "hit cmd+s"), not to a click.
@@ -165,11 +188,51 @@ def is_key_name(phrase: str) -> bool:
     return bool(_KEY_NAME.match(" ".join((phrase or "").split())))
 
 
+def nameable(core: str) -> bool:
+    """Could these words be a control's name: 1-7 words, not only deictics or fillers ("it",
+    "this", "ye"), and not a key."""
+    return _nameable(core)
+
+
 def _nameable(core: str) -> bool:
     words = core.lower().split()
     if not words or len(core) < 2 or len(words) > 7:
         return False
     return not all(w in _VAGUE for w in words) and not is_key_name(core)
+
+
+def is_question(text: str) -> bool:
+    """A question, not a request: a trailing "?", a Hinglish or Hindi question word anywhere (kya,
+    kaun, क्या…), or an English wh-word or auxiliary first ("can you click …" is a request, and a
+    Hinglish click frame's "is" is "this")."""
+    raw = " ".join(unicodedata.normalize("NFC", str(text or "")).split())
+    if raw.endswith("?") or _HI_QUESTION.search(raw):
+        return True
+    return bool(_EN_QUESTION.match(raw)) and not (_HING_POINT.search(raw) or _HI_POINT.search(raw))
+
+
+def frames(text: str) -> list[tuple[str, bool]]:
+    """The control's name at each depth of stripping, the least stripped first, normalised
+    (:func:`norm`) and without repeats: the words as said; without the lead click verb; without the
+    words that are never a name's (a trailing click verb, "wala", "button", "please"); without a
+    filler that can end a label ("now", "again", "here"); and :func:`strip_frame`'s bare name
+    (control nouns such as "tab", "link", "item" gone too). With each, whether a partial match (a
+    whole word of a longer label) may count on it: not while it still holds a click verb or a
+    plain "button"."""
+    raw = " ".join(unicodedata.normalize("NFC", str(text or "")).split())
+    lead = _ARTICLE.sub("", _LEAD_EN.sub("", raw, count=1).strip(_PUNCT))
+    said = _TAIL_HI_VERB.sub("", lead, count=1)
+    said = _TAIL_HING_VERB.sub("", said, count=1)
+    said = _TAIL_BUTTON.sub("", said, count=1)
+    said = _TAIL_FRAME_FILLER.sub("", said, count=1)
+    said = _LEFTOVER.sub("", said, count=1).strip(_PUNCT)
+    bare = _TAIL_FILLER.sub("", said, count=1).strip(_PUNCT)
+    out: dict[str, bool] = {}
+    for s, partial in ((raw, False), (lead, False), (said, True), (bare, True), (strip_frame(raw), True)):
+        k = norm(s.strip(_PUNCT))
+        if k:
+            out[k] = out.get(k, False) or partial
+    return list(out.items())
 
 
 def pointing(text: str) -> str | None:
@@ -180,11 +243,11 @@ def pointing(text: str) -> str | None:
     button", Hindi "… पर क्लिक करो" / "… दबाओ" / "… चुनो"), one clause, not a question, and not a
     key ("press enter")."""
     raw = " ".join(unicodedata.normalize("NFC", str(text or "")).split())
-    if not raw or raw.rstrip().endswith("?") or _HI_QUESTION.search(raw):
+    if not raw or is_question(raw):
         return None
     lead = _LEAD_EN.match(raw)
     tail = _HING_POINT.search(raw) or _HI_POINT.search(raw)
-    if not (lead or tail) or (not tail and _EN_QUESTION.match(raw)):
+    if not (lead or tail):
         return None
     core = strip_frame(raw)
     if _CLAUSES.search(core) or not _nameable(core):

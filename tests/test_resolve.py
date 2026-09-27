@@ -375,8 +375,8 @@ def test_only_the_users_words_get_the_by_meaning_stages(live_meaning):
         res = rs.resolve("start the new game", cands("Start", "New Game"), origin=origin, embed=emb, choose=ch, index=Index({"New Game": ["नया गेम"]}), log_it=False)
         assert isinstance(res, rs.Ambiguous)
     assert emb.calls == [] and ch.seen == []
-    lex = rs.resolve("click new game", cands("Start", "New Game"), origin="agent", log_it=False)
-    assert isinstance(lex, rs.Resolved) and lex.stage == "lexical"
+    lex = rs.resolve("New Game", cands("Start", "New Game"), origin="agent", log_it=False)
+    assert isinstance(lex, rs.Resolved) and lex.stage == "lexical"  # a model's label, as given
 
 
 def test_off_mode_is_the_lexical_stage_alone(monkeypatch):
@@ -412,18 +412,21 @@ def test_a_cold_or_busy_laya_is_never_waited_for(monkeypatch):
 
 
 def test_a_loaded_laya_is_asked_with_the_measured_prompt(monkeypatch):
+    import threading
+
     from neo.reflex import zeroshot
 
     got = {}
 
-    def ask(state, questions, wait_s, stale=None):
-        got.update(state=state, q=questions, wait=wait_s)
-        return {"answers": {"el": {"probabilities": {"Start": 0.2, "New Game": 0.8}}}}
+    class Agent:  # the loaded checkpoint: asked under the Laya lock, never through a load
+        def system_one(self, state, questions):
+            got.update(state=state, q=questions)
+            return {"answers": {"el": {"probabilities": {"Start": 0.2, "New Game": 0.8}}}}
 
-    monkeypatch.setattr(zeroshot, "loaded", lambda: True)
-    monkeypatch.setattr(zeroshot, "ask", ask)
+    monkeypatch.setattr(zeroshot, "_agent", Agent())
+    monkeypatch.setattr(zeroshot, "_lock", lambda: threading.Lock())
     assert rs._default_choose("start the new game", ["Start", "New Game"], 0.2) == (1, 0.8)
-    assert got["state"] == {"request": "start the new game"} and got["wait"] == 0.2
+    assert got["state"] == {"request": "start the new game"}
     assert got["q"]["el"]["criteria"]["New Game"] == "the on-screen control labelled “New Game”"
 
 
@@ -436,8 +439,8 @@ def test_the_models_embedder_is_used_only_when_already_loaded(monkeypatch):
 
 # ---- what a handler calls ----------------------------------------------------------------------------
 class Ctx:
-    def __init__(self, origin="user", **extras):
-        self.origin, self.extras = origin, extras
+    def __init__(self, origin="user", user_text="", **extras):
+        self.origin, self.user_text, self.extras, self.taint = origin, user_text, extras, []
 
     def get(self, k, default=None):
         return self.extras.get(k, default)
@@ -471,14 +474,15 @@ def test_the_models_pick_from_a_handoff_scores_the_users_request_and_becomes_an_
     emb = fake_embed(TABLE)
     amb = rs.resolve("start the new game", cands("Start", "New Game", "Resign", "Hint"), embed=emb, choose=fake_choose("New Game", 0.95), index=False)
     assert isinstance(amb, rs.Ambiguous)
-    rs.handoff_text(amb, "start the new game")
-    # the model reads the choices and calls click_text(label="New Game"): a lexical resolution of its own
+    rs.handoff(amb, "start the new game", ctx=Ctx(user_text="start the new game"), register=False)
+    # the model, in the same request, reads the choices and calls click_text(label="New Game"): a
+    # lexical resolution of its own
     res = rs.resolve("New Game", cands("Start", "New Game"), origin="agent")
-    sig = rs.after_press(res, verified=True, bundle="org.example.board")
+    sig = rs.after_press(res, verified=True, bundle="org.example.board", ctx=Ctx("agent", user_text="start the new game"))
     assert sig["alias"] is True and sig["label"] == "New Game" and sig["changed"] is True
     assert evaluate.shadow_report()["meaning"] == {"n": 1, "precision": 1.0}
     other = rs.resolve("Settings", cands("Settings"), origin="agent")
-    assert rs.after_press(other, verified=True)["alias"] is False  # not one of the choices
+    assert rs.after_press(other, verified=True, ctx=Ctx("agent", user_text="start the new game"))["alias"] is False  # not one of the choices
 
 
 def test_handoff_choices_are_ids_labels_and_roles():
@@ -491,7 +495,8 @@ def test_the_handoff_is_a_multiple_choice_of_ids_and_quoted_labels_with_no_coord
     els = [C("Start", "AXButton", modal=True, box=(412.0, 305.0, 80.0, 24.0), id="e12"), C("Start", "AXButton", box=(40.0, 600.0, 80.0, 24.0), id="e40")]
     amb = rs.Ambiguous(els, "same_label")
     text = rs.handoff_text(amb, "click start")
-    assert "[e12]" in text and "“Start”" in text and "in the open dialog" in text
+    assert '"id": "e12"' in text and '"label": "Start"' in text and "in the open dialog" in text
+    assert '<untrusted source="screen">' in text  # the labels are data
     assert not re.search(r"\d+\s*[,x×]\s*\d+|\b(?:x|y)\s*[=:]|box_2d|412|305|600", text)
     assert "ax_tree" in rs.handoff_text(rs.Ambiguous([], "no_match"))
 
