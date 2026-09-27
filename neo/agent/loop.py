@@ -460,7 +460,8 @@ async def run_agent(
             if k == "meta" or batch.halted(r):
                 continue  # more_tools changes nothing; a skip or a question: nothing ran unseen
             if _looks(reg, c.name):
-                unseen.clear()  # a look: the model sees the state after everything before it
+                if r.ok:
+                    unseen.clear()  # a look: the model sees the state after everything before it
                 continue
             effectful = effectful or r.ok
             # An action whose result already shows the state after it (a picture of it, or NEO's

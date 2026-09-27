@@ -343,7 +343,7 @@ def _st(tool, args, *, ok=True, eff=True, result="ok"):
     return Step(tool, args, result, ok, _eff(eff) if eff is not None else None)
 
 
-WORDS = replay._norm("press new game and start in Boardy")
+WORDS = "press New Game and Start in Boardy"  # the request, as the user said it
 
 
 @pytest.mark.parametrize(
