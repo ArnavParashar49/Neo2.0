@@ -26,6 +26,7 @@ from openai import APIConnectionError, APIStatusError, AsyncOpenAI, RateLimitErr
 
 from neo.config import settings
 from neo.providers.base import (
+    BLIND_PICTURE,
     BadRequest,
     Message,
     ProviderError,
@@ -89,7 +90,7 @@ def _to_messages(messages: list[Message], system: str, vision: bool) -> list[dic
             out.append(msg)
         else:
             for r in m.tool_results:
-                text = r.content + ("\n[screenshot attached]" if r.images and not vision else "")
+                text = r.content + ("\n" + BLIND_PICTURE if r.images and not vision else "")
                 out.append({"role": "tool", "tool_call_id": r.call_id, "content": text})
                 if r.images and vision:
                     content = [{"type": "text", "text": f"Image from {r.name}:"}]
@@ -288,6 +289,7 @@ class OpenAICompatProvider:
         if resp.usage:
             turn.usage = Usage(resp.usage.prompt_tokens or 0, resp.usage.completion_tokens or 0)
         turn.offered = f.offered()
+        turn.sees = bool(self.supports_vision)
         return turn
 
     async def stream(

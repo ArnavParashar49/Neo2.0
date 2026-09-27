@@ -27,8 +27,9 @@ Stopped = Literal["done", "max_steps", "needs_confirm", "needs_user", "thrash", 
 
 _VERIFY_NOTE = (
     "[verify] Before you report, confirm the goal was actually achieved with a read-only check "
-    "(ax_tree, read_file, browser_read, mail_unread, calendar_today…). If it is done, give the final "
-    "answer. If something is off, fix it first. Do not mention this note."
+    "(ax_tree, read_file, browser_read, mail_unread, calendar_today…; after clicks or drags on a "
+    "board, canvas or picture, a new screenshot of the same area, compared with the one before). If "
+    "it is done, give the final answer. If something is off, fix it first. Do not mention this note."
 )
 
 _SEARCHY = ("search", "fetch", "web", "lookup", "find")
@@ -97,6 +98,17 @@ def _model_trouble(e: Exception, steps: list[Step]) -> str:
         n = len(steps)
         said += f" I'd done {n} step{'s' if n != 1 else ''} of it before that."
     return said
+
+
+# Looks that aren't parallel_safe (one screen, one picture at a time) but change nothing.
+_LOOK_ONLY = frozenset({"screenshot", "browser_screenshot"})
+
+
+def _looks(reg: Registry, name: str) -> bool:
+    """A call that only looks (ax_tree, a screenshot, a file read…): it may repeat in an
+    observe → act → verify loop, and it counts as checking the work."""
+    t = reg.get(name)
+    return bool(t and t.parallel_safe) or name in _LOOK_ONLY
 
 
 def _halt_kind(text: str) -> Stopped | None:
@@ -178,10 +190,14 @@ async def _run_calls(
     limit: int,
     job: str = "",
     allowed: set[str] | None = None,
+    blind: bool = False,
 ) -> list[ToolResult]:
-    """`allowed`: the only tools that may run (None = any the model names)."""
+    """`allowed`: the only tools that may run (None = any the model names). `blind`: the brain
+    that chose these calls has no vision (the input tools won't act on screen coordinates)."""
     # A model chose these calls, whoever started the run (the taint list stays shared).
     ctx = ctx if ctx.origin == "agent" else replace(ctx, origin="agent")
+    if blind:
+        ctx = replace(ctx, extras={**ctx.extras, "blind": True})
 
     async def one(c: ToolCall) -> ToolResult:
         if allowed is not None and c.name not in allowed:
@@ -195,7 +211,7 @@ async def _run_calls(
         out: ToolOutput = await reg.invoke(c.name, c.args, ctx)
         await ev.tool_end(c.name, out.ok, out.text, job=job)
         content = _truncate(out.text, limit)
-        if t and t.untrusted and not out.halt:
+        if t and t.untrusted and not out.halt and out.fence:
             # Third-party words — a failure too can quote them (a page's element names, a report
             # that starts with "Error"): data for the model, never orders.
             content = fence(c.name, content)
@@ -315,7 +331,7 @@ async def run_agent(
         key = "|".join(
             c.name + json.dumps(c.args, sort_keys=True, default=str)
             for c in turn.tool_calls
-            if not ((t := reg.get(c.name)) and t.parallel_safe)
+            if not _looks(reg, c.name)
         )
         repeats = repeats + 1 if key and key == last_key else 0
         last_key = key
@@ -359,7 +375,10 @@ async def run_agent(
             )
         await ev.set_state(NeoState.WORKING, job=job)
         results = meta_results + (
-            await _run_calls(real, reg, ctx, ev, s.max_tool_result_chars, job, set(enabled) if strict else None)
+            await _run_calls(
+                real, reg, ctx, ev, s.max_tool_result_chars, job, set(enabled) if strict else None,
+                blind=not getattr(turn, "sees", True),
+            )
             if real
             else []
         )
@@ -367,8 +386,7 @@ async def run_agent(
         messages.append(Message.tool(results))
         for c, r in zip(turn.tool_calls, results, strict=False):
             steps.append(Step(c.name, c.args, r.content, r.ok))
-            t = reg.get(c.name)
-            readonly = bool(t and t.parallel_safe)
+            readonly = _looks(reg, c.name)
             effectful = effectful or (not readonly and r.ok)
             last_readonly = readonly
 

@@ -22,8 +22,14 @@ How to work:
   browser tools…) over AppleScript and shell. See an app with ax_tree; never read or drive an
   app's window through System Events scripts.
 - When an app's content is a canvas or a board — Chess and other games, maps, drawing and photo
-  apps — or ax_tree shows little beyond the window and its menus, take a screenshot and click at
-  the coordinates it shows. Don't script your way around it.
+  apps — or ax_tree shows little beyond the window and its menus, take a screenshot and click or
+  drag at pixel positions in it, passing its shot id. Don't script your way around it.
+- On the screen, work observe → act → verify: look, make one move, then look again (a new
+  screenshot of the same area) and compare before the next move. Each click, drag or scroll result
+  says what was under the pointer and whether anything changed; "nothing visibly changed" means
+  the move didn't happen — look again and correct, never report it as done. A sheet or dialog that
+  opened must be answered first. If a result says you can't see the screen, don't guess
+  coordinates: use ax_tree ids or tell the user.
 - If a tool fails, adapt — try another approach. Never repeat an identical failing call, and
   never try the same failing approach more than twice: switch approach or tell the user what's
   in the way.

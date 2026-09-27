@@ -179,6 +179,11 @@ class Chain:
     ) -> Turn:
         failures: list[tuple[str, ProviderError]] = []
         providers = self._providers()
+        if _has_picture(messages):
+            # The request is working from a picture (a screenshot of a board): a brain that can see
+            # it goes first, however recently it failed — a text-only one would act blind.
+            now = _time.time()
+            providers.sort(key=lambda p: (_cooling(p) > now, not getattr(p, "supports_vision", False)))
         for p in providers:
             try:
                 turn = await p.complete(
@@ -228,6 +233,14 @@ class Chain:
                 if self.sticky:
                     self._demote(p.name, e)
         raise self._no_brain(failures)
+
+
+def _has_picture(messages: list[Message]) -> bool:
+    """Does the request being worked on carry a picture (a screenshot it took, a photo sent)?"""
+    from neo.providers.history import request_start
+
+    start = request_start(messages) if messages else 0
+    return any(m.images or any(r.images for r in m.tool_results) for m in messages[start:])
 
 
 def brain(purpose: Purpose = "agent") -> Chain:

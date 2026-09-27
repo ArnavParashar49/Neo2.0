@@ -32,7 +32,7 @@ import json
 import re
 from dataclasses import dataclass, field, replace
 
-from neo.providers.base import Message, RequestTooLarge, ToolCall, ToolResult, ToolSpec
+from neo.providers.base import BLIND_PICTURE, Message, RequestTooLarge, ToolCall, ToolResult, ToolSpec
 from neo.providers.history import OBSERVATIONS, halted, normalize, request_start
 
 _BYTES_PER_TOKEN = 3.4  # UTF-8 bytes: ~4 per token for English, less for code, UI trees and JSON
@@ -142,9 +142,11 @@ def _shrink_results(msgs: list[Message], limit: int, which: list[int]) -> list[M
     return out
 
 
-def _drop_images(msgs: list[Message], keep: int) -> list[Message]:
+def _drop_images(msgs: list[Message], keep: int, vision: bool = True) -> list[Message]:
     """All but the newest `keep` pictures of tool results go; so do those of older user turns.
-    The request's own picture ("what's in this photo?") stays."""
+    The request's own picture ("what's in this photo?") stays. A brain without vision is told
+    plainly that it can't see the picture, not that it was "dropped to fit"."""
+    dropped = " [picture dropped to fit]" if vision else "\n" + BLIND_PICTURE
     out = list(msgs)
     users = _user_turns(out)
     last_user = users[-1] if users else -1
@@ -158,9 +160,7 @@ def _drop_images(msgs: list[Message], keep: int) -> list[Message]:
                     kept += len(r.images)
                     results.append(r)
                 elif r.images:
-                    results.append(
-                        ToolResult(r.call_id, r.name, r.content + " [picture dropped to fit]", r.ok)
-                    )
+                    results.append(ToolResult(r.call_id, r.name, r.content + dropped, r.ok))
                 else:
                     results.append(r)
             if any(a is not b for a, b in zip(results, m.tool_results, strict=True)):
@@ -326,7 +326,7 @@ def fit(
 
     # 1. pictures
     if any(m.images or any(r.images for r in m.tool_results) for m in msgs):
-        was, msgs = msgs, _drop_images(msgs, keep=1 if vision else 0)
+        was, msgs = msgs, _drop_images(msgs, keep=1 if vision else 0, vision=vision)
         if r := done("pictures", was):
             return r
     # 2. older tool results; the newest steps, and the newest look at each thing, whole

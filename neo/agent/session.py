@@ -953,6 +953,14 @@ _INFO_TOOLS = {
 }  # fmt: skip
 
 
+def _on_screen(st) -> bool:
+    """A step that looked at or acted on the screen by its pixels: a screenshot, or a click, drag
+    or scroll at coordinates."""
+    if st.tool == "screenshot":
+        return True
+    return st.tool in ("click", "drag", "scroll") and any(k in st.args for k in ("x", "x1", "shot"))
+
+
 def _quietly(d: Decision | None, res: AgentResult) -> bool:
     """Was this a command that simply got done? Then there's nothing to say.
 
@@ -964,6 +972,8 @@ def _quietly(d: Decision | None, res: AgentResult) -> bool:
         return False
     if any(st.tool in _INFO_TOOLS or (st.tool == "memory" and st.args.get("action") == "recall") for st in res.steps):
         return False
+    if any(_on_screen(st) for st in res.steps):
+        return False  # worked from the screen (a board, a canvas): the user hears how it went
     low = res.text.lower()
     return not any(w in low for w in ("?", "couldn't", "could not", "can't", "cannot", "unable", "error", "failed"))
 

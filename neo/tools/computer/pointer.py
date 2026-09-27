@@ -1,0 +1,319 @@
+"""Coordinate input the model can trust: it lands where the model aimed, in the app it aimed at,
+never on NEO's own window — and the result says what it hit and whether anything changed.
+
+The Chess run that prompted this: every click and drag reported "ok" while the board never
+moved. A click on a window whose app isn't frontmost may only activate it (a view that doesn't
+accept the first mouse), a screenshot's pixels are not always screen points, NEO's overlay is on
+top but invisible in screenshots, and a bare "ok" hid all of it. So, for each click, drag and
+scroll a model makes:
+
+1. the numbers: plain screen points, or pixels of a screenshot (``shot``) that NEO maps itself;
+   on some display; never picked by a brain that couldn't see the screen;
+2. the target: what's under each point (one AX lookup) — never NEO's own window, never a window
+   a sheet is blocking; the owner brought to the front (and its window made key) first;
+3. the outcome: the owner app and label at the point, and a before/after look (the picture
+   around each point, the front app, a sheet or dialog, the focused window and element). A click
+   after which nothing visibly changed is reported as such, not as a success.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import itertools
+import re
+from dataclasses import dataclass
+
+from neo.agent.registry import ToolContext, fence
+from neo.tools.computer import apps, ax, screen
+
+SETTLE_S = 0.12  # after bringing an app forward (or raising a window), before the input
+LOOK_S = 0.4  # after the input, before looking at what changed
+
+
+class Refused(Exception):
+    """Nothing was posted; the message says why (and what to do instead)."""
+
+
+# ---- screenshots and their pixels ---------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Shot:
+    """How one screenshot's pixels map to the screen: screen = origin + pixel × ppp."""
+
+    id: str
+    x0: float
+    y0: float
+    ppp: float  # screen points per image pixel
+    w: int  # image size, pixels
+    h: int
+
+    def to_screen(self, ix: float, iy: float) -> tuple[float, float]:
+        return self.x0 + ix * self.ppp, self.y0 + iy * self.ppp
+
+
+_shots: dict[str, Shot] = {}
+_shot_ids = itertools.count(1)
+_KEEP_SHOTS = 12
+
+
+def remember(x0: float, y0: float, ppp: float, w: int, h: int) -> Shot:
+    s = Shot(f"s{next(_shot_ids)}", float(x0), float(y0), float(ppp), int(w), int(h))
+    _shots[s.id] = s
+    while len(_shots) > _KEEP_SHOTS:
+        _shots.pop(next(iter(_shots)))
+    return s
+
+
+def get_shot(sid: str) -> Shot | None:
+    return _shots.get(str(sid).strip())
+
+
+def note(s: Shot, what: str, others: list[screen.Display]) -> str:
+    """NEO's own words about a screenshot (not fenced: nothing in them came from the screen)."""
+    exact = abs(s.ppp - 1.0) < 1e-6
+    text = (
+        f"Screenshot {s.id} attached ({what}); the image is {s.w}×{s.h} px. To act on something in it, "
+        f'give its pixel position in this image with shot="{s.id}" — click x,y · drag x1,y1,x2,y2 · '
+        "scroll x,y — and NEO maps it to the screen."
+    )
+    if exact and s.x0 == 0 and s.y0 == 0:
+        text += " (Here image pixels are also screen points.)"
+    else:
+        text += (
+            f" Without shot, x and y are screen points: screen_x = {s.x0:g} + image_x × {s.ppp:.4f}, "
+            f"screen_y = {s.y0:g} + image_y × {s.ppp:.4f}."
+        )
+    if others:
+        text += " Other displays (not in this picture): " + "; ".join(
+            d.words() + f' — screenshot display={d.index} to see it' for d in others
+        ) + "."
+    return text
+
+
+# ---- the numbers --------------------------------------------------------------------------------
+
+_BLIND = (
+    "Error: you can't see the screen — this model has no vision, so no screenshot ever reached you — "
+    "and I won't click, drag or scroll at coordinates nobody saw. Use element ids from ax_tree (click "
+    "id=…, ax_press) or click_text, or tell the user the model that can see the screen is busy right now."
+)
+
+
+def _numbers(a: dict, keys: tuple[str, ...]) -> list[float]:
+    out = []
+    for k in keys:
+        v = a.get(k)
+        if v is None or isinstance(v, bool):
+            raise Refused(f"Error: {' and '.join(keys)} are needed (numbers).")
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            raise Refused(f"Error: {k} must be a number, not {str(v)[:20]!r}.") from None
+        if f != f or f in (float("inf"), float("-inf")):
+            raise Refused(f"Error: {k} must be a finite number.")
+        out.append(f)
+    return out
+
+
+def _said(ctx: ToolContext, values: list[float]) -> bool:
+    """Did the user's own words give these numbers ("click at 300, 400")?"""
+    said = {float(n) for n in re.findall(r"-?\d+(?:\.\d+)?", ctx.user_text or "")}
+    return bool(values) and all(v in said or round(v) in said for v in values)
+
+
+def points(a: dict, keys: tuple[str, ...], ctx: ToolContext) -> tuple[list[tuple[float, float]], Shot | None]:
+    """The screen points a call means, checked: pairs of ``keys`` ("x", "y", or "x1".."y2")."""
+    vals = _numbers(a, keys)
+    if ctx.get("blind") and not _said(ctx, vals):
+        raise Refused(_BLIND)
+    s = None
+    if a.get("shot") not in (None, ""):
+        s = get_shot(str(a["shot"]))
+        if s is None:
+            raise Refused(f"Error: there's no screenshot {str(a['shot'])[:12]!r} any more — take a new one.")
+        for i in range(0, len(vals), 2):
+            ix, iy = vals[i], vals[i + 1]
+            if not (0 <= ix <= s.w and 0 <= iy <= s.h):
+                raise Refused(
+                    f"Error: ({ix:g}, {iy:g}) is outside screenshot {s.id}, which is {s.w}×{s.h} px — give "
+                    "the pixel position in that image (from its top-left corner)."
+                )
+    pts = []
+    for i in range(0, len(vals), 2):
+        x, y = s.to_screen(vals[i], vals[i + 1]) if s else (vals[i], vals[i + 1])
+        pts.append((x, y))
+    shown = screen.displays()
+    for x, y in pts:
+        if not any(d.contains(x, y) for d in shown):
+            raise Refused(
+                f"Error: ({x:g}, {y:g}) is off every screen ({'; '.join(d.words() for d in shown)}). "
+                "Screen points are what click takes; for a spot in a screenshot, pass its pixel position with shot."
+            )
+    return pts, s
+
+
+# ---- the target ---------------------------------------------------------------------------------
+
+
+@dataclass
+class Target:
+    hits: list[ax.Hit]
+    brought: str = ""  # the app brought to the front for this input ("" = it already was)
+
+
+def _neo_words() -> str:
+    return (
+        "that spot is covered by NEO's own window, which floats on top and never shows in screenshots — "
+        "so I didn't touch it. Ask the user to move NEO's window, or act on it another way (ax_tree ids, "
+        "hotkey)."
+    )
+
+
+def _sheet_refusal(h: ax.Hit) -> Refused:
+    return Refused(
+        f"Error: {h.app or 'that app'}'s window has a sheet open — "
+        + fence("screen", h.sheet)
+        + "\nIt blocks clicks on the window behind it: answer it first (click one of its buttons)."
+    )
+
+
+async def probe(pts: list[tuple[float, float]]) -> Target:
+    """What's under each point. Refuses NEO's own window, and a window a sheet is blocking."""
+    hits = [await asyncio.to_thread(ax.hit, x, y) for x, y in pts]
+    for h in hits:
+        if h.pid and ax.is_neo(h.pid, h.app):
+            raise Refused("Error: " + _neo_words())
+    if hits[0].sheet:
+        raise _sheet_refusal(hits[0])
+    return Target(hits)
+
+
+async def bring(t: Target, pts: list[tuple[float, float]], *, want_pid: int = 0) -> None:
+    """Bring the app acted on — the owner of the first point, or ``want_pid`` (an element's app) —
+    to the front and make its window key, then check the point again. With ``want_pid`` the point
+    must be that app's once it is in front (not covered by another window)."""
+    first = t.hits[0]
+    pid = want_pid or first.pid
+    if pid and (first.regular if pid == first.pid else await asyncio.to_thread(ax.regular, pid)):
+        from neo.tools.computer.focus import front_app
+
+        front, front_pid = await asyncio.to_thread(front_app)
+        if front_pid != pid:
+            ok, real = await apps.bring_pid_front(pid)
+            name = real or first.app or "that app"
+            if not ok:
+                raise Refused(
+                    f"Error: {name} didn't come to the front ({front or 'another app'} stayed there), so I "
+                    f"didn't touch it — a click on a window in the background may only bring it forward. "
+                    f"Ask the user to click {name} once, then try again."
+                )
+            t.brought = name
+            await asyncio.sleep(SETTLE_S)
+            again = await asyncio.to_thread(ax.hit, *pts[0])
+            if again.pid and ax.is_neo(again.pid, again.app):
+                raise Refused("Error: " + _neo_words())
+            if again.pid and again.pid != pid:
+                raise Refused(
+                    f"Error: with {name} in front, {again.app or 'another window'} is still over that spot — "
+                    "look again (screenshot or ax_tree) before clicking."
+                )
+            if again.sheet:
+                raise _sheet_refusal(again)
+            if again.pid:
+                t.hits[0] = again
+        if await asyncio.to_thread(ax.raise_window, t.hits[0]):
+            await asyncio.sleep(SETTLE_S)
+        if t.hits[0].app:
+            apps.set_target(t.hits[0].app)  # "click the field, then type": the typing goes here too
+    final = t.hits[0]
+    if want_pid and final.pid and final.pid != want_pid:
+        raise Refused(
+            f"Error: {final.app or 'another window'} covers that element — look again (ax_tree) before clicking."
+        )
+
+
+# ---- the outcome --------------------------------------------------------------------------------
+
+
+@dataclass
+class Look:
+    scene: ax.Scene
+    pixels: list | None
+
+
+async def look(pid: int, pts: list[tuple[float, float]]) -> Look:
+    sc = await asyncio.to_thread(ax.scene, pid)
+    px = await asyncio.to_thread(screen.sample_points, pts)
+    return Look(sc, px)
+
+
+async def after(before: Look, pid: int, pts: list[tuple[float, float]]) -> Look | None:
+    """The same look a moment after the input (None when there was nothing to compare)."""
+    if before.pixels is None and not before.scene.known:
+        return None
+    await asyncio.sleep(LOOK_S)
+    return await look(pid, pts)
+
+
+@dataclass
+class Outcome:
+    said: str  # NEO's own words: what changed, or that nothing visibly did
+    details: str  # words read from the screen (titles, sheets, labels): fenced for the model
+    changed: bool | None  # None: couldn't tell
+
+
+def compare(before: Look, now: Look | None, where: list[str]) -> Outcome:
+    if now is None:
+        return Outcome("I couldn't check whether anything changed (no Screen Recording or Accessibility answer).", "", None)
+    changes: list[str] = []
+    details: list[str] = []
+    b, a = before.scene, now.scene
+    moved = []
+    if before.pixels is not None and now.pixels is not None:
+        moved = [w for w, p, q in zip(where, before.pixels, now.pixels, strict=False) if screen.differs(p, q)]
+        if moved:
+            changes.append("the screen changed around " + " and ".join(moved))
+    if b.known and a.known:
+        if a.front_pid != b.front_pid:
+            changes.append(f"{a.front or 'another app'} is now in front")
+        if a.sheet != b.sheet:
+            changes.append("a sheet or dialog opened" if a.sheet else "the sheet or dialog closed")
+            if a.sheet:
+                details.append(f"now showing {a.sheet}")
+        if a.title != b.title and (a.title or b.title):
+            changes.append("the window changed")
+            details.append(f"window: “{a.title[:80]}”")
+        if a.focus != b.focus and a.focus:
+            changes.append("the keyboard focus moved")
+            details.append(f"focus: {a.focus}")
+    if changes:
+        return Outcome("Changed: " + "; ".join(changes) + ".", "; ".join(details), True)
+    if before.pixels is None or now.pixels is None:
+        return Outcome("I couldn't compare the screen (no Screen Recording), and nothing else changed.", "", None)
+    return Outcome(
+        f"Nothing visibly changed there within {LOOK_S:g}s — it may have missed, been swallowed, or the app "
+        "needs something else first. Look (screenshot) before trying again; don't assume it worked.",
+        "",
+        False,
+    )
+
+
+def click_word(button: str, count: int) -> str:
+    return f"{('', 'Double-', 'Triple-')[max(1, min(3, count)) - 1]}{button.capitalize()}-clicked"
+
+
+def words(h: ax.Hit) -> str:
+    """What was under the pointer, as read from the screen."""
+    role = h.role.removeprefix("AX")
+    label = " ".join(h.label.split())[:60]
+    return f"{role} “{label}”" if label and role else (label or role)
+
+
+def report(head: str, out: Outcome, under: list[str]) -> tuple[str, bool]:
+    """(the tool's text, ok). Third-party words go inside an untrusted fence."""
+    text = f"{head} {out.said}"
+    bits = [f"under the pointer: {u}" for u in under if u] + ([out.details] if out.details else [])
+    if bits:
+        text += "\n" + fence("screen", "; ".join(bits))
+    return text, out.changed is not False

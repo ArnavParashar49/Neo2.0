@@ -21,6 +21,7 @@ __all__ = [
     "_no_shadow_dry_runs",
     "_no_real_browser",
     "_accessibility_on",
+    "_no_real_screen",
     "_no_task_grants",
 ]
 
@@ -113,6 +114,25 @@ def _accessibility_on(monkeypatch):
     from neo.tools.computer import ax
 
     monkeypatch.setattr(ax, "is_trusted", lambda: True)
+
+
+@pytest.fixture(autouse=True)
+def _no_real_screen(monkeypatch):
+    """The input tools look at the real screen around every click (what's under the point, a
+    picture before and after) and ask macOS whether events may be posted: in the suite nothing is
+    under any point, no picture can be taken, one 1512×982 display, and posting is allowed. A test
+    that needs a world fakes these itself."""
+    from neo.tools.computer import ax, pointer, screen
+    from neo.tools.computer import input as inp
+
+    monkeypatch.setattr(inp, "can_post", lambda: True)
+    monkeypatch.setattr(ax, "hit", lambda x, y: ax.Hit())
+    monkeypatch.setattr(ax, "scene", lambda pid: ax.Scene())
+    monkeypatch.setattr(ax, "raise_window", lambda h: False)
+    monkeypatch.setattr(screen, "sample_points", lambda pts, r=60: None)
+    monkeypatch.setattr(screen, "displays", lambda: [screen.Display(1, 0.0, 0.0, 1512.0, 982.0)])
+    monkeypatch.setattr(pointer, "LOOK_S", 0.0)
+    monkeypatch.setattr(pointer, "SETTLE_S", 0.0)
 
 
 @pytest.fixture(autouse=True)

@@ -7,9 +7,9 @@ import re
 import time
 
 from neo.agent import confirm, grants
-from neo.agent.registry import ToolContext, ToolOutput, tool
+from neo.agent.registry import ToolContext, ToolOutput, fence, tool
 from neo.config import decide_mode
-from neo.tools.computer import apps, ax, policy, screen, shell
+from neo.tools.computer import apps, ax, pointer, policy, screen, shell
 from neo.tools.computer import input as inp
 
 _OBJ = {"type": "object", "properties": {}}
@@ -54,6 +54,31 @@ def _needs_ax() -> str | None:
     return None if _ax_trusted() else _ax_off_reply()
 
 
+# macOS checks separately whether a process may post input events, and drops them silently when
+# it may not: a click NEO "made" would never arrive. Asked before any click, key or typing.
+INPUT_OFF = (
+    "macOS isn't letting NEO send clicks or keystrokes — in System Settings › Privacy & Security › "
+    "Accessibility, turn NEO off and on again, then ask again"
+)
+_INPUT_STILL_OFF = (
+    "Error: macOS still isn't letting NEO send clicks or keystrokes, and the user has already been told. "
+    "Stop here and tell them."
+)
+
+
+def _needs_input() -> str | None:
+    """None when NEO may both read the UI and post input events; else what the tool answers."""
+    if err := _needs_ax():
+        return err
+    try:
+        allowed = inp.can_post()
+    except Exception:  # noqa: BLE001
+        allowed = True
+    if allowed:
+        return None
+    return confirm.ask_user(INPUT_OFF) if grants.first("input-off") else _INPUT_STILL_OFF
+
+
 def _dialog_text(els=None, app: str = "") -> str:
     """The words in the app's focused window (a sheet or alert says what its "OK" does)."""
     if els is None:
@@ -73,6 +98,17 @@ def _ask_before_click(tool_name: str, a: dict, label: str, app: str = "", els=No
     where = f" in {app}" if app else ""
     gate = confirm.gated(tool_name, a, f"click “{label.strip()[:60]}”{where}")
     return gate if isinstance(gate, str) else None
+
+
+async def _ask_first(tool_name: str, a: dict, label: str, app: str = "", els=None) -> str | None:
+    """:func:`_ask_before_click` from a handler: the dialog's words (a walk of its window, slow on
+    a busy app) are read off the event loop; the question itself is staged on it (its card)."""
+    if els is None and policy._GENERIC_OK.match(label or ""):
+        try:
+            _, _, els = await asyncio.to_thread(ax.window_elements, app or None)
+        except Exception:  # noqa: BLE001
+            els = []
+    return _ask_before_click(tool_name, a, label, app, els)
 
 
 # ---- seeing ---------------------------------------------------------------------------
@@ -125,15 +161,18 @@ _SCROLL = [
 
 @tool(
     "screenshot",
-    "Take a screenshot (whole screen, or a region x,y,w,h). Use when ax_tree is not enough "
-    "(game boards like Chess, maps, drawing and other canvas apps, Electron apps, images, layout "
-    "questions). Coordinates in the image equal screen coordinates for click/drag.",
+    "Take a screenshot: a whole display (display: its number, 1 = main), or a region x,y,w,h in screen "
+    "points. Use when ax_tree is not enough (game boards like Chess, maps, drawing and other canvas "
+    "apps, Electron apps, images, layout questions). Its note gives the image size and a shot id: to "
+    "click, drag or scroll at something in the picture, pass its pixel position in the image with that "
+    "shot id and NEO maps it to the screen.",
     _p(
         {
             "x": {"type": "integer"},
             "y": {"type": "integer"},
             "w": {"type": "integer"},
             "h": {"type": "integer"},
+            "display": {"type": "integer"},
         }
     ),
     category="computer",
@@ -141,26 +180,43 @@ _SCROLL = [
     untrusted=True,
 )
 async def screenshot(a: dict, c: ToolContext) -> ToolOutput:
+    import io
+
+    from PIL import Image
+
     region = None
-    if all(k in a for k in ("x", "y", "w", "h")):
+    if all(a.get(k) is not None for k in ("x", "y", "w", "h")):
         try:
-            region = tuple(int(a[k]) for k in ("x", "y", "w", "h"))
+            region = tuple(int(float(a[k])) for k in ("x", "y", "w", "h"))
         except (TypeError, ValueError):
             return ToolOutput("Error: x, y, w, h must be integers", ok=False)
         if region[2] <= 0 or region[3] <= 0:
             return ToolOutput("Error: region width and height must be positive", ok=False)
+    shown = await asyncio.to_thread(screen.displays)
+    display = shown[0]
+    if a.get("display") not in (None, "") and not region:
+        try:
+            want = int(a["display"])
+        except (TypeError, ValueError):
+            return ToolOutput("Error: display must be a number (1 = the main display)", ok=False)
+        display = next((d for d in shown if d.index == want), None)
+        if display is None:
+            return ToolOutput(f"Error: there's no display {want} ({'; '.join(d.words() for d in shown)})", ok=False)
     try:
-        img, scale = await asyncio.to_thread(screen.capture, region)
+        img, scale = await asyncio.to_thread(screen.capture, region, None if region else display)
     except PermissionError as e:
         return ToolOutput(confirm.ask_user(str(e)), ok=False)
+    w, h = Image.open(io.BytesIO(img.data)).size
+    x0, y0 = (region[0], region[1]) if region else (display.x, display.y)
+    shot = pointer.remember(x0, y0, scale, w, h)
     if region:
-        note = (
-            f"Region screenshot attached, origin at screen ({region[0]},{region[1]}). "
-            f"screen_x = {region[0]} + image_x×{scale:.2f}; screen_y = {region[1]} + image_y×{scale:.2f}."
-        )
+        what = f"region {region[2]}×{region[3]} pt at screen ({region[0]},{region[1]})"
+        others: list = []
     else:
-        note = f"Screenshot attached (full screen). 1 image px = {scale:.2f} screen pt; image coords = click coords."
-    return ToolOutput(note, images=[img])
+        what = f"all of {display.words()}"
+        others = [d for d in shown if d.index != display.index]
+    # NEO's own words (the mapping) aren't fenced; the picture is what came from the screen.
+    return ToolOutput(pointer.note(shot, what, others), images=[img], fence=False)
 
 
 @tool(
@@ -186,6 +242,22 @@ async def apps_running(a: dict, c: ToolContext) -> str:
 # ---- acting ---------------------------------------------------------------------------
 
 
+def _taint(c: ToolContext, name: str) -> None:
+    """Words read off the screen went into this result: the request has read untrusted content."""
+    if name not in c.taint:
+        c.taint.append(name)
+
+
+async def _watch(c: ToolContext, pid: int, pts: list[tuple[float, float]]) -> pointer.Look | None:
+    """The look before an input a model chose (the user's own commands aren't second-guessed:
+    they are watching)."""
+    return await pointer.look(pid, pts) if c.origin == "agent" else None
+
+
+def _element_pid(e: ax.Element) -> int:
+    return ax.pid_of(e.ref) if e.ref is not None else 0
+
+
 @tool(
     "ax_press",
     "Activate a UI element by id from ax_tree (button, link, menu item, checkbox, tab).",
@@ -196,88 +268,220 @@ async def apps_running(a: dict, c: ToolContext) -> str:
 async def ax_press(a: dict, c: ToolContext) -> str:
     if err := _needs_ax():
         return err
-    e = ax.get(a["id"])
+    e = ax.get(str(a.get("id") or ""))  # resolved once: the element gated is the element pressed
+    if not e:
+        return f"Error: unknown element {a.get('id')} — ids come from the latest ax_tree; call it again."
+    pid = await asyncio.to_thread(_element_pid, e)
+    owner = await asyncio.to_thread(ax.app_of, e.ref) if e.ref is not None else ""
+    if ax.is_neo(pid, owner):
+        return "Error: that element is NEO's own window — NEO never presses its own buttons."
     # The app that owns the element, not whatever is in front: clicking NEO's own card to
     # approve brings NEO forward, and the question must stay the same.
-    if e and (gate := _ask_before_click("ax_press", a, e.title or e.value, ax.app_of(e.ref))):
+    if gate := await _ask_first("ax_press", a, e.title or e.value, owner):
         return gate
-    return await asyncio.to_thread(ax.press, a["id"])
+    before = await _watch(c, pid, [])
+    out = await asyncio.to_thread(ax.press_el, e)
+    if before is not None and not out.startswith("Error"):
+        out += await _changes(before, pid, c)
+    return out
+
+
+async def _changes(before: pointer.Look, pid: int, c: ToolContext) -> str:
+    """What visibly followed a key press or an AX press — only what changed (a press may rightly
+    change nothing anyone can see)."""
+    now = await pointer.after(before, pid, [])
+    out = pointer.compare(before, now, [])
+    if out.changed is not True:
+        return ""
+    text = " " + out.said
+    if out.details:
+        _taint(c, "screen")
+        text += "\n" + fence("screen", out.details)
+    return text
 
 
 @tool(
     "ax_set_value",
-    "Set the text of a text field / area by element id (faster and more reliable than typing).",
+    "Put text into a text field or area by element id (read back; typed into it when the field "
+    "ignores a direct set). Only for text inputs — press or click checkboxes, sliders and popups.",
     _p({"id": {"type": "string"}, "value": {"type": "string"}}, ["id", "value"]),
     category="computer",
     quiet=True,
 )
 async def ax_set_value(a: dict, c: ToolContext) -> str:
-    if err := _needs_ax():
+    if err := _needs_input():
         return err
-    return await asyncio.to_thread(ax.set_value, a["id"], a["value"])
+    e = ax.get(str(a.get("id") or ""))
+    if not e:
+        return f"Error: unknown element {a.get('id')} — ids come from the latest ax_tree; call it again."
+    pid = await asyncio.to_thread(_element_pid, e)
+    if ax.is_neo(pid, await asyncio.to_thread(ax.app_of, e.ref) if e.ref is not None else ""):
+        return "Error: that field is NEO's own window — NEO never types into itself."
+    return await asyncio.to_thread(ax.set_el_value, e, str(a.get("value") or ""))
+
+
+_CLICK_ARGS = {
+    "x": {"type": "number"},
+    "y": {"type": "number"},
+    "shot": {"type": "string", "description": "screenshot id: x,y are pixels of that image"},
+    "id": {"type": "string", "description": "element id from ax_tree, instead of x,y"},
+    "button": {"type": "string", "enum": ["left", "right", "middle"]},
+    "count": {"type": "integer", "description": "1, 2 (double-click) or 3"},
+    "modifiers": {"type": "array", "items": {"type": "string", "enum": ["cmd", "shift", "alt", "ctrl"]}},
+}
+
+
+async def _gate_click(a: dict, labels: list[str], owner: str, verb: str = "click") -> str | None:
+    for label in dict.fromkeys(x for x in labels if x):
+        if gate := await _ask_first(verb, a, label, owner):
+            return gate
+    return None
+
+
+def _at(x: float, y: float) -> str:
+    return f"({int(round(x))}, {int(round(y))})"
 
 
 @tool(
     "click",
-    "Click at screen coordinates, or on an element id from ax_tree. button: left|right; count: 1|2.",
-    _p(
-        {
-            "x": {"type": "number"},
-            "y": {"type": "number"},
-            "id": {"type": "string"},
-            "button": {"type": "string", "enum": ["left", "right"]},
-            "count": {"type": "integer"},
-        }
-    ),
+    "Click on an element id from ax_tree, or at a point: pixels of a screenshot with its shot id, or "
+    "screen points. Brings the app there to the front first, never clicks NEO's own window, and "
+    "says what changed. button: left|right|middle; count: 1-3; modifiers: cmd, shift, alt, ctrl.",
+    _p(_CLICK_ARGS),
     category="computer",
     quiet=True,
 )
-async def click(a: dict, c: ToolContext) -> str:
-    if err := _needs_ax():
+async def click(a: dict, c: ToolContext) -> str | ToolOutput:
+    if err := _needs_input():
         return err
-    if "id" in a:
-        e = ax.get(a["id"])
-        if not e:
-            return f"Error: unknown element {a['id']} — call ax_tree first."
-        x, y = e.center
-        label, owner = e.title or e.value, ax.app_of(e.ref)
-    else:
-        x, y = a["x"], a["y"]
-        label = await asyncio.to_thread(ax.label_at, x, y)
-        owner = await asyncio.to_thread(ax.app_at, x, y)
-    if gate := _ask_before_click("click", a, label, owner):
-        return gate
-    return inp.click(x, y, button=a.get("button", "left"), count=int(a.get("count", 1)))
+    button, count, mods = str(a.get("button") or "left"), a.get("count", 1), a.get("modifiers") or []
+    if count in (None, ""):
+        count = 1
+    try:
+        inp.mods_flags(mods)
+        if button not in ("left", "right", "middle"):
+            raise ValueError(f"button must be left, right or middle, not {button!r}")
+        if isinstance(count, bool) or str(count).strip() not in ("1", "2", "3"):
+            raise ValueError(f"count must be 1, 2 or 3, not {count!r}")
+    except ValueError as e:
+        return f"Error: {e}"
+    count = int(str(count).strip())
+    try:
+        if a.get("id"):
+            e = ax.get(str(a["id"]))
+            if not e:
+                return f"Error: unknown element {a['id']} — call ax_tree first."
+            pid = await asyncio.to_thread(_element_pid, e)
+            owner = await asyncio.to_thread(ax.app_of, e.ref) if e.ref is not None else ""
+            if ax.is_neo(pid, owner):
+                return "Error: that element is NEO's own window — NEO never clicks its own buttons."
+            frame = await asyncio.to_thread(ax.visible_frame, e.ref) if e.ref is not None else (e.x, e.y, e.w, e.h)
+            if frame is None:
+                return (
+                    f"Error: {e.id} isn't on screen now (scrolled out of view, or gone) — scroll to it or look "
+                    "again (ax_tree)."
+                )
+            pts = [(frame[0] + frame[2] / 2, frame[1] + frame[3] / 2)]
+            t = await pointer.probe(pts)
+            labels, where = [e.title or e.value, t.hits[0].label], owner or t.hits[0].app
+            head = f"Clicked {e.id} ({e.role.removeprefix('AX')}) at {_at(*pts[0])}"
+        else:
+            pid = 0
+            pts, shot = pointer.points(a, ("x", "y"), c)
+            t = await pointer.probe(pts)
+            labels, where = [t.hits[0].label], t.hits[0].app
+            head = f"{pointer.click_word(button, count)} at {_at(*pts[0])}"
+            if shot is not None:
+                head += f" (pixel ({float(a['x']):g}, {float(a['y']):g}) of {shot.id})"
+        if gate := await _gate_click(a, labels, where):
+            return gate
+        await pointer.bring(t, pts, want_pid=pid)
+    except pointer.Refused as r:
+        return ToolOutput(str(r), ok=False)
+    h = t.hits[0]
+    pid = pid or h.pid
+    if h.app:
+        head += f" in {h.app}"
+    if t.brought:
+        head += f" (brought {t.brought} to the front first)"
+    head += "."
+    before = await _watch(c, pid, pts)
+    await asyncio.to_thread(inp.click, *pts[0], button=button, count=count, mods=mods)
+    if before is None:
+        return head
+    out = pointer.compare(before, await pointer.after(before, pid, pts), [_at(*pts[0])])
+    under = [pointer.words(h)] if not a.get("id") else []
+    text, ok = pointer.report(head, out, under)
+    if any(under) or out.details:
+        _taint(c, "screen")
+    return ToolOutput(text, ok=ok)
 
 
 @tool(
     "drag",
-    "Drag from (x1,y1) to (x2,y2).",
+    "Drag from (x1,y1) to (x2,y2): pixels of a screenshot with its shot id, or screen points. Brings "
+    "the app there to the front first and says what changed at both ends.",
     _p(
         {
             "x1": {"type": "number"},
             "y1": {"type": "number"},
             "x2": {"type": "number"},
             "y2": {"type": "number"},
+            "shot": {"type": "string", "description": "screenshot id: the points are pixels of that image"},
         },
         ["x1", "y1", "x2", "y2"],
     ),
     category="computer",
     quiet=True,
 )
-async def drag(a: dict, c: ToolContext) -> str:
-    if err := _needs_ax():
+async def drag(a: dict, c: ToolContext) -> str | ToolOutput:
+    if err := _needs_input():
         return err
-    return inp.drag(a["x1"], a["y1"], a["x2"], a["y2"])
+    try:
+        pts, shot = pointer.points(a, ("x1", "y1", "x2", "y2"), c)
+        t = await pointer.probe(pts)
+        src, dst = t.hits
+        # A drop can delete (onto the Trash) or send (onto a chat, AirDrop): the same gate as a click.
+        what = f"drag “{(src.label or 'that')[:40]}” onto “{(dst.label or 'that spot')[:40]}”"
+        commits = [lb for lb in (dst.label, src.label) if lb and policy.commits(lb)]
+        if commits:
+            where = f" in {dst.app}" if dst.app else ""
+            gate = confirm.gated("drag", a, what + where)
+            if isinstance(gate, str):
+                return gate
+        await pointer.bring(t, pts)
+    except pointer.Refused as r:
+        return ToolOutput(str(r), ok=False)
+    pid = t.hits[0].pid
+    before = await _watch(c, pid, pts)
+    await asyncio.to_thread(inp.drag, *pts[0], *pts[1])
+    head = f"Dragged {_at(*pts[0])} → {_at(*pts[1])}"
+    if shot is not None:
+        head += f" (pixels of {shot.id})"
+    if t.hits[0].app:
+        head += f" in {t.hits[0].app}"
+    if t.brought:
+        head += f" (brought {t.brought} to the front first)"
+    head += "."
+    if before is None:
+        return head
+    out = pointer.compare(before, await pointer.after(before, pid, pts), [f"the start {_at(*pts[0])}", f"the end {_at(*pts[1])}"])
+    under = [f"start {pointer.words(src)}" if pointer.words(src) else "", f"end {pointer.words(dst)}" if pointer.words(dst) else ""]
+    text, ok = pointer.report(head, out, under)
+    if any(under) or out.details:
+        _taint(c, "screen")
+    return ToolOutput(text, ok=ok)
 
 
 @tool(
     "scroll",
-    "Scroll the content under the pointer (or at x,y). dy<0 scrolls down, dy>0 up (lines).",
+    "Scroll the content under the pointer (or at x,y: screenshot pixels with its shot id, or screen "
+    "points). dy<0 scrolls down, dy>0 up (lines).",
     _p(
         {
             "x": {"type": "number"},
             "y": {"type": "number"},
+            "shot": {"type": "string", "description": "screenshot id: x,y are pixels of that image"},
             "dy": {"type": "integer"},
             "dx": {"type": "integer"},
             "at_pointer": {"type": "boolean"},
@@ -287,13 +491,38 @@ async def drag(a: dict, c: ToolContext) -> str:
     fast_path=_SCROLL,
     quiet=True,
 )
-async def scroll(a: dict, c: ToolContext) -> str:
-    if err := _needs_ax():
+async def scroll(a: dict, c: ToolContext) -> str | ToolOutput:
+    if err := _needs_input():
         return err
-    x, y = a.get("x"), a.get("y")
-    if a.get("at_pointer") or x is None or y is None:
-        x, y = inp.mouse_position()  # "scroll down": wherever the pointer is
-    return inp.scroll(x, y, int(a.get("dy", -5)), int(a.get("dx", 0)))
+    try:
+        dy = int(float(a.get("dy", -5) if a.get("dy") not in (None, "") else -5))
+        dx = int(float(a.get("dx", 0) or 0))
+    except (TypeError, ValueError):
+        return "Error: dy and dx must be whole numbers (lines)."
+    try:
+        if not a.get("at_pointer") and a.get("x") is not None and a.get("y") is not None:
+            pts, _shot = pointer.points(a, ("x", "y"), c)
+        else:
+            pts = [await asyncio.to_thread(inp.mouse_position)]  # "scroll down": wherever the pointer is
+            h = await asyncio.to_thread(ax.hit, *pts[0])
+            if h.pid and ax.is_neo(h.pid, h.app):
+                # The pointer rests on NEO's window (the user just clicked the orb): scroll the app
+                # they're working in, not NEO's chat.
+                frame = await asyncio.to_thread(ax.work_window_frame)
+                if frame is None:
+                    return ToolOutput("Error: the pointer is over NEO's own window, and no other window is in front to scroll.", ok=False)
+                pts = [(frame[0] + frame[2] / 2, frame[1] + frame[3] / 2)]
+        t = await pointer.probe(pts)
+    except pointer.Refused as r:
+        return ToolOutput(str(r), ok=False)
+    pid = t.hits[0].pid
+    before = await _watch(c, pid, pts)
+    text = await asyncio.to_thread(inp.scroll, pts[0][0], pts[0][1], dy, dx)
+    if before is None:
+        return text
+    out = pointer.compare(before, await pointer.after(before, pid, pts), [_at(*pts[0])])
+    text, ok = pointer.report(str(text) + (f" in {t.hits[0].app}." if t.hits[0].app else "."), out, [])
+    return ToolOutput(text, ok=ok)
 
 
 # ---- dictation lane -------------------------------------------------------------------------
@@ -390,8 +619,6 @@ def _browser_names() -> set[str]:
     if d := apps.default_browser():
         names.add(d.lower())
     return names
-_CHAT_APPS = {"messages", "slack", "discord", "whatsapp", "telegram", "microsoft teams", "signal", "messenger"}
-_SHELL_APPS = {"terminal", "iterm2", "warp", "ghostty", "kitty", "alacritty"}
 _HOTKEYS: list[tuple[str, dict]] = [
     (
         rf"{_LEAD}(?:press|hit|push)\s+(?:the\s+)?(?P<keys>enter|return|tab|escape|esc|delete|"
@@ -564,7 +791,7 @@ async def _ensure_text_focus() -> tuple[str | None, bool]:
     area = await asyncio.to_thread(ax.main_text_area)
     created = False
     if area is None and await asyncio.to_thread(_doc_like, app, pid):
-        inp.hotkey("cmd+n")  # the front window shows no editor at all: a fresh note/document
+        await asyncio.to_thread(inp.hotkey, "cmd+n")  # the front window shows no editor at all: a fresh note/document
         created = True
         await asyncio.sleep(0.7)
         if await asyncio.to_thread(ax.focused_editable):
@@ -574,28 +801,55 @@ async def _ensure_text_focus() -> tuple[str | None, bool]:
         return f"Error: nothing to type into is focused in {app or 'the front app'} — click into a text field first.", created
     if area.focused:  # the editor already has the caret (Notes reports focus on the area, not system-wide)
         return None, created
-    inp.click(*area.center)
-    await asyncio.sleep(0.2)
-    inp.hotkey("cmd+down")  # a click lands mid-text; dictation appends at the end
+    # Focus it through Accessibility; only if the app won't, click it — in the part that's on screen
+    # (a long document's text area reports its whole length, most of it scrolled out of view).
+    if area.ref is None or not await asyncio.to_thread(ax.focus_el, area.ref):
+        frame = await asyncio.to_thread(ax.visible_frame, area.ref) if area.ref is not None else (area.x, area.y, area.w, area.h)
+        if frame is None:
+            return f"Error: the text area in {app or 'the front app'} isn't on screen — click into it first.", created
+        spot = (frame[0] + frame[2] / 2, frame[1] + frame[3] / 2)
+        try:
+            await pointer.probe([spot])  # never NEO's own window
+        except pointer.Refused as r:
+            return str(r), created
+        await asyncio.to_thread(inp.click, *spot)
+        await asyncio.sleep(0.2)
+        if not await asyncio.to_thread(ax.focused_editable):
+            return f"Error: I couldn't put the cursor in {app or 'the front app'}'s text — click into it first.", created
+    await asyncio.to_thread(inp.hotkey, "cmd+down")  # dictation appends at the end
     return None, created
 
 
+async def _line_break(app: str, pid: int, role: str) -> str:
+    """How a line break is typed where the cursor is — decided by what's there, never by the
+    app's name: "" joins the lines (a single-line field; an app running a shell, where any Return
+    runs the line), "return" in a document editor, else shift+return — a new line in a chat box
+    or a web editor, never a "send"."""
+    if role in ax._SINGLE_LINE:
+        return ""
+    from neo.tools.computer.focus import hosts_shell
+
+    if await asyncio.to_thread(hosts_shell, pid):
+        return ""
+    if await asyncio.to_thread(_doc_like, app, pid):
+        return "return"
+    return "shift+return"
+
+
 async def _type(text: str) -> None:
-    """Type text so every line break is a real new line — and never a "send": in a single-line
-    field the lines are joined with spaces, in chat apps a line break is shift+return, and in a
-    shell nothing multi-line is ever entered."""
-    app = ax.frontmost_app()[0].lower()
+    """Type text so every line break is a real new line — and never a "send" or a command run."""
+    app, pid = ax.frontmost_app()
     role, _ = await asyncio.to_thread(ax.focused_role)
     text = text.replace("\r\n", "\n").replace("\r", "\n").rstrip("\n")  # a typed \r is a Return
-    if role in ax._SINGLE_LINE or app in _SHELL_APPS:
+    newline = await _line_break(app, pid, role) if "\n" in text else "return"
+    if not newline:
         text = " ".join(part.strip() for part in text.split("\n") if part.strip())
-    newline = "shift+return" if app in _CHAT_APPS else "return"
     lines = text.split("\n")
     for i, line in enumerate(lines):
         if line:
             await asyncio.to_thread(inp.type_text, line)
         if i < len(lines) - 1:
-            inp.hotkey(newline)
+            await asyncio.to_thread(inp.hotkey, newline)
             await asyncio.sleep(0.03)
 
 
@@ -609,7 +863,7 @@ async def _type(text: str) -> None:
     payload=True,
 )
 async def type_text(a: dict, c: ToolContext) -> str:
-    if err := _needs_ax():
+    if err := _needs_input():
         return err
     text = str(a["text"])
     err, created = await _ensure_text_focus()
@@ -634,7 +888,7 @@ async def dictate(a: dict, c: ToolContext) -> str:
     from neo.providers import brain
     from neo.providers.base import Message
 
-    if ax_err := _needs_ax():
+    if ax_err := _needs_input():
         return ax_err
     brief = str(a["brief"]).strip()
     err, created = await _ensure_text_focus()  # check before spending a model call
@@ -670,7 +924,7 @@ async def dictate(a: dict, c: ToolContext) -> str:
     quiet=True,
 )
 async def hotkey(a: dict, c: ToolContext) -> str:
-    if err := _needs_ax():
+    if err := _needs_input():
         return err
     keys, want = str(a["keys"]), str(a.get("app") or "")
     if a.get("after") == "input":
@@ -701,9 +955,18 @@ async def hotkey(a: dict, c: ToolContext) -> str:
             return "Error: there's no default browser to open a tab in."
         if err := await _guard_front(browser):
             return err
-    if gate := await _ask_before_keys(a, keys, ax.frontmost_app()[0], c):
+    try:
+        inp.parse_chord(keys)
+    except ValueError as e:
+        return f"Error: {e}"  # an unknown modifier or key: nothing pressed, never the bare key
+    name, pid = ax.frontmost_app()
+    if gate := await _ask_before_keys(a, keys, name, c, pid):
         return gate
-    return inp.hotkey(keys)
+    before = await _watch(c, pid, [])
+    out = await asyncio.to_thread(inp.hotkey, keys)
+    if before is not None and not out.startswith("Error"):
+        out += await _changes(before, pid, c)  # ⌘N may open a window, or a sheet that waits for an answer
+    return out
 
 
 async def _new_note(c: ToolContext) -> str:
@@ -721,25 +984,43 @@ async def _new_note(c: ToolContext) -> str:
     item = await asyncio.to_thread(axkit.menu_item, pid, "n", 0) if pid else None
     if item and await asyncio.to_thread(axkit.perform, item[0], "AXPress"):
         return f"New note in {app.name}."
-    return inp.hotkey("cmd+n")
-
-
-_MOD_NAMES = {"command": "cmd", "meta": "cmd", "option": "alt", "control": "ctrl"}
+    return await asyncio.to_thread(inp.hotkey, "cmd+n")
 
 
 def _chord(keys: str) -> set[str]:
-    parts = (p.strip().lower() for p in keys.replace(" ", "").split("+"))
-    return {_MOD_NAMES.get(p, p) for p in parts if p}
+    """The modifiers and key of a chord, by name ({"cmd", "shift", "d"}), however it was written."""
+    try:
+        flags, key = inp.parse_chord(keys)
+    except ValueError:
+        return {p.strip().lower() for p in keys.replace(" ", "").split("+") if p.strip()}
+    return {name for name, f in inp._MODS.items() if flags & f} | {key}
 
 
-async def _ask_before_keys(a: dict, keys: str, app: str, c: ToolContext) -> str | None:
+async def _return_runs_or_sends(pid: int, name: str) -> str:
+    """What a Return does where the keyboard focus is, by evidence rather than the app's name:
+    "runs" in an app running an interactive shell (a terminal, an editor's terminal), "sends" in
+    a multi-line input outside a document editor (a chat box, a web composer), "" otherwise (a
+    document, an address or search field)."""
+    from neo.tools.computer.focus import hosts_shell
+
+    if await asyncio.to_thread(hosts_shell, pid):
+        return "runs"
+    role, _ = await asyncio.to_thread(ax.focused_role)
+    multi = role == "AXTextArea" or (role not in ax._EDITABLE and role != "" and await asyncio.to_thread(ax.focused_editable))
+    if multi and not await asyncio.to_thread(_doc_like, name, pid):
+        return "sends"
+    return ""
+
+
+async def _ask_before_keys(a: dict, keys: str, app: str, c: ToolContext, pid: int = 0) -> str | None:
     """Keys that run or send something: Return in a terminal runs whatever is on its command
-    line; ⌘⇧D sends the open Mail message; Return in a chat app sends the message — asked first
+    line; ⌘⇧D sends the open Mail message; Return in a chat box sends the message — asked first
     once this request has read something untrusted (a page or an email could have asked for it)."""
     ch, low = _chord(keys), app.lower()
     submit = bool(ch & {"return", "enter"}) or ("ctrl" in ch and bool(ch & {"m", "j"}))
     what, detail = "", ""
-    if submit and low in _SHELL_APPS:
+    does = await _return_runs_or_sends(pid, app) if submit else ""
+    if does == "runs":
         text = await asyncio.to_thread(ax.focused_element_text)
         line = next((ln for ln in reversed(text.splitlines()) if ln.strip()), "")
         if len(line) > 2000:
@@ -749,7 +1030,7 @@ async def _ask_before_keys(a: dict, keys: str, app: str, c: ToolContext) -> str 
         what = "send the message that's open in Mail"
         _, win = await asyncio.to_thread(ax.focused_window, app)
         detail = f"Window: {ax._str(ax._attr(win, 'AXTitle', ''))}" if win is not None else ""
-    elif submit and low in _CHAT_APPS and c.tainted():
+    elif does == "sends" and c.tainted():
         what = f"press Return in {app} — it sends the message"
     if not what:
         return None
@@ -774,7 +1055,7 @@ async def click_text(a: dict, c: ToolContext) -> str:
     label = " ".join(str(a["label"]).lower().split())
     if not label or len(label) < 2 or all(w in _VAGUE_LABELS for w in label.split()):
         return f"Error: click what? '{a['label']}' isn't a label I can find."
-    if err := _needs_ax():
+    if err := _needs_input():
         return err
     if err := await _guard_front():
         return err
@@ -803,12 +1084,30 @@ async def click_text(a: dict, c: ToolContext) -> str:
     )
     e = hits[0]
     name = (e.title or e.value)[:40]
-    if gate := _ask_before_click("click_text", a, e.title or e.value, app, els):
+    if gate := await _ask_first("click_text", a, e.title or e.value, app, els):
         return gate
-    if "AXPress" in e.actions and not (await asyncio.to_thread(ax.press_element, e)).startswith("Error"):
-        return f"Clicked '{name}' ({e.role.removeprefix('AX')})"
-    inp.click(*e.center)
-    return f"Clicked '{name}' ({e.role.removeprefix('AX')}) at {tuple(map(int, e.center))}"
+    if "AXPress" in e.actions:
+        pressed = await asyncio.to_thread(ax.press_element, e)
+        if not pressed.startswith("Error"):
+            return f"Clicked '{name}' ({e.role.removeprefix('AX')})"
+        code = _AX_CODE.search(pressed)
+        # Only a press the app says it doesn't support falls back to the mouse. "Cannot complete"
+        # (-25204) comes back when the press happened but the app is busy (it opened a dialog):
+        # a second, mouse click would press it twice or land on that dialog.
+        if code and int(code.group(1)) == ax._CANNOT_COMPLETE:
+            return f"Clicked '{name}' ({e.role.removeprefix('AX')}), but the app didn't answer in time — look before clicking again."
+        if code and int(code.group(1)) not in ax._UNSUPPORTED:
+            return f"Error: couldn't press '{name}' ({pressed.removeprefix('Error: ')})."
+    spot = e.center
+    try:
+        await pointer.probe([spot])  # never NEO's own window over it
+    except pointer.Refused as r:
+        return str(r)
+    await asyncio.to_thread(inp.click, *spot)
+    return f"Clicked '{name}' ({e.role.removeprefix('AX')}) at {tuple(map(int, spot))}"
+
+
+_AX_CODE = re.compile(r"\((-?\d+)\)")
 
 
 # ---- apps -----------------------------------------------------------------------------

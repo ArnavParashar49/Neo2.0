@@ -153,3 +153,46 @@ def pid_running(name: str) -> list[tuple[str, int]]:
     hits = [(n, pid, t) for n, pid, t in running() if n.lower() == want or want in n.lower()]
     hits.sort(key=lambda x: (x[0].lower() != want, x[2] != "Foreground"))
     return [(n, pid) for n, pid, _ in hits]
+
+
+_DEFAULT_SHELLS = frozenset({"sh", "bash", "zsh", "csh", "tcsh", "ksh", "dash", "fish"})
+
+
+def _shells() -> frozenset[str]:
+    """The login shells this Mac lists (/etc/shells), by program name."""
+    try:
+        with open("/etc/shells", encoding="utf-8") as f:
+            names = {line.strip().rsplit("/", 1)[-1] for line in f if line.strip().startswith("/")}
+        return frozenset(names) or _DEFAULT_SHELLS
+    except OSError:
+        return _DEFAULT_SHELLS
+
+
+def hosts_shell(pid: int, depth: int = 3) -> bool:
+    """Does this app run an interactive shell — a terminal, an editor's terminal pane? Its own
+    processes say so: a shell this Mac lists in /etc/shells, on a terminal device, among the app's
+    children (or theirs). There, a Return runs whatever is on the command line."""
+    if not pid or pid <= 1:
+        return False
+    try:
+        out = subprocess.run(["ps", "-axo", "pid=,ppid=,tty=,comm="], capture_output=True, text=True, timeout=2).stdout
+    except (OSError, subprocess.SubprocessError):
+        return False
+    kids: dict[int, list[tuple[int, str, str]]] = {}
+    for line in out.splitlines():
+        parts = line.split(None, 3)
+        if len(parts) < 4 or not parts[0].isdigit() or not parts[1].isdigit():
+            continue
+        kids.setdefault(int(parts[1]), []).append((int(parts[0]), parts[2], parts[3].strip()))
+    shells = _shells()
+    level = [pid]
+    for _ in range(depth):
+        nxt = []
+        for p in level:
+            for child, tty, comm in kids.get(p, []):
+                name = comm.rsplit("/", 1)[-1].lstrip("-")
+                if name in shells and tty not in ("??", "-", ""):
+                    return True
+                nxt.append(child)
+        level = nxt
+    return False
