@@ -138,7 +138,7 @@ def differs(a: Image.Image, b: Image.Image) -> bool:
     """Do two samples of the same place show something different?"""
     if a.size != b.size:
         return True
-    pa, pb = a.getdata(), b.getdata()
+    pa, pb = a.convert("L").tobytes(), b.convert("L").tobytes()
     changed = sum(1 for u, v in zip(pa, pb, strict=True) if abs(int(u) - int(v)) > _CELL_DIFF)
     return changed >= _CELLS_CHANGED
 

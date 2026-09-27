@@ -367,6 +367,61 @@ def _walk(el, depth: int, out: list[Element], new_id, *, box=None, budget: list[
         _walk(c, depth + 1, out, new_id, box=box, budget=budget, skip=skip)
 
 
+# Chromium and Electron apps show their web content (a page, Slack's messages, VS Code's editor)
+# to Accessibility only once asked. NEO asks when it looks at one, and keeps the switch on while the
+# ids it handed out may still be used — then puts it back (neo.decide.axkit counts every flow).
+_WEB_HOLD_S = 120.0
+_WEB_SETTLE_S = 0.4
+_web_lock = threading.Lock()
+_web_held: dict[int, tuple[Any, list, threading.Timer]] = {}
+
+
+def _release_web(pid: int) -> None:
+    with _web_lock:
+        held = _web_held.pop(pid, None)
+    if held is not None:
+        held[2].cancel()
+        from neo.decide import axkit
+
+        try:
+            axkit.restore_web_tree(held[0], held[1])
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _expose_web(pid: int, root) -> bool:
+    """Switch the app's web tree on if it is a Chromium or Electron app (by what its bundle holds,
+    not its name). True when it was just switched on (it needs a moment to fill in)."""
+    with _web_lock:
+        held = _web_held.get(pid)
+        if held is not None:
+            held[2].cancel()
+            timer = threading.Timer(_WEB_HOLD_S, _release_web, (pid,))
+            timer.daemon = True
+            timer.start()
+            _web_held[pid] = (held[0], held[1], timer)
+            return False
+    app = _running(pid)
+    try:
+        path = str(app.bundleURL().path()) if app is not None and app.bundleURL() is not None else ""
+    except Exception:  # noqa: BLE001
+        path = ""
+    if not path:
+        return False
+    from neo.decide import axkit
+
+    rt = axkit.runtime(path)
+    if rt == "native":
+        return False
+    changed = axkit.enable_web_reading(root, rt)
+    timer = threading.Timer(_WEB_HOLD_S, _release_web, (pid,))
+    timer.daemon = True
+    with _web_lock:
+        _web_held[pid] = (root, changed, timer)
+    timer.start()
+    return bool(changed)
+
+
 def _lines_budget() -> int:
     """Characters of tree that reach the model whole (the agent loop cuts longer results)."""
     try:
@@ -401,6 +456,8 @@ def snapshot(app: str | None = None, *, max_lines: int = 250) -> str:
     err, _role = AS.AXUIElementCopyAttributeValue(root, AS.kAXRoleAttribute, None)
     if err == _CANNOT_COMPLETE:
         return f"Error: {name} isn't responding to Accessibility right now (busy or hung) — try again in a moment."
+    if _expose_web(int(pid), root):
+        time.sleep(_WEB_SETTLE_S)
     els: list[Element] = []
     budget = [_MAX_NODES]
     win = _attr(root, AS.kAXFocusedWindowAttribute)
@@ -592,6 +649,9 @@ def window_elements(app: str | None = None) -> tuple[str, tuple[float, float, fl
     name, win = focused_window(app)
     if win is None:
         return name, None, []
+    pid = pid_of(win)
+    if pid and _expose_web(pid, _app_el(pid)):
+        time.sleep(_WEB_SETTLE_S)
     els: list[Element] = []
     n = itertools.count(1)
     _walk(win, 0, els, lambda: f"w{next(n)}", budget=[_MAX_NODES])
