@@ -96,7 +96,7 @@ class ToolInfo:
     read_only: bool
     untrusted: bool  # its output is third-party content: fenced, and it taints the request
     gated: bool  # always asks before it runs (a host tool with confirmation, NEO's destructive tools)
-    requires: tuple[str, ...]  # "macos", "playwright"
+    requires: tuple[str, ...]  # "macos", "playwright", "web" (NEO's [web] extra)
     origin: Literal["builtin", "host"]
 
     def to_dict(self) -> dict[str, Any]:

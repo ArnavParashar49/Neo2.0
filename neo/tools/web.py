@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import re
 
 import httpx
@@ -92,7 +93,16 @@ def _race(query: str, n: int) -> list[dict]:
     return []
 
 
+_NO_DDGS = "Error: web search needs the ddgs package (NEO's [web] extra), which isn't installed."
+
+
+def _has_ddgs() -> bool:
+    return importlib.util.find_spec("ddgs") is not None
+
+
 def _search(query: str, n: int) -> str:
+    if not _has_ddgs():  # each engine's import would fail inside the race: never "No results."
+        return _NO_DDGS
     rows = _race(query, n)
     if not rows:
         return "No results."
@@ -103,6 +113,8 @@ def _search(query: str, n: int) -> str:
 
 
 def _news(query: str, n: int) -> str:
+    if not _has_ddgs():
+        return _NO_DDGS
     from ddgs import DDGS
 
     with DDGS() as d:
@@ -151,6 +163,7 @@ def _news(query: str, n: int) -> str:
     payload=True,
     untrusted=True,
     read_only=True,
+    requires=frozenset({"web"}),  # NEO's [web] extra (ddgs)
 )
 async def web_search(a: dict, c: ToolContext) -> str:
     n = int(a.get("n") or 6)
@@ -171,11 +184,14 @@ async def web_search(a: dict, c: ToolContext) -> str:
     slow=True,
     untrusted=True,
     read_only=True,
+    requires=frozenset({"web"}),  # NEO's [web] extra (trafilatura, pypdf)
 )
 async def web_fetch(a: dict, c: ToolContext) -> str:
     from neo.agent import confirm
     from neo.security import policy
 
+    if importlib.util.find_spec("trafilatura") is None:  # before anything is downloaded
+        return "Error: reading pages needs the trafilatura package (NEO's [web] extra), which isn't installed."
     url = str(a["url"]).strip()
     if not re.match(r"^[a-z][\w+.-]*://", url, re.I):
         url = "https://" + url

@@ -178,8 +178,10 @@ def test_requires_tags_match_the_presets():
     mac = {t.name for t in catalog().all() if "macos" in t.requires}
     assert mac == MACOS_ONLY | {"play_music"}
     assert {t.name for t in catalog().all() if "playwright" in t.requires} == set(PRESETS["browser"])
-    for n in ("web_search", "web_fetch", "weather", "clock", "memory"):
+    for n in ("weather", "clock", "memory"):
         assert not catalog().get(n).requires
+    for n in ("web_search", "web_fetch"):
+        assert catalog().get(n).requires == {"web"}  # NEO's [web] extra: ddgs, trafilatura, pypdf
     assert catalog().get("search_site").requires == {"macos"}  # it opens the Mac's own browser
 
 

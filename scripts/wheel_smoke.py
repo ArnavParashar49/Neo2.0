@@ -6,8 +6,10 @@ Run it with the python of a clean venv the wheel was installed into. It checks t
 from that venv (not a checkout); that `import neo2` loads only the standard library and
 `from neo2 import AsyncAgent` nothing heavy; that none of torch, pyobjc, playwright,
 sentence-transformers, laya, mlx, a vendor SDK, mcp or langchain-core is installed (with
-`--extra web`: that ddgs, trafilatura and pypdf are); and that an agent with a scripted brain
-answers, with and without NEO's web tools. No key, no network, and nothing written to ~/.neo.
+`--extra web`: that ddgs, trafilatura and pypdf are); that an agent with a scripted brain
+answers, with and without NEO's web tools; and that web_search and web_fetch are given only with
+the web extra (without it the "web" preset leaves them out, and asking for one by name names the
+extra). No key, no network, and nothing written to ~/.neo.
 """
 
 from __future__ import annotations
@@ -72,11 +74,22 @@ def main() -> int:
         async with AsyncAgent(neo2.AgentConfig(tools="web", fast_paths=False), provider=brain) as agent:
             r = await agent.ask("what time is it?")
             out.append(f"{r.status}:{','.join(s.tool for s in r.steps)}")
+            web_tools.extend(sorted({"web_search", "web_fetch"} & {t.name for t in agent.tools}))
+        try:
+            await AsyncAgent(neo2.AgentConfig(tools=("web_search",)), provider=ScriptedBrain()).aclose()
+        except neo2.UnsupportedPlatform as e:
+            refused.append(str(e))
         return out
 
+    web_tools: list[str] = []
+    refused: list[str] = []
     asks = asyncio.run(ask())
     if asks != ["done", "done:clock"]:
         problems.append(f"the scripted agent didn't answer: {asks}")
+    if extra == "web" and (web_tools != ["web_fetch", "web_search"] or refused):
+        problems.append(f"with the web extra the web tools must be given: {web_tools} {refused}")
+    if extra is None and (web_tools or not any("[web] extra" in r for r in refused)):
+        problems.append(f"without the web extra the web tools must be left out or refused: {web_tools} {refused}")
     loaded = [m for m in NEVER if m in sys.modules]
     if loaded:
         problems.append(f"loaded while answering: {loaded}")
@@ -84,7 +97,7 @@ def main() -> int:
         problems.append("~/.neo was created")
 
     print(json.dumps({"neo2": neo2.__file__, "from neo2 import AsyncAgent (s)": seconds, "asks": asks,
-                      "web extra": web, "problems": problems}, indent=1))  # fmt: skip
+                      "web extra": web, "web tools": web_tools, "problems": problems}, indent=1))  # fmt: skip
     return 1 if problems else 0
 
 

@@ -234,6 +234,68 @@ async def test_the_mac_tools_need_the_mac_extra(monkeypatch):
     assert not names & MACOS_ONLY
 
 
+async def test_the_web_tools_need_the_web_extra(monkeypatch, caplog):
+    """Installed without NEO's [web] extra (ddgs, trafilatura, pypdf): asking for web_search or
+    web_fetch by name names the extra; the "web" preset — the default, and neo2-mcp's — and globs
+    leave them out with a warning, instead of answering every search "No results."."""
+    import importlib.util
+    import logging
+
+    real = importlib.util.find_spec
+    monkeypatch.setattr(agent_mod, "_WEB_MODULES", ("ddgs", "trafilatura", "pypdf"))  # conftest: none
+    monkeypatch.setattr(importlib.util, "find_spec", lambda n, *a: None if n == "ddgs" else real(n, *a))
+    for tools in (("web_search",), ("web_fetch", "clock"), "web_fetch", ("web", "web_search")):
+        with pytest.raises(neo2.UnsupportedPlatform, match=r"\[web\] extra"):
+            neo2.AsyncAgent(neo2.AgentConfig(tools=tools), provider=ScriptedBrain())
+    for cfg in (neo2.AgentConfig(), neo2.AgentConfig(tools=("web_*", "clock"))):
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger="neo2"):
+            async with neo2.AsyncAgent(cfg, provider=ScriptedBrain()) as a:
+                names = {t.name for t in a.tools}
+        assert not names & {"web_search", "web_fetch"} and "clock" in names
+        assert "web_search" in caplog.text and "[web] extra" in caplog.text
+
+
+def test_without_ddgs_web_search_says_so_instead_of_no_results(monkeypatch):
+    import importlib.util
+
+    from neo.tools import web
+
+    real = importlib.util.find_spec
+    monkeypatch.setattr(importlib.util, "find_spec", lambda n, *a: None if n == "ddgs" else real(n, *a))
+
+    def never(*a, **kw):
+        raise AssertionError("no search may run in this test")
+
+    monkeypatch.setattr(web, "_race", never)
+    monkeypatch.setattr(web, "DDGS", never, raising=False)
+    for fn in (web._search, web._news):
+        out = fn("anything", 3)
+        assert out.startswith("Error:") and "ddgs" in out
+
+
+async def test_without_trafilatura_web_fetch_downloads_nothing(monkeypatch):
+    import importlib.util
+    import socket
+
+    import httpx
+
+    from neo.agent.registry import ToolContext, catalog
+    from neo.tools import load
+
+    load(["web_fetch"])
+    real = importlib.util.find_spec
+    monkeypatch.setattr(importlib.util, "find_spec", lambda n, *a: None if n == "trafilatura" else real(n, *a))
+
+    def never(*a, **kw):
+        raise AssertionError("nothing may be fetched in this test")
+
+    monkeypatch.setattr(httpx.AsyncClient, "get", never)
+    monkeypatch.setattr(socket, "getaddrinfo", never)
+    out = await catalog().get("web_fetch").handler({"url": "https://example.com"}, ToolContext(user_text="x"))
+    assert str(out).startswith("Error:") and "trafilatura" in str(out)
+
+
 def test_provider_factories_read_no_settings(monkeypatch):
     for sdk in ("openai", "google.genai", "anthropic"):  # the [brains] extra
         pytest.importorskip(sdk)

@@ -241,11 +241,11 @@ uv pip install -e ".[web,openai]"      # or from a checkout
 | Extra | What it adds |
 |---|---|
 | *(none)* | the core: `neo2.AsyncAgent` and `Agent`, NEO's agent loop, host tools, the framework adapters, and the `weather` and `clock` tools. No model, macOS framework or browser. |
-| `web` | `web_search` and `web_fetch` |
+| `web` | `web_search` and `web_fetch`. Without it the `"web"` preset (the default) leaves them out, with a warning, and asking for one by name is refused. |
 | `browser` | NEO's own headless Chromium (`browser_*`). Then run `playwright install chromium`. |
 | `mac` | the macOS tools: Accessibility, click and type, apps, files, shell, mail and calendar |
 | `gemini`, `openai`, `claude` | NEO's provider classes for Gemini, any OpenAI-compatible server (OpenAI, Groq, Ollama, LM Studio, vLLM…) and Claude. `brains` is all three. |
-| `mcp` | the MCP server, `neo2-mcp` |
+| `mcp` | the MCP server, `neo2-mcp`. Add `web` for its default `--tools web`: `neo[mcp,web]`. |
 | `langchain` | `neo2.adapters.langchain` |
 | `embeddings` | local embeddings for memory recall |
 | `app` | everything NEO.app runs. `all` is `app` plus `mcp` and `langchain`. |
@@ -418,6 +418,8 @@ async with neo.turn() as t:  # one turn of your loop: what one call read counts 
 The other helpers are `neo2.adapters.openai.tool_messages` (a whole turn of Chat calls, tool messages first), `neo2.adapters.openai.function_call_output`, `neo2.adapters.anthropic.tool_result`, `neo2.adapters.gemini.function_response` and `neo2.adapters.langchain.tool_message`. A Chat tool message can't hold images, so `tool_message` sends a tool's screenshots in a user message after it, labelled as that call's output and never the user's request. The model still reads them in the user's role, so for tools that see third-party content (the screen, pages) prefer the Responses API, whose `function_call_output` keeps them in the tool's output, or pass `images="omit"`.
 
 ### Use NEO from an MCP client
+
+Install NEO with its `mcp` extra, and `web` for the web tools: `pip install "neo[mcp,web] @ git+https://github.com/ArnavParashar49/Neo2.0"`. Without `web`, `--tools web` gives only `weather` and `clock`.
 
 <!-- snippet: mcp-command -->
 ```bash
