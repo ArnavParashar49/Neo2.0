@@ -443,7 +443,13 @@ def _release_web(pid: int) -> None:
 
 def _expose_web(pid: int, root) -> bool:
     """Switch the app's web tree on if it is a Chromium or Electron app (by what its bundle holds,
-    not its name). True when it was just switched on (it needs a moment to fill in)."""
+    not its name). True when it was just switched on (it needs a moment to fill in). Only as
+    NEO.app: embedded in another app's process, NEO switches no app's accessibility mode and
+    leaves no timer thread behind (runtime.process_wide_ok)."""
+    from neo import runtime
+
+    if not runtime.process_wide_ok():
+        return False
     with _web_lock:
         held = _web_held.get(pid)
         if held is not None:

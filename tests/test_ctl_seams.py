@@ -336,3 +336,16 @@ def test_process_wide_work_only_as_neo_app(monkeypatch):
     monkeypatch.setattr(runtime, "_library", False)
     monkeypatch.setattr(runtime, "library_bound", lambda: True)  # an embedded agent's request runs
     assert not runtime.process_wide_ok()
+
+
+def test_no_web_tree_switch_or_timer_thread_in_library_mode(monkeypatch):
+    """ax_tree on a Chromium app switches its web tree on and holds it with a timer thread: as
+    NEO.app only — never inside a host's process."""
+    from neo.tools.computer import ax
+
+    asked: list[int] = []
+    monkeypatch.setattr(ax, "_running", lambda pid: asked.append(pid))
+    monkeypatch.setattr(runtime, "_library", True)
+    assert ax._expose_web(4242, object()) is False and asked == [] and ax._web_held == {}
+    monkeypatch.setattr(runtime, "_library", False)
+    assert ax._expose_web(4242, object()) is False and asked == [4242]  # NEO.app: it looks (no bundle here)

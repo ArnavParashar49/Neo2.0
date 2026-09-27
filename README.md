@@ -504,7 +504,7 @@ neo/
   agent/      loop.py (the one agent loop) · session.py (routing) · confirm.py · registry.py · prompt.py
   providers/  gemini.py · openai_compat.py (Groq, local) · claude.py · base.py (neutral message format)
   reflex/     laya_reflex.py · features.py · finetune.py · generate.py · dataset.py · schema.py · templates_hi.py · hf_data.py + sources.py (public data)
-  tools/      computer/ (ax, input, screen, apps, shell) · browser.py · browser_live.py (the chat's live card) · system.py · web.py · memory_tool.py
+  tools/      computer/ (gates: every check, frozen · tools_ax/pointer/keys/label/apps · ax, input, pointer, screen, apps, shell) · browser.py · browser_live.py (the chat's live card) · system.py · web.py · memory_tool.py
   voice/      wake.py · local.py · live.py · audio.py · pipeline.py
   memory/     store.py (SQLite + FTS5 + vectors, playbooks, sessions) · embed.py · summarize.py
   server/     ws.py (websocket to the overlay)
