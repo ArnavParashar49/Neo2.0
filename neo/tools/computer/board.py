@@ -1342,8 +1342,41 @@ def _same_place(a: Board, b: Board) -> bool:
     return bool(np.all(np.linalg.norm(a.corners() - b.corners(), axis=1) <= tol))
 
 
-def _remember(b: Board) -> Board:
+def _same_window(a: tuple[float, float, float, float] | None, b: tuple[float, float, float, float] | None) -> bool:
+    return a is not None and b is not None and max(abs(p - q) for p, q in zip(a, b, strict=True)) <= 2
+
+
+def _drop(b: Board) -> None:
+    """Forget this board wherever NEO keeps it (by any screenshot id, and as the latest)."""
     global _latest
+    for k in [k for k, v in _boards.items() if v is b]:
+        del _boards[k]
+    if _latest is b:
+        _latest = None
+
+
+def forget_window(window: tuple[float, float, float, float] | None) -> None:
+    """Forget every board seen in this window (its frame, screen points) — or every board, when the
+    window isn't known: its content scrolled, or keys went to it, so where its squares are (or what
+    is on them) must be looked at again before one is acted on. For the scroll and key tools."""
+    for b in {id(v): v for v in [*_boards.values(), *([_latest] if _latest else [])]}.values():
+        if window is None or _same_window(b.window, window):
+            _drop(b)
+
+
+def _remember(b: Board) -> Board:
+    """Keep a board found in a screenshot. The boards NEO knew in the same window go: one at the same
+    place is this one seen again (its screenshot ids now name it), any other is out of date."""
+    global _latest
+    if b.window is not None:
+        for k, old in list(_boards.items()):
+            if old is not b and _same_window(old.window, b.window):
+                if _same_place(old, b):
+                    _boards[k] = b
+                else:
+                    del _boards[k]
+        if _latest is not None and _latest is not b and _same_window(_latest.window, b.window):
+            _latest = None
     if b.shot:
         _boards[b.shot] = b
         while len(_boards) > _KEEP:
@@ -1394,6 +1427,7 @@ def survey(
     sheet: bool = False,
     window: tuple[float, float, float, float] | None = None,
     now: float | None = None,
+    clickable: bool = True,
 ) -> Survey:
     """Look for a board in a screenshot, on evidence only. ``area``: the part of the picture to
     look in (screen points), e.g. a window's content without its toolbar. ``canvas``: the caller's
@@ -1401,9 +1435,12 @@ def survey(
     piece) — only then are grids drawn with lines and boards seen at an angle looked for; a flat
     board of alternating squares is looked for in any case (finding one is its own evidence).
     ``sheet``: a sheet or dialog is open over the window (Accessibility says so): nothing is read
-    under it. ``window``: the window's frame now, to notice later that it moved."""
-    global _latest
+    under it. ``window``: the window's frame now, to notice later that it moved. ``clickable``:
+    the picture's pixels map to where they are on the screen (a window's own picture whose place
+    isn't known doesn't): else no board is kept from it — its squares would be clicked elsewhere."""
     now = time.monotonic() if now is None else now
+    if not clickable:
+        return Survey()
     if sheet:
         return Survey(covered=True)
     region = None
@@ -1415,8 +1452,8 @@ def survey(
     if b is None and canvas:
         b = find_tilted(pic, region)
     if b is None:
-        if _latest is not None and window is not None and _latest.window == window:
-            _latest = None  # the board that was in this window isn't there any more
+        if window is not None:
+            forget_window(window)  # the boards that were in this window aren't there any more
         if canvas and shot:
             _pictures[shot] = pic
             while len(_pictures) > _KEEP_PICTURES:
@@ -1597,11 +1634,12 @@ def look(
     canvas: bool = False,
     window: tuple[float, float, float, float] | None = None,
     now: float | None = None,
+    clickable: bool = True,
 ) -> str:
     """The screenshot note's board part in one call (NEO's own words; "" when there is nothing to
     say): a board found (or seen again, with what changed), one under a sheet, or a board-like area
     NEO couldn't map."""
-    s = survey(pic, shot=shot, area=area, canvas=canvas, sheet=sheet, window=window, now=now)
+    s = survey(pic, shot=shot, area=area, canvas=canvas, sheet=sheet, window=window, now=now, clickable=clickable)
     if s.covered:
         return covered_note() if canvas or (_latest is not None and window is not None and _latest.window == window) else ""
     if s.board is not None:
@@ -1631,11 +1669,30 @@ def blind_refusal() -> str:
     )
 
 
-def _pick(a: dict) -> Board | None:
+def _pick(a: dict) -> Board:
+    """The board a call names: its screenshot's, or the latest one (BoardError: none)."""
     shot = str(a.get("shot") or "").strip()
     if shot:
-        return for_shot(shot) or (None if shot in _pictures else _latest)
+        b = for_shot(shot)
+        if b is None:
+            raise BoardError(
+                f"Error: NEO has no board from screenshot {shot[:16]!r} (none was found in it, or it is out of date) — "
+                "take a new screenshot of the board, then name a square from its note."
+            )
+        return b
+    if _latest is None:
+        raise BoardError("Error: NEO doesn't know a board here yet — take a screenshot of it first (NEO finds its squares).")
     return _latest
+
+
+def _on_a_display(x: float, y: float, displays) -> bool:
+    for d in displays:
+        if hasattr(d, "contains"):
+            if d.contains(x, y):
+                return True
+        elif d[0] <= x < d[0] + d[2] and d[1] <= y < d[1] + d[3]:
+            return True
+    return False
 
 
 def points_for(
@@ -1645,15 +1702,18 @@ def points_for(
     blind: bool = False,
     now: float | None = None,
     window: tuple[float, float, float, float] | None = None,
+    displays=None,
 ) -> tuple[list[tuple[float, float]], Board, list[str]]:
     """The screen points for squares named in ``a[k]`` for each of ``keys`` ("cell", or "from" and
     "to"), on the board of ``a["shot"]`` or the latest one: (points, board, the names as the board
     writes them). A brain that can't see gets squares only on a board NEO found itself in a fresh
-    picture. Raises BoardError (no coordinates in its words)."""
+    picture. ``window``: the board's window's frame now (a click's and a drag's alike): a window
+    that moved means a new look first. ``displays``: the screens now (anything with
+    ``contains(x, y)``, or (x, y, w, h)) — a square off every one (a window hanging past the edge,
+    captured whole) is refused, as ``pointer.points`` refuses such a point. Raises BoardError (no
+    coordinates in its words)."""
     now = time.monotonic() if now is None else now
     b = _pick(a)
-    if b is None:
-        raise BoardError("Error: NEO doesn't know a board here yet — take a screenshot of it first (NEO finds its squares).")
     if blind and b.source != "neo":
         raise BoardError(blind_refusal())
     if now - b.at > FRESH_S:
@@ -1668,6 +1728,13 @@ def points_for(
             raise BoardError(f"Error: {k}: {e}") from None
         pts.append(b.centre(col, row))
         names.append(b.name(col, row))
+    if displays is not None:
+        for (x, y), name in zip(pts, names, strict=True):
+            if not _on_a_display(x, y, displays):
+                raise BoardError(
+                    f"Error: square {name} is off the screen (its window reaches past the screen's edge) — bring the "
+                    "board fully onto the screen and take a new screenshot; nothing was done."
+                )
     return pts, b, names
 
 
@@ -1680,6 +1747,22 @@ class Move:
     cells: list[str] = field(default_factory=list)
 
 
+def before_move(b: Board, pic: Picture, *, now: float | None = None) -> None:
+    """Just before an input on a board's squares, with a picture of it taken the way the look after
+    the input will be (the same capture, the same scale): the board must still be where NEO found it
+    — not covered, moved or scrolled in its window — and this picture is what the move is then judged
+    against. Raises BoardError, and forgets the board, when it isn't there (nothing is posted)."""
+    now = time.monotonic() if now is None else now
+    now_state, now_rim = (None, None) if _off_picture(pic, b) else _seen(pic, b)
+    if now_state is None or _covered(pic, b, now_rim):
+        _drop(b)
+        raise BoardError(
+            "Error: the board isn't where NEO last saw it (covered, moved or scrolled) — take a new screenshot "
+            "first; nothing was done."
+        )
+    b.state, b.rim, b.seen_px, b.at = now_state, now_rim, _px(pic, b), now
+
+
 def after_move(b: Board, pic: Picture, frm: str = "", to: str = "", *, now: float | None = None) -> Move:
     """Compare the board in ``pic`` (a picture taken after the input) with how it looked before:
     which squares changed, and what is on the ones acted on now. ``frm``/``to``: the squares'
@@ -1689,6 +1772,7 @@ def after_move(b: Board, pic: Picture, frm: str = "", to: str = "", *, now: floa
         return Move("", None)
     now_state, now_rim = (None, None) if _off_picture(pic, b) else _seen(pic, b)
     if now_state is None or _covered(pic, b, now_rim):
+        _drop(b)  # (no square of it is acted on again before a new look: a queued move stops here)
         return Move("The board isn't where it was (covered, moved or gone) — take a screenshot before the next move.", None)
     cells = [b.name(c, r) for c, r in changed_cells(b, b.state, now_state, pool=pooling(b, b.seen_px, _px(pic, b)))]
     b.state, b.rim, b.seen_px, b.at = now_state, now_rim, _px(pic, b), now
