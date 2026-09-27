@@ -39,6 +39,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from neo.agent.registry import ToolContext, fence
+from neo.decide._objc import pooled
 from neo.tools.computer import apps, ax, screen
 
 SETTLE_S = 0.12  # after bringing an app forward (or raising a window), before the input
@@ -935,6 +936,7 @@ def _display_shot(s: Shot) -> bool:
     )
 
 
+@pooled
 def _window_frame(h: ax.Hit) -> tuple[float, float, float, float] | None:
     if h.window is None:
         return None
@@ -988,6 +990,7 @@ def capture_area(area: tuple[int, int, int, int], kind: str = "after"):
     return detail(img, "medium" if kind == "after" else "high"), float(area[0]), float(area[1]), scale, w, h
 
 
+@pooled
 def protected_in(area: tuple[float, float, float, float]) -> bool:
     """Does any window on screen over ``area`` belong to an app NEO never touches (a protected app:
     a host's approval dialog, a vault)? Then no picture of it is taken on NEO's own initiative. When
@@ -1079,6 +1082,7 @@ class Control:
         return round((x + w / 2) * 2) / 2, round((y + h / 2) * 2) / 2
 
 
+@pooled
 def control_of(h: ax.Hit) -> Control | None:
     """The control the element under a point is, or is inside (a button's own text): None for a
     surface (a canvas, a board, a picture), a text or anything else a click position matters in."""

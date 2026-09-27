@@ -23,6 +23,7 @@ import time
 from dataclasses import dataclass, field
 
 from neo.agent.registry import ToolContext, fence
+from neo.decide._objc import pooled
 from neo.tools.computer import ax
 from neo.tools.computer.pointer import NORM, Shot
 
@@ -308,6 +309,7 @@ def _off_limits(name: str, pid: int) -> bool:
     return not pid or ax.is_neo(pid, name) or _c._protected(name, pid)
 
 
+@pooled  # (a thread's Objective-C objects are released when it is done)
 def collect_sync(
     area: tuple[float, float, float, float] | None, *, pid: int = 0, name: str = "", deadline_s: float = 0.8, limit: int = MAX_MARKS
 ) -> Collected:

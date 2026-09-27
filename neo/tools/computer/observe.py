@@ -14,6 +14,7 @@ import asyncio
 from collections.abc import Callable
 
 from neo.agent.registry import ToolContext, ToolOutput, fence
+from neo.decide._objc import pooled
 from neo.tools.computer import ax, marks, pointer, screen
 
 LOOK_MARKS = 60  # a look lists more than a screenshot's marks: it is the whole answer for a blind brain
@@ -46,6 +47,7 @@ def add_note(fn: Note) -> None:
         _notes.append(fn)
 
 
+@pooled
 def _window(pid: int) -> tuple[str, tuple[float, float, float, float] | None]:
     """(title, frame) of the app's focused window: two quick questions, so the picture can be taken
     while the elements are still being listed."""

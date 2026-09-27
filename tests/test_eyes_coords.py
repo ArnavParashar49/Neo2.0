@@ -17,6 +17,7 @@ import test_v2_computer_controls as base
 from PIL import Image
 from test_v2_computer_controls import CHESS, run
 
+from neo.agent import confirm
 from neo.agent.registry import ToolContext, registry
 from neo.providers.base import ImagePart
 from neo.tools.computer import ax, marks, pointer, screen
@@ -25,6 +26,13 @@ from neo.tools.computer import ax, marks, pointer, screen
 world = base.world
 shots = base.shots
 _REAL_PROTECTED_IN = pointer.protected_in  # (the suite fakes it: no protected window anywhere)
+
+
+@pytest.fixture(autouse=True)
+def _no_card_left():
+    """A question a test staged (the gate asked before a click) never outlives it."""
+    yield
+    confirm.cancel("t")
 
 
 @pytest.fixture(autouse=True)
