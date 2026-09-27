@@ -93,7 +93,7 @@ async def test_the_run_after_an_approval_offers_only_the_agents_tools(mac_catalo
     assert r.steps[-1].summary == "Unknown tool: shell"
 
 
-async def test_the_agent_registry_is_a_strict_copy():
+async def test_the_agent_registry_is_a_strict_copy(monkeypatch):
     """Changing NEO.app's catalog entry later changes nothing in an agent built before."""
     from neo.tools import load
 
@@ -104,6 +104,18 @@ async def test_the_agent_registry_is_a_strict_copy():
         assert mine is not t and mine.handler is t.handler
         assert "shell" not in agent._rt.registry and "memory" not in agent._rt.registry
         assert {i.name for i in agent.tools} == WEB
+        before = (mine.description, mine.handler, mine.risk, mine.parameters, list(mine.fast_path))
+        monkeypatch.setattr(t, "description", "hijacked")
+        monkeypatch.setattr(t, "handler", lambda a, c: "hijacked")
+        monkeypatch.setattr(t, "risk", "destructive")
+        t.fast_path.append((r"^hijack$", {}))  # in place: the agent's list is its own
+        try:
+            assert (mine.description, mine.handler, mine.risk, mine.parameters, list(mine.fast_path)) == before
+            assert {i.name: i for i in agent.tools}["clock"].description != "hijacked"
+            r = await agent.ask("what time is it")  # a fast path: the agent's own clock runs
+            assert r.route == "quick" and r.steps[0].summary != "hijacked"
+        finally:
+            t.fast_path.pop()
 
 
 async def test_a_fast_path_runs_only_the_agents_own_tool():
