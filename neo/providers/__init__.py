@@ -150,7 +150,9 @@ class Chain:
     (the vision chain must not let a text-only brain answer first and silently drop the screenshot).
     When every brain fails, the error is an AllBrainsFailed that says, per brain, why — quota,
     too large, not running — so the task can end with that reason spoken. Demotions are the
-    agent's own (its BrainPool), NEO.app's module `_demoted` when nothing is bound."""
+    agent's own (its BrainPool), NEO.app's module `_demoted` when nothing is bound — except in a
+    chain of a host's own providers that the host calls itself (neo2.providers.Failover, no agent
+    bound): that one keeps them itself and touches nothing of NEO.app's."""
 
     def __init__(self, names: Sequence[BrainName | Provider], *, sticky: bool = True) -> None:
         self.names = list(names)  # brain names, or provider instances (a host's own), in order
@@ -158,6 +160,18 @@ class Chain:
         self.last_used: str = ""
         self.last_model: str = ""
         self._missing: list[tuple[str, ProviderError]] = []
+        self._own_demoted: dict[str, float] = {}
+
+    def _hosts_only(self) -> bool:
+        """Only a host's own provider objects: no brain here is made from anyone's settings."""
+        return all(not isinstance(n, str) for n in self.names)
+
+    def _alone(self) -> bool:
+        """A host's own chain, called by the host itself with no agent bound (not NEO.app's)."""
+        return self._hosts_only() and runtime.current_scope() is None
+
+    def _demotions(self) -> dict[str, float]:
+        return self._own_demoted if self._alone() else pool().demoted()
 
     def _providers(self) -> list[Provider]:
         out: list[Provider] = []
@@ -181,18 +195,17 @@ class Chain:
         if not self.sticky:
             return list(self.names)
         now = _time.time()
-        demoted = pool().demoted()
+        demoted = self._demotions()
         healthy = [n for n in self.names if demoted.get(_key(n), 0.0) <= now]
         return healthy + [n for n in self.names if n not in healthy]
 
-    @staticmethod
-    def _demote(name: str, e: ProviderError | None = None) -> None:
+    def _demote(self, name: str, e: ProviderError | None = None) -> None:
         if e is not None and getattr(e, "kind", "") in _NO_DEMOTE:
             return
         until = _time.time() + _DEMOTE_S
         if e is not None and getattr(e, "kind", "") == "quota":
             until = max(until, float(getattr(e, "until", 0.0) or 0.0))
-        pool().demoted()[name] = until
+        self._demotions()[name] = until
 
     @property
     def name(self) -> str:
@@ -205,6 +218,8 @@ class Chain:
     supports_tools = True
 
     def _no_brain(self, failures: list[tuple[str, ProviderError]]) -> ProviderError:
+        if self._hosts_only():  # no key of NEO's could have been missing
+            return AllBrainsFailed(failures + self._missing)
         s = settings()
         if not pool().overrides and not (s.gemini_api_key or s.groq_api_key or s.anthropic_api_key):
             return ProviderError(
@@ -217,6 +232,8 @@ class Chain:
         failures.append((p.name, e))
         if self.sticky:
             self._demote(p.name, e)
+        if self._alone():
+            return  # no conversation to tell (and never NEO.app's)
         from neo.events import bus
 
         who = spoken_name(p.name)  # "Gemini Lite", "the local model"

@@ -135,6 +135,31 @@ def test_when_every_host_provider_fails_it_says_so(tmp_path):
         asyncio.run(prov.brain("agent").complete([]))
 
 
+@pytest.mark.parametrize("agents", [False, True])
+def test_a_hosts_own_failover_called_directly_keeps_to_itself(tmp_path, monkeypatch, agents):
+    """neo2.providers.Failover, called by the host itself (no agent bound; before any agent exists,
+    or after): what it demotes is its own, and when every provider fails it says so. It never
+    reaches NEO.app's demotions or settings (~/.neo/.env, ~/.neo/models), nor asks for an agent."""
+    import neo2.providers
+    from neo import config
+    from neo.providers.base import AllBrainsFailed
+
+    monkeypatch.setattr(prov, "_demoted", {})
+    if agents:
+        make_runtime(tmp_path / "a", "a")  # library mode: an accessor with nothing bound fails closed
+        monkeypatch.setattr(config, "_settings", None)  # (the test's own helper loaded NEO.app's tools)
+    limited, ok = Fake("limited", fail=RateLimited), Fake("ok")
+    fo = neo2.providers.Failover(limited, ok)
+    assert asyncio.run(fo.complete([])).text == "from ok"
+    assert fo._order() == [ok, limited]  # demoted in the chain itself
+    assert asyncio.run(fo.complete([])).text == "from ok" and limited.calls == 1
+    other = neo2.providers.Failover(limited, ok)
+    assert other._order() == [limited, ok]  # another chain: its own record
+    with pytest.raises(AllBrainsFailed, match="all brains failed"):
+        asyncio.run(neo2.providers.Failover(Fake("down", fail=ProviderError)).complete([]))
+    assert prov._demoted == {} and config._settings is None
+
+
 def test_constructors_given_everything_read_no_settings(genai_clients):
     """Hosts build providers before any agent exists: that must not reach NEO.app's settings."""
     from neo.providers.claude import ClaudeProvider
