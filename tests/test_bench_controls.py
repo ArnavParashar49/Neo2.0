@@ -410,6 +410,37 @@ def test_the_report_keeps_one_shape():
     assert "| ax_hit |" in text and "| open_and_type | PASS |" in text
 
 
+def _row(passed: bool, trips: int, *, asked: bool = False) -> dict:
+    """A task's report row, as run_scenario writes it (what table() reads)."""
+    return {"pass": passed, "asked": asked, "round_trips": trips, "efforts": ["low"] * trips, "checks": {"goal": passed},
+            "error": "", "total_prompt_tokens": 0, "neo_s": 0.1, "modeled_s": 0.1 + 1.5 * trips}  # fmt: skip
+
+
+def test_a_task_that_stops_to_ask_is_not_counted_as_done():
+    """A scenario that passes by asking the user (NEEDS_CONFIRM; the bench never answers) is a user
+    turn, not a finished task: counted apart from the tasks done, and its trips are never compared
+    with a run that ended another way (did the task, pressed without asking, failed)."""
+    base = {"did": _row(True, 5), "asks": _row(True, 5), "gate": _row(False, 5), "same": _row(True, 3), "fixed": _row(False, 3)}
+    now = {"did": _row(True, 0), "asks": _row(True, 0, asked=True), "gate": _row(True, 0, asked=True), "same": _row(True, 1),
+           "fixed": _row(True, 5)}  # fmt: skip
+    sc = R.scores({}, now)
+    assert sc["tasks_passed"] == "5/5" and sc["tasks_done"] == "3/5" and sc["tasks_asked"] == 2
+    assert sc["round_trips"] == 6  # (every task's, as before)
+    rep = {"sha": "x", "when": "now", "params": {}, "primitives": {}, "scenarios": now, "scores": sc, "features": {}}
+    text = R.table(rep, {"scenarios": base})
+    rows = {line.split("|")[1].strip(): [c.strip() for c in line.split("|")[1:-1]] for line in text.splitlines() if line.startswith("| ")}
+    assert rows["did"][1] == "PASS" and rows["did"][7] == "-5"
+    assert rows["asks"][1] == "ASKED" and rows["asks"][7] == "" and rows["asks"][8] == ""  # (asked: no Δ)
+    assert rows["gate"][1] == "ASKED" and rows["gate"][7] == ""
+    assert rows["fixed"][1] == "PASS" and rows["fixed"][7] == ""  # (failed before: no Δ either)
+    assert rows["same"][7] == "-2"
+    assert "3/5 done, 2 stopped to ask the user" in text
+    # the total that compares: the tasks that ended the same way in both runs (did, same)
+    assert "2 tasks that ended the same way in both runs: 1 round trips vs 8" in text
+    alone = R.table(rep)  # (no base: nothing to compare)
+    assert "ended the same way" not in alone and "3/5 done, 2 stopped to ask the user" in alone
+
+
 def test_the_step0_baseline_is_committed_with_the_same_shape():
     rep = json.loads(BASELINE.read_text())
     assert set(rep) == _TOP and rep["schema"] == R.SCHEMA
@@ -587,28 +618,76 @@ def test_menu_command_and_its_sheet_take_no_model_call():
     if not R.menu_zero_ready(feats):
         pytest.skip("menu_command isn't a tool NEO runs from the user's words alone yet (by_utterance)")
     r = _scenario("menu_command")
-    assert r["pass"] and r["round_trips"] == 0
+    assert r["pass"] and r["round_trips"] == 0, r
+    assert r["route"] == "quick" and r["tools"] == ["menu_command"], r
 
 
 def test_the_menu_threshold_needs_the_by_utterance_lane():
-    feats = {"menu_command": True, "menu_by_utterance": False, "resolver": "live"}
+    feats = {"menu_command": True, "menu_by_utterance": False, "resolver": "shadow"}
     assert not R.menu_zero_ready(feats)  # a menu_command the model must call is still a round trip
+    # "New Game" is in "start a new game": the live lexical stage grounds it, with the meaning stage
+    # in shadow and nothing promoted (DECISIONS 40)
     assert R.menu_zero_ready({**feats, "menu_by_utterance": True})
-    # "start a new game" names no item word for word: only the meaning stage takes it, once promoted
-    shadow = {**feats, "menu_by_utterance": True, "resolver": "shadow", "resolver_promoted": ""}
-    assert not R.menu_zero_ready(shadow)
-    assert R.menu_zero_ready({**shadow, "resolver_promoted": "meaning"})
+    assert R.menu_zero_ready({**feats, "menu_by_utterance": True, "resolver_promoted": ""})
+    assert not R.menu_zero_ready({**feats, "menu_by_utterance": True, "resolver": "off"})  # (the lane shut)
+    assert not R.menu_zero_ready({**feats, "menu_command": False, "menu_by_utterance": True})
+
+
+def test_the_menu_scenario_models_the_reflexs_pick_of_menu_command():
+    """Laya's tool head routes a menu command to menu_command (the tool lane the plan built for it);
+    the bench's scripted reflex says so for this one scenario. Without that pick the words point at
+    no control ("click X"), so a model is asked: the round trips come from the bench's reflex, not
+    from the resolver's shadow policy."""
+    import dataclasses
+
+    from neo2.core.config import settings
+
+    sc = S.by_name("menu_command")
+    assert sc.tool == "menu_command" and sc.tool_p >= settings().reflex_tool_floor
+    assert all(not s.tool for s in S.SCENARIOS if s.name != "menu_command")  # (the others: as before)
+    r = asyncio.run(R.run_scenario(dataclasses.replace(sc, tool="", tool_p=0.0)))
+    assert r["pass"] and r["round_trips"] > 0 and r["route"] != "quick", r
+
+
+def _blind_brains_are_handed_no_coordinates() -> None:
+    for sc in [s for s in S.SCENARIOS if not s.sees]:
+        r = _scenario(sc.name)
+        assert r["checks"]["blind_given_no_coords"], (sc.name, r["blind_given"])
 
 
 @bench
 def test_a_blind_brain_is_handed_no_coordinates():
-    """DECISIONS 43: a brain that can't see never gets coordinates in any form. On once marks are in
-    (the eyes work: ids only for blind brains); before, a scenario that hands one over is expected."""
-    for sc in [s for s in S.SCENARIOS if not s.sees]:
-        r = _scenario(sc.name)
-        if not r["checks"]["blind_given_no_coords"] and not R.features()["marks"]:
-            pytest.xfail(f"{sc.name}: a blind brain is still handed coordinates ({r['blind_given'][:2]})")
-        assert r["checks"]["blind_given_no_coords"], (sc.name, r["blind_given"])
+    """DECISIONS 43: a brain that can't see never gets coordinates in any form — no request, look or
+    tool result it is handed carries any (an invariant: no escape while a feature is missing)."""
+    _blind_brains_are_handed_no_coordinates()
+
+
+def test_a_tree_with_frames_handed_to_a_blind_brain_fails_the_guard(monkeypatch):
+    """The regression the guard is for: an ax_tree that keeps its frames for a blind brain. The
+    guard fails on it — it never xfails or skips."""
+    from neo2.core.tools.computer import ax
+
+    real = ax.snapshot
+
+    def leaky(*a, **k):
+        k["blind"] = False
+        return real(*a, **k)
+
+    monkeypatch.setattr(ax, "snapshot", leaky)
+    try:
+        _blind_brains_are_handed_no_coordinates()
+    except AssertionError as e:
+        assert "@(" in str(e), e  # (the tree's frames, found in what the blind brain was handed)
+    except (pytest.xfail.Exception, pytest.skip.Exception) as e:
+        pytest.fail(f"the guard let a leak through as {type(e).__name__}: {e}")
+    else:
+        pytest.fail("a blind brain was handed a tree with frames and the guard passed")
+
+
+def test_marks_are_found_by_what_a_screenshot_lists():
+    """eyes-marks landed as a list of the picture's controls by id (click id=…), not a click
+    parameter: the feature is found in what a screenshot returns."""
+    assert R.features()["marks"]
 
 
 @bench

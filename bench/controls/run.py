@@ -12,9 +12,13 @@ capture 0.1 s (the P1 projection). Each primitive runs through NEO's real tool h
 "agent": the looks before and after a model's input included) on a fresh fake world.
 
 (b) Tasks. Each scenario (bench/controls/scenarios.py) goes through the real Session → fast paths →
-agent loop → tool selection → prompt, with the scripted brain; it reports round trips, prompt and
-image tokens and effort per call, and a MODELED wall time: NEO-side time + Σ per-call model latency
-by effort (low 1.5 s, medium 5 s, high 12 s — published first-token figures, not measurements).
+agent loop → tool selection → prompt, with a scripted reflex (the scenario's intent, and a tool only
+where it models Laya's tool head naming one) and the scripted brain; it reports round trips, prompt
+and image tokens and effort per call, and a MODELED wall time: NEO-side time + Σ per-call model
+latency by effort (low 1.5 s, medium 5 s, high 12 s — published first-token figures, not
+measurements). A task that passes by stopping to ask the user (NEEDS_CONFIRM: the bench never
+answers) is reported as ASKED — a user turn, not a task done — and never compared with a run that
+ended another way.
 
 Everything runs with NEO_NO_EFFECTS=1 in a scratch data folder: no event reaches the Mac, no model
 is called, nothing is read from or written to ~/.neo.
@@ -363,7 +367,7 @@ async def run_scenario(sc: Any) -> dict:
     brain = FakeBrain(sc.policy(w), sees=sc.sees)
     rec: list[dict] = []
     decision = Decision(sc.intent, 0.95, False, 0.0, sc.needs_screen, 0.9 if sc.needs_screen else 0.1, source="bench",
-                        reply=False, reply_p=0.1)  # fmt: skip
+                        tool=getattr(sc, "tool", ""), tool_p=getattr(sc, "tool_p", 0.0), reply=False, reply_p=0.1)  # fmt: skip
     with install(w) as env:
         p = env.patches
         p.set(embed, "embed_texts", lambda texts: None)
@@ -503,23 +507,13 @@ def chess_trips_limit(feats: dict[str, Any]) -> int | None:
 
 
 def menu_zero_ready(feats: dict[str, Any]) -> bool:
-    """A menu command and its sheet take no model call only once menu_command runs from the user's
-    words alone (the by_utterance lane): a menu_command the model must call is still a round trip.
-    "start a new game" names no menu and no item word for word ("New Game"): the lane takes it only
-    by meaning — the resolver's meaning stage, promoted (DECISIONS 40: shadow until it is)."""
-    promoted = feats["resolver_promoted"] if "resolver_promoted" in feats else _promoted()
-    meaning = feats.get("resolver") in ("live", "on", "all") or "meaning" in str(promoted or "")
-    return bool(feats.get("menu_command") and feats.get("menu_by_utterance") and meaning)
-
-
-def _promoted() -> str:
-    """settings().resolver_promoted: the resolver stages promoted out of shadow ("" when none)."""
-    try:
-        from neo2.core.config import settings
-
-        return str(getattr(settings(), "resolver_promoted", "") or "")
-    except Exception:  # noqa: BLE001
-        return ""
+    """A menu command and its sheet take no model call once menu_command runs from the user's words
+    alone (the by_utterance lane): a menu_command the model must call is still a round trip. The lane
+    takes the request when the reflex names the tool (the menu_command scenario models Laya's tool
+    head doing so) and grounds it itself: "New Game" is in "start a new game", which the live lexical
+    stage matches — the meaning stage isn't needed, so its shadow (DECISIONS 40) holds nothing back.
+    Only ``resolver = "off"`` shuts the lane."""
+    return bool(feats.get("menu_command") and feats.get("menu_by_utterance") and feats.get("resolver") != "off")
 
 
 def _after_look() -> bool:
@@ -546,6 +540,28 @@ def _after_look() -> bool:
     except Exception:  # noqa: BLE001 - a click that breaks here offers no picture
         return False
     return bool(getattr(out, "images", None)) and w.named("Accounts").root.find(lambda e: e.role == "AXCheckBox").attrs.get("AXValue") == 1
+
+
+# A control in a screenshot's list of its picture's controls, by the id a click takes (marks.py):
+# "e7 CheckBox “Remember me” …" (the fake form's checkbox).
+_MARKED = re.compile(r'^\s*e\d+\s+CheckBox\s+["\u201c]Remember me["\u201d]', re.M)
+
+
+def _marks() -> bool:
+    """Does a screenshot list the controls in its picture by id (a model clicks one by id=…, never at
+    a point)? Found the way a model looks: a screenshot of a fake form, its checkbox on the list."""
+    from bench.controls import scenarios as S
+    from bench.controls.fakes import install
+    from neo2.core.tools.computer import apps
+
+    w = S.world(lambda w: S.form_app(), front="Accounts")
+    try:
+        with install(w) as env:
+            env.patches.set(apps, "_target", None)
+            out = asyncio.run(_tool("screenshot"))
+    except Exception:  # noqa: BLE001 - a look that breaks here lists nothing
+        return False
+    return bool(_MARKED.search(str(getattr(out, "text", "") or "")))
 
 
 def features() -> dict[str, Any]:
@@ -583,7 +599,7 @@ def features() -> dict[str, Any]:
         "cell_click": "cell" in props("click"),
         "after_look": _after_look(),
         "batching": may_batch(build(""), registry().specs()),
-        "marks": "mark" in props("click"),
+        "marks": _marks(),
         "zoom": "zoom" in props("screenshot"),
         "menu_command": menu is not None,
         "menu_by_utterance": bool(getattr(menu, "by_utterance", None)),
@@ -656,17 +672,31 @@ def build_report(prims: dict | None, scens: dict | None, *, reps: int) -> dict:
     }
 
 
+def ended(r: dict) -> str:
+    """How a task ended: "done", "asked" (it passed by stopping to ask the user — the bench never
+    answers: a user turn, not a task done) or "failed"."""
+    if not r["pass"]:
+        return "failed"
+    return "asked" if r.get("asked") else "done"
+
+
 def scores(prims: dict, scens: dict) -> dict:
     met = [n for n, r in prims.items() if r.get("target", {}).get("p0") is not None and r["neo_ms"] <= r["target"]["p0"]]
     met1 = [n for n, r in prims.items() if r.get("target", {}).get("p1") is not None and r["neo_ms"] <= r["target"]["p1"]]
     timed = [n for n, r in prims.items() if r.get("target", {}).get("p0") is not None]
     passed = [n for n, r in scens.items() if r["pass"]]
+    done = [n for n in passed if ended(scens[n]) == "done"]
     return {
         "latency_p0": round(len(met) / len(timed), 3) if timed else None,
         "latency_p1": round(len(met1) / len(timed), 3) if timed else None,
         "tasks_passed": f"{len(passed)}/{len(scens)}",
+        "tasks_done": f"{len(done)}/{len(scens)}",  # passed without asking the user anything
+        "tasks_asked": len(passed) - len(done),  # passed by stopping to ask (a user turn each)
         "round_trips": sum(r["round_trips"] for r in scens.values()),
     }
+
+
+_ENDED = {"done": "PASS", "asked": "ASKED", "failed": "FAIL"}
 
 
 def _delta(now: float, was: float | None, fmt: str = "{:+.0f}") -> str:
@@ -704,20 +734,35 @@ def table(rep: dict, base: dict | None = None) -> str:
             "| task | pass | round trips | effort | prompt tokens | NEO s | modeled s | Δ trips | Δ modeled s | failed checks |",
             "|---|---|---:|---|---:|---:|---:|---:|---:|---|",
         ]
+        same = []
         for n, r in rep["scenarios"].items():
-            b = bs.get(n)
+            # (a task compared only with a run that ended the same way: a question to the user, a
+            # press without asking and a failure are not faster or slower ways of doing it)
+            b = bs.get(n) if n in bs and ended(bs[n]) == ended(r) else None
+            if b is not None:
+                same.append(n)
             eff = ",".join(sorted(set(r["efforts"]))) or "-"
             bad = ", ".join(k for k, v in r["checks"].items() if not v) + (f" ({r['error']})" if r["error"] else "")
             lines.append(
-                f"| {n} | {'PASS' if r['pass'] else 'FAIL'} | {r['round_trips']} | {eff} | {r['total_prompt_tokens']} | "
+                f"| {n} | {_ENDED[ended(r)]} | {r['round_trips']} | {eff} | {r['total_prompt_tokens']} | "
                 f"{r['neo_s']:.2f} | {r['modeled_s']:.1f} | {_delta(r['round_trips'], b and b['round_trips'])} | "
                 f"{_delta(r['modeled_s'], b and b['modeled_s'], '{:+.1f}')} | {bad} |"
             )
         lines.append("")
+        if bs:
+            now = sum(rep["scenarios"][n]["round_trips"] for n in same)
+            was = sum(bs[n]["round_trips"] for n in same)
+            lines += [f"Of the {len(same)} tasks that ended the same way in both runs: {now} round trips vs {was} (the Δ "
+                      "columns compare only these; ASKED = passed by stopping to ask the user).", ""]  # fmt: skip
     sc = rep["scores"]
+    asked = (
+        f" — {sc['tasks_done']} done, {sc['tasks_asked']} stopped to ask the user (a user turn each, not a task done)"
+        if "tasks_done" in sc
+        else ""
+    )
     lines.append(
         f"Latency score: {sc['latency_p0']} of primitives meet P0 ({sc['latency_p1']} meet P1); tasks passed "
-        f"{sc['tasks_passed']}; {sc['round_trips']} round trips in all."
+        f"{sc['tasks_passed']}{asked}; {sc['round_trips']} round trips in all."
     )
     feats = {k: v for k, v in rep["features"].items() if v not in (None, False)}
     lines.append(f"Features found: {', '.join(f'{k}={v}' if v is not True else k for k, v in feats.items()) or 'none'}")
