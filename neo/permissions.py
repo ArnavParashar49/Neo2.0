@@ -12,6 +12,8 @@ import os
 import sys
 import time
 
+from neo import effects
+
 _PROMPT_EVERY_S = 24 * 3600
 
 
@@ -55,10 +57,12 @@ def request_missing() -> list[str]:
         if "Accessibility" in gaps:
             import ApplicationServices as AS
 
+            effects.guard("permission", "ask macOS for Accessibility", via=AS.AXIsProcessTrustedWithOptions)
             AS.AXIsProcessTrustedWithOptions({AS.kAXTrustedCheckOptionPrompt: True})
         if "Screen Recording" in gaps:
             import Quartz as Q
 
+            effects.guard("permission", "ask macOS for Screen Recording", via=Q.CGRequestScreenCaptureAccess)
             Q.CGRequestScreenCaptureAccess()
     except Exception:  # noqa: BLE001
         pass

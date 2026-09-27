@@ -10,6 +10,7 @@ import time
 
 from AppKit import NSWorkspace
 
+from neo import effects
 from neo.agent.confirm import ask_user
 
 
@@ -116,6 +117,7 @@ async def bring_front(name: str, *, wait: float = 1.5) -> tuple[bool, str]:
         await asyncio.to_thread(force_front, pid)
         if await _wait_front(pid, 0.4):
             return True, real
+    effects.guard("focus", f"bring {real} to the front", via=a.activateWithOptions_)
     a.activateWithOptions_(1 << 1)  # NSApplicationActivateIgnoringOtherApps
     if await _wait_front(pid, 0.4):
         return True, real

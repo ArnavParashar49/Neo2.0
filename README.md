@@ -247,6 +247,8 @@ ruff check . && ruff format .
 cd ui && npx tsc --noEmit && (cd src-tauri && cargo check)
 ```
 
+The suite can't act on your Mac: under pytest, `neo/effects.py` refuses every real effect (opening apps or pages, AppleScript, keystrokes and clicks, Accessibility actions, sound, permission prompts, model and web requests…) with `EffectRefused`, so a test fakes the step it needs. A scratch script gets the same with `NEO_NO_EFFECTS=1` (plus `NEO_DATA_DIR` pointing somewhere temporary); NEO.app never sets it.
+
 ## Status and roadmap
 
 Working end to end today: routing, quick actions, chat, web research, screen reading via the Accessibility tree, screenshots + vision, mail/calendar/notes, files and shell with confirmation, memory, the overlay, both voice backends (with automatic fallback when Gemini Live is out of quota or offline), and NEO.app with its supervised core. See [ROADMAP.md](ROADMAP.md) for what's verified and what's next.

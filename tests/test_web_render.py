@@ -18,6 +18,7 @@ from contextlib import suppress
 import httpx
 import pytest
 
+from neo import effects
 from neo.agent.registry import ToolContext
 from neo.tools import render, web
 from neo.tools.computer import policy
@@ -816,7 +817,7 @@ def test_a_browser_that_will_not_start_is_not_retried_at_once(browser):
 def test_the_suite_never_starts_a_real_browser():
     if os.environ.get("NEO_TEST_RENDER") == "1":
         pytest.skip("the real browser is on for this run")
-    with pytest.raises(render.RenderError, match="no real browser"):
+    with pytest.raises(effects.EffectRefused, match="Chromium"):
         asyncio.run(render._start_playwright())
 
 

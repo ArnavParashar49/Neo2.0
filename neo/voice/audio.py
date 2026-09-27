@@ -11,6 +11,8 @@ import weakref
 import numpy as np
 import sounddevice as sd
 
+from neo import effects
+
 MIC_RATE = 16000
 OUT_RATE = 24000
 FRAME = 320  # 20 ms at 16 kHz
@@ -44,6 +46,7 @@ class Mic:
         return self.active and (self._stream is None or time.monotonic() - self.last_frame > _STALL_S)
 
     def _open_stream(self) -> None:
+        effects.guard("audio", "open the microphone", via=sd.RawInputStream)
         self._stream = sd.RawInputStream(
             samplerate=self.rate, channels=1, dtype="int16", blocksize=FRAME, callback=self._cb
         )
@@ -118,6 +121,7 @@ class Speaker:
         return self._thread is not None and not self._closed
 
     def _open_stream(self) -> None:
+        effects.guard("audio", "open the speaker", via=sd.OutputStream)
         with self._io:
             self._stream = sd.OutputStream(samplerate=self.rate, channels=1, dtype="float32", blocksize=1024)
             self._stream.start()

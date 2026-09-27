@@ -18,6 +18,7 @@ import unicodedata
 from functools import lru_cache
 from typing import Any
 
+from neo import effects
 from neo.decide._objc import pooled
 
 __all__ = [
@@ -346,6 +347,7 @@ def _type(pid: int, text: str, newline: str) -> None:
     ``newline`` chord: a plain Return would send the message in a chat app."""
     import Quartz as Q
 
+    effects.guard("input", "type into another app", via=Q.CGEventPostToPid)
     key, flags = _NEWLINE_KEYS.get(newline, _NEWLINE_KEYS["return"])
     for n, line in enumerate(text.split("\n")):
         if n:
