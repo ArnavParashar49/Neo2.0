@@ -193,10 +193,25 @@ def test_a_host_tool_cant_declare_an_argument_neo_drops(param):
         neo2.host_tool(ns["t"])
 
 
-@pytest.mark.parametrize("name", ["shell", "web_search", "memory", "open_url", "play_music", "mail_send", "approve", "confirm", "more_tools"])
+@pytest.mark.parametrize(
+    "name",
+    ["shell", "web_search", "memory", "open_url", "play_music", "mail_send", "approve", "confirm", "more_tools", "caller", "context"],
+)
 def test_a_host_tool_cant_take_a_builtin_or_reserved_name(name):
     with pytest.raises(ValueError):
         neo2.host_tool(lambda: "", name=name)
+
+
+def test_a_requests_own_sources_are_never_a_tools_name():
+    """A request's taint holds the names of the untrusted tools it read, and two labels of its
+    own: "caller" (a model wrote the task) and "context" (the context passed with it), which the
+    adapters and the MCP approval text read as the outer model's own words. A tool with either
+    name would pass off third-party output as those."""
+    from neo.tools import PRESETS, REFUSED
+    from neo2.sdk.hosttools import RESERVED_NAMES
+
+    assert {"caller", "context"} <= RESERVED_NAMES
+    assert not (set(PRESETS["all"]) | set(REFUSED)) & RESERVED_NAMES  # NEO's whole catalog
 
 
 @pytest.mark.parametrize("name", ["", "has space", "x" * 65, "dots.not.allowed"])

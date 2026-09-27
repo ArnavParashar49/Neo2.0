@@ -45,8 +45,10 @@ __all__ = ["HostTool", "host_tool", "RESERVED_NAMES"]
 Risk = Literal["safe", "reversible", "destructive"]
 _RISKS = ("safe", "reversible", "destructive")
 _NAME = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")  # what every model API accepts as a tool name
-# Never a tool's name: they read as an approval channel, or are NEO's own meta-tool.
-RESERVED_NAMES = frozenset({"approve", "confirm", "cancel", "deny", "more_tools"})
+# Never a tool's name: they read as an approval channel, or are NEO's own meta-tool — or are the
+# labels a request's taint gives the outer model's own words ("caller": a model wrote the task;
+# "context": the context passed with it), which sit beside the names of the untrusted tools it read.
+RESERVED_NAMES = frozenset({"approve", "confirm", "cancel", "deny", "more_tools", "caller", "context"})
 _DROPPED_ARGS = ("confirm", "cancel")  # neo.agent.registry.Registry.invoke drops these (and "_…")
 # What a failing untrusted tool said, at most: its fenced error stays whole where NEO cuts a result
 # short (800 characters after an approval, neo.agent.session).

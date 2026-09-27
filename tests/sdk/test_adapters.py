@@ -244,7 +244,7 @@ async def test_the_default_description_names_the_tools_and_the_protocol():
 
 async def test_bad_setups_are_refused():
     async with _agent([]) as agent:
-        for name in ("approve", "confirm", "cancel", "deny", "more_tools", "1neo", "has space", "x" * 65, ""):
+        for name in ("approve", "confirm", "cancel", "deny", "more_tools", "caller", "context", "1neo", "has space", "x" * 65, ""):
             with pytest.raises(ValueError):
                 openai.agent_tool(agent, name=name)
         with pytest.raises(ValueError):

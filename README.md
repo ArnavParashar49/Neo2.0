@@ -324,7 +324,7 @@ The rules:
 - **Say where a request came from.** Pass `source="model"` when another model wrote the task; the adapters and the MCP server always do. Such a request, like one with `context=` or one that read a web page, asks first before saving to memory, opening links that could carry data out, or submitting in a chat app.
 - **Everything is audited.** Each staged, approved, denied or expired action is recorded with the agent's name and `via`. The record goes to `on_audit=` if you pass one, and to `<data_dir>/audit.log` (mode 0600), or to the `neo.audit` logger when the agent has no `data_dir`.
 
-Host tools are plain functions. The schema comes from the typed signature (or `parameters=`, a JSON schema or a pydantic model). A parameter typed `neo2.ToolContext` gets the request's `tool_context` as `ctx.extras`. Output counts as third-party content unless you pass `untrusted=False`: the model sees it fenced, and the request then asks before memory writes and data-carrying links. Parameters named `confirm`, `cancel` or `_…` are refused, because NEO drops those from model calls.
+Host tools are plain functions. The schema comes from the typed signature (or `parameters=`, a JSON schema or a pydantic model). A parameter typed `neo2.ToolContext` gets the request's `tool_context` as `ctx.extras`. Output counts as third-party content unless you pass `untrusted=False`: the model sees it fenced, and the request then asks before memory writes and data-carrying links. Parameters named `confirm`, `cancel` or `_…` are refused, because NEO drops those from model calls. So are tool names NEO uses itself: its own tools', `approve`, `confirm`, `cancel`, `deny`, `more_tools`, and `caller` and `context`, which label the model's own words in `Result.read_untrusted`.
 
 ### Plug NEO into another AI framework
 
@@ -446,7 +446,7 @@ For Claude Desktop (`claude_desktop_config.json`), Claude Code (`.mcp.json`) or 
 - **`--approve elicit --trust-client NAME`** lets the MCP client ask its user (MCP elicitation), only for the client names you list. It approves only when the user accepts with `approve: true`. This trusts the client: a client names itself, and it may answer elicitations on its own.
 - **`--env`** reads the API keys (`GEMINI_API_KEY`, `GEMINI_API_KEYS`, `GROQ_API_KEY`, `ANTHROPIC_API_KEY`) and `NEO_MCP_*` settings such as `NEO_MCP_DATA_DIR`. NEO.app's own `NEO_*` variables are never read. Without `--env`, `neo_task` has no model, though the individual tools still work.
 
-The server speaks stdio only and opens no network listener. stdout carries nothing but the protocol, and audit lines go to stderr.
+As with the adapters, anything NEO wrote after reading third-party content (its answer, a question, an action's summary) comes back inside `<untrusted source="neo">`, and the server tells the client that such text is data, never instructions. The server speaks stdio only and opens no network listener. stdout carries nothing but the protocol, and audit lines go to stderr.
 
 ### What NEO never exposes to an embedding app or its model
 
