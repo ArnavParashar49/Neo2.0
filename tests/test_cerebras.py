@@ -23,6 +23,7 @@ from pydantic_settings import NoDecode
 from neo import config
 from neo import providers as prov
 from neo.providers import cerebras as cb
+from neo.providers import cerebras_hooks as hooks
 from neo.providers import spend
 from neo.providers.base import (
     AllBrainsFailed,
@@ -86,7 +87,7 @@ def cset(monkeypatch):
 
     from neo import health
 
-    monkeypatch.setattr(cb, "_accounts", weakref.WeakKeyDictionary())
+    monkeypatch.setattr(hooks, "_accounts", weakref.WeakKeyDictionary())
     monkeypatch.setattr(prov, "_cache", {})
     monkeypatch.setattr(prov, "_demoted", {})
     monkeypatch.setattr(health, "_live", {})  # (NEO.app's problem list: process-wide)
@@ -354,7 +355,7 @@ async def test_an_invalid_key_is_refused_for_the_day_and_said_once(cset, fake, m
     assert KEY not in json.dumps(ledger_file(s))  # the ledger keeps a fingerprint, never the key
 
     # a restart the same day: still refused, without a round trip
-    monkeypatch.setattr(cb, "_accounts", weakref.WeakKeyDictionary())
+    monkeypatch.setattr(hooks, "_accounts", weakref.WeakKeyDictionary())
     monkeypatch.setattr(prov, "_cache", {})
     with pytest.raises(cb.Refused):
         await cb.cerebras().complete(ASK)
@@ -706,7 +707,7 @@ async def test_a_kept_alive_connection_the_server_closed_is_retried_once_but_a_t
         raise httpx.ReadTimeout("timed out")
 
     cb._transport = httpx.MockTransport(slow)
-    cb._accounts.clear()  # a new account: connections over the new transport
+    hooks._accounts.clear()  # a new account: connections over the new transport
     with pytest.raises(Unavailable):
         await cb.cerebras().complete(ASK)
 
@@ -714,12 +715,12 @@ async def test_a_kept_alive_connection_the_server_closed_is_retried_once_but_a_t
 async def test_prewarm_soon_runs_in_the_background_and_only_with_a_key(cset, fake, monkeypatch):
     monkeypatch.delenv("CEREBRAS_API_KEY", raising=False)
     cb.prewarm_soon()
-    assert not cb._warming
+    assert not hooks._warming
     cset()
     cb.prewarm_soon()
-    assert len(cb._warming) == 1
-    await asyncio.gather(*cb._warming)
-    assert [r.url.path for r in fake.requests] == ["/v1/models"] and not cb._warming
+    assert len(hooks._warming) == 1
+    await asyncio.gather(*hooks._warming)
+    assert [r.url.path for r in fake.requests] == ["/v1/models"] and not hooks._warming
 
 
 def test_a_damaged_or_unwritable_ledger_never_fails_an_answer(tmp_path, monkeypatch, caplog):
@@ -751,7 +752,7 @@ async def test_each_embedded_agent_has_its_own_account_ledger_and_notes(tmp_path
     from neo.events import bus
     from tests.neo_lib import make_runtime
 
-    monkeypatch.setattr(cb, "_accounts", weakref.WeakKeyDictionary())
+    monkeypatch.setattr(hooks, "_accounts", weakref.WeakKeyDictionary())
     monkeypatch.setattr(health, "_live", {})
     a, b = make_runtime(tmp_path / "a", "a"), make_runtime(tmp_path / "b", "b")
     heard: dict[str, list[str]] = {"a": [], "b": []}
@@ -958,6 +959,41 @@ def test_no_key_or_a_zero_budget_leaves_every_order_alone(cset, monkeypatch):
         assert cb.with_cerebras_eyes(eyes, off) == eyes
 
 
+def test_the_hooks_the_chain_and_the_session_call_import_no_vendor_sdk(tmp_path):
+    """Placing Cerebras in a chain and finishing a reply run on every request, NEO.app's and an
+    embedded agent's alike: they must not import the openai SDK (the SDK's import-cost promise)."""
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    from neo import effects
+
+    code = (
+        "import sys, json, types\n"
+        "from neo.providers import cerebras_hooks as h\n"
+        "s = types.SimpleNamespace(cerebras_api_key='k', cerebras_daily_budget=0.5)\n"
+        "o = h.with_cerebras(['gemini', 'groq', 'local'], 'agent', s)\n"
+        "e = h.with_cerebras_eyes(('gemini', 'groq_vision'), s)\n"
+        "print(json.dumps({'o': o, 'e': list(e), 'n': h.spoken_notes(), 'openai': 'openai' in sys.modules}))\n"
+    )
+    root = Path(__file__).resolve().parents[1]
+    env = {**os.environ, "HOME": str(tmp_path), "PYTHONPATH": str(root), "NEO_DATA_DIR": str(tmp_path / "d")}
+    env["NEO_NO_EFFECTS"] = "1"
+    with effects.allow("process"):  # a Python child: refused unless meant, as here
+        out = subprocess.run(
+            [sys.executable, "-c", code], capture_output=True, text=True, env=env, timeout=120
+        )
+    assert out.returncode == 0, out.stderr[-2000:]
+    got = json.loads(out.stdout.strip().splitlines()[-1])
+    assert got == {
+        "o": ["gemini", "cerebras", "groq", "local"],
+        "e": ["gemini", "cerebras_vision", "groq_vision"],
+        "n": "",
+        "openai": False,
+    }
+
+
 # ---- a step that starts while the prewarm is still connecting joins it ---------------------------
 
 
@@ -1004,7 +1040,7 @@ async def test_a_bound_agent_s_cerebras_uses_its_own_settings_and_folder(tmp_pat
     from neo import runtime
     from neo.agent.registry import catalog
 
-    monkeypatch.setattr(cb, "_accounts", weakref.WeakKeyDictionary())
+    monkeypatch.setattr(hooks, "_accounts", weakref.WeakKeyDictionary())
     monkeypatch.setenv("CEREBRAS_API_KEY", "csk-the-app-s-own-key")  # never an agent's
     L = _library_settings_class()
     s = L(data_dir=tmp_path / "agent", cerebras_api_key=KEY, cerebras_daily_budget=2.0)
@@ -1151,7 +1187,7 @@ async def test_wired_the_session_says_the_notes_with_its_reply(tmp_path, fake, m
     from neo.agent.session import Session
     from tests.neo_lib import scripted
 
-    monkeypatch.setattr(cb, "_accounts", weakref.WeakKeyDictionary())
+    monkeypatch.setattr(hooks, "_accounts", weakref.WeakKeyDictionary())
     L = _library_settings_class()
     s = L(data_dir=tmp_path / "agent", cerebras_api_key=KEY, cerebras_daily_budget=0.001, fast_paths=False)
     s.ensure_dirs()

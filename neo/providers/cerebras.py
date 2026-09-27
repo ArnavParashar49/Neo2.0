@@ -57,7 +57,7 @@ import re
 import threading
 import time
 import weakref
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal
@@ -66,6 +66,7 @@ import httpx
 from openai import APIConnectionError, APIStatusError, APITimeoutError, AsyncOpenAI
 
 from neo import runtime
+from neo.providers import cerebras_hooks as hooks
 from neo.providers import spend
 from neo.providers.base import (
     Message,
@@ -79,17 +80,28 @@ from neo.providers.base import (
     Turn,
     Unavailable,
 )
+
+# (what the chain, the session and the voice call: kept importable without the openai SDK)
+from neo.providers.cerebras_hooks import (  # noqa: F401 — re-exported
+    DEFAULT_BUDGET,
+    TEXT_BRAIN,
+    VISION_BRAIN,
+    add_spoken_notes,
+    enabled,
+    prewarm_soon,
+    spoken_notes,
+    with_cerebras,
+    with_cerebras_eyes,
+    with_spoken_notes,
+)
 from neo.providers.fit import Fitted, estimate
 from neo.providers.openai_compat import OpenAICompatProvider, Truncated, _retry_after
 
 log = logging.getLogger(__name__)
 
 BASE_URL = "https://api.cerebras.ai/v1"
-TEXT_BRAIN = "cerebras"
-VISION_BRAIN = "cerebras_vision"
 TEXT_MODEL = "gpt-oss-120b"
 VISION_MODEL = "qwen-3.8-27b"
-DEFAULT_BUDGET = 0.50  # dollars a day
 SPOKEN = {TEXT_BRAIN: "Cerebras", VISION_BRAIN: "Cerebras vision"}
 
 # Context windows on a paid key (inference-docs.cerebras.ai); a model not listed gets the smaller
@@ -573,9 +585,6 @@ def _error_text(e: APIStatusError) -> str:
 
 # ---- one agent's account ---------------------------------------------------------------------
 
-_accounts: weakref.WeakKeyDictionary[Any, Account] = weakref.WeakKeyDictionary()
-_accounts_lock = threading.Lock()
-
 
 def account(c: Conf | None = None) -> Account:
     """The bound agent's Cerebras account (its BrainPool's), else NEO.app's; made on first use,
@@ -586,10 +595,10 @@ def account(c: Conf | None = None) -> Account:
     if not c.api_key:
         raise Unavailable("CEREBRAS_API_KEY is not set")
     owner = pool()
-    with _accounts_lock:
-        a = _accounts.get(owner)
+    with hooks._accounts_lock:
+        a = hooks._accounts.get(owner)
         if a is None or a.conf != c:
-            a = _accounts[owner] = Account(c)
+            a = hooks._accounts[owner] = Account(c)
         return a
 
 
@@ -851,125 +860,6 @@ async def prewarm() -> bool:
     except Exception as e:  # noqa: BLE001 — a warm-up must never fail the task it's for
         log.info(f"[brain] cerebras prewarm skipped: {type(e).__name__}")
         return False
-
-
-_warming: set[asyncio.Task] = set()
-
-
-def prewarm_soon() -> None:
-    """:func:`prewarm` in the background: the caller (the wake word, the start of the user's
-    speech or typing) goes on at once. Nothing when Cerebras isn't :func:`enabled` or there's no
-    running event loop; never raises."""
-    try:
-        if not enabled():
-            return
-        loop = asyncio.get_running_loop()
-    except Exception:  # noqa: BLE001 — no loop, no agent bound (library mode): nothing to warm
-        return
-    t = loop.create_task(prewarm())
-    _warming.add(t)  # (a task nobody holds can be collected mid-flight)
-    t.add_done_callback(_warming.discard)
-
-
-# ---- where the brains go in a chain ----------------------------------------------------------
-
-_SEEING = frozenset({"gemini", "gemini_lite", "claude"})
-
-
-def enabled(s: Any = None) -> bool:
-    """Cerebras takes part: a key is set and the daily budget isn't 0 (the user's off switch).
-    Otherwise no chain names it, so nothing the user sees or hears changes."""
-    try:
-        c = conf(s)
-    except Exception:  # noqa: BLE001 — no agent bound in library mode: no settings, no Cerebras
-        return False
-    return bool(c.api_key) and c.daily_budget > 0
-
-
-def _before_groq_vision(names: list[Any]) -> int:
-    """Where the seeing brain goes: right ahead of Groq's vision brain, else right after the
-    leading seeing brains."""
-    if "groq_vision" in names:
-        return names.index("groq_vision")
-    at = 0
-    while at < len(names) and names[at] in _SEEING:
-        at += 1
-    return at
-
-
-def with_cerebras(order: Sequence[str | None], purpose: str, s: Any = None) -> list[str | None]:
-    """A brain() purpose's order with Cerebras placed as decision 49 says: the text brain right
-    ahead of Groq (no Groq: ahead of the offline brain, else last); for "vision" also the seeing
-    one right ahead of Groq's vision brain (none: right after the seeing brains). "offline" is
-    left alone, and so is an order that already names them — and every order when Cerebras
-    isn't :func:`enabled` (`s`: the settings, default the bound agent's)."""
-    out = list(order)
-    if purpose == "offline" or not enabled(s):
-        return out
-    if purpose == "vision" and VISION_BRAIN not in out:
-        out.insert(_before_groq_vision(out), VISION_BRAIN)
-    if TEXT_BRAIN not in out:
-        if "groq" in out:
-            out.insert(out.index("groq"), TEXT_BRAIN)
-        elif "local" in out:
-            out.insert(out.index("local"), TEXT_BRAIN)
-        else:
-            out.append(TEXT_BRAIN)
-    return out
-
-
-def with_cerebras_eyes(eyes: Sequence[str], s: Any = None) -> tuple[str, ...]:
-    """The seeing fallbacks a step working from a picture may ask (an agent chain's `eyes`), with
-    Cerebras' seeing brain right ahead of Groq's vision brain (decision 49: when Gemini is
-    overloaded) — when Cerebras is :func:`enabled`; else `eyes` as they are."""
-    out = list(eyes)
-    if VISION_BRAIN not in out and enabled(s):
-        out.insert(_before_groq_vision(out), VISION_BRAIN)
-    return tuple(out)
-
-
-# ---- what the user hears ---------------------------------------------------------------------
-
-
-def spoken_notes() -> str:
-    """What Cerebras has to say out loud since the last call — the 80% warning, the skip once the
-    budget is spent, a refused key or account (each once a day) — as sentences, or "". Drained:
-    the bound agent's own account, never another's; nothing is made to answer."""
-    try:
-        from neo.providers import pool
-
-        owner = pool()
-    except Exception:  # noqa: BLE001 — no agent bound in library mode: nobody to tell
-        return ""
-    with _accounts_lock:
-        a = _accounts.get(owner)
-    if a is None:
-        return ""
-    return " ".join(t if t.endswith((".", "!", "?")) else t + "." for t in a.take_heard())
-
-
-def with_spoken_notes(reply: str, notes: str, *, question: bool = False) -> str:
-    """`reply` with `notes` (:func:`spoken_notes`) said too: after it, or before it when the reply
-    is a question (it stays the last thing the user hears)."""
-    if not notes:
-        return reply
-    if not reply:
-        return notes
-    return f"{notes} {reply}" if question else f"{reply} {notes}"
-
-
-def add_spoken_notes(reply: Any) -> Any:
-    """The session's Reply (neo.agent.session: text, route, silent) with :func:`spoken_notes` in
-    what the user hears: after its words, before them when it asks a question ("confirm"); a
-    quiet reply (nothing to say) says just the notes. The same Reply when there are none."""
-    notes = spoken_notes()
-    if not notes:
-        return reply
-    silent = bool(getattr(reply, "silent", False))
-    text = with_spoken_notes(
-        "" if silent else reply.text, notes, question=getattr(reply, "route", "") == "confirm"
-    )
-    return replace(reply, text=text, silent=False)
 
 
 def status() -> dict[str, Any]:
