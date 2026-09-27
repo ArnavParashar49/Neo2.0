@@ -22,11 +22,13 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import copy
 import io
 import logging
 import os
 import re
 import secrets
+import signal
 import sys
 import time
 from collections import OrderedDict
@@ -310,7 +312,7 @@ class NeoMCP:
         return types.Tool(
             name=TASK_TOOL,
             description=_TASK_DESCRIPTION.format(tools=shown or "none: it answers from what it knows"),
-            input_schema=dict(_TASK_SCHEMA),
+            input_schema=copy.deepcopy(_TASK_SCHEMA),
             annotations=types.ToolAnnotations(
                 read_only_hint=False,
                 destructive_hint=gated or any(s["annotations"]["destructiveHint"] for s in specs),
@@ -606,11 +608,17 @@ def _version() -> str:
 
 
 async def run_stdio(
-    options: ServerOptions | None = None, *, wire_fd: int | None = None, **neo_kw: Any
+    options: ServerOptions | None = None,
+    *,
+    wire_fd: int | None = None,
+    handle_signals: bool = False,
+    **neo_kw: Any,
 ) -> None:
     """Serve NEO over stdin/stdout until the client closes stdin. `wire_fd`: the real stdout, as
     :func:`neo2.mcp.claim_stdout` saved it (``main()`` claims it before importing anything);
-    without it this claims fd 1 itself."""
+    without it this claims fd 1 itself. `handle_signals` (``main()``): SIGTERM and SIGHUP close
+    the agent — its cards, browser, memory and temp folder — before the process ends, instead of
+    killing it with its temp folder left behind."""
     import anyio
     from mcp.server.stdio import stdio_server
 
@@ -619,8 +627,11 @@ async def run_stdio(
     opts = options or ServerOptions()
     own = wire_fd is None
     fd = claim_stdout() if wire_fd is None else wire_fd
+    unhook = None
     try:
         neo = NeoMCP.from_options(opts, **neo_kw)
+        if handle_signals:
+            unhook = _stop_on_signals(neo)
         try:
             if not neo.has_brain and neo.expose != "tools":
                 log.warning(NO_BRAIN_AT_START)
@@ -640,5 +651,49 @@ async def run_stdio(
             with contextlib.suppress(Exception):
                 await neo.aclose()
     finally:
+        if unhook is not None:
+            unhook()
         if own:
             release_stdout(fd)
+
+
+def _stop_on_signals(neo: NeoMCP) -> Any:
+    """SIGTERM/SIGHUP: close the agent (its cards, browser, memory and temp folder), then end the
+    process — the transport's stdin reader blocks in a thread nothing can interrupt. Returns the
+    undo."""
+    loop = asyncio.get_running_loop()
+    stopping: list[asyncio.Task[None]] = []
+
+    def stop() -> None:
+        if not stopping:
+            log.info("stopping on a signal")
+            stopping.append(loop.create_task(_close_and_exit(neo)))
+
+    hooked = []
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        try:
+            loop.add_signal_handler(sig, stop)
+            hooked.append(sig)
+        except (NotImplementedError, RuntimeError, ValueError):  # not the main thread, or Windows
+            pass
+
+    def unhook() -> None:
+        for sig in hooked:
+            with contextlib.suppress(Exception):
+                loop.remove_signal_handler(sig)
+
+    return unhook
+
+
+async def _close_and_exit(neo: NeoMCP) -> None:
+    try:
+        async with asyncio.timeout(10):
+            await neo.aclose()
+    except BaseException:  # noqa: BLE001 — exiting regardless
+        pass
+    finally:
+        with contextlib.suppress(Exception):  # (run once only: a no-op after a whole aclose)
+            neo.agent._cleanup()  # its cards closed and its temp folder removed, whatever failed
+        with contextlib.suppress(Exception):
+            sys.stderr.flush()
+        os._exit(0)

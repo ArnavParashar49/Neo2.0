@@ -181,7 +181,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             env_files=tuple(args.env_file),
         )
         try:
-            asyncio.run(run_stdio(opts, wire_fd=wire))
+            asyncio.run(run_stdio(opts, wire_fd=wire, handle_signals=True))
         except KeyboardInterrupt:
             return 130
         except Exception as e:  # noqa: BLE001 — a configuration error: one line, not a traceback

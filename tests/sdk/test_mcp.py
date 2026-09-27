@@ -82,7 +82,10 @@ def _text(r: types.CallToolResult) -> str:
 
 
 def _ids(audit: list) -> set[str]:
-    return {a["action_id"] for a in audit if a.get("action_id")}
+    """The action ids the audit saw (at least one: an empty set would prove nothing)."""
+    ids = {a["action"] for a in audit if a.get("action")}
+    assert ids and all(len(i) >= 8 for i in ids)
+    return ids
 
 
 # ---- tools/list --------------------------------------------------------------------------------

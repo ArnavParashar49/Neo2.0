@@ -155,3 +155,23 @@ def test_stray_output_goes_to_stderr(tmp_path):
     for stray in ("stray python print", "stray fd1 write", "stray child output"):
         assert stray in err
         assert not any(stray in line for line in srv.lines)
+
+
+def test_sigterm_stops_it_cleanly(tmp_path):
+    """A client that terminates the server (SIGTERM) still gets its cleanup: the agent's temp
+    folder — which may hold a browser profile — doesn't outlive it."""
+    import signal
+
+    srv = Server([sys.executable, "-m", "neo2.mcp", "--tools", "none"], tmp_path)
+    try:
+        assert _talk(srv) == ["neo_task"]
+        assert len(list(srv.tmp.glob("neo-agent-*"))) == 1  # the agent's folder, while it runs
+        srv.proc.send_signal(signal.SIGTERM)
+        code = srv.proc.wait(timeout=60)
+    finally:
+        if srv.proc.poll() is None:
+            srv.proc.kill()
+        code = srv.close()
+    assert code == 0, srv.stderr()[-2000:]
+    assert list(srv.tmp.glob("neo-agent-*")) == []
+    _only_json_rpc(srv)
