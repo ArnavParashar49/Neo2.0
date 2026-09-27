@@ -709,3 +709,20 @@ def test_the_resolver_under_test_never_sees_the_commit_answer_key(tmp_path):
     assert seen == [[["context", "label", "role"], ["context", "label", "role"]]]
     assert out["commit_presses"] == 1 and not out["gates"]["no_commit_presses"]  # scored from the key it never saw
     assert got[0]["elements"][0]["commit"]  # (the rows keep it, for scoring)
+
+
+def test_a_move_on_a_board_takes_one_picture_before_and_one_after():
+    """A model's click on a board's square: the look before it (with the board's check before the
+    move) is one capture, and the look after it — the change check, the after-look picture and the
+    board's check after the move — is one more."""
+    from neo2.core.tools.computer import apps
+
+    w = S.board_world()
+    with F.install(w) as env:
+        env.patches.set(apps, "_target", None)
+        assert asyncio.run(R._tool("screenshot")).ok  # (NEO finds the board)
+        m = env.mark()
+        out = asyncio.run(R._tool("click", cell="e2"))
+        got = env.since(m)
+    assert out.ok and out.images and "square e2" in out.text, out.text
+    assert got["captures"] == 2, got

@@ -867,6 +867,8 @@ async def look(
             frame = None
         if frame is not None:  # (the samples cut from it: no capture of their own)
             px = await asyncio.to_thread(screen.sample_points, pts, frame=frame, like=like)
+            if px is None and like:  # (that frame came another way than the look before: the samples, that way)
+                px = await asyncio.to_thread(screen.sample_points, pts, like=like)
             return Look(sc, px, cost, frame)
     px = await asyncio.to_thread(screen.sample_points, pts, like=like) if pts else None
     return Look(sc, px, cost)
