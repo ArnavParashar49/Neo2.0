@@ -10,9 +10,10 @@ import pytest
 import neo.agent.session as sess_mod
 from neo.agent import confirm
 from neo.agent.registry import ToolContext, registry
+from neo.config import settings
 from neo.providers.base import ToolCall, Turn
 from neo.reflex.schema import Decision
-from neo.tools import browser
+from neo.tools import browser, browser_live
 
 SHOP = """- generic [active] [ref=e1]:
   - navigation [ref=e2]:
@@ -238,13 +239,16 @@ class Ctx:
         return page
 
 
-@pytest.fixture
-def world(monkeypatch):
-    """A fake NEO's browser with one tab showing the shop page."""
+@pytest.fixture(params=["window", "chat"])
+def world(monkeypatch, request):
+    """A fake NEO's browser with one tab showing the shop page — as a separate window, and as the
+    chat's browser card (every test runs both ways: the card must never change what NEO does)."""
     from neo import config
-    from neo.tools import load_all
+    from neo.tools import browser_live, load_all
 
+    monkeypatch.setenv("NEO_BROWSER_VIEW", request.param)
     monkeypatch.setattr(config, "_settings", None)
+    browser_live.reset()
     load_all()
     confirm.cancel("test")
     b = browser._Browser()
@@ -478,7 +482,8 @@ def test_never_types_passwords_codes_or_card_details(world, info, words):
     page.info["aria-ref=e5"] = info
     out = run("browser_type", {"target": "2", "text": "secret"})
     assert out.halt and out.text.startswith("NEEDS_USER") and words in out.text
-    assert not [x for x in page.log if x[0] == "fill"] and ("front",) in page.log
+    # A separate window comes to the front; in the chat the card turns to the user instead.
+    assert not [x for x in page.log if x[0] == "fill"] and (("front",) in page.log) != browser._in_chat()
 
 
 def test_a_postal_pin_code_is_an_ordinary_field(world):
@@ -594,7 +599,7 @@ def test_a_human_check_page_hands_the_window_to_the_user(world):
     )
     out = run("browser_open", {"url": "search.example/"})
     assert out.halt and out.text.startswith("NEEDS_USER")
-    assert "search.example wants a human check" in out.text and ("front",) in page.log
+    assert "search.example wants a human check" in out.text and (("front",) in page.log) != browser._in_chat()
     # an image-text challenge page (what a package index showed a headless check)
     page.sites["https://index.example/"] = (
         '- button "Play audio CAPTCHA" [ref=e2]',
@@ -627,18 +632,19 @@ def test_the_text_is_the_pages_main_content_and_find_searches_all_of_it(world):
     assert "help@shop.example" in run("browser_read", {"find": "contact"}).text
 
 
+_LOGIN = {
+    "window": "NEEDS_USER: Please log in to shop.example in NEO's browser window, then say continue.",
+    "chat": "NEEDS_USER: Please log in to shop.example in NEO's browser in the chat, then hand it back — "
+    "NEO won't see what you type.",
+}
+
+
 def test_handoff_speaks_neos_own_words_about_the_site(world):
     _, _, page = world
     out = run("browser_handoff", {"kind": "login"})
-    assert (
-        out.halt
-        and out.text
-        == "NEEDS_USER: Please log in to shop.example in NEO's browser window, then say continue."
-    )
-    assert (
-        "Please take over in NEO's browser window on shop.example"
-        in run("browser_handoff", {"kind": "zzz"}).text
-    )
+    assert out.halt and out.text == _LOGIN[settings().browser_view]
+    where = "in the chat on" if browser._in_chat() else "window on"
+    assert f"Please take over in NEO's browser {where} shop.example" in run("browser_handoff", {"kind": "zzz"}).text
 
 
 # ---- opening, tabs -------------------------------------------------------------------------------------
@@ -726,10 +732,18 @@ def test_a_browser_window_the_user_closed_is_started_again(world, monkeypatch):
     assert out.ok and b._ctx is fresh and fresh.pages and b.current is fresh.pages[0]
 
 
-def test_headless_only_when_asked(monkeypatch):
+def test_a_window_is_headless_only_when_asked_and_the_chat_always_is(monkeypatch):
+    from neo import config
+
+    monkeypatch.setenv("NEO_BROWSER_VIEW", "window")
+    monkeypatch.setattr(config, "_settings", None)
     monkeypatch.delenv("NEO_BROWSER_HEADLESS", raising=False)
     assert not browser._headless()
     monkeypatch.setenv("NEO_BROWSER_HEADLESS", "1")
+    assert browser._headless()
+    monkeypatch.setenv("NEO_BROWSER_VIEW", "chat")
+    monkeypatch.delenv("NEO_BROWSER_HEADLESS", raising=False)
+    monkeypatch.setattr(config, "_settings", None)
     assert browser._headless()
 
 
@@ -866,11 +880,9 @@ def test_a_login_inside_browse_comes_back_as_the_users_job_and_continue_picks_it
     _, _, page = world
     inner([_call(1, "browser_read"), _call(2, "browser_handoff", kind="login")])
     out = asyncio.run(registry().invoke("browse", {"goal": "check my orders on shop.example"}, ToolContext()))
-    assert (
-        out.halt
-        and out.text
-        == "NEEDS_USER: Please log in to shop.example in NEO's browser window, then say continue."
-    )
+    assert out.halt and out.text == _LOGIN[settings().browser_view]
+    if browser._in_chat():  # the card turned to the user: they hand it back (or say continue)
+        assert browser_live.live.s.status == "need_user"
     prov = inner([Turn(text="Your mug ships Tuesday.")])
     out = asyncio.run(registry().invoke("browse", {"goal": "continue"}, ToolContext()))
     assert out.text == "Your mug ships Tuesday."

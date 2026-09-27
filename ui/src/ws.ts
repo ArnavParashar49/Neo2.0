@@ -22,7 +22,11 @@ export interface NeoEvent { type: string; data: Record<string, any>; ts: number 
 /** A question NEO is waiting on: exactly what will run if the user says yes. */
 export interface ConfirmCard { action_id: string; tool: string; summary: string; detail: string }
 
-const URL = "ws://127.0.0.1:8765";
+// Dev builds only: `VITE_NEO_WS_URL` / `VITE_NEO_WS_TOKEN` point `npm run dev` at a test core (its own port
+// and scratch token), so a dev tab never talks to the NEO the user is running. Release builds use NEO.app's.
+const DEV_URL = import.meta.env.DEV ? (import.meta.env.VITE_NEO_WS_URL as string | undefined) : undefined;
+const DEV_TOKEN = import.meta.env.DEV ? (import.meta.env.VITE_NEO_WS_TOKEN as string | undefined) : undefined;
+const URL = DEV_URL || "ws://127.0.0.1:8765";
 let nextId = 1;
 /** `?mock=browser` (dev builds only): a scripted in-page core instead of the real socket. */
 export const MOCK = import.meta.env.DEV && new URLSearchParams(location.search).get("mock") === "browser";
@@ -197,6 +201,7 @@ export function useNeo(opts: { surface?: "overlay" | "window" } = {}) {
       } else {
         let token = "";
         try { token = await invoke<string>("ws_token"); } catch { /* outside NEO.app: no token, no access */ }
+        if (!token && DEV_TOKEN) token = DEV_TOKEN;
         if (!alive) return;
         ws = new WebSocket(`${URL}/?token=${encodeURIComponent(token)}`);
       }

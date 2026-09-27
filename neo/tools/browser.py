@@ -1,8 +1,10 @@
 """NEO's own browser: Playwright + Chromium with a persistent profile, driven through the page's
 structure.
 
-A separate, visible Chromium window — never the user's own browser — whose profile lives in
-<data_dir>/browser, so the logins the user makes there persist (the privacy erase removes it).
+NEO's own Chromium — never the user's own browser — whose profile lives in <data_dir>/browser, so
+the logins the user makes there persist (the privacy erase removes it). By default it runs headless
+and the user watches it live in the chat's browser card (browser_live.py), where they can take it
+over or pop it out; with browser_view = "window" it is a separate, visible Chromium window.
 A page is read as a compact snapshot: its interactive elements, numbered, from the page's
 accessibility tree, plus the visible text. The click and type tools take that number (or the
 element's name). A page that is mostly pixels (a canvas, images) comes with a screenshot for the
@@ -19,18 +21,24 @@ that carries data or reaches this Mac's own network.
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import os
+import plistlib
 import re
+import sys
 import time
 from contextlib import suppress
 from dataclasses import dataclass
+from pathlib import Path
 from urllib.parse import quote_plus, urljoin, urlsplit
 
 from neo.agent import confirm
 from neo.agent.registry import ToolContext, ToolOutput, tool
 from neo.config import settings
+from neo.events import current_job
 from neo.providers.base import ImagePart
+from neo.tools.browser_live import live, quoted
 
 _TIMEOUT_MS = 8000  # any one step on a page
 _NAV_MS = 20000  # a page load
@@ -42,12 +50,58 @@ _SETTLE_S = 0.3  # after a banner closes or a key goes in
 _READ_CHARS = 6000  # one read fits the agent's per-result budget whole (nothing cut from the middle)
 _MAX_ELEMENTS = 150
 _MAX_LINKS = 3000
-_VIEWPORT = {"width": 1280, "height": 860}
+_VIEWPORT = {"width": 1280, "height": 860}  # the separate window's page ("window" mode)
+_TOOL_S = 120.0  # one browser tool's own work
+# The registry's cap on a browser tool: while the user has the page in the chat, NEO's next step
+# waits for them to hand it back — that's their time, not the tool's (the card can always stop it).
+_HELD_S = 6 * 3600.0
+
+
+def _in_chat() -> bool:
+    return settings().browser_view == "chat"
 
 
 def _headless() -> bool:
-    """Only for checks without a screen: NEO's browser is meant to be seen (the user steps in)."""
+    """In the chat, always: the card shows the page. A separate window is headless only for checks
+    without a screen."""
+    if _in_chat():
+        return True
     return os.environ.get("NEO_BROWSER_HEADLESS", "").strip().lower() in ("1", "true", "yes")
+
+
+def _chrome_ua(pw) -> str | None:
+    """The user agent a visible Chrome of this build sends: headless Chromium says "HeadlessChrome",
+    which some sites turn away — the page NEO shows should be the page the user would see."""
+    if sys.platform != "darwin":
+        return None
+    try:
+        exe = Path(pw.chromium.executable_path)
+        app = next(p for p in (exe, *exe.parents) if p.suffix == ".app")
+        info = plistlib.loads((app / "Contents" / "Info.plist").read_bytes())
+        major = str(info.get("CFBundleShortVersionString", "")).split(".")[0]
+    except Exception:  # noqa: BLE001 — Chromium's own user agent then
+        return None
+    if not major.isdigit():
+        return None
+    return (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) "
+        f"Chrome/{major}.0.0.0 Safari/537.36"
+    )
+
+
+async def _appearance() -> str:
+    """"dark" or "light", as macOS is set now: sites that support both match the overlay."""
+    if sys.platform != "darwin":
+        return "light"
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "defaults", "read", "-g", "AppleInterfaceStyle",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+        )  # fmt: skip
+        out, _ = await asyncio.wait_for(proc.communicate(), 2)
+    except Exception:  # noqa: BLE001
+        return "light"
+    return "dark" if out.strip().lower() == b"dark" else "light"
 
 
 # ---- the page as numbered elements ---------------------------------------------------------------
@@ -224,9 +278,10 @@ class _Browser:
         self._pw = None
         self._ctx = None
         self._gone = False  # the context closed under NEO (the user closed the window)
+        self._closing = False  # NEO is closing it itself
         self._lock = asyncio.Lock()
         self.dialogs: list[str] = []  # the pages' own pop-ups since the last action reported them
-        self.current = None
+        self._current = None
         self.els: list[_El] = []
         self.els_page = None
         self.els_url = ""
@@ -234,6 +289,22 @@ class _Browser:
         # model put together — it can't carry anything of the user's out.
         self.links: dict[str, None] = {}
         self.shown: dict[int, str] = {}  # id(tab) → the URL NEO last showed a model from it
+
+    @property
+    def current(self):
+        return self._current
+
+    @current.setter
+    def current(self, page) -> None:
+        """The tab NEO works in — the one the chat's card shows."""
+        changed = page is not self._current
+        self._current = page
+        if changed and page is not None:
+            live.page_changed(page)
+
+    def cold(self) -> bool:
+        """Is NEO's browser not running yet (a first step starts it)?"""
+        return self._ctx is None or self._gone
 
     def saw(self, page) -> None:
         self.shown[id(page)] = str(page.url)
@@ -247,14 +318,17 @@ class _Browser:
                 await self._drop()  # the user closed NEO's browser window: start it again
             if self._ctx is None:
                 await self._launch()
+                live.launched()
             if new_tab:
                 self.current = await self._ctx.new_page()
-                return self.current
-            cur = self.current
-            if cur is None or cur.is_closed():
-                pages = self.pages()
-                cur = self.current = pages[-1] if pages else await self._ctx.new_page()
-            return cur
+                cur = self.current
+            else:
+                cur = self.current
+                if cur is None or cur.is_closed():
+                    pages = self.pages()
+                    cur = self.current = pages[-1] if pages else await self._ctx.new_page()
+        await live.bind(cur)  # the chat's card watches the tab NEO works in
+        return cur
 
     async def _launch(self) -> None:
         from playwright.async_api import async_playwright
@@ -263,12 +337,31 @@ class _Browser:
         profile.mkdir(parents=True, exist_ok=True)
         pw = await async_playwright().start()
         try:
-            ctx = await pw.chromium.launch_persistent_context(
-                str(profile),
-                headless=_headless(),
-                viewport=_VIEWPORT,
-                args=["--disable-blink-features=AutomationControlled"],
-            )
+            if _in_chat():
+                # Chromium's new headless mode — the full browser, rendering as a visible one would
+                # — at the card's size, Retina-crisp; no downloads (nothing reaches the Mac's disk).
+                kw: dict = {
+                    "headless": True,
+                    "viewport": {"width": live.vp[0], "height": live.vp[1]},
+                    "device_scale_factor": 2,
+                    "color_scheme": await _appearance(),
+                    "accept_downloads": False,
+                    # A real 2x surface: the screencast captures the surface, not the emulated page.
+                    "args": ["--disable-blink-features=AutomationControlled", "--force-device-scale-factor=2"],
+                }
+                if ua := _chrome_ua(pw):
+                    kw["user_agent"] = ua
+                try:
+                    ctx = await pw.chromium.launch_persistent_context(str(profile), channel="chromium", **kw)
+                except Exception:  # noqa: BLE001 — only the headless shell is installed
+                    ctx = await pw.chromium.launch_persistent_context(str(profile), **kw)
+            else:
+                ctx = await pw.chromium.launch_persistent_context(
+                    str(profile),
+                    headless=_headless(),
+                    viewport=_VIEWPORT,
+                    args=["--disable-blink-features=AutomationControlled"],
+                )
         except Exception:
             await pw.stop()
             raise
@@ -277,19 +370,24 @@ class _Browser:
         ctx.on("page", self._watch)
         for p in ctx.pages:
             self._watch(p)
-        self._pw, self._ctx, self._gone = pw, ctx, False
+        self._pw, self._ctx, self._gone, self._closing = pw, ctx, False, False
 
     def _closed(self, *_) -> None:
         self._gone = True
+        live.browser_down(unexpected=not self._closing)
 
     def _watch(self, page) -> None:
         page.on("dialog", self._dialog)
         page.on("close", lambda p: self.shown.pop(id(p), None))
+        live.new_page(page)  # a tab the user opened while they have the page: the card follows it
 
     async def _dialog(self, dialog) -> None:
-        """A page's own alert / confirm / prompt. Dismissed — "Cancel" is the choice that changes
-        nothing — and told to the model with the next action's result. Leaving a page NEO was told
-        to leave ("unsaved changes?") is accepted."""
+        """A page's own alert / confirm / prompt. While the user has the page in the chat, the card
+        asks them. Otherwise it's dismissed — "Cancel" is the choice that changes nothing — and
+        told to the model with the next action's result. Leaving a page NEO was told to leave
+        ("unsaved changes?") is accepted."""
+        if live.user_dialog(dialog):
+            return
         kind = str(getattr(dialog, "type", ""))
         with suppress(Exception):
             if kind == "beforeunload":
@@ -305,14 +403,16 @@ class _Browser:
         return f" The page showed a pop-up ({said}); NEO dismissed it." if said else ""
 
     async def _drop(self) -> None:
+        self._closing = True
         if self._ctx is not None:
             with suppress(Exception):
                 await self._ctx.close()
         if self._pw is not None:
             with suppress(Exception):
                 await self._pw.stop()
-        self._ctx = self._pw = self.current = self.els_page = None
+        self._ctx = self._pw = self._current = self.els_page = None
         self.els, self.els_url, self._gone, self.shown = [], "", False, {}
+        live.browser_down(unexpected=False)
 
     def pages(self) -> list:
         return [p for p in (self._ctx.pages if self._ctx is not None else []) if not p.is_closed()]
@@ -512,7 +612,7 @@ async def _secret_values(page) -> set[str] | None:
     return got
 
 
-def _mask(entries: list[_El | str], secrets: set[str] | None) -> None:
+def _mask(entries: list[_El | str], secrets: set[str] | None, label: str = "filled") -> None:
     """No secret's value in a snapshot: a field holding one shows as [filled]. When the page
     couldn't say what its secrets are, no field shows its value."""
     for e in entries:
@@ -520,7 +620,36 @@ def _mask(entries: list[_El | str], secrets: set[str] | None) -> None:
             continue
         if secrets is None or " ".join(e.value.split()) in secrets:
             e.value = ""
-            e.states = (*e.states, "filled")
+            e.states = (*e.states, label)
+
+
+# What the fields the user typed into in the chat's card hold (browser_live marks each one as they
+# type): the user's words are theirs, NEO's reads show those fields as [filled by you].
+_JS_USER_FILLED = r"""() => {
+  const out = [];
+  const walk = root => {
+    for (const e of root.querySelectorAll('[data-neo-user-filled]')) {
+      const v = e.isContentEditable ? e.innerText : e.value;
+      if (v && out.length < 50) out.push(String(v));
+    }
+    for (const e of root.querySelectorAll('*')) if (e.shadowRoot) walk(e.shadowRoot);
+  };
+  walk(document);
+  return out;
+}"""
+
+
+async def _user_values(page) -> set[str] | None:
+    got: set[str] = set()
+    for i, fr in enumerate(_frames(page)):
+        try:
+            vals = await fr.evaluate(_JS_USER_FILLED)
+        except Exception:  # noqa: BLE001
+            if i == 0:
+                return None
+            continue
+        got |= {" ".join(str(v).split()) for v in vals or [] if str(v).strip()}
+    return got
 
 
 # Words a human-check page says (on the page itself, not in a small widget's frame).
@@ -564,6 +693,11 @@ async def _aria(page) -> str:
 
 
 async def _shot(page) -> bytes:
+    if _in_chat() and live.user_touched():
+        # After the user had the page: what they filled (and every password box) is blacked out.
+        with suppress(Exception):
+            mask = [page.locator("[data-neo-user-filled], input[type=password]")]
+            return await page.screenshot(type="jpeg", quality=70, scale="css", mask=mask)
     return await page.screenshot(type="jpeg", quality=70, scale="css")
 
 
@@ -575,6 +709,14 @@ async def _front(page) -> None:
 def _handoff(kind: str, url: str) -> confirm.Halt:
     """NEEDS_USER in NEO's own words: the site's host, never text from the page or a model."""
     host = _host(url)
+    if _in_chat():
+        msg = {
+            "login": f"Please log in to {host} in NEO's browser in the chat, then hand it back — NEO won't see what you type.",
+            "captcha": f"{host} wants a human check (a CAPTCHA). Please do it in NEO's browser in the chat, then hand it back.",
+            "code": f"{host} wants a verification code. Please enter it in NEO's browser in the chat, then hand it back.",
+            "payment": f"Please enter your payment details on {host} yourself in NEO's browser in the chat, then hand it back.",
+        }.get(kind, f"Please take over in NEO's browser in the chat on {host}, then hand it back.")
+        return confirm.ask_user(msg)
     msg = {
         "login": f"Please log in to {host} in NEO's browser window, then say continue.",
         "captcha": f"{host} wants a human check (a CAPTCHA). Please do it in NEO's browser window, then say continue.",
@@ -582,6 +724,19 @@ def _handoff(kind: str, url: str) -> confirm.Halt:
         "payment": f"Please enter your payment details on {host} yourself in NEO's browser window, then say continue.",
     }.get(kind, f"Please take over in NEO's browser window on {host}, then say continue.")
     return confirm.ask_user(msg)
+
+
+_NEED = {"login": "login", "code": "2fa", "captcha": "captcha", "payment": "payment"}
+
+
+async def _hand_over(kind: str, page, detail: str = "") -> confirm.Halt:
+    """NEO stops for the user: in the chat the card turns to them (its prompt built from the page's
+    real host); a separate window comes to the front."""
+    if _in_chat():
+        await live.need_user(_NEED.get(kind, "other"), page=page, detail=detail)
+    else:
+        await _front(page)
+    return _handoff(kind, str(page.url))
 
 
 async def _read(
@@ -599,10 +754,11 @@ async def _read(
         waited += 1.0
         probe = await _probe(page)
     if _blocked(probe):
-        await _front(page)
-        return ToolOutput(_handoff("captcha", page.url))
+        return ToolOutput(await _hand_over("captcha", page))
     entries = _parse(await _aria(page))
     _mask(entries, await _secret_values(page))
+    if _in_chat() and live.user_touched():
+        _mask(entries, await _user_values(page), label="filled by you")
     _b.remember(page, entries)
     text = _page_text(probe, find)
     n_els = sum(isinstance(e, _El) for e in entries)
@@ -913,15 +1069,94 @@ def _p(props: dict, required: list[str] | None = None) -> dict:
     return {"type": "object", "properties": props, "required": required or []}
 
 
+async def _timed(coro, name: str):
+    try:
+        return await asyncio.wait_for(coro, _TOOL_S)
+    except TimeoutError:
+        return f"Error: {name} took longer than {int(_TOOL_S)}s and was stopped"
+
+
+# Tools that act on what the model saw of the page: after the user had the page they re-read it
+# instead (the numbers, the page itself may have changed). The rest run as asked.
+_ACTS = {"open", "click", "type", "press", "scroll", "back", "tabs"}
+_USER_WAS_HERE = (
+    "The user used the browser while you waited, so NEO didn't do that step. The page may have "
+    "changed: act on this read, not an earlier one (fields the user filled show as [filled by you])."
+)
+_USER_READ = "The user used the browser while you waited (fields the user filled show as [filled by you])."
+
+
+def _card(kind: str):
+    """A NEO browser tool, as the chat's browser card sees it: the card opens for the job that
+    calls it; while the user has the page the tool waits (then re-reads instead of acting on a page
+    that may have changed); and it holds the page while it acts, so the user's input and NEO's never
+    mix. In "window" mode the tool just runs."""
+
+    def deco(fn):
+        @functools.wraps(fn)
+        async def run(a: dict, c: ToolContext):
+            name = fn.__name__
+            if not _in_chat():
+                return await _timed(fn(a, c), name)
+            job = current_job.get()
+            url = _norm_url(str(a.get("url") or "")) if kind == "open" and a.get("url") else ""
+            live.claim(job, url=url, starting=_b.cold())
+            waited = await live.enter()
+            try:
+                if live.s is None:
+                    live.claim(job, starting=_b.cold())  # the card closed while this step waited
+                if waited and kind in _ACTS:
+                    return await _timed(_reread(), name)
+                out = await _timed(fn(a, c), name)
+                if waited and kind == "read" and isinstance(out, ToolOutput) and not _halted(out):
+                    return ToolOutput(f"{_USER_READ}\n{out.text}", images=out.images)
+                return out
+            finally:
+                live.leave()
+
+        return run
+
+    return deco
+
+
+async def _reread() -> ToolOutput:
+    page = await _b.page()
+    await live.intent("read", "Read the page again", present=False)
+    out = await _read(page)
+    live.done()
+    if _halted(out):
+        return out
+    return ToolOutput(f"{_USER_WAS_HERE}\n{out.text}", images=out.images)
+
+
+async def _box(loc) -> dict | None:
+    """Where an element is on the screen (viewport CSS px), scrolled into view first."""
+    if loc is None:
+        return None
+    with suppress(Exception):
+        await loc.first.scroll_into_view_if_needed(timeout=2000)
+    try:
+        return await loc.first.bounding_box(timeout=2000)
+    except Exception:  # noqa: BLE001 — no box: the card shows no highlight
+        return None
+
+
+def _gate_card(gate: confirm.Halt | str, step: str) -> None:
+    """The step waits on the user's OK: the card spotlights its target."""
+    if _in_chat() and isinstance(gate, confirm.Halt) and gate.action_id:
+        live.waiting(gate.action_id, step)
+
+
 @tool(
     "browser_open",
-    "Open a web page in NEO's own browser (a separate Chromium window; logins made there persist). "
+    "Open a web page in NEO's own browser (its own Chromium with its own logins, which the user can watch). "
     "Returns the page as numbered elements plus its text. new_tab=true keeps the current page open.",
     _p({"url": {"type": "string"}, "new_tab": {"type": "boolean"}}, ["url"]),
     category="browser",
     slow=True,
     quiet=True,
     untrusted=True,
+    timeout=_HELD_S,
     fast_path=[
         (
             # "open example.com in your browser", "go to example.org in NEO's own browser"
@@ -931,22 +1166,28 @@ def _p(props: dict, required: list[str] | None = None) -> dict:
         )
     ],
 )
+@_card("open")
 async def browser_open(a: dict, c: ToolContext) -> str | ToolOutput:
     url = _norm_url(str(a["url"]))
     scheme = url.split(":", 1)[0].lower()
     if scheme not in ("http", "https"):
         return f"Error: NEO's browser only opens web pages, not {scheme}: links."
+    host = _host(url)
     # After reading a page or an email, a link that smuggles data out — or reaches this Mac's own
     # services — is the user's call.
     if why := await _open_risk(url, c):
         gate = _open_card(a, url, why, c)
         if isinstance(gate, str):
+            await live.intent("navigate", f"Asked to open {host}", url=url, present=False)
+            _gate_card(gate, f"Asked to open {host}")
             return gate
     page = await _b.page(new_tab=confirm.as_bool(a.get("new_tab")))
     notes: list[str] = []
+    await live.intent("navigate", f"Opened {host}", url=url)
     try:
         resp = await page.goto(url, wait_until="domcontentloaded", timeout=_NAV_MS)
     except Exception as e:  # noqa: BLE001
+        live.fail(_err(e), f"Couldn't open {host}")
         if "download" in str(e).lower():
             return f"Error: {url} is a file download, not a page (web_fetch reads PDFs)."
         return f"Error: couldn't open {url}: {_err(e)}"
@@ -954,6 +1195,7 @@ async def browser_open(a: dict, c: ToolContext) -> str | ToolOutput:
     if status >= 400:
         notes.append(f"The site answered {status}.")
     await _settle(page)
+    live.done(f"Opened {_host(page.url)}")
     out = await _show(page, c, url, notes=notes)
     if c.origin in ("user", "live") and not _halted(out):
         # The user's own words through a fast path ("open example.com in your browser"): no model
@@ -972,11 +1214,17 @@ async def browser_open(a: dict, c: ToolContext) -> str | ToolOutput:
     parallel_safe=True,
     category="browser",
     untrusted=True,
+    timeout=_HELD_S,
 )
+@_card("read")
 async def browser_read(a: dict, c: ToolContext) -> ToolOutput:
     page = await _b.page()
     limit = max(1000, min(int(a.get("max_chars") or _READ_CHARS), 20000))
-    return await _show(page, c, _b.shown.get(id(page), ""), max_chars=limit, find=str(a.get("find") or ""))
+    find = str(a.get("find") or "")
+    await live.intent("read", f"Looked for {quoted(find)} on the page" if find.strip() else "Read the page", present=False)
+    out = await _show(page, c, _b.shown.get(id(page), ""), max_chars=limit, find=find)
+    live.done()
+    return out
 
 
 @tool(
@@ -994,7 +1242,9 @@ async def browser_read(a: dict, c: ToolContext) -> ToolOutput:
     category="browser",
     quiet=True,
     untrusted=True,
+    timeout=_HELD_S,
 )
+@_card("click")
 async def browser_click(a: dict, c: ToolContext) -> str | ToolOutput:
     page = await _b.page()
     target = str(a.get("target") or "").strip()
@@ -1025,6 +1275,12 @@ async def browser_click(a: dict, c: ToolContext) -> str | ToolOutput:
 
     own = str(info.get("label") or "").strip()
     words = own or (el.name if el else "") or target
+    said = quoted(words) if words else "the page"
+    await live.intent(
+        "click", f"Clicked {said}", rect=await _box(loc), x=float(a["x"]) if at else None,
+        y=float(a["y"]) if at else None, label=words, role=(el.role if el else "") or str(info.get("tag") or ""),
+        remeasure=(lambda: loc.first.bounding_box(timeout=2000)) if loc is not None else None,
+    )  # fmt: skip
     summary = ""
     if policy.commits(f"{target} {own} {el.name if el else ''}") or policy.commits(
         words, str(info.get("around") or "")
@@ -1037,6 +1293,7 @@ async def browser_click(a: dict, c: ToolContext) -> str | ToolOutput:
     if summary:
         gate = confirm.gated("browser_click", a, summary, detail=f"{page.url}\n{el.card() if el else desc}")
         if isinstance(gate, str):
+            _gate_card(gate, f"Asked to click {said}")
             return gate
     before, url0 = {id(p) for p in _b.pages()}, page.url
     try:
@@ -1045,7 +1302,9 @@ async def browser_click(a: dict, c: ToolContext) -> str | ToolOutput:
         else:
             await loc.click(timeout=_CLICK_MS)
     except Exception as e:  # noqa: BLE001
+        live.fail(_err(e), f"Couldn't click {said}")
         return f"Error: couldn't click {desc}: {_err(e)}"
+    live.done()
     return await _after(page, before, url0, f"Clicked {desc}.", c)
 
 
@@ -1061,7 +1320,9 @@ async def browser_click(a: dict, c: ToolContext) -> str | ToolOutput:
     category="browser",
     quiet=True,
     untrusted=True,
+    timeout=_HELD_S,
 )
+@_card("type")
 async def browser_type(a: dict, c: ToolContext) -> str | ToolOutput:
     from neo.tools.computer import policy
 
@@ -1071,11 +1332,21 @@ async def browser_type(a: dict, c: ToolContext) -> str | ToolOutput:
         return err
     info = await _info(loc)
     if kind := _secret_kind(info, el.name if el else ""):
-        await _front(page)
-        return _handoff(kind, page.url)
+        return await _hand_over(kind, page)
     text, submit = str(a["text"]), confirm.as_bool(a.get("submit"))
     desc = el.card() if el else f"“{str(a['target'])[:60]}”"
     host = _host(page.url)
+    field = (el.name if el else "") or str(a["target"])
+    choose = info.get("tag") == "select"
+    step = (
+        f"Chose {quoted(text)} in {field[:40]}"
+        if choose
+        else f"Typed {quoted(text)} in {field[:40]}" + (" and pressed Enter" if submit else "")
+    )
+    await live.intent(
+        "select" if choose else "type", step, rect=await _box(loc), label=field, fieldname=field, text=text,
+        role=el.role if el else "", remeasure=lambda: loc.first.bounding_box(timeout=2000),
+    )  # fmt: skip
     summary = ""
     if submit and not await _is_search(loc):
         summary = f"submit the form on {host}"
@@ -1085,12 +1356,14 @@ async def browser_type(a: dict, c: ToolContext) -> str | ToolOutput:
     if summary:
         gate = confirm.gated("browser_type", a, summary, detail=f"{page.url}\n{desc}: {text}")
         if isinstance(gate, str):
+            _gate_card(gate, f"Asked to submit the form on {host}" if submit else f"Asked to type {quoted(text)}")
             return gate
     if info.get("type") in ("checkbox", "radio"):
+        live.fail("not a text field")
         return f"Error: {desc} is a {info['type']} — click it instead."
     before, url0 = {id(p) for p in _b.pages()}, page.url
     try:
-        if info.get("tag") == "select":
+        if choose:
             try:
                 await loc.select_option(label=text, timeout=_CLICK_MS)
             except Exception:  # noqa: BLE001 — the option's value rather than its label
@@ -1100,7 +1373,9 @@ async def browser_type(a: dict, c: ToolContext) -> str | ToolOutput:
         if submit:
             await loc.press("Enter")
     except Exception as e:  # noqa: BLE001
+        live.fail(_err(e), f"Couldn't type into {field[:40]}")
         return f"Error: couldn't type into {desc}: {_err(e)}"
+    live.done()
     if submit:
         return await _after(page, before, url0, f"Typed into {desc} and submitted.", c)
     return f"Typed into {desc}."
@@ -1155,7 +1430,9 @@ def _editable(info: dict) -> bool:
     category="browser",
     quiet=True,
     untrusted=True,
+    timeout=_HELD_S,
 )
+@_card("press")
 async def browser_press(a: dict, c: ToolContext) -> str | ToolOutput:
     from neo.tools.computer import policy
 
@@ -1172,6 +1449,7 @@ async def browser_press(a: dict, c: ToolContext) -> str | ToolOutput:
     info = await _info(focused) if has_focus else {}
     field = _editable(info)
     label = "" if field else str(info.get("label") or "").strip()  # a field's "label" is its text
+    await live.intent("key", f"Pressed {key[:20]}", key=key[:32], label=label)
     summary = ""
     if last == "enter":
         if has_focus and not await _is_search(focused):
@@ -1198,12 +1476,15 @@ async def browser_press(a: dict, c: ToolContext) -> str | ToolOutput:
     if summary:
         gate = confirm.gated("browser_press", a, summary, detail=f"{page.url}\n{label[:80]}".strip())
         if isinstance(gate, str):
+            _gate_card(gate, f"Asked to press {key[:20]}")
             return gate
     if last in ("enter", "space"):
         before, url0 = {id(p) for p in _b.pages()}, page.url
         await page.keyboard.press(key)
+        live.done()
         return await _after(page, before, url0, f"Pressed {key}.", c)
     await page.keyboard.press(key)
+    live.done()
     await asyncio.sleep(_SETTLE_S)
     return f"Pressed {key}."
 
@@ -1214,12 +1495,17 @@ async def browser_press(a: dict, c: ToolContext) -> str | ToolOutput:
     _p({"direction": {"type": "string", "enum": ["down", "up"]}, "amount": {"type": "integer"}}),
     category="browser",
     quiet=True,
+    timeout=_HELD_S,
 )
+@_card("scroll")
 async def browser_scroll(a: dict, c: ToolContext) -> str:
     page = await _b.page()
-    dy = int(a.get("amount") or 700) * (-1 if a.get("direction") == "up" else 1)
-    await page.mouse.wheel(0, dy)
+    up = a.get("direction") == "up"
+    amount = int(a.get("amount") or 700)
+    await live.intent("scroll", f"Scrolled {'up' if up else 'down'}", direction="up" if up else "down", amount=amount, present=False)
+    await page.mouse.wheel(0, amount * (-1 if up else 1))
     await asyncio.sleep(_SETTLE_S)
+    live.done()
     return f"Scrolled {a.get('direction', 'down')}."
 
 
@@ -1230,17 +1516,23 @@ async def browser_scroll(a: dict, c: ToolContext) -> str:
     category="browser",
     quiet=True,
     untrusted=True,
+    timeout=_HELD_S,
 )
+@_card("back")
 async def browser_back(a: dict, c: ToolContext) -> str | ToolOutput:
     page = await _b.page()
     url0 = page.url
+    await live.intent("navigate", "Went back", caption="Going back", present=False)
     try:
         resp = await page.go_back(wait_until="domcontentloaded", timeout=_NAV_MS)
     except Exception as e:  # noqa: BLE001
+        live.fail(_err(e), "Couldn't go back")
         return f"Error: couldn't go back: {_err(e)}"
     if resp is None and page.url == url0:
+        live.fail("nothing to go back to", "Nothing to go back to")
         return "Nothing to go back to in this tab."
     await _settle(page)
+    live.done()
     return _then("Went back.", await _show(page, c, url0, leave="forward"))
 
 
@@ -1251,7 +1543,9 @@ async def browser_back(a: dict, c: ToolContext) -> str | ToolOutput:
     category="browser",
     quiet=True,
     untrusted=True,
+    timeout=_HELD_S,
 )
+@_card("tabs")
 async def browser_tabs(a: dict, c: ToolContext) -> str | ToolOutput:
     await _b.page()
     pages = _b.pages()
@@ -1273,12 +1567,17 @@ async def browser_tabs(a: dict, c: ToolContext) -> str | ToolOutput:
         return f"Error: there's no tab {a.get('index')!r} — tabs are numbered 1 to {len(pages)}."
     page = pages[i - 1]
     if action == "close":
+        await live.intent("navigate", f"Closed tab {i}", caption=f"Closing tab {i}", present=False)
         await page.close()
+        live.done()
         return f"Closed tab {i}. {len(_b.pages())} left."
     if stop := await _keep_off(page, c, _b.shown.get(id(page), ""), leave="none"):
         return stop
+    await live.intent("navigate", f"Switched to tab {i}", caption=f"Switching to tab {i}", present=False)
     _b.current = page
     await _front(page)
+    await live.bind(page)
+    live.done()
     return _then(f"Switched to tab {i}.", await _read(page))
 
 
@@ -1289,15 +1588,20 @@ async def browser_tabs(a: dict, c: ToolContext) -> str | ToolOutput:
     category="browser",
     slow=True,
     untrusted=True,
+    timeout=_HELD_S,
 )
+@_card("shot")
 async def browser_screenshot(a: dict, c: ToolContext) -> ToolOutput:
     page = await _b.page()
     if stop := await _keep_off(page, c, _b.shown.get(id(page), "")):
         return ToolOutput(stop, halt=True, staged=stop.action_id)
+    await live.intent("read", "Looked at the page", caption="Looking at the page", present=False)
     img = await _shot(page)
+    live.done()
     _b.saw(page)
+    size = (getattr(page, "viewport_size", None) or _VIEWPORT) if _in_chat() else _VIEWPORT
     return ToolOutput(
-        f"Screenshot of {page.url} ({_VIEWPORT['width']}×{_VIEWPORT['height']}).",
+        f"Screenshot of {page.url} ({size['width']}×{size['height']}).",
         images=[ImagePart(img, "image/jpeg")],
     )
 
@@ -1305,21 +1609,45 @@ async def browser_screenshot(a: dict, c: ToolContext) -> ToolOutput:
 @tool(
     "browser_handoff",
     "Hand NEO's browser to the user for what NEO never does itself: log in (kind=login), solve a CAPTCHA "
-    "(captcha), enter a one-time code (code) or card details (payment). Stops and asks them to say continue.",
-    _p({"kind": {"type": "string", "enum": ["login", "captcha", "code", "payment", "other"]}}, ["kind"]),
+    "(captcha), enter a one-time code (code) or card details (payment). Stops and asks them to take over. "
+    "For kind=other, detail says in a few words what they should do.",
+    _p(
+        {
+            "kind": {"type": "string", "enum": ["login", "captcha", "code", "payment", "other"]},
+            "detail": {"type": "string"},
+        },
+        ["kind"],
+    ),
     category="browser",
+    timeout=_HELD_S,
 )
+@_card("handoff")
 async def browser_handoff(a: dict, c: ToolContext) -> str:
     page = await _b.page()
-    await _front(page)
-    return _handoff(str(a.get("kind") or "other"), page.url)
+    kind = str(a.get("kind") or "other")
+    detail = " ".join(str(a.get("detail") or "").split())[:120] if kind not in _NEED else ""
+    return await _hand_over(kind, page, detail=detail)
 
 
-@tool("browser_close", "Close NEO's browser window.", _p({}), category="browser", quiet=True)
+@tool("browser_close", "Close NEO's browser.", _p({}), category="browser", quiet=True)
 async def browser_close(a: dict, c: ToolContext) -> str:
+    if _in_chat():
+        await live.end("done", alive=False)
     await _b.close()
     return "Browser closed."
 
 
-async def shutdown() -> None:
+async def relaunch(url: str) -> None:
+    """Start NEO's browser again (it closed or crashed under the card) at the page it was on."""
+    await _b.close()
+    page = await _b.page()
+    if url.lower().startswith(("http://", "https://")):
+        with suppress(Exception):
+            await page.goto(url, wait_until="commit", timeout=_NAV_MS)
+
+
+async def shutdown(reason: str = "") -> None:
+    """NEO is quitting ("") or the user erased everything ("erased")."""
+    with suppress(Exception):
+        await live.shutdown(reason)
     await _b.close()

@@ -62,7 +62,7 @@ async def forget_everything() -> dict[str, int]:
     try:
         from neo.tools.browser import shutdown as close_browser
 
-        await close_browser()
+        await close_browser("erased")  # the card, its steps, thumbnails and poster go too
     except Exception:  # noqa: BLE001 — not open
         pass
     shutil.rmtree(s.data_dir / "browser", ignore_errors=True)

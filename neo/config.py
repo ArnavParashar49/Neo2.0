@@ -142,6 +142,18 @@ class Settings(BaseSettings):
         pairs = ((str(k).strip().lower(), str(m).strip().lower()) for k, m in v.items())
         return {k: m for k, m in pairs if k and m in get_args(DecideMode)}
 
+    # ---- NEO's own browser -------------------------------------------------------------
+    # "chat": it runs headless and shows live in the chat's browser card, where the user can watch
+    # it, take it over, or pop it out into its own window. "window": a visible Chromium window.
+    browser_view: Literal["chat", "window"] = "chat"
+
+    @field_validator("browser_view", mode="before")
+    @classmethod
+    def _browser_view(cls, v):
+        """A typo must not stop NEO from starting: anything but a visible window is the chat."""
+        s = str(v or "").strip().lower()
+        return "window" if s in ("window", "headed", "visible", "separate") else "chat"
+
     # ---- server / ui -----------------------------------------------------------------
     ws_host: str = "127.0.0.1"
     ws_port: int = 8765
