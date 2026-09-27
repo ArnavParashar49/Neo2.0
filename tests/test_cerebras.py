@@ -676,3 +676,38 @@ async def test_prewarm_takes_the_cold_round_trip_off_the_first_step(tmp_path, mo
         await a.client(cb.TEXT_MODEL).close()
     finally:
         await srv.stop()
+
+
+async def test_a_kept_alive_connection_the_server_closed_is_retried_once_but_a_timeout_is_not(cset, fake):
+    cset()
+    real = fake.handler
+    state = {"n": 0}
+
+    def flaky(request):
+        state["n"] += 1
+        if state["n"] == 1:
+            raise httpx.RemoteProtocolError("Server disconnected without sending a response.")
+        return real(request)
+
+    cb._transport = httpx.MockTransport(flaky)  # (restored by the fake fixture's monkeypatch)
+    assert (await cb.cerebras().complete(ASK)).text == "ok"
+    assert state["n"] == 2
+
+    def slow(request):
+        raise httpx.ReadTimeout("timed out")
+
+    cb._transport = httpx.MockTransport(slow)
+    cb._accounts.clear()  # a new account: connections over the new transport
+    with pytest.raises(Unavailable):
+        await cb.cerebras().complete(ASK)
+
+
+async def test_prewarm_soon_runs_in_the_background_and_only_with_a_key(cset, fake, monkeypatch):
+    monkeypatch.delenv("CEREBRAS_API_KEY", raising=False)
+    cb.prewarm_soon()
+    assert not cb._warming
+    cset()
+    cb.prewarm_soon()
+    assert len(cb._warming) == 1
+    await asyncio.gather(*cb._warming)
+    assert [r.url.path for r in fake.requests] == ["/v1/models"] and not cb._warming

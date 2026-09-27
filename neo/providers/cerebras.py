@@ -552,6 +552,7 @@ class CerebrasProvider(OpenAICompatProvider):
         effort: Literal["low", "medium", "high"] = "medium",
         max_tokens: int = 4096,
     ) -> Turn:
+        effort = effort if effort in ROOM else "low"  # (the values both models take)
         try:
             messages = self._prepare(messages, system, tools)
             await self.account.admit(
@@ -732,6 +733,23 @@ async def prewarm() -> bool:
     except Exception as e:  # noqa: BLE001 — a warm-up must never fail the task it's for
         log.info(f"[brain] cerebras prewarm skipped: {type(e).__name__}")
         return False
+
+
+_warming: set[asyncio.Task] = set()
+
+
+def prewarm_soon() -> None:
+    """:func:`prewarm` in the background: the caller (a screen task starting, the wake word)
+    goes on at once. Nothing without a key or a running event loop; never raises."""
+    try:
+        if not conf().api_key:
+            return
+        loop = asyncio.get_running_loop()
+    except Exception:  # noqa: BLE001 — no loop, no agent bound (library mode): nothing to warm
+        return
+    t = loop.create_task(prewarm())
+    _warming.add(t)  # (a task nobody holds can be collected mid-flight)
+    t.add_done_callback(_warming.discard)
 
 
 # ---- where the brains go in a chain ----------------------------------------------------------
