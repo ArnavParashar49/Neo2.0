@@ -175,15 +175,25 @@ def _buttons(button: str):
 _COUNT_WORDS = {1: "", 2: "Double-", 3: "Triple-"}
 
 
+def click_count(count) -> int:
+    """1, 2 or 3 clicks ("2" and 2.0 too); ValueError for anything else — never a click that
+    silently isn't one (0) or a different number of them."""
+    try:
+        f = float(count) if not isinstance(count, bool) else float("nan")
+    except (TypeError, ValueError):
+        f = float("nan")
+    if f not in (1.0, 2.0, 3.0):
+        raise ValueError(f"count must be 1, 2 or 3, not {count!r}")
+    return int(f)
+
+
 def click(x: float, y: float, *, button: str = "left", count: int = 1, mods=()) -> str:
     """Click at a screen point. Everything is checked before the first event goes out: a bad
     coordinate, button, count or modifier is a ValueError, never half a click."""
     x, y = _num(x, "x"), _num(y, "y")
     if button not in ("left", "right", "middle"):
         raise ValueError(f"button must be left, right or middle, not {button!r}")
-    if isinstance(count, bool) or not isinstance(count, (int, float, str)) or str(count).strip() not in ("1", "2", "3"):
-        raise ValueError(f"count must be 1, 2 or 3, not {count!r}")
-    count = int(str(count).strip())
+    count = click_count(count)
     flags = mods_flags(mods)
     down, up, btn = _buttons(button)
     move(x, y)

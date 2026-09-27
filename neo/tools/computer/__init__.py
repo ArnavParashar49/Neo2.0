@@ -369,17 +369,13 @@ async def click(a: dict, c: ToolContext) -> str | ToolOutput:
     if err := _needs_input():
         return err
     button, count, mods = str(a.get("button") or "left"), a.get("count", 1), a.get("modifiers") or []
-    if count in (None, ""):
-        count = 1
     try:
         inp.mods_flags(mods)
         if button not in ("left", "right", "middle"):
             raise ValueError(f"button must be left, right or middle, not {button!r}")
-        if isinstance(count, bool) or str(count).strip() not in ("1", "2", "3"):
-            raise ValueError(f"count must be 1, 2 or 3, not {count!r}")
+        count = inp.click_count(1 if count in (None, "") else count)
     except ValueError as e:
         return f"Error: {e}"
-    count = int(str(count).strip())
     try:
         if a.get("id"):
             e = ax.get(str(a["id"]))
@@ -834,28 +830,32 @@ async def _ensure_text_focus() -> tuple[str | None, bool]:
     return None, created
 
 
-async def _line_break(app: str, pid: int, role: str) -> str:
+_SHELL_JOINED = " (as one line: this app runs a shell, where a line break would run each line)"
+
+
+async def _line_break(app: str, pid: int, role: str) -> tuple[str, str]:
     """How a line break is typed where the cursor is — decided by what's there, never by the
-    app's name: "" joins the lines (a single-line field; an app running a shell, where any Return
-    runs the line), "return" in a document editor, else shift+return — a new line in a chat box
-    or a web editor, never a "send"."""
+    app's name — and what to tell about it: "" joins the lines (a single-line field; an app running
+    a shell, where any Return runs the line), "return" in a document editor, else shift+return — a
+    new line in a chat box or a web editor, never a "send"."""
     if role in ax._SINGLE_LINE:
-        return ""
+        return "", ""
     from neo.tools.computer.focus import hosts_shell
 
     if await asyncio.to_thread(hosts_shell, pid):
-        return ""
+        return "", _SHELL_JOINED
     if await asyncio.to_thread(_doc_like, app, pid):
-        return "return"
-    return "shift+return"
+        return "return", ""
+    return "shift+return", ""
 
 
-async def _type(text: str) -> None:
-    """Type text so every line break is a real new line — and never a "send" or a command run."""
+async def _type(text: str) -> str:
+    """Type text so every line break is a real new line — and never a "send" or a command run.
+    Returns what the result should add ("" or why the lines were joined)."""
     app, pid = ax.frontmost_app()
     role, _ = await asyncio.to_thread(ax.focused_role)
     text = text.replace("\r\n", "\n").replace("\r", "\n").rstrip("\n")  # a typed \r is a Return
-    newline = await _line_break(app, pid, role) if "\n" in text else "return"
+    newline, note = await _line_break(app, pid, role) if "\n" in text else ("return", "")
     if not newline:
         text = " ".join(part.strip() for part in text.split("\n") if part.strip())
     lines = text.split("\n")
@@ -865,6 +865,7 @@ async def _type(text: str) -> None:
         if i < len(lines) - 1:
             await asyncio.to_thread(inp.hotkey, newline)
             await asyncio.sleep(0.03)
+    return note
 
 
 @tool(
@@ -886,7 +887,7 @@ async def type_text(a: dict, c: ToolContext) -> str | ToolOutput:
     # A model's typing is checked: the text where the cursor is should have changed.
     watch = c.origin == "agent" and not created
     before = await asyncio.to_thread(ax.focused_element_text) if watch else ""
-    await _type(text)
+    note = await _type(text)
     if watch and before:
         await asyncio.sleep(0.1)
         if await asyncio.to_thread(ax.focused_element_text) == before:
@@ -895,7 +896,7 @@ async def type_text(a: dict, c: ToolContext) -> str | ToolOutput:
                 "somewhere else. Look before typing again.",
                 ok=False,
             )
-    return f"Typed “{text[:80]}”" + (" into a new note." if created else ".")
+    return f"Typed “{text[:80]}”{note}" + (" into a new note." if created else ".")
 
 
 @tool(
@@ -926,9 +927,9 @@ async def dictate(a: dict, c: ToolContext) -> str:
     area = await asyncio.to_thread(ax.main_text_area)
     if area is not None and area.value.strip() and not area.value.endswith("\n"):
         text = "\n" + text  # the heading stays a heading; the points start on their own line
-    await _type(text)
+    note = await _type(text)
     first = text.strip().splitlines()[0][:80]
-    return f"Typed {len(text.strip().splitlines())} line(s), starting “{first}”" + (" (new note)." if created else ".")
+    return f"Typed {len(text.strip().splitlines())} line(s), starting “{first}”{note}" + (" (new note)." if created else ".")
 
 
 @tool(

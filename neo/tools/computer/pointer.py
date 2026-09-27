@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import itertools
 import re
+import secrets
 from dataclasses import dataclass
 
 from neo.agent.registry import ToolContext, fence
@@ -56,10 +57,13 @@ class Shot:
 _shots: dict[str, Shot] = {}
 _shot_ids = itertools.count(1)
 _KEEP_SHOTS = 12
+# Ids carry this run's mark: an id a model reads in a conversation from before NEO restarted can
+# never name a different, newer screenshot.
+_RUN = secrets.token_hex(2)
 
 
 def remember(x0: float, y0: float, ppp: float, w: int, h: int) -> Shot:
-    s = Shot(f"s{next(_shot_ids)}", float(x0), float(y0), float(ppp), int(w), int(h))
+    s = Shot(f"s{next(_shot_ids)}-{_RUN}", float(x0), float(y0), float(ppp), int(w), int(h))
     _shots[s.id] = s
     while len(_shots) > _KEEP_SHOTS:
         _shots.pop(next(iter(_shots)))

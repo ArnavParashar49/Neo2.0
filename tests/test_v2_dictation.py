@@ -116,6 +116,7 @@ def test_line_breaks_never_send(monkeypatch, app, focus, shell, expected):
     try:
         out = asyncio.run(registry().invoke("type_text", {"text": "a\nb"}, ToolContext(user_text="")))
         assert out.ok and typed == expected
+        assert ("as one line" in out.text) == shell  # joined for a shell, and the result says why
     finally:
         front[0], role[0] = "Notes", "AXTextArea"
 
