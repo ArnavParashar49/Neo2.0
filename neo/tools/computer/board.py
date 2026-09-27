@@ -443,18 +443,21 @@ def _subpixel(R: np.ndarray, pts: np.ndarray) -> np.ndarray:
     """A peak's position to a fraction of a pixel (a parabola through it and its neighbours), as
     continuous coordinates (the pixel's middle is +0.5)."""
     h, w = R.shape
-    out = pts.copy() + 0.5
-    for n, (x, y) in enumerate(pts.astype(int)):
-        if 0 < x < w - 1:
-            a, b, c = R[y, x - 1], R[y, x], R[y, x + 1]
-            d = a - 2 * b + c
-            if d < 0:
-                out[n, 0] += float(np.clip(0.5 * (a - c) / d, -0.5, 0.5))
-        if 0 < y < h - 1:
-            a, b, c = R[y - 1, x], R[y, x], R[y + 1, x]
-            d = a - 2 * b + c
-            if d < 0:
-                out[n, 1] += float(np.clip(0.5 * (a - c) / d, -0.5, 0.5))
+    out = pts.astype(np.float64) + 0.5
+    if not len(pts):
+        return out
+    x, y = pts[:, 0].astype(np.int64), pts[:, 1].astype(np.int64)
+    for k, (inside, lo, hi) in enumerate(
+        (
+            ((x > 0) & (x < w - 1), (y, np.clip(x - 1, 0, w - 1)), (y, np.clip(x + 1, 0, w - 1))),
+            ((y > 0) & (y < h - 1), (np.clip(y - 1, 0, h - 1), x), (np.clip(y + 1, 0, h - 1), x)),
+        )
+    ):
+        a, b, c = R[lo], R[y, x], R[hi]
+        d = a - 2 * b + c
+        ok = inside & (d < 0)
+        shift = np.clip(0.5 * (a - c) / np.where(ok, d, -1.0), -0.5, 0.5)
+        out[:, k] += np.where(ok, shift, 0.0)
     return out
 
 
@@ -876,6 +879,23 @@ def _lift(f: int, ox: int, oy: int) -> np.ndarray:
     return np.array([[f, 0, ox], [0, f, oy], [0, 0, 1.0]])
 
 
+def _goes_on(rgb: np.ndarray, H: np.ndarray, c0: int, r0: int, c1: int, r1: int, t: Tones) -> bool:
+    """Does the squares' pattern go on just outside the board — its two tones still alternating in
+    the same places on some side, if less cleanly than a board row? A board ends at its frame or the
+    window behind it, whose colours never alternate so (0.0 on every synthetic board, even with a
+    frame and window near the two tones); a texture — floor tiles, a map's warped grid, a checkered
+    background — goes on past wherever the fit stopped (a quarter to a third of the places)."""
+    for strip in (_block(c0, r0 - 1, c1, r0 - 1), _block(c0, r1 + 1, c1, r1 + 1), _block(c0 - 1, r0, c0 - 1, r1), _block(c1 + 1, r0, c1 + 1, r1)):
+        strip = strip[_inside(rgb.shape, H, strip)]
+        even = (strip[:, 0] + strip[:, 1]) % 2 == 0
+        if len(strip) < 2 or even.all() or not even.any():
+            continue
+        near = _own_tone(rgb, H, strip, t)
+        if float(((near[even].mean(axis=0) >= 0.5) & (near[~even].mean(axis=0) >= 0.5)).mean()) > 0.15:
+            return True
+    return False
+
+
 def _settle(pic: Picture, H_img: np.ndarray, keys: np.ndarray, **kw) -> tuple[Board | None, str]:
     """From a lattice of X-corners (``keys``, mapped to image pixels by ``H_img``) to a checked
     board: turned upright, its extent found where its squares stop alternating."""
@@ -893,6 +913,8 @@ def _settle(pic: Picture, H_img: np.ndarray, keys: np.ndarray, **kw) -> tuple[Bo
         return None, "too few squares"
     if _spacing(Hu, c0, r0) < _MIN_SQUARE * 0.6:
         return None, "the squares are too small to be a board's"
+    if _goes_on(pic.rgb, Hu, c0, r0, c1, r1, tones):
+        return None, "the squares' pattern goes on past where the board would end: a texture, not a board"
     b = _board(pic, Hu, c0, r0, c1, r1, tones=tones, agree=agree, **kw)
     b.flat = _perspective(b.H, b.cols, b.rows) < 1.03
     return b, ""
