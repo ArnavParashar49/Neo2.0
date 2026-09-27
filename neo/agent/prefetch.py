@@ -440,8 +440,8 @@ def _picture(pid: int) -> Picture | None:
             return None
         shot = pointer.remember(bounds[0], bounds[1], bounds[2] / w, w, h)
         return Picture(img, shot.id, (w, h))
-    if any(_protected(owner, opid) for owner, opid in over):
-        return None  # a protected app's window is in front of it: none of its pixels go anywhere
+    if any(not opid or _protected(owner, opid) for owner, opid in over):
+        return None  # a protected app's window (or nobody's) is in front of it: none of its pixels go anywhere
     region = _on_screen(bounds)
     if region is None:
         return None

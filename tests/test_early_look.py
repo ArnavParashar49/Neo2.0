@@ -387,6 +387,9 @@ def test_a_protected_app_over_the_window_keeps_the_picture_out(world, monkeypatc
     look = _look("in quillpad, what does this page say", _decision(screen_p=0.9))
     assert look is not None and look.picture is None  # the list still goes; no pixels of that app do
     assert world.shots == 0 and world.region_shots == []
+    world.above = [_window(0, "", 150, 100, 120, 80)]  # a window the window server names no owner for
+    look = _look("in quillpad, what does this page say", _decision(screen_p=0.9))
+    assert look is not None and look.picture is None and world.shots == 0 and world.region_shots == []
 
 
 def test_neos_own_window_a_clear_one_or_one_beside_it_is_no_cover(world):

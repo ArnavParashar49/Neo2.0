@@ -10,8 +10,11 @@ agent loop and the real zeroshot state machine:
 
 1. model round trips and prompt tokens per screen task, without and with the first look;
 2. how much the look adds before the first model call when it runs beside routing (fake AX walks
-   of 50-700 ms, a picture taken in parallel);
-3. the resolver's first question after the user speaks, cold and prewarmed on the wake word.
+   of 50-700 ms, a picture taken in parallel; a Chromium/Electron app whose web tree needs its
+   one-time 400 ms settle, ax._WEB_SETTLE_S, when first switched on);
+3. the resolver's first question after the user speaks, cold and prewarmed on the wake word;
+4. with another app's floating window over part of the pictured window: how many of the picture's
+   pixels show what a click at them hits (a synthetic screen and a fake hit test).
 """
 
 from __future__ import annotations
@@ -64,7 +67,7 @@ def tok(s: str) -> float:
 
 # ---- the made-up Mac ----------------------------------------------------------------------------
 
-W = types.SimpleNamespace(walk_s=0.15, shot_s=0.25, front=("Tablero", 104))
+W = types.SimpleNamespace(walk_s=0.15, shot_s=0.25, front=("Tablero", 104), web=False)
 _PIDS = {"Quillpad": 101, "Tablero": 104}
 
 
@@ -85,6 +88,10 @@ LABELS = ["New Page", "Share", "Title", "Body", "Bold", "Italic", "Search", "Sid
 
 
 def _snapshot(app=None, *, max_lines=250):
+    pid = _PIDS.get(app) if app else W.front[1]
+    if W.web and pid not in ax._web_held:  # a Chromium/Electron app: its web tree switched on, then held
+        ax._web_held[pid] = (None, [], None)
+        time.sleep(ax._WEB_SETTLE_S)
     time.sleep(W.walk_s)
     els = [ax.Element(f"e{i}", "AXButton" if i % 3 else "AXStaticText", f"{LABELS[i % 10]} {i}", "", 100 + i, 60 + i, 80, 22)
            for i in range(1, 41)]  # fmt: skip
@@ -112,6 +119,9 @@ screen.can_capture = lambda: True
 screen.capture_window = _capture
 focus.front_window_id = lambda pid: 7000 + pid
 prefetch._window_bounds = lambda wid: (100.0, 50.0, 800.0, 500.0)
+prefetch._windows_above = lambda wid: []  # nothing in front of the pictured window (section 4 puts one there)
+screen.displays = lambda: [screen.Display(1, 0.0, 0.0, 1512.0, 982.0)]
+ax._web_held = {}
 apps.set_target("")
 
 
@@ -194,8 +204,9 @@ async def scenario(name: str, text: str, d: Decision, front: tuple[str, int], ga
 # ---- 2. what the look adds before the first call --------------------------------------------------
 
 
-async def added_latency(walk_s: float, shot_s: float, route_s: float, image: bool) -> dict:
-    W.front, W.walk_s, W.shot_s = ("Tablero", 104), walk_s, shot_s
+async def added_latency(walk_s: float, shot_s: float, route_s: float, image: bool, web: bool = False) -> dict:
+    W.front, W.walk_s, W.shot_s, W.web = ("Tablero", 104), walk_s, shot_s, web
+    ax._web_held.clear()  # the app's first look in a while
     d = Decision("agent_task", 0.95, False, 0.0, image, 0.9 if image else 0.1, tool="" if image else "click_text", tool_p=0.6)
     runs, attached = [], 0
     prefetch._slow_until.clear()
@@ -206,7 +217,9 @@ async def added_latency(walk_s: float, shot_s: float, route_s: float, image: boo
         look = await prefetch.collect(p, TOOLS)
         runs.append((time.perf_counter() - t0 - route_s) * 1000)
         attached += look is not None
+    W.web = False
     return {"walk_ms": walk_s * 1000, "picture_ms": shot_s * 1000 if image else 0, "routing_ms": route_s * 1000,
+            "web_settle_ms": ax._WEB_SETTLE_S * 1000 if web else 0,
             "added_ms_first": round(runs[0]), "added_ms_p50_next4": round(statistics.median(runs[1:])),
             "attached": f"{attached}/5"}  # fmt: skip
 
@@ -252,6 +265,60 @@ def prewarm_bench(load_s: float, pass_s: float, speak_s: float) -> dict:
     return {"load_ms": load_s * 1000, "speech_ms": speak_s * 1000, **{f"resolver_first_question_ms[{k}]": v for k, v in out.items()}}
 
 
+# ---- 4. a window partly covered by another app's -------------------------------------------------
+
+
+async def covered_window() -> dict:
+    """Another app's floating window (a picture-in-picture video, a meeting toolbar) over part of the
+    pictured one. The window's own pixels (screencapture -l) include what it covers; a click at such a
+    pixel lands in the floating window. Every 10th pixel of the attached picture is checked."""
+    from PIL import Image as Img
+
+    floaty = (500, 300, 320, 180)  # the pictured window: (100, 50), 800×500 pt (_window_bounds)
+    screen_img = Img.new("RGB", (1512, 982), (30, 30, 30))
+    screen_img.paste((200, 200, 200), (100, 50, 900, 550))
+    screen_img.paste((220, 0, 0), (floaty[0], floaty[1], floaty[0] + floaty[2], floaty[1] + floaty[3]))
+    own = Img.new("RGB", (800, 500), (200, 200, 200))  # the window's own pixels: nothing in front of it
+
+    def png(img):
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        return buf.getvalue()
+
+    def capture(region=None, display=None):
+        x, y, w, h = region
+        return ImagePart(png(screen_img.crop((x, y, x + w, y + h)))), 1.0
+
+    saved = screen.capture_window, getattr(prefetch, "_windows_above", None), screen.capture
+    screen.capture_window = lambda wid, region=None: ImagePart(png(own))
+    screen.capture = capture
+    prefetch._windows_above = lambda wid: [{
+        "kCGWindowNumber": 9, "kCGWindowOwnerPID": 555, "kCGWindowOwnerName": "Floaty", "kCGWindowAlpha": 1.0,
+        "kCGWindowLayer": 3, "kCGWindowBounds": {"X": floaty[0], "Y": floaty[1], "Width": floaty[2], "Height": floaty[3]},
+    }]  # fmt: skip
+    W.front, W.walk_s, W.shot_s = ("Tablero", 104), 0.0, 0.0
+    prefetch._slow_until.clear()
+    try:
+        d = Decision("agent_task", 0.95, False, 0.0, True, 0.9)
+        look = await prefetch.collect(prefetch.start("make the first move in tablero", d, sees=True), TOOLS)
+        pic = Img.open(io.BytesIO(look.picture.image.data)).convert("RGB")
+        shot = pointer.get_shot(look.picture.shot)
+        n = right = into_unseen = 0
+        for px in range(0, pic.width, 10):
+            for py in range(0, pic.height, 10):
+                sx, sy = shot.to_screen(px, py)
+                hits_floaty = floaty[0] <= sx < floaty[0] + floaty[2] and floaty[1] <= sy < floaty[1] + floaty[3]
+                shows_floaty = pic.getpixel((px, py)) == (220, 0, 0)
+                n += 1
+                right += hits_floaty == shows_floaty
+                into_unseen += hits_floaty and not shows_floaty
+        return {"sampled_pixels": n, "picture_shows_what_a_click_hits": f"{right / n:.1%}",
+                "clicks_into_an_app_the_picture_doesnt_show": f"{into_unseen / n:.1%}"}  # fmt: skip
+    finally:
+        screen.capture_window, screen.capture = saved[0], saved[2]
+        prefetch._windows_above = saved[1] if saved[1] is not None else (lambda wid: [])
+
+
 async def main() -> None:
     rows = [
         await scenario("AX task: 'in quillpad, press New Page'", "in quillpad, press new page",
@@ -267,17 +334,24 @@ async def main() -> None:
               f"(first call {a['first_call_tokens']} → {b['first_call_tokens']})")  # fmt: skip
     print("\n2. added before the first model call (look beside routing; deadline 500 ms)")
     lat = []
-    for walk, image in ((0.05, False), (0.15, False), (0.40, False), (0.70, False), (0.15, True), (0.40, True)):
-        r = await added_latency(walk, 0.25, 0.03, image)
+    rows2 = ((0.05, False, False), (0.15, False, False), (0.40, False, False), (0.70, False, False), (0.15, True, False),
+             (0.40, True, False), (0.15, False, True), (0.15, True, True))  # fmt: skip
+    for walk, image, web in rows2:
+        r = await added_latency(walk, 0.25, 0.03, image, web)
         lat.append(r)
-        print(f"   AX walk {r['walk_ms']:>4.0f} ms, picture {r['picture_ms']:>3.0f} ms, routing {r['routing_ms']:.0f} ms → "
-              f"+{r['added_ms_first']} ms first request, +{r['added_ms_p50_next4']} ms next ones, attached {r['attached']}")  # fmt: skip
+        print(f"   AX walk {r['walk_ms']:>4.0f} ms{' (web app, +400 ms settle once)' if web else ''}, picture {r['picture_ms']:>3.0f} ms, "
+              f"routing {r['routing_ms']:.0f} ms → +{r['added_ms_first']} ms first request, +{r['added_ms_p50_next4']} ms next ones, "
+              f"attached {r['attached']}")  # fmt: skip
     print("\n3. the resolver's first question after the user speaks (fake checkpoint at measured timings)")
     pw = [prewarm_bench(0.45, 0.035, s) for s in (1.2, 0.3)] + [prewarm_bench(0.70, 0.035, 1.2)]
     for r in pw:
         print(f"   load {r['load_ms']:.0f} ms, speech {r['speech_ms']:.0f} ms → cold {r['resolver_first_question_ms[cold]']} ms, "
               f"prewarmed {r['resolver_first_question_ms[prewarmed on wake]']} ms")  # fmt: skip
-    print("\n" + json.dumps({"round_trips": rows, "added_latency": lat, "prewarm": pw}, indent=1))
+    print("\n4. another app's window over part of the pictured one (every 10th pixel of the picture)")
+    cov = await covered_window()
+    print(f"   {cov['sampled_pixels']} pixels: the picture shows what a click hits at {cov['picture_shows_what_a_click_hits']}; "
+          f"a click lands in an app the picture doesn't show at {cov['clicks_into_an_app_the_picture_doesnt_show']}")  # fmt: skip
+    print("\n" + json.dumps({"round_trips": rows, "added_latency": lat, "prewarm": pw, "covered_window": cov}, indent=1))
 
 
 if __name__ == "__main__":
