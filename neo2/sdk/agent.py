@@ -928,8 +928,9 @@ class AsyncAgent:
 
     async def forget_all(self) -> dict[str, int]:
         """Erase what this agent kept: its memory, audit log, browser profile (cookies, logins) and
-        conversations. Only NEO's own files in its folder go (never anything else there). Host code
-        only: never a tool. Other agents, and NEO.app, are untouched."""
+        conversations. Only NEO's own files in its folder go (never anything else there); a
+        MemoryConfig file is deleted only while it holds NEO's tables alone (else just its rows go).
+        Host code only: never a tool. Other agents, and NEO.app, are untouched."""
         self._check_open()
         rt = self._rt
         rt.generation += 1  # a request already running doesn't write its conversation back
