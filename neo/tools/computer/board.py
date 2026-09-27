@@ -559,18 +559,21 @@ def _seek_lattice(g: np.ndarray, P: np.ndarray, strength: np.ndarray, seeds: int
     for s in np.argsort(-strength)[:seeds]:
         if int(s) in done:
             continue
-        cells = []
-        for a, b in itertools.combinations(np.argsort(D[s])[1:9], 2):
-            u, v = P[a] - P[s], P[b] - P[s]
-            nu, nv = np.linalg.norm(u), np.linalg.norm(v)
-            if nu < 6 or nv < 6 or not (0.33 < nu / nv < 3.0):
-                continue
-            if abs(u[0] * v[1] - u[1] * v[0]) / (nu * nv) < 0.55:  # (≥ about 33° apart)
-                continue
-            d4 = np.linalg.norm(P - (P[s] + u + v), axis=1)
-            c = int(np.argmin(d4))
-            if d4[c] <= 0.25 * min(nu, nv) and c not in (s, a, b):
-                cells.append((int(a), int(b), c))
+        # unit cells: two neighbours in different directions (≥ about 33° apart, lengths within 3×)
+        # and a candidate at the fourth corner — every pair of the 8 nearest at once
+        pairs = np.array(list(itertools.combinations(np.argsort(D[s])[1:9], 2)), int).reshape(-1, 2)
+        U, V = P[pairs[:, 0]] - P[s], P[pairs[:, 1]] - P[s]
+        nu, nv = np.linalg.norm(U, axis=1), np.linalg.norm(V, axis=1)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            ok = (nu >= 6) & (nv >= 6) & (nu / nv > 0.33) & (nu / nv < 3.0)
+            ok &= np.abs(U[:, 0] * V[:, 1] - U[:, 1] * V[:, 0]) / (nu * nv) >= 0.55
+        if not ok.any():
+            continue
+        pairs, U, V, nu, nv = pairs[ok], U[ok], V[ok], nu[ok], nv[ok]
+        d4 = np.linalg.norm(P[None, :, :] - (P[s] + U + V)[:, None, :], axis=2)
+        c4 = np.argmin(d4, axis=1)
+        ok = (d4[np.arange(len(c4)), c4] <= 0.25 * np.minimum(nu, nv)) & (c4 != s) & (c4 != pairs[:, 0]) & (c4 != pairs[:, 1])
+        cells = [(int(a), int(b), int(c)) for (a, b), c in zip(pairs[ok].tolist(), c4[ok].tolist(), strict=True)]
         if not cells:
             continue
         # the corner of four alternating squares, judged on all the candidate cells at once (as if flat
@@ -1354,12 +1357,42 @@ _pictures: dict[str, Picture] = {}  # screenshots NEO saw a board-like area in b
 _KEEP_PICTURES = 2
 
 
+_empty: dict[tuple, np.ndarray] = {}  # canvases searched to no board: where → a thumbnail of it then
+_KEEP_EMPTY = 8
+_hinted: set[tuple] = set()  # where the "give its corners" hint was given already
+
+
 def forget() -> None:
     """Drop every board and picture (tests; a new conversation)."""
     global _latest
     _boards.clear()
     _pictures.clear()
+    _empty.clear()
+    _hinted.clear()
     _latest = None
+
+
+def _where(pic: Picture, window, region) -> tuple:
+    """A canvas's place, to know it again: its window, the part looked at, the picture's size."""
+
+    def whole(v) -> tuple[int, ...] | None:
+        return None if v is None else tuple(int(round(float(x))) for x in v)
+
+    return whole(window), whole(region), pic.rgb.shape
+
+
+def _thumb(pic: Picture, region) -> np.ndarray:
+    """A small picture of what is looked at (about 100 px long): enough to see that it changed."""
+    a = pic.rgb
+    if region is not None:
+        x, y, w, h = region
+        a = a[max(0, int(y)) : max(0, int(y + h)), max(0, int(x)) : max(0, int(x + w))]
+    k = max(1, max(a.shape[:2]) // 100)
+    return a[k // 2 :: k, k // 2 :: k].astype(np.int16)
+
+
+def _unchanged(a: np.ndarray | None, b: np.ndarray) -> bool:
+    return a is not None and a.shape == b.shape and float(np.abs(a - b).mean()) <= 1.5
 
 
 def latest() -> Board | None:
@@ -1485,9 +1518,22 @@ def survey(
         inv = np.linalg.inv(pic.to_screen)
         (ax0, ay0), (ax1, ay1) = _apply(inv, [(area[0], area[1]), (area[0] + area[2], area[1] + area[3])])
         region = (float(ax0), float(ay0), float(ax1 - ax0), float(ay1 - ay0))
-    b = _flat(pic, region, canvas)
-    if b is None and canvas:
-        b = find_tilted(pic, region)
+    where = thumb = None
+    if canvas:  # (a canvas searched a moment ago to no board, unchanged since: not searched again)
+        where, thumb = _where(pic, window, region), _thumb(pic, region)
+    if canvas and _unchanged(_empty.get(where), thumb):
+        b = None
+    else:
+        b = _flat(pic, region, canvas)
+        if b is None and canvas:
+            b = find_tilted(pic, region)
+        if canvas and b is None:
+            _empty[where] = thumb
+            while len(_empty) > _KEEP_EMPTY:
+                _empty.pop(next(iter(_empty)))
+        elif canvas:
+            _empty.pop(where, None)
+            _hinted.difference_update({k for k in _hinted if k[0] == where})
     if b is None:
         if window is not None:
             forget_window(window)  # the boards that were in this window aren't there any more
@@ -1685,7 +1731,19 @@ def look(
         return covered_note() if canvas or (_latest is not None and window is not None and _latest.window == window) else ""
     if s.board is not None:
         return note(s.board, s.since, blind=blind)
-    return hint_note(shot, blind=blind) if s.hint else ""
+    if not s.hint:
+        return ""
+    # the hint once per canvas (per kind of brain): it stays in the conversation, and a canvas with no
+    # board — a photo, a map, a video — shouldn't cost ~70 tokens on every screenshot
+    area_px = None
+    if area is not None:
+        (ax0, ay0), (ax1, ay1) = _apply(np.linalg.inv(pic.to_screen), [(area[0], area[1]), (area[0] + area[2], area[1] + area[3])])
+        area_px = (ax0, ay0, ax1 - ax0, ay1 - ay0)
+    key = (_where(pic, window, area_px), blind)
+    if key in _hinted:
+        return ""
+    _hinted.add(key)
+    return hint_note(shot, blind=blind)
 
 
 def region(b: Board, margin: float = 0.03) -> tuple[int, int, int, int]:
