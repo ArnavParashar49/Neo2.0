@@ -85,9 +85,10 @@ def test_a_board_found_by_neo_still_serves_a_blind_brain(world, new_tools):
 
 
 def test_a_cell_resolver_that_cant_hear_the_blind_flag_is_not_taken():
+    before = pointer._cell_resolver  # (the board helper's, registered at import)
     with pytest.raises(TypeError):
         pointer.set_cell_resolver(lambda cell, shot: (1.0, 2.0))
-    assert pointer._cell_resolver is None
+    assert pointer._cell_resolver is before
     pointer.set_cell_resolver(lambda cell, shot, **kw: (1.0, 2.0))  # (a catch-all takes it)
     pointer.set_cell_resolver(None)
 

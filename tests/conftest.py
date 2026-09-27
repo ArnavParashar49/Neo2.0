@@ -177,6 +177,28 @@ def _no_real_screen(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _pointer_seams():
+    """The helpers plugged into the pointer at import (the board helper's squares and checks, OCR's
+    text marks) are there again after every test: a test that swaps one in and sets it back to None
+    doesn't take NEO's own away from the tests after it."""
+    try:
+        from neo2.core.tools.computer import pointer
+    except ImportError:  # no macOS frameworks: nothing plugged in
+        yield
+        return
+    names = ("_cell_resolver", "_grid_check", "_cell_before", "_cell_after", "_cell_region")
+    saved = {n: getattr(pointer, n, None) for n in names}
+    ids, labels = dict(pointer._id_resolvers), dict(pointer._id_labels)
+    yield
+    for n, v in saved.items():
+        setattr(pointer, n, v)
+    pointer._id_resolvers.clear()
+    pointer._id_resolvers.update(ids)
+    pointer._id_labels.clear()
+    pointer._id_labels.update(labels)
+
+
+@pytest.fixture(autouse=True)
 def _no_task_grants():
     """A "yes for this task" never outlives the test that gave it."""
     from neo2.core.agent import grants

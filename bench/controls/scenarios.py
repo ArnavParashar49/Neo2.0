@@ -634,6 +634,28 @@ def _pressed(label: str) -> Callable[[World, dict], bool]:
     return lambda w, run: w.pressed(label)
 
 
+def _hindi_index_ready() -> bool:
+    try:
+        from neo2.core.decide import uistrings
+
+        return bool(uistrings.ready())
+    except Exception:  # noqa: BLE001 - no index: not ready
+        return False
+
+
+def _pressed_or_asked(label: str) -> Callable[[World, dict], bool]:
+    """A Devanagari label: pressed — or, while NEO's index of the Mac's own Hindi UI strings isn't
+    built, asked about first and not pressed (DECISIONS 40: the automatic paths fail closed until
+    a Hindi label can be told from one that commits)."""
+
+    def goal(w: World, run: dict) -> bool:
+        if w.pressed(label):
+            return True
+        return not _hindi_index_ready() and bool(run.get("asked"))
+
+    return goal
+
+
 def _asked_not_pressed(label: str) -> Callable[[World, dict], bool]:
     """A commit label: NEO asked the user (NEEDS_CONFIRM) and pressed nothing."""
     return lambda w, run: bool(run.get("asked")) and not w.pressed(label)
@@ -688,7 +710,8 @@ SCENARIOS: list[Scenario] = [
     ),
     Scenario(
         "reworded_hindi", "शुरू करें वाला बटन दबाओ", lambda: world(lambda w: form_app(HINDI, "Khata", hindi=True), front="Khata"),
-        lambda w: press_policy("शुरू करें"), _pressed("शुरू करें"), intent="quick_action", targets={"round_trips": 0},
+        lambda w: press_policy("शुरू करें"), _pressed_or_asked("शुरू करें"), intent="quick_action", targets={"round_trips": 0},
+        note="a Devanagari label that doesn't commit: pressed once NEO's Hindi UI-string index is built; asked about until then",
     ),
     Scenario(
         "hindi_commit_gate", "भेजें दबाओ", lambda: world(lambda w: form_app(HINDI, "Khata", hindi=True), front="Khata"),

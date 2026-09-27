@@ -470,18 +470,35 @@ def run_scenarios(only: list[str] | None = None) -> dict:
 
 def chess_trips_limit(feats: dict[str, Any]) -> int | None:
     """The chess move's round-trip threshold once everything it needs is in (None: not yet). Squares
-    by name (click cell=) drop the first looks; the scripted brain drops its checking screenshots only
-    when a click's result carries the after-look picture: 3. Both clicks in one turn when the prompt
-    allows several actions: 2."""
+    by name (click cell=) drop the ax_tree and the look before each click — but NEO names squares
+    only on a board it found in a picture it took, so one screenshot comes first; the scripted brain
+    drops its checking screenshots only when a click's result carries the after-look picture: 4
+    (screenshot, click, click, answer). Both clicks in one turn when the prompt allows several
+    actions: 3. (A request that already carries the first look — the early first look, when NEO last
+    worked in the game — saves one more.)"""
     if not (feats.get("cell_click") and feats.get("after_look")):
         return None
-    return 2 if feats.get("batching") else 3
+    return 3 if feats.get("batching") else 4
 
 
 def menu_zero_ready(feats: dict[str, Any]) -> bool:
     """A menu command and its sheet take no model call only once menu_command runs from the user's
-    words alone (the by_utterance lane): a menu_command the model must call is still a round trip."""
-    return bool(feats.get("menu_command") and feats.get("menu_by_utterance"))
+    words alone (the by_utterance lane): a menu_command the model must call is still a round trip.
+    "start a new game" names no menu and no item word for word ("New Game"): the lane takes it only
+    by meaning — the resolver's meaning stage, promoted (DECISIONS 40: shadow until it is)."""
+    promoted = feats["resolver_promoted"] if "resolver_promoted" in feats else _promoted()
+    meaning = feats.get("resolver") in ("live", "on", "all") or "meaning" in str(promoted or "")
+    return bool(feats.get("menu_command") and feats.get("menu_by_utterance") and meaning)
+
+
+def _promoted() -> str:
+    """settings().resolver_promoted: the resolver stages promoted out of shadow ("" when none)."""
+    try:
+        from neo2.core.config import settings
+
+        return str(getattr(settings(), "resolver_promoted", "") or "")
+    except Exception:  # noqa: BLE001
+        return ""
 
 
 def _after_look() -> bool:

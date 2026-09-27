@@ -1456,6 +1456,9 @@ def install(world: World, *, clock: bool = True) -> Iterator[Env]:
         p.set(inp, "can_post", lambda: True)
         # Accessibility odds and ends that read the real Mac
         p.set(ax, "_expose_web", lambda pid, root: False, only_if_present=True)
+        # a fresh process: NEO sets its messaging timeout on this Mac's Accessibility (not one it set
+        # on another — the real one, or an earlier world's — in this process before)
+        p.set(ax, "_timeout_for", None, only_if_present=True)
         p.set(computer, "_browser_names", lambda: set(), only_if_present=True)
         # the screen: one Retina display, screencapture answered by the world
         p.set(screen, "can_capture", lambda: True)

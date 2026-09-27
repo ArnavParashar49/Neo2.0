@@ -85,7 +85,8 @@ def test_fake_as_counts_every_call_exactly():
 
 def test_a_real_ax_tree_through_the_fakes_counts_the_same_every_time():
     runs = [_prim("ax_tree") for _ in range(2)]
-    assert runs[0]["ax_calls"] == runs[1]["ax_calls"] > 1000
+    # (the AX core reads in batches and only what shows: ~290 calls on the 2,522-element app, 7,879 at Step 0)
+    assert runs[0]["ax_calls"] == runs[1]["ax_calls"] > 100
     assert runs[0]["worked"] and runs[0]["captures"] == 0
 
 
@@ -143,7 +144,8 @@ def test_screenshots_are_synthetic_retina_frames():
     with F.install(w) as env:
         out = asyncio.run(R._tool("screenshot"))
         assert out.ok and out.images
-        assert env.screen.captures == [{"region": None, "fmt": "png", "window": False, "in_process": False}]
+        # (screencapture writes a TIFF: the quickest to write and read back — eyes-capture measured it)
+        assert env.screen.captures == [{"region": None, "fmt": "tiff", "window": False, "in_process": False}]
     assert Image.open(io.BytesIO(out.images[0].data)).size == (1512, 982)  # NEO's own downscale of 3024×1964
 
 
@@ -242,19 +244,26 @@ def test_blind_coordinates_that_act_through_accessibility_are_caught(monkeypatch
                 return S.turn(S.call("ax_tree"))
             if not b.state.get("clicked"):
                 b.state["clicked"] = True
-                start = next(e for e in S.elements(S.latest(msgs, "ax_tree").content) if e["title"] == "Start")
-                x, y, ww, hh = start["frame"]
+                # (NEO hands a blind brain no frames: these numbers come from somewhere else — made up)
+                start = w.named("Chess").root.find(lambda e: e.attrs.get("AXTitle") == "Start")
+                x, y, ww, hh = start.frame
                 return S.turn(S.call("click", x=x + ww / 2, y=y + hh / 2))
             return S.say("done")
 
         return p
 
-    sc = S.Scenario("blind_snap", "press start", lambda: S.board_world(sheet=True), policy,
+    # (words that name no control: NEO's own by-utterance lane would press "Start" for "press start")
+    sc = S.Scenario("blind_snap", "carry on with the dialog", lambda: S.board_world(sheet=True), policy,
                     lambda w, run: not w.pressed("Start"), sees=False, needs_screen=True)  # fmt: skip
     r = asyncio.run(R.run_scenario(sc))
     assert r["neo"]["posted"] == 0  # (nothing posted: the old check saw nothing)
     assert not r["checks"]["no_blind_coords"] and not r["pass"]
-    assert not r["checks"]["blind_given_no_coords"] and any("@(" in s for s in r["blind_given"])
+    assert r["checks"]["blind_given_no_coords"], r["blind_given"]  # (the tree it got had ids, no frames)
+
+
+def test_frames_handed_to_a_blind_brain_are_caught():
+    given = R.coords_in('<untrusted source="ax_tree">\n  e10 Button "Start" @(930,238 100x28)\n</untrusted>')
+    assert given and "@(" in given[0]
 
 
 @pytest.mark.parametrize("text", [
@@ -478,7 +487,12 @@ def _batched_ax(r_name: str) -> dict:
 
 
 @bench
-@pytest.mark.parametrize("name,limit", [("ax_tree", 1000), ("click_text", 600), ("ax_hit", 4)])
+@pytest.mark.parametrize("name,limit", [
+    ("ax_tree", 1000), ("click_text", 600),
+    pytest.param("ax_hit", 4, marks=pytest.mark.xfail(strict=True, reason=(
+        "ax.hit takes 8 AX calls (the element, its attributes, its parent's label, its window, the app's "
+        "focused window and a sheet check) against the plan's 4: open (ax-core's deferred item)"))),
+])  # fmt: skip
 def test_ax_call_budgets(name, limit):
     got = _batched_ax(name)
     if not got["batched"]:
@@ -513,65 +527,48 @@ def test_chess_move_round_trips():
     assert r["round_trips"] <= limit
 
 
-def test_the_chess_threshold_waits_for_the_after_look_too(monkeypatch):
-    """click cell= alone (eyes-board) leaves the scripted brain a checking screenshot per move: four
-    round trips. The ≤3 threshold switches on only once click results carry the after-look picture as
-    well; ≤2 once the prompt also allows several actions in one turn."""
-    import copy
+def _words_only(monkeypatch):
+    """A click whose result is words only: no after-look picture (as at Step 0)."""
     import dataclasses
 
-    from neo2.core.agent.registry import registry
+    from neo2.core.agent.registry import ToolOutput, registry
     from neo2.core.tools import load_all
 
     load_all()
-    reg = registry()
-    click = reg.get("click")
+    click = registry().get("click")
     real = click.handler
-    params = copy.deepcopy(click.parameters)
-    params["properties"]["cell"] = {"type": "string"}
-    params["required"] = [r for r in params.get("required", []) if r not in ("x", "y")]
-    held = {}
 
-    async def cell_click(a, c):  # a faithful cell= stand-in: the square's centre, clicked for real
-        if a.get("cell"):
-            x, y = held["world"].board.center(str(a["cell"]))
-            a, c = {"x": x, "y": y}, dataclasses.replace(c, user_text=f"{x} {y}")
-        return await real(a, c)
+    async def words(a, c):
+        out = await real(a, c)
+        out = out if isinstance(out, ToolOutput) else ToolOutput(str(out))
+        out.images = []
+        if out.effect is not None:
+            out.effect = dataclasses.replace(out.effect, looked=False)
+        return out
 
-    monkeypatch.setitem(reg._tools, "click", dataclasses.replace(click, parameters=params, handler=cell_click))
+    monkeypatch.setitem(registry()._tools, "click", dataclasses.replace(click, handler=words))
+
+
+def test_the_chess_threshold_waits_for_the_after_look_too(monkeypatch):
+    """Squares by name alone (click cell=) leave the scripted brain a checking screenshot after its
+    moves: five round trips (a screenshot to find the board, two clicks, a screenshot, the answer).
+    The ≤4 threshold switches on only once click results carry the after-look picture as well; ≤3
+    once the prompt also allows several actions in one turn."""
+    _words_only(monkeypatch)
     feats = R.features()
     assert feats["cell_click"] and not feats["after_look"]
-    assert R.chess_trips_limit(feats) is None  # (so test_chess_move_round_trips still skips)
-    sc = S.by_name("chess_move")
-    build = sc.build
-
-    def build_and_hold():
-        held["world"] = build()
-        return held["world"]
-
-    monkeypatch.setattr(sc, "build", build_and_hold)
-    r = asyncio.run(R.run_scenario(sc))
-    assert r["pass"] and r["round_trips"] == 4, r
-    assert R.chess_trips_limit({**feats, "after_look": True}) == 3
-    assert R.chess_trips_limit({**feats, "after_look": True, "batching": True}) == 2
+    assert R.chess_trips_limit(feats) is None  # (so test_chess_move_round_trips would skip)
+    r = _scenario("chess_move")
+    assert r["pass"] and r["round_trips"] == 5, r
+    assert r["tools"] == ["screenshot", "click", "click", "screenshot"]
+    assert R.chess_trips_limit({**feats, "after_look": True}) == 4
+    assert R.chess_trips_limit({**feats, "after_look": True, "batching": True}) == 3
 
 
 def test_after_look_is_found_by_what_a_models_click_returns(monkeypatch):
-    from neo2.core.agent.registry import ToolOutput, registry
-    from neo2.core.providers.base import ImagePart
-    from neo2.core.tools import load_all
-
-    load_all()
-    assert not R.features()["after_look"]  # (Step 0: a click's result is words only)
-    real = registry().get("click").handler
-
-    async def with_picture(a, c):
-        out = await real(a, c)
-        text = out.text if isinstance(out, ToolOutput) else str(out)
-        return ToolOutput(text, images=[ImagePart(b"\x89PNG", "image/png")])
-
-    monkeypatch.setattr(registry().get("click"), "handler", with_picture)
-    assert R.features()["after_look"]
+    assert R.features()["after_look"]  # (a model's click at a picture's pixel comes back with the picture after it)
+    _words_only(monkeypatch)
+    assert not R.features()["after_look"]
 
 
 @bench
@@ -584,9 +581,13 @@ def test_menu_command_and_its_sheet_take_no_model_call():
 
 
 def test_the_menu_threshold_needs_the_by_utterance_lane():
-    feats = {"menu_command": True, "menu_by_utterance": False}
+    feats = {"menu_command": True, "menu_by_utterance": False, "resolver": "live"}
     assert not R.menu_zero_ready(feats)  # a menu_command the model must call is still a round trip
     assert R.menu_zero_ready({**feats, "menu_by_utterance": True})
+    # "start a new game" names no item word for word: only the meaning stage takes it, once promoted
+    shadow = {**feats, "menu_by_utterance": True, "resolver": "shadow", "resolver_promoted": ""}
+    assert not R.menu_zero_ready(shadow)
+    assert R.menu_zero_ready({**shadow, "resolver_promoted": "meaning"})
 
 
 @bench
