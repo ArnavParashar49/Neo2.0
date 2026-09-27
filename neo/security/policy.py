@@ -1303,9 +1303,10 @@ _CONSEQUENCE = re.compile(
 # What a press in an app's own UI can't take back, that scripts and drops were never gated on: a
 # forward (it sends), ending the app, the session or the Mac (Quit, Restart…, Shut Down…, Log Off,
 # Force Quit), throwing work away (Revert, Don't Save, Clear History), giving a game up (Resign).
-# Labels only: commits() reads it; the AppleScript and drop checks don't.
+# Labels only: commits() reads it; the AppleScript and drop checks don't. (Moving forward - a browser's
+# "Go Forward", a player's "Skip Forward" - is navigation, not a forward.)
 _UI_COMMIT = re.compile(
-    r"\b(?:forward|quit|restart|reboot|shut\s*down|power\s+off|log\s+off|sign\s+off|force\s+quit|kill|"
+    r"\b(?:(?<!go )(?<!skip )(?<!fast )(?<!fast-)(?<!move )forward|quit|restart|reboot|shut\s*down|power\s+off|log\s+off|sign\s+off|force\s+quit|kill|"
     r"terminate|revert|don['’]?t\s+save|do\s+not\s+save|resign|forfeit|surrender|concede|abandon|"
     r"end\s+(?:game|match|call|meeting|session)|clear\s+(?:all|history|browsing|everything|cache|cookies|data|recents?)|"
     r"update\s+now)\b",

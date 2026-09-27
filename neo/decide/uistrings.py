@@ -583,7 +583,7 @@ def load_or_build(*, busy: Callable[[], bool] | None = None, stop: threading.Eve
         install(ix)
         return True
     t0 = time.process_time()
-    pairs = build(busy=busy, stop=stop)
+    pairs = build(ROOTS, LANGS, busy=busy, stop=stop)
     if p is not None:
         try:
             _save(p, bid, pairs)
