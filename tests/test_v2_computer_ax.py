@@ -212,6 +212,24 @@ def test_the_tree_shows_the_focused_window_first_and_only_what_is_in_view(fake):
     assert "Place order" in tree and tree.count('Window "Doc"') == 1  # the window isn't walked twice
 
 
+def test_an_app_whose_frames_dont_add_up_is_still_shown(fake):
+    kids = [button(f"Tool {i}", frame=(5000 + i, 5000, 40, 20)) for i in range(3)]  # all "outside" the window
+    fake.add_app("Odd", 1, El("AXApplication", children=[window("Odd", *kids)]))
+    tree = ax.snapshot("Odd")
+    assert all(f"Tool {i}" in tree for i in range(3))
+
+
+def test_a_closed_sheet_left_in_the_tree_blocks_nothing(fake, monkeypatch):
+    closed = El("AXSheet", frame=(0, 0, 0, 0), children=[button("Start")])
+    board = El("AXGroup", frame=(0, 60, 1512, 900))
+    win = window("Chess", board, closed)
+    fake.add_app("Chess", 42, El("AXApplication", children=[win]))
+    board.attrs["AXWindow"] = win
+    fake.AXUIElementCopyElementAtPosition = lambda sys, x, y, _: (OK, board)
+    monkeypatch.setattr(ax, "_running", lambda pid: None)
+    assert _REAL_HIT(300.0, 500.0).sheet == ""
+
+
 def test_one_odd_element_never_fails_the_whole_tree(fake):
     odd = button("Odd")
     odd.attrs["AXPosition"] = "not a point"

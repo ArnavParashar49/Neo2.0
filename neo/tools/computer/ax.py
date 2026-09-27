@@ -312,10 +312,13 @@ def _outside(frame, box) -> bool:
     )
 
 
-def _walk(el, depth: int, out: list[Element], new_id, *, box=None, budget: list[int] | None = None, skip=None) -> None:
+def _walk(
+    el, depth: int, out: list[Element], new_id, *, box=None, budget: list[int] | None = None, skip=None, clip: bool = True
+) -> None:
     """List the interesting elements under ``el``, depth first. ``box``: the visible part of the
     screen here (the window, the scroll area); whatever lies wholly outside it is scrolled out of
-    view and skipped with everything under it. One odd element never fails the walk."""
+    view and skipped with everything under it (``clip=False``: nothing is). One odd element never
+    fails the walk."""
     if depth > _MAX_DEPTH or len(out) >= _MAX_ELEMENTS:
         return
     if budget is not None:
@@ -328,12 +331,12 @@ def _walk(el, depth: int, out: list[Element], new_id, *, box=None, budget: list[
         role = _str(_attr(el, AS.kAXRoleAttribute))
         if role in _SKIP_ROLES:
             return
-        if role in _FLOATING:
+        if role in _FLOATING or not clip:
             box = None
         x, y, w, h = _point_size(el)
         if _outside((x, y, w, h), box):
             return
-        if role in _CLIPS and w > 0 and h > 0:
+        if clip and role in _CLIPS and w > 0 and h > 0:
             box = _clip(box, (x, y, w, h))
         title = _str(_attr(el, AS.kAXTitleAttribute)) or _str(_attr(el, AS.kAXDescriptionAttribute))
         if not title:
@@ -369,7 +372,7 @@ def _walk(el, depth: int, out: list[Element], new_id, *, box=None, budget: list[
     except Exception:  # noqa: BLE001 - skip this one element, keep the tree
         return
     for c in children:
-        _walk(c, depth + 1, out, new_id, box=box, budget=budget, skip=skip)
+        _walk(c, depth + 1, out, new_id, box=box, budget=budget, skip=skip, clip=clip)
 
 
 # Chromium and Electron apps show their web content (a page, Slack's messages, VS Code's editor)
@@ -469,6 +472,11 @@ def snapshot(app: str | None = None, *, max_lines: int = 250) -> str:
     win = _attr(root, AS.kAXFocusedWindowAttribute)
     if win is not None:  # the window the user works in first: a big sidebar can't crowd it out
         _walk(win, 1, els, _new_id, budget=budget)
+        if len(els) <= 1:
+            # Nothing but the window itself in view: an app whose frames don't add up (some Java or
+            # Qt builds) — look again without cutting anything to the window.
+            els, budget = [], [_MAX_NODES]
+            _walk(win, 1, els, _new_id, budget=budget, clip=False)
     _walk(root, 0, els, _new_id, budget=budget, skip=win)
     with _lock:
         for e in els:
@@ -883,8 +891,21 @@ def summary(el) -> str:
     return (said or "(no text)") + (f" (buttons: {', '.join(buttons)})" if buttons else "")
 
 
+def _shown(el) -> bool:
+    _x, _y, w, h = _point_size(el)
+    return w > 0 and h > 0
+
+
 def _sheet_of(win) -> Any:
-    return next((c for c in (_attr(win, AS.kAXChildrenAttribute) or []) if _str(_attr(c, AS.kAXRoleAttribute)) == "AXSheet"), None)
+    """The sheet open on a window (one with a size: a closed one lingering in the tree isn't)."""
+    return next(
+        (
+            c
+            for c in (_attr(win, AS.kAXChildrenAttribute) or [])
+            if _str(_attr(c, AS.kAXRoleAttribute)) == "AXSheet" and _shown(c)
+        ),
+        None,
+    )
 
 
 def regular(pid: int) -> bool:
@@ -944,7 +965,7 @@ def hit(x: float, y: float) -> Hit:
         elif pid:
             # An app-modal dialog (an alert in its own window) blocks every other window of the app.
             focused = _attr(_app_el(pid), AS.kAXFocusedWindowAttribute)
-            if focused is not None and not _same(focused, win) and _attr(focused, "AXModal") is True:
+            if focused is not None and not _same(focused, win) and _attr(focused, "AXModal") is True and _shown(focused):
                 h.sheet = summary(focused)
     return h
 
