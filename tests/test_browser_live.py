@@ -19,7 +19,7 @@ from neo.agent import confirm
 from neo.agent.registry import ToolContext, registry
 from neo.events import bus, current_job
 from neo.tools import browser, browser_live
-from neo.tools.browser_live import key_event, pack_frame, page_viewport, unpack_frame
+from neo.tools.browser_live import key_event, pack_frame, page_viewport, tidy_label, unpack_frame
 
 
 def _jpeg(w: int = 64, h: int = 40) -> bytes:
@@ -1834,3 +1834,20 @@ async def test_the_socket_never_deflates_page_frames(card, monkeypatch):
             assert c.protocol.extensions == []  # JPEG frames don't compress: zlib on each one is pure cost
     finally:
         srv._server.close()
+
+
+@pytest.mark.parametrize(
+    ("raw", "said"),
+    [
+        ("Search Search Wikipedia [ctrl-option-f]", "Search Wikipedia"),  # a site's accesskey hint + a repeated role word
+        ("Search [alt-shift-f]", "Search"),
+        ("Log in (⌘L)", "Log in"),
+        ("  Add\n to   cart ", "Add to cart"),
+        ("Next [page]", "Next [page]"),  # brackets that aren't a key hint stay
+        ("Buy now (2 left)", "Buy now (2 left)"),
+        ("", ""),
+        (None, ""),
+    ],
+)
+def test_captions_name_an_element_the_way_a_person_would(raw, said):
+    assert tidy_label(raw) == said

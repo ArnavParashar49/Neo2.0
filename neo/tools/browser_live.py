@@ -86,6 +86,24 @@ def pack_frame(
     return head + image
 
 
+# A site's keyboard hint baked into an element's name ("Search Wikipedia [ctrl-option-f]") and the
+# role word some sites repeat ("Search Search Wikipedia"): not what the user would call it.
+_KEY_HINT = re.compile(
+    r"\s*[\[(](?:(?:ctrl|control|alt|option|opt|shift|cmd|command|meta|access\s*key)\b[^\])]*|[⌃⌥⇧⌘][^\])]*)[\])]",
+    re.I,
+)
+
+
+def tidy_label(label: str | None) -> str:
+    """An element's name the way a caption should say it."""
+    words = _KEY_HINT.sub("", str(label or "")).split()
+    out: list[str] = []
+    for w in words:
+        if not out or w.casefold() != out[-1].casefold():
+            out.append(w)
+    return " ".join(out)
+
+
 class _Frame:
     """One page frame on its way to the views: decoded, packed (or turned into JSON) only when a
     view actually gets it, and then once for all of them."""
@@ -1960,8 +1978,8 @@ class Live:
         if rect is not None and x is None:
             x, y = round(rect["x"] + rect["w"] / 2, 1), round(rect["y"] + rect["h"] / 2, 1)
         base: dict[str, Any] = {
-            "kind": kind, "x": x, "y": y, "rect": rect, "label": " ".join(label.split())[:60] or None,
-            "role": role or None, "field": " ".join(fieldname.split())[:60] or None,
+            "kind": kind, "x": x, "y": y, "rect": rect, "label": tidy_label(label)[:60] or None,
+            "role": role or None, "field": tidy_label(fieldname)[:60] or None,
             "text": None if secret or text is None else text[:200], "secret": True if secret else None,
             "key": key or None, "dir": direction or None, "amount": amount, "url": url[:2048] or None,
             "caption": caption or None, "vw": self.vp[0], "vh": self.vp[1],
