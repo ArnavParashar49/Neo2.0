@@ -117,7 +117,7 @@ class Ledger:
         return nxt.timestamp()
 
     def _fresh(self) -> dict[str, Any]:
-        return {"version": _VERSION, "day": self.day(), "usd": 0.0, "tokens": {}, "said": []}
+        return {"version": _VERSION, "day": self.day(), "usd": 0.0, "tokens": {}, "said": [], "refused": {}}
 
     # ---- the file -------------------------------------------------------------------------
     def _load(self) -> dict[str, Any]:
@@ -147,6 +147,8 @@ class Ledger:
             st["tokens"] = {}
         if not isinstance(st.get("said"), list):
             st["said"] = []
+        if not isinstance(st.get("refused"), dict):
+            st["refused"] = {}
         self._state = st
         return st
 
@@ -229,7 +231,7 @@ class Ledger:
         until = self.midnight()
         with self._lock:
             st = self._load()
-            refused = dict(st.get("refused") or {})
+            refused = dict(st["refused"])
             refused[scope] = {"account": self.account, "words": words, "until": until}
             st["refused"] = refused
             self._save(st)
@@ -239,7 +241,7 @@ class Ledger:
         """(words, until) while `scope` is refused today for this key, else None."""
         with self._lock:
             st = self._load()
-        r = (st.get("refused") or {}).get(scope)
+        r = st["refused"].get(scope)
         if not isinstance(r, dict) or r.get("account") != self.account:
             return None
         try:

@@ -721,6 +721,10 @@ async def test_prewarm_soon_runs_in_the_background_and_only_with_a_key(cset, fak
 
 def test_a_damaged_or_unwritable_ledger_never_fails_an_answer(tmp_path, monkeypatch, caplog):
     f = tmp_path / spend.FILE
+    day = time.strftime("%Y-%m-%d")
+    f.write_text(json.dumps({"version": 1, "day": day, "usd": "x", "tokens": [], "said": 3, "refused": [1]}))
+    odd = spend.Ledger(f, daily_budget=0.5, key=KEY)
+    assert odd.today() == 0.0 and odd.refusal("account") is None and odd.refuse("account", "w") > time.time()
     f.write_text("{not json")
     led = spend.Ledger(f, daily_budget=0.5, key=KEY)
     assert led.today() == 0.0 and led.refusal("account") is None
