@@ -706,6 +706,18 @@ def the_accessibility_question(s):
 
 
 @case("permission")
+def the_input_events_question(s):
+    import Quartz
+
+    from neo import permissions
+
+    s.mp.setattr(permissions, "missing", lambda: ["Input events"])
+    s.mp.delenv("NEO_LAUNCHED_BY_APP", raising=False)
+    s.put(Quartz, "CGRequestPostEventAccess", poses_as="objc")
+    return permissions.request_missing
+
+
+@case("permission")
 def the_automation_question(s):
     from neo.decide import media
 

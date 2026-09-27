@@ -75,6 +75,7 @@ def request_missing() -> list[str]:
             import Quartz as Q
 
             if hasattr(Q, "CGRequestPostEventAccess"):
+                effects.guard("permission", "ask macOS to let NEO post input events", via=Q.CGRequestPostEventAccess)
                 Q.CGRequestPostEventAccess()
     except Exception:  # noqa: BLE001
         pass
