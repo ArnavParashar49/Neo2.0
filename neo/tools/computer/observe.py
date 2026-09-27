@@ -11,7 +11,6 @@ listed as far as the walk got.
 from __future__ import annotations
 
 import asyncio
-import io
 from collections.abc import Callable
 
 from neo.agent.registry import ToolContext, ToolOutput, fence
@@ -79,17 +78,13 @@ async def _picture(frame: tuple[float, float, float, float] | None, what: str):
     if await asyncio.to_thread(pointer.protected_in, area):
         return None, None, "(No picture: a window of an app NEO never reads is over it.)"
     try:
-        got = await asyncio.to_thread(screen.capture, area)
+        img, x0, y0, scale, w, h = await asyncio.to_thread(pointer.capture_area, area, "window")
     except PermissionError as e:
         return None, None, f"(No picture: {e})"
     except Exception as e:  # noqa: BLE001 - the list still answers
         return None, None, f"(No picture: the capture failed — {str(e)[:80]}.)"
-    img, scale = got[0], got[1]
-    from PIL import Image
-
-    w, h = Image.open(io.BytesIO(img.data)).size
-    s = pointer.remember(area[0], area[1], scale, w, h)
-    return pointer.detail(img, "high"), s, pointer.note(s, what, [])
+    s = pointer.remember(x0, y0, scale, w, h)
+    return img, s, pointer.note(s, what, [])
 
 
 async def observe(

@@ -926,6 +926,23 @@ def look_area(
     return int(left), int(top), int(round(right - left)), int(round(bottom - top))
 
 
+def capture_area(area: tuple[int, int, int, int], kind: str = "after"):
+    """(picture, x0, y0, points per pixel, width, height) of a screen area (on one display): the
+    capture pipeline's own shot when it has one (neo.tools.computer.screen.shot: its format, size
+    limit and detail per ``kind``), else the screenshot capture (detail set here)."""
+    shot_fn = getattr(screen, "shot", None)
+    if callable(shot_fn):
+        c = shot_fn(area, kind=kind)
+        return c.part, c.x0, c.y0, c.ppp, c.w, c.h
+    import io
+
+    from PIL import Image
+
+    img, scale = screen.capture(area)
+    w, h = Image.open(io.BytesIO(img.data)).size
+    return detail(img, "medium" if kind == "after" else "high"), float(area[0]), float(area[1]), scale, w, h
+
+
 def protected_in(area: tuple[float, float, float, float]) -> bool:
     """Does any window on screen over ``area`` belong to an app NEO never touches (a protected app:
     a host's approval dialog, a vault)? Then no picture of it is taken on NEO's own initiative. When
@@ -976,16 +993,10 @@ async def after_look(ctx: ToolContext, where: list[Aim], pts: list[tuple[float, 
     if area is None or await asyncio.to_thread(protected_in, area):
         return None
     try:
-        got = await asyncio.to_thread(screen.capture, area)
-        img, scale = got[0], got[1]
-        import io
-
-        from PIL import Image
-
-        w, h = Image.open(io.BytesIO(img.data)).size
+        img, x0, y0, scale, w, h = await asyncio.to_thread(capture_area, area, "after")
     except Exception:  # noqa: BLE001 - no Screen Recording, a failed capture: the text outcome stands
         return None
-    s = remember(area[0], area[1], scale, w, h)
+    s = remember(x0, y0, scale, w, h)
     said = (
         f"After-look {s.id} attached ({area[2]}×{area[3]} pt at screen ({area[0]},{area[1]})); the image is {w}×{h} px. "
         f'To act on it next, use shot="{s.id}" (x,y pixels · nx,ny · box_2d, as before) — no separate screenshot needed.'

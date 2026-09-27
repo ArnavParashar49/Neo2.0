@@ -233,6 +233,7 @@ def looking(fake_ax, monkeypatch):
         return ImagePart(buf.getvalue(), "image/png"), 0.5
 
     monkeypatch.setattr(screen, "capture", capture)
+    monkeypatch.setattr(screen, "shot", None, raising=False)  # (the capture pipeline's own shot: not here)
     monkeypatch.setattr(pointer, "protected_in", lambda area: False)
     monkeypatch.setattr(ax, "scene", lambda pid: ax.Scene(front=APP, front_pid=PID, title="Chess", sheet="a sheet “Start a New Game?”", known=True))
     monkeypatch.setattr(ax, "pid_for_app", lambda name: PID if name == APP else None)

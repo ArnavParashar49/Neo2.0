@@ -58,6 +58,7 @@ def captures(monkeypatch):
 
     monkeypatch.setattr(screen, "can_capture", lambda: True)
     monkeypatch.setattr(screen, "capture", capture)
+    monkeypatch.setattr(screen, "shot", None, raising=False)  # (the capture pipeline's own shot: not here)
     return asked
 
 
@@ -466,6 +467,7 @@ def test_no_picture_when_the_capture_fails(world, new_tools, monkeypatch):
 
     monkeypatch.setattr(screen, "can_capture", lambda: True)
     monkeypatch.setattr(screen, "capture", refused)
+    monkeypatch.setattr(screen, "shot", None, raising=False)
     out = run("click", {"x": 612, "y": 540, "shot": _shot().id})
     assert out.ok and not out.images and out.effect.looked is False
 
@@ -635,3 +637,18 @@ def test_a_helpers_own_marks_are_clicked_by_id_even_by_a_blind_brain(world, new_
             pointer.set_id_resolver("e", text_marks)
     finally:
         pointer.set_id_resolver("t", None)
+
+
+def test_pictures_come_from_the_capture_pipelines_own_shot_when_it_has_one(monkeypatch):
+    import types
+
+    asked = []
+
+    def shot(region=None, display=None, *, kind=None, detail=None, fmt=None):
+        asked.append((region, kind))
+        return types.SimpleNamespace(part=ImagePart(b"jpeg", "image/jpeg"), x0=float(region[0]), y0=float(region[1]), ppp=0.5, w=region[2] * 2, h=region[3] * 2)
+
+    monkeypatch.setattr(screen, "shot", shot, raising=False)
+    img, x0, y0, ppp, w, h = pointer.capture_area((10, 20, 300, 200), "after")
+    assert asked == [((10, 20, 300, 200), "after")] and (x0, y0, ppp, w, h) == (10.0, 20.0, 0.5, 600, 400)
+    assert img.mime == "image/jpeg"
