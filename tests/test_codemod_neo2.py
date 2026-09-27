@@ -455,6 +455,32 @@ def test_a_leftover_that_differs_says_how_to_merge(tmp_path):
     assert len(refused) == 1 and "merge c475799" in refused[0]
 
 
+def test_a_file_git_cant_move_yet_is_listed_not_a_crash(tmp_path):
+    """A merge conflict under neo/ (both sides added the file): `git mv` refuses it until it's resolved."""
+    def g(*args: str) -> None:
+        cm.git(tmp_path, "-c", "user.name=t", "-c", "user.email=t@t", *args)
+
+    (tmp_path / "neo").mkdir()
+    (tmp_path / "neo" / "__init__.py").write_text("A = 1\n")
+    with effects.allow("process"):
+        g("init", "-q", "-b", "main")
+        g("add", "-A")
+        g("commit", "-qm", "base")
+        g("checkout", "-qb", "branch")
+        (tmp_path / "neo" / "new.py").write_text("X = 1\n")
+        g("add", "-A")
+        g("commit", "-qm", "branch")
+        g("checkout", "-q", "main")
+        (tmp_path / "neo" / "new.py").write_text("X = 2\n")
+        g("add", "-A")
+        g("commit", "-qm", "main")
+        cm.git(tmp_path, "merge", "branch", check=False)  # add/add conflict in neo/new.py
+        (tmp_path / "neo2" / "core").mkdir(parents=True)
+        (tmp_path / "neo2" / "core" / "__init__.py").write_text("")
+        (tmp_path / "neo" / "__init__.py").write_text('"""neo2-codemod: shim"""\n')
+        moved, refused = cm.relocate(tmp_path, dry=False)
+    assert moved == [] and len(refused) == 1 and refused[0].startswith("neo/new.py:") and "git add" in refused[0]
+
 @pytest.mark.skipif(not (ROOT / ".git").exists(), reason="not a git checkout")
 def test_the_repo_needs_nothing_more(capsys):
     with effects.allow("process"):  # git ls-files
