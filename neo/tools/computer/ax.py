@@ -250,7 +250,9 @@ class Element:
     def center(self) -> tuple[float, float]:
         return (self.x + self.w / 2, self.y + self.h / 2)
 
-    def line(self) -> str:
+    def line(self, coords: bool = True) -> str:
+        """The element in one line; ``coords`` False: without where it is (for a brain that can't
+        see — it never gets coordinates in any form)."""
         role = self.role.removeprefix("AX")
         bits = [f"{self.id}", role]
         if self.title:
@@ -261,7 +263,8 @@ class Element:
             bits.append("(disabled)")
         if self.focused:
             bits.append("(focused)")
-        bits.append(f"@({int(self.x)},{int(self.y)} {int(self.w)}x{int(self.h)})")
+        if coords:
+            bits.append(f"@({int(self.x)},{int(self.y)} {int(self.w)}x{int(self.h)})")
         if self.note:
             bits.append(self.note)
         return " ".join(bits)
@@ -666,8 +669,7 @@ def _still(pid: int, name_l: str) -> bool:
         a = NSRunningApplication.runningApplicationWithProcessIdentifier_(int(pid))
         if a is None or a.isTerminated():
             return False
-        n = str(a.localizedName() or "").lower()
-        return bool(n) and (n == name_l or name_l in n)
+        return str(a.localizedName() or "").lower() == name_l
     except Exception:  # noqa: BLE001
         return False
 
@@ -677,7 +679,8 @@ def pid_for_app(name: str) -> int | None:
     """The app's pid. An exact name wins over a substring match, and a real app (menu bar,
     windows) wins over a helper process that shares the name — "Notes" must not resolve to
     "LinkedNotesUIService", whose AX tree is empty. Asked fresh (apps launched after NEO started
-    are found too), and kept for a few seconds while that app still runs."""
+    are found too), and kept for a few seconds while that app still runs — an app called exactly
+    that only: a name found by part is asked afresh, so the app called that is found once it runs."""
     from AppKit import NSRunningApplication
 
     from neo.tools.computer.focus import pid_running
@@ -698,7 +701,10 @@ def pid_for_app(name: str) -> int | None:
     if best is None:
         _pid_cache.pop(name_l, None)
         return None
-    _pid_cache[name_l] = (best[1], time.monotonic())
+    if best[0] == 0:  # the app called exactly that, a regular one
+        _pid_cache[name_l] = (best[1], time.monotonic())
+    else:
+        _pid_cache.pop(name_l, None)
     return best[1]
 
 
@@ -1067,9 +1073,10 @@ def _menu_bar(bar, new_id, w: _Walk, open_menus: list[Element]) -> list[Element]
     return out
 
 
-def _canvas_line(w: _Walk) -> str:
+def _canvas_line(w: _Walk, blind: bool = False) -> str:
     """'This area has no accessible parts…' — when one childless leaf with no press action covers
-    much of the window (a board, a map, a canvas drawn by the app itself)."""
+    much of the window (a board, a map, a canvas drawn by the app itself). ``blind``: for a brain
+    that can't see — no coordinates, and no screenshot it couldn't look at."""
     if not w.canvas:
         return ""
     el, role, seen, e = max(w.canvas, key=lambda c: c[2][2] * c[2][3])
@@ -1077,6 +1084,11 @@ def _canvas_line(w: _Walk) -> str:
         return ""
     x, y, fw, fh = seen
     what = f"{e.id} " if e is not None else ""
+    if blind:
+        return (
+            f"This area has no accessible parts (a board or canvas): {what}{role.removeprefix('AX')} — "
+            "working inside it needs a model that can see the screen."
+        )
     return (
         f"This area has no accessible parts (a board or canvas): {what}{role.removeprefix('AX')} "
         f"@({int(x)},{int(y)} {int(fw)}x{int(fh)}) — take a screenshot of it to see and click inside it."
@@ -1107,12 +1119,14 @@ def snapshot(
     deadline_s: float = _TREE_S,
     cancel: threading.Event | None = None,
     window: str | None = None,
+    blind: bool = False,
 ) -> str:
     """Return a compact text tree of the frontmost (or named) app's UI: a sheet or dialog to
     answer first, then its focused window (or ``window``, one of its others by title or id), what's
     in view only, controls ahead of plain text when it's too big to show whole; its other windows
     one line each and its menu bar in one line. At most ``deadline_s`` of walking (a partial tree
-    says so); ``cancel`` set: it stops where it is. ``compact``: the controls only, shorter."""
+    says so); ``cancel`` set: it stops where it is. ``compact``: the controls only, shorter.
+    ``blind``: for a brain that can't see — no coordinates anywhere in it."""
     if not is_trusted():
         from neo.agent.confirm import ask_user
 
@@ -1133,15 +1147,19 @@ def snapshot(
     if err == _CANNOT_COMPLETE:
         return f"Error: {name} isn't responding to Accessibility right now (busy or hung) — try again in a moment."
     w = _Walk(deadline_s, cancel)
-    win = rv.get("AXFocusedWindow") or None
+    # The window the user works in: the focused one, else the main one (an app that isn't active,
+    # some Java and Qt builds), else the only one on screen.
+    win = rv.get("AXFocusedWindow") or rv.get("AXMainWindow") or None
     kids = _seq(rv.get("AXChildren"))
     if window:
-        chosen = _pick_window(kids, window, w)
+        chosen = _pick_window(kids, window, w, int(pid or 0))
         if chosen is None:
             return f"Error: {name} has no window called “{window}” — ax_tree lists its windows."
         win = chosen
+    elif win is None:
+        win = _only_window(kids, w)
     if not compact and window is None:
-        cached = _cached(pid, win, name, walk)
+        cached = _cached(pid, win, name, walk, blind)
         if cached is not None:
             return cached
     gen = _watch_gen(pid)
@@ -1200,12 +1218,12 @@ def snapshot(
     tail: list[str] = []
     if bar_items:
         tail.append("  Menu bar: " + " · ".join(f'{e.id} MenuBarItem "{e.title[:30]}"' for e in bar_items))
-    tail += ["  " + e.line() for e in background]
+    tail += ["  " + e.line(not blind) for e in background]
     if said := w.said():
         tail.append("  " + said)
     elif budget[0] < 0:
         tail.append("  (the walk stopped early: this window is very large)")
-    if canvas := _canvas_line(w):
+    if canvas := _canvas_line(w, blind):
         tail.append("  " + canvas)
     body = els + open_menus
     if compact:
@@ -1214,33 +1232,35 @@ def snapshot(
     shown = body[:max_lines]
     budget_chars = min(_lines_budget(), 2500) if compact else _lines_budget()
     left = budget_chars - len(head) - sum(len(x) + 1 for x in fixed) - sum(len(x) + 1 for x in tail)
-    if sum(len(e.line()) + 3 for e in shown) > left:
+    if sum(len(e.line(not blind)) + 3 for e in shown) > left:
         # Too much for one look: what can be acted on first, in screen order within each group.
         order = sorted(range(len(shown)), key=lambda i: (shown[i].role in _READ_ONLY_ROLES, i))
         keep: set[int] = set()
         for i in order:
-            cost = len(shown[i].line()) + 3
+            cost = len(shown[i].line(not blind)) + 3
             if cost > left:
                 continue
             keep.add(i)
             left -= cost
         shown = [e for i, e in enumerate(shown) if i in keep]
-    lines = [head, *fixed] + ["  " + e.line() for e in shown]
+    lines = [head, *fixed] + ["  " + e.line(not blind) for e in shown]
     if len(body) > len(shown):
         lines.append(f"  … {len(body) - len(shown)} more elements (use ax_find to search)")
     text = "\n".join(lines + tail)
-    if not w.stopped and budget[0] >= 0:
+    whole = not w.stopped and budget[0] >= 0
+    if whole:
         _maybe_watch(int(pid or 0))
-        if not compact and window is None:
-            _keep(pid, win, gen, text, allx, name, covering)
+    if not compact and window is None and (whole or gen is None):
+        _keep(pid, win, gen if whole else None, text, allx, name, covering, blind)
     return text
 
 
-def _pick_window(kids: list, want: str, w: _Walk):
-    """One of the app's windows, by an id from an earlier look or by (part of) its title."""
+def _pick_window(kids: list, want: str, w: _Walk, pid: int = 0):
+    """One of the app's windows, by an id from an earlier look (of this app's: never another's
+    window under this app's name) or by (part of) its title."""
     e = get(want.strip())
     if e is not None and e.role == "AXWindow" and e.ref is not None:
-        return e.ref
+        return e.ref if pid and pid_of(e.ref) == pid else None
     want_l = want.strip().casefold()
     for c in kids:
         cv = _read(c, ("AXRole", "AXTitle"), w)
@@ -1249,16 +1269,31 @@ def _pick_window(kids: list, want: str, w: _Walk):
     return None
 
 
-async def tree(app: str | None = None, window: str | None = None, *, compact: bool = False) -> str:
+def _only_window(kids: list, w: _Walk):
+    """The app's one window on screen (not minimized), when it has exactly one — else None."""
+    found = []
+    for c in kids:
+        cv = _read(c, ("AXRole", "AXSize", "AXMinimized"), w)
+        if not cv or _str(cv.get("AXRole")) != "AXWindow" or cv.get("AXMinimized") is True:
+            continue
+        size = _pair(cv.get("AXSize"), False)
+        if size is not None and size[0] > 0 and size[1] > 0:
+            found.append(c)
+    return found[0] if len(found) == 1 else None
+
+
+async def tree(
+    app: str | None = None, window: str | None = None, *, compact: bool = False, blind: bool = False
+) -> str:
     """:func:`snapshot` off the event loop, stopped when the call awaiting it is cancelled."""
-    return await wait.in_thread(snapshot, app, window=window, compact=compact)
+    return await wait.in_thread(snapshot, app, window=window, compact=compact, blind=blind)
 
 
 # ---- the repeat look (axwatch) -------------------------------------------------------------------------
 # While NEO.app watches the app's Accessibility notifications, a look at a window nothing has changed
 # in since the last look is that look again: the same text, the same ids, no walk.
 _CACHE_MAX_S = 5.0
-_cache: dict[int, tuple[Any, int, str, list[Element], float, str, tuple]] = {}
+_cache: dict[int, tuple[Any, int, str, list[Element], float, str, tuple, bool]] = {}
 
 
 def _maybe_watch(pid: int) -> None:
@@ -1267,7 +1302,10 @@ def _maybe_watch(pid: int) -> None:
     try:
         from neo.tools.computer import axwatch
 
-        if not pid or axwatch.watching() == pid or not axwatch.enabled():
+        if not pid or not axwatch.enabled():
+            return
+        if axwatch.watched(pid):
+            axwatch.watch(pid)  # (the app looked at last now: the last to be let go)
             return
         app = _running(pid)
         path = str(app.bundleURL().path()) if app is not None and app.bundleURL() is not None else ""
@@ -1297,22 +1335,26 @@ def _events_sent() -> int:
         return -1
 
 
-def _keep(pid: int, win, gen: int | None, text: str, els: list[Element], name: str, covering) -> None:
-    if gen is None or win is None or not pid:
+def _keep(pid: int, win, gen: int | None, text: str, els: list[Element], name: str, covering, blind: bool) -> None:
+    if not pid:
         return
-    if _watch_gen(pid) != gen:  # something changed while walking: this tree may be half old
+    if gen is None or win is None or _watch_gen(pid) != gen:
+        # Not watched while walking (or something changed meanwhile): nothing can be kept, and
+        # what was kept from this app before is older than this look.
+        _cache.pop(int(pid), None)
         return
-    _cache[int(pid)] = (win, gen, text, els, time.monotonic(), name.lower(), (tuple(c.owner_pid for c in covering), _events_sent()))
+    _cache[int(pid)] = (win, gen, text, els, time.monotonic(), name.lower(), (tuple(c.owner_pid for c in covering), _events_sent()), blind)
 
 
-def _cached(pid: int, win, name: str, walk: int) -> str | None:
+def _cached(pid: int, win, name: str, walk: int, blind: bool) -> str | None:
     """The last look at this window again, when nothing has changed in it since: the app sent no
-    notification, NEO sent no input, no other app's window came over it, and it is recent."""
+    notification, NEO sent no input, no other app's window came over it, and it is recent (and
+    for the same kind of brain: a blind one is never handed a look with coordinates in it)."""
     kept = _cache.get(int(pid or 0))
     if kept is None or win is None:
         return None
-    kwin, gen, text, els, when, kname, (cover, sent) = kept
-    if time.monotonic() - when > _CACHE_MAX_S or kname != name.lower() or not _same(kwin, win):
+    kwin, gen, text, els, when, kname, (cover, sent), kblind = kept
+    if time.monotonic() - when > _CACHE_MAX_S or kname != name.lower() or not _same(kwin, win) or kblind != blind:
         return None
     if _watch_gen(pid) != gen or _events_sent() != sent:
         return None
@@ -1333,7 +1375,7 @@ def forget(pid: int | None = None) -> None:
 
 
 @pooled
-def find(query: str, app: str | None = None, *, cancel: threading.Event | None = None) -> str:
+def find(query: str, app: str | None = None, *, cancel: threading.Event | None = None, blind: bool = False) -> str:
     """Elements whose title/value/role contains `query` (case-insensitive).
 
     Searches the tree the model is already holding ids for; a fresh walk (new ids) only when
@@ -1345,7 +1387,7 @@ def find(query: str, app: str | None = None, *, cancel: threading.Event | None =
         same = bool(want_pid) and want_pid == _last_tree_pid
     looked = ""
     if not _last_tree or not same or time.time() - _last_tree_ts > _FIND_MAX_AGE_S:
-        out = snapshot(app, cancel=cancel)
+        out = snapshot(app, cancel=cancel, blind=blind)
         if isinstance(out, str) and out.startswith(("Error", "NEEDS_")):
             return out
         looked = f"(looked at {app or 'the front app'} again: these ids are new)\n"
@@ -1357,12 +1399,12 @@ def find(query: str, app: str | None = None, *, cancel: threading.Event | None =
     ]
     if not hits:
         return f"{looked}No element matching '{query}' (tree from {int(time.time() - _last_tree_ts)}s ago)."
-    return looked + "\n".join(e.line() for e in hits[:40])
+    return looked + "\n".join(e.line(not blind) for e in hits[:40])
 
 
-async def find_async(query: str, app: str | None = None) -> str:
+async def find_async(query: str, app: str | None = None, *, blind: bool = False) -> str:
     """:func:`find` off the event loop, stopped when the call awaiting it is cancelled."""
-    return await wait.in_thread(find, query, app)
+    return await wait.in_thread(find, query, app, blind=blind)
 
 
 def get(eid: str) -> Element | None:
@@ -1376,6 +1418,16 @@ def get(eid: str) -> Element | None:
 _PRESS_ACTIONS = ("AXPress", "AXPick", "AXOpen")
 _UNSUPPORTED = (-25206, -25208, -25200)  # action unsupported, not implemented, plain failure
 _SYSTEM_MENU = "Error: that's in the system menu (the Apple menu) — NEO never uses it."
+_MENU_UNSURE = (
+    "Error: that menu isn't answering, so NEO can't tell it apart from the system menu (the Apple "
+    "menu), which it never uses — nothing was pressed; look again in a moment."
+)
+
+
+def _system_menu_refusal(el) -> str:
+    """Why a menu element is never pressed ('' when it may be): the system menu, or can't tell."""
+    place = _menu_place(el)
+    return _SYSTEM_MENU if place == "system" else _MENU_UNSURE if place == "unknown" else ""
 
 
 def press_action(e: Element) -> str:
@@ -1383,20 +1435,39 @@ def press_action(e: Element) -> str:
 
 
 def in_system_menu(el) -> bool:
-    """Is this element the system (Apple) menu or inside it — the menu bar's first item, present in
-    every app's menu bar: Restart…, Shut Down…, Log Out, Force Quit. Told by where it sits, never by
-    its words."""
+    """Is this menu element the system (Apple) menu or inside it — the menu bar's first item, present
+    in every app's menu bar: Restart…, Shut Down…, Log Out, Force Quit — or can't that be told (a
+    menu or menu bar that doesn't answer)? Told by where it sits, never by its words; when its place
+    can't be read, it is taken to be there (never pressed on a guess)."""
+    return _menu_place(el) != "app"
+
+
+def _menu_place(el) -> str:
+    """"system": the system menu or in it; "app": anywhere else (an app's own menu, a popup or
+    context menu, not in a menu at all); "unknown": its menus or menu bar didn't say."""
     p = el
-    for _ in range(10):
+    for _ in range(12):
         if p is None:
-            return False
-        v = _attrs(p, ("AXRole", "AXParent"))
-        if _str(v.get("AXRole")) == "AXMenuBarItem":
+            return "app"  # the chain ended before any menu bar: a popup or context menu
+        v, err = _attrs_err(p, ("AXRole", "AXParent"))
+        role = _str(v.get("AXRole"))
+        if err == _INVALID and p is el:
+            return "app"  # gone: nothing left to press (the press says so)
+        if err or not role:
+            return "unknown"
+        if role == "AXMenuBarItem":
             bar = v.get("AXParent")
-            items = _seq(_attr(bar, AS.kAXChildrenAttribute)) if bar is not None else []
-            return len(items) >= 2 and _same(items[0], p)
+            if bar is None:
+                return "unknown"
+            bv, berr = _attrs_err(bar, ("AXChildren",))
+            items = _seq(bv.get("AXChildren"))
+            if berr or not items:
+                return "unknown"
+            return "system" if len(items) >= 2 and _same(items[0], p) else "app"
+        if role not in ("AXMenu", "AXMenuItem"):
+            return "app"  # not (or no longer) in a menu
         p = v.get("AXParent")
-    return False
+    return "unknown"  # nested deeper than any app's menus: not told apart
 
 
 def _menu_role(e: Element) -> bool:
@@ -1411,8 +1482,8 @@ def press_el(e: Element) -> str:
     if not action:
         offers = ", ".join(a for a in e.actions) or "none"
         return f"Error: {e.id} can't be pressed (its actions: {offers}) — click it by id instead."
-    if _menu_role(e) and e.ref is not None and in_system_menu(e.ref):
-        return _SYSTEM_MENU
+    if _menu_role(e) and e.ref is not None and (no := _system_menu_refusal(e.ref)):
+        return no
     err = perform_action(e.ref, action)
     if err == 0:
         return f"Pressed {what}"
@@ -1556,6 +1627,8 @@ def window_elements(
     frame = _point_size(win)
     if early_exit is None and not w.stopped and gen is not None and _watch_gen(pid) == gen:
         _win_cache[int(pid)] = (win, gen, _events_sent(), time.monotonic(), frame, els)
+    elif pid and (gen is None or _watch_gen(pid) != gen):
+        _win_cache.pop(int(pid), None)  # what was kept from this app is older than this walk
     return name, frame, els
 
 
@@ -1670,8 +1743,8 @@ def press_element(e: Element) -> str:
     action = "AXPress" if "AXPress" in e.actions else ""
     if not action:
         return "Error: no press action"
-    if _menu_role(e) and e.ref is not None and in_system_menu(e.ref):
-        return _SYSTEM_MENU
+    if _menu_role(e) and e.ref is not None and (no := _system_menu_refusal(e.ref)):
+        return no
     err = perform_action(e.ref, action)
     return "Pressed" if err == 0 else f"Error: AX action failed ({err})"
 
@@ -1934,6 +2007,8 @@ def _blocked(pid: int, win, x: float, y: float, kids: list | None = None) -> str
     target = win if win is not None else focused
     if target is None:
         return ""
+    if win is None and not _inside(x, y, _point_size(focused)):
+        return ""  # a point on another window of the app (a board beside the document): not this sheet's
     sheet = _sheet_of(target, kids)
     if sheet is not None and not _inside(x, y, _point_size(sheet)):
         return summary(sheet)
@@ -2194,7 +2269,40 @@ _MENU_ATTRS = (
     "AXChildren",
 )
 # AXMenuItemCmdModifiers: 0 is ⌘ alone; these bits add a modifier, the last takes ⌘ away.
-_MENU_SHIFT, _MENU_OPTION, _MENU_CONTROL, _MENU_NO_COMMAND = 1, 2, 4, 8
+_MENU_SHIFT, _MENU_OPTION, _MENU_CONTROL, _MENU_NO_COMMAND, _MENU_FN = 1, 2, 4, 8, 16
+_MENU_MODS = ((_MENU_SHIFT, "shift"), (_MENU_OPTION, "alt"), (_MENU_CONTROL, "ctrl"), (_MENU_FN, "fn"))
+# What a menu shows for a key with no letter: a control character (Carbon's and AppKit's)…
+_MENU_CONTROL_KEYS = {
+    "\x01": "home", "\x03": "return", "\x04": "end", "\x05": "help", "\x08": "delete", "\t": "tab",
+    "\x0b": "pageup", "\x0c": "pagedown", "\r": "return", "\x19": "tab", "\x1b": "escape",
+    "\x1c": "left", "\x1d": "right", "\x1e": "up", "\x1f": "down", "\x7f": "delete",
+}  # fmt: skip
+# …or one of NSEvent's function-key characters (U+F700–U+F8FF): the arrows, F1…, and the like.
+_MENU_FUNCTION_KEYS = {
+    0xF700: "up", 0xF701: "down", 0xF702: "left", 0xF703: "right", 0xF728: "forwarddelete",
+    0xF729: "home", 0xF72B: "end", 0xF72C: "pageup", 0xF72D: "pagedown", 0xF746: "help",
+    **{0xF704 + n: f"f{n + 1}" for n in range(35)},
+}  # fmt: skip
+
+
+def _menu_key(char: str, vkey: int) -> str:
+    """A menu item's key as input names it: a printable character as itself (a space is "space"),
+    a control or function-key character by the key it stands for, anything else (an emoji, a
+    character with no key) by its virtual key; '' when none of those names a key NEO can press."""
+    from neo.tools.computer import input as inp
+
+    char = char or ""
+    if char == " " or (not char.strip() and char and " " in char):
+        name = "space"
+    else:
+        c = char.strip()
+        if len(c) == 1 and "!" <= c <= "~":
+            name = c.lower()
+        elif len(c) == 1 and (c in _MENU_CONTROL_KEYS or ord(c) in _MENU_FUNCTION_KEYS):
+            name = _MENU_CONTROL_KEYS.get(c) or _MENU_FUNCTION_KEYS[ord(c)]
+        else:  # (a virtual key names a letter by the US layout: only its named keys are taken)
+            name = next((k for k, code in inp._KEYCODES.items() if vkey and code == vkey and len(k) > 1), "")
+    return name if name in inp._KEYCODES or name in inp._SHIFTED else ""
 
 
 @dataclass
@@ -2215,17 +2323,14 @@ class MenuItem:
 
     @property
     def chord(self) -> str:
-        """The shortcut as input.hotkey writes it ("cmd+shift+n"); '' when it has none."""
-        key = self.key.strip().lower()
-        if not key and self.vkey:
-            from neo.tools.computer import input as inp
-
-            key = next((k for k, c in inp._KEYCODES.items() if c == self.vkey and len(k) > 1), "")
+        """The shortcut as input.hotkey writes it ("cmd+shift+n", "cmd+delete", "ctrl+fn+left");
+        '' when it has none, or none NEO could press."""
+        key = _menu_key(self.key, self.vkey)
         if not key:
             return ""
         mods = [] if self.mods & _MENU_NO_COMMAND else ["cmd"]
-        mods += [m for bit, m in ((_MENU_SHIFT, "shift"), (_MENU_OPTION, "alt"), (_MENU_CONTROL, "ctrl")) if self.mods & bit]
-        return "+".join([*mods, {" ": "space"}.get(key, key)])
+        mods += [m for bit, m in _MENU_MODS if self.mods & bit]
+        return "+".join([*mods, key])
 
     def where(self) -> str:
         return " › ".join(self.path)
@@ -2317,8 +2422,8 @@ def press_menu_item(item: MenuItem) -> str:
         return f"Error: no menu item “{where}” to press."
     if item.pid and is_neo(item.pid):
         return "Error: that's NEO's own menu — NEO never presses its own controls."
-    if in_system_menu(item.ref):
-        return _SYSTEM_MENU
+    if no := _system_menu_refusal(item.ref):
+        return no
     if not item.enabled:
         return f"Error: “{where}” can't be chosen right now (it's greyed out)."
     err = perform_action(item.ref, "AXPress", what=f"choose the menu command {where}")

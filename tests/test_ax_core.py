@@ -8,6 +8,7 @@ built and caught before posting."""
 from __future__ import annotations
 
 import asyncio
+import re
 import threading
 import time
 from types import SimpleNamespace
@@ -1150,7 +1151,9 @@ def test_generations_move_with_notifications_and_waits_end_at_the_first(notes):
     threading.Timer(0.02, notes.fire, (5,)).start()
     t0 = time.monotonic()
     assert axwatch.wait_change(5, 1, 2.0) is True and time.monotonic() - t0 < 1.0
-    assert axwatch.watch(6) and notes.stopped == [5] and axwatch.generation(5) is None  # one app at a time
+    assert axwatch.watch(6) and axwatch.watch(7) and notes.stopped == [] and axwatch.generation(5) == 2
+    assert axwatch.watch(8) and notes.stopped == [5] and axwatch.generation(5) is None  # three apps at a time
+    assert axwatch.wait_change(5, 2, 0.01) is None
 
 
 def test_no_watching_in_a_host_process_or_when_switched_off(notes, monkeypatch):
@@ -1356,3 +1359,296 @@ def test_something_frontmost_for_a_moment_is_told_by_how_it_runs_not_its_name(mo
     assert _REAL_FRONTMOST() == ("Editor", 8)
     panel.add(window("Search"))  # …unless the user is in a window of it
     assert _REAL_FRONTMOST() == ("Banners", 31)
+
+
+# ---- review fixes: kept looks, observers, menus, windows, caches, a blind brain -----------------------------------------
+
+
+def _native(monkeypatch, names):
+    """The apps are native ones (they send notifications well: watched)."""
+    from neo.decide import axkit
+
+    def running(pid):
+        if pid not in names:
+            return None
+        return SimpleNamespace(localizedName=lambda: names.get(pid, ""), activationPolicy=lambda: 0,
+                               bundleURL=lambda: SimpleNamespace(path=lambda: f"/Applications/{names[pid]}.app"))  # fmt: skip
+
+    monkeypatch.setattr(ax, "_running", running)
+    monkeypatch.setattr(axkit, "runtime", lambda path: "native")
+
+
+def test_a_look_kept_before_an_app_was_let_go_is_never_served_after_it_is_watched_again(fake, notes, monkeypatch):
+    """A→B→A with room to watch one app only: what was kept from A goes when A is let go, and A's
+    count moves on when it is watched again — the model and the gate read A as it is now."""
+    from neo.tools.computer import gates
+
+    monkeypatch.setattr(axwatch, "_MAX_WATCHED", 1)
+    text = El("AXStaticText", value="Save your changes?", frame=(20, 40, 300, 20))
+    btn = button("Before", frame=(20, 60, 80, 24))
+    fake.add_app("Alpha", 100, app_root(window("Alert", text, btn, button("OK", frame=(20, 90, 60, 24)))))
+    fake.add_app("Beta", 200, app_root(window("B", button("Other"))))
+    _native(monkeypatch, fake.names)
+    ax.snapshot("Alpha")  # watching Alpha from here on
+    assert '"Before"' in ax.snapshot("Alpha")  # kept
+    assert "Save your changes?" in gates._dialog_text(None, "Alpha")  # the gate's walk: kept too
+    ax.snapshot("Beta")  # Alpha is let go, and what was kept from it
+    assert 100 not in ax._cache and 100 not in ax._win_cache
+    btn.attrs["AXTitle"] = "After"  # Alpha changes while nobody watches it
+    text.attrs["AXValue"] = "Delete all 212 files permanently?"
+    assert '"After"' in ax.snapshot("Alpha")  # (walked: watched again from here)
+    again = ax.snapshot("Alpha")
+    assert '"After"' in again and '"Before"' not in again
+    assert "Delete all 212 files" in gates._dialog_text(None, "Alpha")
+
+
+def test_a_new_watch_never_matches_a_count_from_an_earlier_one(notes):
+    assert axwatch.watch(5) and axwatch.generation(5) == 0
+    notes.fire(5)
+    assert axwatch.generation(5) == 1
+    axwatch.stop()
+    assert axwatch.generation(5) is None
+    assert axwatch.watch(5) and axwatch.generation(5) not in (None, 0, 1)  # a fresh count
+
+
+def test_the_last_three_apps_stay_watched_and_the_one_looked_at_longest_ago_is_let_go(fake, notes, monkeypatch):
+    for i, n in enumerate(("One", "Two", "Three", "Four")):
+        fake.add_app(n, 100 + i, app_root(window(n, button("x"))))
+    _native(monkeypatch, fake.names)
+    for n in ("One", "Two", "Three"):
+        ax.snapshot(n)
+    assert notes.started == [100, 101, 102] and notes.stopped == []
+    ax.snapshot("One")  # One is the one looked at last now
+    assert 100 in ax._cache
+    ax.snapshot("Four")
+    assert notes.stopped == [101] and axwatch.generation(101) is None and axwatch.generation(100) is not None
+
+
+def test_alternating_between_two_apps_starts_each_observer_once_and_reuses_the_looks(fake, notes, monkeypatch):
+    fake.add_app("Alpha", 100, app_root(window("A", *[button(f"a{i}") for i in range(30)])))
+    fake.add_app("Beta", 200, app_root(window("B", *[button(f"b{i}") for i in range(30)])))
+    _native(monkeypatch, fake.names)
+    walks = [calls(fake, lambda app=app: ax.snapshot(app))[0] for app in ("Alpha", "Beta") * 3]
+    assert notes.started == [100, 200] and notes.stopped == []
+    assert walks[4] <= 3 and walks[5] <= 3, walks  # the third look at each: the kept one
+
+
+def test_two_looks_finishing_together_leave_no_observer_behind():
+    class Slow(axwatch.Backend):
+        def __init__(self):
+            self.live, self.starts, self.lock = set(), [], threading.Lock()
+
+        def start(self, pid, on_note):
+            time.sleep(0.05)  # thread start + AXObserverCreate + AddNotification round trips
+            h = {"pid": pid, "n": object()}
+            with self.lock:
+                self.live.add(id(h["n"]))
+                self.starts.append(pid)
+            return h
+
+        def stop(self, handle):
+            with self.lock:
+                self.live.discard(id(handle["n"]))
+
+    b = Slow()
+    axwatch.use_backend(b)
+    try:
+        ts = [threading.Thread(target=axwatch.watch, args=(p,)) for p in (11, 22, 11, 11)]
+        for t in ts:
+            t.start()
+        for t in ts:
+            t.join()
+        assert sorted(b.starts) == [11, 22]  # one start per app, however many looks asked
+        axwatch.stop()
+        assert b.live == set()
+        stopper = threading.Thread(target=lambda: (time.sleep(0.01), axwatch.stop()))
+        stopper.start()
+        axwatch.watch(33)  # stop() came while it started: it goes too
+        stopper.join()
+        assert b.live == set() and axwatch.watching() == 0
+    finally:
+        axwatch.use_backend(None)
+
+
+def test_ax_set_values_writes_go_through_the_one_door_and_drop_the_kept_look(fake, notes, monkeypatch):
+    from neo.decide import media
+
+    fld = El("AXTextField", value="", frame=(10, 60, 200, 24))
+    fake.add_app("Alpha", 100, app_root(window("A", fld)))
+    _native(monkeypatch, fake.names)
+    monkeypatch.setattr(media, "_attr", lambda el, name, default=None: el.attrs.get(name, default) if isinstance(el, El) else default)  # fmt: skip
+    seen = []
+    monkeypatch.setattr(ax, "_watch", lambda kind, el, name, value: seen.append((kind, name)))
+    ax.snapshot("Alpha")
+    tree = ax.snapshot("Alpha")
+    assert 100 in ax._cache
+    out = ax.set_el_value(ax.get(_first_id(tree, "TextField")), "hi")
+    assert out.startswith("Set") and {("set", "AXFocused"), ("set", "AXValue")} <= set(seen)
+    assert 100 not in ax._cache  # the write dropped the look from before it
+
+
+def _first_id(tree: str, role: str) -> str:
+    return next(ln.split()[0] for ln in tree.splitlines() if f" {role}" in ln and ln.strip().startswith("e"))
+
+
+def test_keys_typed_into_one_app_count_as_input_sent(monkeypatch):
+    import Quartz
+
+    from neo.tools.computer import gates
+
+    monkeypatch.setattr(Quartz, "CGEventPostToPid", lambda pid, ev: None)
+    monkeypatch.setattr(ax, "is_neo", lambda pid, name="": False)
+    monkeypatch.setattr(gates, "_protected", lambda name, pid=0: False)
+    n = inp._sent
+    inp._post_to_pid(303, Quartz.CGEventCreateKeyboardEvent(None, 0, True))
+    assert inp._sent == n + 1  # a look kept from before it is out of date
+
+
+@pytest.mark.parametrize(
+    ("char", "mods", "vkey", "chord"),
+    [
+        ("\x08", 0, 51, "cmd+delete"),  # Move to Trash (a control character: the key's own)
+        ("\x08", 1, 51, "cmd+shift+delete"),  # Empty Trash…
+        ("", 0, 126, "cmd+up"),  # Enclosing Folder (a function-key character)
+        ("", 28, 123, "ctrl+fn+left"),  # Move & Resize › Left: fn, control, no ⌘
+        ("🎤", 24, 0, ""),  # Start Dictation…: no key NEO can press
+        (" ", 4, 49, "cmd+ctrl+space"),  # a space is a key, not nothing
+        ("", 0, 96, "cmd+f5"),  # no character: by its virtual key
+        ("", 0, 0, "cmd+f1"),
+        ("", 0, 0, "cmd+forwarddelete"),
+        ("\x7f", 2, 0, "cmd+alt+delete"),
+        ("\r", 0, 36, "cmd+return"),
+        ("\x1b", 8, 53, "escape"),
+        ("N", 1, 45, "cmd+shift+n"),
+        ("\x03", 0, 0, "cmd+return"),
+        ("\x10", 0, 0, ""),  # "a function key" with no virtual key to say which
+    ],
+)
+def test_a_menu_items_chord_names_its_key_as_input_presses_it(char, mods, vkey, chord):
+    item = ax.MenuItem("x", ("Menu", "x"), True, key=char, mods=mods, vkey=vkey)
+    assert item.chord == chord
+    if chord:
+        inp.parse_chord(chord)  # a chord input takes as it is
+
+
+def test_an_app_with_no_focused_window_shows_its_main_window_or_its_only_one(fake):
+    only = window("Only", button("Save"), El("AXTextField", value="hello", frame=(10, 100, 200, 24)))
+    fake.add_app("Jay", 9, app_root(only, AXFocusedWindow=None, AXMainWindow=only))
+    tree = ax.snapshot()
+    assert '"Save"' in tree and "'hello'" in tree and "another window" not in tree
+    one = window("One", button("Open"))
+    fake.apps[9] = app_root(one, AXFocusedWindow=None, AXMainWindow=None).set_pid(9)
+    tree = ax.snapshot()
+    assert '"Open"' in tree and "another window" not in tree  # the one window on screen
+    two = window("Two", button("Close"), frame=(40, 60, 800, 600))
+    fake.apps[9] = app_root(window("One", button("Open")), two, AXFocusedWindow=None, AXMainWindow=None).set_pid(9)
+    tree = ax.snapshot()
+    assert tree.count("another window") == 2 and '"Open"' not in tree  # which one is meant: can't tell
+
+
+def test_a_file_opened_in_an_app_that_shows_another_name_is_settled_at_once(clock, monkeypatch):
+    """The handler's bundle is called one thing and runs under another (a localized name, 'Code'):
+    done when a new app is in front with a window, not after the 2 s cap."""
+    at = clock.now() + 0.12
+    monkeypatch.setattr(apps, "_handler_for", lambda t: ("Visual Studio Code", 0))
+    monkeypatch.setattr(apps, "front_name", lambda: "Code" if clock.now() >= at else "Finder")
+    monkeypatch.setattr(apps, "_has_window", lambda n: n == "Code")
+    t0 = clock.now()
+    assert asyncio.run(apps.settle_opened("/tmp/x.py", "Finder")) == "Code"
+    assert clock.now() - t0 < 0.2
+    monkeypatch.setattr(apps, "front_name", lambda: "Finder")  # nothing new comes forward: the cap
+    t0 = clock.now()
+    assert asyncio.run(apps.settle_opened("/tmp/x.py", "Finder")) == "Finder"
+    assert clock.now() - t0 == pytest.approx(apps._OPEN_NEW_S, abs=0.05)
+
+
+def test_a_sheet_on_one_window_never_blocks_a_point_on_another_window_of_its_app(fake, monkeypatch):
+    sheet = El("AXSheet", "Save changes?", frame=(100, 100, 300, 120), children=[button("Save", frame=(110, 180, 60, 24))])
+    doc = window("Doc", sheet, frame=(0, 25, 600, 500))
+    board = window("Board", frame=(700, 25, 600, 500))
+    root = app_root(doc, board)
+    root.attrs["AXFocusedWindow"] = doc
+    fake.add_app("Game", 42, root)
+    fake.at_point = None  # the board shows Accessibility nothing
+    monkeypatch.setattr(ax, "_window_owner_at", lambda x, y: (42, "Game"))
+    monkeypatch.setattr(ax, "regular", lambda pid: True)
+    assert not _REAL_HIT(1000, 300).sheet  # on the board
+    assert "Save changes?" in _REAL_HIT(500, 400).sheet  # on the document, beside its sheet
+
+
+def test_a_menu_whose_chain_cant_be_read_is_never_pressed_as_if_it_werent_the_system_menu(fake):
+    item = El("AXMenuItem", "Restart…", frame=(0, 30, 200, 20), actions=("AXPress",))
+    apple_menu = El("AXMenu", frame=(0, 24, 200, 200), children=[item])
+    apple = El("AXMenuBarItem", "Apple", frame=(0, 0, 30, 24), children=[apple_menu])
+    mine = El("AXMenuItem", "New", frame=(30, 30, 200, 20), actions=("AXPress",))
+    appmenu = El("AXMenuBarItem", "Alpha", frame=(30, 0, 60, 24), children=[El("AXMenu", children=[mine])])
+    bar = El("AXMenuBar", frame=(0, 0, 1512, 24), children=[apple, appmenu])
+    popup = El("AXMenuItem", "Copy", actions=("AXPress",))
+    ctx = button("More", children=[El("AXMenu", children=[popup])])
+    fake.add_app("Alpha", 100, app_root(bar, window("A", ctx)))
+    assert ax.in_system_menu(item) and not ax.in_system_menu(mine) and not ax.in_system_menu(popup)
+    apple_menu.fails = True  # a quick -25204 on the menu (a busy app)
+    assert ax.in_system_menu(item)
+    e = ax.Element("e1", "AXMenuItem", "Restart…", "", 0, 30, 200, 20, actions=["AXPress"], ref=item)
+    assert ax.press_el(e).startswith("Error") and fake.performed == []
+    apple_menu.fails = False
+    bar.fails = True  # the menu bar can't say which of its items is first
+    assert ax.in_system_menu(mine)
+
+
+def test_a_window_id_from_another_apps_look_is_not_this_apps_window(fake):
+    fake.add_app("Alpha", 100, app_root(window("A", button("Mine"))))
+    fake.add_app("Beta", 200, app_root(window("B"), window("Secret", button("Theirs"))))
+    wid = next(ln.split()[0] for ln in ax.snapshot("Beta").splitlines() if "Secret" in ln and "Window" in ln)
+    out = ax.snapshot("Alpha", window=wid)
+    assert "Theirs" not in out and out.startswith("Error")
+    assert '"Theirs"' in ax.snapshot("Beta", window=wid)  # (its own app's id still works)
+
+
+def test_a_blind_look_carries_no_coordinates_and_asks_for_no_screenshot(fake, notes, monkeypatch):
+    board = El("AXGroup", frame=(120, 70, 1200, 800))
+    fake.add_app("Game", 42, app_root(window("Board", button("New Game"), board), window("Other", frame=(40, 40, 300, 200))))
+    _native(monkeypatch, fake.names)
+    seeing = ax.snapshot("Game")
+    assert "@(" in seeing and "screenshot" in seeing  # (a model that can see gets both)
+    for _ in range(2):  # (the second: never the seeing look kept from before)
+        blind = ax.snapshot("Game", blind=True)
+        assert "@(" not in blind and "screenshot" not in blind and not re.search(r"\d+x\d+", blind)
+        assert '"New Game"' in blind and "can see" in blind and '"Other"' in blind
+    assert "@(" not in ax.find("New", "Game", blind=True)
+    assert "@(" in ax.snapshot("Game")  # …and a seeing look is never the blind one kept
+
+
+def test_a_name_found_by_part_is_never_kept_for_the_app_called_that(monkeypatch):
+    """pid_for_app and apps._running keep an exact name only: after the app called that starts, a
+    helper whose name merely contains it is never the answer."""
+    import AppKit
+
+    running = {777: ("LinkedNotesUIService", 1)}
+
+    class NSRA:
+        @staticmethod
+        def runningApplicationWithProcessIdentifier_(pid):
+            if pid not in running:
+                return None
+            n, pol = running[pid]
+            return SimpleNamespace(localizedName=lambda: n, activationPolicy=lambda: pol,
+                                   processIdentifier=lambda: pid, isTerminated=lambda: False)  # fmt: skip
+
+    def pid_running(name_l):
+        hits = [(n, p) for p, (n, _pol) in running.items() if name_l in n.lower()]
+        return sorted(hits, key=lambda x: x[0].lower() != name_l)
+
+    monkeypatch.setattr(focus, "pid_running", pid_running)
+    monkeypatch.setattr(AppKit, "NSRunningApplication", NSRA)
+    monkeypatch.setattr(ax, "_pid_cache", {})
+    monkeypatch.setattr(apps, "_running_cache", {})
+    assert ax.pid_for_app("Notes") == 777  # only the helper runs
+    running[555] = ("Notes", 0)  # the app launches
+    assert ax.pid_for_app("Notes") == 555
+    assert ax.pid_for_app("Notes") == 555  # (kept, now)
+    del running[555]
+    running[888] = ("Sticky Notes Pro", 0)
+    assert apps._running("notes").processIdentifier() == 888  # a windowed app that contains it
+    running[556] = ("Notes", 0)
+    assert apps._running("notes").processIdentifier() == 556

@@ -92,7 +92,8 @@ _running_cache: dict[str, tuple[int, float]] = {}
 def _running(name: str):
     """The running app called `name` — asked fresh (NSWorkspace's cached list can't see apps
     launched after NEO started unless the Cocoa run loop is pumped), and kept for a few seconds
-    while it still runs (not terminated, same name)."""
+    while it still runs (not terminated, same name). Only an app called exactly that is kept: one
+    found by part of its name is asked afresh, so the app called that is found once it runs."""
     from AppKit import NSRunningApplication
 
     from neo.tools.computer.focus import pid_running
@@ -103,7 +104,7 @@ def _running(name: str):
         a = NSRunningApplication.runningApplicationWithProcessIdentifier_(kept[0])
         try:
             real = str(a.localizedName() or "").lower() if a is not None else ""
-            if a is not None and not a.isTerminated() and (real == want or (want in real and a.activationPolicy() == 0)):
+            if a is not None and not a.isTerminated() and real == want:
                 return a
         except Exception:  # noqa: BLE001 - can't tell: ask afresh
             pass
@@ -111,7 +112,8 @@ def _running(name: str):
     for real, pid in pid_running(want):
         a = NSRunningApplication.runningApplicationWithProcessIdentifier_(pid)
         if a is not None and (real.lower() == want or a.activationPolicy() == 0):
-            _running_cache[want] = (int(pid), time.monotonic())
+            if real.lower() == want:
+                _running_cache[want] = (int(pid), time.monotonic())
             return a
     return None
 
@@ -223,20 +225,20 @@ def _has_window(name: str) -> bool:
 
 
 async def settle_opened(target: str, before: str, same_s: float = _OPEN_SAME_S, new_s: float = _OPEN_NEW_S) -> str:
-    """The app in front once `open` has handed ``target`` over — polled, done when the app that
-    opens it is in front with a window (at most ``new_s``), or when anything else has come forward;
-    when the app already in front (``before``) takes it, or who does can't be told, at most
-    ``same_s``. Returns the name of the app then in front."""
+    """The app in front once `open` has handed ``target`` over — polled, done as soon as another
+    app than ``before`` is in front: with a window when another app takes it (at most ``new_s``:
+    by then the handler has had its chance), at once otherwise (at most ``same_s``: the app already
+    in front takes it, or who does can't be told). Never by the handler's name — its bundle's name
+    is not always the one it runs under (a localized name, "Code"), and some handlers never come
+    forward themselves (a disk image's: the Finder does). Returns the name of the app then in front."""
     handler = await asyncio.to_thread(_handler_for, target)
     other = handler is not None and handler[0] and handler[0] != before
 
     def settled() -> str:
         now = front_name()
-        if other and now == handler[0] and _has_window(now):
-            return now
-        if now and now != before and not other:
-            return now
-        return ""
+        if not now or now == before:
+            return ""
+        return now if not other or _has_window(now) else ""
 
     got = await wait.until(settled, new_s if other else same_s, every=0.03, thread=True)
     return got or await asyncio.to_thread(front_name)

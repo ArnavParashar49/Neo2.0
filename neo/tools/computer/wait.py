@@ -41,10 +41,22 @@ __all__ = [
 ]
 
 
-# The real clock's parts, looked up at call time (a test's fake_clock swaps _now and _sleep).
-_now: Callable[[], float] = time.monotonic
-_sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
-_sleep_sync: Callable[[float], None] = time.sleep
+# The real clock's parts. A test's fake_clock swaps _now and _sleep; each asks time and asyncio at
+# call time, so a harness that swaps time.monotonic / time.sleep / asyncio.sleep is followed too.
+_REAL_SLEEP = time.sleep
+
+
+def _now() -> float:
+    return time.monotonic()
+
+
+async def _sleep(s: float) -> None:
+    await asyncio.sleep(s)
+
+
+def _sleep_sync(s: float) -> None:
+    time.sleep(s)
+
 
 EVERY_S = 0.015  # a poll this often: well under a frame's worth of a person's patience
 
@@ -125,7 +137,7 @@ def precise_sleep(s: float) -> None:
     the last couple of milliseconds yielding until the deadline (an input's timing: a drag's steps)."""
     if s <= 0:
         return
-    if type(clock) is Clock and _sleep_sync is time.sleep:  # real time (a fake clock just moves on)
+    if type(clock) is Clock and time.sleep is _REAL_SLEEP:  # real time (a fake clock just moves on)
         end = time.perf_counter() + s
         if s > _SPIN_S:
             time.sleep(s - _SPIN_S)

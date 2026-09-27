@@ -6,11 +6,16 @@ So a repeat look at a window nothing has changed in is the last look again (``ax
 ``ax.window_elements``: no walk at all), and a wait for "something changed" ends at the first
 notification (:func:`wait_change`) instead of polling.
 
-One background thread runs a CFRunLoop holding one AXObserver, for the one app NEO is working in
-(moved when NEO works in another). NEO.app only: never in library mode (the process is a host's),
-never while real effects are off (a test gives it a fake backend), and not when NEO_AX_WATCH=0.
-Chromium and Electron apps send few notifications, so they aren't watched: a count that doesn't
-move proves nothing there, and callers keep polling.
+One background thread per watched app runs a CFRunLoop holding its AXObserver: the few apps NEO
+worked in last (_MAX_WATCHED; the one looked at longest ago is let go), so going back and forth
+between two apps starts no observer on each look. NEO.app only: never in library mode (the process
+is a host's), never while real effects are off (a test gives it a fake backend), and not when
+NEO_AX_WATCH=0. Chromium and Electron apps send few notifications, so they aren't watched: a count
+that doesn't move proves nothing there, and callers keep polling.
+
+An app's count only ever goes up, and a watch that (re)starts moves it on: a look kept while the
+app was watched before can never match a count from a later watch (what changed in between, while
+nobody watched, was never counted). Letting an app go drops its kept looks too (ax.forget).
 """
 
 from __future__ import annotations
@@ -120,10 +125,12 @@ class _RealBackend(Backend):
             t.join(1.0)
 
 
+_MAX_WATCHED = 3
 _cond = threading.Condition()
-_gens: dict[int, int] = {}
-_watched = 0
-_handle: Any = None
+_gens: dict[int, int] = {}  # pid → its count: only ever goes up (a new watch moves it on too)
+_handles: dict[int, Any] = {}  # pid → its observer's handle, the app looked at last at the end
+_starting: set[int] = set()  # observers being started (one start per app at a time)
+_stops = 0  # stop() calls: a start that overlapped one is undone
 _backend: Backend | None = None  # None: the real one (NEO.app); a test sets a fake
 _last: dict[int, tuple[str, float]] = {}  # pid → (the last notification, when)
 
@@ -151,51 +158,86 @@ def enabled() -> bool:
     return effects.on()
 
 
-def watch(pid: int) -> bool:
-    """Watch this app's notifications from now on (and stop watching the one before). True when
-    its count can be trusted to move."""
-    global _watched, _handle
-    if not pid or not enabled():
-        return False
-    with _cond:
-        if _watched == pid and _handle is not None:
-            return True
-    stop()
+def _let_go(dropped: list[tuple[int, Any]]) -> None:
+    """Stop these observers and drop what was kept from their apps (outside the lock)."""
     backend = _backend or _RealBackend()
-    handle = backend.start(int(pid), _on_note)
-    if handle is None:
-        return False
-    with _cond:
-        _watched, _handle = int(pid), handle
-        _gens.setdefault(int(pid), 0)
-    return True
-
-
-def stop() -> None:
-    """Stop watching (the counts of apps no longer watched mean nothing)."""
-    global _watched, _handle
-    with _cond:
-        handle, _handle = _handle, None
-        _watched = 0
-        _cond.notify_all()
-    if handle is not None:
+    for pid, handle in dropped:
         try:
-            (_backend or _RealBackend()).stop(handle)
+            backend.stop(handle)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            from neo.tools.computer import ax
+
+            ax.forget(pid)
         except Exception:  # noqa: BLE001
             pass
 
 
-def watching() -> int:
-    """The pid being watched (0: none)."""
+def watch(pid: int) -> bool:
+    """Watch this app's notifications from now on (it becomes the one looked at last; the one looked
+    at longest ago is let go past _MAX_WATCHED). True when its count can be trusted to move."""
+    if not pid or not enabled():
+        return False
+    pid = int(pid)
     with _cond:
-        return _watched if _handle is not None else 0
+        while pid in _starting:  # another look is starting this app's observer: that one
+            _cond.wait(2.0)
+        if pid in _handles:
+            _handles[pid] = _handles.pop(pid)
+            return True
+        _starting.add(pid)
+        stops = _stops
+    backend = _backend or _RealBackend()
+    handle = None
+    dropped: list[tuple[int, Any]] = []
+    try:
+        handle = backend.start(pid, _on_note)
+    finally:
+        with _cond:
+            _starting.discard(pid)
+            if handle is not None and stops == _stops:
+                _gens[pid] = _gens.get(pid, -1) + 1  # a fresh count: nothing kept before matches it
+                _handles[pid] = handle
+                while len(_handles) > _MAX_WATCHED:
+                    old = next(iter(_handles))
+                    dropped.append((old, _handles.pop(old)))
+            elif handle is not None:  # stop() came meanwhile: this one goes too
+                dropped.append((pid, handle))
+                handle = None
+            _cond.notify_all()
+        _let_go(dropped)
+    return handle is not None
+
+
+def stop() -> None:
+    """Stop watching every app (the counts of apps no longer watched mean nothing)."""
+    global _stops
+    with _cond:
+        dropped = list(_handles.items())
+        _handles.clear()
+        _stops += 1
+        _cond.notify_all()
+    _let_go(dropped)
+
+
+def watching() -> int:
+    """The app looked at last of those watched (0: none)."""
+    with _cond:
+        return next(reversed(_handles), 0) if _handles else 0
+
+
+def watched(pid: int) -> bool:
+    """Is this app's count moving with its notifications now?"""
+    with _cond:
+        return bool(pid) and int(pid) in _handles
 
 
 def generation(pid: int) -> int | None:
-    """How many notifications the app has sent since NEO began watching it; None when it isn't
-    watched (then nothing can be told from it)."""
+    """The app's count: it moves with every notification it sends while watched, and on every new
+    watch of it. None when it isn't watched (then nothing can be told from it)."""
     with _cond:
-        if not pid or pid != _watched or _handle is None:
+        if not pid or int(pid) not in _handles:
             return None
         return _gens.get(int(pid), 0)
 
@@ -206,7 +248,7 @@ def wait_change(pid: int, since: int, timeout: float) -> bool | None:
     end = time.monotonic() + max(0.0, timeout)
     with _cond:
         while True:
-            if not pid or pid != _watched or _handle is None:
+            if not pid or int(pid) not in _handles:
                 return None
             if _gens.get(int(pid), 0) != since:
                 return True

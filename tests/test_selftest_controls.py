@@ -300,8 +300,8 @@ class Desk:
         flags = ev.get("flags") or 0
         if ev.get("uni"):
             text = ev["uni"][1]
-            if self.opts.get("truncate20"):  # one key event carries at most 20 UTF-16 units
-                text = text.encode("utf-16-le")[:40].decode("utf-16-le", errors="ignore")
+            if limit := self.opts.get("truncate"):  # an app that takes fewer UTF-16 units per key event than NEO sends
+                text = text.encode("utf-16-le")[: 2 * limit].decode("utf-16-le", errors="ignore")
             self.write("raw_key_down", chars=text, code=0, mods=0)
             self._insert(text)
             return
@@ -782,7 +782,7 @@ def test_a_window_that_swallows_its_activating_click_gets_the_click_once_brought
 
 
 def test_characters_lost_between_key_events_are_shown(mac):
-    mac.set(truncate20=True)
+    mac.set(truncate=10)  # (NEO sends at most 20 units a key event: an app keeping 10 loses some)
     report = _run(mac)
     typed = _by_name(report)["type_field"]
     assert typed.status == "fail"
