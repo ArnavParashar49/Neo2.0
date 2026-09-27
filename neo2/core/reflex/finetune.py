@@ -555,6 +555,13 @@ def score(h: dict, X: np.ndarray, lab: dict, sl: dict, rules: dict) -> dict:
         _rate(m, f"{name} fa chat", fired, neg_chat)
         if pos.any():
             m[f"{name}_head"] = float((head_probs(h[name], Xs[pos])[:, 1] >= 0.5).mean())
+    # Conversation the tool lane would hand to a by-utterance UI tool (it presses without a model):
+    # the intent head says quick_action and the tool head picks a UI tool at the lane's floor.
+    ui = [i for i, c in enumerate(h["tool"]["classes"]) if c in UI_TOOLS] if h["tool"] is not None else []
+    if ui:
+        Pt = head_probs(h["tool"], Xs)
+        fired_ui = (P.argmax(1) == _INTENTS.index("quick_action")) & np.isin(Pt.argmax(1), ui) & (Pt.max(1) >= _tool_floor())
+        _rate(m, "ui fa chat", fired_ui, public & chat)
     have = base & (lab["reply"][idx] >= 0)
     m["reply"] = float((head_probs(h["reply"], Xs[have]).argmax(1) == lab["reply"][idx][have]).mean()) if h["reply"] is not None and have.any() else float("nan")
     for name in ("tool", "kind"):
@@ -630,7 +637,18 @@ _FLOORS = {"base": 0.85, "recall": 0.6, "destructive": 0.75, "stop": 0.6, "needs
 # destructive on 4.1% of rows labelled not (the rule alone on 2.5%) and 0.8-0.9% of chat, the
 # screen on 0.03% (none of 2047 chat rows). A head with its "yes" pushed up until it catches more
 # (+50 on the screen head's logit) goes off on 4-6% of rows, 4% of chat.
-_CEILINGS = {"stop fa": 0.03, "destructive fa": 0.10, "destructive fa chat": 0.05, "needs_screen fa": 0.02, "needs_screen fa chat": 0.01}
+_CEILINGS = {"stop fa": 0.03, "destructive fa": 0.10, "destructive fa chat": 0.05, "needs_screen fa": 0.02, "needs_screen fa chat": 0.01,
+             # conversation sent to a tool that presses a control by meaning, with no model call
+             "ui fa chat": 0.01}  # fmt: skip
+# The tools the reflex tool lane hands the user's whole words to (neo2.core.agent.fastpath.by_utterance).
+UI_TOOLS = frozenset({"click_text", "menu_command"})
+
+
+def _tool_floor() -> float:
+    try:
+        return float(settings().reflex_tool_floor)
+    except Exception:  # noqa: BLE001
+        return 0.85
 _MIN_JUDGE = 30
 
 

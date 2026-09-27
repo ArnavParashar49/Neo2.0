@@ -107,7 +107,9 @@ def test_click_text_asks_when_ambiguous(monkeypatch):
     pressed = []
     monkeypatch.setattr(ax, "press_element", lambda e: pressed.append(e.id) or "Pressed")
     out = asyncio.run(registry().invoke("click_text", {"label": "save"}, ToolContext(user_text="")))
-    assert not out.ok and "which one" in out.text and pressed == []
+    # (the resolver's multiple choice: the labels fenced as the screen's words, ids to press)
+    assert not out.ok and "Several labels" in out.text and pressed == []
+    assert out.handoff is not None and sorted(c.label for c in out.handoff.choices) == ["Save as", "Save draft"]
 
 
 def test_scroll_fast_path_uses_the_pointer(monkeypatch):

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import shutil
+import sys
 
 from neo2.core import runtime
 from neo2.core.config import settings
@@ -59,6 +60,16 @@ async def forget_everything() -> dict[str, int]:
     run.forget()  # receipts and last actions (memory only)
     eventkit.forget()
     sites.forget()  # site words searched for lately (memory only)
+    from neo2.core.reflex import uimemory
+
+    counts["ui flows"] = uimemory.forget()  # the per-app flows and wordings learned from your requests
+    if sys.platform == "darwin":
+        try:
+            from neo2.core.tools.computer import resolve
+
+            resolve.forget()  # the resolver's picks and handoffs kept for scoring (memory only)
+        except ImportError:  # (no macOS frameworks)
+            pass
     from neo2.core.decide.kinds import schedule
 
     schedule.forget()  # calendar files handed to a calendar app (an event's title and notes)

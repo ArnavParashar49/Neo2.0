@@ -160,7 +160,12 @@ class Settings(BaseSettings):
     # what it would press and acts only on an exact label; "live" lets every stage that passed
     # its eval act; "off" leaves UI commands to the model. The confirmation gate asks either way.
     resolver: Literal["live", "shadow", "off"] = "shadow"
-    resolver_laya_p: float = 0.7  # Laya's pick counts only this sure, and only agreeing with MiniLM
+    # Laya's pick counts only this sure (0.95 among more than 60 controls), and only agreeing with
+    # MiniLM: 0.7 measured 93.5–94.4% right on the grounding eval, 0.9 98.4–98.7% (decision 40: ≥97%).
+    resolver_laya_p: float = 0.9
+    # The shadow stages allowed to act once the resolver is "live", each after passing its eval: a
+    # comma list of alias, os_strings, meaning ("" = none: the exact-label stage alone acts).
+    resolver_promoted: str = ""
     local_grounder: str = ""  # a local vision model for pointing at things ("" = none: the user picks one)
     ground_port: int = 8081  # where that model is served, on this Mac only
     sck_capture: bool = False  # ScreenCaptureKit one-shot captures instead of the screencapture tool

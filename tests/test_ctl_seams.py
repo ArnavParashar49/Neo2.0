@@ -145,7 +145,8 @@ def test_the_controls_settings_and_their_defaults(monkeypatch):
 
     s = config.settings()
     assert (s.screen_effort, s.prefetch_look, s.shot_format, s.resolver) == ("high", True, "jpeg", "shadow")
-    assert (s.resolver_laya_p, s.local_grounder, s.ground_port, s.sck_capture, s.sck_stream) == (0.7, "", 8081, False, False)
+    assert (s.resolver_laya_p, s.local_grounder, s.ground_port, s.sck_capture, s.sck_stream) == (0.9, "", 8081, False, False)
+    assert s.resolver_promoted == ""  # (no shadow stage acts until promoted)
     for key, typo, default in (("resolver", "livee", "shadow"), ("shot_format", "gif", "jpeg"), ("screen_effort", "max", "high")):
         monkeypatch.setenv(f"NEO_{key.upper()}", typo)
         monkeypatch.setattr(config, "_settings", None)
@@ -801,8 +802,12 @@ def test_click_text_never_picks_a_system_menu_item(monkeypatch):
     assert pressed == [] and str(out).startswith("Error"), out
     game = ax.Element("e9", "AXButton", "Restart", "", 300, 300, 80, 24, actions=["AXPress"], ref=None)
     shown.append(game)  # a game's own Restart button beside it: that one, never the system's
+    from neo2.core.agent import confirm
+
+    asked: list[str] = []  # ("Restart" commits by meaning: the resolver asks first — here, a yes)
+    monkeypatch.setattr(confirm, "gated", lambda tool, a, what, **k: asked.append(what))
     asyncio.run(tools_label.click_text({"label": "restart"}, ToolContext(origin="agent")))
-    assert pressed == ["Restart"]
+    assert pressed == ["Restart"] and all("Restart…" not in q for q in asked)
 
 
 # ---- click_text's mouse fallback: what is really under the spot is gated too -------------------------

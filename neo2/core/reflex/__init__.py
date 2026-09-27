@@ -82,8 +82,12 @@ class Reflex:
             kind = getattr(laya, "last_kind", None)
         if emb is None or center is None:
             return d
-        from neo2.core.reflex import memory
+        from neo2.core.reflex import memory, uimemory
 
+        try:  # (kept a moment, in RAM: a UI flow that settles as verified is keyed by it)
+            uimemory.memory().seen(text, emb)
+        except Exception:  # noqa: BLE001 - learning never breaks a decision
+            pass
         # A request the user corrected a moment ago gets the fix now, not after the next retrain.
         return memory.recall(d, text, emb, center, kind)
 

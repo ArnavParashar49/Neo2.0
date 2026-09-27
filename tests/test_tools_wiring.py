@@ -171,3 +171,66 @@ def test_text_marks_are_clicked_by_id_through_the_pointer_with_their_words_gated
     assert "ocr.install()" in inspect.getsource(tools_pointer)  # (at import: text marks work from the start)
     assert ocr.install()
     assert pointer._id_resolvers["t"] is ocr.resolve_mark and pointer._id_labels["t"] is ocr.mark_labels
+
+
+# ---- commands-resolver --------------------------------------------------------------------------------
+
+
+def _session_world(monkeypatch, intent="agent_task"):
+    from neo2.core import config, events
+    from neo2.core.agent import fastpath
+    from neo2.core.agent import session as sess_mod
+    from neo2.core.agent.registry import registry
+    from neo2.core.agent.session import Session
+    from neo2.core.events import EventBus
+    from neo2.core.reflex.schema import Decision
+    from neo2.core.tools import load_all
+
+    monkeypatch.setattr(config, "_settings", None)
+    monkeypatch.setattr(events, "_bus", EventBus())
+    load_all()
+
+    class Reflex:
+        async def decide(self, text):
+            return Decision(intent, 0.9, False, 0.0, False, 0.0, "fake")
+
+    ran: list[tuple[str, dict, str]] = []
+    real = registry().invoke
+
+    async def invoke(name, args, ctx):
+        if name == "click_text":
+            ran.append((name, dict(args), ctx.origin))
+            from neo2.core.agent.registry import ToolOutput
+
+            return ToolOutput("Clicked 'Start'")
+        return await real(name, args, ctx)
+
+    monkeypatch.setattr(registry(), "invoke", invoke)
+    monkeypatch.setattr(fastpath, "plan", lambda text, *a, **k: None)  # (no regex fast path covers it)
+    agent_runs: list[str] = []
+
+    async def agent(self, text, d, images, job, **kw):
+        agent_runs.append(text)
+        return sess_mod.Reply("agent", "agent", d, job=job)
+
+    monkeypatch.setattr(Session, "_agent", agent)
+    return Session(reflex=Reflex()), ran, agent_runs
+
+
+def test_the_users_words_pointing_at_a_control_take_the_by_utterance_lane(monkeypatch):
+    s, ran, agent_runs = _session_world(monkeypatch)
+    r = asyncio.run(s.handle("start wala button dabao", from_user=True))
+    assert ran and ran[0][0] == "click_text" and ran[0][1]["utterance"] and ran[0][2] == "user"
+    assert r.route == "quick" and agent_runs == []
+    asyncio.run(s.handle("start wala button dabao"))  # Live's relay, not the user's own words: no lane
+    assert len(ran) == 1 and agent_runs == ["start wala button dabao"]
+
+
+def test_the_lane_is_shut_when_the_resolver_is_off(monkeypatch):
+    s, ran, agent_runs = _session_world(monkeypatch)
+    monkeypatch.setenv("NEO_RESOLVER", "off")
+    from neo2.core import config
+
+    monkeypatch.setattr(config, "_settings", None)
+    asyncio.run(s.handle("start wala button dabao", from_user=True))
+    assert ran == [] and agent_runs == ["start wala button dabao"]

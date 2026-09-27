@@ -529,6 +529,9 @@ async def learn_loop(is_idle) -> None:
             idle_since = idle_since or time.time()
             if enabled():
                 memory.rebuild_soon(is_idle)
+                from neo2.core.reflex import uimemory
+
+                uimemory.rebuild_soon(is_idle)  # (the UI flows' skeletons, re-embedded after a restart)
             # due() with learning off: only a reflex without a head, retrained on public rows
             if time.time() - idle_since >= _IDLE_S and due():
                 done = asyncio.get_running_loop().create_future()

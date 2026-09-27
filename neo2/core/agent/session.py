@@ -276,6 +276,11 @@ class Session:
         # the whole job — no model needed.) A plan covers the whole utterance or nothing.
         if d.intent != "chat" and settings().fast_paths and (steps := fastpath.plan(text)):
             return await self._quick(text, d, steps, job=job, origin=origin)
+        # The by-utterance lane: the user's own words point at a control ("start wala button dabao",
+        # "click the new game button") and a tool that grounds them itself takes the whole request —
+        # no model filling in a label. Only the user's words to NEO.app (registry.utterance_lane).
+        if settings().fast_paths and (step := fastpath.by_utterance(text, origin=origin, decision=d)) is not None:
+            return await self._quick(text, d, [step], job=job, origin=origin)
 
         if d.intent == "chat" and not images and not d.needs_screen:
             return await self._chat(text, d, job)
@@ -427,6 +432,13 @@ class Session:
                     log.info(f"  ~ {tool} failed; handing to the agent")
                     ran = "; ".join(f"{tl}({', '.join(f'{k}={v!r}' for k, v in a.items())})" for tl, a in steps[:i])
                     note = f"\n[ALREADY DONE] These steps of the request already ran — don't repeat them: {ran}" if ran else ""
+                    if out.handoff is not None:
+                        # (NEO's own words only: the screen's labels in the handoff are never put in a
+                        # system prompt — the agent looks at the window itself)
+                        note += (
+                            f"\n[NOT SURE WHICH] {tool} couldn't tell which on-screen control the user meant "
+                            f"({out.handoff.reason[:30]}): look at the window (ax_tree) and choose, or ask the user."
+                        )
                     _request_taint.set(tuple(taint))  # what the steps before it read counts for the agent
                     return await self._agent(text, d, None, job, done_note=note)
                 asked = out.staged or asked
