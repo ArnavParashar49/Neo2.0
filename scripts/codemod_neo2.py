@@ -71,6 +71,7 @@ LIGHT = {
 _ALONE = r"(?<![\w.~$/-])"
 R_MODULE = re.compile(_ALONE + r"neo\.(?P<sub>[A-Za-z_]\w*)(?![\w-])")
 R_PATH = re.compile(r"(?:(?<=\./)|" + _ALONE + r")neo/")
+R_SUBDIR = re.compile(r"(?<=/)(?<!\./)neo/")  # …/neo/…: site-packages/neo/? (a URL's path is left alone)
 R_M_PY = re.compile(r"(?P<pre>\bpython[\w.]*\b[^\n]*?(?<![\w-])-m\s+)neo(?![\w.-])")
 R_M_ARGS = re.compile(r"(?P<pre>(?P<q1>[\"'])-m(?P=q1)\s*,\s*)(?P<q2>[\"'])neo(?P=q2)")
 R_M_BARE = re.compile(r"(?<![\w-])-m\s+neo(?![\w.-])")
@@ -162,6 +163,15 @@ def text_edits(
                 add(m.start(), m.start() + 3, NEW, "module path")
     for m in R_PATH.finditer(text):
         add(m.start(), m.end(), NEW_DIR + "/", "path")
+    if not light:
+        for m in R_SUBDIR.finditer(text):
+            if "://" not in text[text.rfind("\n", 0, m.start()) + 1 : m.start()]:
+                refused.append(
+                    (
+                        base + m.start(),
+                        "a path through a folder named neo (site-packages/neo/?): rewrite by hand or mark it",
+                    )
+                )
     return edits, refused
 
 
@@ -351,6 +361,10 @@ def rewrite_python(src: str, ctx: Ctx) -> Outcome:
             as_is.add(at(t.start))
             continue
         if val != OLD:
+            continue
+        near = [sig[j] for j in (k - 2, k + 2) if 0 <= j < len(sig) and sig[j].type == tokenize.STRING]
+        if any(_literal(s) == DIST for s in near):
+            refused.append((t.start[0], '"neo" next to "neo2": the old package? rewrite by hand or mark it'))
             continue
         p1 = sig[k - 1] if k >= 1 else None
         p2 = sig[k - 2] if k >= 2 else None

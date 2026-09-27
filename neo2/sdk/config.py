@@ -30,7 +30,7 @@ class MemoryConfig:
     """Long-term memory in a SQLite file of the host's choosing: a new (or empty) file, or one NEO
     made for an agent before — never a database of the host's own (NEO marks the one it makes)."""
 
-    path: Path  # e.g. /srv/neo/u42/memory.sqlite3
+    path: Path  # e.g. /srv/myapp/u42/memory.sqlite3
     cloud: Literal["full", "profile", "off"] = "profile"  # how much of it rides along to the cloud model
     playbooks: bool = True  # recall and save the tool paths of past tasks
     summaries: bool = False  # summarise long conversations into memory

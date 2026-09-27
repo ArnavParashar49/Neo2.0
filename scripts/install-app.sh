@@ -24,7 +24,7 @@ PYVER="$("$ROOT/.venv/bin/python" -c 'import platform; print(platform.python_ver
 mkdir -p "$RUNTIME"
 uv venv --quiet --allow-existing --python "$PYVER" "$RUNTIME/.venv"
 uv pip install --quiet --python "$RUNTIME/.venv/bin/python" -r "$ROOT/requirements.lock"
-uv pip install --quiet --python "$RUNTIME/.venv/bin/python" --no-deps --reinstall "$ROOT"
+uv pip install --quiet --python "$RUNTIME/.venv/bin/python" --no-deps --reinstall "$ROOT"  # neo2: the app runs -m neo2
 rm -rf "$ROOT/build"  # setuptools' scratch copy of the package
 mkdir -p "$HOME/.neo" && chmod 700 "$HOME/.neo"
 if [ ! -f "$HOME/.neo/.env" ] && [ -f "$ROOT/.env" ]; then
@@ -50,6 +50,19 @@ echo "→ installing"
 launchctl bootout "gui/$(id -u)/$BUNDLE_ID" 2>/dev/null || true
 pkill -TERM -f "$DEST/Contents/MacOS/" 2>/dev/null || true
 for _ in $(seq 1 40); do pgrep -f "$DEST/Contents/MacOS/" >/dev/null || break; sleep 0.5; done
+# Before 2.1 NEO's distribution was `neo` (now `neo2`), and its files include neo2/'s: two owners of
+# the same files, until removing one breaks the other. With the old core stopped (it ran from that
+# distribution, under the old name), remove it and put neo2's files back. Only NEO's own: NeuralEnsemble's
+# `neo` is another project with the same name.
+if "$RUNTIME/.venv/bin/python" -I -c 'import importlib.metadata as m, sys
+sys.exit(0 if (m.metadata("neo")["Summary"] or "").startswith("NEO") else 1)' 2>/dev/null; then
+  echo "  replacing the old neo distribution with neo2"
+  CORE_PID="$(cat "$HOME/.neo/core.pid" 2>/dev/null || true)"  # it saves its session as it stops
+  case "$CORE_PID" in ''|*[!0-9]*) ;; *) for _ in $(seq 1 30); do kill -0 "$CORE_PID" 2>/dev/null || break; sleep 0.5; done ;; esac
+  uv pip uninstall --quiet --python "$RUNTIME/.venv/bin/python" neo
+  uv pip install --quiet --python "$RUNTIME/.venv/bin/python" --no-deps --reinstall "$ROOT"
+  rm -rf "$ROOT/build"
+fi
 rm -rf "$DEST"
 ditto "$APP" "$DEST"
 # Exactly one NEO: forget and remove the build copy, and keep Spotlight out of the build folder.

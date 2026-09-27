@@ -224,6 +224,8 @@ def test_what_it_refuses():
     assert [line for line, _ in out.refused] == [1, 2, 3] and out.counts == {}
     out = py('if name.startswith("neo."):\n    pass\n')
     assert [line for line, _ in out.refused] == [1] and out.text.startswith('if name.startswith("neo.")')
+    out = py('for pkg in ("neo2", "neo"):\n    pass\nassert "/site/neo/" in f\nURL = "https://x.org/neo/y"\n')
+    assert [line for line, _ in out.refused] == [1, 3]
     out = py("def f(:\n")  # not Python: left alone, and said so
     assert out.refused and out.text == "def f(:\n"
 

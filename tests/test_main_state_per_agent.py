@@ -276,12 +276,11 @@ def test_the_suite_itself_runs_embedded_agents_with_effects_off(tmp_path):
 
 
 def _installed(tmp_path: Path) -> Path:
-    """NEO as another app has it: installed into that app's environment (here its two packages,
-    linked into a folder of their own), not run from NEO's source tree."""
+    """NEO as another app has it: installed into that app's environment (here its package, neo2,
+    linked into a folder of its own), not run from NEO's source tree."""
     site = tmp_path / "site"
     site.mkdir()
-    for pkg in ("neo", "neo2"):
-        (site / pkg).symlink_to(ROOT / pkg, target_is_directory=True)
+    (site / "neo2").symlink_to(ROOT / "neo2", target_is_directory=True)
     return site
 
 
@@ -293,7 +292,7 @@ _HOST = textwrap.dedent(
     from neo2.core import effects
     from neo2.testing import ScriptedBrain, ToolCall, Turn
 
-    assert "/site/neo/" in effects.__file__, effects.__file__  # the installed copy, not the source tree
+    assert "/site/neo2/core/" in effects.__file__, effects.__file__  # the installed copy, not the source tree
     before = [effects.why_off(), effects._hooked]
     # The host's own program and its own service (a CI database): nothing of NEO's refuses them.
     # (Asked of the check itself: nothing is started or connected.)
