@@ -47,11 +47,13 @@ SCREEN = {
     "apps_running",
 }
 # A run that works on the screen gets these, the ones registered, in this order (the lean screen
-# mode): look, act by id or label, type, press keys, scroll and drag.
+# mode): look, act by id or label, type, press keys, scroll and drag. The first few come before the
+# request's own best matches, the rest after them.
 SCREEN_CORE = (
-    "look", "ax_tree", "ax_find", "screenshot", "click", "click_text", "ax_press", "ax_set_value", "type_text",
-    "hotkey", "scroll", "drag", "menu_command",
+    "look", "ax_tree", "screenshot", "click", "ax_press", "type_text",
+    "click_text", "ax_set_value", "hotkey", "scroll", "drag", "menu_command", "ax_find",
 )  # fmt: skip
+_SCREEN_FIRST = 6  # SCREEN_CORE[:6]: to look, click, press and type — whatever the request matched
 # NEO's own tools a screen run never gets unless the request itself asks for them.
 _SCREEN_UNLESS_ASKED = frozenset({"shell", "trash", "dictate"})
 _SCREEN_CATEGORY = "computer"
@@ -63,7 +65,7 @@ FAMILIES = {"browser", "computer"}
 _TOP_K = 6
 _MIN_SIM = 0.25
 _MAX_TOOLS = 18
-_MAX_SCREEN_TOOLS = 14
+_MAX_SCREEN_TOOLS = 16
 
 MORE_TOOLS = ToolSpec(
     "more_tools",
@@ -186,10 +188,13 @@ class ToolSelector:
         for n in required:
             add(n, "required")
         if screen:
-            for n in SCREEN_CORE:
+            for n in SCREEN_CORE[:_SCREEN_FIRST]:
                 add(n, "screen")
         for n in top:
             add(n, "match")
+        if screen:
+            for n in SCREEN_CORE[_SCREEN_FIRST:]:
+                add(n, "screen")
         for n in playbook_tools or []:
             add(n, "playbook")
         for n in history_tools or []:
