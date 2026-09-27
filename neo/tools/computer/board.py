@@ -755,6 +755,7 @@ class Board:
     agree: float = 1.0  # share of squares whose colour alternates as a board's should
     state: np.ndarray | None = field(default=None, repr=False)  # how every square looked last time
     rim: np.ndarray | None = field(default=None, repr=False)  # …and its rim (a move leaves rims alone)
+    seen_px: float = 0.0  # …in a picture with squares this many pixels big (its scale)
     occupancy: list[str] | None = None  # per row, top first: '.' empty, 'L' light piece, 'D' dark piece
 
     # -- geometry --
@@ -1136,11 +1137,34 @@ def orientation(occ: list[str]) -> str:
     return ""
 
 
-def changed_cells(b: Board, before: np.ndarray, after: np.ndarray) -> list[tuple[int, int]]:
+def _pooled(st: np.ndarray, k: int) -> np.ndarray:
+    """A flat board's state with its S × S cells averaged k × k."""
+    if k <= 1:
+        return st
+    r, c, n, ch = st.shape
+    m = int(round(math.sqrt(n)))
+    return st.reshape(r, c, m // k, k, m // k, k, ch).mean(axis=(3, 5)).reshape(r, c, -1, ch)
+
+
+def pooling(b: Board, px_a: float, px_b: float) -> int:
+    """How coarsely to compare two looks at a flat board taken at these scales (its squares' size
+    in each picture's pixels): cell by cell at one scale; else in cells at least 2 px big in the
+    coarser picture (a piece's outline blurs differently at each scale — thinner cells take that
+    for a change; coarser ones would miss a light piece on a light square)."""
+    if not b.flat or not px_a or not px_b or max(px_a, px_b) / min(px_a, px_b) <= 1.02:
+        return 1
+    cell = 0.8 / _S * min(px_a, px_b)
+    return next((k for k in (1, 2, 4) if k * cell >= 2.0), 8)
+
+
+def changed_cells(b: Board, before: np.ndarray, after: np.ndarray, *, pool: int = 1) -> list[tuple[int, int]]:
     """Squares (col, row) whose look changed between two states (``state``): what a move did. A
     square changed when enough of its samples did (noise, JPEG and a blinking highlight don't).
     Seen at an angle, a change only in the middle of a square whose neighbour toward the viewer
-    changed too is that neighbour's piece rising over it, not a change of its own."""
+    changed too is that neighbour's piece rising over it, not a change of its own. ``pool``: the
+    looks were taken at different scales (``pooling``)."""
+    if b.flat and pool > 1:
+        before, after = _pooled(before, pool), _pooled(after, pool)
     hit = np.abs(before - after).mean(axis=3) > 25  # (rows, cols, samples)
     moved = hit.mean(axis=2) > (0.05 if b.flat else 0.15)
     if not b.flat:
@@ -1157,17 +1181,117 @@ def changed_cells(b: Board, before: np.ndarray, after: np.ndarray) -> list[tuple
     return [(int(c), int(r)) for r, c in zip(rows, cols, strict=True)]
 
 
+def _integral(crop: np.ndarray, rows: np.ndarray, cols: np.ndarray) -> np.ndarray:
+    """The integral image of ``crop`` at these row and column boundaries only (sorted indices, 0 …
+    size): (rows, cols, colour), the sum of every pixel above and left of each. Sums down each
+    column first — a matrix product, exact in float32 while a column sums below 2**24 — then
+    along the rows in float64."""
+    h = crop.shape[0]
+    up = (np.arange(h)[None, :] < rows[:, None]).astype(np.float32)  # (rows, h): the pixel rows above each
+    cf = np.ascontiguousarray(np.moveaxis(crop, 2, 0), dtype=np.float32)  # (colour, h, w)
+    down = (up @ cf).astype(np.float64)  # (colour, rows, w)
+    left = np.concatenate([np.zeros(down.shape[:2] + (1,)), np.cumsum(down, axis=2)], axis=2)
+    return np.moveaxis(left[:, :, cols], 0, 2)
+
+
+def _integral_at(crop: np.ndarray, Y: np.ndarray, X: np.ndarray, *, grid: bool = True) -> np.ndarray:
+    """The integral image at continuous positions, read between pixels as the area they cover
+    (exact for a picture of square pixels): at every (Y[j], X[i]) — (len(Y), len(X), colour) — or,
+    with ``grid`` False, at each point (Y[k], X[k]) — (len(Y), colour)."""
+    iy = np.clip(np.floor(Y).astype(np.int64), 0, crop.shape[0] - 1)
+    ix = np.clip(np.floor(X).astype(np.int64), 0, crop.shape[1] - 1)
+    R, ry = np.unique(np.r_[iy, iy + 1], return_inverse=True)
+    C, cx = np.unique(np.r_[ix, ix + 1], return_inverse=True)
+    S = _integral(crop, R, C)
+    r0, r1, c0, c1 = ry[: len(Y)], ry[len(Y) :], cx[: len(X)], cx[len(X) :]
+    if not grid:
+        fy, fx = (Y - iy)[:, None], (X - ix)[:, None]
+        return (S[r0, c0] * (1 - fx) + S[r0, c1] * fx) * (1 - fy) + (S[r1, c0] * (1 - fx) + S[r1, c1] * fx) * fy
+    fy, fx = (Y - iy)[:, None, None], (X - ix)[None, :, None]
+    Sy = S[r0] * (1 - fy) + S[r1] * fy
+    return Sy[:, c0] * (1 - fx) + Sy[:, c1] * fx
+
+
+_CELLS = 0.1 + 0.8 * (np.arange(_S) + 0.5) / _S  # a flat square's cells' middles (each 0.05 wide)
+_EDGES = 0.1 + 0.8 * np.arange(_S + 1) / _S  # …and their edges
+_RING = np.nonzero((np.minimum.outer(np.minimum(np.arange(_S), _S - 1 - np.arange(_S)), np.minimum(np.arange(_S), _S - 1 - np.arange(_S))) < 2).ravel())[0]
+
+
+def _cell_means(rgb: np.ndarray, Hi: np.ndarray, rows: int, cols: int) -> np.ndarray:
+    """The mean colour of each of a flat board's S × S cells per square (the middle 0.8 of it):
+    (rows, cols, S·S, colour). ``Hi``: board units → image pixels. Exact area means (an integral
+    image): a cell covers the same part of the screen whatever the picture's scale, so a picture
+    resized for the model and one taken at 1 or 2 px per point agree where point samples on a
+    piece's outline don't. A board seen straight on: its cells' edges are one grid of x and y; else
+    each cell is taken as the upright box round its mapped middle."""
+    h, w = rgb.shape[:2]
+    Hn = Hi / Hi[2, 2]
+    upright = abs(Hn[0, 1]) + abs(Hn[1, 0]) <= 1e-9 * (abs(Hn[0, 0]) + abs(Hn[1, 1])) and abs(Hn[2, 0]) + abs(Hn[2, 1]) <= 1e-12
+    if upright and Hn[0, 0] > 0 and Hn[1, 1] > 0:
+        X = np.clip(Hn[0, 0] * (np.arange(cols)[:, None] + _EDGES[None, :]) + Hn[0, 2], 0, w)  # (cols, S+1)
+        Y = np.clip(Hn[1, 1] * (np.arange(rows)[:, None] + _EDGES[None, :]) + Hn[1, 2], 0, h)
+        ox, oy = int(math.floor(X.min())), int(math.floor(Y.min()))
+        G = _integral_at(rgb[oy : int(math.ceil(Y.max())), ox : int(math.ceil(X.max()))], Y.ravel() - oy, X.ravel() - ox)
+        G = G.reshape(rows, _S + 1, cols, _S + 1, -1)
+        box = G[:, 1:, :, 1:] - G[:, :-1, :, 1:] - G[:, 1:, :, :-1] + G[:, :-1, :, :-1]
+        area = np.diff(Y, axis=1)[:, :, None, None] * np.diff(X, axis=1)[None, None, :, :]
+        means = box / np.maximum(area, 1e-9)[..., None]
+        return means.transpose(0, 2, 1, 3, 4).reshape(rows, cols, _S * _S, -1).astype(np.float32)
+    xx, yy = np.meshgrid(_CELLS, _CELLS)
+    centres = (_block(0, 0, cols - 1, rows - 1)[:, None, :] + np.stack([xx.ravel(), yy.ravel()], 1)[None]).reshape(-1, 2)
+    xy = _apply(Hi, centres)
+    c = centres.mean(axis=0)
+    p = _apply(Hi, [c, c + (1.0, 0.0), c + (0.0, 1.0)])
+    J = np.abs(np.column_stack([p[1] - p[0], p[2] - p[0]]))  # image pixels per board unit
+    half = 0.4 / _S
+    hx, hy = (J[0, 0] + J[0, 1]) * half, (J[1, 0] + J[1, 1]) * half
+    x0, x1 = np.clip(xy[:, 0] - hx, 0, w), np.clip(xy[:, 0] + hx, 0, w)
+    y0, y1 = np.clip(xy[:, 1] - hy, 0, h), np.clip(xy[:, 1] + hy, 0, h)
+    ox, oy = int(math.floor(x0.min())), int(math.floor(y0.min()))
+    crop = rgb[oy : int(math.ceil(y1.max())), ox : int(math.ceil(x1.max()))]
+    F = _integral_at(crop, np.r_[y1, y0, y1, y0] - oy, np.r_[x1, x1, x0, x0] - ox, grid=False).reshape(4, len(x0), -1)
+    means = (F[0] - F[1] - F[2] + F[3]) / np.maximum((x1 - x0) * (y1 - y0), 1e-9)[:, None]
+    return means.reshape(rows, cols, _S * _S, -1).astype(np.float32)
+
+
+def _seen(pic: Picture, b: Board) -> tuple[np.ndarray, np.ndarray]:
+    """How every square looks now, to compare with a later picture: (its piece samples — ``state``
+    —, its rim). On a flat board, the mean colour of each of S × S cells (the rim: the outer ring
+    of them): the same parts of the screen at any scale. Seen at an angle, points (a board seen at
+    an angle is only ever compared at one place and one scale of its own)."""
+    Hi = np.linalg.inv(pic.to_screen) @ b.H
+    if not b.flat:
+        return _look(pic, b)[0], _rim_colours(pic.rgb, Hi, _block(0, 0, b.cols - 1, b.rows - 1))
+    body = _cell_means(pic.rgb, Hi, b.rows, b.cols)
+    return body, body[:, :, _RING].reshape(b.rows * b.cols, len(_RING), -1)
+
+
+def _px(pic: Picture, b: Board) -> float:
+    """How big the board's squares are in this picture's pixels (its scale, for ``pooling``)."""
+    return b.square_size() / pic.ppp
+
+
+def _take(pic: Picture, b: Board) -> None:
+    """Keep how the board looks in this picture (to compare the next look with)."""
+    b.state, b.rim = _seen(pic, b)
+    b.seen_px = _px(pic, b)
+
+
 def state(pic: Picture, b: Board) -> np.ndarray:
-    """How every square looks now (its piece points), to compare with a later picture."""
-    return _look(pic, b)[0]
+    """How every square looks now (its piece samples), to compare with a later picture."""
+    return _seen(pic, b)[0]
 
 
 def _rims(pic: Picture, b: Board) -> np.ndarray:
-    Hi = np.linalg.inv(pic.to_screen) @ b.H
-    return _rim_colours(pic.rgb, Hi, _block(0, 0, b.cols - 1, b.rows - 1))
+    return _seen(pic, b)[1]
 
 
-def _covered(pic: Picture, b: Board) -> bool:
+def _off_picture(pic: Picture, b: Board) -> bool:
+    """Is a tenth of the board or more outside this picture?"""
+    return bool(_inside(pic.rgb.shape, np.linalg.inv(pic.to_screen) @ b.H, _block(0, 0, b.cols - 1, b.rows - 1)).mean() < 0.9)
+
+
+def _covered(pic: Picture, b: Board, rim: np.ndarray | None = None) -> bool:
     """Is the board no longer where it was — covered (a sheet, a menu), moved or gone? A move changes
     squares' middles, and a highlight or a piece's shadow a few squares' rims; something over the
     board changes many rims at once, and a board that moved no longer alternates where it was."""
@@ -1177,7 +1301,7 @@ def _covered(pic: Picture, b: Board) -> bool:
     if seen.mean() < 0.9:
         return True
     if b.rim is not None:
-        rim = _rims(pic, b)
+        rim = _rims(pic, b) if rim is None else rim
         changed = (np.abs(rim - b.rim).mean(axis=2) > 12).mean(axis=1) > 0.3
         if changed.sum() > max(6, 0.12 * len(sq)):
             return True
@@ -1239,10 +1363,14 @@ def _read(pic: Picture, b: Board, now: float, previous: Board | None) -> list[st
             b.orientation, b.oriented_by = o, "pieces"
         elif previous is not None and previous.orientation:
             b.orientation, b.oriented_by = previous.orientation, previous.oriented_by
-    b.state, b.rim = state(pic, b), _rims(pic, b)
+    _take(pic, b)
     b.at = now
-    if previous is not None and previous.state is not None and previous.state.shape == b.state.shape:
-        since = [b.name(c, r) for c, r in changed_cells(b, previous.state, b.state)]
+    if previous is not None and previous.state is not None and previous.flat == b.flat:
+        # (compared on the earlier board's own squares: two fits of one grid differ by a fraction
+        # of a point, and on a piece's outline that is a change)
+        again = _seen(pic, previous)[0]
+        pool = pooling(previous, previous.seen_px, _px(pic, previous))
+        since = [b.name(c, r) for c, r in changed_cells(previous, previous.state, again, pool=pool)]
     return since
 
 
@@ -1559,11 +1687,11 @@ def after_move(b: Board, pic: Picture, frm: str = "", to: str = "", *, now: floa
     now = time.monotonic() if now is None else now
     if b.state is None:
         return Move("", None)
-    if _covered(pic, b):
+    now_state, now_rim = (None, None) if _off_picture(pic, b) else _seen(pic, b)
+    if now_state is None or _covered(pic, b, now_rim):
         return Move("The board isn't where it was (covered, moved or gone) — take a screenshot before the next move.", None)
-    now_state = state(pic, b)
-    cells = [b.name(c, r) for c, r in changed_cells(b, b.state, now_state)]
-    b.state, b.rim, b.at = now_state, _rims(pic, b), now
+    cells = [b.name(c, r) for c, r in changed_cells(b, b.state, now_state, pool=pooling(b, b.seen_px, _px(pic, b)))]
+    b.state, b.rim, b.seen_px, b.at = now_state, now_rim, _px(pic, b), now
     if not b.lines:
         b.occupancy = occupancy(pic, b)
     if not cells:

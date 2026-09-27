@@ -231,8 +231,8 @@ def tilted_screen(
     cam = Camera(elev=elev, yaw=yaw, dist=dist, focal=focal, centre=centre, n=n, ss=ss)
     Hs = cam.board_H()
     Wp, Hp = W_PT * ss, H_PT * ss
-    # background: a window's dark gradient
-    yy, xx = np.mgrid[0:Hp, 0:Wp].astype(np.float32)
+    # background: a window's dark gradient (coordinates broadcast, not full grids: a render stays small)
+    yy = np.arange(Hp, dtype=np.float32)[:, None]
     bg = np.array(background, np.float32)
     img = np.empty((Hp, Wp, 3), np.float32)
     img[:] = bg
@@ -246,7 +246,7 @@ def tilted_screen(
     x1, y1 = np.ceil(pc.max(0)).astype(int)
     x0, y0, x1, y1 = max(0, x0), max(0, y0), min(Wp, x1), min(Hp, y1)
     Hi = np.linalg.inv(Hs)
-    X, Y = xx[y0:y1, x0:x1] + 0.5, yy[y0:y1, x0:x1] + 0.5
+    X, Y = np.meshgrid(np.arange(x0, x1, dtype=np.float32) + 0.5, np.arange(y0, y1, dtype=np.float32) + 0.5)
     q = np.stack([X, Y, np.ones_like(X)], -1) @ Hi.T
     u, v = q[..., 0] / q[..., 2], q[..., 1] / q[..., 2]
     inside = (u >= 0) & (u < n) & (v >= 0) & (v < n)
