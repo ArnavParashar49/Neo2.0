@@ -614,3 +614,24 @@ def test_the_tool_words_name_every_form_and_no_app():
         assert not re.search(r"\b(Chess|Safari|Chrome|Finder|Mail|Notes)\b", text)
     assert {"nx", "ny", "box_2d"} <= set(pointer.FORM_ARGS)
     assert {"nx1", "ny1", "nx2", "ny2", "box_2d1", "box_2d2"} <= set(pointer.DRAG_FORM_ARGS)
+
+
+def test_a_helpers_own_marks_are_clicked_by_id_even_by_a_blind_brain(world, new_tools):
+    world.front = ("Chess", CHESS)
+
+    def text_marks(eid):
+        if eid != "t3":
+            raise KeyError(f"there's no text mark {eid} any more — look again")
+        return (612.0, 540.0)
+
+    pointer.set_id_resolver("t", text_marks)
+    try:
+        out = run("click", {"id": "t3"}, _ctx(blind=True))
+        assert out.ok and _moved(world) == (612.0, 540.0) and "mark t3" in out.text
+        out = run("click", {"id": "t9"}, _ctx(blind=True))
+        assert not out.ok and "no text mark t9" in out.text
+        assert not run("click", {"id": "e5"}).ok  # Accessibility's ids still go to ax (unknown here)
+        with pytest.raises(ValueError):
+            pointer.set_id_resolver("e", text_marks)
+    finally:
+        pointer.set_id_resolver("t", None)

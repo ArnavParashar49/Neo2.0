@@ -55,9 +55,11 @@ def test_what_is_listed_is_what_can_be_acted_on_and_is_in_the_picture():
         _el("e7", "AXButton", "Half in", 990, 10, 40, 20),
         _el("e8", "AXButton", "Half in", 990, 10, 40, 20),  # the same control twice (a cell and its button)
         _el("e9", "AXWindow", "Chess", 0, 0, 1000, 500),
+        _el("e10", "AXButton", "Collapsed", 10, 210, 0, 0),  # no size: nothing to click
     ]
     got, more = marks.pick(els, (0.0, 0.0, 1000.0, 500.0))
     assert [m.id for m in got] == ["e7", "e3", "e6"] and more == 0
+    assert "e10" not in {m.id for m in marks.pick(els, None)[0]}  # not even with no area to cut to
     assert got[0].frame == (990.0, 10.0, 10.0, 20.0)  # its part in the area
     assert all("hunter2" not in m.label for m in got)  # a password field's value never
 

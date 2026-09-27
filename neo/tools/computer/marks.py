@@ -141,7 +141,7 @@ def pick(
             continue  # an unnamed button: nothing to match it by (the picture still shows it)
         f = _clip((e.x, e.y, e.w, e.h), window)
         f = _clip(f, area) if f is not None else None
-        if f is None:
+        if f is None or f[2] < _MIN_PT or f[3] < _MIN_PT:
             continue
         key = (e.role, label, round(f[0]), round(f[1]), round(f[2]), round(f[3]))
         if key in seen:
@@ -251,7 +251,6 @@ def _register(els: list[ax.Element]) -> None:
             ax._issued[e.id] = e
         while len(ax._issued) > ax._ISSUED_MAX:
             ax._issued.pop(next(iter(ax._issued)))
-    _remember([e.id for e in els])
 
 
 def walk_window(pid: int, deadline: float) -> tuple[str, tuple | None, list[ax.Element], dict[str, str]]:
@@ -325,6 +324,7 @@ def collect_sync(
             return Collected(app=name, pid=pid, refused="protected")
         title, window, els, blocked = walk_window(pid, time.monotonic() + deadline_s)
         chosen, more = pick(els, area, window=window, blocked=blocked, limit=limit)
+        _remember([m.id for m in chosen])  # (an input by one of these gets the picture after it)
         kind = next(iter(set(blocked.values())), "")
         return Collected(name, pid, title, window, kind, chosen, more)
     except Exception:  # noqa: BLE001 - marks are a help, never a failure of the look

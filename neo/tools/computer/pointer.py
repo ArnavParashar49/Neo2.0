@@ -251,6 +251,38 @@ def set_cell_resolver(fn: CellResolver | None) -> None:
     _cell_resolver = fn
 
 
+# Other ids NEO grounds itself, by their prefix (OCR's text marks "t1"…: neo.tools.computer.ocr
+# registers "t"): ``fn(id)`` → the screen point of that mark, or raises Refused / ValueError / KeyError.
+IdResolver = Callable[[str], tuple[float, float]]
+_id_resolvers: dict[str, IdResolver] = {}
+
+
+def set_id_resolver(prefix: str, fn: IdResolver | None) -> None:
+    """A helper's seam for its own marks (ids with ``prefix`` and a number: "t3"). Their points were
+    read off NEO's own capture, so a brain that can't see may use them, like Accessibility's ids."""
+    if not re.fullmatch(r"[a-z]{1,3}", prefix) or prefix in ("e", "w"):
+        raise ValueError(f"{prefix!r}: a mark prefix is 1–3 lowercase letters, never Accessibility's own (e, w)")
+    if fn is None:
+        _id_resolvers.pop(prefix, None)
+    else:
+        _id_resolvers[prefix] = fn
+
+
+def _own_mark(eid: str) -> Aim | None:
+    for prefix, fn in _id_resolvers.items():
+        if re.fullmatch(rf"{re.escape(prefix)}\d+", eid):
+            try:
+                pt = fn(eid)
+            except Refused:
+                raise
+            except (ValueError, KeyError, LookupError) as e:
+                raise Refused(f"Error: {e}") from None
+            x, y = float(pt[0]), float(pt[1])
+            _on_screen([(x, y)])
+            return Aim((x, y), "mark", None, f"mark {eid}")
+    return None
+
+
 def set_grid_check(fn: GridCheck | None) -> None:
     """The board helper's seam: ``fn(x, y)`` — is that screen point inside a grid NEO found?"""
     global _grid_check
@@ -276,8 +308,9 @@ class Aim:
 
     @property
     def pictured(self) -> bool:
-        """Aimed at a picture: a screenshot's pixels or a board's square (a change shows at the point)."""
-        return self.shot is not None or self.form == "cell"
+        """Aimed at a picture: a screenshot's pixels, a board's square or a mark read off a capture
+        (a change shows at the point)."""
+        return self.shot is not None or self.form in ("cell", "mark")
 
 
 def _present(v) -> bool:
@@ -425,6 +458,8 @@ async def aim(a: dict, ctx: ToolContext, tool: str = "click", end: str = "") -> 
     """Where one end of an input goes, from whichever form the call used: an element id first (as
     before: exact, the element's live frame), else :func:`numeric`. None: nothing for this end."""
     eid = a.get(f"id{end}")
+    if _present(eid) and (own := _own_mark(str(eid).strip())) is not None:
+        return own
     if _present(eid):
         got = await _gates()._element_spot(str(eid), tool)
         if isinstance(got, str):
