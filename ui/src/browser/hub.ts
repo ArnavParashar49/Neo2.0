@@ -57,6 +57,9 @@ export class BrowserHub {
   private views = new Map<string, ViewReg>();
   private viewTimer: number | undefined;
   private lastViewSent = "";
+  private lastView: { surface: string; visible: boolean } | null = null;
+  /** A resize came in while an approval was pending; it goes out once the approval resolves. */
+  private viewHeld = false;
   private helloSent = false;
   readonly frames: FramePipe;
   /** performance.now() of the last frame that arrived (for "Live view is catching up…"). */
@@ -132,7 +135,7 @@ export class BrowserHub {
     this.prevLive = null;
     this.helloSent = true;
     this.sendFn({ cmd: "browser_hello", v: 1, binary: true, formats: ["jpeg"], surface: this.surface });
-    this.lastViewSent = "";
+    this.lastViewSent = ""; this.lastView = null;
     this.flushView();
   }
 
@@ -166,7 +169,7 @@ export class BrowserHub {
         if (!this.replaying) this.frames.setSid(o.sid);
         this.lastAid = -1; this.lastPhase = -1; this.inputSeq = 0;
         this.set({ open: o, live: synthState(o), ended, steps: prior?.steps ?? [], action: null, dialog: null, select: null, hint: null });
-        this.lastViewSent = "";
+        this.lastViewSent = ""; this.lastView = null;
         this.flushView();
         return true;
       }
@@ -176,6 +179,7 @@ export class BrowserHub {
         if (!cur || s.sid !== cur.sid || s.seq <= cur.seq) return true;
         const next: BrowserState = { ...s, favicon: s.favicon === undefined ? cur.favicon : s.favicon };
         this.set(s.controller === "neo" ? { live: next, hint: null } : { live: next });
+        if (this.viewHeld && next.status !== "waiting") this.flushView();
         return true;
       }
       case "browser_action": {
@@ -314,6 +318,7 @@ export class BrowserHub {
 
   private flushView() {
     this.viewTimer = undefined;
+    this.viewHeld = false;
     const sid = this.snap.live?.sid;
     if (!sid || !this.helloSent) return;
     let best: ViewReg | null = null;
@@ -327,7 +332,12 @@ export class BrowserHub {
       : { cmd: "browser_view", sid, surface: best!.surface, css_w: Math.round(best!.w), css_h: Math.round(best!.h), dpr: Math.min(devicePixelRatio || 1, 2), visible: true };
     const key = JSON.stringify(msg);
     if (key === this.lastViewSent) return;
+    // While NEO waits for an approval, the page it measured must not change size under the
+    // highlighted target: a view that only changed size (the confirm card came up) waits.
+    const l = this.lastView;
+    if (this.snap.live?.status === "waiting" && l && l.visible && msg.visible && l.surface === msg.surface) { this.viewHeld = true; return; }
     this.lastViewSent = key;
+    this.lastView = { surface: msg.surface, visible: msg.visible };
     this.sendFn(msg);
   }
 

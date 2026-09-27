@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { ThinkingOrb } from "thinking-orbs";
 import ReactMarkdown from "react-markdown";
@@ -145,6 +145,12 @@ export default function App() {
   // render, so there is never a frame between "session over" and "card lingering".
   const [folding, setFolding] = useState(false);
   const [foldedSid, setFoldedSid] = useState<string | null>(null);
+  // The fold's flight: a copy of the page lifts off the card and lands on the session's row.
+  const [foldFx, setFoldFx] = useState<null | "out" | "in">(null);
+  const [landingSid, setLandingSid] = useState<string | null>(null);
+  const ghost = useRef<{ el: HTMLCanvasElement; x: number; y: number; w: number; h: number; sid: string } | null>(null);
+  const foldHold = useRef<Promise<void> | null>(null); // the window keeps its size until the flight lands
+  const foldLand = useRef<(() => void) | null>(null);
   const lastLive = useRef<BrowserSnap | null>(null);
   const collapsedDuringJob = useRef(false);
   const live = bsnap.live ? bsnap : null;
@@ -207,6 +213,17 @@ export default function App() {
       if (my !== gen.current) return;
       const from = winSize.current;
       if (!expanded) { await resizeAnchored(PILL); winSize.current = PILL; return; }
+      const hold = foldHold.current;
+      foldHold.current = null;
+      if (hold) {
+        // Folding: the card is already its new size; the window waits for the flight to land.
+        setSnapSize(true); setCardSize(target);
+        await Promise.race([hold, new Promise((r) => setTimeout(r, 1200))]);
+        if (my !== gen.current) return;
+        await resizeAnchored(target);
+        winSize.current = target;
+        return;
+      }
       const fromPill = from.w === PILL.w && from.h === PILL.h;
       if (fromPill || reduced) {
         setSnapSize(true); setCardSize(target);
@@ -278,15 +295,81 @@ export default function App() {
     if (bmode === "popped" || bmode === "mini" || !expanded) { void closeBrowserWindow(); setSimPopout(false); done(); return; }
     const t0 = performance.now();
     let timer: number | undefined;
+    const fade = () => { setFolding(true); timer = window.setTimeout(done, reduced ? 120 : 240); };
+    const fly = () => {
+      // FLIP (§7): copy the page as it is on screen, fade the card away around it (160 ms), snap
+      // the card to its chat size, then fly the copy onto the row's thumbnail (360 ms).
+      const root = document.getElementById("root");
+      const canvas = root?.querySelector<HTMLCanvasElement>(".stage .br-canvas");
+      if (!root || !canvas || !canvas.width || reduced || !neo.items.some((i) => i.kind === "browser" && i.sid === sid)) { fade(); return; }
+      const rb = root.getBoundingClientRect(), cb = canvas.getBoundingClientRect();
+      const el = document.createElement("canvas");
+      el.width = canvas.width; el.height = canvas.height;
+      el.getContext("2d")?.drawImage(canvas, 0, 0);
+      el.className = "fold-ghost";
+      const g = { el, x: cb.left - rb.left, y: cb.top - rb.top, w: cb.width, h: cb.height, sid };
+      Object.assign(el.style, { left: `${g.x}px`, top: `${g.y}px`, width: `${g.w}px`, height: `${g.h}px` });
+      root.appendChild(el);
+      ghost.current = g;
+      setFoldFx("out");
+      // Never leave a copy behind if the landing can't happen (the layout changed under it).
+      window.setTimeout(() => {
+        if (!el.isConnected) return;
+        el.remove(); ghost.current = null; setFoldFx(null); setLandingSid(null); foldLand.current?.(); foldLand.current = null;
+      }, 1600);
+      timer = window.setTimeout(() => {
+        // Snap the card to its chat size in the same render as the layout change, so the row the
+        // copy flies to is measured where it will rest; the window keeps its size until it lands.
+        foldHold.current = new Promise<void>((r) => { foldLand.current = r; });
+        setSnapSize(true); setCardSize(CARD);
+        setLandingSid(sid); setFoldFx("in"); done();
+      }, 160);
+    };
     const wait = () => {
       if (reason === "done" && hoverRef.current && performance.now() - t0 < 10_000) { timer = window.setTimeout(wait, 250); return; }
-      setFolding(true);
-      timer = window.setTimeout(done, reduced ? 120 : 240);
+      fly();
     };
     wait();
-    return () => clearTimeout(timer);
+    return () => {
+      clearTimeout(timer);
+      // A new session opened mid-fold: drop the flight rather than leave the card hidden.
+      const g = ghost.current;
+      if (g && g.sid === sid) { g.el.remove(); ghost.current = null; setFoldFx(null); setLandingSid(null); foldLand.current?.(); foldLand.current = null; }
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [liveSid]);
+
+  // The fold lands: the chat layout is on screen, so the row's thumbnail has a place to fly to.
+  useLayoutEffect(() => {
+    const g = ghost.current;
+    if (!g || foldFx !== "in" || layout !== "chat") return;
+    ghost.current = null;
+    const root = document.getElementById("root"), log = logRef.current;
+    if (log && stickToBottom.current) log.scrollTop = log.scrollHeight; // land where the chat will rest
+    const row = root?.querySelector<HTMLElement>(`[data-ended-sid="${CSS.escape(g.sid)}"]`);
+    const thumb = row?.querySelector<HTMLElement>(".br-row-thumb");
+    // The row's own entrance (a small rise) would move the target mid-flight: settle it first.
+    row?.getAnimations({ subtree: true }).forEach((a) => a.finish());
+    // The card (now chat-sized) comes back around the flight. Imperative, so the card's own CSS
+    // entrance animation is never restarted by a class change.
+    root?.querySelector<HTMLElement>(".card")?.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 220, delay: 60, easing: "ease", fill: "backwards" });
+    const finish = () => { g.el.remove(); setLandingSid(null); setFoldFx(null); foldLand.current?.(); foldLand.current = null; };
+    if (!root || !thumb || !log) { g.el.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 200, fill: "forwards" }).onfinish = finish; return; }
+    const rb = root.getBoundingClientRect(), tb = thumb.getBoundingClientRect(), lb = log.getBoundingClientRect();
+    const visible = tb.bottom > lb.top + 8 && tb.top < lb.bottom - 8;
+    const to = { x: tb.left - rb.left, y: tb.top - rb.top, w: tb.width, h: tb.height };
+    // Uniform scale by width; the bottom is clipped away, like the row's top-anchored cover fit.
+    const k = to.w / g.w;
+    const clipB = Math.max(0, g.h - to.h / k);
+    const end = visible
+      ? { transform: `translate(${to.x - g.x}px, ${to.y - g.y}px) scale(${k})`, clipPath: `inset(0px 0px ${clipB}px 0px round ${8 / k}px)`, opacity: 1 }
+      : { transform: `translate(${to.x - g.x}px, ${Math.max(lb.top - rb.top, to.y) - g.y}px) scale(${k})`, clipPath: `inset(0px 0px ${clipB}px 0px round ${8 / k}px)`, opacity: 0 };
+    const an = g.el.animate(
+      [{ transform: "none", clipPath: "inset(0px 0px 0px 0px round 0px)", opacity: 1 }, end],
+      { duration: 360, easing: "cubic-bezier(0.2, 0.8, 0.2, 1)", fill: "forwards" },
+    );
+    an.onfinish = finish;
+  }, [foldFx, layout]);
 
   // ---- modes -------------------------------------------------------------------------------------
   const toggleFocus = useCallback(() => { if (live) { setBmode((m) => (m === "focus" ? "docked" : "focus")); setExpanded(true); } }, [live]);
@@ -477,7 +560,7 @@ export default function App() {
       if (strip) return null;
       const e = bsnap.ended[it.sid];
       if (!e) return null;
-      return <EndedRow key={it.id} e={e} canReopen={it.sid === latestBrowserSid && !live} onReopen={() => hub.controlSid(it.sid, "reopen")} />;
+      return <EndedRow key={it.id} e={e} landing={landingSid === it.sid} canReopen={it.sid === latestBrowserSid && !live} onReopen={() => hub.controlSid(it.sid, "reopen")} />;
     }
     if (it.kind === "tools") {
       const tools = it.job && browserJobs.has(it.job) ? it.tools.filter((t) => !t.name.startsWith("browser")) : it.tools;
@@ -495,7 +578,7 @@ export default function App() {
 
   const header = layout === "docked" ? (
     <header className="head compact" data-tauri-drag-region>
-      <div className="orb sm" data-tauri-drag-region><ThinkingOrb state={orb} size={32} theme="dark" speed={ORB_SPEED} {...({ "data-tauri-drag-region": true } as object)} /></div>
+      <div className="orb sm" data-tauri-drag-region><ThinkingOrb state={orb} size={32} theme="auto" speed={ORB_SPEED} {...({ "data-tauri-drag-region": true } as object)} /></div>
       <div className="head-text" data-tauri-drag-region>
         <div className="title" data-tauri-drag-region>NEO</div>
         <div className={"status" + (neo.connected ? "" : " off")} data-tauri-drag-region aria-live="polite">
@@ -511,7 +594,7 @@ export default function App() {
     </header>
   ) : layout === "chat" ? (
     <header className="head" data-tauri-drag-region>
-      <div className="orb" data-tauri-drag-region><ThinkingOrb state={orb} size={64} theme="dark" speed={ORB_SPEED} gravity {...({ "data-tauri-drag-region": true } as object)} /></div>
+      <div className="orb" data-tauri-drag-region><ThinkingOrb state={orb} size={64} theme="auto" speed={ORB_SPEED} gravity {...({ "data-tauri-drag-region": true } as object)} /></div>
       <div className="head-text" data-tauri-drag-region>
         <div className="title" data-tauri-drag-region>NEO</div>
         <div className={"status" + (neo.connected ? "" : " off")} data-tauri-drag-region aria-live="polite">
@@ -527,6 +610,16 @@ export default function App() {
     </header>
   ) : null;
 
+  const replyToastEl = replyToast ? (
+    <button key={replyToast.id} className="reply-toast" onClick={() => {
+      setReplyToast(null);
+      if (layout === "focus") setBmode("docked");
+      window.setTimeout(() => document.getElementById(`msg-${replyToast.id}`)?.scrollIntoView({ block: "nearest" }), MORPH_MS + 60);
+    }}>
+      <span className="reply-toast-who">NEO</span><span className="reply-toast-text">{replyToast.text}</span>
+    </button>
+  ) : null;
+
   const stage = card && (layout === "docked" || layout === "focus") ? (
     <div className={"stage" + (folding ? " folding" : "") + (layout === "focus" ? " focus" : "")}>
       <BrowserCard
@@ -539,6 +632,7 @@ export default function App() {
         onMinimize={toggleMini}
         onPopout={() => void popOut()}
         focusSignal={viewFocus}
+        overlay={replyToastEl}
       />
     </div>
   ) : null;
@@ -605,7 +699,7 @@ export default function App() {
   return (
     <>
       <div
-        className={`card layout-${layout}` + (compact ? " compact" : "") + (snapSize ? " snap" : "")}
+        className={`card layout-${layout}` + (compact ? " compact" : "") + (snapSize ? " snap" : "") + (foldFx ? ` fold-${foldFx}` : "")}
         style={{ width: cardSize.w, height: cardSize.h }}
         onMouseEnter={() => setHover(true)}
         onMouseLeave={() => setHover(false)}
@@ -629,15 +723,6 @@ export default function App() {
             {neo.items.map((it, idx) => renderItem(it, idx, showStrip))}
             {neo.error && <div className="msg system">{neo.error}</div>}
           </div>
-        )}
-        {replyToast && (
-          <button key={replyToast.id} className="reply-toast" onClick={() => {
-            setReplyToast(null);
-            if (layout === "focus") setBmode("docked");
-            window.setTimeout(() => document.getElementById(`msg-${replyToast.id}`)?.scrollIntoView({ block: "nearest" }), MORPH_MS + 60);
-          }}>
-            <span className="reply-toast-who">NEO</span><span className="reply-toast-text">{replyToast.text}</span>
-          </button>
         )}
         {composer}
         <div className="hide-btn-hint" aria-hidden />

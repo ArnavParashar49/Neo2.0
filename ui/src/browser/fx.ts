@@ -7,6 +7,10 @@ import type { BrowserAction, Rect } from "./types";
 export type FxMode = "acting" | "thinking" | "waiting" | "off";
 type HlKind = "click" | "type" | "read" | "select" | "waiting";
 type Pt = { x: number; y: number };
+/** The page a highlight's rect was measured on: its viewport size and (when the core says) scroll. */
+type Base = { vw: number; vh: number; sy?: number };
+type Hl = { el: HTMLDivElement; rect: Rect; kind: HlKind; timer?: number; base: Base | null; dy: number };
+export interface FrameGeo { vw: number; vh: number; sy: number }
 
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
 const CURSOR_SVG =
@@ -44,7 +48,8 @@ export class Fx {
   private target: Pt | null = null;
   private anims: Animation[] = [];
   private travelEnd = 0;
-  private hls = new Map<number, { el: HTMLDivElement; rect: Rect; kind: HlKind; timer?: number }>();
+  private hls = new Map<number, Hl>();
+  private page: FrameGeo | null = null;
   private last: BrowserAction | null = null;
   private tagTimer: number | undefined;
   private restTimer: number | undefined;
@@ -88,8 +93,39 @@ export class Fx {
       this.ox.style.transform = `translateX(${this.target.x * s}px)`;
       this.oy.style.transform = `translateY(${this.target.y * s}px)`;
     }
-    for (const hl of this.hls.values()) this.placeHl(hl.el, hl.rect);
+    for (const hl of this.hls.values()) this.placeHl(hl.el, hl.rect, hl.dy);
   }
+
+  /** Every painted frame. A highlight is a viewport rect on the page as it was when NEO measured
+   *  it: when the page on screen is a different size it points at nothing (hide it); when it
+   *  has only scrolled, the element moved with it (follow). Never trust a stale box on an approval. */
+  frame(g: FrameGeo) {
+    this.page = g;
+    for (const h of this.hls.values()) this.syncHl(h);
+  }
+
+  private baseOf(a: BrowserAction): Base | null {
+    if (a.vw && a.vh) return { vw: a.vw, vh: a.vh, sy: a.sy };
+    // Older cores don't say: assume the frame on screen (size only — its scroll may lag the action).
+    return this.page ? { vw: this.page.vw, vh: this.page.vh } : null;
+  }
+
+  private syncHl(h: Hl) {
+    const b = h.base, g = this.page;
+    if (!b || !g) return;
+    // A different page size: the box points at nothing on screen. Hide it until a frame of the
+    // size it was measured on arrives (a lagging frame catches up; a real resize never does).
+    const stale = Math.abs(b.vw - g.vw) > 0.5 || Math.abs(b.vh - g.vh) > 0.5;
+    h.el.classList.toggle("stale", stale);
+    if (stale || b.sy == null) return;
+    const dy = b.sy - g.sy;
+    if (Math.abs(dy - h.dy) < 0.25) return;
+    h.dy = dy;
+    this.placeHl(h.el, h.rect, dy);
+  }
+
+  /** "Take control" was pressed: NEO finishes its step, and the cursor steps back meanwhile. */
+  setTaking(on: boolean) { this.root.classList.toggle("taking", on); }
 
   setMode(m: FxMode) {
     if (m === this.mode) return;
@@ -107,7 +143,7 @@ export class Fx {
       else if (this.target) this.showCursorAt(this.target);
     }
     const l = this.last;
-    if (m === "waiting" && l && l.gated && l.phase === "intent" && l.rect && this.hls.get(l.aid)?.kind !== "waiting") this.showHl(l.aid, l.rect, "waiting");
+    if (m === "waiting" && l && l.gated && l.phase === "intent" && l.rect && this.hls.get(l.aid)?.kind !== "waiting") this.showHl(l.aid, l.rect, "waiting", this.baseOf(l));
     if (m === "thinking") this.rest(true);
     else if (m === "acting") this.rest(false);
     if (m !== "waiting") for (const [id, h] of this.hls) if (h.kind === "waiting") this.hideHl(id, 0);
@@ -122,7 +158,7 @@ export class Fx {
     if (this.mode === "off") return;
     this.showCursorAt(pt);
     if (a.phase === "intent" && a.rect && a.kind !== "move" && a.kind !== "navigate" && a.kind !== "scroll") {
-      this.showHl(a.aid, a.rect, a.gated ? "waiting" : a.kind === "type" ? "type" : a.kind === "read" ? "read" : "click");
+      this.showHl(a.aid, a.rect, a.gated ? "waiting" : a.kind === "type" ? "type" : a.kind === "read" ? "read" : "click", this.baseOf(a));
     }
   }
 
@@ -138,7 +174,7 @@ export class Fx {
       case "move":
         if (a.phase === "intent") {
           this.clearHls();
-          if (a.rect && a.kind !== "move") this.showHl(a.aid, a.rect, a.gated ? "waiting" : a.kind === "select" ? "select" : "click");
+          if (a.rect && a.kind !== "move") this.showHl(a.aid, a.rect, a.gated ? "waiting" : a.kind === "select" ? "select" : "click", this.baseOf(a));
           if (pt) this.moveTo(pt);
         } else if (a.phase === "done") {
           const hl = this.hls.get(a.aid);
@@ -153,14 +189,14 @@ export class Fx {
       case "type":
         if (a.phase === "intent") {
           this.clearHls();
-          if (a.rect) this.showHl(a.aid, a.rect, "type");
+          if (a.rect) this.showHl(a.aid, a.rect, "type", this.baseOf(a));
           if (pt) this.moveTo(pt);
         } else this.hideHl(a.aid, a.phase === "done" ? 1200 : 0);
         break;
       case "read":
         if (a.phase === "intent") {
           this.clearHls();
-          if (a.rect) this.showHl(a.aid, a.rect, "read");
+          if (a.rect) this.showHl(a.aid, a.rect, "read", this.baseOf(a));
           this.sweep(a.rect);
         } else this.hideHl(a.aid, 250);
         break;
@@ -298,18 +334,18 @@ export class Fx {
   private rest(on: boolean) { this.ox.classList.toggle("rest", on); }
 
   // ---- highlights -----------------------------------------------------------------------
-  private placeHl(el: HTMLDivElement, r: Rect) {
+  private placeHl(el: HTMLDivElement, r: Rect, dy = 0) {
     const pad = 4, s = this.s;
     el.style.left = `${r.x * s - pad}px`;
-    el.style.top = `${r.y * s - pad}px`;
+    el.style.top = `${(r.y + dy) * s - pad}px`;
     el.style.width = `${r.w * s + pad * 2}px`;
     el.style.height = `${r.h * s + pad * 2}px`;
     el.style.borderRadius = `${clamp(Math.min((r.h * s) / 2, 10), 4, 10)}px`;
     const chip = el.querySelector<HTMLElement>(".fx-hl-chip");
-    if (chip) chip.classList.toggle("below", r.y * s < 28);
+    if (chip) chip.classList.toggle("below", (r.y + dy) * s < 28);
   }
 
-  private showHl(id: number, rect: Rect, kind: HlKind) {
+  private showHl(id: number, rect: Rect, kind: HlKind, base: Base | null) {
     const old = this.hls.get(id);
     if (old) { clearTimeout(old.timer); old.el.remove(); }
     const el = div("fx-hl " + kind, this.hlLayer);
@@ -317,9 +353,12 @@ export class Fx {
       const chip = div("fx-hl-chip", el);
       chip.textContent = "Needs your OK";
     }
-    this.placeHl(el, rect);
+    const h: Hl = { el, rect, kind, base, dy: 0 };
+    if (base?.sy != null && this.page) h.dy = base.sy - this.page.sy;
+    this.placeHl(el, rect, h.dy);
     el.animate([{ opacity: 0, transform: this.reduced ? "none" : "scale(1.03)" }, { opacity: 1, transform: "none" }], { duration: 160, easing: "cubic-bezier(0.2, 0.8, 0.2, 1)" });
-    this.hls.set(id, { el, rect, kind });
+    this.hls.set(id, h);
+    this.syncHl(h);
   }
 
   private hideHl(id: number, delay: number) {

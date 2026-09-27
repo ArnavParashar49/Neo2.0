@@ -47,7 +47,13 @@ export function q(s: string | undefined, n = 32): string {
   return `“${t.length > n ? t.slice(0, n).trimEnd() + "…" : t}”`;
 }
 
-export interface Caption { text: string; ctx?: string; orb: OrbState }
+export interface Caption {
+  text: string; ctx?: string; orb: OrbState;
+  /** A lead-in ("Scrolling to “Buy”"): shown only if no action on its target follows within 1 s. */
+  soft?: boolean;
+  /** An answer to something the user just did: shown at once, without waiting out the dwell. */
+  now?: boolean;
+}
 
 const ORB_FOR: Record<string, OrbState> = {
   click: "working", type: "working", key: "working", select: "working", move: "working", scroll: "working",
@@ -79,7 +85,7 @@ export function captionFor(a: BrowserAction): Caption {
     case "select":
       return a.field ? { text: `Choosing ${q(a.label || a.text)}`, ctx: `in ${a.field}`, orb } : { text: `Choosing ${q(a.label || a.text)}`, orb };
     case "scroll":
-      if (a.label) return { text: `Scrolling to ${lab}`, orb };
+      if (a.label) return { text: `Scrolling to ${lab}`, orb, soft: a.phase === "intent" };
       return { text: `Scrolling ${a.dir ?? "down"}`, orb };
     case "read":
       return { text: a.label ? `Reading ${lab}` : "Reading the page", orb };
@@ -89,6 +95,18 @@ export function captionFor(a: BrowserAction): Caption {
       return { text: `Pointing at ${lab || "the page"}`, orb };
   }
   return { text: "Working", orb };
+}
+
+/** What NEO didn't do (declined approval) or couldn't do (the action failed). */
+export function failCaption(a: BrowserAction): Caption {
+  const verb: Partial<Record<BrowserAction["kind"], string>> = {
+    click: "click", type: "type in", select: "choose", key: "press", navigate: "open", read: "read", scroll: "scroll to", wait: "wait for", move: "point at",
+  };
+  const v = verb[a.kind] ?? "do";
+  const what = a.kind === "key" ? a.key || "the key" : a.kind === "navigate" ? (a.url ? displayHost(a.url) : "the page") : a.label ? q(a.label) : a.field || `the ${a.role || "element"}`;
+  return a.reason === "declined"
+    ? { text: `Didn't ${v} ${what}`, orb: "shaping" }
+    : { text: `Couldn't ${v} ${what}`, orb: "shaping" };
 }
 
 export function fmtDuration(ms: number): string {
@@ -116,6 +134,6 @@ export function browsingLine(s: BrowserState | null): string {
     case "need_user": return `Your turn on ${host}`;
     case "user": return "You're in control";
     case "error": return `Browser problem · ${host}`;
-    default: return `Browsing · ${host}`;
+    default: return s.controller === "neo" && !s.job ? `Done · ${host}` : `Browsing · ${host}`;
   }
 }

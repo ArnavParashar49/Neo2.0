@@ -44,8 +44,8 @@
   --br-view-edge: rgba(255, 255, 255, 0.06);
   --br-user-edge: rgba(255, 255, 255, 0.22);
   --br-scrim: rgba(8, 8, 10, 0.32);
-  --br-glass: rgba(20, 20, 24, 0.78);
-  --br-glass-muted: rgba(236, 236, 238, 0.74);
+  --br-glass: rgba(20, 20, 24, 0.90);
+  --br-glass-muted: rgba(236, 236, 238, 0.78);
   --br-glass-strong: rgba(18, 18, 22, 0.90);
   --br-glass-edge: rgba(255, 255, 255, 0.10);
   --br-hl: var(--accent);
@@ -85,7 +85,7 @@
   --glow-halo: rgba(74, 144, 255, 0.30); --glow-halo-2: rgba(139, 108, 255, 0.24);
   --br-card-bg: rgba(255, 255, 255, 0.55); --br-chrome-bg: rgba(0, 0, 0, 0.03); --br-canvas: #f2f2f4;
   --br-view-edge: rgba(0, 0, 0, 0.08); --br-user-edge: rgba(0, 0, 0, 0.20);
-  --br-glass: rgba(255, 255, 255, 0.84); --br-glass-muted: rgba(28, 28, 31, 0.72); --br-glass-strong: rgba(250, 250, 252, 0.94);
+  --br-glass: rgba(255, 255, 255, 0.92); --br-glass-muted: rgba(28, 28, 31, 0.74); --br-glass-strong: rgba(250, 250, 252, 0.94);
   --br-glass-edge: rgba(0, 0, 0, 0.08); --br-cursor: #111; --br-cursor-stroke: rgba(255, 255, 255, 0.9); --br-ring-bg: #f4f4f6;
   --br-hl-fill: rgba(31, 111, 209, 0.08); --br-hl-glow: rgba(31, 111, 209, 0.20);
   --br-shadow-float: 0 8px 28px rgba(0, 0, 0, 0.16), inset 0 1px 0 rgba(255, 255, 255, 0.6);
@@ -192,7 +192,9 @@ kbd { font: 11px/1 -apple-system, system-ui; opacity: 0.7; margin-left: 6px; }
   border-radius: 12px; padding: 9px 12px; outline: none; font: inherit; transition: border-color 120ms, background 120ms;
 }
 .input-row input:focus { border-color: var(--edge-2); background: rgba(255, 255, 255, 0.06); }
-.input-row input::placeholder { color: var(--dim); }
+/* A text field's focus is its border and a soft halo, not the bright ring buttons get. */
+.input-row input:focus-visible { outline: none; border-color: var(--accent-edge); box-shadow: 0 0 0 3px var(--accent-bg); }
+.input-row input::placeholder { color: var(--muted); }
 .input-row .icon { width: 34px; height: 34px; border-radius: 11px; border: 1px solid var(--edge); background: var(--bg-2); }
 .input-row .icon.accent { background: var(--accent-bg); border-color: transparent; }
 

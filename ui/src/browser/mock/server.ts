@@ -71,6 +71,8 @@ export class MockCore {
   private gate: Gate | null = null;
   private releaseWaiters: (() => void)[] = [];
   private lock = false;
+  /** "Take control" is waiting for the current action to finish: no new action may start. */
+  private wantTake = false;
   private favicon = "";
   private canvas: OffscreenCanvas | HTMLCanvasElement | null = null;
   private dirty = false;
@@ -232,7 +234,9 @@ export class MockCore {
   private async take() {
     const s = this.s;
     if (!s || s.controller === "user") return;
-    for (let i = 0; i < 80 && this.lock; i++) await new Promise((r) => setTimeout(r, 100));
+    this.wantTake = true;
+    for (let i = 0; i < 160 && this.lock; i++) await new Promise((r) => setTimeout(r, 50));
+    this.wantTake = false;
     if (this.gate) { const g = this.gate; this.gate = null; g.resolve(false); }
     s.controller = "user";
     s.status = "user";
@@ -362,7 +366,8 @@ export class MockCore {
 
   private action(a: Omit<BrowserAction, "sid" | "aid"> & { aid?: number }, bump = true): BrowserAction {
     const s = this.s!;
-    const full: BrowserAction = { ...a, sid: s.sid, aid: a.aid ?? (bump ? ++s.aid : s.aid) } as BrowserAction;
+    // The page the target was measured on (size + scroll), so the UI can keep boxes on the pixels.
+    const full: BrowserAction = { vw: s.page.vw, vh: s.page.vh, sy: Math.round(s.page.scrollY * 10) / 10, ...a, sid: s.sid, aid: a.aid ?? (bump ? ++s.aid : s.aid) } as BrowserAction;
     s.action = full;
     this.bcastBrowser("browser_action", full);
     return full;
@@ -382,7 +387,8 @@ export class MockCore {
   private pickViewport() {
     const s = this.s;
     if (!s || s.ended) return;
-    if (this.lock) { this.viewTimer = window.setTimeout(() => this.pickViewport(), 250); return; }
+    // Never mid-action, and never while an approval is pending: the highlighted target must stay put.
+    if (this.lock || s.status === "waiting") { this.viewTimer = window.setTimeout(() => this.pickViewport(), 250); return; }
     const vp = this.largestView();
     if (vp.w === s.page.vw && vp.h === s.page.vh) return;
     s.page.vw = vp.w; s.page.vh = vp.h;
@@ -431,7 +437,9 @@ export class MockCore {
     this.lastRender = performance.now();
     try {
       const st = s.page;
-      const w = Math.min(2560, st.vw * DPR), h = Math.min(1600 * DPR, st.vh * DPR);
+      // Capped like the core's screencast (≤ 2560 × 3200 device px), keeping the page's aspect.
+      const k = Math.min(DPR, 2560 / st.vw, 3200 / st.vh);
+      const w = Math.round(st.vw * k), h = Math.round(st.vh * k);
       const canvas = this.ensureCanvas(w, h);
       const ctx = canvas.getContext("2d") as CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
       this.built = build(st);
@@ -510,6 +518,11 @@ export class MockCore {
     const p = s.page;
     p.key = key; p.genericUrl = o.genericUrl ?? ""; p.scrollY = 0; p.hover = null; p.pressed = null; p.focus = null; p.loaded = 0.3; p.signinError = false;
     if (key !== "cart") p.banner = false;
+    // The user finished signing in (the page moved on): the prompt says so, from NEO's own words.
+    if (s.needUser && s.needUser.reason === "login" && key !== "signin" && s.status === "need_user") {
+      s.needUser = { ...s.needUser, title: "Signed in? Hand back to NEO.", sub: "NEO picks up from here.", rect: undefined };
+      this.bcastBrowser("browser_need_user", { ...s.needUser, sid: s.sid });
+    }
     s.progress = 0.55;
     this.invalidate(true);
     this.emitState();
@@ -696,8 +709,14 @@ export class MockCore {
     kind: BrowserAction["kind"]; id?: string; label?: string; text?: string; key?: string; field?: string; secret?: boolean;
     dir?: "up" | "down"; amount?: number; gated?: boolean; step: string; rect?: Rect; caption?: string; tool?: string; perform?: () => Promise<void> | void;
   }): Promise<boolean> {
+    // A pending "Take control" wins over NEO's next action (§6.4: at most the current one finishes).
+    while (this.wantTake && gen === this.gen) await new Promise((r) => setTimeout(r, 30));
     await this.hold(gen);
     const s = this.s!;
+    // A resize that came in during the last action lands now, between actions (not whenever the
+    // lock happens to be free), so the page matches the view before NEO measures its next target.
+    clearTimeout(this.viewTimer);
+    this.pickViewport();
     this.lock = true;
     s.status = "working";
     this.setNeo("working");
@@ -934,8 +953,14 @@ export class MockCore {
           const s = await setup("checkout", "working");
           s.page.signedIn = true;
           this.running = true;
-          await this.act(gen, { kind: "click", id: "place", label: "Place your order", gated: true, step: "Asked to click “Place your order”" });
+          const placed = await this.act(gen, { kind: "click", id: "place", label: "Place your order", gated: true, step: "Asked to click “Place your order”" });
+          await this.wait(gen, 900);
+          this.say("assistant", placed ? "Done — your order is placed." : "Okay — I didn't place the order.", job);
+          // The job is over while the page is still NEO's: the card says so, then folds (as in the full task).
           this.running = false;
+          if (this.s) { this.s.job = null; if (this.s.controller === "neo") this.s.status = "thinking"; this.emitState(true); }
+          this.setNeo("idle");
+          this.closeTimer = window.setTimeout(() => { if (this.s && this.s.controller === "neo" && !this.s.needUser && !this.running) void this.endSession("done"); }, 1500);
           break;
         }
         case "user": { const s = await setup("product", "user", "user"); s.userStep = this.step({ kind: "user", label: "You took over", status: "running", by: "user" }); this.running = true; await this.waitRelease(); break; }

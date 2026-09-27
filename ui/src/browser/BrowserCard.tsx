@@ -29,12 +29,19 @@ export interface CardProps {
   confirmElsewhere?: boolean;
   /** Bumped by the host to put keyboard focus on the page (need_user). */
   focusSignal?: number;
+  /** Floats over the live view (the overlay's reply toast in focus / compact layouts). */
+  overlay?: ReactNode;
 }
 
 type Ring = "acting" | "thinking" | "starting" | "waiting" | "user" | "need" | "error" | "offline" | "ended";
 
+/** The job is over but the page is still NEO's: nothing is happening, and the card folds soon. */
+export function isFinished(st: BrowserState, connected: boolean): boolean {
+  return connected && st.controller === "neo" && !st.job && (st.status === "thinking" || st.status === "working");
+}
+
 function ringOf(st: BrowserState, connected: boolean): Ring {
-  if (st.status === "ended") return "ended";
+  if (st.status === "ended" || isFinished(st, connected)) return "ended";
   if (!connected) return "offline";
   if (st.status === "error") return "error";
   if (st.status === "need_user") return "need";
@@ -98,7 +105,9 @@ function Address({ st, userDriving, editSignal, onNavigate, disabled }: {
   const inputRef = useRef<HTMLInputElement>(null);
   const boxRef = useRef<HTMLDivElement>(null);
   const host = hostOf(st.url);
-  const { sub, reg } = splitHost(host);
+  const { sub: fullSub, reg } = splitHost(host);
+  // A long subdomain gives way from its left, so the part touching the real domain stays.
+  const sub = fullSub.length > 18 ? "…" + fullSub.slice(-17) : fullSub;
   const title = (st.title || "").slice(0, 200);
 
   useEffect(() => { if (editSignal && userDriving) setEditing(true); }, [editSignal, userDriving]);
@@ -157,7 +166,7 @@ function Address({ st, userDriving, editSignal, onNavigate, disabled }: {
       >
         {fav}
         {security}
-        <span className="br-host" dir="ltr">{sub && <span className="br-host-sub">{sub}</span>}<span className="br-host-reg">{reg || st.url}</span></span>
+        <span className="br-host" dir="ltr" title={host}>{sub && <span className="br-host-sub">{sub}</span>}<span className="br-host-reg">{reg || st.url}</span></span>
         {title && <><span className="br-addr-sep" aria-hidden>—</span><span className="br-addr-title" dir="auto">{title}</span></>}
         {!title && st.status === "starting" && <span className="br-shimmer title" aria-hidden />}
       </button>
@@ -224,11 +233,12 @@ function Tabs({ st, onPick }: { st: BrowserState; onPick: (i: number) => void })
 }
 
 // ---- the card ----------------------------------------------------------------------------------
-export function BrowserCard({ hub, snap, connected, surface, reduced, onExpand, onMinimize, onPopout, confirmElsewhere, focusSignal = 0 }: CardProps) {
+export function BrowserCard({ hub, snap, connected, surface, reduced, onExpand, onMinimize, onPopout, confirmElsewhere, focusSignal = 0, overlay }: CardProps) {
   const st = snap.live!;
   const ring = ringOf(st, connected);
+  const finished = isFinished(st, connected);
   const userDriving = connected && st.controller === "user" && (st.status === "user" || st.status === "need_user");
-  const neoDriving = connected && st.controller === "neo" && (st.status === "working" || st.status === "thinking" || st.status === "waiting");
+  const neoDriving = !finished && connected && st.controller === "neo" && (st.status === "working" || st.status === "thinking" || st.status === "waiting");
   const job = st.job;
   const nu = st.status === "need_user" ? st.need_user : null;
   const [stepsOpen, setStepsOpen] = useState(false);
@@ -294,7 +304,7 @@ export function BrowserCard({ hub, snap, connected, surface, reduced, onExpand, 
     if (u.href.length > 2048) { hub.toast("That address is too long", 2200); return; }
     void hub.control("navigate", { url: u.href }).then((r) => { if (!r.ok && r.code === "blocked_url") hub.toast("NEO's browser won't open that address", 2600); });
   }, [hub]);
-  const toggleControl = useCallback(() => { if (userDriving) release(); else if (neoDriving || st.status === "starting") take(); }, [userDriving, neoDriving, st.status, release, take]);
+  const toggleControl = useCallback(() => { if (userDriving) release(); else if (neoDriving || finished || st.status === "starting") take(); }, [userDriving, neoDriving, finished, st.status, release, take]);
 
   // Shortcuts (capture phase, never forwarded to the page).
   useEffect(() => {
@@ -329,13 +339,21 @@ export function BrowserCard({ hub, snap, connected, surface, reduced, onExpand, 
 
   const pending = snap.pending;
   const taking = !!pending.take;
+  // The Done button nudges when the prompt changes under it ("Signed in? Hand back to NEO.").
+  const nuTitle = useRef<string | null>(null);
+  const [nudge, setNudge] = useState(0);
+  useEffect(() => {
+    const t = nu?.title ?? null;
+    if (t && nuTitle.current && t !== nuTitle.current) setNudge((n) => n + 1);
+    nuTitle.current = t;
+  }, [nu?.title]);
   const releasing = !!pending.release;
   const isWindow = surface === "window";
   const drag = surface !== "docked" ? { "data-tauri-drag-region": true } : {};
   const navTitle = (base: string, key: string) => neoDriving ? `${base} — takes control (${key})` : `${base} (${key})`;
 
   const statusEl = (() => {
-    if (ring === "ended") return <><span className="br-status-glyph">{I.check(14)}</span>Finished</>;
+    if (ring === "ended") return <><span className="br-status-glyph ok">{I.check(14)}</span><span className="br-fg">Finished</span></>;
     if (off) return <><span className="br-dot off" />Offline</>;
     switch (ring) {
       case "starting": return <><span className="br-dot dim" />Starting…</>;
@@ -348,10 +366,11 @@ export function BrowserCard({ hub, snap, connected, surface, reduced, onExpand, 
     }
   })();
 
-  const needGlyph = nu ? (nu.reason === "login" ? I.key(15) : nu.reason === "captcha" ? I.shield(15) : nu.reason === "2fa" ? I.message(15) : I.warn(15)) : null;
+  const needGlyph = nu ? (nu.reason === "login" ? I.key(14) : nu.reason === "captcha" ? I.shield(14) : nu.reason === "2fa" ? I.message(14) : I.warn(14)) : null;
+  const needSub = nu ? (nu.reason === "other" && nu.detail ? `NEO: “${nu.detail.slice(0, 120)}”` : nu.sub) : "";
 
   return (
-    <section ref={shellRef} className={`br-shell ring-${ring} surf-${surface}`} role="region" aria-label={`NEO's browser — ${host}`}>
+    <section ref={shellRef} className={`br-shell ring-${ring} surf-${surface}` + (taking && neoDriving ? " taking" : "")} role="region" aria-label={`NEO's browser — ${host}`}>
       <div className="br-glow" aria-hidden><div className="br-halo" /><div className="br-ring a" /><div className="br-ring b" /></div>
       <div className="br-warn" aria-hidden><div className="br-halo warn" /><div className="br-ring solid" /></div>
       <div className="br-card">
@@ -388,7 +407,8 @@ export function BrowserCard({ hub, snap, connected, surface, reduced, onExpand, 
         </div>
 
         <div className="br-viewwrap">
-          <BrowserView hub={hub} snap={snap} surface={surface} connected={connected} reduced={reduced} onTakeControl={take} focusSignal={viewFocus} drawerOpen={stepsOpen} />
+          <BrowserView hub={hub} snap={snap} surface={surface} connected={connected} reduced={reduced} onTakeControl={take} focusSignal={viewFocus} drawerOpen={stepsOpen} taking={taking} finished={finished} />
+          {overlay}
           {stepsOpen && <Timeline id={`steps-${st.sid}`} steps={snap.steps} startedAt={snap.open?.started_at ?? 0} variant="drawer" onClose={() => setStepsOpen(false)} />}
           {snap.dialog && <DialogSheet hub={hub} snap={snap} />}
           {snap.select && <SelectPopover hub={hub} snap={snap} />}
@@ -397,11 +417,11 @@ export function BrowserCard({ hub, snap, connected, surface, reduced, onExpand, 
         {nu ? (
           <div className="br-need" role="alert">
             <div className="br-need-badge" aria-hidden>{needGlyph}</div>
-            <div className="br-need-text">
-              <div className="br-need-title">{nu.title}</div>
-              <div className="br-need-sub">{nu.reason === "other" && nu.detail ? `NEO: “${nu.detail.slice(0, 120)}”` : nu.sub}</div>
+            <div className="br-need-text" title={`${nu.title} ${needSub}`.trim()}>
+              <span className="br-need-title">{nu.title}</span>
+              {needSub && <span className="br-need-sub"><span aria-hidden> · </span>{needSub}</span>}
             </div>
-            <button className="br-pill solid" onClick={release} aria-disabled={off || releasing || undefined} title="Hand back to NEO (⌘⇧U)">
+            <button key={nudge} className={"br-pill solid" + (nudge ? " nudge" : "")} onClick={release} aria-disabled={off || releasing || undefined} title="Hand back to NEO (⌘⇧U)">
               {releasing ? <span className="br-spin sm dark" /> : null}Done — hand back
             </button>
             {job && <button className="br-pill bad" onClick={stop} title="Stop NEO (⌘.)">{I.stop()}<span>Stop</span></button>}
@@ -424,7 +444,7 @@ export function BrowserCard({ hub, snap, connected, surface, reduced, onExpand, 
                   {releasing ? <span className="br-spin sm" /> : job ? I.sparkle() : I.check(14)}<span>{job ? "Hand back to NEO" : "Done"}</span>
                 </MorphPill>
               ) : (
-                <MorphPill variant="take" className="" reduced={reduced} disabled={off || taking || !neoDriving} onClick={take} title="Take control (⌘⇧U)">
+                <MorphPill variant="take" className="" reduced={reduced} disabled={off || taking || !(neoDriving || finished)} onClick={take} title="Take control (⌘⇧U)">
                   {taking ? <span className="br-spin sm" /> : I.hand()}<span>{taking ? "Taking control…" : "Take control"}</span>
                 </MorphPill>
               )
@@ -437,13 +457,11 @@ export function BrowserCard({ hub, snap, connected, surface, reduced, onExpand, 
   );
 }
 
-function StepsToggle({ steps, open, onToggle, controls }: { steps: { thumb?: string | null; step_id: number }[]; open: boolean; onToggle: () => void; controls: string }) {
-  const thumbs = steps.filter((s) => s.thumb).slice(-3);
+function StepsToggle({ steps, open, onToggle, controls }: { steps: { step_id: number }[]; open: boolean; onToggle: () => void; controls: string }) {
+  // The glyph and the count: page thumbnails at footer size read as smudges (they live in the drawer).
   return (
     <button className="br-steps-toggle" aria-expanded={open} aria-controls={controls} title="Steps" onClick={onToggle}>
-      <span className="br-thumbstack" aria-hidden>
-        {thumbs.length === 0 ? <span className="br-thumbstack-empty">{I.steps(13)}</span> : thumbs.map((t) => <img key={t.step_id} src={t.thumb!} alt="" draggable={false} />)}
-      </span>
+      <span className="br-steps-glyph" aria-hidden>{I.steps(14)}</span>
       <span className="br-steps-count">{steps.length} {steps.length === 1 ? "step" : "steps"}</span>
       <span className={"br-chev" + (open ? " open" : "")} aria-hidden>{I.chevron(12)}</span>
     </button>

@@ -61,6 +61,9 @@ export interface BrowserAction {
   gated?: boolean;
   caption?: string;
   reason?: string;
+  /** The page `rect`/`x`/`y` were measured on: viewport CSS size and scroll Y. Lets the UI keep a
+   *  highlight on the pixels while frames lag or the page scrolls, and drop it if the page is resized. */
+  vw?: number; vh?: number; sy?: number;
 }
 
 export type StepKind = ActionKind | "user" | "confirm" | "dialog" | "need_user" | "error";

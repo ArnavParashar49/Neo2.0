@@ -73,8 +73,8 @@ export function MiniRow({ hub, snap, onExpand, onStop }: { hub: BrowserHub; snap
         </span>
       </button>
       <span className="br-row-actions">
-        <button className="br-icon" aria-label="Expand" title="Expand (⌘⇧M)" onClick={onExpand}>{I.expand()}</button>
-        {st.job && <button className="br-icon bad" aria-label="Stop NEO" title="Stop NEO (⌘.)" onClick={onStop}>{I.stop()}</button>}
+        <button className="br-icon" aria-label="Show browser" title="Show browser (⌘⇧M)" onClick={onExpand}>{I.popin()}</button>
+        {st.job && <button className="br-icon bad boxed" aria-label="Stop NEO" title="Stop NEO (⌘.)" onClick={onStop}>{I.stop()}</button>}
       </span>
     </div>
   );
@@ -83,46 +83,51 @@ export function MiniRow({ hub, snap, onExpand, onStop }: { hub: BrowserHub; snap
 /** Popped out: the chat keeps a small live row. */
 export function PoppedRow({ hub, snap, onShow, onBringBack }: { hub: BrowserHub; snap: BrowserSnap; onShow: () => void; onBringBack: () => void }) {
   const st = snap.live!;
+  const acting = st.controller === "neo" && (st.status === "working" || st.status === "thinking") && !!st.job;
+  const need = st.status === "need_user" || st.status === "waiting";
+  const cap = rowCaption(snap);
   return (
-    <div className="br-row live sticky popped">
-      <button className="br-row-main" onClick={onShow} aria-label={`NEO's browser on ${displayHost(st.url)} is in its own window. Show window`}>
+    <div className={"br-row live sticky popped" + (acting ? " acting" : "") + (need ? " need" : "")}>
+      <button className="br-row-main" onClick={onShow} aria-label={`NEO's browser on ${displayHost(st.url)} is in its own window: ${cap}. Show window`}>
         <span className="br-row-thumb"><LiveThumb hub={hub} /><Fav src={st.favicon} /></span>
         <span className="br-row-text">
-          <span className="br-row-l1"><span className="br-row-host">{displayHost(st.url)}</span></span>
-          <span className="br-row-l2">In its own window</span>
+          <span className="br-row-l1"><span className="br-row-host">{displayHost(st.url)}</span><span className="br-live"><span className="br-live-dot" />Live</span></span>
+          <span className="br-row-l2" dir="auto" title={cap}>In its own window · {cap}</span>
         </span>
       </button>
-      <span className="br-row-actions text stack">
-        <button className="br-pill sm ghost" onClick={onShow}>Show window</button>
-        <button className="br-pill sm" onClick={onBringBack} title="Bring back (⌘⇧O)">Bring back</button>
+      <span className="br-row-actions">
+        <button className="br-icon" aria-label="Show window" title="Show window" onClick={onShow}>{I.popout()}</button>
+        <button className="br-icon" aria-label="Bring back to the chat" title="Bring back (⌘⇧O)" onClick={onBringBack}>{I.popin()}</button>
       </span>
     </div>
   );
 }
 
 /** Ended: where browsing began in the transcript. */
-export function EndedRow({ e, canReopen, onReopen }: { e: EndedSession; canReopen: boolean; onReopen: () => void }) {
+export function EndedRow({ e, canReopen, onReopen, landing = false }: { e: EndedSession; canReopen: boolean; onReopen: () => void; landing?: boolean }) {
   const [open, setOpen] = useState(false);
   const c = e.close;
   const host = displayHost(c.url);
   const n = c.steps || e.steps.length;
-  const line2 = [`${n} ${n === 1 ? "step" : "steps"}`, fmtDuration(c.duration_ms), c.summary].filter(Boolean).join(" · ");
+  const meta = `${n} ${n === 1 ? "step" : "steps"} · ${fmtDuration(c.duration_ms)}`;
+  const line2 = c.summary || meta;
   return (
-    <div className="br-ended">
+    <div className={"br-ended" + (landing ? " landing" : "")} data-ended-sid={c.sid}>
       <div className={"br-row ended" + (open ? " open" : "")}>
         <button className="br-row-main" aria-expanded={open} aria-controls={`ended-${c.sid}`} onClick={() => setOpen((o) => !o)}
-          aria-label={`Browsed ${host}. ${line2}. ${open ? "Hide" : "Show"} steps`}>
+          aria-label={`Browsed ${host}. ${c.summary ? c.summary + ". " : ""}${meta}. ${open ? "Hide" : "Show"} steps`}>
           <span className="br-row-thumb">
             {c.poster ? <img className="br-row-poster" src={c.poster} alt="" draggable={false} /> : <span className="br-row-poster empty">{I.globe(18)}</span>}
             <Fav src={c.favicon} />
           </span>
           <span className="br-row-text">
             <span className="br-row-l1"><span className="br-row-host">Browsed {host}</span><span className={"br-chev" + (open ? " open" : "")} aria-hidden>{I.chevronDown(12)}</span></span>
-            <span className="br-row-l2" title={line2}>{line2}</span>
+            <span className="br-row-l2" title={line2} dir="auto">{line2}</span>
+            {c.summary && <span className="br-row-l3">{meta}</span>}
           </span>
         </button>
         {canReopen && c.alive && (
-          <span className="br-row-actions text">
+          <span className="br-row-actions text top">
             <button className="br-pill sm" onClick={onReopen}>Reopen</button>
           </span>
         )}
