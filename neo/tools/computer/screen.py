@@ -12,12 +12,14 @@ screen points (``screen = origin + pixel × ppp``), which is what a shot id reme
 * A whole display: scaled to *points* (a Retina display halves exactly: ``Image.reduce(2)``, about
   3 ms) and at most ``_MAX_W`` wide, so on a 14" MacBook Pro pixels are points.
 * A region or a zoom: the display's own pixels (0.5 pt per pixel on Retina) while they fit
-  ``_ZOOM_MAX``; else points; a small crop is scaled up to ``_ZOOM_MIN`` (a model reads small text
-  better big).
+  ``_ZOOM_MAX`` and ``_MAX_AREA`` (about a whole display's worth); else points; a small crop is
+  scaled up to ``_ZOOM_MIN`` (a model reads small text better big).
 * A window: its own pixels (even where another window covers it, no shadow) with the same mapping,
-  from the window server's bounds, so a window shot can be clicked through.
+  from the window server's bounds, so a window shot can be clicked through — except where another
+  window was over it on the screen (``Capture.covered``: a click there lands on that window).
 * Encoded per ``settings().shot_format``: JPEG q85 4:4:4 by default (4–5 ms, 215–366 KB), PNG
-  (compress level 1) as the A/B switch back. Never PNG ``optimize=True`` (101–292 ms).
+  (compress level 1) as the A/B switch back. Never PNG ``optimize=True`` (101–292 ms). A JPEG still
+  past the upload budget is made smaller, never blurrier: q85 4:4:4 always.
 
 Where the pixels come from: ScreenCaptureKit in process (sck.py) when ``settings().sck_capture`` is
 on and the framework is there, else the ``screencapture`` CLI writing an uncompressed TIFF (ImageIO
@@ -34,7 +36,7 @@ import subprocess
 import tempfile
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import Quartz as Q
@@ -48,6 +50,7 @@ log = logging.getLogger(__name__)
 _MAX_W = 1600  # a whole display or a window: at most this wide (14"/16" MBP logical widths: 1512/1728)
 _ZOOM_MAX = 1536  # a region or zoom keeps the display's own pixels up to this long edge…
 _ZOOM_MIN = 768  # …and a smaller one is scaled up to at least this long edge
+_MAX_AREA = 1_600_000  # a window, region or zoom: at most about a whole display's pixels (1512×982)
 _AFTER_MAX = 1024  # a look after an action (medium detail): at most this long edge
 ZOOM_W, ZOOM_H = 320, 200  # a zoom's default area, in points
 JPEG_QUALITY = 85  # with 4:4:4 chroma: PSNR 38.5–41.5 dB against the lossless picture
@@ -188,11 +191,36 @@ def _image_limit() -> tuple[int, int] | None:
 # ---- the pixels ----------------------------------------------------------------------------------
 
 
+Rect = tuple[float, float, float, float]  # x, y, width, height in screen points
+
+
+def covered_at(covered: tuple[Rect, ...] | list[Rect], x: float, y: float) -> bool:
+    """Is screen point (x, y) in one of these rectangles (the parts of a window others were over)?"""
+    return any(cx <= x < cx + cw and cy <= y < cy + ch for cx, cy, cw, ch in covered)
+
+
+def _overlaps(rects: list[Rect] | tuple[Rect, ...], area: Rect) -> tuple[Rect, ...]:
+    """The parts of ``rects`` inside ``area``."""
+    ax_, ay, aw, ah = area
+    out = []
+    for x, y, w, h in rects:
+        left, top = max(x, ax_), max(y, ay)
+        right, bottom = min(x + w, ax_ + aw), min(y + h, ay + ah)
+        if right > left and bottom > top:
+            out.append((left, top, right - left, bottom - top))
+    return tuple(out)
+
+
 @dataclass(frozen=True, eq=False)
 class Frame:
     """One capture as it came from the screen: ``image`` (RGB), whose pixel (0, 0) is at screen
     point (``x0``, ``y0``), ``ppp`` screen points per pixel (0.5 on Retina), taken at ``t``
-    (time.monotonic). ``window_id``: a window's own pixels (0: whatever was on screen there)."""
+    (time.monotonic, when the capture began).
+
+    ``window_id``: a window's own pixels (0: whatever was on screen there), owned by ``pid``. They
+    include what other windows were over on the screen (``covered``, screen points): only where
+    :meth:`shows` says so is a pixel what the screen showed. ``mapped`` False: where the pixels are
+    on the screen isn't known (x0, y0, ppp are a guess) — never map a point through it."""
 
     image: Image.Image
     x0: float
@@ -202,6 +230,14 @@ class Frame:
     window_id: int = 0
     backend: str = "cli"  # "cli" (screencapture) or "sck" (in process)
     grab_ms: float = 0.0
+    pid: int = 0
+    covered: tuple[Rect, ...] = ()
+    mapped: bool = True
+
+    @property
+    def screen_like(self) -> bool:
+        """What the screen showed, everywhere in it: mapped, and no window's own pixels."""
+        return self.mapped and not self.window_id
 
     @property
     def rect(self) -> tuple[float, float, float, float]:
@@ -222,6 +258,12 @@ class Frame:
         fx, fy, fw, fh = self.rect
         return fx - 0.5 <= x and fy - 0.5 <= y and x + w <= fx + fw + 0.5 and y + h <= fy + fh + 0.5
 
+    def shows(self, x: float, y: float) -> bool:
+        """Is this frame's pixel at screen point (x, y) what the screen showed there when it was
+        taken? In the frame, mapped, and (a window's own pixels) no other window over it."""
+        fx, fy, fw, fh = self.rect
+        return self.mapped and fx <= x < fx + fw and fy <= y < fy + fh and not covered_at(self.covered, x, y)
+
     def cut(self, x: float, y: float, w: float, h: float) -> Frame:
         """The part of this frame showing a rectangle in screen points, clipped to the frame."""
         fx, fy, fw, fh = self.rect
@@ -231,14 +273,19 @@ class Frame:
             raise ValueError("that part isn't in the picture")
         l_, t_, r_, b_ = self.box(left, top, right - left, bottom - top)
         img = self.image.crop((l_, t_, max(r_, l_ + 1), max(b_, t_ + 1)))
-        return Frame(img, self.x0 + l_ * self.ppp, self.y0 + t_ * self.ppp, self.ppp, self.t, self.window_id, self.backend)
+        return replace(self, image=img, x0=self.x0 + l_ * self.ppp, y0=self.y0 + t_ * self.ppp)
 
 
 @dataclass(frozen=True, eq=False)
 class Capture:
     """A picture for a model and how its pixels map to the screen: screen = (x0, y0) + pixel × ppp.
-    ``clickable`` False: the mapping isn't known (a window whose bounds didn't match its picture) —
-    for looking at, not for clicking through."""
+    ``clickable`` False: the mapping isn't known (a window whose bounds didn't match its picture, or
+    that isn't on the screen) — for looking at, not for clicking through.
+
+    A window shot (``window_id``, owned by ``pid``) shows the window's own pixels, also where other
+    windows were over it on the screen (``covered``, screen points, cut to the picture): a click
+    there would land on the window on top. :meth:`clear_at` says where a click lands on what the
+    picture shows."""
 
     part: ImagePart
     x0: float
@@ -250,9 +297,18 @@ class Capture:
     kind: str = "full"
     clickable: bool = True
     post_ms: float = 0.0  # NEO's own work after the capture: cut, scale, encode
+    window_id: int = 0
+    pid: int = 0
+    covered: tuple[Rect, ...] = ()
 
     def to_screen(self, ix: float, iy: float) -> tuple[float, float]:
         return self.x0 + ix * self.ppp, self.y0 + iy * self.ppp
+
+    def clear_at(self, sx: float, sy: float) -> bool:
+        """Does the screen show at point (sx, sy) what this picture shows there — a click through
+        it lands on what the model saw? Clickable, in the picture, and no other window over it."""
+        inside = self.x0 <= sx < self.x0 + self.w * self.ppp and self.y0 <= sy < self.y0 + self.h * self.ppp
+        return self.clickable and inside and not covered_at(self.covered, sx, sy)
 
 
 _capture_lock = threading.Lock()  # one capture at a time (ScreenCaptureKit queues concurrent ones badly)
@@ -261,29 +317,38 @@ _last: Frame | None = None  # the newest picture taken for a model (not the smal
 
 def last_frame(max_age_s: float | None = None) -> Frame | None:
     """The full-resolution frame of the newest picture taken for a model — a screenshot, a zoom, a
-    window, a look after an action (None: none yet, or older than ``max_age_s`` seconds)."""
+    window, a look after an action (None: none yet, older than ``max_age_s`` seconds, or the newest
+    picture has no known place on the screen: a window shot that isn't mapped is never kept).
+
+    Before mapping a point through it to act there, a consumer checks ``window_id``: a window's own
+    pixels are the screen only where ``frame.shows(x, y)``; change samples need ``screen_like``;
+    ``backend`` says which capture path it came from (samples of different paths don't compare)."""
     f = _last
     if f is None or (max_age_s is not None and f.age() > max_age_s):
         return None
     return f
 
 
-def _keep(f: Frame) -> None:
+def _keep(f: Frame | None) -> None:
+    """The newest picture's frame (None: the newest picture has none that maps)."""
     global _last
-    _last = f
+    _last = f if f is not None and f.mapped else None
 
 
 # screencapture's file format: an uncompressed TIFF. Measured on a synthetic 3024×1964 frame with the
 # ImageIO encoder screencapture writes through, plus PIL's decode: TIFF 11–12 ms, BMP 14, JPEG 22–29
-# (and lossy twice), PNG 60–183. Any failure with it switches to PNG for the rest of the run.
+# (and lossy twice), PNG 60–183. It switches to PNG for the rest of the run only once PNG is shown to
+# work where TIFF didn't: a TIFF PIL can't read, or a whole display that failed as TIFF and not as
+# PNG. A window that closed or a region off the screen fails either way: one run, and TIFF stays.
 _CLI_FORMAT = "tiff"
 _cli_format = _CLI_FORMAT
 
 
-def _grab(cmd_extra: list[str]) -> Image.Image:
-    """One ``screencapture`` run (``cmd_extra``: -R x,y,w,h · -D n · -o -l id) → its picture, RGB."""
-    global _cli_format
-    fmt = _cli_format
+class _Unreadable(OSError):
+    """screencapture wrote a file PIL can't read."""
+
+
+def _cli_run(fmt: str, cmd_extra: list[str]) -> Image.Image:
     with tempfile.NamedTemporaryFile(suffix=f".{fmt}", delete=False) as f:
         path = Path(f.name)
     try:
@@ -291,24 +356,34 @@ def _grab(cmd_extra: list[str]) -> Image.Image:
             raise TimeoutError("another screen capture is still running")
         try:
             subprocess.run(["screencapture", "-x", "-t", fmt, *cmd_extra, str(path)], check=True, timeout=10)
-        except subprocess.CalledProcessError as e:
-            failed: Exception | None = e
-        else:
-            failed = None
         finally:
             _capture_lock.release()
-        if failed is None:
-            try:
-                return Image.open(path).convert("RGB")  # (loads it, before the file goes)
-            except OSError as e:  # (a file PIL can't read)
-                failed = e
-        if fmt == "png":
-            raise failed
-        log.warning("screencapture -t %s failed (%s): PNG from now on", fmt, failed)
-        _cli_format = "png"
+        try:
+            return Image.open(path).convert("RGB")  # (loads it, before the file goes)
+        except OSError as e:
+            raise _Unreadable(f"screencapture -t {fmt} wrote a picture that can't be read ({e})") from e
     finally:
         path.unlink(missing_ok=True)
-    return _grab(cmd_extra)
+
+
+def _grab(cmd_extra: list[str]) -> Image.Image:
+    """One ``screencapture`` run (``cmd_extra``: -R x,y,w,h · -D n · -o -l id) → its picture, RGB."""
+    global _cli_format
+    fmt = _cli_format
+    try:
+        return _cli_run(fmt, cmd_extra)
+    except _Unreadable as e:
+        if fmt == "png":
+            raise
+        failed: Exception = e
+    except subprocess.CalledProcessError as e:
+        if fmt == "png" or "-l" in cmd_extra or "-R" in cmd_extra:
+            raise  # (a window or a region: what failed is it, not the format)
+        failed = e
+    img = _cli_run("png", cmd_extra)  # (fails too: nothing to do with the format, which stays)
+    log.warning("screencapture -t %s failed (%s) where PNG works: PNG from now on", fmt, failed)
+    _cli_format = "png"
+    return img
 
 
 def _grab_rect(x: int, y: int, w: int, h: int, *, fallback: bool = True) -> tuple[Image.Image, str]:
@@ -352,13 +427,29 @@ def _grab_window(window_id: int) -> tuple[Image.Image, str]:
     return _grab(["-o", "-l", str(int(window_id))]), "cli"
 
 
+def _on_display(region: tuple[int, int, int, int]) -> tuple[int, int, int, int]:
+    """A region cut to the display it is on (its centre's, else its top-left corner's): only what
+    is on that screen is ever in a picture of it, whichever way it is captured. Off every display:
+    as it is."""
+    x, y, w, h = (int(v) for v in region)
+    d = display_at(x + w / 2, y + h / 2) or display_at(x, y)
+    if d is None:
+        return x, y, w, h
+    left, top = max(x, d.x), max(y, d.y)
+    right, bottom = min(x + w, d.x + d.w), min(y + h, d.y + d.h)
+    if right - left < 1 or bottom - top < 1:
+        return x, y, w, h
+    return _whole(left, top, right, bottom)
+
+
 def grab(region: tuple[int, int, int, int] | None = None, display: Display | None = None) -> Frame:
     """A capture at the display's own resolution, as a Frame (nothing encoded). ``region``: a
-    rectangle in global points (on one display); else the whole of ``display`` (the main one)."""
+    rectangle in global points, cut to its display; else the whole of ``display`` (the main one).
+    The frame's time is when the capture began."""
     _need_permission()
-    t = time.perf_counter()
+    t0, t = time.monotonic(), time.perf_counter()
     if region:
-        x, y, w, h = (int(v) for v in region)
+        x, y, w, h = _on_display(region)
         img, backend = _grab_rect(x, y, w, h)
         x0, y0, width = float(x), float(y), float(w)
     else:
@@ -366,25 +457,38 @@ def grab(region: tuple[int, int, int, int] | None = None, display: Display | Non
         img, backend = _grab_display(d)
         x0, y0, width = d.x, d.y, d.w
     ms = (time.perf_counter() - t) * 1000
-    return Frame(img, x0, y0, width / max(1, img.width), backend=backend, grab_ms=ms)
+    return Frame(img, x0, y0, width / max(1, img.width), t0, backend=backend, grab_ms=ms)
 
 
 # ---- what the model gets -------------------------------------------------------------------------
 
 
 def encode(img: Image.Image, fmt: str | None = None) -> tuple[bytes, str]:
-    """(bytes, mime): JPEG q85 4:4:4, or PNG at compress level 1 — never PNG's optimize (100–290 ms).
-    A JPEG past the upload budget (a photo, noise) is made again at q75 4:2:0: about half the bytes."""
+    """(bytes, mime): JPEG q85 4:4:4, or PNG at compress level 1 — never PNG's optimize (100–290 ms)."""
     buf = io.BytesIO()
     if (fmt or shot_format()) == "png":
         img.save(buf, format="PNG", compress_level=1)
         return buf.getvalue(), "image/png"
     rgb = img if img.mode == "RGB" else img.convert("RGB")
     rgb.save(buf, format="JPEG", quality=JPEG_QUALITY, subsampling=0)
-    if buf.tell() > _MAX_BYTES:
-        buf = io.BytesIO()
-        rgb.save(buf, format="JPEG", quality=75, subsampling=2)
     return buf.getvalue(), "image/jpeg"
+
+
+def _fit(img: Image.Image, fmt: str | None) -> tuple[Image.Image, bytes, str]:
+    """(the picture sent, its bytes, mime). A JPEG past the upload budget (a photo, noise) is made
+    smaller until it fits, at the same q85 4:4:4 (the quality the A/B test fixes): the caller maps
+    from the picture that is sent. A PNG (the lossless arm of the A/B test) is sent as it is."""
+    src, k = img, 1.0
+    data, mime = encode(img, fmt)
+    for _ in range(6):
+        if mime != "image/jpeg" or len(data) <= _MAX_BYTES or min(img.size) <= 16:
+            break
+        k *= math.sqrt(_MAX_BYTES / len(data)) * 0.95  # (bytes go about with the area)
+        # (always from the first picture: no blur on blur; BOX, an area average, is the quickest
+        # clean way down by a little — 4 ms for 1.5 MP, against BILINEAR's 7)
+        img = src.resize((max(1, round(src.width * k)), max(1, round(src.height * k))), Image.BOX)
+        data, mime = encode(img, fmt)
+    return img, data, mime
 
 
 def _part(data: bytes, mime: str, detail: str) -> ImagePart:
@@ -400,21 +504,26 @@ def _part(data: bytes, mime: str, detail: str) -> ImagePart:
 
 def _size(frame: Frame, kind: str, limit: tuple[int, int] | None) -> tuple[int, int]:
     """The picture's size for a model. A whole display: points, at most _MAX_W wide. A region, a
-    zoom, a window, an after-look: the display's own pixels while they fit the kind's cap, else
-    points while those fit, else scaled to the cap; a small region or zoom grows to _ZOOM_MIN."""
+    zoom, a window, an after-look: the display's own pixels while they fit the kind's cap on the
+    long edge and _MAX_AREA (so a q85 JPEG stays near the upload budget), else points while those
+    fit, else scaled to fit; a small region or zoom grows to _ZOOM_MIN."""
     iw, ih = frame.image.size
     k = 1.0 / frame.ppp  # pixels per point (2 on Retina)
     if kind == "full":
         s = min(1.0, 1.0 / k if k > 1.0 else 1.0, _MAX_W / iw)
     else:
         cap = {"window": _MAX_W, "after": _AFTER_MAX}.get(kind, _ZOOM_MAX)
-        long = max(iw, ih)
-        if long <= cap:
+        long, area = max(iw, ih), iw * ih
+
+        def fits(s: float) -> bool:
+            return long * s <= cap and area * s * s <= _MAX_AREA
+
+        if fits(1.0):
             s = 1.0
-        elif k > 1.0 and long / k <= cap:
+        elif k > 1.0 and fits(1.0 / k):
             s = 1.0 / k
         else:
-            s = cap / long
+            s = min(cap / long, math.sqrt(_MAX_AREA / area))
         if kind in ("region", "zoom") and long * s < _ZOOM_MIN:
             s = _ZOOM_MIN / long
     if limit:
@@ -450,11 +559,14 @@ def render(
     encoded per the shot format, with the mapping of its pixels to the screen."""
     t = time.perf_counter()
     src = frame.cut(*rect) if rect is not None else frame
-    img = _resize(src.image, _size(src, kind, _image_limit()))
-    data, mime = encode(img, fmt)
+    img, data, mime = _fit(_resize(src.image, _size(src, kind, _image_limit())), fmt)
     ppp = src.image.width * src.ppp / img.width
     part = _part(data, mime, detail or _DETAIL.get(kind, "high"))
-    return Capture(part, src.x0, src.y0, ppp, img.width, img.height, frame, kind, clickable, post_ms=(time.perf_counter() - t) * 1000)
+    return Capture(
+        part, src.x0, src.y0, ppp, img.width, img.height, frame, kind, clickable and frame.mapped,
+        post_ms=(time.perf_counter() - t) * 1000, window_id=frame.window_id, pid=frame.pid,
+        covered=_overlaps(frame.covered, src.rect),
+    )
 
 
 def shot(
@@ -556,28 +668,63 @@ def _main_scale() -> float:
         return 2.0
 
 
+def _window_stack(window_id: int) -> tuple[int, list[Rect]] | None:
+    """(the window's owner pid, the on-screen windows over it — any app's, NEO's overlay, the Dock —
+    as rectangles in points), from the window server (about 0.5 ms). None: it couldn't say, or the
+    window isn't on the screen (minimised, another Space). A window nothing is drawn in (alpha 0)
+    covers nothing."""
+    try:
+        opts = Q.kCGWindowListOptionOnScreenAboveWindow | Q.kCGWindowListOptionIncludingWindow
+        info = Q.CGWindowListCopyWindowInfo(opts, int(window_id))
+    except Exception:  # noqa: BLE001 - unknown
+        return None
+    if info is None:
+        return None
+    pid, above, found = 0, [], False
+    for w in info:
+        try:
+            if int(w.get("kCGWindowNumber", 0) or 0) == int(window_id):
+                if not w.get("kCGWindowIsOnscreen"):
+                    return None
+                pid, found = int(w.get("kCGWindowOwnerPID", 0) or 0), True
+                continue
+            b = w.get("kCGWindowBounds") or {}
+            x, y, ww, hh = (float(b.get(k, 0) or 0) for k in ("X", "Y", "Width", "Height"))
+            alpha = float(w.get("kCGWindowAlpha", 1) or 0)
+        except Exception:  # noqa: BLE001 - a window that won't say where it is: can't tell what it covers
+            return None
+        if ww > 0 and hh > 0 and alpha > 0:
+            above.append((x, y, ww, hh))
+    return (pid, above) if found else None
+
+
 def window_shot(
     window_id: int, region: tuple[float, float, float, float] | None = None, *, detail: str = "high", fmt: str | None = None
 ) -> Capture:
     """One window's own pixels (even where another window covers it; no shadow), at most _MAX_W on
-    its long edge, mapped to the screen through the window server's bounds for the window (clickable
-    when the picture matches them). ``region`` (screen points, x y width height): only that part of it
-    — a page without the browser's tabs — when at least _MIN_CUT points of it are in the window."""
+    its long edge and _MAX_AREA, mapped to the screen through the window server's bounds for the
+    window: clickable when the picture matches them and the window is on the screen, except where
+    another window was over it (``covered``; see Capture.clear_at). ``region`` (screen points, x y
+    width height): only that part of it — a page without the browser's tabs — when at least
+    _MIN_CUT points of it are in the window. Its frame is kept (last_frame) only when it maps."""
     _need_permission()
     was = _window_bounds(window_id)
-    t = time.perf_counter()
+    t0, t = time.monotonic(), time.perf_counter()
     img, backend = _grab_window(window_id)
     grab_ms = (time.perf_counter() - t) * 1000
     bounds = _window_bounds(window_id)
-    got = {"window_id": int(window_id), "backend": backend, "grab_ms": grab_ms}
-    clickable = False
+    stack = _window_stack(window_id)
+    pid, above = stack if stack is not None else (0, [])
+    got = {"t": t0, "window_id": int(window_id), "backend": backend, "grab_ms": grab_ms, "pid": pid}
     if bounds is not None and bounds[2] > 0 and bounds[3] > 0:
         kx, ky = img.width / bounds[2], img.height / bounds[3]
-        # (a picture with a shadow, of another size, or of a window that moved meanwhile: no mapping)
-        clickable = was == bounds and abs(kx - ky) <= 0.02 * max(kx, ky)
-        frame = Frame(img, bounds[0], bounds[1], bounds[2] / img.width, **got)
+        # (a picture with a shadow, of another size, of a window that moved meanwhile, or of one not
+        # on the screen: no mapping)
+        mapped = was == bounds and abs(kx - ky) <= 0.02 * max(kx, ky) and stack is not None
+        covered = _overlaps(above, bounds) if mapped else ()
+        frame = Frame(img, bounds[0], bounds[1], bounds[2] / img.width, covered=covered, mapped=mapped, **got)
     else:
-        frame = Frame(img, 0.0, 0.0, 1.0 / _main_scale(), **got)
+        frame = Frame(img, 0.0, 0.0, 1.0 / _main_scale(), mapped=False, **got)
     cut = None
     if region is not None and bounds is not None and bounds[2] > 0:
         x, y, w, h = bounds
@@ -586,7 +733,7 @@ def window_shot(
         if right - left >= _MIN_CUT and bottom - top >= _MIN_CUT:
             cut = (left, top, right - left, bottom - top)
     _keep(frame)
-    return render(frame, "window", rect=cut, detail=detail, fmt=fmt, clickable=clickable)
+    return render(frame, "window", rect=cut, detail=detail, fmt=fmt, clickable=frame.mapped)
 
 
 def capture_window(window_id: int, region: tuple[float, float, float, float] | None = None) -> ImagePart:
@@ -607,7 +754,10 @@ _CELLS_CHANGED = 3  # …and this many changed cells are a change
 
 def samples_from(frame: Frame, points: list[tuple[float, float]], r: float = _SAMPLE_R) -> list[Image.Image]:
     """The change samples around each point, cut from a frame that shows them (no capture). Each
-    says which capture path it came from (``info["via"]``): only samples of one path compare."""
+    says which capture path it came from (``info["via"]``): only samples of one path compare. A
+    window's own pixels, or a frame with no known place: ValueError (they aren't the screen)."""
+    if not frame.screen_like:
+        raise ValueError("change samples come only from a picture of the screen")
     out = []
     for px, py in points:
         box = frame.box(px - r, py - r, 2 * r, 2 * r)
@@ -636,7 +786,11 @@ def sample_points(
         if not points:
             return None
         via = _via(like)
-        if frame is not None and all(frame.covers(p[0] - r, p[1] - r, 2 * r, 2 * r) for p in points):
+        if (
+            frame is not None
+            and frame.screen_like  # (never a window's own pixels: a capture of the screen instead)
+            and all(frame.covers(p[0] - r, p[1] - r, 2 * r, 2 * r) for p in points)
+        ):
             return samples_from(frame, points, r) if via in ("", frame.backend) else None
         if not can_capture():
             return None
@@ -651,13 +805,14 @@ def sample_points(
         if right - left < 2 or bottom - top < 2:
             return None
         x, y, w, h = _whole(left, top, right, bottom)
+        t0 = time.monotonic()
         if via == "cli":
             img, backend = _grab(["-R", f"{x},{y},{w},{h}"]), "cli"
         else:  # (the in-process path when it's on, with no CLI fallback: a pair never mixes the two)
             img, backend = _grab_rect(x, y, w, h, fallback=False)
             if via and backend != via:
                 return None
-        return samples_from(Frame(img, float(x), float(y), w / max(1, img.width), backend=backend), points, r)
+        return samples_from(Frame(img, float(x), float(y), w / max(1, img.width), t0, backend=backend), points, r)
     except Exception:  # noqa: BLE001 - no picture: unknown, not "unchanged"
         return None
 

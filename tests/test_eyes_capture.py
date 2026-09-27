@@ -31,6 +31,7 @@ from neo import effects
 from neo.tools.computer import sck, screen
 
 _REAL_SAMPLE = screen.sample_points  # (the suite's conftest makes it "no picture" in every test)
+_REAL_STACK = getattr(screen, "_window_stack", None)  # (faked in every test here: the window server)
 W2, H2 = 3024, 1964  # a 14" MacBook Pro's Retina frame (1512×982 pt)
 
 
@@ -121,6 +122,19 @@ def _fresh_capture_state(monkeypatch):
     monkeypatch.setattr(sck, "_content", None)
     monkeypatch.setattr(sck, "_misses", 0)
     monkeypatch.setattr(sck, "_off", "")
+    # Hermetic: the window server is never asked (a test that needs a window fakes these itself).
+    monkeypatch.setattr(screen, "_window_bounds", lambda wid: None)
+    monkeypatch.setattr(screen, "_window_stack", lambda wid: None, raising=False)
+    monkeypatch.setattr(sck, "_on_screen_owners", lambda: set(), raising=False)
+    monkeypatch.setattr(screen.Q, "CGWindowListCopyWindowInfo", _no_window_server)
+
+
+class _ReachedTheWindowServer(BaseException):  # (a BaseException: no "can't tell" handler swallows it)
+    pass
+
+
+def _no_window_server(*args):
+    raise _ReachedTheWindowServer("a test asked the real window server")
 
 
 def _settings(monkeypatch, **values):
@@ -260,6 +274,7 @@ def test_a_zoom_is_centred_on_the_point_and_stays_on_its_display(cli):
 def test_a_window_shot_maps_through_the_window_servers_bounds(cli, monkeypatch):
     cli.picture = lambda extra: synthetic_screen("ui", (2400, 1600))
     monkeypatch.setattr(screen, "_window_bounds", lambda wid: (100.0, 50.0, 1200.0, 800.0))
+    monkeypatch.setattr(screen, "_window_stack", lambda wid: (4321, []), raising=False)  # on screen, nothing over it
     c = screen.window_shot(77)
     assert cli.runs == [["-o", "-l", "77"]]  # its own pixels, no shadow
     assert c.clickable and c.kind == "window" and (c.w, c.h, c.ppp) == (1200, 800, 1.0)
@@ -342,7 +357,7 @@ def test_the_cli_writes_an_uncompressed_tiff_and_falls_back_to_png_once(monkeypa
         Image.new("RGB", (64, 40), (10, 20, 30)).save(cmd[-1], format="TIFF" if cmd[3] == "tiff" else "PNG")
 
     monkeypatch.setattr(screen.subprocess, "run", run)
-    img = screen._grab(["-R", "0,0,32,20"])
+    img = screen._grab([])  # (a whole display that fails as TIFF and not as PNG)
     assert [c[:4] for c in runs] == [["screencapture", "-x", "-t", "tiff"], ["screencapture", "-x", "-t", "png"]]
     assert img.mode == "RGB" and img.getpixel((0, 0)) == (10, 20, 30)
     screen._grab([])
@@ -518,6 +533,8 @@ def fake_sck(monkeypatch):
     fake = FakeSCK()
     monkeypatch.setattr(sck, "_SC", fake)
     monkeypatch.setattr(ax, "is_neo", lambda pid, name="": pid == 999)
+    # the window server's view now: every app the fake lists has a window on screen
+    monkeypatch.setattr(sck, "_on_screen_owners", lambda: {(a.processID(), a.applicationName()) for a in fake.apps}, raising=False)
     return fake
 
 
@@ -633,6 +650,271 @@ def test_an_in_process_capture_is_a_guarded_effect(fake_sck, monkeypatch):
     fake_sck.SCScreenshotManager.captureImageWithFilter_configuration_completionHandler_ = Q.CGMainDisplayID
     with pytest.raises(effects.EffectRefused):
         sck.capture_rect(0, 0, 10, 10, screen.Display(1, 0.0, 0.0, 1512.0, 982.0, 1, 2.0))
+
+
+# ---- windows on the screen, frames that map, one deadline -------------------------------------------
+
+
+def test_a_window_shot_says_whose_it_is_and_where_other_windows_covered_it(cli, monkeypatch):
+    """A window shot shows the window's own pixels, even where another window (another app's, or
+    NEO's overlay) is over it on the screen; a click there would land on that other window. So the
+    shot carries its window, its owner and those covered parts, and no spot in them is clear."""
+    cli.picture = lambda extra: synthetic_screen("ui", (2400, 1600))
+    monkeypatch.setattr(screen, "_window_bounds", lambda wid: (100.0, 50.0, 1200.0, 800.0))
+    above = [(1000.0, 700.0, 400.0, 300.0), (1400.0, 0.0, 100.0, 100.0)]  # (the overlay; one off the window)
+    monkeypatch.setattr(screen, "_window_stack", lambda wid: (4321, above))
+    c = screen.window_shot(77)
+    assert c.clickable and (c.window_id, c.pid) == (77, 4321)
+    assert c.covered == ((1000.0, 700.0, 300.0, 150.0),)  # (cut to the window)
+    assert c.clear_at(200.0, 200.0) and not c.clear_at(1100.0, 800.0)
+    assert not c.clear_at(50.0, 60.0)  # (outside the picture: nothing to say about it)
+    assert c.frame.covered == c.covered and not c.frame.shows(1100.0, 800.0) and c.frame.shows(200.0, 200.0)
+    assert screen.covered_at(c.covered, 1100.0, 800.0) and not screen.covered_at(c.covered, 200.0, 200.0)
+    page = screen.window_shot(77, (100.0, 130.0, 600.0, 400.0))  # a part the overlay isn't over
+    assert page.covered == () and page.clear_at(300.0, 300.0)
+    # the window server can't say what is over it (or it isn't on screen): for looking only
+    monkeypatch.setattr(screen, "_window_stack", lambda wid: None)
+    c = screen.window_shot(77)
+    assert not c.clickable and not c.clear_at(200.0, 200.0)
+    whole = screen.shot()  # a picture of the screen shows what is on it everywhere
+    assert whole.window_id == 0 and whole.covered == () and whole.clear_at(1100.0, 800.0)
+
+
+def test_the_window_stack_is_read_from_the_window_server(monkeypatch):
+    info = [
+        {"kCGWindowNumber": 9, "kCGWindowOwnerPID": 999, "kCGWindowAlpha": 1.0, "kCGWindowIsOnscreen": True,
+         "kCGWindowBounds": {"X": 1000, "Y": 700, "Width": 400, "Height": 300}},
+        {"kCGWindowNumber": 8, "kCGWindowOwnerPID": 5, "kCGWindowAlpha": 0.0, "kCGWindowIsOnscreen": True,
+         "kCGWindowBounds": {"X": 0, "Y": 0, "Width": 1512, "Height": 982}},  # (invisible: covers nothing)
+        {"kCGWindowNumber": 77, "kCGWindowOwnerPID": 4321, "kCGWindowAlpha": 1.0, "kCGWindowIsOnscreen": True,
+         "kCGWindowBounds": {"X": 100, "Y": 50, "Width": 1200, "Height": 800}},
+    ]
+    asked: list = []
+    monkeypatch.setattr(screen.Q, "CGWindowListCopyWindowInfo", lambda opts, wid: (asked.append((opts, wid)), info)[1])
+    monkeypatch.setattr(screen, "_window_stack", _REAL_STACK)
+    assert screen._window_stack(77) == (4321, [(1000.0, 700.0, 400.0, 300.0)])
+    assert asked == [(screen.Q.kCGWindowListOptionOnScreenAboveWindow | screen.Q.kCGWindowListOptionIncludingWindow, 77)]
+    info[2]["kCGWindowIsOnscreen"] = False  # minimized, or on another Space
+    assert screen._window_stack(77) is None
+    assert screen._window_stack(78) is None  # (not listed at all)
+
+
+def test_only_a_frame_whose_place_on_the_screen_is_known_is_kept(cli, monkeypatch):
+    """last_frame() is what the board finder, OCR and change checks map through: a window picture
+    with no mapping (bounds unknown, moved during the capture, not on screen) is never it."""
+    screen.shot()
+    assert screen.last_frame() is not None
+    cli.picture = lambda extra: Image.new("RGB", (2400, 1600), "white")
+    monkeypatch.setattr(screen, "_window_stack", lambda wid: (4321, []))
+    c = screen.window_shot(77)  # (no bounds)
+    assert not c.clickable and not c.frame.mapped and screen.last_frame() is None
+    moving = iter([(100.0, 50.0, 1200.0, 800.0), (400.0, 300.0, 1200.0, 800.0)])
+    monkeypatch.setattr(screen, "_window_bounds", lambda wid: next(moving))
+    c = screen.window_shot(77)
+    assert not c.frame.mapped and screen.last_frame() is None
+    monkeypatch.setattr(screen, "_window_bounds", lambda wid: (100.0, 50.0, 1200.0, 800.0))
+    c = screen.window_shot(77)
+    kept = screen.last_frame()
+    assert kept is c.frame and kept.mapped and kept.window_id == 77 and kept.pid == 4321
+
+
+def test_change_samples_are_never_cut_from_a_window_picture(cli, monkeypatch):
+    """A window's own pixels aren't the screen (another window may be over them): a sample cut from
+    them, compared with one of the screen, could report a change that never happened."""
+    win = screen.Frame(Image.new("RGB", (2400, 1600), "white"), 100.0, 50.0, 0.5, window_id=77)
+    with pytest.raises(ValueError):
+        screen.samples_from(win, [(300.0, 300.0)])
+    got = _REAL_SAMPLE([(300.0, 300.0)], frame=win)  # not from the window: a capture of the screen
+    assert cli.runs == [["-R", "240,240,120,120"]] and got is not None
+    guess = screen.Frame(Image.new("RGB", (3024, 1964), "white"), 0.0, 0.0, 0.5, mapped=False)
+    with pytest.raises(ValueError):
+        screen.samples_from(guess, [(300.0, 300.0)])
+    _REAL_SAMPLE([(300.0, 300.0)], frame=guess)
+    assert len(cli.runs) == 2
+
+
+def test_a_region_past_its_displays_edge_maps_the_same_either_way(fake_sck, cli, monkeypatch):
+    """Only what is on the display is ever in the picture: the region is cut to it before either
+    path captures, so the frame maps from what was really captured."""
+    d = screen.Display(1, 0.0, 0.0, 1512.0, 982.0, 1, 2.0)
+    monkeypatch.setattr(screen, "displays", lambda: [d])
+    f = screen.grab((-100, 100, 400, 200))  # 100 pt of it off the left edge (the CLI)
+    assert cli.runs == [["-R", "0,100,300,200"]] and (f.x0, f.y0, f.ppp) == (0.0, 100.0, 0.5)
+    _settings(monkeypatch, sck_capture=True)
+    f = screen.grab((-100, 100, 400, 200))  # (in process)
+    assert f.backend == "sck" and f.image.size == (600, 400) and (f.x0, f.y0, f.ppp) == (0.0, 100.0, 0.5)
+    assert fake_sck.shots[-1][1]["SourceRect"] == ((0, 100), (300, 200))
+    assert f.to_screen(600, 400) == (300.0, 300.0)
+    f = screen.grab((1400, 900, 300, 300))  # past the bottom right corner
+    assert f.rect == (1400.0, 900.0, 112.0, 82.0)
+
+
+def test_a_frame_is_stamped_when_its_capture_began(cli, monkeypatch):
+    def slow(extra):
+        time.sleep(0.2)  # screencapture and the decode
+        return Image.new("RGB", (3024, 1964))
+
+    cli.picture = slow
+    t0 = time.monotonic()
+    f = screen.grab()
+    assert f.t - t0 < 0.05 and f.age() >= 0.2
+    monkeypatch.setattr(screen, "_window_bounds", lambda wid: (0.0, 0.0, 1512.0, 982.0))
+    monkeypatch.setattr(screen, "_window_stack", lambda wid: (4321, []))
+    t0 = time.monotonic()
+    assert screen.window_shot(77).frame.t - t0 < 0.05
+
+
+# ---- the CLI's format ----------------------------------------------------------------------------
+
+
+def test_a_failed_window_or_region_capture_runs_once_and_keeps_the_tiff(monkeypatch):
+    """A window that closed or a region off the screen fails as PNG too: one screencapture run, and
+    the fast format stays for every later capture."""
+    runs: list[list[str]] = []
+
+    def run(cmd, check, timeout):
+        runs.append(cmd)
+        if "-l" in cmd or "-R" in cmd:
+            raise subprocess.CalledProcessError(1, cmd)
+        Image.new("RGB", (64, 40)).save(cmd[-1], format="TIFF" if cmd[3] == "tiff" else "PNG")
+
+    monkeypatch.setattr(screen.subprocess, "run", run)
+    for extra in (["-o", "-l", "4242"], ["-R", "5000,5000,10,10"]):
+        with pytest.raises(subprocess.CalledProcessError):
+            screen._grab(extra)
+    assert [c[3] for c in runs] == ["tiff", "tiff"] and screen._cli_format == "tiff"
+    runs.clear()
+    screen._grab([])
+    assert [c[3] for c in runs] == ["tiff"]
+
+
+def test_a_whole_display_failure_switches_to_png_only_when_png_works(monkeypatch):
+    runs: list[list[str]] = []
+    works = {"png": False}
+
+    def run(cmd, check, timeout):
+        runs.append(cmd)
+        if cmd[3] == "tiff" or not works["png"]:
+            raise subprocess.CalledProcessError(1, cmd)
+        Image.new("RGB", (64, 40)).save(cmd[-1], format="PNG")
+
+    monkeypatch.setattr(screen.subprocess, "run", run)
+    with pytest.raises(subprocess.CalledProcessError):
+        screen._grab([])  # (both fail: nothing to do with the TIFF)
+    assert [c[3] for c in runs] == ["tiff", "png"] and screen._cli_format == "tiff"
+    works["png"] = True
+    assert screen._grab([]).size == (64, 40) and screen._cli_format == "png"  # PNG works where TIFF doesn't
+
+
+def test_a_tiff_that_cant_be_read_switches_to_png(monkeypatch):
+    runs: list[list[str]] = []
+
+    def run(cmd, check, timeout):
+        runs.append(cmd)
+        if cmd[3] == "tiff":
+            with open(cmd[-1], "wb") as f:
+                f.write(b"not a picture")
+        else:
+            Image.new("RGB", (64, 40), (10, 20, 30)).save(cmd[-1], format="PNG")
+
+    monkeypatch.setattr(screen.subprocess, "run", run)
+    img = screen._grab(["-R", "0,0,32,20"])
+    assert [c[3] for c in runs] == ["tiff", "png"] and img.getpixel((0, 0)) == (10, 20, 30)
+    assert screen._cli_format == "png" and not any(os.path.exists(c[-1]) for c in runs)
+
+
+# ---- ScreenCaptureKit: switching off, one deadline, NEO left out -----------------------------------
+
+
+def test_a_capture_that_never_answers_is_switched_off_even_when_the_list_answers(fake_sck, monkeypatch):
+    """Screenshots more than CONTENT_TTL_S apart fetch the window list again each time; its answer
+    is not an answered capture."""
+    monkeypatch.setattr(sck, "CONTENT_TTL_S", 0.0)
+    fake_sck.answer = False
+    d = screen.Display(1, 0.0, 0.0, 1512.0, 982.0, 1, 2.0)
+    for _ in range(2):
+        with pytest.raises(sck.Failed, match="no answer"):
+            sck.capture_rect(0, 0, 10, 10, d, timeout=0.05)
+    assert not sck.enabled() and "no answer" in sck._off and fake_sck.content_calls == 2
+
+
+def test_an_answered_capture_starts_the_count_again(fake_sck):
+    d = screen.Display(1, 0.0, 0.0, 1512.0, 982.0, 1, 2.0)
+    fake_sck.answer = False
+    with pytest.raises(sck.Failed):
+        sck.capture_rect(0, 0, 10, 10, d, timeout=0.05)
+    fake_sck.answer = True
+    sck.capture_rect(0, 0, 10, 10, d)
+    fake_sck.answer = False
+    with pytest.raises(sck.Failed):
+        sck.capture_rect(0, 0, 10, 10, d, timeout=0.05)
+    assert sck.enabled()
+
+
+def test_one_capture_waits_one_timeout_in_all(fake_sck):
+    """The lock, the window list, the list again for a new window and the capture share one
+    deadline: a slow list and a capture that never answers cost the timeout once, then the CLI."""
+    timeout, lists = 0.2, [0]
+
+    def slow_list(ex, on, handler):  # answers just inside the timeout; the window is on the second list
+        lists[0] += 1
+        wins = [SimpleNamespace(windowID=lambda: 88, frame=lambda: _Rect(0, 0, 100, 50))] if lists[0] > 1 else []
+        content = SimpleNamespace(displays=lambda: fake_sck.displays, applications=lambda: [], windows=lambda: wins)
+        threading.Timer(0.9 * timeout, handler, args=(content, None)).start()
+
+    fake_sck.SCShareableContent.getShareableContentExcludingDesktopWindows_onScreenWindowsOnly_completionHandler_ = staticmethod(slow_list)
+    fake_sck.answer = False
+    t = time.perf_counter()
+    with pytest.raises(sck.Failed, match="no answer"):
+        sck.capture_window(88, timeout=timeout)
+    assert time.perf_counter() - t < 1.5 * timeout
+
+
+def test_a_neo_window_newer_than_the_cached_list_is_still_left_out(fake_sck):
+    """NEO's overlay (re)started after the list was fetched: the list is fetched again before the
+    filter is made, so the new NEO process is left out too."""
+    fake_sck.apps = [SimpleNamespace(processID=lambda: 42, applicationName=lambda: "Some App")]
+    d = screen.Display(1, 0.0, 0.0, 1512.0, 982.0, 1, 2.0)
+    sck.capture_rect(0, 0, 10, 10, d)
+    sck.capture_rect(0, 0, 10, 10, d)
+    assert fake_sck.content_calls == 1  # (nothing new: the list is reused)
+    fake_sck.apps.append(SimpleNamespace(processID=lambda: 999, applicationName=lambda: "NEO"))
+    sck.capture_rect(0, 0, 10, 10, d)
+    flt, _ = fake_sck.shots[-1]
+    assert [a.processID() for a in flt.excluded] == [999] and fake_sck.content_calls == 2
+    sck.capture_rect(0, 0, 10, 10, d)
+    assert fake_sck.content_calls == 2  # (and reused again)
+
+
+# ---- the upload budget, for every kind -----------------------------------------------------------
+
+
+def _jpeg_is_q85_444(data: bytes) -> bool:
+    from PIL import JpegImagePlugin
+
+    img = Image.open(io.BytesIO(data))
+    ref = io.BytesIO()
+    Image.new("RGB", (16, 16)).save(ref, format="JPEG", quality=screen.JPEG_QUALITY, subsampling=0)
+    return JpegImagePlugin.get_sampling(img) == 0 and img.quantization == Image.open(ref).quantization
+
+
+@pytest.mark.parametrize("kind", ["ui", "mixed"])
+def test_windows_and_regions_fit_the_upload_at_q85(kind):
+    """Windows, regions and zooms keep Retina pixels only while they're about a whole display's
+    worth; a picture still past the budget is made smaller, never blurrier (q85 4:4:4 stays)."""
+    f = screen.Frame(synthetic_screen(kind), 0.0, 0.0, 0.5)
+    for what, rect in (("window", (100.0, 60.0, 700.0, 700.0)), ("window", (100.0, 60.0, 780.0, 780.0)),
+                       ("region", (300.0, 100.0, 760.0, 490.0)), ("zoom", (300.0, 200.0, 320.0, 200.0))):
+        c = screen.render(f, what, rect=rect, fmt="jpeg")
+        assert len(c.part.data) <= 400_000 and _jpeg_is_q85_444(c.part.data), (what, rect, len(c.part.data))
+        assert c.w * c.h <= 1_600_000 and c.to_screen(c.w, c.h) == pytest.approx((rect[0] + rect[2], rect[1] + rect[3]), abs=1.0)
+
+
+def test_a_picture_past_the_budget_is_scaled_down_and_still_maps():
+    noise = Image.effect_noise((1512, 982), 90).convert("RGB")  # (the worst case for a JPEG)
+    c = screen.render(screen.Frame(noise, 0.0, 0.0, 1.0), "full", fmt="jpeg")
+    assert len(c.part.data) <= 400_000 and _jpeg_is_q85_444(c.part.data)
+    assert c.w < 1512 and _decode(c.part).size == (c.w, c.h) and c.to_screen(c.w, 0)[0] == pytest.approx(1512.0, abs=1.5)
 
 
 # ---- speed (hermetic: synthetic frames) --------------------------------------------------------------
