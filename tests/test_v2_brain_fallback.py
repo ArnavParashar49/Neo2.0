@@ -794,12 +794,20 @@ def test_the_chess_run_survives_on_groq_when_gemini_is_spent(monkeypatch):
     gem_p = prov.make("gemini")
     gem_p._clients = [spent(0), spent(1)]
 
-    # The seeing fallbacks (Flash-Lite, Groq's vision model) are asked only for a step with a
-    # picture: this run's steps carry none, so Groq's text model carries it and neither is asked.
+    # A game on this Mac to play (the route a real one takes: a screen task, the vision chain), not
+    # whatever an earlier scan left behind. Flash-Lite, one of that chain's own brains, is spent too.
+    # The run's steps carry no picture, so Groq's text model carries it: Groq's vision model, a
+    # fallback only for a step with a picture, is never asked one (its 8K a minute stays for those).
+    from neo.decide.inventory import App
+
+    game = App(bundle_id="test.boards.game", name="Board Game", path="/Applications/Board Game.app",
+               category="board-games")  # fmt: skip
+    monkeypatch.setattr(sess_mod, "_game_to_play", lambda text: game)
+    lite_asked: list[int] = []
     vision_asked: list[int] = []
 
     async def lite_spent(*, model, contents, config):
-        vision_asked.append(1)
+        lite_asked.append(1)
         raise _err(429, "quota", _per_day())
 
     prov.make("gemini_lite")._clients = [
@@ -868,6 +876,7 @@ def test_the_chess_run_survives_on_groq_when_gemini_is_spent(monkeypatch):
     assert r.route == "confirm" and len(ran) == 8
     # Gemini: each (model, key) learned spent once, then never asked again on a later step.
     assert len(gemini_asked) == 6
+    assert len(lite_asked) == 1  # Flash-Lite: learned spent once, like Gemini
     assert vision_asked == []  # no step of the run carried a picture
     # Groq: every request it answered fitted its 8K (a 413, if any, was learned from and refitted).
     assert k["n"] >= 12 and all(sz <= 8000 for sz in sizes[-5:])
