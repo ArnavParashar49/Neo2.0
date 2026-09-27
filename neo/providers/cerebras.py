@@ -101,19 +101,35 @@ KEEPALIVE_S = 120.0  # a warm connection outlives the few seconds between an age
 TIMEOUT = httpx.Timeout(30.0, connect=5.0)  # it answers in well under a second: a hang fails over
 PREWARM_TIMEOUT_S = 5.0
 PREWARM_IDLE_S = 20.0  # a connection used this recently is still warm: no prewarm
+# A step that starts while the prewarm is still connecting waits this long for it (a cold round
+# trip is ~0.9 s), then goes ahead on a connection of its own.
+PREWARM_JOIN_S = 1.5
+_HEARD_MAX = 4  # lines kept for the next reply (each is said once a day at most)
 MODELS_TTL_S = 6 * 3600.0
 SLEEP_MAX_S = 2.0  # a rate window that reopens this soon is waited for, not failed over
 DAILY_S = 3600.0  # a limit that reopens later than this is a daily one: out until then
 
-# Words in an error that mean the account can't pay (any status), or the key itself is refused.
-_BILLING = re.compile(
-    r"insufficient[_ ](?:funds|credits?|balance)|out of credits?|no (?:remaining )?credits?|credit balance"
-    r"|billing|payment[_ ]required|top[- ]?up|add (?:a )?payment",
+# The account can't pay: HTTP 402, or an error whose code or type field says so. A billing code
+# counts on a 403 or a 429 too, and so do the same words in its message, whole words only: those
+# are the statuses a refused account comes with. A 400/422 quotes the request ("desktop update",
+# "no credit card") and a 5xx is the server's own trouble: neither ever refuses the account.
+_BILLING_CODE = re.compile(
+    r"(?:^|_)(?:payment_required|insufficient_(?:funds|credits?|balance|quota)|billing|out_of_credits?"
+    r"|credits?_(?:exhausted|depleted))(?:_|$)",
     re.I,
 )
-_BAD_KEY = re.compile(
-    r"invalid[_ ]api[_ ]key|incorrect api key|wrong api key|api key (?:is )?(?:invalid|revoked)", re.I
+_BILLING_WORDS = re.compile(
+    r"\b(?:insufficient[_ ](?:funds|credits?|balance|quota)|out of credits?|no (?:remaining )?credits? (?:left|remaining)"
+    r"|payment[_ ]required|top[- ]up your (?:account|balance|credits?)|add (?:a )?payment method)\b",
+    re.I,
 )
+# The key itself is refused: a 401, or a 403 whose code or message says it's the key.
+_BAD_KEY_CODE = re.compile(r"(?:invalid|wrong|incorrect)_api_key|api_key_(?:invalid|revoked)", re.I)
+_BAD_KEY_WORDS = re.compile(
+    r"\b(?:invalid[_ ]api[_ ]key|incorrect api key|wrong api key|api key (?:is )?(?:invalid|revoked))\b", re.I
+)
+KEY_REFUSED = "Cerebras refused the API key (CEREBRAS_API_KEY)"
+NO_CREDITS = "Cerebras says the account is out of credits"
 
 # Tests hand in an httpx.MockTransport here (nothing leaves the process), and a fake sleep.
 _transport: httpx.AsyncBaseTransport | None = None
@@ -229,19 +245,23 @@ class Limits:
                     worst = (secs, f"{kind} per {span or 'minute'}")
         return worst
 
-    def refused_for(self, now: float) -> float | None:
-        """After a 429: seconds until the window that ran out reopens — one with nothing (or under
-        a tenth) left, else the soonest per-minute one; None when the server described none."""
-        low, minute = [], []
-        for (_kind, span), w in self.windows.items():
+    def refused_for(self, now: float, tokens: int = 1) -> float | None:
+        """After a 429: seconds until every window too small for the refused request (~`tokens`
+        prompt tokens) reopens, else the soonest per-minute one; None when the server described
+        none. A window that still has room isn't waited for, however low it runs: a day window
+        at 8% of 720M tokens takes the next step, and waiting for it would bench a brain for a
+        day over a minute's limit."""
+        out, minute = [], []
+        for (kind, span), w in self.windows.items():
             if w.reset_at is None or w.reset_at <= now:
                 continue
-            if w.remaining is not None and (w.remaining < 1 or (w.limit and w.remaining < 0.1 * w.limit)):
-                low.append(w.reset_at - now)
+            need = 1 if kind == "requests" else max(1, tokens)
+            if w.remaining is not None and w.remaining < need:
+                out.append(w.reset_at - now)
             elif span in ("", "minute"):
                 minute.append(w.reset_at - now)
-        if low:
-            return max(low)
+        if out:
+            return max(out)
         return min(minute) if minute else None
 
 
@@ -264,7 +284,10 @@ class Account:
         self.offered_at = 0.0
         self.missing: dict[str, float] = {}  # model → until: "no such model" (404)
         self.last_io = 0.0  # time.monotonic() of the last response: the connection is warm
-        self._pending: list[str] = []
+        self._asked: dict[str, int] = {}  # model → the last request's size (tokens): what a 429 refused
+        self._pending: list[str] = []  # lines for the turn's progress line (bus note)
+        self._heard: list[str] = []  # the same lines, for the reply the user hears (spoken_notes)
+        self._warming: asyncio.Future | None = None  # the prewarm's GET /v1/models, while in flight
         self._lock = threading.Lock()
         self._loop: Any = None  # the event loop the connections belong to (None: not used yet)
         self._transport: httpx.AsyncBaseTransport | None = None
@@ -329,22 +352,38 @@ class Account:
         t = max(t, self.missing.get(model, 0.0))
         return t if t > now else 0.0
 
-    async def admit(self, model: str, tokens: int, name: str) -> None:
-        """Raise unless a request of ~`tokens` prompt tokens may go to `model` now. Nothing here
-        touches the network: every refusal was learnt earlier (or is today's budget)."""
+    def refusal(self, model: str, name: str, now: float | None = None) -> Refused | None:
+        """Why `model` is out for the day, if it is (no network): a refused key or account, a
+        model this key may not use, today's budget spent (said once a day), or a daily rate limit
+        used up. None: it may be asked (a short wait or a missing model aside)."""
+        now = time.time() if now is None else now
         for scope in ("account", model):
             if (r := self.ledger.refusal(scope)) is not None:
-                raise Refused(f"{name}: {r[0]}", until=r[1], words=r[0])
+                return Refused(f"{name}: {r[0]}", until=r[1], words=r[0])
         if self.ledger.over():
             b = self.ledger.daily_budget
             words = (
                 f"Cerebras' daily budget of {_usd(b)} is used up" if b > 0 else "Cerebras' daily budget is $0"
             )
-            self.say_once("spent", f"{words}; skipping it until tomorrow")
-            raise Refused(f"{name}: {words}", until=self.ledger.midnight(), words=words)
+            if b > 0:  # (a budget of 0 is the user's own off switch: nothing to tell them)
+                self.say_once("spent", f"{words}; skipping it until tomorrow")
+            return Refused(f"{name}: {words}", until=self.ledger.midnight(), words=words)
+        if (lim := self.limits.get(model)) is not None and (w := lim.wait(1, now)) is not None:
+            secs, which = w
+            if secs > DAILY_S:
+                words = f"Cerebras' {which} limit is used up"
+                return Refused(f"{name}: {words}", until=now + secs, words=words)
+        return None
+
+    async def admit(self, model: str, tokens: int, name: str) -> None:
+        """Raise unless a request of ~`tokens` prompt tokens may go to `model` now. Nothing here
+        touches the network: every refusal was learnt earlier (or is today's budget)."""
         now = time.time()
+        if (r := self.refusal(model, name, now)) is not None:
+            raise r
         if self.missing.get(model, 0.0) > now or (self.offered and model not in self.offered):
             raise Unavailable(f"{name}: Cerebras doesn't offer {model} to this key")
+        self._asked[model] = tokens
         if (lim := self.limits.get(model)) is not None and (w := lim.wait(tokens, now)) is not None:
             secs, which = w
             if secs <= SLEEP_MAX_S:
@@ -357,14 +396,29 @@ class Account:
             raise RateLimited(f"{name}: {which} limit reached", retry_after=secs)
 
     # errors -----------------------------------------------------------------------------------
+    def account_refusal(self, e: APIStatusError, name: str) -> Refused | None:
+        """An error that refuses the whole account, refused for the day (and said): the key (a
+        401, or a 403 that says it's the key), or credits (a 402, or a billing code or words on a
+        403/429). None for anything else: a 400/422 quotes the request, a 5xx is the server's."""
+        code, text = e.status_code, _error_text(e)
+        fields = [str(x) for x in (getattr(e, "code", None), getattr(e, "type", None)) if x]
+        if code == 401 or (
+            code == 403 and (any(_BAD_KEY_CODE.search(f) for f in fields) or _BAD_KEY_WORDS.search(text))
+        ):
+            return self._refuse("account", KEY_REFUSED, name, e)
+        if code == 402 or (
+            code in (403, 429)
+            and (any(_BILLING_CODE.search(f) for f in fields) or _BILLING_WORDS.search(text))
+        ):
+            return self._refuse("account", NO_CREDITS, name, e)
+        return None
+
     def classify(self, e: APIStatusError, model: str, name: str) -> ProviderError | None:
         """Cerebras' own meaning of an HTTP error (None: the generic mapping applies)."""
-        code, text = e.status_code, _error_text(e)
+        code = e.status_code
         now = time.time()
-        if code == 401 or _BAD_KEY.search(text):
-            return self._refuse("account", "Cerebras refused the API key (CEREBRAS_API_KEY)", name, e)
-        if code == 402 or _BILLING.search(text):
-            return self._refuse("account", "Cerebras says the account is out of credits", name, e)
+        if (refused := self.account_refusal(e, name)) is not None:
+            return refused
         if code == 403:
             return self._refuse(model, f"Cerebras doesn't let this key use {model}", name, e)
         if code == 404:
@@ -372,7 +426,8 @@ class Account:
             return Unavailable(f"{name}: Cerebras doesn't offer {model} to this key")
         if code == 429:
             waits = []
-            if model in self.limits and (w := self.limits[model].refused_for(now)) is not None:
+            lim = self.limits.get(model)
+            if lim is not None and (w := lim.refused_for(now, self._asked.get(model, 1))) is not None:
                 waits.append(w)
             if (ra := _retry_after(e)) is not None:
                 waits.append(ra)
@@ -402,21 +457,37 @@ class Account:
         crossed = self.ledger.add(model, tokens_in, tokens_out)
         b = self.ledger.daily_budget
         if "warn" in crossed and "spent" not in crossed:
-            self._pending.append(f"Cerebras has used {_usd(self.ledger.today())} of today's {_usd(b)} budget")
+            self._tell(f"Cerebras has used {_usd(self.ledger.today())} of today's {_usd(b)} budget")
         if "spent" in crossed:
-            self._pending.append(
-                f"Cerebras' daily budget of {_usd(b)} is used up; I'll skip it until tomorrow"
-            )
+            self._tell(f"Cerebras' daily budget of {_usd(b)} is used up; I'll skip it until tomorrow")
 
     # what the user hears ----------------------------------------------------------------------
     def say_once(self, tag: str, text: str) -> None:
-        """Queue `text` for the user, once a day per `tag`."""
+        """Tell the user `text`, once a day per `tag`."""
         if self.ledger.mark_said(tag):
-            self._pending.append(text)
+            self._tell(text)
+
+    def _tell(self, text: str) -> None:
+        """Queue `text` twice: for the turn's progress line (:meth:`announce`) and for the reply
+        the user hears (:func:`spoken_notes`, which the session adds to it). A host's own provider
+        called with no agent bound has no one to hear it: only logged."""
+        self._pending.append(text)
+        if runtime.current_scope() is None and runtime.library_mode():
+            return
+        with self._lock:
+            if text not in self._heard:
+                self._heard = [*self._heard, text][-_HEARD_MAX:]
+
+    def take_heard(self) -> list[str]:
+        """What's to be said out loud since the last call (drained)."""
+        with self._lock:
+            out, self._heard = self._heard, []
+        return out
 
     async def announce(self) -> None:
-        """Say what's queued (the budget warning, a refusal) on the agent's own bus: shown as the
-        turn's progress line, as every brain switch is. Never to another agent's or NEO.app's."""
+        """Show what's queued (the budget warning, a refusal) on the agent's own bus: the turn's
+        progress line, as every brain switch is. Never to another agent's or NEO.app's. (What the
+        user hears is the reply's: :func:`spoken_notes`.)"""
         while self._pending:
             text = self._pending.pop(0)
             log.warning(f"[brain] {text}")
@@ -432,25 +503,51 @@ class Account:
     # warming up -------------------------------------------------------------------------------
     async def prewarm(self, *, idle_s: float = PREWARM_IDLE_S) -> bool:
         """Open (or keep open) the connection before it's needed, and refresh which models this
-        key may use. Free: /v1/models spends no tokens. False when nothing was done."""
+        key may use. Free: /v1/models spends no tokens. False when nothing was done. A step that
+        starts while it's still connecting waits for it (:meth:`join_prewarm`) rather than open
+        a second, cold connection next to it."""
         if self.ledger.refusal("account") is not None or self.ledger.over():
             return False
         fresh = self.offered is not None and time.time() - self.offered_at < MODELS_TTL_S
         if time.monotonic() - self.last_io < idle_s and fresh:
             return False
+        if self._warming is not None and not self._warming.done():
+            return False  # one is already on its way
+        call = asyncio.ensure_future(self.client("").models.list())
+        self._warming = call
         try:
-            page = await asyncio.wait_for(self.client("").models.list(), PREWARM_TIMEOUT_S)
+            page = await asyncio.wait_for(call, PREWARM_TIMEOUT_S)
         except APIStatusError as e:
-            self.classify(e, self.conf.model, TEXT_BRAIN)  # a refused key is learnt before the task needs it
+            # Only what's about the account is learnt here (a refused key, no credits): the models
+            # list isn't a model's request, and its 403/404/429/5xx say nothing about one.
+            if self.account_refusal(e, TEXT_BRAIN) is None:
+                log.info(f"[brain] cerebras prewarm: /v1/models answered {e.status_code}; nothing learnt")
             await self.announce()
             return False
         except Exception as e:  # noqa: BLE001 — a failed warm-up costs nothing; the request will tell
             log.info(f"[brain] cerebras prewarm failed: {type(e).__name__}")
             return False
+        finally:
+            if self._warming is call:
+                self._warming = None
         ids = {str(getattr(m, "id", "")) for m in getattr(page, "data", None) or []} - {""}
         if ids:
             self.offered, self.offered_at = ids, time.time()
         return True
+
+    async def join_prewarm(self) -> None:
+        """A prewarm still connecting on this event loop: wait for it (at most
+        :data:`PREWARM_JOIN_S`), then this request takes its connection — the rest of one
+        handshake instead of a whole second one."""
+        call = self._warming
+        if call is None or call.done():
+            return
+        try:
+            if call.get_loop() is not asyncio.get_running_loop():
+                return
+        except RuntimeError:
+            return
+        await asyncio.wait({call}, timeout=PREWARM_JOIN_S)  # (never raises; never cancels it)
 
 
 def _usd(x: float) -> str:
@@ -519,6 +616,13 @@ class CerebrasProvider(OpenAICompatProvider):
         t = max(super().cooling_until(), self.account.blocked_until(self.model, now))
         return t if t > now else 0.0
 
+    def cooling_reason(self) -> Refused | None:
+        """Why :meth:`cooling_until` is hours away, when it's because Cerebras is out for the day
+        (a refused key or account, today's budget spent, a daily limit used up): the error to
+        report for it, in its own words — not "no time left" (a run's budget, which the chain
+        checks against cooling_until). None when it's a short wait, or none."""
+        return self.account.refusal(self.model, self.name)
+
     def _error(self, e: Exception) -> ProviderError:
         if (
             isinstance(e, APIStatusError)
@@ -560,6 +664,7 @@ class CerebrasProvider(OpenAICompatProvider):
         effort = effort if effort in ROOM else "low"  # (the values both models take)
         try:
             messages = self._prepare(messages, system, tools)
+            await self.account.join_prewarm()
             await self.account.admit(
                 self.model, estimate(messages, system, tools, vision=self.supports_vision), self.name
             )
@@ -601,6 +706,7 @@ class CerebrasProvider(OpenAICompatProvider):
     ) -> AsyncIterator[str]:
         try:
             messages = self._prepare(messages, system, None)
+            await self.account.join_prewarm()
             await self.account.admit(
                 self.model, estimate(messages, system, None, vision=self.supports_vision), self.name
             )
@@ -762,21 +868,38 @@ def prewarm_soon() -> None:
 _SEEING = frozenset({"gemini", "gemini_lite", "claude"})
 
 
-def with_cerebras(order: Sequence[str | None], purpose: str) -> list[str | None]:
+def enabled(s: Any = None) -> bool:
+    """Cerebras takes part: a key is set and the daily budget isn't 0 (the user's off switch).
+    Otherwise no chain names it, so nothing the user sees or hears changes."""
+    try:
+        c = conf(s)
+    except Exception:  # noqa: BLE001 — no agent bound in library mode: no settings, no Cerebras
+        return False
+    return bool(c.api_key) and c.daily_budget > 0
+
+
+def _before_groq_vision(names: list[Any]) -> int:
+    """Where the seeing brain goes: right ahead of Groq's vision brain, else right after the
+    leading seeing brains."""
+    if "groq_vision" in names:
+        return names.index("groq_vision")
+    at = 0
+    while at < len(names) and names[at] in _SEEING:
+        at += 1
+    return at
+
+
+def with_cerebras(order: Sequence[str | None], purpose: str, s: Any = None) -> list[str | None]:
     """A brain() purpose's order with Cerebras placed as decision 49 says: the text brain right
     ahead of Groq (no Groq: ahead of the offline brain, else last); for "vision" also the seeing
     one right ahead of Groq's vision brain (none: right after the seeing brains). "offline" is
-    left alone, and so is an order that already names them. A missing key costs nothing: the
-    chain skips a brain it can't make."""
+    left alone, and so is an order that already names them — and every order when Cerebras
+    isn't :func:`enabled` (`s`: the settings, default the bound agent's)."""
     out = list(order)
-    if purpose == "offline":
+    if purpose == "offline" or not enabled(s):
         return out
     if purpose == "vision" and VISION_BRAIN not in out:
-        at = out.index("groq_vision") if "groq_vision" in out else 0
-        if "groq_vision" not in out:
-            while at < len(out) and out[at] in _SEEING:
-                at += 1
-        out.insert(at, VISION_BRAIN)
+        out.insert(_before_groq_vision(out), VISION_BRAIN)
     if TEXT_BRAIN not in out:
         if "groq" in out:
             out.insert(out.index("groq"), TEXT_BRAIN)
@@ -785,6 +908,46 @@ def with_cerebras(order: Sequence[str | None], purpose: str) -> list[str | None]
         else:
             out.append(TEXT_BRAIN)
     return out
+
+
+def with_cerebras_eyes(eyes: Sequence[str], s: Any = None) -> tuple[str, ...]:
+    """The seeing fallbacks a step working from a picture may ask (an agent chain's `eyes`), with
+    Cerebras' seeing brain right ahead of Groq's vision brain (decision 49: when Gemini is
+    overloaded) — when Cerebras is :func:`enabled`; else `eyes` as they are."""
+    out = list(eyes)
+    if VISION_BRAIN not in out and enabled(s):
+        out.insert(_before_groq_vision(out), VISION_BRAIN)
+    return tuple(out)
+
+
+# ---- what the user hears ---------------------------------------------------------------------
+
+
+def spoken_notes() -> str:
+    """What Cerebras has to say out loud since the last call — the 80% warning, the skip once the
+    budget is spent, a refused key or account (each once a day) — as sentences, or "". Drained:
+    the bound agent's own account, never another's; nothing is made to answer."""
+    try:
+        from neo.providers import pool
+
+        owner = pool()
+    except Exception:  # noqa: BLE001 — no agent bound in library mode: nobody to tell
+        return ""
+    with _accounts_lock:
+        a = _accounts.get(owner)
+    if a is None:
+        return ""
+    return " ".join(t if t.endswith((".", "!", "?")) else t + "." for t in a.take_heard())
+
+
+def with_spoken_notes(reply: str, notes: str, *, question: bool = False) -> str:
+    """`reply` with `notes` (:func:`spoken_notes`) said too: after it, or before it when the reply
+    is a question (it stays the last thing the user hears)."""
+    if not notes:
+        return reply
+    if not reply:
+        return notes
+    return f"{notes} {reply}" if question else f"{reply} {notes}"
 
 
 def status() -> dict[str, Any]:

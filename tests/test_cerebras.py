@@ -599,7 +599,8 @@ def test_hosted_provider_keeps_everything_in_memory(tmp_path):
 # ---- where it goes in a chain -----------------------------------------------------------------
 
 
-def test_placed_ahead_of_groq_as_decision_49_says():
+def test_placed_ahead_of_groq_as_decision_49_says(cset):
+    cset()  # (a key: without one, no order changes)
     w = cb.with_cerebras
     assert w(["gemini", "groq", "local"], "agent") == ["gemini", "cerebras", "groq", "local"]
     assert w(["groq", "gemini", "local"], "fast") == ["cerebras", "groq", "gemini", "local"]
@@ -772,3 +773,224 @@ async def test_each_embedded_agent_has_its_own_account_ledger_and_notes(tmp_path
     assert "gpt-oss-120b" not in json.loads((tmp_path / "a" / spend.FILE).read_text())["tokens"]
     assert any("API key" in t for t in heard["a"]) and not any("API key" in t for t in heard["b"])
     assert not any("Cerebras" in x for x in health._live.values())  # never NEO.app's problem list
+
+
+# ---- a per-minute 429 is a per-minute wait, whatever a day window has left --------------------
+
+
+async def test_a_minute_429_is_a_minute_wait_even_with_a_day_window_under_a_tenth(cset, fake):
+    cset()
+    fake.reply(429, {"message": "Requests per minute limit exceeded - too many requests sent.",
+                     "type": "too_many_requests_error", "code": "request_quota_exceeded"}, {
+        "x-ratelimit-limit-requests-minute": "1000",
+        "x-ratelimit-remaining-requests-minute": "0",
+        "x-ratelimit-reset-requests-minute": "12",
+        "x-ratelimit-limit-tokens-day": "720000000",
+        "x-ratelimit-remaining-tokens-day": "60000000",  # 8% of the day left: plenty for a step
+        "x-ratelimit-reset-tokens-day": "50000",
+    })  # fmt: skip
+    p = cb.cerebras()
+    with pytest.raises(RateLimited) as e:
+        await p.complete(ASK)
+    assert not isinstance(e.value, cb.Refused) and 11 < e.value.retry_after <= 12
+    assert p.cooling_until() < time.time() + 13  # benched for the minute, not the day
+
+
+def test_after_a_429_only_a_window_too_small_for_the_request_counts():
+    now = 1000.0
+    lim = cb.Limits()
+    lim.update({"x-ratelimit-remaining-requests-minute": "0", "x-ratelimit-reset-requests-minute": "12",
+                "x-ratelimit-remaining-tokens-day": "2000", "x-ratelimit-reset-tokens-day": "50000"}, now)  # fmt: skip
+    assert lim.refused_for(now, 500) == 12  # the day still takes a 500-token request
+    assert lim.refused_for(now, 3000) == 50000  # it doesn't take a 3000-token one: out for the day
+
+
+# ---- billing: said by the status or a code field, never by words a request happened to quote ----
+
+
+@pytest.mark.parametrize(
+    "status,body",
+    [
+        (400, {"message": "Invalid 'messages[1].content': open the desktop update panel"}),
+        (422, {"message": "field required: input 'no credit card on file needed'"}),
+        (400, {"message": "Invalid 'messages[0].content': why does it say invalid api key?"}),
+        (500, {"message": "internal error while billing usage; retry"}),
+        (503, {"message": "payment service unavailable: please top up later", "type": "server_error"}),
+    ],
+)
+async def test_words_in_a_request_error_never_refuse_the_account(cset, fake, status, body):
+    s = cset()
+    fake.reply(status, body)
+    with pytest.raises(Exception) as e:  # noqa: PT011 — whatever it is, it isn't a refusal
+        await cb.cerebras().complete(ASK)
+    assert not isinstance(e.value, cb.Refused)
+    assert not (s.data_dir / spend.FILE).exists() or not ledger_file(s)["refused"]
+    assert (await cb.cerebras_vision().complete(ASK)).text == "ok"  # the account is fine
+
+
+async def test_a_billing_code_on_a_403_refuses_the_account(cset, fake):
+    cset()
+    fake.reply(403, {"message": "Access denied", "type": "invalid_request_error", "code": "insufficient_funds"})
+    with pytest.raises(cb.Refused, match="out of credits"):
+        await cb.cerebras().complete(ASK)
+    with pytest.raises(cb.Refused):
+        await cb.cerebras_vision().complete(ASK)
+    assert fake.chats == 1
+
+
+# ---- a prewarm learns only what's about the account --------------------------------------------
+
+
+@pytest.mark.parametrize("status", [403, 404, 429, 500])
+async def test_a_models_list_error_benches_nothing(cset, fake, status):
+    s = cset()
+    real = fake.handler
+
+    def handler(request):
+        if request.url.path.endswith("/models"):
+            fake.requests.append(request)
+            return httpx.Response(status, json={"message": "nope"})
+        return real(request)
+
+    cb._transport = httpx.MockTransport(handler)
+    assert await cb.prewarm() is False
+    assert (await cb.cerebras().complete(ASK)).text == "ok"  # the text brain was never benched
+    assert fake.chats == 1
+    assert not (s.data_dir / spend.FILE).exists() or not ledger_file(s)["refused"]
+
+
+async def test_a_prewarm_that_meets_a_refused_key_refuses_it_for_the_day(cset, fake):
+    cset()
+    real = fake.handler
+
+    def handler(request):
+        if request.url.path.endswith("/models"):
+            fake.requests.append(request)
+            return httpx.Response(401, json={"message": "Wrong API Key", "code": "wrong_api_key"})
+        return real(request)
+
+    cb._transport = httpx.MockTransport(handler)
+    assert await cb.prewarm() is False
+    with pytest.raises(cb.Refused, match="API key"):
+        await cb.cerebras().complete(ASK)
+    assert fake.chats == 0
+
+
+# ---- what the user hears -------------------------------------------------------------------------
+
+
+async def test_the_budget_warning_and_the_skip_are_spoken_with_the_reply(cset, fake):
+    cset(NEO_CEREBRAS_DAILY_BUDGET="0.001")
+    assert cb.spoken_notes() == ""
+    fake.reply(payload=completion(usage=(2000, 200)))  # 85%
+    await cb.cerebras().complete(ASK)
+    said = cb.spoken_notes()
+    assert "Cerebras has used $0.0008 of today's $0.0010 budget" in said
+    assert cb.spoken_notes() == ""  # said once
+    fake.reply(payload=completion(usage=(2000, 200)))  # over
+    await cb.cerebras().complete(ASK)
+    assert "used up" in cb.spoken_notes()
+    with pytest.raises(cb.Refused):
+        await cb.cerebras().complete(ASK)
+    assert cb.spoken_notes() == ""  # the skip was already said today
+
+
+async def test_a_refused_key_is_spoken_once(cset, fake):
+    cset()
+    fake.reply(401, {"message": "Wrong API Key", "code": "wrong_api_key"})
+    with pytest.raises(cb.Refused):
+        await cb.cerebras().complete(ASK)
+    assert "refused the API key" in cb.spoken_notes()
+    with pytest.raises(cb.Refused):
+        await cb.cerebras().complete(ASK)
+    assert cb.spoken_notes() == ""
+
+
+def test_spoken_notes_put_a_question_last():
+    assert cb.with_spoken_notes("Done.", "Cerebras is out.") == "Done. Cerebras is out."
+    assert cb.with_spoken_notes("Send it?", "Cerebras is out.", question=True) == "Cerebras is out. Send it?"
+    assert cb.with_spoken_notes("", "Cerebras is out.") == "Cerebras is out."
+    assert cb.with_spoken_notes("Done.", "") == "Done."
+
+
+def test_nothing_is_spoken_without_a_key(monkeypatch):
+    monkeypatch.delenv("CEREBRAS_API_KEY", raising=False)
+    assert cb.spoken_notes() == ""
+
+
+# ---- without a key (or with a $0 budget) the chain doesn't change ------------------------------
+
+
+def test_no_key_or_a_zero_budget_leaves_every_order_alone(cset, monkeypatch):
+    s = cset()
+    assert cb.with_cerebras(["gemini", "groq", "local"], "agent", s) == ["gemini", "cerebras", "groq", "local"]
+    assert cb.with_cerebras_eyes(("gemini", "gemini_lite", "claude", "groq_vision"), s) == (
+        "gemini", "gemini_lite", "claude", "cerebras_vision", "groq_vision")  # fmt: skip
+    assert cb.with_cerebras_eyes(("gemini", "claude"), s) == ("gemini", "claude", "cerebras_vision")
+    assert cb.with_cerebras_eyes(("gemini", "cerebras_vision", "groq_vision"), s) == (
+        "gemini", "cerebras_vision", "groq_vision")  # fmt: skip
+    for off in (cset(CEREBRAS_API_KEY=""), cset(NEO_CEREBRAS_DAILY_BUDGET="0")):
+        assert cb.with_cerebras(["gemini", "groq", "local"], "agent", off) == ["gemini", "groq", "local"]
+        assert cb.with_cerebras(["gemini", "groq_vision", "groq"], "vision", off) == ["gemini", "groq_vision", "groq"]
+        eyes = ("gemini", "gemini_lite", "claude", "groq_vision")
+        assert cb.with_cerebras_eyes(eyes, off) == eyes
+
+
+# ---- a step that starts while the prewarm is still connecting joins it ---------------------------
+
+
+@pytest.mark.parametrize("head_start", [0.02, 0.3])
+async def test_a_step_right_after_the_prewarm_starts_rides_its_connection(tmp_path, head_start):
+    srv = SlowHandshakeServer(handshake=0.4)
+    url = await srv.start()
+    try:
+        a = cb.Account(cb.Conf(api_key=KEY, data_dir=tmp_path), base_url=url)
+        t = cb.CerebrasProvider(a, model=cb.TEXT_MODEL, name=cb.TEXT_BRAIN, vision=False)
+        warm = asyncio.ensure_future(a.prewarm())  # prewarm_soon() at the wake word
+        await asyncio.sleep(head_start)
+        t0 = time.perf_counter()
+        await t.complete(ASK, effort="low")
+        first = time.perf_counter() - t0
+        assert await warm is True
+        assert srv.connections == 1  # one connection, not a second cold one next to the prewarm's
+        assert first < 0.4 - head_start + 0.15  # the rest of the handshake, not all of it again
+        await a.client(cb.TEXT_MODEL).close()
+    finally:
+        await srv.stop()
+
+
+# ---- an agent's own settings: its key, its ledger ------------------------------------------------
+
+
+def _library_settings_class():
+    """neo.config.LibrarySettings once the Cerebras fields are declared on Settings (the wiring);
+    until then, the same fields on a subclass."""
+    if "cerebras_api_key" in config.LibrarySettings.model_fields:
+        return config.LibrarySettings
+
+    class L(config.LibrarySettings):
+        cerebras_api_key: str = Field(default="", validation_alias="CEREBRAS_API_KEY", repr=False)
+        cerebras_model: str = "gpt-oss-120b"
+        cerebras_vision_model: str = "qwen-3.8-27b"
+        cerebras_daily_budget: float = 0.50
+        cerebras_prices: Annotated[dict[str, Any] | str, NoDecode] = ""
+
+    return L
+
+
+async def test_a_bound_agent_s_cerebras_uses_its_own_settings_and_folder(tmp_path, fake, monkeypatch):
+    from neo import runtime
+    from neo.agent.registry import catalog
+
+    monkeypatch.setattr(cb, "_accounts", weakref.WeakKeyDictionary())
+    monkeypatch.setenv("CEREBRAS_API_KEY", "csk-the-app-s-own-key")  # never an agent's
+    L = _library_settings_class()
+    s = L(data_dir=tmp_path / "agent", cerebras_api_key=KEY, cerebras_daily_budget=2.0)
+    s.ensure_dirs()
+    rt = runtime.Runtime("agent", s, catalog().subset(()))
+    with runtime.bind(rt.scope()):
+        p = cb.cerebras()
+        assert p.account.conf.api_key == KEY and p.account.ledger.daily_budget == 2.0
+        assert p.account.ledger.path == tmp_path / "agent" / spend.FILE
+        assert (await p.complete(ASK)).text == "ok"
+    assert json.loads((tmp_path / "agent" / spend.FILE).read_text())["tokens"]["gpt-oss-120b"] == [1000, 200]
