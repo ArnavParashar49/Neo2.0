@@ -11,11 +11,14 @@ it anyway is told to open the game and play it there.
 
 from __future__ import annotations
 
+import asyncio
+
 from neo.agent.registry import ToolContext, tool
 
 # The check both patterns share: "chess as white" of "play chess as white", or "as white" of "open
 # chess and play as white", is an installed game, not music (neo.decide.games, which reads the
-# request the plan covers). Cached apps only: before the first scan every query is claimed.
+# request the plan covers). Cached apps only: before the first scan every query is claimed, and
+# the handler below, which waits for that scan, refuses a game.
 
 
 def _not_a_game(f: dict) -> bool:
@@ -60,14 +63,18 @@ async def play_music(a: dict, c: ToolContext) -> str:
     query = " ".join(str(a.get("query") or "").split()).strip(" .!?\"'")
     if not query or query.lower() in _VAGUE:
         return "Error: play what? (a song, artist or video name)"
-    from neo.decide import games
+    from neo.decide import games, inventory
     from neo.decide.media import play_best
 
     # Gemini Live hands over its arguments as the text while the user's words are still on the
     # way: those aren't what the user said, so play_best decides by the query and reports nothing.
     said = c.user_text if c.user_text.strip() and c.user_text != str(a) else ""
     # Gemini Live and the agent call this directly: "chess", or "as white" of "open chess and play
-    # as white", is the game on this Mac, never a search for a video of it.
-    if (game := games.in_play(query, said)) is not None:
+    # as white", is the game on this Mac, never a search for a video of it. Before the first scan
+    # has finished, wait for one (off the event loop): play_best would scan right after anyway.
+    apps = inventory.snapshot()
+    if apps is None:
+        apps = await asyncio.to_thread(inventory.inventory)
+    if (game := games.in_play(query, said, apps)) is not None:
         return games.refusal(game, c.origin)
     return await play_best(query, text=said)

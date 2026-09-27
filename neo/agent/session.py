@@ -227,7 +227,7 @@ class Session:
 
         # "play chess as white" with a chess game on this Mac: the agent opens it and plays, whatever
         # the reflex made of it (music, a chat, the one-tool lane) and whatever a fast path would run.
-        if (game := _game_to_play(text)) is not None:
+        if (game := await asyncio.to_thread(_game_to_play, text)) is not None:
             return await self._play_game(text, d, images, job, game)
 
         # Regex fast paths are precise; trust them unless the reflex says this is conversation.
@@ -269,7 +269,8 @@ class Session:
         # A command, by construction: if the agent has to rescue it and succeeds, there's still
         # nothing to say.
         d = Decision("agent_task", 1.0, False, 0.0, False, 0.0, source="lane", reply=False, reply_p=0.0)
-        if (game := _game_to_play(text)) is not None:  # "open chess and play as white": not music
+        # "open chess and play as white": not music, whatever the plan says
+        if (game := await asyncio.to_thread(_game_to_play, text)) is not None:
             return await self._play_game(text, d, None, job, game)
         return await self._quick(text, d, steps, job=job, origin="user")
 
@@ -998,7 +999,8 @@ def _quietly(d: Decision | None, res: AgentResult) -> bool:
 
 def _game_to_play(text: str):
     """The game installed on this Mac that the request asks to play (neo.decide.games), or None.
-    From the apps of the last scan only: nothing waits for one."""
+    From the apps of the last scan only: nothing waits for one. Called in a thread: a word new to
+    it ("play <game> on <word>") is looked up in the system word list, a read of the disk."""
     from neo.decide import games
 
     return games.to_play(text)

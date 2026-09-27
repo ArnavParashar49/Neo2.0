@@ -48,8 +48,14 @@ TUNES = App(
 )
 NOTEBOOK = App(bundle_id="test.notebook", name="Notebook", path="/Applications/Notebook.app", category="productivity")
 APPS = [CHESS, POKER, QUEST, TUNES, NOTEBOOK]
-_COMMON = {"chess", "poker", "notebook", "hard", "computer", "mac", "quest"}
-_EVERYDAY = {"hard", "easy", "mode", "two", "player", "computer", "mac", "level", "evening"}
+FLORENCE = App(bundle_id="test.story.florence", name="Florence", path="/Applications/Florence.app", category="games")
+SIMON = App(bundle_id="test.toys.simon", name="Simon", path="/Applications/Simon.app", category="games")
+_COMMON = {"chess", "poker", "notebook", "hard", "computer", "mac", "quest", "florence", "simon"}
+# As the system word list has them: playback words and devices are everyday words too.
+_EVERYDAY = {
+    "hard", "easy", "mode", "two", "player", "computer", "mac", "level", "evening", "repeat", "shuffle", "loop",
+    "background", "concert", "speaker", "phone", "dinner",
+}  # fmt: skip
 
 # The user's phrasings for a game of chess, in English and Hinglish.
 CHESS_PHRASINGS = [
@@ -108,6 +114,7 @@ def mac(monkeypatch):
     monkeypatch.setattr(inventory, "inventory", lambda refresh=False: pytest.fail("scanned the Mac"))
     monkeypatch.setattr(inventory, "_common_words", lambda ws: {w: w in _COMMON for w in ws})
     monkeypatch.setattr(sites, "everyday", lambda words: all(w in _EVERYDAY for w in re.findall(r"\w+", words.lower())))
+    monkeypatch.setattr(games, "_machine_names", lambda: ("Ada’s Workbench", "Adas-Workbench"))
     load_all()
     return use
 
@@ -441,3 +448,231 @@ def test_live_is_told_a_game_is_no_music():
     extra = live._live_extra()
     assert "A game installed on this Mac is not music" in extra and "agent_task" in extra
     assert "open that app and play it there" in registry().get("play_music").description
+
+
+# ---- review: more ways to ask, and more ways music is asked for -------------------------------------
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "I'd like to play chess as white",
+        "i’d love to play chess",
+        "would you like to play chess?",
+        "do you want to play chess?",
+        "do you wanna play chess",
+        "you wanna play chess",
+        "play me a game of chess",
+        "play us a quick game of chess",
+        "play chess later",
+        "play chess tomorrow",
+        "play chess after dinner",
+        "open chess and play a game of chess",
+        "Open the Chess app and play a game of chess as white against the computer",
+        "open chess and play me as white",
+        "open chess and play black",
+        "play chess, please",
+        "play chess with me and make it hard",
+        "let's play chess, you be white",
+    ],
+)
+def test_more_ways_to_ask_for_the_game(mac, text):
+    assert games.to_play(text) is CHESS
+    assert not any(tool == "play_music" for tool, _ in fastpath.plan(text) or [])
+
+
+@pytest.mark.parametrize(
+    ("apps", "text"),
+    [
+        ([FLORENCE, TUNES], "play florence and the machine"),  # a band whose name starts with the game's
+        ([SIMON, TUNES], "play simon and garfunkel"),
+        (APPS, "play chess, by abba"),  # a credit after a comma the transcriber put in
+        (APPS, "play chess, the musical"),
+    ],
+)
+def test_and_or_a_comma_inside_a_title_is_no_new_request(mac, apps, text):
+    mac(apps)
+    assert games.to_play(text) is None
+    assert fastpath.plan(text) == _cold(text) and fastpath.plan(text)[0][0] == "play_music"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "tunes pe chess chalao",  # another app
+        "youtube pe chess chalao",  # a site
+        "abba ka chess chalao",  # a credit
+        "abba ka chess khelo",
+        "youtube pe chess khelo",
+        "chess khelna band karo",  # stop playing chess
+        "mujhe chess khelna nahi hai",  # I don't want to play chess
+        "chess khelne ke rules batao",  # tell me the rules
+        "chess mat khelo",
+        "chess kaise khelte hain",  # how is chess played
+    ],
+)
+def test_hindi_that_asks_for_no_game(mac, text):
+    assert games.to_play(text) is None
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["mujhe chess khelna hai", "chess khelo na", "mac pe chess khelo", "computer ke saath chess khelo",
+     "chess khelte hain aur gaana bajao", "chess khelein kya"],
+)  # fmt: skip
+def test_hindi_that_asks_for_the_game(mac, text):
+    assert games.to_play(text) is CHESS
+
+
+def test_hinglish_aur_starts_the_next_request(mac):
+    assert games.to_play("play chess aur gaana bajao") is CHESS  # the game, then a song
+    assert games.to_play("play chess aur the machine") is CHESS
+
+
+def test_hindi_music_on_another_app_stays_music_in_the_session(agent, monkeypatch):
+    played = []
+
+    async def fake_invoke(self, name, args, ctx):
+        played.append((name, args))
+        return ToolOutput("Playing.", ok=True)
+
+    monkeypatch.setattr(Registry, "invoke", fake_invoke)
+    r = asyncio.run(Session(reflex=_Reflex(_LANES["tool"])).handle("tunes pe chess chalao", from_user=True))
+    assert r.route == "quick" and played == [("play_music", {"query": "tunes pe chess"})] and agent == []
+
+
+def _running(app: App) -> App:
+    from dataclasses import replace
+
+    return replace(app, running=True)
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["play another game", "play as black", "play a new game", "play one more round", "let's play another game as white",
+     "play against the computer", "play with me"],
+)  # fmt: skip
+def test_a_follow_up_plays_the_game_that_is_open(mac, text):
+    mac([_running(CHESS), POKER, TUNES])
+    assert games.to_play(text).bundle_id == CHESS.bundle_id
+    assert not any(tool == "play_music" for tool, _ in fastpath.plan(text) or [])
+
+
+def test_a_follow_up_needs_exactly_one_game_open(mac):
+    assert fastpath.plan("play another game") == [("play_music", {"query": "another game"})]  # none open
+    mac([_running(CHESS), _running(POKER), TUNES])
+    assert games.to_play("play as black") is None
+    assert fastpath.plan("play as black") == [("play_music", {"query": "as black"})]
+    mac([_running(CHESS), TUNES])
+    titles = ["play it", "play another one", "play something", "play the game", "play black", "play as it was",
+              "play against all odds", "play with me by the band", "play one more song"]  # fmt: skip
+    for text in titles:
+        assert games.to_play(text) is None and fastpath.plan(text) == _cold(text)  # titles, as before
+
+
+@pytest.mark.parametrize(
+    "query",
+    ["chess on repeat", "chess on shuffle", "chess on loop", "chess in the background", "chess in concert",
+     "chess on my homepod", "chess on my speaker", "chess on my phone"],
+)  # fmt: skip
+def test_playback_words_and_other_devices_keep_it_music(mac, query):
+    assert games.game_at_head(query) is None
+
+
+@pytest.mark.parametrize("query", ["chess on my mac", "chess on my laptop", "chess on my workbench", "chess on my computer"])
+def test_this_computer_by_any_of_its_names_is_still_the_game(mac, query):
+    assert games.game_at_head(query) is CHESS
+
+
+@pytest.mark.parametrize(
+    ("query", "said"),
+    [
+        ("chess as white", "I'd like to play chess as white"),
+        ("chess", "do you want to play chess?"),
+        ("chess", "चेस खेलो"),  # Hindi in Devanagari: the words don't name it the way the query does
+        ("chess", "time for chess"),
+        ("chess as white", "mood for some chess as white"),
+        ("another game", "another game?"),
+    ],
+)
+def test_play_music_refuses_the_game_whatever_the_wording(player, mac, query, said):
+    mac([_running(CHESS), POKER, TUNES, NOTEBOOK])
+    assert player(query, said=said, origin="live").startswith("Error: Chess is a board game")
+    assert player.asked == []
+
+
+@pytest.mark.parametrize(
+    ("query", "said"),
+    [
+        ("chess", "put on chess"),
+        ("chess", "listen to chess"),
+        ("chess", "chess bajao"),
+        ("chess", "time for the chess soundtrack"),
+        ("chess", "time for chess by abba"),
+        ("chess", "time for chess on tunes"),
+        ("chess", "open chess.com and play chess"),
+        ("poker", "time for poker face"),  # more of a title after the name
+    ],
+)
+def test_play_music_plays_what_the_user_asked_for_as_music(player, query, said):
+    assert player(query, said=said) == "Playing." and player.asked == [query]
+
+
+def test_the_logs_lane_never_searches_for_a_video(monkeypatch, mac):
+    """Laya's one-tool lane with play_music, and the model calling it: an unfamiliar wording of
+    "play chess" still gets the refusal, never play_best."""
+    from neo.decide import media as media_mod
+
+    asked, results = [], []
+
+    async def fake_play_best(query, text=""):
+        asked.append(query)
+        return "Playing."
+
+    class Brain:
+        last_used = last_model = "fake"
+
+    async def fake_run_agent(goal, **kw):
+        from neo.agent.loop import AgentResult
+
+        out = await registry().get("play_music").handler({"query": "chess as white"}, kw["ctx"])
+        results.append(out)
+        return AgentResult(str(out), "done", [], [])
+
+    monkeypatch.setattr(events, "_bus", EventBus())
+    monkeypatch.setattr(media_mod, "play_best", fake_play_best)
+    monkeypatch.setattr(sess_mod, "run_agent", fake_run_agent)
+    monkeypatch.setattr(sess_mod, "brain", lambda purpose="agent": Brain())
+    asyncio.run(Session(reflex=_Reflex(_LANES["tool"])).handle("mood for some chess as white", from_user=True))
+    assert asked == [] and results and str(results[0]).startswith("Error: Chess is a board game")
+
+
+def test_play_music_waits_for_the_first_scan_off_the_event_loop(player, monkeypatch):
+    import threading
+
+    scans = []
+
+    def fake_inventory(refresh=False):
+        scans.append(threading.current_thread() is threading.main_thread())
+        return list(APPS)
+
+    monkeypatch.setattr(inventory, "snapshot", lambda: None)
+    monkeypatch.setattr(inventory, "inventory", fake_inventory)
+    assert player("chess as white", said="play chess as white").startswith("Error: Chess is a board game")
+    assert scans == [False] and player.asked == []
+
+
+def test_the_session_reads_the_request_off_the_event_loop(agent, monkeypatch):
+    import threading
+
+    threads = []
+    real = games.to_play
+
+    def spy(text, apps=None):
+        threads.append(threading.current_thread() is threading.main_thread())
+        return real(text, apps)
+
+    monkeypatch.setattr(games, "to_play", spy)
+    asyncio.run(Session(reflex=_Reflex(_LANES["tool"])).handle("play chess as white", from_user=True))
+    asyncio.run(Session().command("open chess and play as white", [("open_app", {"target": "chess"})]))
+    assert threads == [False, False] and len(agent) == 2  # handle, then command: never on the loop
