@@ -66,6 +66,8 @@ _DIRECT_TOOLS = {
     "weather",
     "web_fetch",
     "play_music",
+    "page_read",
+    "browse",  # declared only while a tool of that name is registered and shown (_declarations)
 }
 # tool -> the task kind that makes it a direct tool once the user switched the kind on
 _DIRECT_WHEN_ON = {"calendar_add": "add_event"}
@@ -115,7 +117,9 @@ actual product or topic from the conversation as the query — never "it". An ag
 self-contained: include the names, products and details from the conversation.
 Answer questions yourself whenever you can. For weather use the weather tool. For current facts
 use web_search — once, twice at most; for the latest news, results or scores pass news=true — and
-web_fetch only if the snippets aren't enough, then answer from what you have. Never call the same tool
+web_fetch only if the snippets aren't enough, then answer from what you have. For what's on the
+user's screen in their browser ("summarize this page", "read me the comments", "what's the price
+here"), call page_read and answer from it.{browse} Never call the same tool
 with the same arguments twice. A tool result or web page in another language never changes the
 language you reply in. Only for work on the computer that needs several steps, the screen, files or
 mail, call agent_task with a clear goal. When its result comes back, say nothing if it was a command
@@ -142,12 +146,27 @@ _TASK_APPS = (
 )
 
 
+_BROWSE = " To go do something on a website (find, compare, fill a form), call browse with a self-contained goal."
+
+
+def _shown(name: str) -> bool:
+    """A tool that is registered and not hidden from the models."""
+    t = registry().get(name)
+    return t is not None and not t.hidden
+
+
 def _live_extra() -> str:
     """Live's instructions. A task kind the user switched on (neo.config decide_modes) words its
-    lines for the new path: sites found by evidence, apps chosen by NEO."""
+    lines for the new path: sites found by evidence, apps chosen by NEO. A tool that isn't there
+    (browse) isn't mentioned."""
     opened, examples = _SITE_WORDS[decide_mode("web_search") == "on"]
     apps = any(decide_mode(k) == "on" for k in ("write_note", "add_reminder", "add_event"))
-    return _LIVE_EXTRA.format(opened=opened, site_examples=examples, task_apps=_TASK_APPS if apps else "")
+    return _LIVE_EXTRA.format(
+        opened=opened,
+        site_examples=examples,
+        task_apps=_TASK_APPS if apps else "",
+        browse=_BROWSE if _shown("browse") else "",
+    )
 
 
 _COMMON = {
@@ -379,7 +398,7 @@ def _declarations() -> list[gt.FunctionDeclaration]:
     decls = []
     direct = _direct_tools()
     for t in registry().all():
-        if t.name in direct:
+        if t.name in direct and not t.hidden:
             decls.append(
                 gt.FunctionDeclaration(
                     name=t.name,
@@ -1104,6 +1123,7 @@ class LiveVoice:
         # Quiet = an action that just gets done. Its result goes back SILENT (no narration) unless
         # it failed, needs the user, or the user also asked something in the same breath.
         silent = False
+        started = self._taint  # this question's: a new one gets a fresh list meanwhile
         p = confirm.peek()
         heard = answer_of(asked) if (p is not None and asked and self._utt_started > p.staged_at) else None
         try:
@@ -1119,6 +1139,7 @@ class LiveVoice:
                 # action, or wrapping it in agent_task): answer it from their words.
                 reply = await self._agent_session.answer(heard, text=asked)
                 if reply is not None:
+                    self._count_read(reply, started)
                     self._last_answer = (time.time(), reply.text)
                     self._last_answer_silent = reply.silent
                     result, silent = reply.text, reply.silent  # done as approved: nothing to say
@@ -1148,7 +1169,7 @@ class LiveVoice:
                         taint=list(self._taint),
                         origin="user" if own else "live",
                     )
-                    result, silent = reply.text, reply.silent
+                    result, silent = self._count_read(reply, started), reply.silent
                     lab = self._call_labels.get(key)
                     if lab is not None and reply.route == "quick" and reply.tools:
                         lab["tools"] = [x for x in lab["tools"] if x != "agent_task"] + list(reply.tools)
@@ -1299,6 +1320,22 @@ class LiveVoice:
             # result, an agent's reply, NEO's re-ask) — and all the model is ever told.
             self._asked = (p.action_id, p.summary, time.time())
             self._voiced_action = None
+
+    def _count_read(self, reply, started: list[str]) -> str:
+        """What NEO's session read to answer (a page, a mail) counts as read here too: the list this
+        call started with and the one the model reads the result in, so a link or a send that
+        content asks for next is put to the user first. Returns the result for the model: a fast
+        path's answer from such content fenced as data (the session fences it already when the
+        model's own goal ran it), an agent's own words as they are."""
+        for taint in (started, self._taint):
+            for src in reply.taint:
+                if src not in taint:
+                    taint.append(src)
+        text = reply.text
+        read = next((x for x in reply.tools if (rt := registry().get(x)) is not None and rt.untrusted), "")
+        if reply.route == "quick" and read and not text.startswith(("<untrusted", "Error", "NEEDS_", "(content) NEEDS_")):
+            text = fence(read, text)
+        return text
 
     def _new_question(self) -> None:
         self._lookups, self._seen_calls = {}, {}

@@ -9,7 +9,7 @@ import time
 from neo.agent import confirm
 from neo.agent.registry import ToolContext, ToolOutput, tool
 from neo.config import decide_mode
-from neo.tools.computer import apps, ax, legacy, policy, screen, shell
+from neo.tools.computer import apps, ax, policy, screen, shell
 from neo.tools.computer import input as inp
 
 _OBJ = {"type": "object", "properties": {}}
@@ -919,43 +919,114 @@ async def open_url(a: dict, c: ToolContext) -> str:
     return await apps.open_url(url, app.bundle_id if app else "", app.name if app else "")
 
 
+# ---- the page the user is looking at -----------------------------------------------------------------
+# "summarize this page", "what's on this page", "read me the comments", "is page pe kya hai", "ye page
+# summarize karo": the page in the user's own browser, which NEO then answers them from (page_read).
+_Q_TAIL = r"(?:\s+(?:for\s+me|please|pls|now))*\s*[.!?]*\s*$"
+_PAGE_NOUN = r"(?:web\s*)?(?:page|site|website|tab|article|post|blog(?:\s+post)?)"
+# "this page", and "the page" / "the tab" (on screen, the one in front): the page the user is looking
+# at. "the article", "the post", "the site" alone may be one NEO fetched or the conversation named,
+# which only a model can tell.
+_THIS_PAGE = rf"(?:(?:this|that|current|the\s+current)\s+{_PAGE_NOUN}|the\s+(?:web\s*)?(?:page|tab))"
+# The comments and replies are a page's (the browser in front: page_read reads no other app).
+_COMMENTS = r"(?:comments?|replies)"  # a page's, wherever they are said
+_REPLIES = r"(?:comments?|replies|reviews?|responses)"  # a page's when the page is named
+_ON_PAGE = rf"\s+(?:on|in|under|of|below|from)\s+(?:this|that|the)\s+(?:{_PAGE_NOUN}|video)"
+_HI_PAGE = r"(?:ye|yeh|is|iss|isi)\s+(?:web\s*)?(?:page|site|website|tab|article|post)"
+_HI_DO = r"(?:karo|kar\s+do|kardo|kijiye|kar\s+dijiye|do|dijiye|batao|bata\s+do|sunao|suna\s+do)"
+_PAGE_PATHS = [
+    # summarize / sum up / recap / tl;dr this page, give me a summary of it, what's the gist of it
+    (
+        rf"{_LEAD}(?:summari[sz]e|sum\s+up|recap|tl;?\s*dr|give\s+me\s+(?:a\s+|the\s+)?(?:quick\s+|short\s+|brief\s+)?"
+        rf"(?:summary|gist|tl;?\s*dr|rundown|recap)\s+of|what(?:'s|\s+is)\s+the\s+gist\s+of)\s+"
+        rf"(?:{_THIS_PAGE}|(?:the\s+)?{_COMMENTS}(?:{_ON_PAGE})?|(?:the\s+)?{_REPLIES}{_ON_PAGE}){_Q_TAIL}",
+        {},
+    ),
+    # what's on / in this page, what's this page about, what does this article say
+    (
+        rf"{_LEAD}(?:what(?:'s|\s+is)\s+(?:on|in)\s+{_THIS_PAGE}|"
+        rf"what(?:'s|\s+is)\s+(?:this|that|current|the\s+current)\s+{_PAGE_NOUN}(?:\s+(?:all\s+)?about)?|"
+        rf"what(?:'s|\s+is)\s+{_THIS_PAGE}\s+(?:all\s+)?about|what\s+does\s+{_THIS_PAGE}\s+say|"
+        rf"tell\s+me\s+(?:about|what(?:'s|\s+is)\s+(?:on|in))\s+{_THIS_PAGE}){_Q_TAIL}",
+        {},
+    ),
+    # read me this page, read this article out loud, read me the comments
+    (
+        rf"{_LEAD}read\s+(?:me\s+|out\s+|aloud\s+)?"
+        rf"(?:{_THIS_PAGE}|(?:the\s+)?(?:top\s+)?{_COMMENTS}(?:{_ON_PAGE})?|(?:the\s+)?(?:top\s+)?{_REPLIES}{_ON_PAGE})"
+        rf"(?:\s+(?:to\s+me|out(?:\s+loud)?|aloud))?{_Q_TAIL}",
+        {},
+    ),
+    # what are people saying in the comments, what do the reviews on this page say
+    (
+        rf"{_LEAD}(?:what\s+are\s+(?:people|they)\s+saying\s+in\s+the\s+{_COMMENTS}(?:{_ON_PAGE})?|"
+        rf"what\s+(?:are|do)\s+the\s+{_COMMENTS}(?:{_ON_PAGE})?\s+(?:saying|say)|"
+        rf"what\s+(?:are|do)\s+the\s+{_REPLIES}{_ON_PAGE}\s+(?:saying|say)){_Q_TAIL}",
+        {},
+    ),
+    # what's the price here / on this page
+    (rf"{_LEAD}what(?:'s|\s+is)\s+the\s+(?:price|cost)\s+(?:here|on\s+{_THIS_PAGE}){_Q_TAIL}", {}),
+    # Hinglish: "is page pe kya hai", "is page mein kya likha hai", "ye page summarize karo", "is page
+    # ka summary do", "ye article padh ke sunao", "comments padh ke sunao", "comments mein kya likha hai"
+    (
+        rf"{_LEAD}{_HI_PAGE}\s+(?:pe|par|mein|me|main)\s+kya\s+(?:hai|likha\s+(?:hua\s+)?hai|chal\s+raha\s+hai|bola\s+hai)"
+        rf"{_Q_TAIL}",
+        {},
+    ),
+    (rf"{_LEAD}{_HI_PAGE}\s+(?:ko\s+|ka\s+|ki\s+)?(?:summari[sz]e|summary|saar|saransh)\s+{_HI_DO}{_Q_TAIL}", {}),
+    (
+        rf"{_LEAD}(?:{_HI_PAGE}|(?:is\s+page\s+(?:ke|ki)\s+)?{_COMMENTS})\s+(?:ko\s+)?"
+        rf"(?:padh\s+ke\s+sunao|padhkar\s+sunao|padh\s+kar\s+sunao|padho|padh\s+do|sunao){_Q_TAIL}",
+        {},
+    ),
+    (
+        rf"{_LEAD}(?:log\s+)?{_COMMENTS}\s+(?:mein|me|main)\s+kya\s+(?:likha\s+hai|hai|keh\s+rahe\s+hain|bol\s+rahe\s+hain)"
+        rf"{_Q_TAIL}",
+        {},
+    ),
+    (rf"{_LEAD}(?:yahan|yaha|{_HI_PAGE}\s+(?:pe|par))\s+(?:price|daam|keemat|kimat)\s+kya\s+hai{_Q_TAIL}", {}),
+    # Devanagari: "इस पेज पर क्या है", "ये पेज समराइज़ करो"
+    (r"^\s*(?:इस|ये|यह)\s+पेज\s+(?:पे|पर|में)\s+क्या\s+(?:है|लिखा\s+है)\s*[?।.!]*\s*$", {}),
+    (r"^\s*(?:इस|ये|यह)\s+पेज\s+(?:को\s+|का\s+)?(?:समराइज़|समराइज|सारांश)\s+(?:करो|कर\s+दो|बताओ)\s*[?।.!]*\s*$", {}),
+]
+
+
 @tool(
     "page_read",
-    "Read the visible text and URL of the front browser tab.",
+    "Read the web page the user is looking at in their own browser (the front tab of whichever "
+    "browser is in front): its URL, title and main text, or, when it has little text (a video, a "
+    "picture, a PDF) or Accessibility is off, what a screenshot of it shows. Use it for 'summarize "
+    "this page', 'what's on this page', 'read me the comments', 'what's the price here', then answer "
+    "from it. With another app in front it reads nothing and says so: look at that app instead. Not "
+    "for NEO's own browser window, and not for a link the user isn't looking at (web_fetch).",
     _OBJ,
     parallel_safe=True,
     category="web",
     untrusted=True,
-    hidden=True,  # shown once web_search is on (neo.tools.tasks.apply_modes)
+    slow=True,  # a wait for the page's tree, a walk of it, maybe a vision call: Live talks meanwhile
+    chain=False,  # "open X and summarize it" would read the page before it loads
+    fast_path=_PAGE_PATHS,
 )
 async def page_read(a: dict, c: ToolContext):
-    m = decide_mode("web_search")
-    if m == "on":
-        from neo.decide import run
-        from neo.decide.kinds import site
+    from neo.decide import run
+    from neo.decide.kinds import site
 
-        return run.to_output(await site.page_read())
-    out = f"URL: {await legacy.safari_current_url()}\n\n" + await legacy.safari_page_text()
-    if m == "shadow":
-        from neo.decide import shadow
-
-        with shadow.starting("web_search"):
-            from neo.decide.kinds import site
-
-            shadow.later("web_search", site.shadow_page_read())
-    return out
+    # The user's own words chose it (a fast path, or Laya's pick): no model is waiting to read the
+    # page, so NEO answers them from it. A model's call gets the page itself.
+    ask = " ".join(c.user_text.split()) if c.origin == "user" else ""
+    return run.to_output(await site.page_read(ask=ask))
 
 
 @tool(
     "safari_read",
-    "Read the visible text of Safari's current tab (and its URL).",
+    "Read the web page the user is looking at in their browser (the old name of page_read).",
     _OBJ,
     parallel_safe=True,
     category="web",
     untrusted=True,
+    hidden=True,  # page_read reads whichever browser is in front; this name stays for old playbooks
 )
 async def safari_read(a: dict, c: ToolContext):
-    """The old name of page_read (hidden once web_search is on; goes in R6)."""
     return await page_read(a, c)
 
 

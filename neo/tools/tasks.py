@@ -113,9 +113,6 @@ _WHEN_ON: dict[str, tuple[str, dict[str, Any]]] = {
             "parameters": _p({"site": _S, "query": _S, "browser": _S}, ["site", "query"]),
         },
     ),
-    # page_read reads whichever browser is in front; until web_search is on, the model keeps the old tool
-    "page_read": ("web_search", {"hidden": False}),
-    "safari_read": ("web_search", {"hidden": True}),
 }
 _AS_REGISTERED: dict[str, dict[str, Any]] = {}
 

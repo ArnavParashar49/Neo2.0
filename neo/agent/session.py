@@ -96,6 +96,9 @@ class Reply:
     job: str = ""
     silent: bool = False  # the task was done quietly: nothing to speak, no chat bubble
     tools: tuple[str, ...] = ()  # quick route: the fast-path tools that ran
+    # The untrusted sources this request read (web pages, mail, files): the caller counts them as
+    # read too (Gemini Live's taint), so what they might ask for next is asked of the user first.
+    taint: tuple[str, ...] = ()
 
 
 @dataclass
@@ -283,10 +286,12 @@ class Session:
     ) -> Reply:
         from neo.agent.early import _APP_TOOLS, _SETTLE_AFTER_APP_S, early
 
-        spoken: list[str] = []
-        texts: list[str] = []
+        outs: list[tuple[str, str, bool]] = []  # (tool, its text, read from an untrusted source)
+        spoken: list[int] = []  # the steps whose text is said
         prev = ""
         asked = ""  # the card a step stopped to ask about
+        # One request, one taint: a page one step read counts for the next step and for the caller.
+        taint = list(_request_taint.get())
         for i, (tool, args) in enumerate(steps):
             t = registry().get(tool)
             async with early()._lock:  # an early run still in flight finishes — and leaves its claim — first
@@ -299,7 +304,7 @@ class Session:
                 if prev in _APP_TOOLS and tool not in _APP_TOOLS:
                     await asyncio.sleep(_SETTLE_AFTER_APP_S)
                 await bus().tool_start(tool, args, job=job)
-                ctx = ToolContext(user_text=text, taint=list(_request_taint.get()), origin=origin)
+                ctx = ToolContext(user_text=text, taint=taint, origin=origin)
                 out = await registry().invoke(tool, args, ctx)
                 await bus().tool_end(tool, out.ok, out.text, job=job)
                 outcomes.step(job, tool, out.ok, halt=out.halt)
@@ -309,20 +314,34 @@ class Session:
                     print(f"  ~ {tool} failed; handing to the agent")
                     ran = "; ".join(f"{tl}({', '.join(f'{k}={v!r}' for k, v in a.items())})" for tl, a in steps[:i])
                     note = f"\n[ALREADY DONE] These steps of the request already ran — don't repeat them: {ran}" if ran else ""
+                    _request_taint.set(tuple(taint))  # what the steps before it read counts for the agent
                     return await self._agent(text, d, None, job, done_note=note)
                 asked = out.staged or asked
             prev = tool
-            texts.append(out.text)
+            untrusted = bool(t and t.untrusted and out.ok and not out.halt)
+            if untrusted and tool not in taint:
+                taint.append(tool)  # (an early actor's result never went through the registry)
+            outs.append((tool, out.text, untrusted))
             needs_user = out.text.startswith(("NEEDS_", "Error"))
             if needs_user or voiced(out, bool(t and t.quiet)):
-                spoken.append(out.text)
-        reply_text = " ".join(spoken) if spoken else "; ".join(texts)
-        await self._remember(Message.user(text), Message.assistant(reply_text))
+                spoken.append(len(outs) - 1)
+
+        def said(fenced: bool) -> str:
+            """The reply; with ``fenced``, what an untrusted source said stays marked as its own."""
+            chosen = [outs[i] for i in spoken] if spoken else outs
+            parts = [fence(tl, tx) if fenced and u else tx for tl, tx, u in chosen]
+            return (" " if spoken else "; ").join(parts)
+
+        plain = said(False)  # what the user sees and hears
+        # A model reading the reply (Live's agent_task goal matched a fast path) gets a page or a mail
+        # fenced as data, like any untrusted tool result; the history never keeps it as NEO's words.
+        reply_text = said(origin != "user")
+        await self._remember(Message.user(text), Message.assistant(said(True)))
         silent = not spoken  # every step was an action that worked: just done, nothing to say
         if silent:
-            await bus().note(reply_text[:120])
+            await bus().note(plain[:120])
         else:
-            await bus().say(reply_text, final=True, job=job)
+            await bus().say(plain, final=True, job=job)
         await bus().publish(
             "turn", job=job, route="quick", brain="", model="", ms=int((time.time() - t0) * 1000), tools=len(steps)
         )
@@ -331,11 +350,13 @@ class Session:
             # The question is this session's to answer, like an agent's (the answer runs it, and no
             # model finishes the job afterwards); the orb keeps asking until then. Only that card:
             # one another job staged meanwhile was never this request's question.
-            self._adopt(p, _request_taint.get(), "direct")
+            self._adopt(p, taint, "direct")
             await bus().set_state(NeoState.CONFIRMING, job=job)
         else:
             await bus().end_job(job)
-        return Reply(reply_text, "quick", d, job=job, silent=silent, tools=tuple(t for t, _ in steps))
+        return Reply(
+            reply_text, "quick", d, job=job, silent=silent, tools=tuple(t for t, _ in steps), taint=tuple(taint)
+        )
 
     async def _agent(
         self,
@@ -395,7 +416,7 @@ class Session:
         _learn_from(job, res)
         if res.stopped == "needs_confirm" and self._stage_pending(res, ctx.taint):
             await bus().say(res.question, final=True, job=job)
-            return Reply(res.question, "confirm", d, res, job=job)
+            return Reply(res.question, "confirm", d, res, job=job, taint=tuple(ctx.taint))
         if res.stopped == "done" and not ctx.taint:
             # A path learned while reading a page or an email could have been steered by it.
             await asyncio.to_thread(self._save_playbook, text, res)
@@ -414,7 +435,7 @@ class Session:
             tools=len(res.steps),
         )
         await bus().end_job(job)
-        return Reply(res.text, "agent", d, res, job=job, silent=silent)
+        return Reply(res.text, "agent", d, res, job=job, silent=silent, taint=tuple(ctx.taint))
 
     # ---- tool selection ---------------------------------------------------------------
     def _tools_for(self, text: str, needs_screen: bool, playbook_ctx: str):
@@ -576,14 +597,14 @@ class Session:
             _learn_from(episode, res)
         if res.stopped == "needs_confirm" and self._stage_pending(res, ctx.taint):
             await bus().say(res.question, final=True, job=job)
-            return Reply(res.question, "confirm", None, res, job=job)
+            return Reply(res.question, "confirm", None, res, job=job, taint=tuple(ctx.taint))
         # Shown in the overlay either way; spoken only if it didn't go as approved.
         await bus().say(res.text, final=True, job=job)
         await bus().end_job(job)
         done = res.stopped == "done" and not res.question and all(st.ok for st in res.steps)
         failed_words = ("couldn't", "could not", "can't", "cannot", "unable", "error", "failed", "didn't")
         silent = out.ok and done and not any(w in res.text.lower() for w in failed_words)
-        return Reply(res.text, "agent", None, res, job=job, silent=silent)
+        return Reply(res.text, "agent", None, res, job=job, silent=silent, taint=tuple(ctx.taint))
 
     async def _expire_confirm(self, action_id: str) -> None:
         """If nobody answers, the question lapses and the orb stops asking."""
