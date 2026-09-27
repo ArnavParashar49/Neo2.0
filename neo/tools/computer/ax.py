@@ -25,26 +25,60 @@ from neo.decide._objc import pooled
 
 # ---- the one door for Accessibility actions -------------------------------------------------------
 # Every AX action NEO takes in another app — a press, a value or the focus set, a window raised —
-# goes through perform_action / set_attribute, as every event goes through input._post. While the
-# controls self-test runs, its watcher (_watch) sees each first and raises instead when the action
-# wouldn't stay in its test window; then the effects switch (neo/effects.py) has its say.
+# goes through perform_action / set_attribute, as every event goes through input._post (or, for one
+# app only, input._post_to_pid). While the controls self-test runs, its watcher (_watch) sees each
+# first and raises instead when the action wouldn't stay in its test window; then the target must be
+# neither one of NEO's own processes nor a protected app (OffLimits); then the effects switch
+# (neo/effects.py) has its say. An app that fails, or an element that can't be asked, is an error
+# code: the door itself raises only to refuse, and no caller takes a refusal for a plain failure
+# that another way around (typing where a value set failed) could make up for.
 _watch: Callable[[str, Any, str, Any], None] | None = None
+# What makes an app's web content readable (neo.decide.axkit.enable_web_reading), switched on and
+# back on its application element: nothing anyone sees changes, so it is no action in its UI.
+_READING_SWITCHES = frozenset({"AXManualAccessibility", "AXEnhancedUserInterface"})
+_ILLEGAL = -25201  # kAXErrorIllegalArgument: the answer for an element that can't be asked
+
+
+class OffLimits(Exception):
+    """The door won't act there: one of NEO's own processes, or an app NEO never touches."""
+
+
+def refuse_off_limits(pid: int) -> None:
+    """Raise OffLimits for NEO's own processes and protected apps. The tools and task kinds check
+    first, with better answers; this is the last word for any path that didn't."""
+    if not pid:
+        return
+    from neo.tools.computer import gates  # (the frozen gates, looked up at call time)
+
+    if is_neo(pid) or gates._protected("", pid):
+        raise OffLimits("that's NEO's own window or an app NEO never touches — nothing was done there")
+
+
+def _through(kind: str, el: Any, name: str, value: Any) -> None:
+    if _watch is not None:
+        _watch(kind, el, name, value)
+    if not (kind == "set" and name in _READING_SWITCHES):
+        refuse_off_limits(pid_of(el))
 
 
 def perform_action(el: Any, action: str, *, kind: str = "accessibility", what: str = "") -> int:
     """AXUIElementPerformAction through the one door: the AX error code (0 = done)."""
-    if _watch is not None:
-        _watch("perform", el, action, None)
+    _through("perform", el, action, None)
     effects.guard(kind, what or f"press {action} in another app's UI", via=AS.AXUIElementPerformAction)
-    return AS.AXUIElementPerformAction(el, action)
+    try:
+        return AS.AXUIElementPerformAction(el, action)
+    except Exception:  # noqa: BLE001 - an element that can't be asked: a failure, not a refusal
+        return _ILLEGAL
 
 
 def set_attribute(el: Any, name: str, value: Any, *, kind: str = "accessibility", what: str = "") -> int:
     """AXUIElementSetAttributeValue through the one door: the AX error code (0 = done)."""
-    if _watch is not None:
-        _watch("set", el, name, value)
+    _through("set", el, name, value)
     effects.guard(kind, what or f"set {name} in another app's UI", via=AS.AXUIElementSetAttributeValue)
-    return AS.AXUIElementSetAttributeValue(el, name, value)
+    try:
+        return AS.AXUIElementSetAttributeValue(el, name, value)
+    except Exception:  # noqa: BLE001
+        return _ILLEGAL
 
 
 # Roles worth showing to the model. Containers are walked but not listed unless titled.
@@ -651,8 +685,9 @@ def secure(el) -> bool:
 @pooled
 def set_el_value(e: Element, value: str) -> str:
     """Put text into a text field / area and read it back: AXValue first; a field that ignores it
-    (many web and framework inputs) is focused and typed into. Never a password field, never a
-    checkbox, slider or popup (those are pressed, through the click gate)."""
+    (many web and framework inputs) is focused and typed into — never a line break (a Return there
+    could send or run it: type_text knows how to type one where the cursor is). Never a password
+    field, never a checkbox, slider or popup (those are pressed, through the click gate)."""
     if e.role == "AXSecureTextField" or secure(e.ref):
         return "Error: that's a password field — NEO never fills those."
     web = _attr(e.ref, "AXEditableAncestor") is not None
@@ -660,10 +695,21 @@ def set_el_value(e: Element, value: str) -> str:
         return f"Error: {e.id} is a {e.role.removeprefix('AX')}, not a text field — press or click it instead."
     from neo.decide import axkit
 
-    if axkit._put(e.ref, value, "shift+return"):
+    value = value.replace("\r\n", "\n").replace("\r", "\n")
+    if axkit._put(e.ref, value, ""):  # "": no chord for a line break — those are never typed here
         return f"Set {e.id} to “{value[:60]}”."
     now = _str(_attr(e.ref, AS.kAXValueAttribute))
+    if not _norm_text(now) and axkit._CONTROL.search(value):
+        return (
+            f"Error: {e.id} didn't take the text, and typing it in would press Return at each line break "
+            "(which could send or run it) — click into it and use type_text, which types line breaks "
+            "the safe way for where the cursor is."
+        )
     return f"Error: {e.id} didn't take the text (it reads “{now[:60]}”) — click into it and use type_text."
+
+
+def _norm_text(s: str) -> str:
+    return " ".join(s.split())
 
 
 def set_value(eid: str, value: str) -> str:
@@ -810,11 +856,9 @@ def visible_frame(el) -> tuple[float, float, float, float] | None:
 
 
 def focus_el(el) -> bool:
-    """Give the element the keyboard focus through AX (no click), and say whether it took it."""
-    try:
-        if set_attribute(el, AS.kAXFocusedAttribute, True, what="focus a text area in another app's UI") != 0:
-            return False
-    except Exception:  # noqa: BLE001
+    """Give the element the keyboard focus through AX (no click), and say whether it took it. (A
+    refusal at the door goes on up: nothing may type in its place.)"""
+    if set_attribute(el, AS.kAXFocusedAttribute, True, what="focus a text area in another app's UI") != 0:
         return False
     return bool(_attr(el, AS.kAXFocusedAttribute, False))
 
@@ -850,7 +894,11 @@ def focused_terminal(pid: int = 0) -> bool:
     editor's terminal pane is a web view: without it, nothing in it can be seen)."""
     if pid and _expose_web(pid, _app_el(pid)):
         time.sleep(_WEB_SETTLE_S)
-    el = _focused()
+    return is_terminal(_focused())
+
+
+def is_terminal(el) -> bool:
+    """Does this element, or the pane around it, say it is a terminal view?"""
     for _ in range(2):
         if el is None:
             return False
@@ -1091,11 +1139,8 @@ def raise_window(h: Hit) -> bool:
     if focused is None or _same(focused, h.window) or _attr(focused, "AXModal") is True:
         return False  # (a modal window stays on top: never raise another over it)
     what = f"raise {h.app or 'an app'}'s window under the pointer"
-    try:
-        perform_action(h.window, "AXRaise", kind="focus", what=what)
-        set_attribute(h.window, "AXMain", True, kind="focus", what=what)
-    except Exception:  # noqa: BLE001
-        return False
+    perform_action(h.window, "AXRaise", kind="focus", what=what)  # (a refusal at the door goes on up)
+    set_attribute(h.window, "AXMain", True, kind="focus", what=what)
     return True
 
 

@@ -533,6 +533,11 @@ def load_the_memory_embedder(s):
 # macOS calls with no program or socket under them: guard() before each
 
 
+# A process that is none of NEO's own (the door never posts into those): the sentinel stands in for
+# the post, so nothing reaches it.
+_OTHER_APP = 1
+
+
 @case("input")
 def a_click(s):
     import Quartz
@@ -550,7 +555,7 @@ def typing_into_another_app(s):
     from neo.decide import axkit
 
     s.put(Quartz, "CGEventPostToPid", poses_as="objc")
-    return lambda: axkit._type(os.getpid(), "hi", "return")
+    return lambda: axkit._type(_OTHER_APP, "hi", "return")
 
 
 @case("input")
@@ -560,7 +565,7 @@ def return_in_another_app(s):
     from neo.decide import media
 
     s.put(Quartz, "CGEventPostToPid", poses_as="objc")
-    return lambda: media._post_return(os.getpid())
+    return lambda: media._post_return(_OTHER_APP)
 
 
 @case("accessibility")

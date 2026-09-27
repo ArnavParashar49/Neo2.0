@@ -803,21 +803,15 @@ def _attr(el, name: str, default=None):
 
 
 def _set(el, name: str, value) -> bool:
-    """Through the computer tools' one door for AX actions (ax.set_attribute)."""
-    set_attribute = _ax_mod().set_attribute  # (resolved first: effects off refuse the set, not this lookup)
-    try:
-        return set_attribute(el, name, value) == 0
-    except Exception:  # noqa: BLE001
-        return False
+    """Through the computer tools' one door for AX actions (ax.set_attribute). It answers an app
+    that failed with an error code: what it raises is a refusal (its watcher's, a protected app,
+    effects off), which goes on up — never taken for a failure another way around could make up for."""
+    return _ax_mod().set_attribute(el, name, value) == 0
 
 
 def _perform(el, action: str) -> bool:
-    """Through the computer tools' one door for AX actions (ax.perform_action)."""
-    perform_action = _ax_mod().perform_action
-    try:
-        return perform_action(el, action) == 0
-    except Exception:  # noqa: BLE001
-        return False
+    """Through the computer tools' one door for AX actions (ax.perform_action), like :func:`_set`."""
+    return _ax_mod().perform_action(el, action) == 0
 
 
 def _actions(el) -> list[str]:
@@ -847,12 +841,14 @@ def _trusted() -> bool:
 
 
 def _post_return(pid: int) -> None:
-    """A Return keystroke to that app only (not to whatever is frontmost)."""
+    """A Return keystroke to that app only (not to whatever is frontmost), through the input door."""
     import Quartz as Q
+
+    from neo.tools.computer import input as inp
 
     effects.guard("input", "press Return in another app", via=Q.CGEventPostToPid)
     for down in (True, False):
-        Q.CGEventPostToPid(pid, Q.CGEventCreateKeyboardEvent(None, 36, down))
+        inp._post_to_pid(pid, Q.CGEventCreateKeyboardEvent(None, 36, down))
 
 
 def _s(v) -> str:

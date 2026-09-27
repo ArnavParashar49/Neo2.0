@@ -96,4 +96,23 @@ async def ax_set_value(a: dict, c: ToolContext) -> str:
     owner = await asyncio.to_thread(ax.app_of, e.ref) if e.ref is not None else ""
     if await gates._off_limits_el(e, pid, owner):  # NEO's own field, or a protected app's
         return gates._protected_out()
-    return await asyncio.to_thread(ax.set_el_value, e, str(a.get("value") or ""))
+    value = str(a.get("value") or "").replace("\r\n", "\n").replace("\r", "\n")
+    joined = "\n" in value and await _one_line_only(e, pid)
+    if joined:
+        value = " ".join(part.strip() for part in value.split("\n") if part.strip())
+    out = await asyncio.to_thread(ax.set_el_value, e, value)
+    return out + _JOINED if joined and not out.startswith("Error") else out
+
+
+_JOINED = " (as one line: a line break there would run or submit it)"
+
+
+async def _one_line_only(e: ax.Element, pid: int) -> bool:
+    """Would a line break in this field run or submit what is in it? A one-line field; a field of
+    an app that can't be told; a command line — a terminal app, or an app's terminal pane with the
+    keyboard in it or this field in it (by what the field or the pane around it says it is)."""
+    if e.role in ax._SINGLE_LINE or not pid or await gates._command_line(pid):
+        return True
+    from neo.tools.computer.focus import hosts_shell
+
+    return await asyncio.to_thread(hosts_shell, pid) == "pane" and await asyncio.to_thread(ax.is_terminal, e.ref)
