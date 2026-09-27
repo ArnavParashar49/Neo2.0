@@ -6,11 +6,18 @@ against the test window — the only real end-to-end model latencies in the cont
 
 It uses the user's own model quota, so only the user starts it, from their own Terminal (the same
 rules as ``python -m neo.selftest controls``). Each request runs in the controls test window with
-every guard of the controls check: events only to the test window and Accessibility actions only on
-its elements (neo.selftest.watch), stop the moment the user touches the mouse or keyboard, NEO's own
-window never, and a question for the user (NEEDS_CONFIRM) ends that run unanswered. The model gets
-only the screen tools; ``hotkey`` refuses chords the whole Mac acts on (⌘Tab, ⌘Space, ⌘Q…) and
-``menu_command`` (when the build has it) the system menu's commands (Restart…, Shut Down…, Log Out…).
+every guard of the controls check: events only to the test window, Accessibility actions only on its
+elements and no other app brought forward (neo.selftest.watch), stop the moment the user touches the
+mouse or keyboard, NEO's own window never, and a question for the user (NEEDS_CONFIRM) ends that run
+unanswered. The model gets only the screen tools, and they read the test window only: a screenshot
+is cut to the window, ax_tree / ax_find / click_text read nothing while another app is in front, and
+no tool takes another app's name. ``hotkey`` presses only keys for the test window — judged on the
+chord it would press, never its spelling (no ctrl, option or fn chord, no F key, ⌘ only with the test
+window's own menu letters) — and ``menu_command`` (when the build has it) refuses the system's menus
+(Restart…, Shut Down…, Log Out…, Services, Hide Others…).
+
+Each run starts untainted (what an earlier run read never tightens a later one's gates), and the A/B
+arms alternate request by request (ABBA…), so provider load drifting over the hour reaches both.
 
 For each run: did the goal happen (from the test window's own log), model calls and their seconds,
 tool calls, total seconds, and which brain answered (a failover to another brain — an overloaded
@@ -27,6 +34,7 @@ import asyncio
 import contextlib
 import dataclasses
 import json
+import math
 import re
 import statistics
 import time
@@ -102,25 +110,49 @@ ARMS = {
     "batch": (Arm("batch off", batch=False), Arm("batch on", batch=True)),
 }
 
-# Chords the whole Mac acts on, whatever app is in front: never sent in the agent section.
-_GLOBAL = re.compile(r"(?:cmd|command|⌘).*(?:tab|space|\bq\b|\bh\b|\bm\b|`)|ctrl.*(?:up|down|left|right|space)|"
-                     r"(?:cmd|command|⌘).*(?:alt|option|opt).*esc|shift.*[345]\b|\bfn\b", re.I)  # fmt: skip
+# Keys the agent section may press: a bare key, or one with shift (typing, moving, confirming — it goes
+# to the app in front, which the watch keeps the test window), and ⌘ only with a letter the test
+# window's own menus define (or select all). Everything else can act on the whole Mac whatever app is
+# in front: ctrl, option and fn chords (Spaces, input sources, Force Quit, the menu bar's focus), the
+# F keys and caps lock, ⌘ with shift (screenshots, Log Out), ⌘Tab / ⌘Space / ⌘` / ⌘Q / ⌘H / ⌘M.
+_NEVER_BARE = frozenset({"capslock", *(f"f{i}" for i in range(1, 21))})
+_MENU_CHORDS = (L.MENU_KEYS, L.ROUND_KEYS, "cmd+a")
+
+
+def chord_ok(keys: str) -> bool:
+    """Whether the agent section may press ``keys`` — judged on the chord the hotkey tool would press
+    (its own parser: super, win and meta are ⌘; control and ⌃ are ctrl; "#" is shift+3), never on
+    how it is spelled. A chord the parser can't read is refused too."""
+    from neo.tools.computer import input as inp
+
+    try:
+        flags, key = inp.parse_chord(keys)
+        allowed = {inp.parse_chord(k) for k in _MENU_CHORDS}
+    except ValueError:
+        return False
+    if key in _NEVER_BARE:
+        return False
+    if (flags & ~inp._MODS["shift"]) == 0:
+        return True
+    return (flags, key) in allowed
 
 
 def _safe_hotkey(handler: Callable) -> Callable:
     async def hotkey(a: dict, c: Any) -> Any:
         keys = str(a.get("keys") or "")
-        if _GLOBAL.search(keys) or a.get("app"):
+        if not chord_ok(keys) or a.get("app"):
             return f"Error: {keys!r} isn't available in the self-test (it would act outside the test window)."
         return await handler(a, c)
 
     return hotkey
 
 
-# Menu commands the whole Mac acts on (the system menu's): never chosen in the agent section, whatever
-# menu_command itself would do with them.
+# Menu commands the whole Mac acts on (the system menu's, the app menu's Services and Hide Others, the
+# test app's own Quit and Hide): never chosen in the agent section, whatever menu_command itself would
+# do with them (DECISIONS 29 and 46: never the Apple or Services menus).
 _SYSTEM_MENU = re.compile(r"restart|shut\s*down|log\s*out|force\s*quit|\bsleep\b|lock\s*screen|system\s*settings|"
-                          r"system\s*preferences|about\s+this\s+mac|app\s*store|recent\s+items", re.I)  # fmt: skip
+                          r"system\s*preferences|about\s+this\s+mac|app\s*store|recent\s+items|services|"
+                          r"\bhide\b|show\s+all|\bquit\b", re.I)  # fmt: skip
 
 
 def _safe_menu(handler: Callable) -> Callable:
@@ -130,6 +162,62 @@ def _safe_menu(handler: Callable) -> Callable:
         return await handler(a, c)
 
     return menu_command
+
+
+# The tools that read the app in front (or the one they are named): nothing while another app is.
+_READS_FRONT = frozenset({"ax_tree", "ax_find", "click_text"})
+
+
+def _in_window(a: dict, bounds: tuple[float, float, float, float]) -> dict | None:
+    """A screenshot's region cut to the test window (the whole window when none is asked for); None
+    when the region is outside it."""
+    bx, by, bw, bh = (float(v) for v in bounds)
+    x, y, w, h = bx, by, bw, bh
+    if all(a.get(k) is not None for k in ("x", "y", "w", "h")):
+        try:
+            x, y, w, h = (float(a[k]) for k in ("x", "y", "w", "h"))
+        except (TypeError, ValueError):
+            return None
+    x0, y0 = math.ceil(max(x, bx)), math.ceil(max(y, by))
+    x1, y1 = min(x + w, bx + bw), min(y + h, by + bh)
+    if x1 - x0 < 1 or y1 - y0 < 1:
+        return None
+    return {"x": int(x0), "y": int(y0), "w": int(x1 - x0), "h": int(y1 - y0)}
+
+
+def _confined(name: str, handler: Callable, r: controls._Run) -> Callable:
+    """``handler`` reading and acting in the test window only (what the watch doesn't see: reads)."""
+    test_name = str(r.ready.get("name") or "")
+
+    async def confined(a: dict, c: Any) -> Any:
+        app = str(a.get("app") or "")
+        if app and app != test_name:
+            return f"Error: only the test window's app ({test_name}) is available in the self-test, not {app!r}."
+        if name == "screenshot":
+            region = _in_window(a, r.bounds)
+            if region is None:
+                return "Error: that part of the screen is outside the test window, and the self-test shows nothing else."
+            a = {**{k: v for k, v in a.items() if k != "display"}, **region}
+        elif name in _READS_FRONT and not app and await asyncio.to_thread(r.front_pid) != r.pid:
+            return "Error: the test window isn't in front, and the self-test reads nothing else."
+        return await handler(a, c)
+
+    return confined
+
+
+def _tools_for(r: controls._Run) -> Any:
+    """The screen tools the model gets, confined to the test window (see the module doc)."""
+    from neo.agent.registry import registry
+
+    reg = registry().subset([n for n in AGENT_TOOLS if registry().get(n) is not None])
+    for t in list(reg._tools.values()):
+        handler = _confined(t.name, t.handler, r)
+        if t.name == "hotkey":
+            handler = _safe_hotkey(handler)
+        elif t.name == "menu_command":
+            handler = _safe_menu(handler)
+        reg._tools[t.name] = dataclasses.replace(t, handler=handler)
+    return reg
 
 
 class _Counting:
@@ -188,18 +276,14 @@ def _check(req: Request, arm: Arm, results: list[dict]) -> Callable:
         from neo.agent import confirm
         from neo.agent.loop import run_agent
         from neo.agent.prompt import build
-        from neo.agent.registry import ToolContext, registry
+        from neo.agent.registry import ToolContext
         from neo.providers import brain
 
         c = controls.Check(f"agent_{req.key}", f"{req.key} ({arm.name})")
         with _settings_for(arm) as have:
             if arm.batch is not None and not have[BATCH_SETTINGS[0]]:
                 return c.skip("this build has no batching switch")
-            reg = registry().subset([n for n in AGENT_TOOLS if registry().get(n) is not None])
-            if (hk := reg.get("hotkey")) is not None:
-                reg._tools["hotkey"] = dataclasses.replace(hk, handler=_safe_hotkey(hk.handler))
-            if (mc := reg.get("menu_command")) is not None:
-                reg._tools["menu_command"] = dataclasses.replace(mc, handler=_safe_menu(mc.handler))
+            reg = _tools_for(r)
             if await asyncio.to_thread(r.front_pid) != r.pid and r.ready.get("name"):
                 await r.tool("activate_app", name=str(r.ready["name"]))  # (the scene: the test window in front)
             words = req.words(r)
@@ -209,7 +293,7 @@ def _check(req: Request, arm: Arm, results: list[dict]) -> Callable:
             try:
                 res = await run_agent(
                     words, provider=chain, system=build(""), tools=reg.specs(), reg=reg, strict=True, effort=arm.thinking(),  # type: ignore[arg-type]
-                    max_seconds=RUN_S, ctx=ToolContext(user_text=words, taint=r.taint, origin="user"), verify=True,
+                    max_seconds=RUN_S, ctx=ToolContext(user_text=words, taint=[], origin="user"), verify=True,  # (untainted)
                 )  # fmt: skip
                 stopped, steps = res.stopped, len(res.steps)
             except Exception as e:  # noqa: BLE001 - a broken run is a failed run, not a broken test
@@ -307,14 +391,22 @@ def verdicts(s: dict[str, Any]) -> list[str]:
     return out
 
 
+def plan(arms: list[Arm], runs: int) -> list[tuple[Request, Arm]]:
+    """The runs in order: ``runs`` per arm, cycling through the requests; each request on every arm
+    back to back, the arms' order flipping each time (ABBA…) so that drift over the session (provider
+    load, a warming cache) reaches every arm alike."""
+    out: list[tuple[Request, Arm]] = []
+    for i in range(runs):
+        order = arms if i % 2 == 0 else list(reversed(arms))
+        out += [(REQUESTS[i % len(REQUESTS)], arm) for arm in order]
+    return out
+
+
 async def run(*, arms: list[Arm] | None = None, runs: int = 1, mac: Any = None, notify: Callable[[str], Any] | None = None) -> Result:
-    """The requests, ``runs`` times per arm (cycling through them), in one test window session."""
+    """The requests, ``runs`` times per arm (in :func:`plan`'s order), in one test window session."""
     arms = arms or [Arm("as built")]
     results: list[dict] = []
-    checks = []
-    for arm in arms:
-        for i in range(runs):
-            checks.append(_check(REQUESTS[i % len(REQUESTS)], arm, results))
+    checks = [_check(req, arm, results) for req, arm in plan(arms, runs)]
     report = await controls.run(
         mac=mac, notify=notify, checks=tuple(checks), check_s=RUN_S + 10, budget_s=max(60.0, len(checks) * (RUN_S + 10)),
     )  # fmt: skip

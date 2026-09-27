@@ -966,6 +966,65 @@ def test_a_watch_that_isnt_armed_checks_nothing(monkeypatch):
     assert w.ax_seen == [] and not w.refused
 
 
+def test_bringing_another_app_forward_is_refused_before_it_happens(monkeypatch):
+    """Bringing an app forward (the WindowServer switch, activation) posts no event and isn't an AX
+    press, so the watch is shown each way NEO does it before it happens: only the test window's app
+    comes forward while a run is armed."""
+    from neo.tools.computer import apps, focus
+    from neo.tools.computer import input as inp
+
+    brought = []
+
+    async def bring_pid_front(pid):
+        brought.append(("pid", pid))
+        return True, "x"
+
+    async def bring_front(name, *, wait=1.5):
+        brought.append(("name", name))
+        return True, name
+
+    async def raise_app(a):
+        brought.append(("raise", a.processIdentifier()))
+        return True, "x"
+
+    def force_front(pid):
+        brought.append(("force", pid))
+        return True
+
+    def app(pid):
+        return types.SimpleNamespace(processIdentifier=lambda: pid)
+
+    running = {"NEO Self-Test AB12": 4242, "Safari": 111}
+    monkeypatch.setattr(apps, "bring_pid_front", bring_pid_front)
+    monkeypatch.setattr(apps, "bring_front", bring_front)
+    monkeypatch.setattr(apps, "_raise", raise_app)
+    monkeypatch.setattr(focus, "force_front", force_front)
+    monkeypatch.setattr(apps, "_running", lambda name: app(running[name]) if name in running else None)
+    w = watch_mod.Watch(_AxMac({}), 4242, {1: (0, 0, 100, 100)})
+    monkeypatch.setattr(inp, "_watch", w)
+    w._install_ax()
+    try:
+        asyncio.run(apps.bring_pid_front(4242))
+        focus.force_front(4242)
+        asyncio.run(apps.bring_front("NEO Self-Test AB12"))
+        asyncio.run(apps._raise(app(4242)))
+        asyncio.run(apps.bring_front("Nothing Running"))  # (nothing to bring: _raise is watched if it ever is)
+        mine = list(brought)
+        assert mine == [("pid", 4242), ("force", 4242), ("name", "NEO Self-Test AB12"), ("raise", 4242), ("name", "Nothing Running")]
+        for bring in (lambda: asyncio.run(apps.bring_pid_front(111)), lambda: focus.force_front(111),
+                      lambda: asyncio.run(apps.bring_front("Safari")), lambda: asyncio.run(apps._raise(app(111)))):  # fmt: skip
+            w.refused = ""  # (a refusal stops the run: each is checked on its own here)
+            with pytest.raises(watch_mod.Stop, match="brought another app forward"):
+                bring()
+        assert brought == mine  # none of them happened
+        assert w.ax_seen == []  # (brings aren't Accessibility presses: the ax_watched check counts those)
+        assert [b["pid"] for b in w.brought] == [4242, 4242, 4242, 4242]
+    finally:
+        w._uninstall_ax()
+    assert apps.bring_pid_front is bring_pid_front and apps.bring_front is bring_front
+    assert apps._raise is raise_app and focus.force_front is force_front
+
+
 # ---- a local grounder, scored on a saved picture ------------------------------------------------------------
 
 
@@ -1026,10 +1085,147 @@ def test_the_agent_section_never_presses_chords_the_whole_mac_acts_on():
         return "Chose it."
 
     mc = agent._safe_menu(menu)
-    for words in ("Restart…", "shut down the mac", "Log Out Arnav…", "Force Quit…", "System Settings…"):
+    for words in ("Restart…", "shut down the mac", "Log Out Arnav…", "Force Quit…", "System Settings…", "Services",
+                  "Services › Make New Sticky Note", "Hide Others", "Show All"):  # fmt: skip
         assert asyncio.run(mc({"command": words}, None)).startswith("Error"), words
     assert asyncio.run(mc({"command": "New Round", "app": "Finder"}, None)).startswith("Error")
     assert asyncio.run(mc({"command": "start a new round"}, None)) == "Chose it." and chosen == [{"command": "start a new round"}]
+
+
+@pytest.mark.parametrize("keys", [
+    "super+space", "win+tab", "meta+q", "control+up", "ctl+left", "⌃+down", "cmd+#", "cmd+$", "⌘+⌥+escape",
+    "command+option+d", "cmd+f5", "ctrl+f2", "f3", "f11", "capslock", "cmd+shift+q", "ctrl+cmd+q", "cmd+opt+h",
+    "cmd+`", "cmd+shift+tab", "cmd+ctrl+f", "cmd+v", "cmd+w", "opt+left", "⌘⇧5", "cmd+nope",
+])  # fmt: skip
+def test_the_agent_section_refuses_every_spelling_of_a_whole_mac_chord(keys):
+    """Judged on the chord the hotkey tool would press (its own parser: super/win/meta are ⌘, ⌃ and
+    control are ctrl, "#" is shift+3), never on the text: anything with ctrl, option or fn, the F keys,
+    ⌘ with shift, and ⌘+letter unless the test window's own menus define it."""
+    from neo.selftest import agent
+
+    sent = []
+
+    async def real(a, c):
+        sent.append(a["keys"])
+        return "Pressed"
+
+    assert asyncio.run(agent._safe_hotkey(real)({"keys": keys}, None)).startswith("Error"), keys
+    assert sent == []
+
+
+@pytest.mark.parametrize("keys", ["return", "escape", "tab", "shift+tab", "left", "down", "delete", "a", "shift+a",
+                                  "space", "cmd+a", "cmd+j", "⌘K", "COMMAND+J"])  # fmt: skip
+def test_the_agent_section_lets_keys_for_the_test_window_through(keys):
+    from neo.selftest import agent
+
+    async def real(a, c):
+        return "Pressed"
+
+    assert asyncio.run(agent._safe_hotkey(real)({"keys": keys}, None)) == "Pressed", keys
+
+
+def test_the_ab_runs_alternate_arms_so_drift_reaches_both():
+    """Each request runs on every arm back to back, the arms' order flipping each time (ABBA…): an hour
+    of provider load drifting biases neither arm."""
+    from neo.selftest import agent
+
+    arms = [agent.Arm("low", effort="low"), agent.Arm("high", effort="high")]
+    got = [(req.key, arm.name) for req, arm in agent.plan(arms, 4)]
+    assert got == [("bravo", "low"), ("bravo", "high"), ("move", "high"), ("move", "low"),
+                   ("round", "low"), ("round", "high"), ("bravo", "high"), ("bravo", "low")]  # fmt: skip
+    assert [a.name for _, a in agent.plan([agent.Arm("as built")], 2)] == ["as built", "as built"]
+
+
+class _AgentRun:
+    """What an agent-section check uses of a run: the test window's pid, name, bounds; the log."""
+
+    pid = 4242
+    bounds = (40.0, 64.0, 1000.0, 408.0)
+    ready = {"name": "NEO Self-Test AB12"}
+
+    def __init__(self):
+        self.taint = ["ax_tree"]  # (the controls checks' own: tainted already)
+        self.front = 4242
+
+    def front_pid(self):
+        return self.front
+
+    async def tool(self, name, **a):
+        raise AssertionError(f"{name}: the test window is in front already")
+
+    def mark(self):
+        return 0
+
+    async def wait(self, mark, pred, timeout=None):
+        return None
+
+    def since(self, mark, name=None, **match):
+        return []
+
+    def state(self):
+        return {}
+
+
+def test_each_agent_run_starts_untainted_and_reads_only_the_test_window(monkeypatch):
+    import neo.agent.loop as loop
+    import neo.agent.prompt as prompt
+    import neo.providers as providers
+    from neo.selftest import agent
+
+    shots, trees = [], []
+
+    async def screenshot(a, c):
+        shots.append(dict(a))
+        return ToolOutput("a picture")
+
+    async def ax_tree(a, c):
+        trees.append(dict(a))
+        return "a tree"
+
+    monkeypatch.setattr(registry().get("screenshot"), "handler", screenshot)
+    monkeypatch.setattr(registry().get("ax_tree"), "handler", ax_tree)
+    monkeypatch.setattr(registry().get("ax_find"), "handler", ax_tree)
+    r = _AgentRun()
+    seen = []
+
+    async def run_agent(words, *, reg, ctx, **kw):
+        seen.append(list(ctx.taint))
+        ctx.taint.append("screenshot")  # (what reading the screen does to the run's taint)
+        out = {}
+        for key, name, a in [
+            ("whole", "screenshot", {}),
+            ("display", "screenshot", {"display": 1}),
+            ("big", "screenshot", {"x": 0, "y": 0, "w": 3000, "h": 2000}),
+            ("inside", "screenshot", {"x": 100, "y": 100, "w": 50, "h": 50}),
+            ("outside", "screenshot", {"x": 1200, "y": 800, "w": 50, "h": 50}),
+            ("other_app", "ax_tree", {"app": "Safari"}),
+            ("own_app", "ax_find", {"query": "Bravo", "app": "NEO Self-Test AB12"}),
+            ("front", "ax_tree", {}),
+        ]:
+            got = await reg.get(name).handler(a, ctx)
+            out[key] = got.text if isinstance(got, ToolOutput) else str(got)
+        r.front = 111  # the user's app came forward
+        got = await reg.get("ax_tree").handler({}, ctx)
+        out["not_front"] = str(got)
+        r.front = 4242
+        seen.append(out)
+        return types.SimpleNamespace(stopped="done", steps=[])
+
+    monkeypatch.setattr(loop, "run_agent", run_agent)
+    monkeypatch.setattr(prompt, "build", lambda *a, **k: "")
+    monkeypatch.setattr(providers, "brain", lambda purpose="agent": types.SimpleNamespace(name="fake", complete=None))
+    results = []
+    check = agent._check(agent.REQUESTS[0], agent.Arm("as built"), results)
+    asyncio.run(check(r))
+    asyncio.run(check(r))
+    taints, out = seen[0::2], seen[1]
+    assert taints == [[], []] and r.taint == ["ax_tree"]  # each run its own, fresh; never the controls checks'
+    win = {"x": 40, "y": 64, "w": 1000, "h": 408}
+    assert shots[:4] == [win, win, win, {"x": 100, "y": 100, "w": 50, "h": 50}]  # the test window, or less
+    assert out["outside"].startswith("Error") and len(shots) == 8  # (4 per run: never the one outside)
+    assert out["other_app"].startswith("Error") and out["not_front"].startswith("Error")
+    assert trees[:2] == [{"query": "Bravo", "app": "NEO Self-Test AB12"}, {}]
+    assert len(results) == 2
 
 
 def test_the_ab_verdict_needs_enough_runs_and_success_before_speed():

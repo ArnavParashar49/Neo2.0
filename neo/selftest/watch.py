@@ -32,10 +32,18 @@ never sees them: `ax_hook` is shown each one instead, before it is made, and ref
 any whose element isn't the test window's — or any once the user has taken over. It is installed at
 NEO's one AX-action choke point when the code has it (``AX_CHOKE``), and around each function that
 acts through Accessibility today (``AX_ACTIONS``), for as long as the watch is armed.
+
+Bringing an app forward posts no event either, and happens before the click that needed it: the
+WindowServer switch (with an AXRaise of the app's window), activation, an AppleScript activate. So
+`bring_hook` is shown each way NEO does it (``BRINGS``: by pid, by name as NEO resolves it, by the
+running app) before it happens, and refuses any app but the test window's — the user's app is never
+activated to be refused only at the mouse-down after.
 """
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 import os
 import secrets
 import threading
@@ -84,6 +92,15 @@ AX_ACTIONS: dict[str, dict[str, tuple[str, str]]] = {
     "neo.decide.media": {"_perform": ("ref", "perform"), "_set": ("ref", "set")},
 }
 
+# Each way NEO brings an app forward, and what names the app: "pid" (the argument), "name" (the app
+# that name resolves to, as apps.bring_front resolves it), "app" (a running application's pid).
+# apps._raise is where bring_front and bring_pid_front both end; force_front is the WindowServer
+# switch itself (with its AXRaise), which apps._raise and the self-test's own clean-up call.
+BRINGS: dict[str, dict[str, str]] = {
+    "neo.tools.computer.apps": {"bring_pid_front": "pid", "bring_front": "name", "_raise": "app"},
+    "neo.tools.computer.focus": {"force_front": "pid"},
+}
+
 _DOWN_UP = {"down": "up", "rdown": "rup", "odown": "oup"}
 _GESTURE_REST = {"up", "rup", "oup", "dragged", "rdragged", "odragged"}
 _POINTER_SLACK = 3.0  # points: the pointer is "still where NEO put it"
@@ -114,6 +131,7 @@ class Watch:
         self._lock = threading.RLock()
         self._mouse, self._keyk = _kinds()
         self.ax_seen: list[dict] = []  # every Accessibility action NEO made during the run
+        self.brought: list[dict] = []  # every time NEO brought an app (the test window's) forward
         self._ax_undo: list[tuple[Any, str, Any, bool]] = []
 
     # ---- life ------------------------------------------------------------------------------
@@ -200,6 +218,20 @@ class Watch:
                 self._refuse(f"an Accessibility {action or 'action'} would have acted on another app (pid {owner or '?'})")
             self.ax_seen.append({"action": action, "pid": owner})
 
+    def bring_hook(self, pid: int, via: str = "") -> None:
+        """Shown every time NEO is about to bring an app forward: only the test window's app, and
+        nothing at all once the user has taken over. (Armed only, like `ax_hook`.)"""
+        from neo.tools.computer import input as inp
+
+        if inp._watch is not self:
+            return
+        with self._lock:
+            if self.stopped or self.refused:
+                raise Stop(self.stopped or self.refused)
+            if int(pid or 0) != self.test_pid:
+                self._refuse(f"NEO would have brought another app forward (pid {pid or '?'}, {via})")
+            self.brought.append({"via": via, "pid": int(pid)})
+
     def _install_ax(self) -> None:
         import importlib
 
@@ -222,6 +254,52 @@ class Watch:
                     continue
                 self._ax_undo.append((mod, name, fn, True))
                 setattr(mod, name, self._watched(fn, kind, what))
+        for mod_name, fns in BRINGS.items():
+            try:
+                mod = importlib.import_module(mod_name)
+            except ImportError:
+                continue
+            for name, kind in fns.items():
+                fn = getattr(mod, name, None)
+                if fn is None:
+                    continue
+                self._ax_undo.append((mod, name, fn, True))
+                setattr(mod, name, self._bring_watched(fn, kind, f"{mod_name.rsplit('.', 1)[-1]}.{name}"))
+
+    def _bring_watched(self, fn: Any, kind: str, via: str) -> Any:
+        def pid_of(target: Any) -> int | None:
+            """The pid this call would bring forward (None: a name no running app has — nothing to
+            bring; apps._raise is watched should one appear)."""
+            try:
+                if kind == "pid":
+                    return int(target or 0)
+                if kind == "app":
+                    return int(target.processIdentifier())
+                from neo.tools.computer import apps
+
+                a = apps._running(str(target))
+                return int(a.processIdentifier()) if a is not None else None
+            except Exception:  # noqa: BLE001 - an app that can't be named is not the test window
+                return 0
+
+        if inspect.iscoroutinefunction(fn):
+
+            async def watched(target: Any, *a: Any, **k: Any) -> Any:
+                pid = await asyncio.to_thread(pid_of, target) if kind == "name" else pid_of(target)
+                if pid is not None:
+                    self.bring_hook(pid, via)
+                return await fn(target, *a, **k)
+
+        else:
+
+            def watched(target: Any, *a: Any, **k: Any) -> Any:  # type: ignore[misc]
+                pid = pid_of(target)
+                if pid is not None:
+                    self.bring_hook(pid, via)
+                return fn(target, *a, **k)
+
+        watched.__wrapped__ = fn  # type: ignore[attr-defined]
+        return watched
 
     def _watched(self, fn: Any, kind: str, what: str) -> Any:
         def watched(target: Any, *a: Any, **k: Any) -> Any:

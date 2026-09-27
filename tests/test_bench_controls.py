@@ -310,6 +310,70 @@ def test_the_scripted_menu_command_names_its_command_argument():
     assert got.tool_calls[0].name == "menu_command" and got.tool_calls[0].args == {"item": "New Game", "app": "Chess"}
 
 
+def test_a_models_click_on_another_app_never_brings_it_forward(monkeypatch):
+    """The self-test's watch (neo/selftest/watch.py), end to end on the bench's pretend Mac: the
+    self-test app in front, a model's click at a point on the user's other app's window. The watch
+    refuses before that app is activated (it used to refuse only at the window raise or the mouse-down,
+    after the activation)."""
+    from neo.agent.registry import ToolContext, registry
+    from neo.selftest import watch as watch_mod
+    from neo.tools.computer import apps
+    from neo.tools.computer import input as inp
+
+    class Mac:
+        def __init__(self, w):
+            self.w = w
+
+        def front(self):
+            a = self.w.apps.get(self.w.front_pid)
+            return (a.name, a.pid) if a else ("", 0)
+
+        def pointer(self):
+            return self.w.pointer
+
+        def windows(self):
+            out = []
+            for d in self.w.window_list():
+                b = d["kCGWindowBounds"]
+                out.append({"pid": d["kCGWindowOwnerPID"], "name": d["kCGWindowOwnerName"], "number": d["kCGWindowNumber"],
+                            "alpha": 1.0, "bounds": (b["X"], b["Y"], b["Width"], b["Height"])})  # fmt: skip
+            return out
+
+        def window(self, n):
+            return next((x for x in self.windows() if x["number"] == n), None)
+
+        def hit_pid(self, x, y):
+            el = self.w.element_at(x, y)
+            return el.pid if el is not None else 0
+
+        def buttons_down(self):
+            return False
+
+        def element_pid(self, ref):
+            return getattr(ref, "pid", 0)
+
+        def post(self, ev):
+            self.w.post(ev)
+
+    w = S.world(lambda w: S.big_app(), lambda w: S.board_app(w, name="SelfTest"), front="SelfTest")
+    test = w.named("SelfTest")
+    win = test.windows()[0]
+    with F.install(w) as env:
+        env.patches.set(apps, "_target", None)
+        watch = watch_mod.Watch(Mac(w), test.pid, {w.window_numbers[id(win)]: win.frame})
+        watch.mode = "pointer"
+        monkeypatch.setattr(inp, "_watch", watch)
+        watch._install_ax()
+        try:
+            asyncio.run(registry().invoke("click", {"x": 200, "y": 400}, ToolContext(user_text="click at 200, 400", origin="agent")))
+        except watch_mod.Stop:
+            pass
+        finally:
+            watch._uninstall_ax()
+    assert w.brings == [] and w.front_pid == test.pid  # the user's app stayed where it was
+    assert "brought another app forward" in watch.refused and not w.posted
+
+
 # ---- the report ----------------------------------------------------------------------------------------------
 
 _ROW_PRIM = {"ax_calls", "captures", "captures_in_process", "sleeps", "sleep_s", "ax_block_s", "posted", "brings", "ok", "worked", "said",
