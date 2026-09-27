@@ -341,28 +341,35 @@ class Chain:
     def _for_pixels(self, providers: list[Provider], failures: list[tuple[str, ProviderError]]) -> list[Provider]:
         """Who may answer a step working from a picture: the brains that can see it — the chain's
         own first, then its seeing fallbacks — and a text-only brain on this Mac only where the user
-        put it ahead of a cloud brain that sees (local-first: the screen stays on the Mac while a
-        brain here can answer). Every other text-only brain is left out, as Blind: it would act
-        on a picture it never saw. A host's own chain keeps its brains as the host gave them."""
+        put it ahead of a cloud brain (local-first: the screen stays on the Mac while a brain here
+        can answer; the fallbacks, cloud brains all, come after it). Every other text-only brain is
+        left out, as Blind: it would act on a picture it never saw. A host's own chain keeps its
+        brains as the host gave them."""
         if self._hosts_only():
             return _eyes_first(providers)
         have = {p.name for p in providers}
         extra = [p for p in self._eye_brains() if p.name not in have]
-        ordered = _eyes_first(providers + extra)
-        # (a brain here guards the screen only from a seeing cloud brain after it, in the user's order)
+
+        def cloud(q: Provider) -> bool:
+            return not getattr(q, "on_device", False)
+
+        # A brain here guards the screen where the user put it before a cloud brain, and a cloud
+        # brain that sees would come after it (one of the chain's own, or a fallback).
         guards = {
             p.name
             for i, p in enumerate(providers)
-            if getattr(p, "on_device", False)
-            and any(q.supports_vision and not getattr(q, "on_device", False) for q in providers[i + 1 :] + extra)
+            if not cloud(p)
+            and any(cloud(q) for q in providers[i + 1 :])
+            and any(cloud(q) and q.supports_vision for q in providers[i + 1 :] + extra)
         }
         out: list[Provider] = []
-        for p in ordered:
+        for p in _eyes_first(providers):
             if getattr(p, "supports_vision", False) or p.name in guards:
                 out.append(p)
             else:
                 failures.append((p.name, Blind(f"{p.name}: this model has no vision")))
-        return out
+        now = _time.time()
+        return out + sorted(extra, key=lambda p: _cooling(p) > now)  # (stable: EYES order otherwise)
 
     def _no_brain(self, failures: list[tuple[str, ProviderError]], *, pixels: bool = False) -> ProviderError:
         if any(getattr(e, "kind", "") == "budget" for _, e in failures):

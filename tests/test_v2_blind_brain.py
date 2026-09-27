@@ -16,7 +16,16 @@ import pytest
 from neo.agent.loop import run_agent
 from neo.agent.registry import ToolContext, ToolOutput, registry
 from neo.events import EventBus
-from neo.providers.base import BLIND_PICTURE, ImagePart, Message, NoEyes, Overloaded, ToolCall, ToolResult, Turn
+from neo.providers.base import (
+    BLIND_PICTURE,
+    ImagePart,
+    Message,
+    NoEyes,
+    Overloaded,
+    ToolCall,
+    ToolResult,
+    Turn,
+)
 from neo.tools.computer import input as inp
 from neo.tools.computer import pointer, screen
 
