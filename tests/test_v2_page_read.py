@@ -203,8 +203,8 @@ def test_a_window_is_captured_by_its_id_and_scaled_down(monkeypatch):
     monkeypatch.setattr(screen.subprocess, "run", run)
     monkeypatch.setattr(screen, "can_capture", lambda: True)
     img = screen.capture_window(77)
-    assert ran[0][:-1] == ["screencapture", "-x", "-o", "-t", "png", "-l", "77"]
-    assert Image.open(io.BytesIO(img.data)).size == (1600, 500) and img.mime == "image/png"
+    assert ran[0][:-1] == ["screencapture", "-x", "-t", "tiff", "-o", "-l", "77"]  # (uncompressed: eyes-capture)
+    assert Image.open(io.BytesIO(img.data)).size == (1600, 500) and img.mime == "image/jpeg"
     monkeypatch.setattr(screen, "can_capture", lambda: False)
     with pytest.raises(PermissionError):
         screen.capture_window(77)
