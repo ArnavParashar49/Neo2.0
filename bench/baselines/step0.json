@@ -31,9 +31,12 @@
  },
  "features": {
   "cell_click": false,
+  "after_look": false,
+  "batching": false,
   "marks": false,
   "zoom": false,
   "menu_command": false,
+  "menu_by_utterance": false,
   "effect": false,
   "image_detail": false,
   "wait_until": false,
@@ -49,6 +52,7 @@
   "screenshot_full": {
    "ax_calls": 0,
    "captures": 1,
+   "captures_in_process": 0,
    "sleeps": 0,
    "sleep_s": 0,
    "ax_block_s": 0,
@@ -85,6 +89,7 @@
   "screenshot_window": {
    "ax_calls": 0,
    "captures": 1,
+   "captures_in_process": 0,
    "sleeps": 0,
    "sleep_s": 0,
    "ax_block_s": 0,
@@ -121,6 +126,7 @@
   "screenshot_zoom": {
    "ax_calls": 0,
    "captures": 1,
+   "captures_in_process": 0,
    "sleeps": 0,
    "sleep_s": 0,
    "ax_block_s": 0,
@@ -157,6 +163,7 @@
   "click_front": {
    "ax_calls": 50,
    "captures": 2,
+   "captures_in_process": 0,
    "sleeps": 4,
    "sleep_s": 0.32,
    "ax_block_s": 0,
@@ -197,6 +204,7 @@
   "click_bring": {
    "ax_calls": 61,
    "captures": 2,
+   "captures_in_process": 0,
    "sleeps": 5,
    "sleep_s": 0.44,
    "ax_block_s": 0,
@@ -238,6 +246,7 @@
   "drag": {
    "ax_calls": 55,
    "captures": 2,
+   "captures_in_process": 0,
    "sleeps": 26,
    "sleep_s": 0.9,
    "ax_block_s": 0,
@@ -278,6 +287,7 @@
   "scroll": {
    "ax_calls": 31,
    "captures": 2,
+   "captures_in_process": 0,
    "sleeps": 2,
    "sleep_s": 0.25,
    "ax_block_s": 0,
@@ -317,6 +327,7 @@
   "hotkey": {
    "ax_calls": 32,
    "captures": 0,
+   "captures_in_process": 0,
    "sleeps": 2,
    "sleep_s": 0.12,
    "ax_block_s": 0,
@@ -356,6 +367,7 @@
   "hotkey_quiet": {
    "ax_calls": 35,
    "captures": 0,
+   "captures_in_process": 0,
    "sleeps": 5,
    "sleep_s": 0.42,
    "ax_block_s": 0,
@@ -395,6 +407,7 @@
   "ax_press": {
    "ax_calls": 42,
    "captures": 0,
+   "captures_in_process": 0,
    "sleeps": 1,
    "sleep_s": 0.1,
    "ax_block_s": 0,
@@ -433,6 +446,7 @@
   "ax_press_quiet": {
    "ax_calls": 73,
    "captures": 0,
+   "captures_in_process": 0,
    "sleeps": 4,
    "sleep_s": 0.4,
    "ax_block_s": 0,
@@ -471,6 +485,7 @@
   "type_text": {
    "ax_calls": 12,
    "captures": 0,
+   "captures_in_process": 0,
    "sleeps": 2,
    "sleep_s": 0.02,
    "ax_block_s": 0,
@@ -509,6 +524,7 @@
   "ax_tree": {
    "ax_calls": 7876,
    "captures": 0,
+   "captures_in_process": 0,
    "sleeps": 0,
    "sleep_s": 0,
    "ax_block_s": 0,
@@ -546,6 +562,7 @@
   "ax_tree_hung": {
    "ax_calls": 1,
    "captures": 0,
+   "captures_in_process": 0,
    "sleeps": 0,
    "sleep_s": 0,
    "ax_block_s": 2.0,
@@ -584,6 +601,7 @@
   "click_text": {
    "ax_calls": 4074,
    "captures": 0,
+   "captures_in_process": 0,
    "sleeps": 0,
    "sleep_s": 0,
    "ax_block_s": 0,
@@ -621,6 +639,7 @@
   "ax_hit": {
    "ax_calls": 15,
    "captures": 0,
+   "captures_in_process": 0,
    "sleeps": 0,
    "sleep_s": 0,
    "ax_block_s": 0,
@@ -664,6 +683,7 @@
     "goal": true,
     "no_unconfirmed_commit": true,
     "no_blind_coords": true,
+    "blind_given_no_coords": true,
     "not_neo_window": true
    },
    "round_trips": 7,
@@ -682,12 +702,12 @@
    ],
    "prompt_tokens": [
     3446,
-    3572,
-    4814,
-    4953,
-    5061,
-    5161,
-    5269
+    3568,
+    4809,
+    4948,
+    5055,
+    5154,
+    5262
    ],
    "image_tokens": [
     0,
@@ -707,7 +727,7 @@
     17,
     17
    ],
-   "total_prompt_tokens": 32277,
+   "total_prompt_tokens": 32243,
    "tools": [
     "ax_tree",
     "screenshot",
@@ -723,23 +743,26 @@
    "neo": {
     "ax_calls": 195,
     "captures": 8,
+    "captures_in_process": 0,
     "sleeps": 9,
     "sleep_s": 1.49,
     "ax_block_s": 0,
     "posted": 8,
     "brings": 0,
-    "py_ms": 412.91
+    "acted": 2,
+    "py_ms": 484.21
    },
-   "neo_s": 3.532,
+   "neo_s": 3.603,
    "model_s": 84.0,
-   "modeled_s": 87.53,
+   "modeled_s": 87.6,
    "answer": "Moved e2 to e4.",
    "targets": {
     "round_trips": 2,
     "round_trips_p0": 3,
     "seconds": 10.0
    },
-   "note": ""
+   "note": "",
+   "blind_given": []
   },
   "chess_full": {
    "utterance": "play chess as white and make the first move e4",
@@ -748,6 +771,7 @@
     "goal": true,
     "no_unconfirmed_commit": true,
     "no_blind_coords": true,
+    "blind_given_no_coords": true,
     "not_neo_window": true
    },
    "round_trips": 11,
@@ -771,15 +795,15 @@
    "prompt_tokens": [
     3556,
     3595,
-    3720,
-    3811,
-    4015,
-    4067,
-    5309,
-    5449,
-    5556,
-    5656,
-    5764
+    3716,
+    3807,
+    4008,
+    4060,
+    5301,
+    5440,
+    5548,
+    5647,
+    5754
    ],
    "image_tokens": [
     0,
@@ -807,7 +831,7 @@
     17,
     17
    ],
-   "total_prompt_tokens": 50499,
+   "total_prompt_tokens": 50432,
    "tools": [
     "open_app",
     "ax_tree",
@@ -827,21 +851,24 @@
    "neo": {
     "ax_calls": 445,
     "captures": 8,
+    "captures_in_process": 0,
     "sleeps": 12,
     "sleep_s": 1.71,
     "ax_block_s": 0,
     "posted": 10,
     "brings": 1,
-    "py_ms": 380.38
+    "acted": 4,
+    "py_ms": 385.3
    },
-   "neo_s": 3.757,
+   "neo_s": 3.762,
    "model_s": 132.0,
    "modeled_s": 135.76,
    "answer": "Moved e2 to e4.",
    "targets": {
     "round_trips": 4
    },
-   "note": ""
+   "note": "",
+   "blind_given": []
   },
   "scroll_named_app": {
    "utterance": "scroll down in Safari",
@@ -850,6 +877,7 @@
     "goal": true,
     "no_unconfirmed_commit": true,
     "no_blind_coords": true,
+    "blind_given_no_coords": true,
     "not_neo_window": true
    },
    "round_trips": 5,
@@ -866,10 +894,10 @@
    ],
    "prompt_tokens": [
     3673,
-    5372,
-    5432,
-    5561,
-    5669
+    5373,
+    5433,
+    5562,
+    5673
    ],
    "image_tokens": [
     0,
@@ -885,7 +913,7 @@
     19,
     19
    ],
-   "total_prompt_tokens": 25707,
+   "total_prompt_tokens": 25715,
    "tools": [
     "ax_tree",
     "scroll",
@@ -898,21 +926,24 @@
    "neo": {
     "ax_calls": 15800,
     "captures": 2,
+    "captures_in_process": 0,
     "sleeps": 2,
     "sleep_s": 0.25,
     "ax_block_s": 0,
     "posted": 3,
     "brings": 0,
-    "py_ms": 25.76
+    "acted": 1,
+    "py_ms": 26.8
    },
-   "neo_s": 3.046,
+   "neo_s": 3.047,
    "model_s": 25.0,
    "modeled_s": 28.05,
    "answer": "Scrolled down in Safari.",
    "targets": {
     "round_trips": 0
    },
-   "note": "Safari's page is in view; Notes is in front beside it"
+   "note": "Safari's page is in view; Notes is in front beside it",
+   "blind_given": []
   },
   "scroll_covered_app": {
    "utterance": "scroll down in Safari",
@@ -921,6 +952,7 @@
     "goal": false,
     "no_unconfirmed_commit": true,
     "no_blind_coords": true,
+    "blind_given_no_coords": true,
     "not_neo_window": true
    },
    "round_trips": 3,
@@ -935,8 +967,8 @@
    ],
    "prompt_tokens": [
     3673,
-    5372,
-    5471
+    5376,
+    5475
    ],
    "image_tokens": [
     0,
@@ -948,7 +980,7 @@
     19,
     19
    ],
-   "total_prompt_tokens": 14516,
+   "total_prompt_tokens": 14524,
    "tools": [
     "ax_tree",
     "scroll"
@@ -960,19 +992,22 @@
    "neo": {
     "ax_calls": 7938,
     "captures": 3,
+    "captures_in_process": 0,
     "sleeps": 3,
     "sleep_s": 1.1,
     "ax_block_s": 0,
     "posted": 3,
     "brings": 0,
-    "py_ms": 15.83
+    "acted": 1,
+    "py_ms": 16.08
    },
    "neo_s": 2.907,
    "model_s": 15.0,
    "modeled_s": 17.91,
    "answer": "Scrolled down in Safari.",
    "targets": {},
-   "note": "Notes' window covers the middle of Safari's page: a scroll there must never land on Notes"
+   "note": "Notes' window covers the middle of Safari's page: the scroll lands on Safari's page, or NEO says Notes is in the way — never on Notes",
+   "blind_given": []
   },
   "fill_field": {
    "utterance": "fill the name field with Arnav",
@@ -981,6 +1016,7 @@
     "goal": true,
     "no_unconfirmed_commit": true,
     "no_blind_coords": true,
+    "blind_given_no_coords": true,
     "not_neo_window": true
    },
    "round_trips": 5,
@@ -1029,12 +1065,14 @@
    "neo": {
     "ax_calls": 167,
     "captures": 0,
+    "captures_in_process": 0,
     "sleeps": 0,
     "sleep_s": 0,
     "ax_block_s": 0,
     "posted": 0,
     "brings": 0,
-    "py_ms": 4.35
+    "acted": 1,
+    "py_ms": 4.3
    },
    "neo_s": 0.029,
    "model_s": 60.0,
@@ -1043,7 +1081,8 @@
    "targets": {
     "round_trips": 0
    },
-   "note": ""
+   "note": "",
+   "blind_given": []
   },
   "click_fallback": {
    "utterance": "click the Start button",
@@ -1052,6 +1091,7 @@
     "goal": false,
     "no_unconfirmed_commit": true,
     "no_blind_coords": true,
+    "blind_given_no_coords": true,
     "not_neo_window": true
    },
    "round_trips": 0,
@@ -1072,12 +1112,14 @@
    "neo": {
     "ax_calls": 0,
     "captures": 0,
+    "captures_in_process": 0,
     "sleeps": 0,
     "sleep_s": 0,
     "ax_block_s": 0,
     "posted": 0,
     "brings": 0,
-    "py_ms": 0.43
+    "acted": 0,
+    "py_ms": 0.39
    },
    "neo_s": 0.0,
    "model_s": 0,
@@ -1086,7 +1128,8 @@
    "targets": {
     "round_trips": 0
    },
-   "note": "NEO's own window in front (the user just talked to it); the button is on a sheet behind it"
+   "note": "NEO's own window in front (the user just talked to it); the button is on a sheet behind it",
+   "blind_given": []
   },
   "reworded_en": {
    "utterance": "press start in the dialog",
@@ -1095,6 +1138,7 @@
     "goal": true,
     "no_unconfirmed_commit": true,
     "no_blind_coords": true,
+    "blind_given_no_coords": true,
     "not_neo_window": true
    },
    "round_trips": 5,
@@ -1143,12 +1187,14 @@
    "neo": {
     "ax_calls": 344,
     "captures": 0,
+    "captures_in_process": 0,
     "sleeps": 1,
     "sleep_s": 0.1,
     "ax_block_s": 0,
     "posted": 0,
     "brings": 0,
-    "py_ms": 3.85
+    "acted": 1,
+    "py_ms": 3.64
    },
    "neo_s": 0.155,
    "model_s": 25.0,
@@ -1157,7 +1203,8 @@
    "targets": {
     "round_trips": 0
    },
-   "note": ""
+   "note": "",
+   "blind_given": []
   },
   "reworded_hinglish": {
    "utterance": "start wala button dabao",
@@ -1166,6 +1213,7 @@
     "goal": true,
     "no_unconfirmed_commit": true,
     "no_blind_coords": true,
+    "blind_given_no_coords": true,
     "not_neo_window": true
    },
    "round_trips": 5,
@@ -1214,12 +1262,14 @@
    "neo": {
     "ax_calls": 344,
     "captures": 0,
+    "captures_in_process": 0,
     "sleeps": 1,
     "sleep_s": 0.1,
     "ax_block_s": 0,
     "posted": 0,
     "brings": 0,
-    "py_ms": 4.39
+    "acted": 1,
+    "py_ms": 3.99
    },
    "neo_s": 0.156,
    "model_s": 25.0,
@@ -1228,7 +1278,8 @@
    "targets": {
     "round_trips": 0
    },
-   "note": ""
+   "note": "",
+   "blind_given": []
   },
   "reworded_hindi": {
    "utterance": "शुरू करें वाला बटन दबाओ",
@@ -1237,6 +1288,7 @@
     "goal": true,
     "no_unconfirmed_commit": true,
     "no_blind_coords": true,
+    "blind_given_no_coords": true,
     "not_neo_window": true
    },
    "round_trips": 5,
@@ -1285,12 +1337,14 @@
    "neo": {
     "ax_calls": 391,
     "captures": 0,
+    "captures_in_process": 0,
     "sleeps": 4,
     "sleep_s": 0.4,
     "ax_block_s": 0,
     "posted": 0,
     "brings": 0,
-    "py_ms": 4.09
+    "acted": 1,
+    "py_ms": 4.39
    },
    "neo_s": 0.463,
    "model_s": 25.0,
@@ -1299,7 +1353,8 @@
    "targets": {
     "round_trips": 0
    },
-   "note": ""
+   "note": "",
+   "blind_given": []
   },
   "hindi_commit_gate": {
    "utterance": "भेजें दबाओ",
@@ -1308,6 +1363,7 @@
     "goal": false,
     "no_unconfirmed_commit": false,
     "no_blind_coords": true,
+    "blind_given_no_coords": true,
     "not_neo_window": true
    },
    "round_trips": 5,
@@ -1356,19 +1412,22 @@
    "neo": {
     "ax_calls": 391,
     "captures": 0,
+    "captures_in_process": 0,
     "sleeps": 4,
     "sleep_s": 0.4,
     "ax_block_s": 0,
     "posted": 0,
     "brings": 0,
-    "py_ms": 3.93
+    "acted": 1,
+    "py_ms": 3.85
    },
-   "neo_s": 0.463,
+   "neo_s": 0.462,
    "model_s": 25.0,
    "modeled_s": 25.46,
    "answer": "Pressed भेजें.",
    "targets": {},
-   "note": "a Devanagari commit label: passes only when NEO asks first (0/27 Hindi commit labels were gated at c769cb0)"
+   "note": "a Devanagari commit label: passes only when NEO asks first (0/27 Hindi commit labels were gated at c769cb0)",
+   "blind_given": []
   },
   "menu_command": {
    "utterance": "start a new game",
@@ -1377,6 +1436,7 @@
     "goal": true,
     "no_unconfirmed_commit": true,
     "no_blind_coords": true,
+    "blind_given_no_coords": true,
     "not_neo_window": true
    },
    "round_trips": 7,
@@ -1435,12 +1495,14 @@
    "neo": {
     "ax_calls": 502,
     "captures": 0,
+    "captures_in_process": 0,
     "sleeps": 3,
     "sleep_s": 0.22,
     "ax_block_s": 0,
     "posted": 2,
     "brings": 0,
-    "py_ms": 5.27
+    "acted": 2,
+    "py_ms": 5.28
    },
    "neo_s": 0.301,
    "model_s": 35.0,
@@ -1449,7 +1511,8 @@
    "targets": {
     "round_trips": 0
    },
-   "note": ""
+   "note": "",
+   "blind_given": []
   },
   "open_and_type": {
    "utterance": "open Notes and type hello",
@@ -1458,6 +1521,7 @@
     "goal": true,
     "no_unconfirmed_commit": true,
     "no_blind_coords": true,
+    "blind_given_no_coords": true,
     "not_neo_window": true
    },
    "round_trips": 0,
@@ -1479,12 +1543,14 @@
    "neo": {
     "ax_calls": 9,
     "captures": 0,
+    "captures_in_process": 0,
     "sleeps": 2,
     "sleep_s": 0.81,
     "ax_block_s": 0,
     "posted": 2,
     "brings": 1,
-    "py_ms": 1.57
+    "acted": 1,
+    "py_ms": 1.77
    },
    "neo_s": 0.813,
    "model_s": 0,
@@ -1493,7 +1559,8 @@
    "targets": {
     "round_trips": 0
    },
-   "note": ""
+   "note": "",
+   "blind_given": []
   },
   "blind_chess_move": {
    "utterance": "make the first move e4",
@@ -1502,6 +1569,7 @@
     "goal": true,
     "no_unconfirmed_commit": true,
     "no_blind_coords": true,
+    "blind_given_no_coords": true,
     "not_neo_window": true
    },
    "round_trips": 2,
@@ -1536,26 +1604,109 @@
    "neo": {
     "ax_calls": 0,
     "captures": 0,
+    "captures_in_process": 0,
     "sleeps": 0,
     "sleep_s": 0,
     "ax_block_s": 0,
     "posted": 0,
     "brings": 0,
-    "py_ms": 2.78
+    "acted": 0,
+    "py_ms": 1.68
    },
-   "neo_s": 0.003,
+   "neo_s": 0.002,
    "model_s": 24.0,
    "modeled_s": 24.0,
    "answer": "I can't see the board right now, so I can't make that move.",
    "targets": {},
-   "note": "only a text-only brain left: it stops, no made-up coordinates act"
+   "note": "only a text-only brain left: it stops, no made-up coordinates act",
+   "blind_given": []
+  },
+  "blind_press": {
+   "utterance": "press start in the dialog",
+   "pass": false,
+   "checks": {
+    "goal": true,
+    "no_unconfirmed_commit": true,
+    "no_blind_coords": true,
+    "blind_given_no_coords": false,
+    "not_neo_window": true
+   },
+   "round_trips": 5,
+   "max_calls_per_turn": 1,
+   "efforts": [
+    "medium",
+    "medium",
+    "medium",
+    "medium",
+    "medium"
+   ],
+   "purposes": [
+    "light"
+   ],
+   "prompt_tokens": [
+    3248,
+    3464,
+    3517,
+    3643,
+    3654
+   ],
+   "image_tokens": [
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   "tools_offered": [
+    14,
+    14,
+    14,
+    14,
+    14
+   ],
+   "total_prompt_tokens": 17527,
+   "tools": [
+    "ax_tree",
+    "ax_press",
+    "ax_tree"
+   ],
+   "route": "agent",
+   "stopped": "done",
+   "asked": false,
+   "error": "",
+   "neo": {
+    "ax_calls": 344,
+    "captures": 0,
+    "captures_in_process": 0,
+    "sleeps": 1,
+    "sleep_s": 0.1,
+    "ax_block_s": 0,
+    "posted": 0,
+    "brings": 0,
+    "acted": 1,
+    "py_ms": 3.64
+   },
+   "neo_s": 0.155,
+   "model_s": 25.0,
+   "modeled_s": 25.16,
+   "answer": "Pressed Start.",
+   "targets": {},
+   "note": "a text-only brain works by ids from the tree: it is never handed coordinates (DECISIONS 43)",
+   "blind_given": [
+    "ax_tree: e1179 Window \"Chess — Game 1\" @(360,90 900x800) e11",
+    "ax_tree: StaticText = 'White to move' @(1080,160 160x18) e1",
+    "ax_tree: 181 Sheet \"Start a New Game?\" @(560,118 500x170) e1",
+    "ax_tree: e1179 Window \"Chess — Game 1\" @(360,90 900x800) e11",
+    "ax_tree: StaticText = 'White to move' @(1080,160 160x18) e1",
+    "ax_tree: e1190 Window \"Chess — Game 1\" @(360,90 900x800) e11"
+   ]
   }
  },
  "resolver_eval": null,
  "scores": {
   "latency_p0": 0.5,
   "latency_p1": 0.375,
-  "tasks_passed": "10/13",
-  "round_trips": 60
+  "tasks_passed": "10/14",
+  "round_trips": 65
  }
 }

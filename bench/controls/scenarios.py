@@ -12,8 +12,8 @@ Apps (``fakes.App`` trees; names are fake-world data, never NEO's decision logic
 * ``notes_app`` — one text area; ``neo_overlay`` — NEO's own floating window (never to be touched).
 
 A scenario passes only when the goal is reached in the fake world, nothing that commits was pressed
-(the bench never says yes to a NEEDS_CONFIRM), a brain that can't see never had coordinates acted
-on, and nothing touched NEO's own window.
+(the bench never says yes to a NEEDS_CONFIRM), a brain that can't see neither had coordinates acted
+on nor was handed any (DECISIONS 43), and nothing touched NEO's own window.
 
 The scripted brain follows what it is offered, not what the bench hopes for: it clicks a square by
 name only when ``click`` takes a ``cell``, skips its checking screenshot only when the action's
@@ -271,6 +271,21 @@ def offered(tools: list, name: str) -> bool:
     return any(t.name == name for t in tools)
 
 
+# menu_command's argument for the command, by the names the commands workstream may give it (the
+# self-test's _menu_sheet asks in the same order).
+MENU_ARGS = ("command", "item", "request", "text", "title", "name", "path")
+
+
+def menu_arg(names: set[str]) -> str:
+    """Which of menu_command's parameters takes the command: the first of MENU_ARGS it has, else its
+    one other parameter (never whichever sorts first: "confirm" before "item")."""
+    got = next((k for k in MENU_ARGS if k in names), None)
+    if got is not None:
+        return got
+    rest = sorted(names - {"app"})
+    return rest[0] if len(rest) == 1 else "command"
+
+
 _BATCH_WORDS = re.compile(r"\b(?:several|multiple|a batch of)\s+(?:actions|tool calls|calls|steps)\s+in\s+one\s+(?:turn|reply|step)", re.I)
 
 
@@ -348,12 +363,18 @@ def set_policy(label: str, value: str) -> Callable:
 
 
 def scroll_policy(app_name: str) -> Callable:
+    """Find a scrollable area in the app's tree and scroll it by id; answer — with NEO's own words
+    when the scroll was refused (a model passes an error on)."""
+
     def policy(b: F.FakeBrain, msgs: list, system: str, tools: list) -> Any:
         st = b.state
         if verify_asked(msgs):
             st["verified"] = True
             return turn(call("ax_tree", app=app_name))
         if st.get("verified") or st.get("acted"):
+            refused = latest(msgs, "scroll")
+            if refused is not None and refused.content.startswith(("Error", "NEEDS_")):
+                return say(refused.content)
             return say(f"Scrolled down in {app_name}.")
         areas = [e for e in elements(looks(msgs)) if e["role"] in ("WebArea", "ScrollArea", "TextArea")]
         if not areas:
@@ -467,8 +488,7 @@ def new_game_policy(start_label: str = "Start", app_name: str = "Chess", *, open
         if not st.get("menu"):
             st["menu"] = True
             if offered(tools, "menu_command"):
-                p = sorted(params(tools, "menu_command") - {"app"})
-                return turn(call("menu_command", **{(p[0] if p else "command"): "New Game", "app": app_name}))
+                return turn(call("menu_command", **{menu_arg(params(tools, "menu_command")): "New Game", "app": app_name}))
             return turn(call("hotkey", keys="cmd+n", app=app_name))
         last = results(msgs)[-1] if results(msgs) else None
         if not st.get("pressed"):
@@ -561,6 +581,20 @@ def _scrolled(app_name: str) -> Callable[[World, dict], bool]:
     return goal
 
 
+def _covered_scroll(app_name: str, cover: str) -> Callable[[World, dict], bool]:
+    """A scroll meant for ``app_name`` whose window ``cover`` covers in part: it lands on
+    ``app_name`` (a part that shows), or NEO says what covers it (the scroll's own answer, or the
+    reply) — and never lands on ``cover``."""
+
+    def goal(w: World, run: dict) -> bool:
+        if _scrolled(cover)(w, run):
+            return False
+        said = [run.get("answer") or ""] + [text for tool, text in run.get("results") or [] if tool == "scroll"]
+        return _scrolled(app_name)(w, run) or any(cover.casefold() in t.casefold() for t in said)
+
+    return goal
+
+
 def _typed(app_name: str, want: str) -> Callable[[World, dict], bool]:
     def goal(w: World, run: dict) -> bool:
         a = w.named(app_name)
@@ -604,8 +638,9 @@ SCENARIOS: list[Scenario] = [
     ),
     Scenario(
         "scroll_covered_app", "scroll down in Safari", lambda: world(lambda w: big_app(), lambda w: notes_app(), front="Notes"),
-        lambda w: scroll_policy("Safari"), lambda w, run: not _scrolled("Notes")(w, run), intent="quick_action",
-        note="Notes' window covers the middle of Safari's page: a scroll there must never land on Notes",
+        lambda w: scroll_policy("Safari"), _covered_scroll("Safari", "Notes"), intent="quick_action",
+        note="Notes' window covers the middle of Safari's page: the scroll lands on Safari's page, or NEO says Notes "
+             "is in the way — never on Notes",
     ),
     Scenario(
         "fill_field", "fill the name field with Arnav", lambda: world(lambda w: form_app(), front="Accounts"),
@@ -646,6 +681,11 @@ SCENARIOS: list[Scenario] = [
         "blind_chess_move", "make the first move e4", lambda: board_world(),
         lambda w: move_policy(w, [("e2", "e4")], blind_guess=True), _stopped_blind, needs_screen=True, sees=False,
         note="only a text-only brain left: it stops, no made-up coordinates act",
+    ),
+    Scenario(
+        "blind_press", "press start in the dialog", lambda: board_world(sheet=True),
+        lambda w: press_policy("Start"), _new_game, intent="quick_action", sees=False,
+        note="a text-only brain works by ids from the tree: it is never handed coordinates (DECISIONS 43)",
     ),
 ]
 

@@ -13,6 +13,7 @@ download, never a model API. Without ``--resolver`` it uses NEO's own resolver w
 Rows, one JSON object per line (the names in brackets are accepted too):
   text [q, utterance, request]          the user's words
   elements [screen, candidates]         [{"role", "label", "context", "commit"}] or [role, label, context]
+                                        ("commit" is the answer key: scored, never shown to the resolver)
   gold [target, answer]                 the right element: an index, a list of indices, or a label
   n                                     window size (default: len(elements))
   lang                                  en | hinglish | hi (optional; the script is read from the text)
@@ -120,12 +121,20 @@ def _pct(xs: list[float], q: float) -> float | None:
     return round(xs[min(len(xs) - 1, int(round(q * (len(xs) - 1))))], 3)
 
 
+def _shown(elements: list[dict]) -> list[dict]:
+    """What the resolver under test is handed: each element without the rows' gold ``commit`` flag
+    (the answer key its commit presses are scored against — a real resolver has to tell a commit
+    label itself)."""
+    return [{k: v for k, v in e.items() if k != "commit"} for e in elements]
+
+
 def evaluate(rows: list[dict], resolve: Resolver) -> dict[str, Any]:
     times: list[float] = []
     per: list[dict] = []
     for r in rows:
+        shown = _shown(r["elements"])
         t = time.perf_counter()
-        idx, stage = _pick(resolve(r["text"], r["elements"]))
+        idx, stage = _pick(resolve(r["text"], shown))
         times.append((time.perf_counter() - t) * 1000)
         acted = idx is not None
         per.append({

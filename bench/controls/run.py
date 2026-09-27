@@ -6,9 +6,10 @@
     python -m bench.controls.run --save-baseline       # bench/baselines/step0.json (the Step-0 tree only)
 
 (a) Primitives. NEO-side time = measured Python ms (time in fakes subtracted) + AX calls × per-call
-latency (0.05 / 0.15 / 0.5 / 0.9 ms) + captures × (screencapture CLI 0.2 s | ScreenCaptureKit 0.1 s)
-+ the sleeps it counted. Each primitive runs through NEO's real tool handler (origin "agent": the
-looks before and after a model's input included) on a fresh fake world.
+latency (0.05 / 0.15 / 0.5 / 0.9 ms) + each capture at its own cost (a screencapture CLI run 0.2 s, an
+in-process ScreenCaptureKit frame 0.1 s) + the sleeps it counted; the "sck" column charges every
+capture 0.1 s (the P1 projection). Each primitive runs through NEO's real tool handler (origin
+"agent": the looks before and after a model's input included) on a fresh fake world.
 
 (b) Tasks. Each scenario (bench/controls/scenarios.py) goes through the real Session → fast paths →
 agent loop → tool selection → prompt, with the scripted brain; it reports round trips, prompt and
@@ -25,6 +26,7 @@ import argparse
 import asyncio
 import json
 import os
+import re
 import statistics
 import sys
 import tempfile
@@ -41,7 +43,10 @@ RESOLVER_DATA = ROOT / "tests" / "data" / "ground_eval.jsonl"
 
 def prepare_process() -> Path:
     """A process that runs the bench on its own: effects off before NEO is imported, a scratch data
-    folder, no model, no voice, no keys. (Under pytest the suite's conftest has done all this.)"""
+    folder, no model, no voice, no keys — and no settings file read at all: pydantic-settings opens
+    every ``env_file`` (~/.neo/.env holds the user's keys) before NEO's own source list drops them, so
+    the list is emptied first, as the suite's conftest does. (Under pytest the conftest has done all
+    this.)"""
     os.environ["NEO_NO_EFFECTS"] = "1"
     os.environ.setdefault("NEO_REFLEX", "off")
     os.environ.setdefault("NEO_VOICE", "off")
@@ -52,6 +57,12 @@ def prepare_process() -> Path:
     data = Path(tempfile.mkdtemp(prefix="neo-bench-"))
     os.environ["NEO_DATA_DIR"] = str(data / "neo_data")
     os.environ["NEO_NOTES_DIR"] = str(data / "notes")
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    from neo import config
+
+    config.Settings.model_config["env_file"] = None  # before any Settings() is built
+    config._settings = None  # (one built before this, with the files read, is not kept)
     return data
 
 
@@ -195,8 +206,15 @@ def _prims() -> list[Prim]:
     ]
 
 
-def _modeled(m: dict, lat_ms: float, capture_s: float) -> float:
-    return m["py_ms"] + m["ax_calls"] * lat_ms + m["captures"] * capture_s * 1000 + (m["sleep_s"] + m["ax_block_s"]) * 1000
+def _modeled(m: dict, lat_ms: float, *, every: float | None = None) -> float:
+    """NEO-side ms: Python + AX calls × ``lat_ms`` + captures + sleeps. Each capture is charged by how
+    it was made (the screencapture CLI's cost, or ScreenCaptureKit's for an in-process one); ``every``
+    charges them all that many seconds instead (a projection)."""
+    from bench.controls.fakes import CAPTURE_S
+
+    n, inproc = m["captures"], m.get("captures_in_process", 0)
+    cap_s = n * every if every is not None else (n - inproc) * CAPTURE_S["cli"] + inproc * CAPTURE_S["sck"]
+    return m["py_ms"] + m["ax_calls"] * lat_ms + cap_s * 1000 + (m["sleep_s"] + m["ax_block_s"]) * 1000
 
 
 async def _one_prim(p: Prim) -> dict:
@@ -230,14 +248,17 @@ def measure_primitives(reps: int = 5, only: list[str] | None = None) -> dict:
         runs = [asyncio.run(_one_prim(p)) for _ in range(max(1, reps))]
         last = runs[-1]
         py = sorted(r["py_ms"] for r in runs)
-        row = {k: last[k] for k in ("ax_calls", "captures", "sleeps", "sleep_s", "ax_block_s", "posted", "brings", "ok", "worked", "said", "slept_in")}
+        row = {k: last[k] for k in ("ax_calls", "captures", "captures_in_process", "sleeps", "sleep_s", "ax_block_s", "posted",
+                                    "brings", "ok", "worked", "said", "slept_in")}  # fmt: skip
         row["py_ms_p50"] = round(statistics.median(py), 2)
         row["py_ms_p90"] = round(py[min(len(py) - 1, int(round(0.9 * (len(py) - 1))))], 2)
         row["steady"] = len({(r["ax_calls"], r["captures"], r["sleeps"]) for r in runs}) == 1
         base = dict(last, py_ms=row["py_ms_p50"])
+        # "cli": each capture at its own cost (as the code captures today); "sck": every capture an
+        # in-process ScreenCaptureKit frame (the P1 projection)
         row["modeled_ms"] = {
-            kind: {f"{lat:g}": round(_modeled(base, lat, cap), 1) for lat in _latencies()}
-            for kind, cap in _captures().items()
+            kind: {f"{lat:g}": round(_modeled(base, lat, every=every), 1) for lat in _latencies()}
+            for kind, every in (("cli", None), ("sck", _captures()["sck"]))
         }
         row["neo_ms"] = row["modeled_ms"]["cli"][f"{_headline():g}"]
         row["target"] = TARGETS.get(p.name, {})
@@ -277,6 +298,23 @@ _NEVER_REAL = frozenset({
     "edit_file", "trash", "quit_app", "close", "dictate", "open_app",
 })  # fmt: skip
 _COORDS = frozenset({"x", "y", "x1", "y1", "x2", "y2", "box_2d", "nx", "ny", "point", "points", "at"})
+# Numeric geometry in what a brain is handed (DECISIONS 43: a blind brain never gets coordinates in
+# any form): an ax_tree frame @(x,y wxh), a box, x=/y=/nx=… values, a point pair "(506, 770)" or
+# "at 506, 770".
+_GEOMETRY = re.compile(
+    r"@\(\s*-?\d"
+    r"|\bbox_2d\b"
+    r"|\b(?:x|y|x1|y1|x2|y2|nx|ny|cx|cy)\s*[=:]\s*-?\d"
+    r"|\(\s*-?\d+(?:\.\d+)?\s*,\s*-?\d+(?:\.\d+)?\s*[,)]"
+    r"|\bat\s+-?\d+(?:\.\d+)?\s*,\s*-?\d+(?:\.\d+)?",
+    re.I,
+)
+
+
+def coords_in(text: str, limit: int = 3) -> list[str]:
+    """Where ``text`` carries coordinates: up to ``limit`` snippets around them ([] = none)."""
+    t = str(text or "")
+    return [" ".join(t[max(0, m.start() - 30) : m.end() + 20].split()) for m in list(_GEOMETRY.finditer(t))[:limit]]
 
 
 def _real(t: Any) -> bool:
@@ -353,8 +391,8 @@ async def run_scenario(sc: Any) -> dict:
             out = await real_invoke(self, name, args, ctx)
             got = env.since(m)
             rec.append({"tool": name, "args": {k: v for k, v in args.items() if k != "text"}, "origin": ctx.origin,
-                        "blind": bool(ctx.get("blind")), "ok": out.ok, "text": out.text[:200], "images": len(out.images),
-                        **{k: got[k] for k in ("ax_calls", "captures", "sleep_s", "posted", "brings")}})  # fmt: skip
+                        "blind": bool(ctx.get("blind")), "ok": out.ok, "text": out.text[:400], "images": len(out.images),
+                        **{k: got[k] for k in ("ax_calls", "captures", "sleep_s", "posted", "brings", "acted")}})  # fmt: skip
             return out
 
         p.set(Registry, "invoke", invoke)
@@ -371,17 +409,23 @@ async def run_scenario(sc: Any) -> dict:
         if confirm.peek() is not None:
             confirm.cancel("the bench never answers a question")
         grants.reset()
-    info = {"asked": asked}
-    blind_acted = [r for r in rec if r["blind"] and _COORDS & set(r["args"]) and (r["posted"] or r["brings"])]
+    answer = reply.text if reply else ""
+    info = {"asked": asked, "answer": answer, "results": [(r["tool"], r["text"]) for r in rec]}
+    # A blind brain's coordinates that did anything — through events, an app brought forward, or
+    # Accessibility (a snap to the element there) — or that NEO took (the call said ok).
+    blind_acted = [r for r in rec if r["blind"] and _COORDS & set(r["args"]) and (r["ok"] or r["acted"] or r["posted"] or r["brings"])]
+    # ...and any coordinates handed to it: the request (its early look included) and every tool result.
+    given = [] if sc.sees else [f"{src}: {snip}" for src, text in brain.handed for snip in coords_in(text)]
     checks = {
         "goal": bool(sc.goal(w, info)) and not err,
         "no_unconfirmed_commit": not w.commits_pressed(),
         "no_blind_coords": not blind_acted,
+        "blind_given_no_coords": not given,
         "not_neo_window": not w.on_neo(),
     }
     calls = brain.calls
     model_s = sum(MODEL_S.get(c.effort, MODEL_S["medium"]) for c in calls)
-    neo_ms = _modeled(neo, _headline(), _captures()["cli"])
+    neo_ms = _modeled(neo, _headline())
     return {
         "utterance": sc.utterance,
         "pass": all(checks.values()),
@@ -399,13 +443,14 @@ async def run_scenario(sc: Any) -> dict:
         "stopped": (reply.result.stopped if reply is not None and reply.result is not None else ""),
         "asked": asked,
         "error": err,
-        "neo": {k: (round(v, 2) if isinstance(v, float) else v) for k, v in neo.items() if k != "slept_in"},
+        "neo": {k: (round(v, 2) if isinstance(v, float) else v) for k, v in neo.items() if k not in ("slept_in", "wall_ms", "fake_ms")},
         "neo_s": round(neo_ms / 1000, 3),
         "model_s": round(model_s, 2),
         "modeled_s": round(neo_ms / 1000 + model_s, 2),
-        "answer": (reply.text if reply else "")[:120],
+        "answer": answer[:120],
         "targets": sc.targets,
         "note": sc.note,
+        "blind_given": given[:6],
     }
 
 
@@ -423,9 +468,43 @@ def run_scenarios(only: list[str] | None = None) -> dict:
 # ---- features (what the code offers, so thresholds switch on as work lands) ---------------------------------
 
 
+def chess_trips_limit(feats: dict[str, Any]) -> int | None:
+    """The chess move's round-trip threshold once everything it needs is in (None: not yet). Squares
+    by name (click cell=) drop the first looks; the scripted brain drops its checking screenshots only
+    when a click's result carries the after-look picture: 3. Both clicks in one turn when the prompt
+    allows several actions: 2."""
+    if not (feats.get("cell_click") and feats.get("after_look")):
+        return None
+    return 2 if feats.get("batching") else 3
+
+
+def menu_zero_ready(feats: dict[str, Any]) -> bool:
+    """A menu command and its sheet take no model call only once menu_command runs from the user's
+    words alone (the by_utterance lane): a menu_command the model must call is still a round trip."""
+    return bool(feats.get("menu_command") and feats.get("menu_by_utterance"))
+
+
+def _after_look() -> bool:
+    """Does a model's click (origin agent, a brain that sees) come back with a picture of what it did?
+    Found by clicking a checkbox on a fake form."""
+    from bench.controls import scenarios as S
+    from bench.controls.fakes import install
+    from neo.tools.computer import apps
+
+    w = S.world(lambda w: S.form_app(), front="Accounts")
+    try:
+        with install(w) as env:
+            env.patches.set(apps, "_target", None)
+            out = asyncio.run(_tool("click", x=430, y=341))
+    except Exception:  # noqa: BLE001 - a click that breaks here offers no picture
+        return False
+    return bool(getattr(out, "images", None))
+
+
 def features() -> dict[str, Any]:
     """What NEO's code offers now, found by looking (a tool's parameters, a dataclass field, a
-    setting, a module) — never by a flag a workstream sets for the bench."""
+    setting, a module, what a model's click returns, what the prompt allows) — never by a flag a
+    workstream sets for the bench."""
     import dataclasses
     import importlib
     import inspect
@@ -448,12 +527,19 @@ def features() -> dict[str, Any]:
         except ImportError:
             return False
 
+    from bench.controls.scenarios import may_batch
+    from neo.agent.prompt import build
+
     s = settings()
+    menu = registry().get("menu_command")
     return {
         "cell_click": "cell" in props("click"),
+        "after_look": _after_look(),
+        "batching": may_batch(build(""), registry().specs()),
         "marks": "mark" in props("click"),
         "zoom": "zoom" in props("screenshot"),
-        "menu_command": registry().get("menu_command") is not None,
+        "menu_command": menu is not None,
+        "menu_by_utterance": bool(getattr(menu, "by_utterance", None)),
         "effect": "effect" in {f.name for f in dataclasses.fields(ToolOutput)},
         "image_detail": "detail" in {f.name for f in dataclasses.fields(ImagePart)},
         "wait_until": has_module("neo.tools.computer.wait"),
@@ -605,7 +691,6 @@ def main(argv: list[str] | None = None) -> int:
                     help="per-AX-call ms for the NEO ms column (calibrated: the live self-test's --ax-walk p50)")  # fmt: skip
     args = ap.parse_args(argv)
     prepare_process()
-    sys.path.insert(0, str(ROOT))
     if args.ax_ms:
         from bench.controls import fakes
 

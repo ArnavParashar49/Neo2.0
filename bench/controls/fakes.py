@@ -1027,6 +1027,14 @@ class FakeScreen:
         self._frame = (self.world.version, img)
         return img
 
+    def capture_in_process(self, region: tuple[float, float, float, float] | None = None) -> Any:
+        """An in-process capture (ScreenCaptureKit, CGWindowList): counted like a screencapture run,
+        marked ``in_process`` (charged ScreenCaptureKit's cost), answered with the region's picture —
+        a PIL image at 2 px per point, the whole main display when no region is given."""
+        self.captures.append({"region": tuple(region) if region else None, "fmt": "sck", "window": False, "in_process": True})
+        with METER.fake():
+            return self.grab(tuple(region) if region else None)
+
     def grab(self, region: tuple[float, float, float, float] | None = None) -> Any:
         img = self.frame()
         if region is None:
@@ -1050,7 +1058,7 @@ class FakeScreen:
                 if w["kCGWindowNumber"] == num:
                     b = w["kCGWindowBounds"]
                     win = (b["X"], b["Y"], b["Width"], b["Height"])
-        self.captures.append({"region": region or win, "fmt": fmt, "window": win is not None})
+        self.captures.append({"region": region or win, "fmt": fmt, "window": win is not None, "in_process": False})
         with METER.fake():
             img = self.grab(region or win)
             pil_fmt = {"jpg": "JPEG", "jpeg": "JPEG", "bmp": "BMP", "tiff": "TIFF", "tif": "TIFF", "gif": "GIF"}.get(fmt, "PNG")
@@ -1298,20 +1306,26 @@ class Env:
     def mark(self) -> dict:
         return {"ax": self.AS.count(), "captures": len(self.screen.captures), "sleeps": self.clock.mark(),
                 "posted": len(self.world.posted), "fake_s": METER.fake_s, "t": time.perf_counter(),
-                "brings": len(self.world.brings)}  # fmt: skip
+                "brings": len(self.world.brings), "acted": len(self.world.acted)}  # fmt: skip
 
     def since(self, m: dict) -> dict:
         wall = time.perf_counter() - m["t"]
+        fake = METER.fake_s - m["fake_s"]
         sleeps = self.clock.since(m["sleeps"])
+        caps = self.screen.captures[m["captures"] :]
         return {
             "ax_calls": self.AS.count() - m["ax"],
-            "captures": len(self.screen.captures) - m["captures"],
+            "captures": len(caps),
+            "captures_in_process": sum(1 for c in caps if c.get("in_process")),
             "sleeps": len([s for s in sleeps if s.kind != "ax_block"]),
             "sleep_s": round(sum(s.seconds for s in sleeps if s.kind != "ax_block"), 4),
             "ax_block_s": round(sum(s.seconds for s in sleeps if s.kind == "ax_block"), 4),
             "posted": len(self.world.posted) - m["posted"],
             "brings": len(self.world.brings) - m["brings"],
-            "py_ms": max(0.0, (wall - (METER.fake_s - m["fake_s"])) * 1000),
+            "acted": len(self.world.acted) - m["acted"],
+            "py_ms": max(0.0, (wall - fake) * 1000),
+            "wall_ms": wall * 1000,
+            "fake_ms": fake * 1000,
             "slept_in": sorted({s.where for s in sleeps}),
         }
 
@@ -1453,10 +1467,10 @@ def install(world: World, *, clock: bool = True) -> Iterator[Env]:
             if m.__name__.startswith("neo.tools.computer") and getattr(m, "subprocess", None) is subprocess:
                 p.set(m, "subprocess", guarded)
         for hook in CAPTURE_HOOKS:  # in-process capture paths, when a workstream adds one
-            mod_name, fn_name = hook
+            mod_name, fn_name, *rest = hook
             with contextlib.suppress(ImportError):
                 mod = importlib.import_module(mod_name)
-                p.set(mod, fn_name, lambda *a, **k: fs.grab(k.get("region") or (a[0] if a else None)), only_if_present=True)
+                p.set(mod, fn_name, _captured(fs, rest[0] if rest else None), only_if_present=True)
         # the clock
         if clock:
             p.set(asyncio, "sleep", world.clock.asleep)
@@ -1477,9 +1491,24 @@ def install(world: World, *, clock: bool = True) -> Iterator[Env]:
         p.undo()
 
 
-# (module, function) pairs that capture the screen in-process (ScreenCaptureKit, CGWindowList): each
-# is answered by FakeScreen.grab(region) and counted by its caller. A capture workstream adds its own.
-CAPTURE_HOOKS: list[tuple[str, str]] = []
+# The functions that capture the screen in-process (ScreenCaptureKit, CGWindowList), as (module,
+# function) or (module, function, adapt). Each call is answered by FakeScreen.capture_in_process(region)
+# — counted in ``captures`` (``in_process``: charged ScreenCaptureKit's cost, never free) — with a PIL
+# image of the region (x, y, w, h in points, top-left origin; the ``region`` keyword or the first
+# argument) at 2 px per point. When the real function returns something else (PNG or JPEG bytes, a
+# CGImage…), ``adapt(image)`` turns the picture into that. A capture workstream adds its own.
+CAPTURE_HOOKS: list[tuple[str, str] | tuple[str, str, Callable[[Any], Any]]] = []
+
+
+def _captured(fs: FakeScreen, adapt: Callable[[Any], Any] | None) -> Callable:
+    def capture(*a: Any, **k: Any) -> Any:
+        img = fs.capture_in_process(k.get("region") or (a[0] if a else None))
+        if adapt is None:
+            return img
+        with METER.fake():  # (the conversion stands in for the real function's own: not NEO's)
+            return adapt(img)
+
+    return capture
 
 
 # ---- the scripted brain ---------------------------------------------------------------------------
@@ -1554,12 +1583,20 @@ class FakeBrain:
         self.purposes: list[str] = []
         self.last_used, self.last_model = "fake", "fake-scripted"
         self.state: dict[str, Any] = {}
+        # Everything it was handed, once each: (source, text) — the user's turns ("request": the words
+        # and any early look NEO put with them) and every tool result (by tool name).
+        self.handed: dict[tuple[str, str], None] = {}
 
     async def complete(self, messages: list, *, system: str = "", tools: list | None = None, effort: str = "medium",
                        max_tokens: int = 4096) -> Any:  # fmt: skip
         from neo.providers.base import Turn
 
         self.calls.append(account(messages, system, tools, effort, self.sees))
+        for m in messages:
+            if m.role == "user" and m.text:
+                self.handed.setdefault(("request", str(m.text)), None)
+            for r in m.tool_results:
+                self.handed.setdefault((str(r.name), str(r.content)), None)
         turn = self.policy(self, messages, system, list(tools or []))
         if not isinstance(turn, Turn):
             turn = Turn(text=str(turn or "Done."))
