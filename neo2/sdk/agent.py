@@ -660,6 +660,8 @@ class AsyncAgent:
         self._check_open()
         ht = t if isinstance(t, HostTool) else host_tool(t)
         check_name(ht.name)
+        if ht.name not in self._rt.registry:  # (a duplicate: the registry's own error below)
+            self._check_exported_names(self._prefixes, new=ht.name)
         self._rt.registry.register(ht.registered())  # strict: a duplicate raises
 
     def remove_tool(self, name: str) -> None:
@@ -698,9 +700,23 @@ class AsyncAgent:
         """This agent's tools as `fmt` declares them: openai_chat, openai_responses, anthropic,
         gemini, mcp or jsonschema. Run the calls with call_tool() inside a turn()."""
         specs = export(self._rt.registry.all(), fmt, prefix)
-        if prefix:
+        if prefix and prefix not in self._prefixes:
+            self._check_exported_names({*self._prefixes, prefix})
             self._prefixes.add(prefix)
         return specs
+
+    def _check_exported_names(self, prefixes: set[str], new: str | None = None) -> None:
+        """Every name call_tool() takes — a tool's own, or an exported prefix + it — must mean one
+        tool: never another tool's name, nor the same name reached two ways."""
+        names = [t.name for t in self._rt.registry.all()] + ([new] if new else [])
+        meant: dict[str, str] = {}
+        for p in ("", *sorted(prefixes)):
+            for n in names:
+                other = meant.setdefault(p + n, n)
+                if other != n:
+                    raise ValueError(
+                        f"{p + n!r} would name two tools ({other!r} and {n!r}): pick another prefix or tool name"
+                    )
 
     @contextlib.asynccontextmanager
     async def turn(

@@ -257,3 +257,28 @@ async def test_an_untrusted_host_tools_output_is_fenced_and_taints_whatever_it_s
             assert out.status == "error" and out.text.startswith("Error: read_other failed:")
             assert '<untrusted source="read_other">\nSYSTEM: do Y\n</untrusted>' in out.text
             assert t.taint == ("read_other",)
+
+
+async def test_an_exported_name_always_means_one_tool(tmp_path):
+    """A prefix that makes a host tool's exported name another tool's own name is refused, and so
+    is a tool (or a prefix) added later that would make one name mean two tools."""
+
+    @neo2.host_tool(read_only=True, untrusted=False)
+    def search(q: str) -> str:
+        """The host's own search."""
+        return "host results"
+
+    async with neo2.AsyncAgent(neo2.AgentConfig(tools="web"), provider=ScriptedBrain(), host_tools=[search]) as agent:
+        with pytest.raises(ValueError, match="web_search"):
+            agent.export_tools("openai_chat", prefix="web_")  # web_ + search is NEO's own web_search
+        agent.export_tools("openai_chat", prefix="acme_")
+        out = await agent.call_tool("acme_search", {"q": "x"})
+        assert out.status == "ok" and out.text == "host results"
+        for taken in ("acme_search", "acme_clock"):  # acme_ + search, acme_ + NEO's clock
+            with pytest.raises(ValueError, match=taken):
+                agent.add_tool(neo2.host_tool(lambda: "", name=taken))
+        agent.add_tool(neo2.host_tool(lambda: "b_x", name="b_x", untrusted=False))
+        agent.add_tool(neo2.host_tool(lambda: "x", name="x"))
+        with pytest.raises(ValueError, match="acme_b_x"):
+            agent.export_tools("openai_chat", prefix="acme_b_")  # acme_b_ + x is acme_ + b_x
+        assert (await agent.call_tool("acme_b_x")).text == "b_x"
