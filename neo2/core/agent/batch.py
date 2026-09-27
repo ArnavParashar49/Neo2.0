@@ -48,7 +48,7 @@ log = logger(__name__)
 _MISS_WORDS = ("Nothing visibly changed",)
 # The pointer inputs: their Effect is the eyes' outcome, where "nothing changed" means the move
 # didn't land. Anything else may rightly change nothing anyone sees (a menu's Copy, a keystroke):
-# its changed=False is no miss unless its Effect says so (``missed``, if Step 0 settles on one).
+# its changed=False is no miss (an Effect with a ``missed`` of its own would say otherwise).
 _POINTER = frozenset({"click", "drag", "scroll", "click_text"})
 _SCREEN_CATEGORY = "computer"  # the tools that work the screen (a registered tool's category)
 _SCENE_WORDS = (

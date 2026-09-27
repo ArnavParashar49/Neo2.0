@@ -284,8 +284,7 @@ async def test_a_greyed_out_command_says_so(world):
 async def test_the_same_title_in_two_menus_is_a_question_unless_the_menu_is_named(world):
     out = await run({"item": "Close"}, ToolContext())
     assert not out.ok and "several" in out.text and "File › Close" in out.text and "Window › Close" in out.text
-    if hasattr(out, "handoff"):
-        assert len(out.handoff) == 2
+    assert [ch.id for ch in out.handoff.choices] == ["File › Close", "Window › Close"]  # (a Handoff, as click_text's)
     out = await run({"path": "Window > Close"}, ToolContext())
     assert out.ok and world.pressed == ["Window › Close"]
 

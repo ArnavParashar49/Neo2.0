@@ -55,7 +55,7 @@ from typing import Any
 from neo2.core import logger
 from neo2.core.agent import confirm
 from neo2.core.agent.confirm import Halt
-from neo2.core.agent.registry import ToolContext, ToolOutput, fence
+from neo2.core.agent.registry import Choice, Effect, Handoff, ToolContext, ToolOutput, fence
 from neo2.core.config import settings
 from neo2.core.decide import uistrings
 from neo2.core.security import policy
@@ -513,27 +513,18 @@ def _ground(ask: _Ask, items: list) -> _Pick:
 def _with_effect(
     out: ToolOutput, *, changed: bool | None, scene_changed: bool = False, sheet: str = "", looked: bool = False
 ) -> ToolOutput:
-    """Attach what the command changed (ToolOutput.effect, where this build has it). ``looked``: the
-    result lists what is on screen after it (the controls of the sheet it opened, by id), so the
-    model needs no separate look before it answers the sheet."""
-    try:
-        from neo2.core.agent import registry as reg
-
-        cls = getattr(reg, "Effect", None)
-        if cls is not None and hasattr(out, "effect"):
-            out.effect = cls(changed=changed, scene_changed=scene_changed, sheet=sheet, looked=looked)
-    except Exception:  # noqa: BLE001 - an Effect this build can't make: the text still says it
-        pass
+    """Attach what the command changed (ToolOutput.effect). ``looked``: the result lists what is on
+    screen after it (the controls of the sheet it opened, by id), so the model needs no separate look
+    before it answers the sheet."""
+    out.effect = Effect(changed=changed, scene_changed=scene_changed, sheet=sheet, looked=looked)
     return out
 
 
-def _with_handoff(out: ToolOutput, options: list[str]) -> ToolOutput:
-    """Attach the multiple choice a model should pick from (ToolOutput.handoff, where it exists)."""
-    if options and hasattr(out, "handoff"):
-        try:
-            out.handoff = tuple(options[:_OPTIONS])
-        except Exception:  # noqa: BLE001
-            pass
+def _with_handoff(out: ToolOutput, reason: str, options: list[tuple[str, str]]) -> ToolOutput:
+    """Attach the multiple choice a model should pick from (ToolOutput.handoff): (id, label) pairs,
+    at most :data:`_OPTIONS` of them."""
+    if options:
+        out.handoff = Handoff(reason, [Choice(str(i), str(label)) for i, label in options[:_OPTIONS]])
     return out
 
 
@@ -762,7 +753,7 @@ def _no_pick(ask: _Ask, pick: _Pick, name: str, items: list, c: ToolContext) -> 
             f"Error: several menu commands in {name} match “{said[:60]}” — which one?\n" + fence("screen", "\n".join(opts)),
             ok=False,
         )
-        return _with_handoff(out, opts)
+        return _with_handoff(out, "several", [(o, o) for o in opts])
     tops = list(dict.fromkeys(i.path[0] for i in items if getattr(i, "path", ())))[:12]
     listing = ("\n" + fence("screen", "its menus: " + ", ".join(tops))) if tops else ""
     if tops:
@@ -904,7 +895,7 @@ async def _answer_sheet(
         else "look at it (ax_tree) and answer it"
     )
     out = ToolOutput(f"{said}. It opened a {kind} in {name} that waits for an answer: {how}.\n" + fence("screen", "\n".join(lines) or after.sheet))
-    out = _with_handoff(out, [f"{getattr(b, 'id', '')} “{_button_label(b)}”" for b in buttons])
+    out = _with_handoff(out, "sheet", [(getattr(b, "id", ""), _button_label(b)) for b in buttons])
     return _with_effect(out, changed=True, scene_changed=True, sheet=after.sheet, looked=bool(buttons))
 
 
@@ -1192,7 +1183,7 @@ async def _fill(text: str, field_name: str, c: ToolContext, app: str, replace: b
             g._taint(c, "screen")
             opts = [f"{getattr(x, 'id', '')} {x.role.removeprefix('AX')} “{_field_label(x)[:40]}”" for x in several[:_OPTIONS]]
             out = ToolOutput(f"Error: several fields in {name} match “{field_name[:40]}” — which one?\n" + fence("screen", "\n".join(opts)), ok=False)
-            return _with_handoff(out, opts)
+            return _with_handoff(out, "several", [(getattr(x, "id", ""), _field_label(x)[:40]) for x in several])
         return ToolOutput(f"Error: no field called “{field_name[:40]}” in the front window of {name}.", ok=False)
     if e.role == "AXSecureTextField" or (e.ref is not None and await asyncio.to_thread(ax.secure, e.ref)):
         return ToolOutput("Error: that's a password field — NEO never fills those.", ok=False)
