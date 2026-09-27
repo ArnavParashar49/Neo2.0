@@ -20,6 +20,8 @@ __all__ = [
     "_fresh_learning_state",
     "_no_shadow_dry_runs",
     "_no_real_browser",
+    "_accessibility_on",
+    "_no_task_grants",
 ]
 
 # Hermetic: no test may read the developer's real keys or settings (~/.neo/.env, ./.env).
@@ -102,6 +104,25 @@ def _no_real_browser(monkeypatch):
         raise render.RenderError("no real browser in the test suite")
 
     monkeypatch.setattr(render, "_start_playwright", refuse)
+
+
+@pytest.fixture(autouse=True)
+def _accessibility_on(monkeypatch):
+    """The suite never depends on whether this Mac granted the test runner Accessibility: it is
+    on, and a test that needs it off says so (monkeypatching ax.is_trusted)."""
+    from neo.tools.computer import ax
+
+    monkeypatch.setattr(ax, "is_trusted", lambda: True)
+
+
+@pytest.fixture(autouse=True)
+def _no_task_grants():
+    """A "yes for this task" never outlives the test that gave it."""
+    from neo.agent import grants
+
+    grants.reset()
+    yield
+    grants.reset()
 
 
 @pytest.fixture

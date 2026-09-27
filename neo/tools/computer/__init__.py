@@ -6,7 +6,7 @@ import asyncio
 import re
 import time
 
-from neo.agent import confirm
+from neo.agent import confirm, grants
 from neo.agent.registry import ToolContext, ToolOutput, tool
 from neo.config import decide_mode
 from neo.tools.computer import apps, ax, policy, screen, shell
@@ -17,6 +17,41 @@ _OBJ = {"type": "object", "properties": {}}
 
 def _p(props: dict, required: list[str] | None = None) -> dict:
     return {"type": "object", "properties": props, "required": required or []}
+
+
+# ---- Accessibility ------------------------------------------------------------------------
+# Seeing and acting in other apps (the AX tree, clicks, keys, typing, System Events' UI
+# scripting) all take the Accessibility permission. Without it every such call fails, and a
+# model that keeps getting failures tries its way around them (the Chess run: six AppleScripts,
+# each a card). So the first one in a task stops the run and tells the user how to turn it on.
+AX_OFF = (
+    "NEO needs Accessibility to see and click in apps — turn NEO on in System Settings › Privacy & "
+    "Security › Accessibility, then ask again"
+)
+_AX_STILL_OFF = (
+    "Error: Accessibility is still off for NEO, and the user has already been told how to turn it on. "
+    "Stop here and tell them; don't try AppleScript or any other way into the app."
+)
+# What osascript says when System Events may not drive another app's UI.
+_AX_DENIED = re.compile(r"assistive access|not allowed to send keystrokes|\(-1719\)|\(-25211\)", re.I)
+
+
+def _ax_trusted() -> bool:
+    try:
+        return bool(ax.is_trusted())
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _ax_off_reply() -> str:
+    """NEEDS_USER the first time in a task (the run stops, the user hears how to fix it); after
+    that an error that tells the model to stop rather than look for another way in."""
+    return confirm.ask_user(AX_OFF) if grants.first("accessibility-off") else _AX_STILL_OFF
+
+
+def _needs_ax() -> str | None:
+    """None with Accessibility on, else what the tool answers instead of trying."""
+    return None if _ax_trusted() else _ax_off_reply()
 
 
 def _dialog_text(els=None, app: str = "") -> str:
@@ -47,13 +82,16 @@ def _ask_before_click(tool_name: str, a: dict, label: str, app: str = "", els=No
     "ax_tree",
     "Read the frontmost (or named) app's UI as a text tree of elements with ids, roles, titles, "
     "values and screen positions. Use this FIRST to see what's on screen — it's fast and exact. "
-    "Element ids (e12) can be used with ax_press, ax_set_value, and click.",
+    "Element ids (e12) can be used with ax_press, ax_set_value, and click. When it shows little "
+    "(a game board like Chess, a map, a canvas), take a screenshot and click at x,y instead.",
     _p({"app": {"type": "string", "description": "App name; omit for the frontmost app"}}),
     parallel_safe=True,
     category="computer",
     untrusted=True,
 )
 async def ax_tree(a: dict, c: ToolContext) -> str:
+    if err := _needs_ax():
+        return err
     return await asyncio.to_thread(ax.snapshot, a.get("app"))
 
 
@@ -66,6 +104,8 @@ async def ax_tree(a: dict, c: ToolContext) -> str:
     untrusted=True,
 )
 async def ax_find(a: dict, c: ToolContext) -> str:
+    if err := _needs_ax():
+        return err
     return await asyncio.to_thread(ax.find, a["query"], a.get("app"))
 
 
@@ -85,9 +125,9 @@ _SCROLL = [
 
 @tool(
     "screenshot",
-    "Take a screenshot (whole screen, or a region x,y,w,h). Use only when ax_tree is not enough "
-    "(canvas/Electron apps, images, layout questions). Coordinates in the image equal screen "
-    "coordinates for click/drag.",
+    "Take a screenshot (whole screen, or a region x,y,w,h). Use when ax_tree is not enough "
+    "(game boards like Chess, maps, drawing and other canvas apps, Electron apps, images, layout "
+    "questions). Coordinates in the image equal screen coordinates for click/drag.",
     _p(
         {
             "x": {"type": "integer"},
@@ -154,6 +194,8 @@ async def apps_running(a: dict, c: ToolContext) -> str:
     quiet=True,
 )
 async def ax_press(a: dict, c: ToolContext) -> str:
+    if err := _needs_ax():
+        return err
     e = ax.get(a["id"])
     # The app that owns the element, not whatever is in front: clicking NEO's own card to
     # approve brings NEO forward, and the question must stay the same.
@@ -170,6 +212,8 @@ async def ax_press(a: dict, c: ToolContext) -> str:
     quiet=True,
 )
 async def ax_set_value(a: dict, c: ToolContext) -> str:
+    if err := _needs_ax():
+        return err
     return await asyncio.to_thread(ax.set_value, a["id"], a["value"])
 
 
@@ -189,6 +233,8 @@ async def ax_set_value(a: dict, c: ToolContext) -> str:
     quiet=True,
 )
 async def click(a: dict, c: ToolContext) -> str:
+    if err := _needs_ax():
+        return err
     if "id" in a:
         e = ax.get(a["id"])
         if not e:
@@ -220,6 +266,8 @@ async def click(a: dict, c: ToolContext) -> str:
     quiet=True,
 )
 async def drag(a: dict, c: ToolContext) -> str:
+    if err := _needs_ax():
+        return err
     return inp.drag(a["x1"], a["y1"], a["x2"], a["y2"])
 
 
@@ -240,6 +288,8 @@ async def drag(a: dict, c: ToolContext) -> str:
     quiet=True,
 )
 async def scroll(a: dict, c: ToolContext) -> str:
+    if err := _needs_ax():
+        return err
     x, y = a.get("x"), a.get("y")
     if a.get("at_pointer") or x is None or y is None:
         x, y = inp.mouse_position()  # "scroll down": wherever the pointer is
@@ -559,6 +609,8 @@ async def _type(text: str) -> None:
     payload=True,
 )
 async def type_text(a: dict, c: ToolContext) -> str:
+    if err := _needs_ax():
+        return err
     text = str(a["text"])
     err, created = await _ensure_text_focus()
     if err:
@@ -582,6 +634,8 @@ async def dictate(a: dict, c: ToolContext) -> str:
     from neo.providers import brain
     from neo.providers.base import Message
 
+    if ax_err := _needs_ax():
+        return ax_err
     brief = str(a["brief"]).strip()
     err, created = await _ensure_text_focus()  # check before spending a model call
     if err:
@@ -616,6 +670,8 @@ async def dictate(a: dict, c: ToolContext) -> str:
     quiet=True,
 )
 async def hotkey(a: dict, c: ToolContext) -> str:
+    if err := _needs_ax():
+        return err
     keys, want = str(a["keys"]), str(a.get("app") or "")
     if a.get("after") == "input":
         from neo.agent.registry import registry as _reg
@@ -718,6 +774,8 @@ async def click_text(a: dict, c: ToolContext) -> str:
     label = " ".join(str(a["label"]).lower().split())
     if not label or len(label) < 2 or all(w in _VAGUE_LABELS for w in label.split()):
         return f"Error: click what? '{a['label']}' isn't a label I can find."
+    if err := _needs_ax():
+        return err
     if err := await _guard_front():
         return err
     app, frame, els = await asyncio.to_thread(ax.window_elements)
@@ -858,10 +916,16 @@ async def close(a: dict, c: ToolContext) -> str:
     return await close_target(str(a.get("target") or ""))
 
 
+_SCRIPT_TRIES = 2  # failed scripts on one app in one task before NEO stops trying that way
+
+
 @tool(
     "applescript",
-    "Run AppleScript and return its result. Use for anything scriptable that has no dedicated tool. "
-    "Scripts that only read (get/count/exists) run straight away; the user approves anything else.",
+    "Run AppleScript and return its result. Only for what an app exposes to scripting that no "
+    "dedicated tool covers - not for seeing or clicking in an app's window (ax_tree, screenshot, "
+    "click, type_text and hotkey do that). Scripts that only read (get/count/exists/set a camelCase variable) "
+    "run straight away; the user approves anything else. After two failures on an app, stop "
+    "scripting it.",
     _p({"script": {"type": "string"}}, ["script"]),
     risk="destructive",
     category="apps",
@@ -869,14 +933,32 @@ async def close(a: dict, c: ToolContext) -> str:
     untrusted=True,  # file contents and app data it prints are content, never orders
 )
 async def applescript(a: dict, c: ToolContext) -> str:
-    from neo.agent import confirm
-
     script = str(a.get("script") or "")
-    if not policy.script_is_read_only(script):
-        gate = confirm.gated("applescript", a, "run an AppleScript", detail=script)
+    facts = policy.script_facts(script)
+    if facts.ui and (err := _needs_ax()):
+        return err  # System Events' UI scripting takes Accessibility too
+    failed = f"applescript-failed:{(facts.app or '?').casefold()}"
+    if grants.count(failed) >= _SCRIPT_TRIES:
+        return (
+            f"Error: AppleScript already failed {_SCRIPT_TRIES} times on {facts.app or 'this'} in this task, so I "
+            "didn't run another. Stop scripting it: look with screenshot and act with click, type_text or "
+            "hotkey, or tell the user what's in the way."
+        )
+    # A script that only reads runs straight away — unless this request has read something
+    # untrusted (a page, a mail, the screen), which could be what asked for it.
+    if not facts.read_only or c.tainted():
+        where = f" in {facts.app}" if facts.app else ""
+        what = f"read {facts.app} with an AppleScript" if facts.read_only and facts.app else f"run an AppleScript{where}"
+        target = grants.Target(facts.app, facts.danger, tuple(c.taint))
+        gate = confirm.gated("applescript", a, what, detail=script, target=target)
         if isinstance(gate, str):
             return gate
-    return await apps.osascript(script, timeout=60)
+    out = await apps.osascript(script, timeout=60)
+    if out.startswith("Error"):
+        if _AX_DENIED.search(out):
+            return _ax_off_reply()
+        grants.note(failed)
+    return out
 
 
 def _named_browser(name: str):

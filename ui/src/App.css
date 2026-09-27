@@ -224,6 +224,16 @@ kbd { font: 11px/1 -apple-system, system-ui; opacity: 0.7; margin-left: 6px; }
 .confirm-btns .primary { background: var(--fg); color: #111; border-color: transparent; font-weight: 600; }
 .confirm-btns .primary:hover { background: #fff; }
 .confirm-btns .primary kbd { opacity: 0.55; }
+/* A third answer, "Yes for this task (App)": the two usual buttons keep their size and it takes
+   the rest of the row, its label wrapping onto a second line rather than squeezing theirs. */
+.confirm-btns.scoped button { flex: none; }
+.confirm-btns.scoped .task { flex: 1 1 0; min-width: 0; gap: 6px; line-height: 1.25; }
+.confirm-btns .task-label { min-width: 0; text-align: center; }
+.confirm-btns .task-app {
+  display: inline-block; max-width: 100%; vertical-align: bottom;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.confirm-btns .task kbd { margin-left: 0; flex: none; }
 
 /* ---- floating orb (collapsed) ------------------------------------------------------ */
 .pill {

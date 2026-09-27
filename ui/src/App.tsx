@@ -7,7 +7,7 @@ import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { MOCK, useNeo, type Item, type NeoState, type OrbState, type ToolRun, type TurnMeta } from "./ws";
+import { MOCK, useNeo, type ConfirmScope, type Item, type NeoState, type OrbState, type ToolRun, type TurnMeta } from "./ws";
 import { useBrowser, type BrowserSnap } from "./browser/hub";
 import { BrowserCard } from "./browser/BrowserCard";
 import { EndedRow, MiniRow, PoppedRow } from "./browser/BrowserRow";
@@ -515,19 +515,27 @@ export default function App() {
   };
 
   // Keys while a question is up: ⌘⏎ approves (a stray Enter meant for something else must not),
-  // ⎋ declines. The answer names the exact action on the card.
-  const answer = useCallback((yes: boolean) => {
-    if (neo.ask) neo.send({ cmd: "confirm", yes, action_id: neo.ask.action_id });
+  // ⌘⇧⏎ approves for the rest of the task (only when the card offers it), ⎋ declines. The answer
+  // names the exact action on the card.
+  const offersTask = !!neo.ask?.scopes?.includes("task");
+  const answer = useCallback((yes: boolean, scope?: ConfirmScope) => {
+    if (neo.ask) neo.send({ cmd: "confirm", yes, action_id: neo.ask.action_id, ...(scope ? { scope } : {}) });
   }, [neo.ask, neo.send]);
   useEffect(() => {
     if (!confirming) return;
     const h = (e: KeyboardEvent) => {
+      if (e.key === "Enter" && e.metaKey && e.shiftKey) {
+        // Never a plain yes in its place: without the offer, this key does nothing.
+        e.preventDefault();
+        if (offersTask) answer(true, "task");
+        return;
+      }
       if (e.key === "Enter" && e.metaKey) { e.preventDefault(); answer(true); }
       if (e.key === "Escape") { e.preventDefault(); answer(false); }
     };
     window.addEventListener("keydown", h);
     return () => window.removeEventListener("keydown", h);
-  }, [confirming, answer]);
+  }, [confirming, answer, offersTask]);
 
   const busy = !["idle", "listening"].includes(shown);
   const lastReply = [...neo.items].reverse().find((i) => i.kind === "msg" && i.role === "assistant") as Extract<Item, { kind: "msg" }> | undefined;
@@ -687,8 +695,20 @@ export default function App() {
     <div className="confirm" role="alertdialog" aria-labelledby="confirm-q" aria-describedby="confirm-detail">
       <div className="confirm-q" id="confirm-q">NEO wants to {neo.ask.summary}.</div>
       {neo.ask.detail && <pre className="confirm-detail" id="confirm-detail">{neo.ask.detail}</pre>}
-      <div className="confirm-btns">
+      <div className={offersTask ? "confirm-btns scoped" : "confirm-btns"}>
         <button className="primary" onClick={() => answer(true)}>Yes, do it <kbd>⌘⏎</kbd></button>
+        {offersTask && (
+          <button
+            className="task"
+            onClick={() => answer(true, "task")}
+            title={`Also run the next steps like this${neo.ask.app ? ` in ${neo.ask.app}` : ""} without asking, until this task ends. Anything risky still asks.`}
+          >
+            <span className="task-label">
+              Yes for this task{neo.ask.app ? <>{" "}<span className="task-app">({neo.ask.app})</span></> : null}
+            </span>
+            <kbd>⌘⇧⏎</kbd>
+          </button>
+        )}
         <button onClick={() => answer(false)}>No <kbd>esc</kbd></button>
       </div>
     </div>
