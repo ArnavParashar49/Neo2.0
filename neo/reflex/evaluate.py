@@ -239,5 +239,269 @@ def _print(results: dict[str, dict]) -> None:
         print(f"{k:{width}s}" + "".join(cells))
 
 
+# ---- the resolver's benchmark ------------------------------------------------------------------------
+# tests/data/ground_eval.jsonl (built by tests/data/build_ground_eval.py): requests in English,
+# Hinglish and Hindi against windows of 12/50/200 elements, hand-built dialogs and the self-test
+# window. A stage of neo.tools.computer.resolve goes live only once it is precise enough here
+# (SHIP_P overall, SHIP_P_SCRIPT per script) and on the user's own requests (shadow_report).
+
+GROUND_EVAL = Path(__file__).resolve().parents[2] / "tests" / "data" / "ground_eval.jsonl"
+SHIP_P = 0.97
+SHIP_P_SCRIPT = 0.95
+SHIP_N = 200  # answers a stage needs on real requests before its shadow numbers count
+
+
+class EvalStrings:
+    """The eval file's own OS strings (macOS's English→Hindi forms of its labels) as the resolver's
+    string index."""
+
+    def __init__(self, os_map: dict[str, list[str]]) -> None:
+        from neo.tools.computer.phrases import norm
+
+        self._norm = norm
+        self._f = {norm(k): list(v) for k, v in os_map.items()}
+        self._r: dict[str, list[str]] = {}
+        for en, his in os_map.items():
+            for h in his:
+                for key in {norm(h), norm(h.rstrip("…"))}:
+                    self._r.setdefault(key, []).append(en)
+
+    def ready(self) -> bool:
+        return True
+
+    def forms(self, label: str) -> list[str]:
+        return self._f.get(self._norm(label), [])
+
+    def sources(self, label: str) -> list[str]:
+        return self._r.get(self._norm(label), [])
+
+
+def load_ground(path: Path = GROUND_EVAL) -> tuple[dict, list[dict]]:
+    lines = [json.loads(x) for x in Path(path).read_text(encoding="utf-8").splitlines() if x.strip()]
+    head = next(x for x in lines if x.get("kind") == "vocab")
+    return head, [x for x in lines if x.get("kind") == "row"]
+
+
+def ground_windows(head: dict, row: dict, sizes: tuple[str, ...] = ("12", "50", "200")) -> list[tuple[str, list, set[int]]]:
+    """(size, candidates, positions of the right element) for each window of a row."""
+    from neo.tools.computer.resolve import Candidate
+
+    gold = set(row["gold"])
+    out = []
+    if "screen" in row:
+        cands = [Candidate(lab, role, modal=bool(m), id=f"e{i}") for i, (role, lab, m) in enumerate(row["screen"])]
+        out.append(("hand", cands, {i for i, c in enumerate(cands) if c.label in gold}))
+        return out
+    for n in sizes:
+        ids = row["screens"].get(n)
+        if ids is None:
+            continue
+        cands = [Candidate(head["elements"][j][1], head["elements"][j][0], id=f"e{i}") for i, j in enumerate(ids)]
+        out.append((n, cands, {i for i, c in enumerate(cands) if c.label in gold}))
+    return out
+
+
+def _rate(right: int, n: int) -> float | None:
+    return round(right / n, 4) if n else None
+
+
+def ground_eval(
+    path: Path = GROUND_EVAL,
+    *,
+    sizes: tuple[str, ...] = ("12", "50", "200"),
+    stages: tuple[str, ...] | None = ("lexical",),
+    index: bool = True,
+    embed=False,
+    choose=False,
+    rows: list[dict] | None = None,
+) -> dict:
+    """Run the resolver over the benchmark: how often it acts (coverage), how often it is right when
+    it does (precision) — overall, per script, per stage (in cascade order) and per window size —,
+    whether every commit label it acted on reached the gate, and its latency. ``stages``: the ones
+    that act (None: every stage). ``index``: the eval's own OS strings as the string index (False:
+    none, as before it is built). ``embed`` / ``choose``: MiniLM and Laya's choice (False: none)."""
+    from neo.tools.computer import resolve as rs
+
+    head, all_rows = load_ground(path)
+    rows = all_rows if rows is None else rows
+    idx = EvalStrings(head.get("os", {})) if index else False
+    acting = tuple(rs.STAGES) if stages is None else tuple(stages)
+    tally: dict[str, dict[str, int]] = {}
+    ms: dict[str, list[float]] = {}
+    commit_seen = commit_unflagged = asked = 0
+    wrong: list[dict] = []
+
+    def add(key: str, acted: bool, right: bool) -> None:
+        t = tally.setdefault(key, {"n": 0, "acted": 0, "right": 0})
+        t["n"] += 1
+        t["acted"] += int(acted)
+        t["right"] += int(acted and right)
+
+    for row in rows:
+        for size, cands, gold in ground_windows(head, row, sizes):
+            t0 = time.perf_counter()
+            res = rs.resolve(
+                row["text"], cands, origin="user", stages=acting, index=idx, embed=embed, choose=choose,
+                alias=False, log_it=False,
+            )  # fmt: skip
+            ms.setdefault(size, []).append((time.perf_counter() - t0) * 1000)
+            acted = isinstance(res, rs.Resolved)
+            right = acted and cands.index(res.candidate) in gold
+            stage = res.stage if acted else ""
+            for key in ("all", f"script {row['script']}", f"size {size}", f"source {row['source']}", f"lang {row['lang']}"):
+                add(key, acted, right)
+            if acted:
+                add(f"stage {stage}", True, right)
+                add(f"stage {stage} {row['script']}", True, right)
+                asked += int(bool(res.ask))
+                picked_commits = rs.label_commits(res.label, idx or None) or bool(row.get("commit") and right)
+                if picked_commits:
+                    commit_seen += 1
+                    if not (res.commits or res.ask):
+                        commit_unflagged += 1
+                if not right and len(wrong) < 40:
+                    wrong.append({"text": row["text"], "size": size, "stage": stage, "picked": res.label, "gold": row["gold"]})
+    rep: dict = {"rows": len(rows), "stages": list(acting), "index": bool(index)}
+    for key, t in sorted(tally.items()):
+        rep[key] = {"n": t["n"], "acted": t["acted"], "coverage": _rate(t["acted"], t["n"]), "precision": _rate(t["right"], t["acted"])}
+    rep["commit labels acted on"] = commit_seen
+    rep["commit labels not flagged for the gate"] = commit_unflagged
+    rep["asked first (label the gate can't read)"] = asked
+    rep["latency ms"] = {
+        size: {"p50": round(float(np.median(v)), 3), "p90": round(float(np.percentile(v, 90)), 3)} for size, v in ms.items()
+    }
+    rep["ship"] = ship(rep)
+    rep["wrong"] = wrong
+    return rep
+
+
+def ship(rep: dict) -> dict[str, bool | None]:
+    """Per stage: does it clear the bar (SHIP_P overall, SHIP_P_SCRIPT on each script it answered)?
+    None when it answered nothing."""
+    out: dict[str, bool | None] = {}
+    for key, v in rep.items():
+        if not key.startswith("stage ") or key.count(" ") != 1 or not isinstance(v, dict):
+            continue
+        stage = key.split(" ", 1)[1]
+        if not v["acted"]:
+            out[stage] = None
+            continue
+        ok = (v["precision"] or 0.0) >= SHIP_P
+        for sc in ("latin", "devanagari"):
+            s = rep.get(f"stage {stage} {sc}")
+            if s and s["acted"]:
+                ok = ok and (s["precision"] or 0.0) >= SHIP_P_SCRIPT
+        out[stage] = ok
+    return out
+
+
+def shadow_report(path: Path | None = None) -> dict:
+    """The resolver's own shadow log (neo.decide.shadow ``ui_resolve`` / ``ui_resolve_outcome``
+    lines): per stage, how often its pick was what was finally pressed and verified — overall and
+    per script — and whether that clears the bar on at least SHIP_N real answers."""
+    from neo.decide import shadow
+
+    p = Path(path) if path is not None else shadow.path()
+    lines = []
+    if p.exists():
+        for x in p.read_text(encoding="utf-8").splitlines():
+            try:
+                lines.append(json.loads(x))
+            except ValueError:
+                continue
+    script = {x.get("rid"): x.get("script", "") for x in lines if x.get("kind") == "ui_resolve"}
+    tally: dict[str, dict[str, int]] = {}
+    for x in lines:
+        if x.get("kind") != "ui_resolve_outcome" or not x.get("verified"):
+            continue
+        for k, v in x.items():
+            if not k.endswith("_right"):
+                continue
+            stage = k[: -len("_right")]
+            for key in (stage, f"{stage} {script.get(x.get('rid'), '')}".strip()):
+                t = tally.setdefault(key, {"n": 0, "right": 0})
+                t["n"] += 1
+                t["right"] += int(bool(v))
+    out: dict = {"resolutions": len(script)}
+    for key, t in sorted(tally.items()):
+        out[key] = {"n": t["n"], "precision": _rate(t["right"], t["n"])}
+    for stage in {k.split(" ")[0] for k in tally}:
+        v = out.get(stage, {})
+        ok = v.get("n", 0) >= SHIP_N and (v.get("precision") or 0) >= SHIP_P
+        for sc in ("latin", "devanagari"):
+            s = out.get(f"{stage} {sc}")
+            if s:
+                ok = ok and (s["precision"] or 0) >= SHIP_P_SCRIPT
+        out[f"ship {stage}"] = ok
+    return out
+
+
+def _ground_main(argv: list[str]) -> None:
+    """python -m neo.reflex.evaluate --ground [--models] [--all-stages] [--no-index]"""
+    ap = argparse.ArgumentParser(prog="python -m neo.reflex.evaluate --ground")
+    ap.add_argument("--ground", action="store_true")
+    ap.add_argument("--path", type=Path, default=GROUND_EVAL)
+    ap.add_argument("--all-stages", action="store_true", help="every stage acts (default: the lexical stage only)")
+    ap.add_argument("--no-index", action="store_true", help="as before the OS string index is built")
+    ap.add_argument("--models", action="store_true", help="load MiniLM and Laya's typed-decisions checkpoint (local, opt-in)")
+    ap.add_argument("--shadow", action="store_true", help="report the shadow log of real requests instead")
+    a = ap.parse_args(argv)
+    if a.shadow:
+        print(json.dumps(shadow_report(), indent=1, ensure_ascii=False))
+        return
+    embed = choose = False
+    if a.models:
+        embed, choose = _ground_models()
+    rep = ground_eval(a.path, stages=None if a.all_stages else ("lexical",), index=not a.no_index, embed=embed, choose=choose)
+    print(json.dumps(rep, indent=1, ensure_ascii=False))
+
+
+def _ground_models():
+    """MiniLM and Laya's typed-decisions checkpoint for the benchmark, from the local cache only
+    (HF_HUB_OFFLINE): an opt-in run outside the tests (it loads ~1.8 GB)."""
+    import os
+
+    from neo import effects
+
+    os.environ.setdefault("HF_HUB_OFFLINE", "1")
+    with effects.allow("model"):
+        from sentence_transformers import SentenceTransformer
+
+        from neo import models
+        from neo.memory import embed as mem
+        from neo.reflex import zeroshot
+
+        mini = SentenceTransformer(mem.MODEL, device="cpu", revision=models.EMBEDDER_REVISION)
+        path = zeroshot.checkpoint_dir(download=False)
+        agent = zeroshot._open(path)
+        agent.system_one({"text": "warm up"}, zeroshot._WARM)
+
+    def embed(texts: list[str]):
+        return mini.encode(list(texts), normalize_embeddings=True, convert_to_numpy=True, show_progress_bar=False)
+
+    def choose(request: str, options: list[str], wait_s: float):
+        from neo.tools.computer import resolve as rs
+
+        keys: list[str] = []
+        crit: dict[str, str] = {}
+        for i, lab in enumerate(options):
+            k = lab if lab not in crit else f"{lab} ({i})"
+            keys.append(k)
+            crit[k] = f"the on-screen control labelled “{lab}”"
+        res = agent.system_one({"request": request}, {"el": {"type": "choice", "instructions": "Which on-screen control does the request mean?", "criteria": crit}})
+        probs = rs._probs(res, "el")
+        if not probs:
+            return None, 0.0
+        pick = max(probs, key=probs.__getitem__)
+        return (keys.index(pick) if pick in keys else None), float(probs[pick])
+
+    return embed, choose
+
+
 if __name__ == "__main__":
-    main()
+    import sys
+
+    if "--ground" in sys.argv[1:]:
+        _ground_main(sys.argv[1:])
+    else:
+        main()

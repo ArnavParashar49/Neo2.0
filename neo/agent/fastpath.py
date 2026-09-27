@@ -14,6 +14,9 @@ make it safe:
 * A `chain=False` tool runs only as the first step: in "open youtube and search for cats" the
   search belongs to YouTube, so the plan fails and the model handles it.
 * Anything the regexes can't cover — one unknown clause — makes the whole plan None.
+
+:func:`by_utterance` is the lane beside the regexes: a tool registered with ``by_utterance=True``
+gets the user's whole request and grounds it by meaning itself — only for the user's own words.
 """
 
 from __future__ import annotations
@@ -135,6 +138,70 @@ def _plan(text: str, first_index: int) -> list[Step] | None:
         steps.append(hit)
         pos = nxt
     return steps
+
+
+# ---- the by-utterance lane -------------------------------------------------------------------
+# A tool registered with ``by_utterance=True`` (click_text, menu_command…) can take the user's whole
+# request and find its target by meaning (neo.tools.computer.resolve): no model call to fill in a
+# label. Only for the user's own words: a model's (the agent loop, an embedding host's Session.handle)
+# and Gemini Live's relays never drive a by-meaning press; they keep the exact regex fast paths.
+
+
+def _by_utterance_tools() -> dict[str, RegisteredTool]:
+    return {t.name: t for t in registry().all() if getattr(t, "by_utterance", False) and not t.hidden}
+
+
+def _tool_floor() -> float:
+    try:
+        from neo.config import settings
+
+        return float(settings().reflex_tool_floor)
+    except Exception:  # noqa: BLE001
+        return 0.85
+
+
+def by_utterance(text: str, *, origin: str, decision=None) -> Step | None:
+    """One step for the whole request — ``(tool, {"utterance": text, "label": <the control's name>})``
+    — when a by-utterance tool should take it without a model, else None.
+
+    * ``origin`` must be "user" (the user's own words); anything else → None.
+    * The reflex picked a by-utterance tool (``decision.intent == "quick_action"``, ``decision.tool``,
+      ``tool_p`` at the reflex_tool_floor) → that tool.
+    * Or the words themselves point at a control (phrases.pointing: "click X", "press X" that isn't a
+      key, "X pe click karo", "X dabao", "X पर क्लिक करो"…), one clause, not a question, and the
+      reflex doesn't call it conversation → the click tool (the by-utterance tool that takes a press).
+    """
+    if origin != "user":
+        return None
+    text = (text or "").strip(_EDGE)
+    tools = _by_utterance_tools()
+    if not text or not tools:
+        return None
+    from neo.tools.computer import phrases
+
+    intent = str(getattr(decision, "intent", "") or "")
+    picked = str(getattr(decision, "tool", "") or "")
+    p = float(getattr(decision, "tool_p", 0.0) or 0.0)
+    core = phrases.pointing(text)
+    if intent == "quick_action" and picked in tools and p >= _tool_floor():
+        if SPLIT.search(text) and core is None:
+            return None  # two things ("reply and send"): the agent's job
+        return picked, {"utterance": text, "label": core or phrases.strip_frame(text)}
+    if core is None or intent == "chat":
+        return None
+    press = [n for n, t in tools.items() if _takes(t, "press")]
+    if not press:
+        return None
+    return press[0], {"utterance": text, "label": core}
+
+
+def _takes(t: RegisteredTool, want: str) -> bool:
+    """What a by-utterance tool grounds: its ``by_utterance`` value when it names one ("press",
+    "menu", "field"), else a press for a tool whose parameters take a label."""
+    v = getattr(t, "by_utterance", False)
+    if isinstance(v, str):
+        return v == want
+    return want == "press" and "label" in (t.parameters.get("properties") or {})
 
 
 def _split_trailing_commands(text: str, whole: Step, first_index: int) -> list[Step]:
