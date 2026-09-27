@@ -22,6 +22,7 @@ batching setting yet) is skipped and says so.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import dataclasses
 import json
@@ -62,7 +63,7 @@ class Request:
 
 
 def _bravo(r: controls._Run, mark: int) -> bool:
-    return bool(r.since(mark, "button", name=L.BUTTON_B))
+    return any(e.get("name") == L.BUTTON_B for e in r.since(mark, "button"))
 
 
 def _move_words(r: controls._Run) -> str:
@@ -174,6 +175,8 @@ def _check(req: Request, arm: Arm, results: list[dict]) -> Callable:
             reg = registry().subset([n for n in AGENT_TOOLS if registry().get(n) is not None])
             if (hk := reg.get("hotkey")) is not None:
                 reg._tools["hotkey"] = dataclasses.replace(hk, handler=_safe_hotkey(hk.handler))
+            if await asyncio.to_thread(r.front_pid) != r.pid and r.ready.get("name"):
+                await r.tool("activate_app", name=str(r.ready["name"]))  # (the scene: the test window in front)
             words = req.words(r)
             chain = _Counting(brain("vision"))
             m = r.mark()

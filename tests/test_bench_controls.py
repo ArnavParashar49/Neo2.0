@@ -310,3 +310,43 @@ def test_scenario_invariants(name):
 def test_primitive_meets_its_p0_target(name):
     r = R.measure_primitives(3, [name])[name]
     assert r["neo_ms"] <= R.TARGETS[name]["p0"]
+
+
+# ---- the resolver eval (opt-in script; its scoring is tested here) ---------------------------------------------
+
+
+def test_the_resolver_eval_scores_coverage_precision_and_commit_presses(tmp_path):
+    from bench.controls import resolver_eval as E
+
+    rows = [
+        {"text": "click Start", "elements": [["AXButton", "Start", "sheet"], ["AXButton", "Cancel", "sheet"]], "gold": 0},
+        {"text": "start wala button dabao", "elements": [["AXButton", "Start", ""], ["AXButton", "Stop", ""]], "gold": "Start"},
+        {"q": "गुलाबी बटन दबाओ", "screen": [{"role": "AXButton", "label": "गुलाबी"}, {"role": "AXButton", "label": "Alpha"}], "target": 0},
+        {"text": "send it", "elements": [{"role": "AXButton", "label": "Send", "commit": True}], "gold": 0, "n": 50},
+        {"text": "press OK", "elements": [["AXButton", "OK", ""], ["AXButton", "OK", ""]], "gold": [0, 1]},
+    ]  # fmt: skip
+    data = tmp_path / "ground_eval.jsonl"
+    data.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in rows) + "\n", encoding="utf-8")
+    got = E.load_rows(data)
+    assert [r["script"] for r in got] == ["latin", "latin", "devanagari", "latin", "latin"]
+    assert got[1]["gold"] == {0} and got[3]["n"] == 50
+    base = E.evaluate(got, E.lexical)
+    # exact labels (verb and "button" stripped, Hinglish and Hindi frames too); never an ambiguous one
+    assert base["overall"]["acted"] == 3 and base["overall"]["precision"] == 1.0 and base["overall"]["coverage"] == 0.6
+    assert base["by_script"]["devanagari"]["acted"] == 1 and base["commit_presses"] == 0
+
+    def reckless(text, els):
+        return {"index": 0, "stage": "minilm+laya", "p": 0.9}
+
+    bad = E.evaluate(got, reckless)
+    assert bad["commit_presses"] == 1 and not bad["gates"]["no_commit_presses"]
+    assert bad["by_stage"]["minilm+laya"]["acted"] == 5 and bad["by_window"]["50"]["acted"] == 1
+    assert bad["ms"]["cold_first"] is not None and bad["ms"]["p90"] is not None
+    assert E.find_resolver("")[0] in (*E.RESOLVERS, "lexical (built-in)")
+
+
+def test_the_resolver_eval_script_does_nothing_without_data(tmp_path, capsys):
+    from bench.controls import resolver_eval as E
+
+    assert E.main(["--data", str(tmp_path / "missing.jsonl")]) == 0
+    assert "nothing to do" in capsys.readouterr().err

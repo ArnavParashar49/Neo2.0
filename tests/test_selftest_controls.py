@@ -128,6 +128,7 @@ class Desk:
         self.area = ""
         self.list_off = 0.0
         self.piece = [1, 6]
+        self.pieces = testwin.start_pieces()
         self.sheet = False  # the "Start a new round?" sheet is open
         self.round = 1
         self.pressing = ""
@@ -256,7 +257,7 @@ class Desk:
         if target == "board":
             bx, by, _, _ = TARGETS["board"]
             cell = testwin.cell_at(x - bx, y - by)
-            self.grab = cell if (button == "left" and cell == self.piece) else None
+            self.grab = cell if (button == "left" and cell is not None and tuple(cell) in self.pieces) else None
             self.write("board_down", button=button, cell=cell, at=[x, y], clicks=clicks)
         elif target in ("double", "marker", "tiny"):
             self.write(f"{target}_down", at=[x, y], clicks=clicks)
@@ -291,9 +292,12 @@ class Desk:
             cell = testwin.cell_at(x - bx, y - by)
             self.write("board_up", cell=cell, at=[x, y], drags=self.drags)
             if self.grab is not None and cell and cell != self.grab and self.drags:
-                self.write("piece_moved", start=self.grab, end=cell)
-                self.piece = cell
-                self.state()
+                start = self.grab
+                if testwin.move_piece(self.pieces, start, cell):
+                    self.write("piece_moved", start=start, end=cell, squares=[G.square(*start), G.square(*cell)])
+                    if start == self.piece:
+                        self.piece = cell
+                    self.state()
         elif self.pressing in ("button_a", "button_b", "hindi") and target == self.pressing:
             self.write("button", name={"button_a": L.BUTTON_A, "button_b": L.BUTTON_B, "hindi": L.HINDI_BUTTON}[target])
         elif self.pressing == "tile" and self.dnd:
@@ -1260,3 +1264,252 @@ def test_only_an_app_that_came_forward_during_the_run_is_left_in_front():
         m, report = M(), controls.Report()
         asyncio.run(controls._clean_up(m, report, None, ("Safari", USER_PID), TEST_PID, ("Finder", 1), None, armed))
         assert m.activations == want, armed
+
+
+# ---- what NEO is still gaining: each check passes once its tool offers it -------------------------------
+
+
+def _offer(monkeypatch, tool_name, props, wrap):
+    """Give a tool new arguments (``props``) and put ``wrap(real, args, ctx)`` in front of it — a
+    stand-in for the feature a workstream will build."""
+    import copy
+
+    from neo.agent.registry import registry
+
+    t = registry().get(tool_name)
+    params = copy.deepcopy(t.parameters)
+    params.setdefault("properties", {}).update(props)
+    monkeypatch.setattr(t, "parameters", params)
+    real = t.handler
+
+    async def handler(a, c):
+        return await wrap(real, a, c)
+
+    monkeypatch.setattr(t, "handler", handler)
+
+
+def _as_output(out):
+    from neo.agent.registry import ToolOutput
+
+    return out if isinstance(out, ToolOutput) else ToolOutput(str(out), ok=not str(out).startswith("Error"))
+
+
+def _square_point(cell, shot_id=None):
+    from neo.tools.computer import pointer
+
+    col, row = G.cell_of(cell)
+    shot = pointer.get_shot(shot_id) if shot_id else None
+    tx, ty, tw, th = TARGETS["tilt"]
+    if shot is not None and tx - 5 <= shot.x0 <= tx + tw:
+        return G.cell_center([tuple(p) for p in TILT_QUAD], col, row)
+    bx, by, _, _ = TARGETS["board"]
+    return bx + (col + 0.5) * L.CELL, by + (row + 0.5) * L.CELL
+
+
+def test_squares_by_name_on_both_boards_once_click_and_drag_take_them(mac, monkeypatch):
+    async def click(real, a, c):
+        if "cell" not in a:
+            return await real(a, c)
+        x, y = _square_point(a["cell"], a.get("shot"))
+        return await real({"x": x, "y": y}, c)
+
+    async def drag(real, a, c):
+        if "cell1" not in a:
+            return await real(a, c)
+        (x1, y1), (x2, y2) = _square_point(a["cell1"]), _square_point(a["cell2"])
+        out = _as_output(await real({"x1": x1, "y1": y1, "x2": x2, "y2": y2}, c))
+        out.text += f" Squares that changed: {a['cell1']}, {a['cell2']}."
+        return out
+
+    _offer(monkeypatch, "click", {"cell": {"type": "string"}}, click)
+    _offer(monkeypatch, "drag", {"cell1": {"type": "string"}, "cell2": {"type": "string"}}, drag)
+    report = _run(mac)
+    checks = _by_name(report)
+    assert checks["board_cells"].status == "pass", checks["board_cells"].line()
+    assert checks["tilted_board"].status == "pass", checks["tilted_board"].line()
+    assert "e2 on the tilted board" in checks["tilted_board"].arrived
+    assert mac.desk.stray == []
+
+
+def test_a_drag_by_squares_that_doesnt_name_them_fails(mac, monkeypatch):
+    async def click(real, a, c):
+        if "cell" not in a:
+            return await real(a, c)
+        x, y = _square_point(a["cell"], a.get("shot"))
+        return await real({"x": x, "y": y}, c)
+
+    async def drag(real, a, c):
+        if "cell1" not in a:
+            return await real(a, c)
+        (x1, y1), (x2, y2) = _square_point(a["cell1"]), _square_point(a["cell2"])
+        return _as_output("Dragged.") if await real({"x1": x1, "y1": y1, "x2": x2, "y2": y2}, c) else None
+
+    _offer(monkeypatch, "click", {"cell": {"type": "string"}}, click)
+    _offer(monkeypatch, "drag", {"cell1": {"type": "string"}, "cell2": {"type": "string"}}, drag)
+    c = _by_name(_run(mac))["board_cells"]
+    assert c.status == "fail" and "doesn't say which squares changed" in c.arrived
+
+
+def test_zoom_then_a_12pt_button(mac, monkeypatch):
+    async def shot(real, a, c):
+        return await real({k: v for k, v in a.items() if k != "zoom"}, c)
+
+    _offer(monkeypatch, "screenshot", {"zoom": {"type": "boolean"}}, shot)
+    c = _by_name(_run(mac))["zoom_tiny"]
+    assert c.status == "pass", c.line()
+    assert "pt from the 12-pt button's centre" in c.arrived
+
+
+def test_a_click_by_the_id_a_screenshot_lists(mac, monkeypatch):
+    async def shot(real, a, c):
+        out = _as_output(await real(a, c))
+        out.text += f'\nOn screen: e4 Button "{L.BUTTON_B}"'
+        return out
+
+    _offer(monkeypatch, "screenshot", {}, shot)
+    c = _by_name(_run(mac))["click_mark"]
+    assert c.status == "pass" and "(e4)" in c.arrived, c.line()
+
+
+def test_a_menu_command_and_its_sheet(mac, monkeypatch):
+    from neo.agent.registry import RegisteredTool, registry
+    from neo.tools.computer import input as inp
+
+    said = []
+
+    async def menu_command(a, c):
+        said.append((a, c.user_text))
+        await asyncio.to_thread(inp.hotkey, "cmd+k")  # Test › New Round…, as found by meaning
+        return f"Chose Test › {L.ROUND_MENU}; a sheet is open: “{L.SHEET_TITLE}” (Start, Cancel)."
+
+    registry().register(RegisteredTool("menu_command", "Choose a menu item by meaning.",
+                                       {"type": "object", "properties": {"command": {"type": "string"}}}, menu_command))  # fmt: skip
+    try:
+        c = _by_name(_run(mac))["menu_sheet"]
+    finally:
+        registry().remove("menu_command")
+    assert c.status == "pass", c.line()
+    assert "answered by its id" in c.arrived and mac.desk.round == 2
+    assert said == [({"command": "start a new round"}, "start a new round")]
+
+
+def test_the_after_look_and_effect_fields_once_results_carry_them(mac, monkeypatch):
+    from neo.providers.base import ImagePart
+
+    async def with_effect(real, a, c):
+        out = _as_output(await real(a, c))
+        out.effect = types.SimpleNamespace(changed=True, looked=c.origin == "agent")
+        if c.origin == "agent":
+            out.images = [ImagePart(b"after", "image/png")]
+        return out
+
+    for name in ("click", "drag", "scroll"):
+        _offer(monkeypatch, name, {}, with_effect)
+    monkeypatch.setattr(controls, "_has_effect", lambda: True)
+    checks = _by_name(_run(mac))
+    assert checks["after_look"].status == "pass", checks["after_look"].line()
+    assert checks["effect_fields"].status == "pass", checks["effect_fields"].line()
+
+
+def test_an_effect_that_says_nothing_fails(mac, monkeypatch):
+    monkeypatch.setattr(controls, "_has_effect", lambda: True)
+    c = _by_name(_run(mac))["effect_fields"]
+    assert c.status == "fail" and "no Effect.changed on click, drag, scroll" in c.arrived
+
+
+def test_typing_into_a_field_named_by_its_label(mac, monkeypatch):
+    async def typed(real, a, c):
+        if "field" in a:
+            assert a["field"] == L.FIELD_HINT
+            mac.desk.focus_el = "field"  # (what the feature does: finds the field by its label)
+        return await real({k: v for k, v in a.items() if k != "field"}, c)
+
+    _offer(monkeypatch, "type_text", {"field": {"type": "string"}}, typed)
+    c = _by_name(_run(mac))["type_named"]
+    assert c.status == "pass", c.line()
+
+
+def test_click_by_meaning_once_the_resolver_acts(mac, monkeypatch):
+    asked = []
+
+    async def by_meaning(real, a, c):
+        asked.append(a["label"])
+        label = L.HINDI_BUTTON if a["label"] in L.HINDI_PHRASES.values() else a["label"]
+        return await real({"label": label}, c)
+
+    _offer(monkeypatch, "click_text", {}, by_meaning)
+    monkeypatch.setattr(controls, "_resolver_live", lambda: True)
+    c = _by_name(_run(mac))["click_meaning"]
+    assert c.status == "pass" and "skipped" not in c.arrived, c.line()
+    assert asked == [L.HINDI_BUTTON, *L.HINDI_PHRASES.values()]
+
+
+def test_a_sheet_blocks_the_board_and_the_click_says_so(mac):
+    desk = mac.desk
+    report = _run(mac)
+    c = _by_name(report)["sheet_blocks"]
+    assert c.status == "pass", c.line()
+    assert "sheet" in c.said and desk.sheet is False and desk.round == 1  # answered Cancel
+    opened = [e for e in desk.posted if e.get("code") == 40]
+    assert opened and desk.stray == []
+
+
+def test_bench_mode_repeats_the_primitives_for_timings(mac):
+    report = _run(mac, reps=3)
+    assert report.ok, report.text()
+    assert len(report.repeats) == 2 * len(controls.REPEAT)
+    assert all(c.status == "pass" for c in report.repeats), [c.line() for c in report.repeats if c.status != "pass"]
+    assert {c.rep for c in report.repeats} == {1, 2}
+    t = report.timing
+    assert t["click"]["n"] >= 3 and t["drag"]["n"] >= 3 and t["screenshot"]["n"] >= 6
+    assert mac.desk.field == L.TYPE_TEXT  # typed over, not appended to
+    assert mac.desk.stray == []
+    sc = report.scores
+    assert sc["passed"] == 21 + len(report.repeats) and sc["success"] == 1.0
+
+
+def test_accessibility_actions_went_through_the_watch_and_it_let_go(mac):
+    from neo.tools.computer import ax
+
+    before = ax.press_el
+    report = _run(mac)
+    c = _by_name(report)["ax_watched"]
+    assert c.status == "pass" and "each the test window's" in c.arrived
+    assert ax.press_el is before  # nothing of the watch is left behind
+
+
+def test_the_agent_section_with_a_scripted_brain(mac, monkeypatch):
+    from neo import providers
+    from neo.providers.base import ToolCall, Turn
+    from neo.selftest import agent
+
+    class Brain:
+        name = "fake"
+        supports_vision = supports_tools = True
+        last_used = "fake"
+        names = ["fake"]
+
+        def __init__(self):
+            self.n = 0
+
+        async def complete(self, messages, **kw):
+            self.n += 1
+            done = any(r.name == "click" for m in messages for r in m.tool_results)
+            tree = next((r.content for m in messages for r in m.tool_results if r.name == "ax_tree"), "")
+            if done:
+                return Turn(text="Clicked Bravo.")
+            if not tree:
+                return Turn(tool_calls=[ToolCall("t1", "ax_tree", {})])
+            eid = next(ln.split()[0] for ln in tree.splitlines() if f'"{L.BUTTON_B}"' in ln)
+            return Turn(tool_calls=[ToolCall("t2", "click", {"id": eid})])
+
+    monkeypatch.setattr(providers, "brain", lambda purpose="agent": Brain())
+    result = asyncio.run(agent.run(mac=mac, runs=1, arms=[agent.Arm("low", effort="low")]))
+    assert result.report.refused == "", result.report.text()
+    assert len(result.runs) == 1
+    row = result.runs[0]
+    assert row["success"], (row, result.report.text())
+    assert row["success"] and row["request"] == "bravo" and row["model_calls"] >= 3 and row["arm"] == "low"
+    assert mac.desk.stray == []
+    j = result.to_json()
+    assert j["arms"]["low"]["runs"] == 1 and "controls" in j
