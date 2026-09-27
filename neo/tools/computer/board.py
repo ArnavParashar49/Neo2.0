@@ -747,7 +747,7 @@ class Board:
     flat: bool = True  # seen straight on (no perspective): pieces lie within their squares
     lines: bool = False  # a grid drawn with lines, not alternating squares
     orientation: str = ""  # where the light pieces' home rows are ("bottom", …; "" unknown)
-    oriented_by: str = ""  # "pieces" (NEO judged it) or "model" (a seeing model said so)
+    oriented_by: str = ""  # "pieces" (NEO judged it), "model" (a seeing model said so) or "kept" (from the last look)
     shot: str = ""
     at: float = 0.0  # time.monotonic() of the picture it was found or last checked in
     window: tuple[float, float, float, float] | None = None  # the window's frame then (screen points)
@@ -1122,6 +1122,20 @@ def occupancy(pic: Picture, b: Board) -> list[str]:
     return ["".join(("L" if light_share[r, c] >= 0.25 else "D") if there[r, c] else "." for c in range(b.cols)) for r in range(b.rows)]
 
 
+def _unturned(before: list[str] | None, now: list[str]) -> bool:
+    """The pieces now are the last look's a move or two on (at most 8 squares differ: two moves,
+    castling included) — and the board wasn't turned round in between (the last look's pieces fit
+    now better as they stood than turned by a quarter, a half or three quarters)."""
+    if not before or len(before) != len(now) or any(len(a) != len(b) for a, b in zip(before, now, strict=True)):
+        return False
+    B0, N = np.array([list(r) for r in before]), np.array([list(r) for r in now])
+    d0 = int((B0 != N).sum())
+    if d0 > 8:
+        return False
+    turns = [np.rot90(B0, 2)] + ([np.rot90(B0, 1), np.rot90(B0, 3)] if B0.shape[0] == B0.shape[1] else [])
+    return all(int((t != N).sum()) > d0 for t in turns)
+
+
 def orientation(occ: list[str]) -> str:
     """Where the light pieces' home rows are, judged from where the pieces stand: "bottom", "top",
     "left", "right", or "" when the pieces don't say (too few, or mixed)."""
@@ -1394,8 +1408,9 @@ def _read(pic: Picture, b: Board, now: float, previous: Board | None) -> list[st
         o = orientation(b.occupancy)
         if o:
             b.orientation, b.oriented_by = o, "pieces"
-        elif previous is not None and previous.orientation:
-            b.orientation, b.oriented_by = previous.orientation, previous.oriented_by
+        elif previous is not None and previous.orientation and _unturned(previous.occupancy, b.occupancy):
+            # the same game a move or two on: its sides are where they were (said as such)
+            b.orientation, b.oriented_by = previous.orientation, "model" if previous.oriented_by == "model" else "kept"
     _take(pic, b)
     b.at = now
     if previous is not None and previous.state is not None and previous.flat == b.flat:
@@ -1583,7 +1598,11 @@ def note(b: Board, since: list[str] | None = None, *, blind: bool = False) -> st
     seen = "" if b.flat else ", seen at an angle"
     text = f"{how} {kind} of {b.rows}×{b.cols} squares{seen}. "
     if b.chess:
-        who = "judged from the pieces" if b.oriented_by == "pieces" else "as the model said"
+        who = {
+            "pieces": "judged from the pieces",
+            "model": "as the model said",
+            "kept": "as at the last look (the pieces now don't show it by themselves)",
+        }.get(b.oriented_by, "")
         text += f"Squares are named {b.names()}: White (the light pieces) {_SIDE_WORDS[b.orientation]}, {who}. "
     else:
         text += f"Squares are named by row and column from the top-left as seen: r1c1 … r{b.rows}c{b.cols}"
@@ -1594,8 +1613,8 @@ def note(b: Board, since: list[str] | None = None, *, blind: bool = False) -> st
     if blind and b.source != "neo":
         text += "A model that can't see can't act on this board's squares (its corners came from a model); take a new screenshot."
         return text
-    c, r = min(4, b.cols - 1), max(0, b.rows - 2)
-    text += f'To act on a square, name it — click cell="{b.name(c, r)}" · drag from="{b.name(c, r)}" to="{b.name(c, max(0, r - 2))}"'
+    # (placeholders, not an example move: a model asked to "make a move" copies an example)
+    text += 'To act on a square, name it — click cell="<square>" · drag from="<square>" to="<square>", each a name as above'
     text += " — and NEO works out the points."
     if b.occupancy is not None:
         text += f" Pieces now, top row first (L light, D dark, digits: empty squares): {_rows_text(b)}"
@@ -1862,15 +1881,19 @@ def map_board(a: dict, *, blind: bool = False, picture: Picture | None = None, n
 # ---- for the pointer tools: their arguments and words ----------------------------------------------
 
 CELL_ARG = {
-    "cell": {"type": "string", "description": "a board square's name from the screenshot note (e4, r3c5), instead of x,y: NEO computes the point"},
+    "cell": {
+        "type": "string",
+        "description": "a board square's name as the screenshot note gives it (a chess name, or row and column like r3c5), instead of x,y: NEO computes the point",
+    },
 }
 DRAG_CELL_ARGS = {
-    "from": {"type": "string", "description": "the board square to drag from, by its name in the screenshot note (e2, r7c5)"},
-    "to": {"type": "string", "description": "the board square to drop on (e4, r5c5)"},
+    "from": {"type": "string", "description": "the board square to drag from, by its name in the screenshot note"},
+    "to": {"type": "string", "description": "the board square to drop on, by its name in the screenshot note"},
 }
 SCREENSHOT_WORDS = (
     "When a window shows a board or a grid (a large area with no accessible elements), the note says so and "
-    'names its squares: act on them by name — click cell="e4", drag from="e2" to="e4" — and NEO computes the points.'
+    'names its squares: act on them by name — click cell="<square>", drag from="<square>" to="<square>" — and NEO '
+    "computes the points."
 )
 MAP_BOARD_DESCRIPTION = (
     "Map a board NEO couldn't find by itself (seen at an angle, textured): give the 4 corners of its playing area "

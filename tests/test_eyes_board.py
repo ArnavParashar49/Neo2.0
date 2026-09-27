@@ -384,7 +384,7 @@ def test_the_note_names_squares_and_says_how_to_act_on_them():
     s = B.survey(B.Picture.of(img), shot="s1")
     text = B.note(s.board)
     assert "NEO found a board of 8×8 squares" in text and "a1–h8" in text and "White (the light pieces) at the bottom" in text
-    assert 'click cell="e2" · drag from="e2" to="e4"' in text
+    assert 'click cell="<square>" · drag from="<square>" to="<square>"' in text
     assert "DDDDDDDD/DDDDDDDD/8/8/8/8/LLLLLLLL/LLLLLLLL" in text
 
 
@@ -468,12 +468,14 @@ def test_a_window_crop_is_mapped_to_the_same_screen_points():
     assert b2 is not None and _worst(b2, tr) <= 0.5
 
 
-def test_orientation_is_kept_for_the_same_board_when_the_pieces_no_longer_say():
+def test_an_orientation_isnt_kept_when_the_pieces_are_another_game_altogether():
     img, _ = _flat()
     assert B.survey(B.Picture.of(img)).board.orientation == "bottom"
     few = ("....k...", "........", "........", "...q....", "....Q...", "........", "........", "....K...")
-    later = B.survey(B.Picture.of(_flat(position=few)[0])).board
-    assert B.orientation(later.occupancy) == "" and later.orientation == "bottom" and later.chess
+    later = B.survey(B.Picture.of(_flat(position=few)[0]), shot="s2").board
+    # (not the last look's game a move or two on: which side is White's is for the pieces or a model to say)
+    assert B.orientation(later.occupancy) == "" and later.orientation == "" and not later.chess
+    assert 'map_board orientation="bottom"' in B.note(later)
 
 
 def test_squares_map_through_a_screenshots_shot_like_its_pixels_do():
