@@ -883,3 +883,24 @@ def test_one_window_server_lookup_names_a_point_accessibility_cannot(monkeypatch
     assert ax.hit(10, 10) == ax.Hit()
     with pytest.raises(pointer.Refused):
         asyncio.run(pointer.probe([(10.0, 10.0)]))
+
+
+def test_a_menu_item_whose_place_cant_be_told_is_not_pressed(monkeypatch):
+    """A menu item whose way up to its menu bar can't be read might be the system's: refused (fail
+    closed), like a target whose owner can't be told."""
+    from neo.agent import confirm
+    from neo.agent.registry import ToolContext
+    from neo.tools.computer import ax, tools_ax
+
+    item = ax.Element("e88", "AXMenuItem", "Restart…", "", 20, 120, 220, 22, actions=["AXPress", "AXCancel"], ref="REF")
+    monkeypatch.setattr(ax, "_attr", lambda el, name, default=None: default)  # nothing can be read
+    monkeypatch.setattr(ax, "get", lambda eid: item)
+    monkeypatch.setattr(tools_ax, "_element_pid", lambda el: 555)
+    monkeypatch.setattr(ax, "app_of", lambda ref: "TextEdit")
+    monkeypatch.setattr(ax, "is_neo", lambda pid, name="": False)
+    monkeypatch.setattr(ax, "app_names", lambda pid: {"textedit"})
+    pressed = []
+    monkeypatch.setattr(confirm, "gated", lambda *a, **k: "NEEDS_CONFIRM: x")
+    monkeypatch.setattr(ax, "press_el", lambda e: pressed.append(e.title) or f"Pressed {e.id}")
+    out = asyncio.run(tools_ax.ax_press({"id": "e88"}, ToolContext(origin="agent")))
+    assert pressed == [] and not out.ok

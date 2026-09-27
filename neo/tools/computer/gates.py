@@ -245,7 +245,7 @@ async def _protected_hit(h: ax.Hit, x: float, y: float) -> bool:
     nobody can say, yes."""
     if h.pid and ax.is_neo(h.pid, h.app):
         return True
-    if h.el is not None and h.role in (*_MENU_ROLES, "") and await asyncio.to_thread(_in_system_menu, h.el):
+    if h.el is not None and h.role in (*_MENU_ROLES, "") and await asyncio.to_thread(_in_system_menu, h.el, h.role):
         return True
     if h.pid or h.app:
         return _protected(h.app, h.pid)
@@ -258,7 +258,7 @@ async def _off_limits_el(e: ax.Element, pid: int, owner: str) -> bool:
     closed)."""
     if pid and ax.is_neo(pid, owner):
         return True
-    if e.role in _MENU_ROLES and e.ref is not None and await asyncio.to_thread(_in_system_menu, e.ref):
+    if e.role in _MENU_ROLES and e.ref is not None and await asyncio.to_thread(_in_system_menu, e.ref, e.role):
         return True
     if pid:
         return _protected(owner, pid)
@@ -273,27 +273,29 @@ async def _off_limits_el(e: ax.Element, pid: int, owner: str) -> bool:
 _MENU_ROLES = frozenset({"AXMenuBarItem", "AXMenu", "AXMenuItem"})
 
 
-def _in_system_menu(el) -> bool:
-    """Is this Accessibility element the system menu or in it — the first item of a menu bar, or a
-    menu or item under it? Only menus are walked up: anything else is in no menu bar."""
+def _in_system_menu(el, role: str = "") -> bool:
+    """Is this Accessibility element (`role`: its role, when already known) the system menu or in
+    it — the first item of a menu bar, or a menu or item under it? Only menus are walked up:
+    anything else is in no menu bar. A menu whose way up can't be read might be the system's: yes
+    (fail closed)."""
     node = el
     for _ in range(16):
         if node is None:
-            return False
-        role = ax._str(ax._attr(node, "AXRole"))
+            return True
+        role = role or ax._str(ax._attr(node, "AXRole"))
         if role == "AXMenuBarItem":
             bar = ax._attr(node, "AXParent")
             items = (ax._attr(bar, "AXChildren") or []) if bar is not None else []
-            return bool(items) and ax._same(items[0], node)
+            return not items or ax._same(items[0], node)
         if role not in _MENU_ROLES:
             return False
-        node = ax._attr(node, "AXParent")
+        node, role = ax._attr(node, "AXParent"), ""
     return True  # menus nested deeper than any app's: not told apart, so not touched
 
 
 def _outside_system_menu(els: list) -> list:
     """The elements that are neither the system menu nor in it (a label match never picks one)."""
-    return [e for e in els if not (e.role in _MENU_ROLES and e.ref is not None and _in_system_menu(e.ref))]
+    return [e for e in els if not (e.role in _MENU_ROLES and e.ref is not None and _in_system_menu(e.ref, e.role))]
 
 
 # The controls self-test's own test window (neo.selftest.controls), by its pid, while that test
