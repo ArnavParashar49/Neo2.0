@@ -7,10 +7,19 @@
     python scripts/codemod_neo2.py -v PATH…     # only these files or folders, listing each file
 
 Safe to run again, on any branch, as often as needed: what it already rewrote doesn't match any
-more. After merging a branch that still has the old paths, run it and review the diff.
+more. A branch that still has the old paths:
+
+    git merge c475799                  # first main just before the move, if the branch is older
+    git merge main                     # then the move: git follows neo/ → neo2/core/ (ordinary conflicts)
+    python scripts/codemod_neo2.py     # then `git add` what it moved and any "file location" conflict
+    ruff check --fix neo neo2 tests scripts   # a rewritten import can sort differently
+
+Merged straight into an older branch, the move loses git's rename detection for files the branch
+changed a lot: they come back whole at neo/… (modify/delete), which this lists to port by hand.
 
 1. Files under `neo/` that aren't the repo-only compatibility shim (a merged branch added or changed
-   them there) move to `neo2/core/` (`git mv`). Before the rename, the whole package moves.
+   them there) move to `neo2/core/` (`git mv`). Before the rename, the whole package moves (over a
+   neo2/core/ holding only __pycache__ left by a branch switch; anything else there is refused).
 2. Python, by tokens: `import neo`, `import neo.x [as y]`, `from neo[.x] import …` (relative imports
    are left alone); after a plain `import neo[.x]`, the `neo.x…` references in that file; and in
    strings and comments the text rules below, plus "neo" as a module argument
@@ -21,14 +30,21 @@ more. After merging a branch that still has the old paths, run it and review the
    - `neo/…` paths to the package folder (never `~/.neo/…`, `…/neo/…` or URLs)
    - NEO's own extras `neo[web,mcp]` → `neo2[…]`, and `pip install neo` → `neo2`
    - pyproject.toml: `name = "neo"`, `include = ["neo*"]`
-   Never touched: ~/.neo, NEO_* names, NEO in prose, com.arnav.neo, URLs, neo2.*, neon, neo-ui,
-   neo_lib, the `neo` and `neo.audit` logger names, and `neo` as a variable (`neo.ask(…)`).
+4. In NEO's own package, `logging.getLogger(__name__)` → `logger(__name__)` from neo2.core: its
+   modules log as `neo.<module>` (the `neo` logger NEO.app prints), and __name__ is neo2.core.… now.
+
+Never touched: ~/.neo, NEO_* names, NEO in prose, com.arnav.neo, URLs, neo2.*, neon, neo-ui, neo_lib,
+logger names (`neo`, `neo.audit`, `getLogger("neo.x")`, `logger="neo.x"`: NEO still logs as neo.*),
+and `neo` as a variable (`neo.ask(…)`).
 
 Anything it can't rewrite safely is refused and listed (exit 1): a bare `import neo` in prose, `-m neo`
 outside a Python command line, `"neo."` used as a prefix, `neo[…]` naming unknown extras, `neo` both
-imported and used as a plain name in one file, files that differ in neo/ and neo2/core/, and pyproject
-entries only a person can rename. A line that must keep an old name carries `neo2-codemod: keep`;
-a file that must be skipped says `neo2-codemod: skip-file` in its first lines.
+imported and used as a plain name in one file, files that differ in neo/ and neo2/core/, pyproject
+entries only a person can rename, the folder by name where only the shim is left (`ROOT / "neo"`,
+`os.path.join(ROOT, "neo")`, `Path("neo")`, `.join("neo")`, `mypy neo`, `--cov=neo`,
+`packages = ["neo"]`), and in NEO's package a getLogger(__name__) it can't make logger(__name__).
+A line that must keep an old name carries `neo2-codemod: keep`; a file that must be skipped says
+`neo2-codemod: skip-file` in its first lines.
 """
 
 from __future__ import annotations
@@ -39,10 +55,12 @@ import filecmp
 import io
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tokenize
 from collections import Counter
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -53,6 +71,10 @@ DIST = "neo2"
 KEEP = "neo2-codemod: keep"
 SKIP_FILE = "neo2-codemod: skip-file"
 SHIM = "neo2-codemod: shim"  # marks the compatibility shim's own files (neo/__init__.py, neo/__main__.py)
+FIX_ORDER = "ruff check --fix neo neo2 tests scripts   (import order)"
+PRE_MOVE = "c475799"  # main just before the move: a branch older than that merges it first
+MERGE_ORDER = (f"merge {PRE_MOVE} (main just before the move) into the branch first, then the move, "
+               "then run this: git follows the move, and only ordinary conflicts are left")  # fmt: skip
 
 TEXT_SUFFIXES = {".py", ".pyi", ".md", ".rst", ".txt", ".toml", ".cfg", ".ini", ".yml", ".yaml", ".sh",
                  ".bash", ".zsh", ".rs", ".ts", ".tsx", ".js", ".mjs", ".cjs", ".json", ".html", ".example"}  # fmt: skip
@@ -91,6 +113,24 @@ R_UP_TWO = re.compile(
 )
 R_MODULE_FILE = re.compile(r"\w\.__file__\b")
 MODULE_FUNCS = {"import_module", "importorskip", "find_spec", "__import__", "reload", "run_module"}
+
+# A logger name, not a module path: NEO's modules still log as neo.<module> (see neo2/core/__init__.py)
+R_LOGGER_ARG = re.compile(r"""(?:\bgetLogger\(\s*|\blogger\s*=\s*)["']$""")
+# The package folder by name, as a path or a tool's argument: after the move it holds only the shim
+TOOLS = {"ruff", "mypy", "pyright", "pytest", "compileall", "coverage", "pylint", "flake8", "pyflakes", "black",
+         "isort", "vulture", "bandit", "pdoc", "pydoc"}  # fmt: skip
+# a tool and its arguments: words up to the end of the line, a comment or a sentence's punctuation
+R_TOOL_LINE = re.compile(r"(?<![\w.-])(?:" + "|".join(sorted(TOOLS)) + r")(?![\w.-])(?:[ \t]+(?!#)[^\s;()#]+)*")
+R_BARE_NEO = re.compile(r"""(?<=[\s"'`=,\[])neo(?=[\s"'`,\]]|$)""")
+R_COV = re.compile(r"--(?:cov|source)(?:=|\s+)neo(?![\w./-])")
+R_TOML_LIST = re.compile(
+    r"""(?m)^\s*(?:source|packages|src|include|known[-_]first[-_]party|py[-_]modules)\s*=\s*\[[^\]\n]*?["']neo["']"""
+)
+R_JOIN_NEO = re.compile(r"""\bjoin\([^()\n]*?["']neo["']""")
+R_PATH_NEO = re.compile(r"""\b(?:Path|PurePath|PosixPath|PathBuf::from)\(\s*["']neo["']""")
+FOLDER = "only the compatibility shim is in neo/ now (neo2/core, neo2): rewrite by hand or mark it"
+REPO_NAMES = {"root", "repo", "repo_root", "here", "base", "base_dir", "project", "project_root", "project_dir",
+              "checkout", "src", "top", "pkg_root", "__file__", "parent", "parents", "cwd"}  # fmt: skip
 
 
 @dataclass
@@ -165,8 +205,19 @@ def text_edits(
             if free(m.start(), m.end()):
                 refused.append((base + m.start(), "a bare `import neo` in text: rewrite it by hand"))
         for m in R_MODULE.finditer(text):
-            if m.group("sub") in ctx.subs:
+            if m.group("sub") in ctx.subs and not R_LOGGER_ARG.search(text, max(0, m.start() - 40), m.start()):
                 add(m.start(), m.start() + 3, NEW, "module path")
+        for m in R_TOOL_LINE.finditer(text):
+            for n in R_BARE_NEO.finditer(m.group()):
+                if free(m.start() + n.start(), m.start() + n.end()):
+                    refused.append((base + m.start() + n.start(), f"`neo` as {m.group().split()[0]}'s argument: {FOLDER}"))
+        for rx, what in ((R_COV, "--cov=neo"), (R_TOML_LIST, 'a list with "neo"')):
+            for m in rx.finditer(text):
+                if free(m.start(), m.end()) and not any(base + m.start() <= o < base + m.end() for o, _ in refused):
+                    refused.append((base + m.start(), f"{what}: {FOLDER}"))
+    for rx, what in ((R_JOIN_NEO, 'join(…, "neo")'), (R_PATH_NEO, 'Path("neo")')):
+        for m in rx.finditer(text):
+            refused.append((base + m.start(), f"{what} (the package folder?): {FOLDER}"))
     for m in R_PATH.finditer(text):
         add(m.start(), m.end(), NEW_DIR + "/", "path")
     if not light:
@@ -233,6 +284,88 @@ def _literal(tok: tokenize.TokenInfo) -> object:
         return None
 
 
+def _opener(sig: list[tokenize.TokenInfo], k: int) -> int | None:
+    """The bracket sig[k] is inside (its index), or None at the top of a statement."""
+    depth = 0
+    for j in range(k - 1, -1, -1):
+        t = sig[j]
+        if t.type in (tokenize.NEWLINE, tokenize.INDENT, tokenize.DEDENT):
+            return None
+        if t.type == tokenize.OP and t.string in ")]}":
+            depth += 1
+        elif t.type == tokenize.OP and t.string in "([{":
+            if depth == 0:
+                return j
+            depth -= 1
+    return None
+
+_EXPR_START = {"return", "in", "for", "yield", "assert", "if", "else", "and", "or", "not", "lambda", "await"}
+
+
+def _operand_names(sig: list[tokenize.TokenInfo], k: int) -> set[str]:
+    """The names in the expression left of sig[k] (`Path(__file__).parents[1] / "neo"`), back to
+    the start of its statement, bracket or argument."""
+    names: set[str] = set()
+    depth = 0
+    for j in range(k - 1, -1, -1):
+        t = sig[j]
+        if t.type in (tokenize.NEWLINE, tokenize.INDENT, tokenize.DEDENT):
+            break
+        if t.type == tokenize.OP and t.string in ")]}":
+            depth += 1
+        elif t.type == tokenize.OP and t.string in "([{":
+            if depth == 0:
+                break
+            depth -= 1
+        elif depth == 0 and (
+            (t.type == tokenize.OP and t.string not in ("/", ".", "//"))
+            or (t.type == tokenize.NAME and t.string in _EXPR_START)
+        ):
+            break
+        if t.type == tokenize.NAME:
+            names.add(t.string)
+    return names
+
+
+def _names_the_folder(sig: list[tokenize.TokenInfo], k: int) -> str | None:
+    """Why the string "neo" at sig[k] looks like the package's folder (None if it doesn't): the
+    checkout's `ROOT / "neo"`, `os.path.join(ROOT, "neo")`, `Path("neo")`, or a tool's argument
+    (`["mypy", "neo"]`). Never `tmp_path / "neo"` or a name like `controller = "neo"`."""
+    p1 = sig[k - 1] if k else None
+    n1 = sig[k + 1] if k + 1 < len(sig) else None
+
+    def repoish(names: Iterable[str]) -> bool:
+        return bool({n.lower() for n in names} & REPO_NAMES)
+
+    if (p1 is not None and p1.string == "/") or (n1 is not None and n1.string == "/"):
+        if p1 is not None and p1.string == "/" and repoish(_operand_names(sig, k - 1)):
+            return '`… / "neo"` (the package folder?)'
+        return None
+    ob = _opener(sig, k)
+    if ob is None:
+        return None
+    fn = sig[ob - 1] if ob and sig[ob - 1].type == tokenize.NAME else None
+    if sig[ob].string == "(" and fn is not None:
+        if fn.string in ("Path", "PurePath", "PosixPath", "PurePosixPath") and ob == k - 1:
+            return 'Path("neo") (the package folder?)'
+        if fn.string == "join" and ob >= 3 and sig[ob - 2].string == "." and sig[ob - 3].string in ("path", "os", "posixpath"):
+            if repoish(t.string for t in sig[ob + 1 : k] if t.type == tokenize.NAME):
+                return 'os.path.join(…, "neo") (the package folder?)'
+            return None
+    args, depth = [], 0
+    for t in sig[ob + 1 : k]:
+        if t.type == tokenize.OP and t.string in "([{":
+            depth += 1
+        elif t.type == tokenize.OP and t.string in ")]}":
+            depth -= 1
+        elif depth == 0 and t.type == tokenize.STRING:
+            v = _literal(t)
+            if isinstance(v, str):
+                args.append(v.rsplit("/", 1)[-1])
+    tool = next((a for a in args if a in TOOLS), None)
+    return f"`neo` as {tool}'s argument" if tool else None
+
+
 def rewrite_python(src: str, ctx: Ctx, *, in_core: bool = False) -> Outcome:
     if skipped(src):
         return Outcome(src)
@@ -243,7 +376,7 @@ def rewrite_python(src: str, ctx: Ctx, *, in_core: bool = False) -> Outcome:
 
     try:
         toks = list(tokenize.generate_tokens(io.StringIO(src).readline))
-        ast.parse(src)
+        tree0 = ast.parse(src)
     except (tokenize.TokenError, SyntaxError, ValueError) as e:
         return Outcome(src, refused=[(getattr(e, "lineno", 1) or 1, f"not valid Python ({e}): left as is")])
 
@@ -360,6 +493,16 @@ def rewrite_python(src: str, ctx: Ctx, *, in_core: bool = False) -> Outcome:
         if t.type != tokenize.STRING:
             continue
         val = _literal(t)
+        p1 = sig[k - 1] if k >= 1 else None
+        p2 = sig[k - 2] if k >= 2 else None
+        n1 = sig[k + 1] if k + 1 < len(sig) else None
+        n2 = sig[k + 2] if k + 2 < len(sig) else None
+        if p1 is not None and p2 is not None and (
+            (p1.string == "(" and p2.string == "getLogger")
+            or (p1.string == "=" and p2.string == "logger" and k >= 3 and sig[k - 3].string in ("(", ","))
+        ):
+            as_is.add(at(t.start))  # a logger name (getLogger("neo.x"), logger="neo.x"): those didn't move
+            continue
         if val in ("neo.", "neo/"):
             refused.append(
                 (t.start[0], f"{t.string} as a prefix: is it the package? rewrite by hand or mark it")
@@ -372,10 +515,6 @@ def rewrite_python(src: str, ctx: Ctx, *, in_core: bool = False) -> Outcome:
         if any(_literal(s) == DIST for s in near):
             refused.append((t.start[0], '"neo" next to "neo2": the old package? rewrite by hand or mark it'))
             continue
-        p1 = sig[k - 1] if k >= 1 else None
-        p2 = sig[k - 2] if k >= 2 else None
-        n1 = sig[k + 1] if k + 1 < len(sig) else None
-        n2 = sig[k + 2] if k + 2 < len(sig) else None
         q = t.string[-1]
         if p1 is None or p2 is None:
             continue
@@ -384,20 +523,20 @@ def rewrite_python(src: str, ctx: Ctx, *, in_core: bool = False) -> Outcome:
         )
         if names_module and p2.type == tokenize.NAME:  # import_module("neo"), sys.modules["neo"]
             edits.append(Edit(at(t.start), at(t.end), f"{q}{NEW}{q}", "module path"))
-        elif p1.string == "," and p2.type == tokenize.STRING and _literal(p2) == "-m":
+            continue
+        if p1.string == "," and p2.type == tokenize.STRING and _literal(p2) == "-m":
             edits.append(Edit(at(t.start), at(t.end), f"{q}{DIST}{q}", "-m neo"))
-        elif (
-            p1.string == "/"
-            and n1 is not None
-            and n1.string == "/"
-            and n2 is not None
-            and n2.type == tokenize.STRING
-        ):
+            continue
+        if p1.string == "/" and n1 is not None and n1.string == "/" and n2 is not None and n2.type == tokenize.STRING:
             nxt = _literal(n2)
             if isinstance(nxt, str) and (
                 nxt in ctx.subs or nxt.removesuffix(".py") in ctx.subs | {"__init__"}
             ):
                 edits.append(Edit(at(t.start), at(t.end), f"{q}neo2{q} / {q}core{q}", "path"))
+                continue
+        why = _names_the_folder(sig, k)
+        if why:
+            refused.append((t.start[0], f"{why}: {FOLDER}"))
 
     # strings and comments: the text rules
     for t in toks:
@@ -414,6 +553,11 @@ def rewrite_python(src: str, ctx: Ctx, *, in_core: bool = False) -> Outcome:
         e, r = text_edits(src[a:b], ctx, a)
         edits += e
         refused += [(line_of(src, o), why) for o, why in r]
+
+    if in_core:
+        e, r = _core_loggers(src, sig, import_ids, tree0, starts)
+        edits += e
+        refused += r
 
     # A path worked out from a module's own file, two folders up: the package is a level deeper now
     for n, line in enumerate(src.split("\n"), 1):
@@ -438,6 +582,163 @@ def rewrite_python(src: str, ctx: Ctx, *, in_core: bool = False) -> Outcome:
         if any(n == OLD or n.startswith(OLD + ".") for n in names) and node.lineno not in keep:
             refused.append((node.lineno, "an import of neo is left: rewrite by hand"))
     return Outcome(new, counts, sorted(set(refused)))
+
+
+def _core_loggers(
+    src: str, sig: list[tokenize.TokenInfo], import_ids: set[int], tree: ast.Module, starts: list[int]
+) -> tuple[list[Edit], list[tuple[int, str]]]:
+    """In NEO's own package, `logging.getLogger(__name__)` → `logger(__name__)` from neo2.core: its
+    modules log under the `neo` logger as neo.<module>, which NEO.app (log_to_stdout, core.log) and
+    hosts configure, and __name__ says neo2.core.<module> now. Adds the import (into an existing
+    one-line `from neo2.core import …` when there is one) and drops a plain `import logging` nothing
+    else uses."""
+    edits: list[Edit] = []
+    refused: list[tuple[int, str]] = []
+
+    def off(line: int, col: int) -> int:  # ast columns count UTF-8 bytes
+        text = src[starts[line - 1] : starts[line] if line < len(starts) else len(src)]
+        return starts[line - 1] + len(text.encode()[:col].decode(errors="ignore"))
+
+    calls: list[int] = []  # sig index of `logging` in logging.getLogger(__name__)
+    for k, t in enumerate(sig):
+        if not (t.type == tokenize.NAME and t.string == "getLogger" and k + 3 < len(sig)):
+            continue
+        if [x.string for x in sig[k + 1 : k + 4]] != ["(", "__name__", ")"]:
+            continue
+        if k >= 2 and sig[k - 1].string == "." and sig[k - 2].string == "logging" and sig[k - 3].string != ".":
+            calls.append(k - 2)
+        else:
+            refused.append((t.start[0], "getLogger(__name__) in NEO's package logs as neo2.core.…, outside the "
+                                        "`neo` logger: use `logger(__name__)` from neo2.core"))  # fmt: skip
+    if not calls:
+        return edits, refused
+
+    ours, other = False, []  # `from neo2.core import logger` at the top; anything else named logger
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            for a in node.names:
+                if (a.asname or a.name.split(".")[0]) != "logger":
+                    continue
+                if (isinstance(node, ast.ImportFrom) and node.level == 0 and node.module in (OLD, NEW)
+                        and a.asname is None and node in tree.body):  # fmt: skip
+                    ours = True
+                else:
+                    other.append(node.lineno)
+        elif "logger" in _binds(node):
+            other.append(getattr(node, "lineno", 1))
+    first = min(sig[k].start[0] for k in calls)
+    if other:
+        return edits, refused + [(sig[k].start[0], f"`logger` is another name here (line {other[0]}): use "
+                                                  "neo2.core's logger(__name__) by hand") for k in calls]  # fmt: skip
+
+    imp = None
+    if not ours:
+        imp = _logger_import(src, tree, starts, off, first)
+        if imp is None:
+            return edits, refused + [(first, "no imports before this: add `from neo2.core import logger` and "
+                                             "use logger(__name__) by hand")]  # fmt: skip
+    for k in calls:
+        edits.append(Edit(_at(starts, sig[k].start), _at(starts, sig[k + 2].end), "logger", "logger"))
+
+    # `import logging`, if that was all it was for (and the blank line after it, if it was a section alone)
+    rest = [
+        k for k, t in enumerate(sig)
+        if t.type == tokenize.NAME and t.string == "logging" and k not in import_ids and k not in calls
+        and not (k and sig[k - 1].string == ".")
+    ]  # fmt: skip
+    in_text = any(t.type == tokenize.STRING and re.search(r"\blogging\.", t.string) for t in sig)
+    lines = src.split("\n")
+    for node in tree.body if not rest and not in_text else []:
+        if not (isinstance(node, ast.Import) and [(a.name, a.asname) for a in node.names] == [("logging", None)]):
+            continue
+        n = node.lineno
+        if node.end_lineno != n or not re.fullmatch(r"import logging[ \t]*(#.*)?", lines[n - 1]):
+            continue
+        alone = (n == 1 or not lines[n - 2].strip()) and n < len(lines) - 1 and not lines[n].strip()
+        end = starts[n + 1] if alone else starts[n] if n < len(starts) else len(src)
+        if imp is not None and starts[n - 1] <= imp.start < end:  # the new import goes where this one was
+            new = imp.new.strip("\n") + "\n" + ("\n" if alone else "")
+            edits.append(Edit(starts[n - 1], end, new, "logger import"))
+            imp = None
+        else:
+            edits.append(Edit(starts[n - 1], end, "", "logger import"))
+    if imp is not None:
+        edits.append(imp)
+    return edits, refused
+
+
+def _binds(node: ast.AST) -> set[str]:
+    """The names a node (other than an import) binds: a def or class, an assignment, a parameter."""
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return {node.name}
+    if isinstance(node, ast.Name) and not isinstance(node.ctx, ast.Load):
+        return {node.id}
+    if isinstance(node, ast.arg):
+        return {node.arg}
+    if isinstance(node, (ast.Global, ast.Nonlocal)):
+        return set(node.names)
+    if isinstance(node, ast.ExceptHandler) and node.name:
+        return {node.name}
+    return set()
+
+
+def _at(starts: list[int], pos: tuple[int, int]) -> int:
+    return starts[pos[0] - 1] + pos[1]
+
+
+def _logger_import(
+    src: str, tree: ast.Module, starts: list[int], off: Callable[[int, int], int], first: int
+) -> Edit | None:
+    """Where `from neo2.core import logger` goes: into a one-line `from neo2.core import …` above the
+    first use, else a line of its own where isort would put it (among NEO's own imports)."""
+
+    def new_name(m: str) -> str:
+        return NEW + m[len(OLD) :] if m == OLD or m.startswith(OLD + ".") else m
+
+    def ours(m: str) -> bool:
+        return m == DIST or m.startswith(DIST + ".")
+
+    def line_start(n: int) -> tuple[int, str]:
+        """The offset of line n (1-based), and a newline to put first when the file's last line has none."""
+        at = starts[n - 1] if n - 1 < len(starts) else len(src)
+        return at, "\n" if at == len(src) and src and not src.endswith("\n") else ""
+
+    header = [n for n in tree.body if isinstance(n, (ast.Import, ast.ImportFrom)) and n.end_lineno < first]
+    froms = [n for n in header if isinstance(n, ast.ImportFrom) and n.level == 0 and n.module and ours(new_name(n.module))]
+    core = [n for n in froms if new_name(n.module) == NEW and all(a.name != "*" for a in n.names)]
+    if core and core[0].lineno == core[0].end_lineno:
+        names = core[0].names
+
+        def rank(name: str) -> tuple[int, str]:  # isort's order-by-type: CONSTANTS, Classes, the rest
+            return (0 if name.isupper() and len(name) > 1 else 1 if name[:1].isupper() else 2, name.lower())
+
+        after = next((a for a in names if rank(a.name) > rank("logger")), None)
+        if after is not None:
+            at = off(after.lineno, after.col_offset)
+            return Edit(at, at, "logger, ", "logger import")
+        at = off(names[-1].end_lineno, names[-1].end_col_offset)
+        return Edit(at, at, ", logger", "logger import")
+    line = "from neo2.core import logger\n"
+    if core:  # a multi-line import: a line of its own just above (ruff --fix joins them)
+        at, _ = line_start(core[0].lineno)
+        return Edit(at, at, line, "logger import")
+    later = [n for n in froms if tuple(new_name(n.module).split(".")) > tuple(NEW.split("."))]
+    if later:
+        at, _ = line_start(later[0].lineno)
+        return Edit(at, at, line, "logger import")
+    plain = [n for n in header if isinstance(n, ast.Import) and any(ours(new_name(a.name)) for a in n.names)]
+    mine = froms + plain
+    if mine:
+        at, nl = line_start(max(n.end_lineno for n in mine) + 1)
+        return Edit(at, at, nl + line, "logger import")
+    relative = [n for n in header if isinstance(n, ast.ImportFrom) and n.level > 0]
+    if relative:
+        at, _ = line_start(relative[0].lineno)
+        return Edit(at, at, line + "\n", "logger import")
+    if header:
+        at, nl = line_start(header[-1].end_lineno + 1)
+        return Edit(at, at, nl + "\n" + line, "logger import")
+    return None
 
 
 # ---- pyproject -----------------------------------------------------------------------------------
@@ -500,6 +801,29 @@ def is_shim(p: Path) -> bool:
         return False
 
 
+def _move(root: Path, src: str, dst: str) -> str | None:
+    """`git mv` a tracked path (a plain rename otherwise); why it failed, or None."""
+    if tracked(root, src):
+        r = git(root, "mv", src, dst, check=False)
+        if r.returncode:
+            return (r.stderr.strip() or f"git mv exited {r.returncode}") + " — resolve it (git add?) and re-run"
+    else:
+        os.rename(root / src, root / dst)
+    return None
+
+
+def _not_just_caches(d: Path) -> list[str]:
+    """What a folder holds besides what nothing needs: __pycache__ (bytecode) and .DS_Store."""
+    left: list[str] = []
+    if d.exists() and not d.is_dir():
+        return [d.name]
+    for dirpath, dirnames, filenames in os.walk(d):
+        dirnames[:] = [x for x in dirnames if x != "__pycache__"]
+        left += [Path(dirpath, f).relative_to(d).as_posix() for f in filenames
+                 if f != ".DS_Store" and not f.endswith((".pyc", ".pyo"))]  # fmt: skip
+    return sorted(left)
+
+
 def relocate(root: Path, dry: bool) -> tuple[list[str], list[str]]:
     """Put NEO's package under neo2/core: (what moved, what was refused)."""
     moved: list[str] = []
@@ -510,13 +834,22 @@ def relocate(root: Path, dry: bool) -> tuple[list[str], list[str]]:
     init = old / "__init__.py"
     if not (new / "__init__.py").exists():
         if init.exists() and not is_shim(init):
+            # A neo2/core/ without an __init__.py: usually the renamed tree's git-ignored __pycache__
+            # folders, left by a branch switch. Moving onto it would put the package in neo2/core/neo/.
+            left = _not_just_caches(new) if new.exists() else []
+            if left:
+                refused.append(f"{NEW_DIR}/ exists without __init__.py ({', '.join(left[:3])}"
+                               f"{', …' if len(left) > 3 else ''}): move that away and re-run")  # fmt: skip
+                return moved, refused
             moved.append(f"{OLD}/ → {NEW_DIR}/ (the whole package)")
             if not dry:
+                if new.exists():
+                    shutil.rmtree(new)  # only bytecode and .DS_Store: nothing git tracks or needs
                 new.parent.mkdir(parents=True, exist_ok=True)
-                if tracked(root, f"{OLD}/__init__.py"):
-                    git(root, "mv", OLD, NEW_DIR)
-                else:
-                    os.rename(old, new)
+                why = _move(root, OLD, NEW_DIR)
+                if why or not (new / "__init__.py").exists():
+                    moved.pop()
+                    refused.append(f"{OLD}/ didn't move to {NEW_DIR}/: {why or 'its __init__.py is not there'}")
         return moved, refused
     for name in ("__init__.py", "__main__.py"):
         f = old / name
@@ -535,10 +868,10 @@ def relocate(root: Path, dry: bool) -> tuple[list[str], list[str]]:
                 moved.append(f"{OLD}/{rel} → {NEW_DIR}/{rel}")
                 if not dry:
                     dst.parent.mkdir(parents=True, exist_ok=True)
-                    if tracked(root, f"{OLD}/{rel}"):
-                        git(root, "mv", f"{OLD}/{rel}", f"{NEW_DIR}/{rel}")
-                    else:
-                        os.rename(src, dst)
+                    why = _move(root, f"{OLD}/{rel}", f"{NEW_DIR}/{rel}")
+                    if why:
+                        moved.pop()
+                        refused.append(f"{OLD}/{rel}: {why}")
             elif filecmp.cmp(src, dst, shallow=False):
                 moved.append(f"{OLD}/{rel} removed (the same as {NEW_DIR}/{rel})")
                 if not dry:
@@ -547,7 +880,8 @@ def relocate(root: Path, dry: bool) -> tuple[list[str], list[str]]:
                     else:
                         src.unlink()
             else:
-                refused.append(f"{OLD}/{rel} and {NEW_DIR}/{rel} both exist and differ: merge them by hand")
+                refused.append(f"{OLD}/{rel} and {NEW_DIR}/{rel} both exist and differ: merge them by hand "
+                               f"(a branch from before the move? {MERGE_ORDER})")  # fmt: skip
     return moved, refused
 
 
@@ -611,7 +945,8 @@ def list_files(root: Path, only: list[str]) -> list[str]:
 def rewrite_file(rel: str, text: str, ctx: Ctx) -> Outcome:
     suffix = Path(rel).suffix
     if suffix in (".py", ".pyi"):
-        return rewrite_python(text, ctx, in_core=rel.startswith(NEW_DIR + "/"))
+        # neo/…: a merged branch's module, on its way to neo2/core (--check doesn't move it)
+        return rewrite_python(text, ctx, in_core=rel.startswith((NEW_DIR + "/", OLD + "/")))
     if rel == "pyproject.toml":
         return rewrite_pyproject(text, ctx)
     return rewrite_text(text, ctx, light=suffix in LIGHT)
@@ -664,6 +999,9 @@ def main(argv: list[str] | None = None) -> int:
     if a.verbose:
         for rel, counts in changed:
             print(f"    {rel}: " + ", ".join(f"{r} {n}" for r, n in counts.most_common()))
+    if (changed or moved) and not a.check:
+        # `from neo import x` above `from neo2 import y` sorts after it once rewritten (ruff's I001)
+        print(f"then: {FIX_ORDER}, and review the diff")
     if refused:
         print(f"refused {len(refused)} (left as they are — fix by hand, or mark a line `{KEEP}`):")
         for r in refused:

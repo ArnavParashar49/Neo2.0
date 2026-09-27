@@ -25,7 +25,7 @@ mkdir -p "$RUNTIME"
 uv venv --quiet --allow-existing --python "$PYVER" "$RUNTIME/.venv"
 uv pip install --quiet --python "$RUNTIME/.venv/bin/python" -r "$ROOT/requirements.lock"
 # setuptools builds in the checkout and ships whatever is in build/lib: clear an earlier build's
-# copy first (it could hold the pre-2.1 top-level neo/), and its own scratch copy afterwards.
+# copy first (one from before 2.1 holds the old top-level neo package), and this one's afterwards.
 rm -rf "$ROOT/build"
 uv pip install --quiet --python "$RUNTIME/.venv/bin/python" --no-deps --reinstall "$ROOT"  # neo2: the app runs -m neo2
 rm -rf "$ROOT/build"

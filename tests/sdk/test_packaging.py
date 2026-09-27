@@ -152,12 +152,11 @@ def test_the_distribution_is_neo2_and_ships_no_top_level_neo():
     assert folders | {"neo2"} == pkgs
 
 
-
 def test_the_installers_ship_no_stale_build_and_pin_no_local_path():
     """setuptools builds in the checkout and ships everything under build/lib, so a build/ left by an
-    earlier in-tree build (one from before 2.1 holds a top-level neo/) must go before NEO.app's
-    runtime is installed from the checkout. And requirements.lock never pins NEO itself, in any form
-    `uv pip freeze` writes it: an absolute file:// path would break the installer everywhere else."""
+    earlier in-tree build (one from before 2.1 holds the old top-level neo package) must go before
+    NEO.app's runtime is installed from the checkout. And requirements.lock never pins NEO itself, in
+    any form `uv pip freeze` writes it: an absolute file:// path would break the installer elsewhere."""
     lines = [ln.strip() for ln in (ROOT / "scripts" / "install-app.sh").read_text().splitlines()]
     lines = [ln for ln in lines if ln and not ln.startswith("#")]
     installs = [i for i, ln in enumerate(lines) if "--reinstall \"$ROOT\"" in ln]

@@ -187,7 +187,8 @@ A 54-agent audit found 45 gaps across security, reliability, packaging, onboardi
 ### One name: neo2 (2026-09-27)
 
 - NEO's package moved into the library's: `neo2.core` (it was the top-level `neo`, which NeuralEnsemble's PyPI `neo` also installs). The distribution is `neo2` (2.1.0, unpublished until the owner publishes it); `python -m neo2` is NEO.app's core, and NEO.app starts it that way (its orphan check also knows an older app's core). Unchanged: `~/.neo`, every `NEO_*` variable, the bundle id, the websocket protocol, the audit log, the memory database and the `neo` / `neo.audit` logger names.
-- `scripts/codemod_neo2.py` did the rewrite and runs again after merging a branch that predates it (idempotent; lists what it won't decide). A checkout's `neo` shim keeps old imports and the old `-m` entry points working, as the same modules, with one DeprecationWarning; the wheel has no `neo`. `scripts/install-app.sh` replaces the old `neo` distribution in NEO.app's runtime.
+- `scripts/codemod_neo2.py` did the rewrite and runs again after merging a branch that predates it (idempotent; lists what it won't decide). A branch older than `c475799` merges that first, then main, so git follows the move; then the codemod and `ruff check --fix` (README → Development). A checkout's `neo` shim keeps old imports and the old `-m` entry points working, as the same modules, with one DeprecationWarning; the wheel has no `neo`. `scripts/install-app.sh` replaces the old `neo` distribution in NEO.app's runtime.
+- After pulling 2.1, run `scripts/install-app.sh` before `tauri dev`: a dev build uses the installed runtime when there is one, and a runtime from before 2.1 can't start `-m neo2`. The app then says so ("runtime older than the app") instead of crash-looping.
 
 ### Next
 
