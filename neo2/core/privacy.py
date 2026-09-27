@@ -3,7 +3,7 @@
 What goes: memories (profile, lessons, notes), playbooks, session summaries, the requests Laya
 learned from (on disk, still settling in RAM, and the correction memory) and their cached
 features, which apps worked for what (and the songs/videos, sites, lists and contacts NEO
-learned), the audit trail, the core's logs, and NEO's own browser profile (its cookies and logins). What stays: settings and keys (~/.neo/.env), timers that are still running, and
+learned, and the flows it replays), the audit trail, the core's logs, and NEO's own browser profile (its cookies and logins). What stays: settings and keys (~/.neo/.env), timers that are still running, and
 downloaded models — none of them is about the user.
 
 Reached only from the overlay (after its own confirmation) or `python -m neo2 --forget-all`: never
@@ -57,6 +57,9 @@ async def forget_everything() -> dict[str, int]:
     counts["learned places & people"] = learned.forget()
     counts["task dry runs"] = shadow.forget()  # the shadow log
     run.forget()  # receipts and last actions (memory only)
+    from neo2.core.agent import replay
+
+    replay.forget()  # flows learned from your requests, and their words (memory only)
     eventkit.forget()
     sites.forget()  # site words searched for lately (memory only)
     from neo2.core.decide.kinds import schedule

@@ -3,7 +3,12 @@
 The prefix is who NEO is (IDENTITY, or an embedding host's own `persona`), then "How to work":
 the safety rules (SAFETY_RULES — always, whoever NEO is) with the guidance for particular tools
 between them, each line only when those tools are there. NEO.app has every tool, so its prompt is
-the one it always had.
+the one it always had — except for a run on the screen, which gets the lean screen prompt: a
+shorter identity and only the guidance for the tools that run was given, every safety rule word
+for word (fewer tokens on every one of its model calls, the screen rules easier to see).
+
+No app is named in any rule: what the model is told about a window (a board, a canvas) comes from
+what it shows, never from which app it is.
 """
 
 from __future__ import annotations
@@ -24,6 +29,14 @@ open and control apps, run shell commands, edit files, browse the web, manage ma
 notes and reminders. Prefer the fewest actions that fully achieve the goal.
 """
 
+# Who NEO is on a run that works on the screen (session: the lean screen prompt).
+SCREEN_IDENTITY = """You are NEO — the user's personal AI agent for their Mac, working on its screen for them.
+
+Voice: warm, calm, direct; lead with the answer in 1–3 short sentences. Never narrate what you're
+about to do or which tools you're using — just do it, then report the result once. Prefer the
+fewest actions that fully achieve the goal.
+"""
+
 _ANY_TOOL = frozenset({"*"})  # a line for an agent with any tools at all
 # The tools that see or act in other apps' windows: they take the Accessibility permission, and
 # say so when it is off (neo2.core.tools.computer).
@@ -31,6 +44,31 @@ _NEEDS_AX = frozenset({
     "ax_tree", "ax_find", "ax_press", "ax_set_value", "click", "click_text", "drag", "scroll", "type_text",
     "dictate", "hotkey", "applescript",
 })  # fmt: skip
+# How to work on the screen, one move at a time (the default) or several actions per reply
+# (neo2.core.agent.batch: `batch_actions`, on only after the user's A/B — DECISIONS 47).
+_SCREEN_STEPS = (
+    "- On the screen: look, make one move, then check its result before the next. Each click, drag or\n"
+    "  scroll result says what was under the pointer and whether anything changed; a picture of the\n"
+    "  area after it, when one comes with it, is your new look (else take a screenshot of the same area\n"
+    "  and compare). On a board or canvas, \"nothing visibly changed\" means the move didn't land: look\n"
+    "  again and correct it. \"No change was seen near\" a button or link means NEO couldn't see its\n"
+    "  effect: take a screenshot before clicking it again (it may have worked elsewhere — a cart, a\n"
+    "  track — and would happen twice). Never report either as done. Answer a sheet or dialog that\n"
+    "  opened first. If a result says you can't see the screen, don't guess coordinates: use ax_tree\n"
+    "  ids or tell the user.\n",
+    "- On the screen: look, then act. When every target is visible now (ids in your latest look, points\n"
+    "  or squares in your latest picture), send several actions in one reply: NEO runs them in order and\n"
+    "  stops at the first that fails, changes nothing or changes the screen (a sheet, a window, another\n"
+    "  app), and shows you that result. Don't batch past what you can't see yet (a menu that must open,\n"
+    "  a sheet, a page that must load). Each click, drag or scroll result says what was under the\n"
+    "  pointer and whether anything changed; a picture of the area after it, when one comes with it, is\n"
+    "  your new look. On a board or canvas, \"nothing visibly changed\" means the move didn't land: look\n"
+    "  again and correct it. \"No change was seen near\" a button or link means NEO couldn't see its\n"
+    "  effect: take a screenshot before clicking it again (it may have worked elsewhere and would happen\n"
+    "  twice). Never report either as done. Answer a sheet or dialog that opened first. If a result says\n"
+    "  you can't see the screen, don't guess coordinates: use ax_tree ids or tell the user.\n",
+)
+
 # (line, tools it's about): None = a safety rule, always there.
 _HOW_TO_WORK: tuple[tuple[str, frozenset[str] | None], ...] = (
     ("- Observe before acting. Use real tool results; never assume a tool succeeded.\n", None),
@@ -41,29 +79,20 @@ _HOW_TO_WORK: tuple[tuple[str, frozenset[str] | None], ...] = (
         frozenset({"applescript", "shell"}),
     ),
     (
-        "- When an app's content is a canvas or a board — Chess and other games, maps, drawing and photo\n"
-        "  apps — or ax_tree shows little beyond the window and its menus, take a screenshot and click or\n"
-        "  drag at pixel positions in it, passing its shot id. Don't script your way around it.\n",
+        "- Act on a window's elements by their ids or names where it has them. When the window shows no\n"
+        "  accessible elements where its content is (ax_tree lists little beyond the window and its menus:\n"
+        "  a board, a canvas, a map, a picture), take a screenshot and click or drag at pixel positions in\n"
+        "  it, passing its shot id. Don't script your way around it.\n",
         frozenset({"screenshot", "click"}),
     ),
+    (_SCREEN_STEPS[0], frozenset({"screenshot", "click", "drag", "scroll"})),
     (
-        "- On the screen, work observe → act → verify: look, make one move, then look again (a new\n"
-        "  screenshot of the same area) and compare before the next move. Each click, drag or scroll result\n"
-        "  says what was under the pointer and whether anything changed. On a board or canvas, \"nothing\n"
-        "  visibly changed\" means the move didn't land — look again and correct it. \"No change was seen\n"
-        "  near\" a button or link means NEO couldn't see its effect: take a screenshot and check before\n"
-        "  clicking it again, since a click that worked elsewhere (a cart, a track) would happen twice.\n"
-        "  Never report either as done. A sheet or dialog that opened must be answered first. If a result\n"
-        "  says you can't see the screen, don't guess coordinates: use ax_tree ids or tell the user.\n",
-        frozenset({"screenshot", "click", "drag", "scroll"}),
-    ),
-    (
-        "- \"Play <game>\" (\"play chess as white\", \"a game of chess against you\") when that game is an app on\n"
-        "  this Mac means play it in that app, never music or a video: open it or bring it to the front,\n"
-        "  start a new game set up as asked (the side the user plays, the level, the opponent) from its own\n"
+        "- \"Play <game>\" (as a side, at a level, against the user) when that game is an app on this Mac\n"
+        "  means play it in that app, never music or a video: open it or bring it to the front, start a\n"
+        "  new game set up as asked (the side the user plays, the level, the opponent) from its own\n"
         "  New Game menu item or dialog, then play on the board. If they want you to move, make your moves\n"
         "  by clicking the board and tell them when it's their turn.\n",
-        frozenset({"open_app", "click"}),
+        frozenset({"open_app", "activate_app"}),
     ),
     (
         "- If a tool fails, adapt — try another approach. Never repeat an identical failing call, and\n"
@@ -133,17 +162,43 @@ def _applies(about: frozenset[str] | None, tools: Collection[str] | None) -> boo
     return bool(about & set(tools))
 
 
-def persona(tools: Collection[str] | None = None) -> str:
+def persona(tools: Collection[str] | None = None, *, screen: bool = False) -> str:
     """Who NEO is and how it works. `tools`: the agent's tool names (None = all of them, as in
-    NEO.app): guidance about tools it doesn't have is left out, the safety rules never are."""
+    NEO.app): guidance about tools it doesn't have is left out, the safety rules never are.
+    `screen`: a run that works on the screen gets the shorter identity (a host's own persona
+    stays whatever it is)."""
+    from neo2.core.agent import batch
     from neo2.core.config import decide_mode, settings
 
     own = (settings().persona or "").strip()
-    head = own + "\n" if own else IDENTITY
+    head = own + "\n" if own else (SCREEN_IDENTITY if screen else IDENTITY)
     work = "".join(line for line, about in _HOW_TO_WORK if _applies(about, tools))
+    if batch.enabled():
+        work = work.replace(_SCREEN_STEPS[0], _SCREEN_STEPS[1])
     return (head + "\nHow to work:\n" + work).replace(
         "{search_site}", _SEARCH_SITE[decide_mode("web_search") == "on"]
     )
+
+
+def guidance(tools: Collection[str], *, already: str = "") -> str:
+    """The how-to-work lines about `tools` that `already` (the run's system prompt) lacks — for tools
+    a run gains mid-run (more_tools) after its prompt was built without them (the lean screen
+    prompt): "never drive an app's window through System Events scripts" arrives with applescript.
+    NEO's own words; "" when there is nothing to add."""
+    from neo2.core.agent import batch
+    from neo2.core.config import decide_mode
+
+    names = set(tools)
+    out = []
+    for line, about in _HOW_TO_WORK:
+        if about is None or about is _ANY_TOOL or not (about & names):
+            continue
+        if batch.enabled() and line == _SCREEN_STEPS[0]:
+            line = _SCREEN_STEPS[1]
+        line = line.replace("{search_site}", _SEARCH_SITE[decide_mode("web_search") == "on"])
+        if line not in already:
+            out.append(line)
+    return "".join(out)
 
 
 def _agent_tools() -> list[str] | None:
@@ -166,10 +221,16 @@ def system_context() -> str:
     return f"\n[CONTEXT] {where}{who} · {now.strftime('%A %Y-%m-%d %H:%M')}"
 
 
-def build(memory_context: str = "", extra: str = "") -> str:
+def build(memory_context: str = "", extra: str = "", *, screen_tools: Collection[str] | None = None) -> str:
+    """The system prompt. `screen_tools`: the tools of a run that works on the screen — it gets the
+    lean screen prompt (the shorter identity, guidance for those tools only, every safety rule).
+    Guidance for a tool the run gains later comes with it (guidance(), from more_tools)."""
     from neo2.core.config import settings
 
-    parts = [persona(_agent_tools())]
+    tools = _agent_tools()
+    if screen_tools is not None:
+        tools = list(screen_tools) if tools is None else [t for t in tools if t in set(screen_tools)]
+    parts = [persona(tools, screen=screen_tools is not None)]
     if instructions := settings().instructions.strip():
         parts.append("\n" + instructions)
     if memory_context:

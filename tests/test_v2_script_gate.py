@@ -715,7 +715,8 @@ def test_the_prompt_steers_canvas_apps_to_screenshot_and_click():
     from neo2.core.agent.prompt import persona
 
     p = persona()
-    assert "Chess" in p and "screenshot" in p and "coordinates" in p
+    assert "a board, a canvas" in p and "screenshot" in p and "coordinates" in p
+    assert "Chess" not in p  # the canvas rule is evidence (what the window shows), never an app's name
     assert "more than twice" in p and "Accessibility is off" in p
     assert "System Events" in p  # never drive an app's window through its scripts
     d = registry().get("applescript").description if registry().get("applescript") else ""

@@ -185,6 +185,12 @@ class Settings(BaseSettings):
     # A first look at the requested app, taken before the first model call — only when that app
     # is already in front (or none is named and the front one is where NEO last worked), never a
     # protected app's, with a picture only when the screen is needed. Off: the model looks itself.
+    # Several actions per reply, and a run that ends on `finish` once NEO verified its last actions
+    # (neo2.core.agent.batch): off until the user's A/B on the self-test window (DECISIONS 47).
+    batch_actions: bool = False
+    # The replay lane (neo2.core.agent.replay): a request a model did the same way twice in the same
+    # app is done the third time with no model call. None: on in NEO.app, off where effects are off.
+    replay_flows: bool | None = None
     prefetch_look: bool = True
     prefetch_look_s: float = 0.5  # the most that first look may add before the first model call
     # Laya's resolver is loaded at the wake word (the start of speech), not when the words are in:
