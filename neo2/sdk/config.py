@@ -183,7 +183,9 @@ class AgentConfig(BaseModel):
         config's fields (`prefix` + FIELD, e.g. NEO_BRAIN, NEO_TOOLS) from `env_files` (later ones
         win), then the process environment, then `overrides`. Only when asked for: an AgentConfig
         built directly reads none of it. Confirmation isn't a field — nothing here turns it off —
-        and a file inside ~/.neo (NEO.app's own settings) is refused."""
+        and a file inside ~/.neo (NEO.app's own settings) is refused. NEO_DATA_DIR in the process
+        environment is where NEO.app keeps its data, so it's refused as an agent's folder: name the
+        agent's with another `prefix`, or pass data_dir= as an override."""
         from neo.config import _refuse_neo_home
 
         env: dict[str, str] = {}

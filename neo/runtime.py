@@ -226,7 +226,9 @@ def live_runtimes() -> list[Runtime]:
 def secret_roots() -> list[Path]:
     """Folders NEO's tools never read or write beyond the fixed list in the policy: every live
     agent's data dir and extra secret paths, and the app's own data dir once its settings have
-    been built (read from the module global — this never builds settings)."""
+    been built (read from the module global — this never builds settings). Embedded, also NEO.app's
+    data wherever the environment's NEO_DATA_DIR / NEO_MEMORY_PATH moved it (its settings are
+    never built in a host's process)."""
     roots: list[Path] = []
     for rt in live_runtimes():
         s = rt.settings
@@ -241,6 +243,9 @@ def secret_roots() -> list[Path]:
         roots.append(Path(app.data_dir))
         roots.extend(Path(p) for p in getattr(app, "extra_secret_paths", None) or ())
         roots.extend(_memory_files(app))
+    if _library:
+        for p in config.moved_app_data():  # a folder, or a memory file with its side files
+            roots.extend([p, *(p.with_name(p.name + x) for x in _SIDE_FILES)])
     out: list[Path] = []
     for p in roots:
         p = Path(str(p)).expanduser()
@@ -249,7 +254,10 @@ def secret_roots() -> list[Path]:
     return out
 
 
+_SIDE_FILES = ("-wal", "-shm", "-journal")  # what SQLite keeps next to a database
+
+
 def _memory_files(s: Settings) -> list[Path]:
     """A memory database kept outside the data dir (`memory_path`), with SQLite's side files."""
     p = _memory_db(s)
-    return [] if p is None else [p, *(p.with_name(p.name + x) for x in ("-wal", "-shm", "-journal"))]
+    return [] if p is None else [p, *(p.with_name(p.name + x) for x in _SIDE_FILES)]

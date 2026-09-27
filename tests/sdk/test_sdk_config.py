@@ -84,6 +84,10 @@ def test_the_settings_an_agent_runs_with(tmp_path, home):
 
 
 def test_from_env_is_an_explicit_opt_in(tmp_path, monkeypatch):
+    # The environment's NEO_DATA_DIR is NEO.app's data (here: the suite's own), never an agent's.
+    with pytest.raises(ValueError, match="NEO.app's own data"):
+        neo2.AgentConfig.from_env()
+    monkeypatch.setenv("NEO_DATA_DIR", "")
     env = tmp_path / "neo.env"
     env.write_text("GEMINI_API_KEY=file-key\nNEO_BRAIN=claude\nNEO_MAX_STEPS=7\nANTHROPIC_API_KEY=ant\n")
     later = tmp_path / "later.env"

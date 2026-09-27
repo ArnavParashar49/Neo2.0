@@ -396,9 +396,23 @@ def _neo_homes() -> list[Path]:
     return out
 
 
-def _in_neo_home(path: Path) -> Path | None:
-    """The ~/.neo that `path` is, lies inside, or holds (the home folder, "/"), if any."""
-    return next((h for h in _neo_homes() if overlaps(path, h)), None)
+def moved_app_data() -> list[Path]:
+    """Where NEO_DATA_DIR and NEO_MEMORY_PATH in this process's environment put NEO.app's data (its
+    folder, its memory database). Only the environment: an embedded agent never opens ~/.neo/.env
+    to find out (a NEO_DATA_DIR set only there is NEO.app's own business)."""
+    out: list[Path] = []
+    for k in ("NEO_DATA_DIR", "NEO_MEMORY_PATH"):
+        v = os.environ.get(k, "").strip()
+        if v and (p := Path(os.path.abspath(os.path.expanduser(v)))) not in out:
+            out.append(p)
+    return out
+
+
+def _in_neo_home(path: Path, *, moved: bool = True) -> Path | None:
+    """The NEO.app data that `path` is, lies inside, or holds (the home folder, "/"), if any:
+    ~/.neo, and (`moved`) wherever the environment moved it."""
+    homes = _neo_homes() + (moved_app_data() if moved else [])
+    return next((h for h in homes if overlaps(path, h)), None)
 
 
 def _refuse_neo_home(path: Path, what: str = "data_dir") -> None:
@@ -476,5 +490,5 @@ def _refuse_real_data_under_tests(data_dir: Path) -> None:
     conftest skipped the isolation fixture and an erase test wiped the real ~/.neo."""
     if "pytest" not in sys.modules and "PYTEST_CURRENT_TEST" not in os.environ:
         return
-    if (real := _in_neo_home(data_dir)) is not None:
+    if (real := _in_neo_home(data_dir, moved=False)) is not None:  # NEO_DATA_DIR is the test's own
         raise RuntimeError(f"refusing to use the real {real} under pytest: set NEO_DATA_DIR to a temporary directory")

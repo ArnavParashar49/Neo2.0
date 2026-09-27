@@ -80,7 +80,7 @@ def test_a_checkout_reads_its_own_env_file_an_installed_package_does_not(tmp_pat
 
 
 def test_confirmation_is_always_on(tmp_path):
-    assert LibrarySettings(data_dir=tmp_path, confirm_destructive=False).confirm_destructive is True
+    assert LibrarySettings(data_dir=tmp_path / "agent", confirm_destructive=False).confirm_destructive is True
 
 
 def test_task_kinds_run_their_legacy_scripts_and_learning_is_off(tmp_path):
@@ -98,7 +98,7 @@ def test_task_kinds_run_their_legacy_scripts_and_learning_is_off(tmp_path):
 
 
 def test_the_quiet_defaults(tmp_path):
-    s = LibrarySettings(data_dir=tmp_path)
+    s = LibrarySettings(data_dir=tmp_path / "agent")
     assert (s.reflex, s.embeddings, s.memory_enabled, s.voice) == ("off", "off", False, "off")
     assert s.browser_headless and not s.include_username
     app = Settings()
@@ -120,17 +120,17 @@ def test_data_dir_is_required_and_never_neo_home(tmp_path, monkeypatch):
 
 def test_typos_and_unknown_reflex_modes_are_refused(tmp_path):
     with pytest.raises(ValidationError, match="extra"):
-        LibrarySettings(data_dir=tmp_path, confirm_destrutive=False)
+        LibrarySettings(data_dir=tmp_path / "agent", confirm_destrutive=False)
     with pytest.raises(ValidationError):
-        LibrarySettings(data_dir=tmp_path, reflex="laya")  # one process-wide model: NEO.app's
+        LibrarySettings(data_dir=tmp_path / "agent", reflex="laya")  # one process-wide model: NEO.app's
     with pytest.raises(ValidationError, match="Gemini key"):
-        LibrarySettings(data_dir=tmp_path, reflex="lite")
-    assert LibrarySettings(data_dir=tmp_path, reflex="lite", gemini_api_key="k").reflex == "lite"
+        LibrarySettings(data_dir=tmp_path / "agent", reflex="lite")
+    assert LibrarySettings(data_dir=tmp_path / "agent", reflex="lite", gemini_api_key="k").reflex == "lite"
 
 
 def test_keys_never_show_in_repr(tmp_path):
-    s = LibrarySettings(data_dir=tmp_path, gemini_api_key="sk-GEM", groq_api_key="sk-GROQ", anthropic_api_key="sk-ANT")
-    s2 = LibrarySettings(data_dir=tmp_path, GEMINI_API_KEYS="sk-EXTRA")  # the env-style name works too
+    s = LibrarySettings(data_dir=tmp_path / "agent", gemini_api_key="sk-GEM", groq_api_key="sk-GROQ", anthropic_api_key="sk-ANT")
+    s2 = LibrarySettings(data_dir=tmp_path / "agent", GEMINI_API_KEYS="sk-EXTRA")  # the env-style name works too
     for text in (repr(s), str(s), repr(s2)):
         assert "sk-" not in text
     assert s.gemini_keys == ["sk-GEM"] and s2.gemini_keys == ["sk-EXTRA"]

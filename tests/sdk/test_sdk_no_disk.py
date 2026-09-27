@@ -114,6 +114,40 @@ async def test_the_agents_folders_are_never_neo_apps(home):
         neo2.AgentConfig(models_dir=home / ".neo" / "models")
 
 
+async def test_neo_apps_data_where_neo_data_dir_moved_it_is_never_an_agents(tmp_path, monkeypatch):
+    """NEO.app's data moved with NEO_DATA_DIR (or its memory with NEO_MEMORY_PATH): never an
+    agent's folder or memory, and secret to every agent's tools (read from the environment only —
+    an embedded agent never opens ~/.neo/.env to find out)."""
+    from neo.security import policy
+
+    app = tmp_path / "moved-neo"
+    app.mkdir()
+    (app / "memory.sqlite3").write_text("NEO.app's memory")
+    app_mem = tmp_path / "elsewhere" / "neo-memory.sqlite3"
+    monkeypatch.setenv("NEO_DATA_DIR", str(app))
+    monkeypatch.setenv("NEO_MEMORY_PATH", str(app_mem))
+    for bad in (
+        {"data_dir": app},
+        {"data_dir": app / "sub"},  # inside it
+        {"data_dir": tmp_path},  # holding it
+        {"memory": neo2.MemoryConfig(path=app / "memory.sqlite3")},
+        {"memory": neo2.MemoryConfig(path=app_mem)},
+        {"data_dir": app_mem.parent},  # holding NEO.app's memory
+    ):
+        with pytest.raises(ValueError, match="NEO.app's own data"):
+            neo2.AgentConfig(**bad)
+    from neo.config import LibrarySettings
+
+    with pytest.raises(ValueError, match="NEO.app's own data"):
+        LibrarySettings(data_dir=app / "sub")  # the settings an agent runs with check it too
+    assert not policy.is_secret(app / "memory.sqlite3")  # NEO.app's own tools: as before
+    async with neo2.AsyncAgent(neo2.AgentConfig(tools="none", data_dir=tmp_path / "agent"), provider=ScriptedBrain()):
+        for p in (app / "memory.sqlite3", app / "audit.log", app_mem, Path(str(app_mem) + "-wal")):
+            assert policy.is_secret(p), p
+        assert policy.covers_secret(tmp_path) and not policy.shell_is_read_only(f"cat {app}/audit.log")
+    assert (app / "memory.sqlite3").read_text() == "NEO.app's memory"
+
+
 async def test_a_folder_of_the_hosts_own_files_is_refused(tmp_path):
     d = tmp_path / "project"
     d.mkdir()
