@@ -1,10 +1,12 @@
 """Zero-LLM dispatch: regex fast paths, and plans that cover a whole utterance with them.
 
 Tools declare `fast_path=[(regex, args)]`, or `(regex, args, check)` when the words alone can't
-tell ("search X on <W>" is a site search only if W is a site NEO knows). `match()` finds the
-tool whose pattern accepts a text. `plan()` covers a whole utterance with fast-path steps — "open notes and type salt and
-pepper" → open_app(notes), type_text("salt and pepper") — or returns None so the utterance
-goes to a model. The rules that make it safe:
+tell ("search X on <W>" is a site search only if W is a site NEO knows). A check may also read
+:func:`utterance`, the whole request a plan is covering ("as white" is no song in "open chess and
+play as white"). `match()` finds the tool whose pattern accepts a text. `plan()` covers a whole
+utterance with fast-path steps — "open notes and type salt and pepper" → open_app(notes),
+type_text("salt and pepper") — or returns None so the utterance goes to a model. The rules that
+make it safe:
 
 * A *payload* tool (type_text, dictate, click_text, notes_create, memory, web_search) takes
   the rest of the sentence as its text: "salt and pepper" is never split at "and". Only a
@@ -17,6 +19,7 @@ goes to a model. The rules that make it safe:
 from __future__ import annotations
 
 import re
+from contextvars import ContextVar
 
 from neo.agent.registry import RegisteredTool, registry
 
@@ -25,6 +28,13 @@ Step = tuple[str, dict]
 SPLIT = re.compile(r"\s*(?:,|;|\band then\b|\bthen\b|\band\b|\bafter that\b)\s*", re.I)
 _EDGE = " ,.;!?"
 _QUOTED = re.compile(r"""^(["“'])([^"“”']*)(["”'])$""")
+_utterance: ContextVar[str] = ContextVar("fastpath_utterance", default="")
+
+
+def utterance() -> str:
+    """The whole request :func:`plan` is covering while its checks run ("" for a lone
+    :func:`match`)."""
+    return _utterance.get()
 
 
 def strip_quotes(v):
@@ -74,13 +84,24 @@ def is_payload(name: str) -> bool:
     return bool(t and t.payload)
 
 
-def plan(text: str, *, first_index: int = 0) -> list[Step] | None:
+def plan(text: str, *, first_index: int = 0, whole: str = "") -> list[Step] | None:
     """Fast-path steps that cover the *whole* text, in order, or None.
 
-    `first_index` > 0 means steps already ran for this utterance (chain rules apply)."""
+    `first_index` > 0 means steps already ran for this utterance (chain rules apply). `whole`:
+    the utterance when `text` is only what is left of it (what the checks read as the request)."""
     text = text.strip(_EDGE)
     if not text:
         return []
+    if _utterance.get():  # a clause of the request being planned
+        return _plan(text, first_index)
+    token = _utterance.set(whole.strip(_EDGE) or text)
+    try:
+        return _plan(text, first_index)
+    finally:
+        _utterance.reset(token)
+
+
+def _plan(text: str, first_index: int) -> list[Step] | None:
     whole = match(text)
     if whole is not None:
         tool, _ = whole

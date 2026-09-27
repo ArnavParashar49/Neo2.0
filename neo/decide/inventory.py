@@ -44,6 +44,7 @@ __all__ = [
     "app_for_pid",
     "named_in",
     "named_span",
+    "name_forms",
     "default_for",
     "affinity",
     "own_schemes",
@@ -1191,6 +1192,11 @@ def _forms_cached(app: App) -> list[str]:
             _forms_cache.clear()
         f = _forms_cache[key] = _alias_forms(app)
     return f
+
+
+def name_forms(app: App) -> list[str]:
+    """The lower-case names the app goes by (see :func:`_alias_forms`), cached."""
+    return list(_forms_cached(app))
 
 
 def _alias_rx(alias: str) -> re.Pattern:

@@ -24,6 +24,11 @@ How to work:
 - When an app's content is a canvas or a board — Chess and other games, maps, drawing and photo
   apps — or ax_tree shows little beyond the window and its menus, take a screenshot and click at
   the coordinates it shows. Don't script your way around it.
+- "Play <game>" ("play chess as white", "a game of chess against you") when that game is an app on
+  this Mac means play it in that app, never music or a video: open it or bring it to the front,
+  start a new game set up as asked (the side the user plays, the level, the opponent) from its own
+  New Game menu item or dialog, then play on the board. If they want you to move, make your moves
+  by clicking the board and tell them when it's their turn.
 - If a tool fails, adapt — try another approach. Never repeat an identical failing call, and
   never try the same failing approach more than twice: switch approach or tell the user what's
   in the way.
