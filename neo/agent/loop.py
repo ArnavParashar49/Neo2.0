@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from typing import Literal
 
@@ -30,6 +31,25 @@ _VERIFY_NOTE = (
 )
 
 _SEARCHY = ("search", "fetch", "web", "lookup", "find")
+
+# Time spent waiting for the user rather than working — NEO's browser held while the user drives it
+# — is not a run's time: each clock says how many seconds of that there have been so far.
+_pause_clocks: list[Callable[[], float]] = []
+
+
+def add_pause_clock(fn: Callable[[], float]) -> None:
+    if fn not in _pause_clocks:
+        _pause_clocks.append(fn)
+
+
+def paused() -> float:
+    total = 0.0
+    for fn in list(_pause_clocks):
+        try:
+            total += float(fn())
+        except Exception:  # noqa: BLE001 — a broken clock counts nothing
+            pass
+    return total
 
 
 @dataclass
@@ -233,6 +253,7 @@ async def run_agent(
     import time as _time
 
     deadline = _time.monotonic() + (max_seconds or s.max_seconds)
+    paused0 = paused()
 
     messages: list[Message] = list(history or [])
     if goal:
@@ -246,7 +267,7 @@ async def run_agent(
     verified = False
 
     for _ in range(max_steps):
-        if _time.monotonic() > deadline:
+        if _time.monotonic() - (paused() - paused0) > deadline:
             await _settle(ev, idle_on_finish, job)
             summary = "; ".join(f"{st.tool}: {'ok' if st.ok else 'failed'}" for st in steps[-4:])
             return AgentResult(

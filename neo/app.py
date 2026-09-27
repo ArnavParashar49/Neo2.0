@@ -77,6 +77,19 @@ class App:
         print("[privacy] erased everything NEO kept about the user")
         return counts
 
+    async def resume_browsing(self, text: str) -> None:
+        """The user handed NEO's browser back after doing their part (a login, a code): the job
+        goes on, as if they had said so — they did, on the card."""
+        if self.voice and getattr(self.voice, "handles_text", False):
+            await bus().say(text, role="user")
+            await self.voice.send_text(text)
+        else:
+            await self.handle_text(text)
+
+    async def decline(self, action_id: str) -> None:
+        """The user took NEO's browser over while it waited for their OK: that's a no."""
+        await self.answer(False, action_id=action_id, said="no")
+
     def cancel_current(self) -> bool:
         """Stop everything in flight (the stop button / "stop")."""
         n = 0
@@ -106,6 +119,9 @@ class App:
                 await bus().say(text, role="user")
                 await self.answer(ans, said=text)  # typed straight to the question, in any voice mode
             elif self.voice and getattr(self.voice, "handles_text", False):
+                from neo.tools.browser_live import live
+
+                live.user_said()  # the user's own words (a typed request has its job only in Live's calls)
                 await self.voice.send_text(text)  # Live answers aloud + in the transcript
             else:
                 await self.handle_text(text)
@@ -124,6 +140,9 @@ class App:
             await bus().publish("erased", counts=counts)
             await bus().note("Erased: " + ", ".join(f"{n} {k}" for k, n in counts.items()))
         elif kind == "stop":
+            from neo.tools.browser_live import live
+
+            live.user_stopped()  # the page NEO was on stays, and it's the user's now
             if self.voice:
                 await self.voice.interrupt()  # tells Laya's outcome ledger, knowing how long NEO spoke
             else:
@@ -221,6 +240,10 @@ async def run() -> None:
         print(f"[neo] missing: {', '.join(missing)} — allow NEO in System Settings → Privacy & Security (NEO's menu has shortcuts)")
     load_all()
     app = App()
+    from neo.tools.browser_live import live
+
+    live.hooks.resume = app.resume_browsing
+    live.hooks.decline = app.decline
     ui = UIServer(app.on_command)
     await ui.start()
     warmup(app.session.reflex)  # Laya, then the memory embedder, sequentially
