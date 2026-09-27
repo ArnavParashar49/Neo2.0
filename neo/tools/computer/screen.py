@@ -386,14 +386,17 @@ def _grab(cmd_extra: list[str]) -> Image.Image:
     return img
 
 
-def _grab_rect(x: int, y: int, w: int, h: int, *, fallback: bool = True) -> tuple[Image.Image, str]:
-    """The pixels of a rectangle in global points (on one display), at the display's resolution.
-    ``fallback`` False: when the in-process capture is on and fails, no picture (sck.Failed) rather
-    than the CLI's — a before/after pair of change samples must come one way to be compared."""
+def _grab_rect(
+    x: int, y: int, w: int, h: int, *, fallback: bool = True, display: Display | None = None
+) -> tuple[Image.Image, str]:
+    """The pixels of a rectangle in global points (on one display, ``display`` when known), at the
+    display's resolution. ``fallback`` False: when the in-process capture is on and fails, no
+    picture (sck.Failed) rather than the CLI's — a before/after pair of change samples must come
+    one way to be compared."""
     if _sck_on():
         from neo.tools.computer import sck
 
-        d = display_at(x + w / 2, y + h / 2) or display_at(x, y)
+        d = display or display_at(x + w / 2, y + h / 2) or display_at(x, y)
         try:
             if d is None:
                 raise sck.Failed("that rectangle isn't on a display")
@@ -427,19 +430,19 @@ def _grab_window(window_id: int) -> tuple[Image.Image, str]:
     return _grab(["-o", "-l", str(int(window_id))]), "cli"
 
 
-def _on_display(region: tuple[int, int, int, int]) -> tuple[int, int, int, int]:
-    """A region cut to the display it is on (its centre's, else its top-left corner's): only what
-    is on that screen is ever in a picture of it, whichever way it is captured. Off every display:
-    as it is."""
+def _on_display(region: tuple[int, int, int, int]) -> tuple[tuple[int, int, int, int], Display | None]:
+    """(a region cut to the display it is on, that display): its centre's display, else its
+    top-left corner's. Only what is on that screen is ever in a picture of it, whichever way it is
+    captured. Off every display: as it is, and None."""
     x, y, w, h = (int(v) for v in region)
     d = display_at(x + w / 2, y + h / 2) or display_at(x, y)
     if d is None:
-        return x, y, w, h
+        return (x, y, w, h), None
     left, top = max(x, d.x), max(y, d.y)
     right, bottom = min(x + w, d.x + d.w), min(y + h, d.y + d.h)
     if right - left < 1 or bottom - top < 1:
-        return x, y, w, h
-    return _whole(left, top, right, bottom)
+        return (x, y, w, h), None
+    return _whole(left, top, right, bottom), d
 
 
 def grab(region: tuple[int, int, int, int] | None = None, display: Display | None = None) -> Frame:
@@ -449,8 +452,8 @@ def grab(region: tuple[int, int, int, int] | None = None, display: Display | Non
     _need_permission()
     t0, t = time.monotonic(), time.perf_counter()
     if region:
-        x, y, w, h = _on_display(region)
-        img, backend = _grab_rect(x, y, w, h)
+        (x, y, w, h), home = _on_display(region)
+        img, backend = _grab_rect(x, y, w, h, display=home)
         x0, y0, width = float(x), float(y), float(w)
     else:
         d = display or displays()[0]

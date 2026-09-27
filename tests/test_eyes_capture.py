@@ -851,6 +851,13 @@ def test_an_answered_capture_starts_the_count_again(fake_sck):
     assert sck.enabled()
 
 
+def test_a_call_never_made_for_want_of_time_is_no_miss():
+    started: list = []
+    with pytest.raises(sck.Failed, match="no time left"):
+        sck._wait(started.append, lambda *a: None, "the screen capture", time.monotonic() - 0.01, capture=True)
+    assert started == [] and sck._misses == 0 and sck.enabled() is sck.available()
+
+
 def test_one_capture_waits_one_timeout_in_all(fake_sck):
     """The lock, the window list, the list again for a new window and the capture share one
     deadline: a slow list and a capture that never answers cost the timeout once, then the CLI."""
@@ -984,8 +991,24 @@ def bench() -> None:  # pragma: no cover - run by hand: python tests/test_eyes_c
     after = _med(lambda: screen.render(frame, "after", rect=(100.0, 100.0, 800.0, 600.0), fmt="jpeg"), 15)
     samples = _med(lambda: screen.samples_from(frame, [(400.0, 300.0), (900.0, 500.0)]), 30)
     print(f"zoom 320×200 pt → 768×480: {zoom:.1f} ms · after-look 800×600 pt: {after:.1f} ms · 2 change samples: {samples:.2f} ms")
+    _bench_windows()
     _bench_cli_file()
     _bench_sck()
+
+
+def _bench_windows() -> None:  # pragma: no cover
+    """Windows and regions under the upload budget: size, bytes, quality and render time."""
+    print("windows and regions (Retina frame, JPEG): size, upload, quality, render")
+    for kind in ("ui", "mixed"):
+        frame = screen.Frame(synthetic_screen(kind), 0.0, 0.0, 0.5)
+        row = []
+        for what, rect in (("window", (100.0, 60.0, 700.0, 700.0)), ("window", (100.0, 60.0, 780.0, 780.0)),
+                           ("region", (300.0, 100.0, 760.0, 490.0))):
+            c = screen.render(frame, what, rect=rect, fmt="jpeg")
+            ms = _med(lambda frame=frame, what=what, rect=rect: screen.render(frame, what, rect=rect, fmt="jpeg"), 9)
+            q = "q85 4:4:4" if _jpeg_is_q85_444(c.part.data) else "other"
+            row.append(f"{what} {rect[2]:g}×{rect[3]:g} pt → {c.w}×{c.h} {len(c.part.data) / 1e3:.0f} KB {q} {ms:.1f} ms")
+        print(f"  {kind:6} " + " | ".join(row))
 
 
 def _imageio_write(cg, uti: str, path: str) -> None:

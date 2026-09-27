@@ -110,11 +110,12 @@ def _wait(
     """Start an asynchronous ScreenCaptureKit call and wait for its completion handler, which runs
     ``take`` on what it was handed (on ScreenCaptureKit's own queue: its image is copied out there,
     while it is surely alive). No answer by ``deadline`` (time.monotonic): Failed (a late answer is
-    dropped), and a miss. Only an answered ``capture`` clears the misses."""
+    dropped), and a miss. No time left to ask at all: Failed, not a miss (nothing went unanswered).
+    Only an answered ``capture`` clears the misses."""
     global _misses
     left = deadline - time.monotonic()
     if left <= 0:
-        raise _missed(what)
+        raise Failed(f"no answer to {what} in time (no time left to ask)")
     done = threading.Event()
     box: dict[str, Any] = {}
 
@@ -287,9 +288,8 @@ def capture_rect(
         raise Failed("that rectangle isn't on the display")
 
     def run() -> Image.Image:
-        content, fresh = _shareable(deadline), False
-        if _content is not None and _content[1] is content and _neo_new_since(_content[2]):
-            content, fresh = _shareable(deadline, fresh=True), True
+        fresh = _content is not None and _neo_new_since(_content[2])  # (a NEO window newer than the list)
+        content = _shareable(deadline, fresh=fresh)
         try:
             shown = _display(content, display)
         except Failed:  # (a display newer than the cached list: look again once)
