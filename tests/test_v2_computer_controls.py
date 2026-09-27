@@ -83,6 +83,7 @@ class World:
 
     names = {NEO: "NEO", CHESS: "Chess", DOCK: "Dock", MAIL: "Mail"}
     regular = {NEO: True, CHESS: True, DOCK: False, MAIL: True}
+    layers = {NEO: 3, DOCK: 20}  # the window server's: NEO's card floats, the Dock has its own; apps' windows are normal (0)
 
     def __init__(self, log: list):
         self.log = log
@@ -107,6 +108,13 @@ class World:
             if rx <= x < rx + rw and ry <= y < ry + rh:
                 return ax.Hit(pid=pid, app=self.names[pid], label=label, role=role, regular=self.regular[pid], sheet=sheet)
         return ax.Hit()
+
+    def windows_at(self, x, y):
+        return [
+            ax.Win(pid, self.names[pid], self.layers.get(pid, 0), (float(rx), float(ry), float(rw), float(rh)))
+            for rx, ry, rw, rh, pid, *_ in self.regions
+            if rx <= x < rx + rw and ry <= y < ry + rh
+        ]
 
     async def bring(self, pid):
         self.log.append(("bring", pid))
@@ -146,6 +154,7 @@ def world(monkeypatch):
     monkeypatch.setattr(inp, "_post", w.posted)
     monkeypatch.setattr(inp, "time", types.SimpleNamespace(sleep=lambda s: log.append(("sleep", s))))
     monkeypatch.setattr(ax, "hit", w.hit)
+    monkeypatch.setattr(ax, "windows_at", w.windows_at)
     monkeypatch.setattr(ax, "is_neo", lambda pid, name="": pid == NEO)
     monkeypatch.setattr(ax, "scene", w.scene)
     monkeypatch.setattr(focus, "front_app", lambda: w.front)

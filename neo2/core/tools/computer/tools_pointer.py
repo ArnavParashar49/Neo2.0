@@ -169,14 +169,17 @@ async def click(a: dict, c: ToolContext) -> str | ToolOutput:
     pid = pid or h.pid
     if h.app:
         head += f" in {h.app}"
-    if t.brought:
+    if t.brought and not t.cold:
         head += f" (brought {t.brought} to the front first)"
     head += "."
     before = await gates._watch(c, pid, pts, hover=pts[0])
     await asyncio.to_thread(inp.click, *pts[0], button=button, count=count, mods=mods)
     if before is None:
+        if await pointer.woke(t, pid):  # nothing looked at, but the click itself brought its app forward
+            said = pointer.brought_only(h.app or t.brought or "the app", looked=False).said
+            return ToolOutput(f"{head} {said}{gates._input_doubt()}")
         return head + gates._input_doubt()
-    out = await pointer.outcome(before, pid, pts, [_at(*pts[0])])
+    out = await pointer.outcome(before, pid, pts, [_at(*pts[0])], target=t)
     if not pointer.at_the_point(h, shot is not None):
         out = pointer.maybe_elsewhere(out, _at(*pts[0]))
     under = [pointer.words(h)] if not a.get("id") else []

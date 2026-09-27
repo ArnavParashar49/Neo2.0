@@ -63,20 +63,29 @@ def desk(monkeypatch):
     monkeypatch.setattr(ax, "regular", lambda pid: True)
     monkeypatch.setattr(comp.inp, "move", lambda x, y: None)
     _FRONTED.clear()
+    front = {"app": ("Finder", 102)}
 
     async def bring_pid_front(pid):
         _FRONTED.append(pid)
-        return True, next((n for n, p in _PIDS.items() if p == pid), "")
+        front["app"] = (next((n for n, p in _PIDS.items() if p == pid), ""), pid)
+        return True, front["app"][0]
 
     monkeypatch.setattr(comp.apps, "bring_pid_front", bring_pid_front)
     monkeypatch.setattr(comp.pointer, "SETTLE_S", 0.0)
     from neo2.core.tools.computer import focus
 
-    monkeypatch.setattr(focus, "front_app", lambda: ("Finder", 102))
+    monkeypatch.setattr(focus, "front_app", lambda: front["app"])
     monkeypatch.setattr(ax, "app_of", lambda ref: _OWNERS.get(ref, ""))
     monkeypatch.setattr(ax, "app_at", _owner_at)
     # the window server's view of the same desktop, and every app's other names
     monkeypatch.setattr(ax, "window_owner_at", lambda x, y: (_owner_at(x, y), 100 + int(x >= 100) + int(x >= 200)))
+
+    def windows_at(x, y):  # …with its layers: NEO's overlay floats, the apps' windows are normal ones
+        owner = _owner_at(x, y)
+        pid = _PIDS[owner]
+        return [ax.Win(pid, owner, 3 if owner == "NEO" else 0, (100.0 * (pid - 100), 0.0, 100.0, 982.0))]
+
+    monkeypatch.setattr(ax, "windows_at", windows_at)
     # every app's other names, by its pid or by its name (what names_of_app says of that name)
     monkeypatch.setattr(ax, "app_names", lambda pid: ax.names_of_app(next((n for n, p in _PIDS.items() if p == pid), "")))
     monkeypatch.setattr(ax, "names_of_app", lambda name: set())

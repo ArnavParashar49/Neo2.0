@@ -1193,6 +1193,69 @@ def window_owner_at(x: float, y: float) -> tuple[str, int] | None:
     return "", 0
 
 
+@dataclass(frozen=True)
+class Win:
+    """A window on screen as the window server has it: the process that owns it, its layer (0: a
+    normal app window — the menu bar, status items, the Dock, menus, Notification Center, Control
+    Center and Spotlight are all on other layers) and its frame (points, from the top left)."""
+
+    pid: int
+    owner: str
+    layer: int
+    frame: tuple[float, float, float, float]
+
+
+@pooled
+def windows_at(x: float, y: float) -> list[Win] | None:
+    """Every on-screen window under a screen point, front to back, from the window server (None:
+    it couldn't say)."""
+    try:
+        import Quartz as Q
+
+        wins = Q.CGWindowListCopyWindowInfo(
+            Q.kCGWindowListOptionOnScreenOnly | Q.kCGWindowListExcludeDesktopElements, Q.kCGNullWindowID
+        )
+    except Exception:  # noqa: BLE001
+        return None
+    if wins is None:
+        return None
+    out = []
+    for w in wins:
+        b = w.get("kCGWindowBounds") or {}
+        wx, wy, ww, wh = (float(b.get(k, 0) or 0) for k in ("X", "Y", "Width", "Height"))
+        if ww <= 0 or wh <= 0 or float(w.get("kCGWindowAlpha", 1) or 0) <= 0:
+            continue
+        if wx <= x < wx + ww and wy <= y < wy + wh:
+            layer = int(w.get("kCGWindowLayer", 1))  # (no layer given: not taken for a normal window)
+            out.append(Win(int(w.get("kCGWindowOwnerPID", 0) or 0), str(w.get("kCGWindowOwnerName", "") or ""), layer, (wx, wy, ww, wh)))
+    return out
+
+
+@pooled
+def key_window(pid: int) -> Any:
+    """The app's key window: its focused window while it is the active app. None when it isn't
+    active — its own word (AXFrontmost), whatever LaunchServices calls frontmost — or no window of
+    it is key."""
+    app = _app_el(pid)
+    if _attr(app, "AXFrontmost") is False:
+        return None
+    return _attr(app, AS.kAXFocusedWindowAttribute)
+
+
+def _on(win) -> Any:
+    """A sheet counts as the window it is on."""
+    return _attr(win, "AXParent") if win is not None and _str(_attr(win, AS.kAXRoleAttribute)) == "AXSheet" else win
+
+
+@pooled
+def is_key(h: Hit) -> bool:
+    """Is the window under a point its app's key window, with the app active — so a click there
+    reaches the view instead of only activating the window?"""
+    if h.window is None or not h.pid:
+        return False
+    return _same(_on(key_window(h.pid)), _on(h.window))
+
+
 def app_names(pid: int) -> set[str]:
     """Every name the app with this pid goes by: its own, its bundle id, its executable's."""
     try:
