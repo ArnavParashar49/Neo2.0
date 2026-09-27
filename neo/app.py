@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import signal
 import sys
@@ -262,9 +263,12 @@ async def run() -> None:
         except Exception:  # noqa: BLE001
             pass
     try:
+        from neo.tools import render
         from neo.tools.browser import shutdown as close_browser
 
         await asyncio.wait_for(close_browser(), 2)
+        with contextlib.suppress(Exception):  # the invisible page renderer (atexit would also do it)
+            await asyncio.wait_for(render.shutdown(), 2)
         if s := await asyncio.wait_for(app.session.checkpoint(final=True, budget_s=5.0), _SUMMARY_BUDGET_S):
             print(f"[memory] session saved ({len(s)} chars)")  # not what was said: logs stay content-free
     except TimeoutError:

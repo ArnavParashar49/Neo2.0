@@ -344,6 +344,19 @@ def _asks(text: str) -> bool:
     return question and _command_steps(text) is None and _command_steps(core) is None
 
 
+def _answers(name: str, p) -> bool:
+    """Is the model's call really the user answering the question on the table? It re-asks for the
+    action, wraps it in agent_task, or calls browse again for a card a browse run is waiting on
+    (that card belongs to the inner browser step, not to browse)."""
+    if name in (p.tool, "agent_task"):
+        return True
+    if name == "browse":
+        from neo.tools import browse
+
+        return browse.asks(p)
+    return False
+
+
 def _is_action_call(fc) -> bool:
     """A call that only does something (nothing to report when it works)."""
     t = registry().get(fc.name)
@@ -1127,14 +1140,14 @@ class LiveVoice:
         p = confirm.peek()
         heard = answer_of(asked) if (p is not None and asked and self._utt_started > p.staged_at) else None
         try:
-            if heard is True and fc.name in (p.tool, "agent_task") and not self._voiced(p):
+            if heard is True and _answers(fc.name, p) and not self._voiced(p):
                 # A "yes" to something — but NEO never read this question out. It only counts once
                 # the user has heard what they're agreeing to.
                 result = (
                     f"NEEDS_CONFIRM: the user hasn't heard this question yet. Ask them exactly this, in "
                     f"their language, and wait for their answer: {p.summary} — should I go ahead?"
                 )
-            elif heard is not None and fc.name in (p.tool, "agent_task"):
+            elif heard is not None and _answers(fc.name, p):
                 # The user's own "yes"/"no" to the question on the table (the model re-asking for the
                 # action, or wrapping it in agent_task): answer it from their words.
                 reply = await self._agent_session.answer(heard, text=asked)

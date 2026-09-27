@@ -627,3 +627,17 @@ def test_a_can_you_the_tool_itself_accepts_still_runs_on_the_lane():
 
     load_all()
     assert _command_steps("Can you type hello?") == [("type_text", {"text": "hello"})]  # as before c6848e0
+
+
+def test_a_yes_to_a_browse_card_answers_it(monkeypatch):
+    from types import SimpleNamespace
+
+    from neo.tools import browse
+    from neo.voice.live import _answers
+
+    p = SimpleNamespace(tool="browser_click", action_id="browser_click:abc")
+    assert _answers("browser_click", p) and _answers("agent_task", p)
+    assert not _answers("browse", p)  # not a card a browse run is waiting on
+    monkeypatch.setattr(browse, "_asked", {"browser_click:abc"})
+    assert _answers("browse", p)  # the model calling browse again after "yes" answers it
+    assert not _answers("web_search", p)
