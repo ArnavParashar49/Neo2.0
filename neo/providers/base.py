@@ -6,7 +6,7 @@ never touches a vendor SDK.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Collection
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
 
@@ -278,30 +278,56 @@ class AllBrainsFailed(ProviderError):
             return "I couldn't reach any model, so I stopped."
         return f"I had to stop: {said}."
 
-    def _said(self) -> str:
-        parts = [failure_words(n, e) for n, e in self.failures]
+    def _said(self, failures: list[tuple[str, ProviderError]] | None = None) -> str:
+        parts = [failure_words(n, e) for n, e in (self.failures if failures is None else failures)]
         if not parts:
             return ""
         return parts[0] if len(parts) == 1 else ", ".join(parts[:-1]) + " and " + parts[-1]
+
+    def _asked(self) -> list[tuple[str, ProviderError]]:
+        """The failures of the brains that were asked: a brain left out of a picture step because
+        it can't see (Blind) was never asked, and saying so first hides why the others failed."""
+        asked = [(n, e) for n, e in self.failures if getattr(e, "kind", "") != "blind"]
+        return asked or self.failures
 
 
 class NoEyes(AllBrainsFailed):
     """A step working from a picture (a screenshot it took, a photo sent), and no brain that can
     see it could answer: the run stops and says so rather than hand the picture to a brain that
-    would act blind (DECISIONS 39, 43)."""
+    would act blind (DECISIONS 39, 43).
 
-    def __init__(self, failures: list[tuple[str, ProviderError]]) -> None:
+    `seeing`: the brains that see which were asked and failed — none when no brain that sees is set
+    up at all (then the words say that, not that one is busy). None: every failure that isn't Blind.
+    `photo`: the picture is one the user sent, not a screenshot of the screen."""
+
+    def __init__(
+        self,
+        failures: list[tuple[str, ProviderError]],
+        *,
+        seeing: Collection[str] | None = None,
+        photo: bool = False,
+    ) -> None:
         super().__init__(failures)
         self.kind = "no_eyes"
+        self.photo = photo
+        if seeing is None:
+            seeing = {n for n, e in failures if getattr(e, "kind", "") != "blind"}
+        self.seeing = frozenset(seeing)
 
     def spoken(self) -> str:
+        what = "the picture" if self.photo else "the screen"
         # Why the brains that see couldn't answer; that the others can't see goes without saying.
-        seeing = [(n, e) for n, e in self.failures if getattr(e, "kind", "") != "blind"]
-        said = AllBrainsFailed(seeing)._said() if seeing else self._said()
-        why = f" ({said})" if said else ""
+        tried = [(n, e) for n, e in self.failures if n in self.seeing and getattr(e, "kind", "") != "blind"]
+        if not tried:
+            return (
+                f"None of the models set up for me can see {what}, so I stopped rather than act blind. "
+                "I can still press buttons and menu items by their names; to work from pictures I need a "
+                "model that sees (a Gemini key, or Groq's vision model)."
+            )
         return (
-            f"The model that can see the screen is busy right now{why}, so I stopped rather than act "
-            "blind. I can still press buttons and menu items by their names, or you can try again in a minute."
+            f"The model that can see {what} is busy right now ({self._said(tried)}), so I stopped rather "
+            "than act blind. I can still press buttons and menu items by their names, or you can try "
+            "again in a minute."
         )
 
 
@@ -315,7 +341,7 @@ class OutOfTime(AllBrainsFailed):
         self.limit_s = limit_s
 
     def spoken(self) -> str:
-        said = self._said()
+        said = self._said(self._asked())
         limit = f" ({int(self.limit_s)}s)" if self.limit_s else ""
         head = f"I had to stop: {said}, and" if said else "I had to stop:"
         return f"{head} waiting any longer would run past my time limit{limit}."

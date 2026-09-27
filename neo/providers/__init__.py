@@ -38,6 +38,7 @@ from neo.providers.base import (
     OutOfTime,
     Provider,
     ProviderError,
+    QuotaExhausted,
     RateLimited,
     ToolSpec,
     TooSlow,
@@ -211,18 +212,40 @@ _PATIENCE_S = 20.0
 _ANSWER_S = 3.0
 
 
-def _too_late(p: Provider) -> TooSlow | None:
-    """Within a run: the reason not to ask this brain now — the run's time is up, or the wait it
-    asked for (a spent per-minute budget) ends after it. None: ask it."""
+def _too_late(p: Provider) -> ProviderError | None:
+    """Within a run: the reason not to ask this brain now. None: ask it.
+
+    The run's time is up: TooSlow (the step stops as out of time). The brain is cooling until after
+    the time left (a spent quota, an overload, a per-minute wait): its own reason — the quota and
+    when it resets, the overload — as it would have failed had it been asked. Whether the time is
+    what stopped the step is decided once every brain had its turn (Chain._out_of_time)."""
     left = budget.left()
     if left is None:
         return None
     if left <= 0:
         return TooSlow("the run's time is up")
-    wait = _cooling(p) - _time.time()
-    if wait > left:
-        return TooSlow(f"{p.name} asked to wait {wait:.0f}s, past the {left:.0f}s left")
+    until = _cooling(p)
+    if until - _time.time() > left:
+        return _cooling_error(p, until)
     return None
+
+
+def _cooling_error(p: Provider, until: float) -> ProviderError:
+    """Why a cooling brain can't be asked: its own words when it knows them (Gemini: quota or
+    overload, `cooling_error()`), else the wait it asked for — a wait longer than any rate-limit
+    pause is a spent quota until then."""
+    own = getattr(p, "cooling_error", None)
+    if callable(own):
+        try:
+            e = own()
+        except Exception:  # noqa: BLE001 — can't say: the wait itself, below
+            e = None
+        if isinstance(e, ProviderError):
+            return e
+    wait = max(0.0, until - _time.time())
+    if wait > _WAIT_MAX_S:
+        return QuotaExhausted(f"{p.name}: can't be asked for {wait:.0f}s", until=until)
+    return RateLimited(f"{p.name}: asked to wait {wait:.0f}s", retry_after=wait)
 
 
 async def _patience(name: str) -> None:
@@ -372,20 +395,43 @@ class Chain:
         now = _time.time()
         return out + sorted(extra, key=lambda p: _cooling(p) > now)  # (stable: EYES order otherwise)
 
-    def _no_brain(self, failures: list[tuple[str, ProviderError]], *, pixels: bool = False) -> ProviderError:
+    @staticmethod
+    def _out_of_time(failures: list[tuple[str, ProviderError]]) -> bool:
+        """Did the run's time stop this step: it was up, or a call was cut off at it (TooSlow), or
+        less is left than a brain needs to answer. A brain skipped for a quota or an overload that
+        ends past the time left is not that: its own reason is what the user hears. Nor is a picture
+        step no brain set up could see: more time wouldn't have helped (NoEyes says why)."""
         if any(getattr(e, "kind", "") == "budget" for _, e in failures):
+            return True
+        left = budget.left()
+        if left is None or left > _ANSWER_S:
+            return False
+        return any(getattr(e, "kind", "") != "blind" for _, e in failures)
+
+    def _no_brain(
+        self,
+        failures: list[tuple[str, ProviderError]],
+        *,
+        pixels: bool = False,
+        seeing: Sequence[str] = (),
+        photo: bool = False,
+    ) -> ProviderError:
+        """The error a step ends with when no brain answered. `seeing`: for a picture step, the
+        brains that can see it (asked, or skipped for a cooldown); `photo`: the picture is one the
+        user sent."""
+        if self._out_of_time(failures):
             return OutOfTime(failures, limit_s=budget.limit())
         if self._hosts_only():  # no key of NEO's could have been missing
             return AllBrainsFailed(failures + self._missing)
-        if pixels and any(getattr(e, "kind", "") != "blind" for _, e in failures):
-            return NoEyes(failures)  # a brain that sees was asked and couldn't answer
+        if pixels and any(n in seeing for n, _ in failures):
+            return NoEyes(failures, seeing=seeing, photo=photo)  # a brain that sees couldn't answer
         s = settings()
         if not pool().overrides and not (s.gemini_api_key or s.groq_api_key or s.anthropic_api_key):
             return ProviderError(
                 "no API key set — add GEMINI_API_KEY to .env (free at aistudio.google.com/apikey)"
             )
-        if pixels:
-            return NoEyes(failures or self._missing)
+        if pixels:  # none that sees is set up: the words say so, not that one is busy
+            return NoEyes(failures or self._missing, seeing=(), photo=photo)
         return AllBrainsFailed(failures + self._missing)
 
     async def _failed(self, p: Provider, e: ProviderError, failures: list[tuple[str, ProviderError]]) -> None:
@@ -455,6 +501,12 @@ class Chain:
         pixels = _needs_eyes(messages)
         if pixels:
             providers = self._for_pixels(providers, failures)
+        seeing = [p.name for p in providers if getattr(p, "supports_vision", False)] if pixels else []
+        photo = pixels and _photo_only(messages)
+
+        def no_brain() -> ProviderError:
+            return self._no_brain(failures, pixels=pixels, seeing=seeing, photo=photo)
+
         for p in providers:
             if (late := _too_late(p)) is not None:
                 failures.append((p.name, late))
@@ -465,7 +517,7 @@ class Chain:
                 return turn
             except TooSlow as e:  # the run's time is up: no other brain could answer in none
                 failures.append((p.name, e))
-                raise self._no_brain(failures, pixels=pixels) from None
+                raise no_brain() from None
             except ProviderError as e:
                 await self._failed(p, e, failures)
         if (wait := self._short_wait(failures)) is not None:
@@ -492,7 +544,7 @@ class Chain:
             except ProviderError as e:
                 failures = [(n, x) for n, x in failures if n != name]
                 await self._failed(p, e, failures)
-        raise self._no_brain(failures, pixels=pixels)
+        raise no_brain()
 
     async def stream(
         self, messages: list[Message], *, system: str = "", max_tokens: int = 2048
@@ -538,6 +590,15 @@ def _has_picture(messages: list[Message]) -> bool:
     return any(m.images or any(r.images for r in m.tool_results) for m in messages[start:])
 
 
+def _photo_only(messages: list[Message]) -> bool:
+    """The request's picture is one the user sent (a photo), and no screenshot was taken in it."""
+    from neo.providers.history import request_start
+
+    start = request_start(messages) if messages else 0
+    rest = messages[start:]
+    return any(m.images for m in rest) and not any(r.images for m in rest for r in m.tool_results)
+
+
 def _needs_eyes(messages: list[Message]) -> bool:
     """Is the request being worked on a pixel task: it carries a picture, or a brain that can't see
     already tried to act at screen coordinates in it and was refused (BLIND_REFUSAL) — the task
@@ -558,10 +619,28 @@ def _needs_eyes(messages: list[Message]) -> bool:
 # 4. last, Groq's vision model: 8K tokens a minute, ~30–40 s a picture step — the run's budget
 #    (neo.providers.budget) stops it rather than let it run past the task's limit.
 # A local model joins only once it can see (supports_vision), wherever the user put it. A seeing
-# fallback faster than Groq's goes in before "groq_vision".
+# fallback faster than Groq's goes in before "groq_vision" (and, when it should answer only the
+# steps with a picture, into _EYES_ONLY too).
 EYES: tuple[BrainName, ...] = ("gemini", "gemini_lite", "claude", "groq_vision")
 # Brains that never see (a picture step never goes to them; they take the steps without one).
 _TEXT_ONLY: frozenset[str] = frozenset({"groq", "local"})
+# Seeing fallbacks that only ever answer a step with a picture, never one without (the vision chain
+# has them as eyes, not among its own brains): Groq's vision model's per-minute budget is kept for
+# the pixel steps — an AX-only step goes to a text brain instead.
+_EYES_ONLY: frozenset[str] = frozenset({"groq_vision"})
+# Brains on this Mac: a user who puts one first keeps their pictures here (see _fallback_eyes).
+_ON_THIS_MAC: frozenset[str] = frozenset({"local"})
+
+
+def _fallback_eyes(s: Any) -> tuple[BrainName, ...]:
+    """The seeing fallbacks the chains get: EYES — except for a user who put a brain on this Mac
+    first and named no cloud brain that sees (NEO_BRAIN=local with only a Groq key: no picture ever
+    left the Mac). A fallback in the cloud doesn't change that on its own: their picture steps stop
+    and say so (DECISIONS 39), unless they opt in (NEO_CLOUD_EYES=on) or name one that sees."""
+    named = (s.brain, s.fast_brain, getattr(s, "offline_brain", None))
+    if s.cloud_eyes == "on" or s.brain not in _ON_THIS_MAC or any(n in EYES for n in named):
+        return EYES
+    return ()
 
 
 def brain(purpose: Purpose = "agent", *, effort: Effort | None = None) -> Chain:
@@ -569,14 +648,18 @@ def brain(purpose: Purpose = "agent", *, effort: Effort | None = None) -> Chain:
     if own := _hosts(purpose):
         return Chain(own, sticky=purpose != "vision", effort=effort)
     s = settings()
+    eyes = _fallback_eyes(s)
     if purpose == "fast":
         order: list[BrainName | None] = [s.fast_brain, s.brain, s.offline_brain]
     elif purpose == "vision":
         # The brains that can see the screenshot come first; text-only ones take only the steps that
-        # carry no picture (an AX-only step): given one, they would act blind.
-        vision: list[BrainName | None] = [n for n in (s.brain, *EYES) if n not in _TEXT_ONLY]
+        # carry no picture (an AX-only step): given one, they would act blind. An eyes-only fallback
+        # is asked only for a picture, after these (a brain the user named is theirs to ask).
+        vision: list[BrainName | None] = [
+            n for n in (s.brain, *EYES) if n not in _TEXT_ONLY and (n == s.brain or n not in _EYES_ONLY)
+        ]
         order = vision + [n for n in (s.brain, s.fast_brain, s.offline_brain) if n not in vision]
-        return Chain(_dedupe(order), sticky=False, effort=effort)
+        return Chain(_dedupe(order), sticky=False, eyes=eyes, effort=effort)
     elif purpose == "offline":
         return Chain(_dedupe([s.offline_brain]), effort=effort)  # (no cloud eyes: offline means here)
     elif purpose == "light":
@@ -584,7 +667,7 @@ def brain(purpose: Purpose = "agent", *, effort: Effort | None = None) -> Chain:
         order = ["gemini_lite", s.fast_brain, s.brain, s.offline_brain]
     else:
         order = [s.brain, s.fast_brain, s.offline_brain]
-    return Chain(_dedupe(order), eyes=EYES, effort=effort)
+    return Chain(_dedupe(order), eyes=eyes, effort=effort)
 
 
 # ---- how big a picture may be --------------------------------------------------------------------

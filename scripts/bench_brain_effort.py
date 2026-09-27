@@ -197,6 +197,28 @@ class BlindGroq:
         yield ""
 
 
+class TextGroq:
+    """Groq's text model answering a scripted run of steps with no picture (it can't see)."""
+
+    name = model = "groq"
+    supports_vision, supports_tools = False, True
+
+    def __init__(self, turns: list[Turn]) -> None:
+        self.turns, self.asked = list(turns), 0
+
+    def cooling_until(self) -> float:
+        return 0.0
+
+    async def complete(self, messages, **kw):
+        self.asked += 1
+        await _advance(GROQ_STEP_S)
+        n = sum(1 for m in messages if m.role == "assistant")
+        return self.turns[min(n, len(self.turns) - 1)]
+
+    async def stream(self, messages, **kw):
+        yield ""
+
+
 def _make(brains: dict):
     def make(n):
         if n in brains:
@@ -268,6 +290,73 @@ def overload(all_eyes_busy: bool) -> dict:
             "wall_s": round(took, 1), "outcome": res.stopped, "said": res.text[:140]}  # fmt: skip
 
 
+def text_steps_on_the_vision_chain() -> dict:
+    """A screen task while every Flash model and Flash-Lite are overloaded, Groq's two models up:
+    its steps with no picture (AX reads). Which of Groq's models answers them — each step on the
+    vision model spends ~4K of its 8K tokens a minute, which the next pixel step then waits for."""
+    script = [Turn(tool_calls=[ToolCall(f"a{i}", "ax_tree", {})]) for i in range(4)] + [Turn(text="Listed.")]
+    g = Seeing("gemini", [], LATENCY, down=True)
+    lite = Seeing("gemini_lite", [], LITE_LATENCY, down=True)
+    gv = Seeing("groq_vision", script, {k: GROQ_STEP_S for k in LATENCY})
+    groq = TextGroq(script)
+    prov.make = _make({"gemini": g, "gemini_lite": lite, "groq": groq, "groq_vision": gv})
+    prov._demoted.clear()
+    CLOCK.t = 1000.0
+    res, took = run(_run(_chain("vision", "high"), registry(False), effort="high"))
+    return {"groq_vision_steps": len(gv.levels), "groq_text_steps": groq.asked,
+            "vision_tokens_spent_modeled": len(gv.levels) * 4000, "outcome": res.stopped}  # fmt: skip
+
+
+def stop_reason_spent_quota() -> dict:
+    """Gemini's keys spent until tomorrow, Groq failing with a 500, 170 s of the run left (the
+    budget bound as the integrator wires it): what the user hears."""
+    from neo.providers.base import QuotaExhausted
+
+    until = time.time() + 36_000
+
+    class Spent(Seeing):
+        def cooling_until(self) -> float:
+            return until
+
+        async def complete(self, messages, **kw):
+            raise QuotaExhausted("429 gemini: every key is out of quota", until=until)
+
+    class Failing(TextGroq):
+        async def complete(self, messages, **kw):
+            raise ProviderError("groq: 500 internal server error")
+
+    prov.make = _make({"gemini": Spent("gemini", [], LATENCY), "groq": Failing([])})
+    prov._demoted.clear()
+    from neo import config
+
+    os.environ["GEMINI_API_KEY"] = "bench-key"  # (never sent: every brain is a fake)
+
+    config._settings = None
+    try:
+        chain = prov.Chain(["gemini", "groq"])
+        if NEW:
+            from neo.providers import budget
+
+            with budget.run(lambda: 170.0, limit_s=180.0):
+                err = _stop(chain)
+        else:
+            err = _stop(chain)
+    finally:
+        os.environ.pop("GEMINI_API_KEY", None)
+        config._settings = None
+    return {"stop": type(err).__name__, "said": err.spoken() if hasattr(err, "spoken") else str(err)}
+
+
+def _stop(chain) -> Exception:
+    from neo.providers.base import Message
+
+    try:
+        asyncio.run(chain.complete([Message.user("what's on my calendar")]))
+    except ProviderError as e:
+        return e
+    raise AssertionError("a brain answered")
+
+
 class Throttled(Seeing):
     """A seeing brain on a per-minute budget: every step first gets a 429 asking for `wait` s."""
 
@@ -336,6 +425,19 @@ def settle() -> dict:
     return out
 
 
+def settle_windowless() -> dict:
+    """An app in front with no focused window (all its windows closed; activate_app on it): the wait
+    before the next step (a fixed 0.8 s before)."""
+    if not NEW:
+        return {"waited_s": 0.8}
+    from neo.agent import settle as st
+    from neo.agent.settle import Ready
+
+    mac = _FakeMac(0.0, 0.0)
+    st.probe = lambda app, typing: (setattr(mac, "t", mac.t + 0.002), Ready(True, False, False))[1]
+    return {"waited_s": round(asyncio.run(st.app_ready(clock=mac.now, sleep=mac.sleep)), 3)}
+
+
 def picture_tokens() -> dict:
     """What a 1512×982 screenshot is counted as, per brain, when fitting a request."""
     from neo.providers import fit
@@ -358,7 +460,10 @@ def main() -> None:
         "overload_flash_lite_up": overload(False),
         "overload_every_eye_busy": overload(True),
         "budget_429_wait_50s": budget_overrun(50.0),
+        "text_steps_on_the_vision_chain": text_steps_on_the_vision_chain(),
+        "stop_reason_spent_quota_170s_left": stop_reason_spent_quota(),
         "settle_after_open": settle(),
+        "settle_front_no_window": settle_windowless(),
         "picture_tokens_1512x982": picture_tokens(),
     }
     if NEW:

@@ -7,9 +7,10 @@ it waits until the app is in front with a focused window — and, when the next 
 field that takes text — checking every 50 ms, twice in a row, never longer than 2 s.
 
 When nothing reports a field that takes text (an editor whose role Accessibility doesn't name),
-a focused window is enough once the old fixed time (0.8 s) has passed: never slower than before
-for an app that is up. Only reads: the front app, its focused window, the keyboard focus. Nothing
-is pressed, raised or typed, and nothing keeps running after the wait.
+or the app in front has no focused window (all its windows closed, one that never takes focus),
+the app being in front is enough once the old fixed time (0.8 s) has passed: never slower than
+before for an app that is up. Only reads: the front app, its focused window, the keyboard focus.
+Nothing is pressed, raised or typed, and nothing keeps running after the wait.
 """
 
 from __future__ import annotations
@@ -67,8 +68,9 @@ async def app_ready(
 ) -> float:
     """Wait until the app just opened (`app`, else the app NEO last opened) is ready for the next
     step: in front with a focused window, and with the keyboard in a field that takes text when
-    `typing` (or OLD_SETTLE_S has passed with its window focused). Returns the seconds waited;
-    after `cap` it gives up waiting and the step goes ahead."""
+    `typing` — or, once OLD_SETTLE_S has passed, in front at all (no window or field may ever come:
+    the old fixed wait went ahead then too). Returns the seconds waited; after `cap` it gives up
+    waiting and the step goes ahead."""
     t0 = clock()
     streak = 0
     while True:
@@ -88,7 +90,8 @@ async def app_ready(
                 await sleep(rest)
             return clock() - t0
         waited = clock() - t0
-        ok = r.front and r.window and (not typing or r.editable or waited >= OLD_SETTLE_S)
+        late = waited >= OLD_SETTLE_S
+        ok = r.front and (r.window or late) and (not typing or r.editable or late)
         streak = streak + 1 if ok else 0
         if streak >= STABLE:
             return waited

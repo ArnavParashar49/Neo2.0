@@ -427,6 +427,12 @@ class GeminiProvider:
                 ends.append(self._until(model, ki))
         return min(ends) if ends else 0.0
 
+    def cooling_error(self) -> ProviderError | None:
+        """While no (model, key) can be asked: why — the error asking now would end in (a spent
+        quota and when it resets, an overload, keys refused). None when one can be asked. The chain
+        records it for a brain it skips inside a run (neo.providers._too_late)."""
+        return self._all_blocked_error() if self.cooling_until() else None
+
     def _all_blocked_error(self) -> ProviderError:
         """Nothing left to try: say whether that's quota (for how long), overload or the keys."""
         now = time.time()

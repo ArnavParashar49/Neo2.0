@@ -794,20 +794,24 @@ def test_the_chess_run_survives_on_groq_when_gemini_is_spent(monkeypatch):
     gem_p = prov.make("gemini")
     gem_p._clients = [spent(0), spent(1)]
 
-    # The seeing fallbacks are spent too (Flash-Lite's own quota, Groq's vision model's own limit):
-    # the run's steps carry no picture, so Groq's text model carries it.
+    # The seeing fallbacks (Flash-Lite, Groq's vision model) are asked only for a step with a
+    # picture: this run's steps carry none, so Groq's text model carries it and neither is asked.
+    vision_asked: list[int] = []
+
     async def lite_spent(*, model, contents, config):
+        vision_asked.append(1)
         raise _err(429, "quota", _per_day())
 
     prov.make("gemini_lite")._clients = [
         SimpleNamespace(aio=SimpleNamespace(models=SimpleNamespace(generate_content=lite_spent)))
     ]
 
-    async def vision_spent(**kw):
+    async def vision_create(**kw):
+        vision_asked.append(1)
         req = httpx.Request("POST", "https://api.groq.com/openai/v1/chat/completions")
         raise openai.RateLimitError("rate limited", response=httpx.Response(429, request=req), body=None)
 
-    monkeypatch.setattr(prov.make("groq_vision")._client.chat.completions, "create", vision_spent)
+    monkeypatch.setattr(prov.make("groq_vision")._client.chat.completions, "create", vision_create)
 
     groq_p = prov.make("groq")
     sizes: list[int] = []
@@ -864,6 +868,7 @@ def test_the_chess_run_survives_on_groq_when_gemini_is_spent(monkeypatch):
     assert r.route == "confirm" and len(ran) == 8
     # Gemini: each (model, key) learned spent once, then never asked again on a later step.
     assert len(gemini_asked) == 6
+    assert vision_asked == []  # no step of the run carried a picture
     # Groq: every request it answered fitted its 8K (a 413, if any, was learned from and refitted).
     assert k["n"] >= 12 and all(sz <= 8000 for sz in sizes[-5:])
     # …and every one could ask for the tools it wasn't shown; every follow-up after a yes (offered

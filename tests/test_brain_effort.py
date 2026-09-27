@@ -21,10 +21,13 @@ from neo.providers.base import (
     NoEyes,
     OutOfTime,
     Overloaded,
+    ProviderError,
+    QuotaExhausted,
     RateLimited,
     ToolCall,
     ToolResult,
     Turn,
+    Unavailable,
 )
 from neo.providers.effort import Effort, for_brain, start_level, trouble
 from neo.reflex.schema import Decision
@@ -321,6 +324,20 @@ def test_a_model_that_refuses_a_pictures_resolution_gets_it_without(gem):
     assert first[0].parts[1].media_resolution is not None and second[0].parts[1].media_resolution is None
 
 
+def test_gemini_says_why_it_is_cooling(gem):
+    """What the chain records for a Gemini it skips inside a run: its quota and when it resets, or
+    its overload — the words it would have failed with had it been asked."""
+    g, p = gem.g, gem.p
+    assert p.cooling_error() is None  # nothing cooling: nothing to say
+    tomorrow = time.time() + 36_000
+    p._exhausted[("gemini-3.7-flash", p._kid(0))] = tomorrow
+    e = p.cooling_error()
+    assert isinstance(e, QuotaExhausted) and e.until == tomorrow
+    p._exhausted.clear()
+    p._exhausted[("gemini-3.7-flash", g._ANY_KEY)] = time.time() + 90  # the model overloaded
+    assert isinstance(p.cooling_error(), Overloaded)
+
+
 # ---- which brains may see a picture ---------------------------------------------------------------
 
 
@@ -328,7 +345,10 @@ def test_the_vision_chain_order(monkeypatch):
     from neo import config
 
     monkeypatch.setattr(config, "_settings", None)
-    assert prov.brain("vision").names == ["gemini", "gemini_lite", "claude", "groq_vision", "groq", "local"]
+    # Groq's vision model is only a seeing fallback there: a step with no picture (an AX-only step)
+    # goes to the text brains and never spends its 8K tokens a minute; a picture step reaches it last.
+    assert prov.brain("vision").names == ["gemini", "gemini_lite", "claude", "groq", "local"]
+    assert prov.brain("vision").eyes == ["groq_vision"]
     assert prov.brain("agent").eyes == ["gemini_lite", "claude", "groq_vision"]
     assert prov.brain("offline").eyes == []  # offline means this Mac: no cloud eyes
 
@@ -349,6 +369,21 @@ def test_a_screenshot_step_goes_to_flash_lite_when_flash_is_overloaded_never_to_
     assert b["groq"].asked == []
 
 
+def test_a_step_with_no_picture_on_the_vision_chain_goes_to_groqs_text_model_not_its_vision_one(monkeypatch):
+    b = _brains(
+        monkeypatch,
+        gemini=Brain("gemini", error=Overloaded("busy")),
+        gemini_lite=Brain("gemini_lite", error=Overloaded("busy")),
+        groq_vision=Brain("groq_vision", answer="qwen"),
+        groq=Brain("groq", False, answer="gpt-oss"),
+    )
+    chain = prov.brain("vision")
+    assert asyncio.run(chain.complete([Message.user("list the windows")])).text == "gpt-oss"
+    assert b["groq_vision"].asked == []  # its per-minute budget is kept for the steps with a picture
+    assert asyncio.run(chain.complete(_picture_step())).text == "qwen"  # …which still reach it
+    assert len(b["groq"].asked) == 1  # and never Groq's text model
+
+
 def test_every_brain_that_sees_busy_stops_the_step_and_says_what_still_works(monkeypatch):
     b = _brains(
         monkeypatch,
@@ -363,6 +398,33 @@ def test_every_brain_that_sees_busy_stops_the_step_and_says_what_still_works(mon
     assert b["groq"].asked == [] and "can see the screen is busy" in said and "by their names" in said
     assert "Gemini Lite is overloaded" in said and "Groq can't see" not in said  # why the seeing ones failed
     assert any(e.kind == "blind" for _, e in stop.value.failures)  # (the log still has who was left out)
+
+
+def _settings_env(monkeypatch, **env):
+    from neo import config
+
+    for k in ("GEMINI_API_KEY", "GROQ_API_KEY", "ANTHROPIC_API_KEY", "NEO_BRAIN", "NEO_FAST_BRAIN",
+              "NEO_GROQ_VISION_MODEL", "NEO_CLOUD_EYES"):  # fmt: skip
+        monkeypatch.delenv(k, raising=False)
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.setattr(config, "_settings", None)
+
+
+def test_when_no_brain_set_up_can_see_the_stop_says_that_not_busy(monkeypatch):
+    """Only Groq's text model (its vision model turned off): nothing that sees was asked, so nothing
+    is 'busy' — the user hears that none can see, and what would fix it."""
+    _settings_env(monkeypatch, GROQ_API_KEY="g", NEO_GROQ_VISION_MODEL="")
+    b = _brains(monkeypatch, groq=Brain("groq", False))
+    with pytest.raises(NoEyes) as stop:
+        asyncio.run(prov.brain("agent").complete(_picture_step()))
+    said = stop.value.spoken()
+    assert b["groq"].asked == [] and "busy" not in said
+    assert "None of the models set up for me can see the screen" in said and "Gemini key" in said
+    # A photo the user sent is "the picture", not the screen.
+    with pytest.raises(NoEyes) as stop:
+        asyncio.run(prov.brain("agent").complete([Message.user("what's in this photo?", images=[PNG])]))
+    assert "can see the picture" in stop.value.spoken()
 
 
 def test_a_blind_brains_refused_coordinates_make_the_next_step_a_pixel_step(monkeypatch):
@@ -413,6 +475,45 @@ def test_a_local_brain_the_user_put_first_still_keeps_the_screen_on_the_mac(monk
         == "cloud"
     )
     assert last.asked == []
+
+
+def test_a_local_first_user_keeps_pictures_off_the_cloud_fallbacks_unless_they_opt_in(monkeypatch):
+    """NEO_BRAIN=local with only a Groq key: before the seeing fallbacks, a screenshot never left the
+    Mac on that chain (Groq's text model gets none). A fallback doesn't change that on its own: the
+    step stops (nothing set up for them sees), and Groq's vision model is never sent the picture."""
+    _settings_env(monkeypatch, GROQ_API_KEY="g", NEO_BRAIN="local")
+    assert prov.brain("agent").eyes == [] and prov.brain("vision").eyes == []
+    here = Brain("local", False, error=Unavailable("local model server not running"))
+    here.on_device = True
+    b = _brains(monkeypatch, local=here, groq=Brain("groq", False), groq_vision=Brain("groq_vision", answer="cloud"))
+    with pytest.raises(NoEyes) as stop:
+        asyncio.run(prov.brain("agent").complete(_picture_step()))
+    assert b["groq_vision"].asked == [] and "None of the models set up" in stop.value.spoken()
+    # Opting in (NEO_CLOUD_EYES=on), or naming a cloud brain that sees, lets them look.
+    _settings_env(monkeypatch, GROQ_API_KEY="g", NEO_BRAIN="local", NEO_CLOUD_EYES="on")
+    assert asyncio.run(prov.brain("agent").complete(_picture_step())).text == "cloud"
+    _settings_env(monkeypatch, GROQ_API_KEY="g", NEO_BRAIN="local", NEO_FAST_BRAIN="gemini")
+    assert "groq_vision" in prov.brain("agent").eyes
+    _settings_env(monkeypatch, GROQ_API_KEY="g")  # a cloud brain first (the default): as decided (43)
+    assert "groq_vision" in prov.brain("agent").eyes and prov.brain("vision").eyes == ["groq_vision"]
+
+
+def test_an_embedded_agent_sends_no_picture_to_groqs_vision_model_unless_its_host_names_one(tmp_path):
+    from neo.config import LibrarySettings
+
+    assert LibrarySettings(data_dir=tmp_path / "a").groq_vision_model == ""
+    assert LibrarySettings(data_dir=tmp_path / "b", groq_vision_model="qwen/x").groq_vision_model == "qwen/x"
+
+
+def test_the_input_tools_refuse_a_blind_brain_in_the_words_the_chain_looks_for():
+    """A refused blind click makes the task a pixel task only while the refusal holds BLIND_REFUSAL:
+    a rewording of pointer.blind() must fail here, not silently hand the next steps back to the blind
+    brain."""
+    from neo.providers.base import BLIND_REFUSAL
+
+    pointer = pytest.importorskip("neo.tools.computer.pointer")
+    for tool in ("click", "drag", "scroll", "move", "right_click", "double_click"):
+        assert BLIND_REFUSAL in pointer.blind(tool), tool
 
 
 def test_groq_vision_is_its_own_seeing_brain_from_the_groq_key(monkeypatch):
@@ -477,6 +578,73 @@ def test_a_call_still_out_when_the_time_is_up_is_given_up_on():
     with pytest.raises(OutOfTime):
         asyncio.run(go())
     assert time.monotonic() - t0 < 1.0
+
+
+def test_a_spent_quota_inside_a_run_is_said_as_the_quota_not_as_the_time_limit(monkeypatch):
+    """Gemini's keys are spent until tomorrow, 170 s of the run are left and Groq fails: the user hears
+    the quota and when it resets, as outside a run — the time limit isn't what stopped it."""
+    _settings_env(monkeypatch, GEMINI_API_KEY="k")
+    tomorrow = time.time() + 36_000
+    gem = Brain("gemini", error=QuotaExhausted("spent", until=tomorrow), cool=tomorrow)
+    _brains(monkeypatch, gemini=gem, groq=Brain("groq", False, error=ProviderError("groq: 500 internal")))
+    with budget.run(lambda: 170.0, limit_s=180.0), pytest.raises(prov.AllBrainsFailed) as stop:
+        asyncio.run(prov.Chain(["gemini", "groq"]).complete([Message.user("hi")]))
+    said = stop.value.spoken()
+    assert not isinstance(stop.value, OutOfTime) and "time limit" not in said
+    assert "Gemini is out of free quota until" in said and "Groq failed" in said
+    assert gem.asked == []  # (still not asked: its wait ends past the time left)
+    # A brain that knows why it's cooling says so in its own words (Gemini: overloaded).
+    busy = Brain("gemini", cool=time.time() + 90)
+    busy.cooling_error = lambda: Overloaded("every model is overloaded", retry_after=90.0)
+    _brains(monkeypatch, gemini=busy, groq=Brain("groq", False, error=ProviderError("groq: 500 internal")))
+    with budget.run(lambda: 60.0, limit_s=180.0), pytest.raises(prov.AllBrainsFailed) as stop:
+        asyncio.run(prov.Chain(["gemini", "groq"]).complete([Message.user("hi")]))
+    assert not isinstance(stop.value, OutOfTime) and "Gemini is overloaded" in stop.value.spoken()
+
+
+def test_a_pixel_step_with_the_seeing_brains_cooling_inside_a_run_stops_as_no_eyes(monkeypatch):
+    """DECISIONS 39: a pixel step no brain that sees could answer stops with that reason (and what
+    still works), in a run as outside one — not as a time limit with 170 s left."""
+    tomorrow = time.time() + 36_000
+    b = _brains(
+        monkeypatch,
+        gemini=Brain("gemini", error=Overloaded("x"), cool=tomorrow),
+        gemini_lite=Brain("gemini_lite", error=Overloaded("busy")),
+        groq_vision=Brain("groq_vision", error=ProviderError("groq_vision: 404 model not found")),
+        groq=Brain("groq", False),
+    )
+    with budget.run(lambda: 170.0, limit_s=180.0), pytest.raises(NoEyes) as stop:
+        asyncio.run(prov.brain("agent").complete(_picture_step()))
+    assert b["gemini"].asked == [] and "by their names" in stop.value.spoken()
+
+
+def test_with_no_time_left_to_answer_the_stop_is_the_time_limit(monkeypatch):
+    """When the time really is up (less left than a brain needs to answer), that is the reason."""
+    _brains(monkeypatch, gemini=Brain("gemini", cool=time.time() + 90),
+            groq=Brain("groq", False, error=ProviderError("groq: 500 internal")))  # fmt: skip
+    with budget.run(lambda: 2.0, limit_s=180.0), pytest.raises(OutOfTime) as stop:
+        asyncio.run(prov.Chain(["gemini", "groq"]).complete([Message.user("hi")]))
+    assert "time limit (180s)" in stop.value.spoken()
+    # …but a picture step no brain set up could see stops for that, time or not.
+    _settings_env(monkeypatch, GROQ_API_KEY="g")
+    _brains(monkeypatch, groq=Brain("groq", False))
+    with budget.run(lambda: 2.0, limit_s=180.0), pytest.raises(NoEyes):
+        asyncio.run(prov.Chain(["groq"], eyes=prov.EYES).complete(_picture_step()))
+
+
+def test_the_time_limit_stop_names_only_the_brains_that_were_asked(monkeypatch):
+    _brains(
+        monkeypatch,
+        gemini=Brain("gemini", error=Overloaded("busy")),
+        gemini_lite=Brain("gemini_lite", error=Overloaded("busy")),
+        groq_vision=Brain("groq_vision", error=RateLimited("429", retry_after=50.0)),
+        groq=Brain("groq", False),
+    )
+    with budget.run(lambda: 20.0, limit_s=180.0), pytest.raises(OutOfTime) as stop:
+        asyncio.run(prov.brain("agent").complete(_picture_step()))
+    said = stop.value.spoken()
+    assert said.startswith("I had to stop: Gemini is overloaded") and "can't see pictures" not in said
+    assert "Groq's vision model is rate-limited" in said and "time limit (180s)" in said
 
 
 def test_a_brain_whose_wait_ends_after_the_run_is_not_asked(monkeypatch):
@@ -681,6 +849,21 @@ def test_typing_waits_for_a_field_that_takes_text_or_the_old_time(monkeypatch):
     assert 0.4 <= _wait(monkeypatch, Mac(front_at=0.1, field_at=0.4), typing=True) < 0.5
     # a field Accessibility never names: a focused window is enough once the old 0.8 s has passed
     assert 0.8 <= _wait(monkeypatch, Mac(front_at=0.1, field_at=None), typing=True) < 0.9
+
+
+def test_an_app_in_front_with_no_window_goes_ahead_after_the_old_fixed_time(monkeypatch):
+    """An app whose windows are all closed (activate_app on it, a window that never takes focus):
+    in front is enough once the old 0.8 s has passed — never the 2 s cap."""
+    from neo.agent.settle import Ready
+
+    class Windowless(Mac):
+        def probe(self, app, typing):
+            r = super().probe(app, typing)
+            return Ready(r.front, False, False)
+
+    assert 0.8 <= _wait(monkeypatch, Windowless(front_at=0.0)) < 0.9
+    assert 0.8 <= _wait(monkeypatch, Windowless(front_at=0.0), typing=True) < 0.9
+    assert 1.3 <= _wait(monkeypatch, Windowless(front_at=1.3)) < 1.45  # still waits for it to come forward
 
 
 def test_the_wait_never_passes_its_cap_and_a_mac_that_cant_answer_gets_the_old_wait(monkeypatch):

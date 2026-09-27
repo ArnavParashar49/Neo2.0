@@ -79,8 +79,14 @@ class Settings(BaseSettings):
     gemini_lite_model: str = "gemini-3.5-flash-lite"
     gemini_live_model: str = "gemini-3.8-live"
     groq_model: str = "openai/gpt-oss-120b"
-    # Groq's model that sees pictures: the last seeing fallback (neo.providers.EYES). "" = none.
+    # Groq's model that sees pictures: the last seeing fallback (neo.providers.EYES), on GROQ_API_KEY.
+    # It is sent a screenshot only when no other brain that sees can answer. "" = none.
     groq_vision_model: str = "qwen/qwen3.8-27b"
+    # The seeing fallbacks (Flash-Lite, Claude, Groq's vision model) for a picture the chain's own
+    # brains can't answer. "auto": they join — except for a user who put the local brain first and
+    # named no cloud brain that sees (their pictures stayed on the Mac: a fallback doesn't change
+    # that on its own). "on": they join for that user too.
+    cloud_eyes: Literal["auto", "on"] = "auto"
     local_model: str = "mlx-community/gemma-4-12B-it-4bit"
     claude_model: str = "claude-opus-5"
 
@@ -153,6 +159,13 @@ class Settings(BaseSettings):
     # '["com.example.myapp"]' in NEO_PROTECTED_APPS. The bundle id is the one that can't drift.
     protected_apps: list[str] = []
     fast_paths: bool = True  # zero-LLM regex commands (neo.agent.fastpath)
+
+    @field_validator("cloud_eyes", mode="before")
+    @classmethod
+    def _cloud_eyes(cls, v):
+        """Only a clear yes sends a local-first user's pictures to a cloud fallback: anything else
+        (a typo too) is auto."""
+        return "on" if str(v or "").strip().lower() in ("on", "true", "yes", "1", "always") else "auto"
 
     @field_validator("screen_effort", mode="before")
     @classmethod
@@ -295,6 +308,9 @@ class LibrarySettings(Settings):
     # No brain but the ones the host gave: the local model server is one only when named here.
     # (Whatever answers on 127.0.0.1:8080 of a server is some other service.)
     offline_brain: BrainName | None = None
+    # Nor a model the host didn't name: its Groq key sends no picture to Groq's vision model unless
+    # it names one (a seeing fallback: neo.providers.EYES).
+    groq_vision_model: str = ""
     embeddings: Literal["local", "off"] = "off"
     memory_enabled: bool = False
     learn: bool = False
