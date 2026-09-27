@@ -71,6 +71,9 @@ __all__ = [
     "aresolve",
     "candidates",
     "choose",
+    "forget",
+    "ground",
+    "handoff_choices",
     "handoff_text",
     "label_commits",
     "live_stages",
@@ -79,6 +82,8 @@ __all__ = [
     "os_index",
     "outcome",
     "resolve",
+    "signature",
+    "utterance_of",
 ]
 
 Want = Literal["press", "field", "menu"]
@@ -113,6 +118,7 @@ PRESS_ROLES = (
 MENU_ROLES = ("AXMenuItem", "AXMenuBarItem")
 # A control proper (a text, a row or a picture of the same name elsewhere is not a second one).
 _CONTROL_ROLES = frozenset(PRESS_ROLES) - set(_WEAK_ROLES)
+_TEXT_ROLES = frozenset({"AXStaticText", "AXImage", "AXHeading"})
 # UI chrome: an app's own words, which a log line may carry. Never rows, cells, static text, links
 # or field values — those can be the user's content.
 CHROME_ROLES = frozenset(
@@ -479,7 +485,9 @@ def _lexical(phrase: str, cands: list[Candidate]) -> Candidate | str | None:
     if exact:
         return _pick(exact)
     w = _whole(phrase)
-    hits = [c for c in cands if w.search(phrases.norm(c.label))]
+    # A few words inside a longer text or heading ("back" in "Welcome back") are no control's name:
+    # a partial match counts on a control, a row or a cell only (0.9965 → 0.999 precision offline).
+    hits = [c for c in cands if c.role not in _TEXT_ROLES and w.search(phrases.norm(c.label))]
     if not hits:
         return None
     if len({phrases.norm(c.label) for c in hits}) > 1:
@@ -884,6 +892,59 @@ async def aresolve(utterance: str, items: Sequence[Any], **kw: Any) -> Result:
     """:func:`resolve` off the event loop (its by-meaning stages take 5-60 ms, Laya's lock up to
     its wait)."""
     return await asyncio.to_thread(resolve, utterance, items, **kw)
+
+
+# ---- what a tool handler calls ----------------------------------------------------------------------
+def utterance_of(a: dict) -> str:
+    """The words a handler resolves: the by-utterance lane's ``utterance`` (the user's whole
+    request), else the ``label`` a fast path or a model gave."""
+    return str(a.get("utterance") or a.get("label") or "").strip()
+
+
+async def ground(
+    a: dict,
+    c: Any,
+    els: Iterable[Any],
+    frame: tuple[float, float, float, float] | None = None,
+    *,
+    want: Want = "press",
+    bundle: str = "",
+    skip: Callable[[Any], bool] | None = None,
+    modal: Callable[[Any], bool] | Collection[str] | None = None,
+) -> Result:
+    """click_text / menu_command / a named field: the element ``a`` means among ``els`` (the working
+    window's elements), off the event loop. ``c``: the ToolContext (its origin decides which stages
+    run; an extras "destructive" is the reflex's head). ``skip``: the caller's protected / NEO-own
+    check (sync: precompute the async gate helpers' verdicts into a set first)."""
+    cands = candidates(els, frame, want=want, modal=modal, skip=skip)
+    destructive = None
+    getter = getattr(c, "get", None)
+    if callable(getter):
+        destructive = getter("destructive")
+    return await aresolve(utterance_of(a), cands, want=want, origin=str(getattr(c, "origin", "agent")), destructive=destructive, app=bundle)
+
+
+def signature(res: Resolved, *, bundle: str, changed: bool | None, kind: str = "press", expect: dict | None = None, alias: bool = False) -> dict[str, Any]:
+    """The step signature for neo.reflex.outcomes.signature (the per-app flow memory): kind, role, the
+    label only when it is UI chrome, the owning app's bundle id, what it changed. ``alias``: the
+    model picked this control from a shortlist (a wording to learn once verified)."""
+    c = res.candidate
+    return {
+        "kind": kind,
+        "role": c.role,
+        "label": c.label[:80] if c.ui_chrome else "",
+        "path": list(c.path),
+        "bundle": bundle,
+        "changed": changed,
+        "expect": dict(expect or {}),
+        "alias": bool(alias),
+    }
+
+
+def handoff_choices(amb: Ambiguous) -> list[dict[str, Any]]:
+    """The shortlist as data (for ToolOutput.handoff): id, label (untrusted, the app's words), role,
+    in-dialog. Never coordinates."""
+    return [{"id": c.id, "label": c.label[:80], "role": c.role, "modal": c.modal} for c in amb.shortlist]
 
 
 # ---- handing off -------------------------------------------------------------------------------------

@@ -181,6 +181,16 @@ def test_a_control_beats_a_heading_of_the_same_name_elsewhere():
     assert isinstance(res, rs.Resolved) and res.candidate.id == "b"
 
 
+def test_a_few_words_inside_a_text_are_no_controls_name():
+    els = [C("Welcome back", "AXStaticText", box=(0, 0, 200, 20)), C("पीछे", "AXButton", box=(0, 40, 80, 20))]
+    assert isinstance(rs.resolve("tap back", els, index=False, log_it=False), rs.Ambiguous)
+    rows = [C("Inbox — 3 unread", "AXRow", box=(0, 0, 200, 20)), C("Sent", "AXRow", box=(0, 40, 200, 20))]
+    res = rs.resolve("click inbox", rows, log_it=False)
+    assert isinstance(res, rs.Resolved) and res.label.startswith("Inbox")  # a row or a cell still counts
+    heading = rs.resolve("click welcome back", els, index=False, log_it=False)
+    assert isinstance(heading, rs.Resolved)  # the whole text, exactly: as today
+
+
 @pytest.mark.parametrize("text", ["click it", "click the", "tap on", "click"])
 def test_vague_words_are_never_a_label(text):
     assert isinstance(rs.resolve(text, cands("It", "The", "On"), log_it=False), rs.Ambiguous)
@@ -419,6 +429,42 @@ def test_the_models_embedder_is_used_only_when_already_loaded(monkeypatch):
 
     monkeypatch.setattr(embed, "ready", lambda: False)
     assert rs._default_embed() is None
+
+
+# ---- what a handler calls ----------------------------------------------------------------------------
+class Ctx:
+    def __init__(self, origin="user", **extras):
+        self.origin, self.extras = origin, extras
+
+    def get(self, k, default=None):
+        return self.extras.get(k, default)
+
+
+def test_ground_takes_the_lanes_utterance_or_the_label_and_the_callers_origin():
+    import asyncio
+
+    els = [El("AXButton", "New Game", eid="a"), El("AXButton", "Start", eid="b", y=40), El("AXButton", "Hidden", eid="c", y=80)]
+    res = asyncio.run(rs.ground({"utterance": "new game pe click karo", "label": "new game"}, Ctx(), els, skip=lambda e: e.id == "c"))
+    assert isinstance(res, rs.Resolved) and res.element is els[0]
+    res = asyncio.run(rs.ground({"label": "Hidden"}, Ctx("agent"), els, skip=lambda e: e.id == "c"))
+    assert isinstance(res, rs.Ambiguous)  # the caller's protected check keeps it out
+    res = asyncio.run(rs.ground({"label": "Start"}, Ctx("user", destructive=True), els))
+    assert isinstance(res, rs.Ambiguous) and res.reason == "destructive_mismatch"  # the reflex's head counts
+    assert rs.utterance_of({"label": " Start "}) == "Start"
+
+
+def test_a_signature_carries_chrome_labels_and_the_bundle_only():
+    res = rs.resolve("click new game", cands("New Game"), log_it=False)
+    sig = rs.signature(res, bundle="org.example.board", changed=True, expect={"sheet": ["Start"]})
+    assert sig == {"kind": "press", "role": "AXButton", "label": "New Game", "path": [], "bundle": "org.example.board",
+                   "changed": True, "expect": {"sheet": ["Start"]}, "alias": False}  # fmt: skip
+    row = rs.resolve("click priya", [C("Priya Sharma", "AXRow", box=(0, 0, 9, 9))], log_it=False)
+    assert rs.signature(row, bundle="b", changed=True)["label"] == ""
+
+
+def test_handoff_choices_are_ids_labels_and_roles():
+    amb = rs.Ambiguous([C("Start", "AXButton", modal=True, box=(1, 2, 3, 4), id="e1")], "same_label")
+    assert rs.handoff_choices(amb) == [{"id": "e1", "label": "Start", "role": "AXButton", "modal": True}]
 
 
 # ---- the handoff ---------------------------------------------------------------------------------------
