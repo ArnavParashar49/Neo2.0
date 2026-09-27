@@ -249,7 +249,8 @@ def test_one_look_says_the_app_what_blocks_it_and_its_controls(looking):
     out = _look(ctx)
     assert out.ok and not out.images and not looking and out.fence is False
     head, fenced = out.text.split('<untrusted source="screen">', 1)
-    assert head.startswith("App: Chess (in front)") and "is open: it blocks the rest" in head
+    assert head.startswith("Look (read-only) at the app in front") and "is open: it blocks the rest" in head
+    assert "app: Chess" in fenced and "Chess" not in head  # an app's own name is its words, not NEO's
     assert "Start a New Game?" in fenced and "Start a New Game?" not in head
     assert "Button “Start” [sheet]" in out.text and "box_2d" not in out.text  # no picture: no boxes
     assert "screen" in ctx.taint

@@ -84,7 +84,7 @@ async def _picture(frame: tuple[float, float, float, float] | None, what: str):
     except Exception as e:  # noqa: BLE001 - the list still answers
         return None, None, f"(No picture: the capture failed — {str(e)[:80]}.)"
     s = pointer.remember(x0, y0, scale, w, h)
-    return img, s, pointer.note(s, what, [])
+    return img, s, pointer.note(s, f"{what}: {area[2]}×{area[3]} pt at screen ({area[0]},{area[1]})", [])
 
 
 async def observe(
@@ -115,7 +115,7 @@ async def observe(
     scene = asyncio.create_task(asyncio.to_thread(ax.scene, pid))
     img, shot, said = (None, None, "")
     if want_picture:
-        img, shot, said = await _picture(frame, f"the window of {name}")
+        img, shot, said = await _picture(frame, "its window")
     try:
         got = await asyncio.wait_for(walk, deadline_s + 1.0)
     except TimeoutError:
@@ -124,8 +124,12 @@ async def observe(
         sc = await asyncio.wait_for(scene, 0.5)
     except TimeoutError:
         sc = ax.Scene()
-    head = [f"App: {name}" + (" (in front)" if sc.known and sc.front_pid == pid else (f" (behind {sc.front})" if sc.known and sc.front else ""))]
-    screen_words = []
+    in_front = sc.known and sc.front_pid == pid
+    head = ["Look (read-only) at " + ("the app in front" if in_front else "an app that isn't in front") + ", as named below:"]
+    # Names and titles are the apps' own words (any app may call itself anything): fenced with the rest.
+    screen_words = [f"app: {name}"]
+    if sc.known and sc.front and not in_front:
+        screen_words.append(f"in front instead: {sc.front}")
     if title:
         screen_words.append(f"window: “{title[:80]}”")
     if sc.sheet:

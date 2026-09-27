@@ -187,11 +187,11 @@ def block(c: Collected, s: Shot | None, *, blind: bool) -> str:
         return ""
     if blind:
         head = (
-            f"Elements NEO found in {c.app or 'the app'} by Accessibility (you can't see the picture, but these "
-            "ids work: click id=…, ax_press):"
+            "Controls NEO found by Accessibility (you can't see the picture, but these ids work: click id=…, "
+            "ax_press):"
         )
     elif s is None:
-        head = f"Controls NEO found in {c.app or 'the app'} by Accessibility (click id=…, ax_press):"
+        head = "Controls NEO found by Accessibility (click id=…, ax_press):"
     else:
         head = (
             "Elements in this picture, from Accessibility — exact, so prefer click id=… over pixels when the target "
