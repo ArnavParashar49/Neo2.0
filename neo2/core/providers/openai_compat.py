@@ -139,8 +139,27 @@ def _too_large(e: APIStatusError) -> bool:
     return e.status_code == 413 or "context_length_exceeded" in text or "reduce the length" in text
 
 
+class Truncated(BadRequest):
+    """The answer ran out of room before it began: a reasoning model spent all of `max_tokens`
+    thinking (finish_reason "length", no text and no tool call). Request-shaped, like any 400: the
+    brain is fine, and asking again with more room or less thinking usually works."""
+
+
+def _ran_out(choice: Any) -> bool:
+    """A reply cut off by max_tokens with nothing to show for it (reasoning spent it all)."""
+    msg = getattr(choice, "message", None)
+    return getattr(choice, "finish_reason", None) == "length" and not (
+        getattr(msg, "content", None) or getattr(msg, "tool_calls", None)
+    )
+
+
 class OpenAICompatProvider:
     supports_tools = True
+    # A reply whose reasoning used up all of max_tokens (no text, no call) raises Truncated instead
+    # of coming back empty: a subclass that can retry with more room (neo2.core.providers.cerebras) says so.
+    raise_truncated = False
+    # reasoning_effort for streamed chat answers (None: the model's default), for brains with one
+    stream_effort: str | None = None
 
     def __init__(
         self,
@@ -179,6 +198,14 @@ class OpenAICompatProvider:
     def cooling_until(self) -> float:
         """When this brain can be asked again (0: now)."""
         return self._cool_until if self._cool_until > time.time() else 0.0
+
+    def client(self) -> AsyncOpenAI:
+        """The client requests go through (a subclass may hand out one per event loop)."""
+        return self._client
+
+    def _spent(self, usage: Any, f: Fitted, text: str = "") -> None:
+        """Every answer's token usage as the server reported it (None: it didn't — `text` is what
+        streamed). Nothing here: a paid brain counts it (neo2.core.providers.cerebras)."""
 
     async def _preflight(self) -> None:
         """Fail fast when the local server isn't up instead of hanging on connect/retry."""
@@ -265,7 +292,7 @@ class OpenAICompatProvider:
             if t:
                 kwargs["tools"] = t
             try:
-                resp = await self._client.chat.completions.create(
+                resp = await self.client().chat.completions.create(
                     model=self.model,
                     messages=_to_messages(f.messages, system, self.supports_vision),
                     max_tokens=f.max_tokens,
@@ -282,6 +309,9 @@ class OpenAICompatProvider:
                 raise self._error(e) from e
 
         self._learn_real(f, resp.usage)
+        self._spent(resp.usage, f)
+        if self.raise_truncated and _ran_out(resp.choices[0]):
+            raise Truncated(f"{self.name}: no room for the answer (reasoning used all {f.max_tokens} tokens)")
         choice = resp.choices[0].message
         turn = Turn(text=choice.content or "")
         for tc in choice.tool_calls or []:
@@ -305,19 +335,30 @@ class OpenAICompatProvider:
     ) -> AsyncIterator[str]:
         await self._preflight()
         f = self._fit(messages, system, None, max_tokens)
+        said: list[str] = []
+        usage: Any = None
         try:
-            st = await self._client.chat.completions.create(
+            extra: dict[str, Any] = {}
+            if self._reasoning and self.stream_effort:
+                extra["reasoning_effort"] = self.stream_effort
+            st = await self.client().chat.completions.create(
                 model=self.model,
                 messages=_to_messages(f.messages, system, self.supports_vision),
                 max_tokens=f.max_tokens,
                 stream=True,
+                **extra,
             )
             async for chunk in st:
+                usage = getattr(chunk, "usage", None) or usage  # (a server that reports it: the last chunk)
                 d = chunk.choices[0].delta if chunk.choices else None
                 if d and d.content:
+                    said.append(d.content)
                     yield d.content
         except Exception as e:  # noqa: BLE001
             raise self._error(e) from e
+        finally:
+            if said or usage is not None:
+                self._spent(usage, f, "".join(said))
 
 
 def groq(model: str | None = None) -> OpenAICompatProvider:
