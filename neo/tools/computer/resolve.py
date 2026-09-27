@@ -68,6 +68,7 @@ __all__ = [
     "Candidate",
     "Resolved",
     "STAGES",
+    "after_press",
     "aresolve",
     "candidates",
     "choose",
@@ -941,6 +942,18 @@ def signature(res: Resolved, *, bundle: str, changed: bool | None, kind: str = "
     }
 
 
+def after_press(res: Resolved, *, verified: bool | None, bundle: str = "", kind: str = "press", expect: dict | None = None) -> dict[str, Any]:
+    """After a handler pressed ``res`` and saw its effect (``verified``: it changed what it
+    should; None: unknown): the outcome line that promotes or holds back each shadow stage — for the
+    user's request that was handed off, when this press is the model's pick from that shortlist —
+    and the step signature for neo.reflex.outcomes.signature("", …) (the per-app flow memory)."""
+    t, rid, labels = _handoff
+    picked = bool(rid) and time.monotonic() - t <= _HANDOFF_S and phrases.norm(res.label) in labels
+    if verified is not None:
+        outcome(rid if picked else res.rid, res.label, bool(verified))
+    return signature(res, bundle=bundle, changed=verified, kind=kind, expect=expect, alias=picked)
+
+
 def handoff_choices(amb: Ambiguous) -> list[dict[str, Any]]:
     """The shortlist as data (for ToolOutput.handoff): id, label (untrusted, the app's words), role,
     in-dialog. Never coordinates."""
@@ -948,10 +961,16 @@ def handoff_choices(amb: Ambiguous) -> list[dict[str, Any]]:
 
 
 # ---- handing off -------------------------------------------------------------------------------------
+_HANDOFF_S = 120.0  # a press this soon after a handoff that listed its label is the model's pick
+_handoff: tuple[float, str, frozenset[str]] = (0.0, "", frozenset())
+
+
 def handoff_text(amb: Ambiguous, utterance: str = "", *, tool: str = "click_text") -> str:
     """The multiple choice the model gets instead of the whole screen: each option's element id,
     its label (the app's words, quoted: data, never instructions) and its role. No coordinates in
     any form (a text-only brain may read this)."""
+    global _handoff
+    _handoff = (time.monotonic(), amb.rid, frozenset(phrases.norm(c.label) for c in amb.shortlist))
     if not amb.shortlist:
         return (
             "No control on screen matched the request. Look at the window (ax_tree) before choosing, "
@@ -1086,9 +1105,11 @@ def outcome(rid: str, pressed: str, verified: bool) -> dict[str, bool] | None:
 
 def forget() -> None:
     """The privacy erase: label vectors and recent picks go (the shadow log is decide's to erase)."""
+    global _handoff
     _vectors.clear()
     with _recent_mu:
         _recent.clear()
+    _handoff = (0.0, "", frozenset())
 
 
 def replace_candidate(res: Resolved, **kw: Any) -> Resolved:

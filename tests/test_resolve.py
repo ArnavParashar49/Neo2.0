@@ -465,6 +465,22 @@ def test_a_signature_carries_chrome_labels_and_the_bundle_only():
     assert rs.signature(row, bundle="b", changed=True)["label"] == ""
 
 
+def test_the_models_pick_from_a_handoff_scores_the_users_request_and_becomes_an_alias_candidate():
+    from neo.reflex import evaluate
+
+    emb = fake_embed(TABLE)
+    amb = rs.resolve("start the new game", cands("Start", "New Game", "Resign", "Hint"), embed=emb, choose=fake_choose("New Game", 0.95), index=False)
+    assert isinstance(amb, rs.Ambiguous)
+    rs.handoff_text(amb, "start the new game")
+    # the model reads the choices and calls click_text(label="New Game"): a lexical resolution of its own
+    res = rs.resolve("New Game", cands("Start", "New Game"), origin="agent")
+    sig = rs.after_press(res, verified=True, bundle="org.example.board")
+    assert sig["alias"] is True and sig["label"] == "New Game" and sig["changed"] is True
+    assert evaluate.shadow_report()["meaning"] == {"n": 1, "precision": 1.0}
+    other = rs.resolve("Settings", cands("Settings"), origin="agent")
+    assert rs.after_press(other, verified=True)["alias"] is False  # not one of the choices
+
+
 def test_handoff_choices_are_ids_labels_and_roles():
     amb = rs.Ambiguous([C("Start", "AXButton", modal=True, box=(1, 2, 3, 4), id="e1")], "same_label")
     assert rs.handoff_choices(amb) == [{"id": "e1", "label": "Start", "role": "AXButton", "modal": True}]
