@@ -176,8 +176,10 @@ def by_utterance(text: str, *, origin: str, decision=None) -> Step | None:
     * The reflex picked a by-utterance tool (``decision.intent == "quick_action"``, ``decision.tool``,
       ``tool_p`` at the reflex_tool_floor) → that tool.
     * Or the words themselves point at a control (phrases.pointing: "click X", "press X" that isn't a
-      key, "X pe click karo", "X dabao", "X पर क्लिक करो"…), one clause, and the reflex doesn't call
-      it conversation → the click tool (the by-utterance tool that takes a press).
+      key, "X pe click karo", "X dabao", "X पर क्लिक करो"…), one clause, the reflex doesn't call it
+      conversation, and isn't sure it's another tool's ("press pause" at play_music, "select dark
+      mode" at applescript: that tool's one-tool lane takes it) → the click tool (the by-utterance
+      tool that takes a press).
     """
     if origin != "user":
         return None
@@ -203,6 +205,8 @@ def by_utterance(text: str, *, origin: str, decision=None) -> Step | None:
         return picked, {"utterance": text, "label": name}
     if core is None or intent == "chat":
         return None
+    if picked and picked not in tools and p >= _tool_floor() and (t := registry().get(picked)) is not None and not t.hidden:
+        return None  # the reflex is sure it's another tool's: never a press by these words
     press = [n for n, t in tools.items() if _takes(t, "press")]
     if not press:
         return None

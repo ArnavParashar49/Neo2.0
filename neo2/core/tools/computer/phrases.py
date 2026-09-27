@@ -305,12 +305,15 @@ _TAIL_FRAME_FILLER = re.compile(_FRAME_FILLER, re.I)
 _PUNCT = " ,.!?।\"'“”‘’"
 
 # ---- what is never a control's name --------------------------------------------------------------
-# Keys belong to the hotkey tool ("press enter", "hit cmd+s"), not to a click.
-_KEY = (
-    r"(?:enter|return|tab|escape|esc|delete|backspace|space(?:\s*bar)?|up|down|left|right|home|end|all|"
-    r"command|cmd|control|ctrl|option|opt|alt|shift|fn|caps\s+lock|page\s+(?:up|down)|f\d{1,2}|"
-    r"(?:(?:cmd|command|ctrl|control|opt|option|alt|shift|fn)\s*[+-]?\s*)+\S)"
+# Keys belong to the hotkey tool ("press enter", "hit cmd+s", "press cmd space"), not to a click.
+_NAMED_KEY = (
+    r"enter|return|tab|escape|esc|delete|backspace|space(?:\s*bar)?|up|down|left|right|home|end|"
+    r"caps\s+lock|page\s+(?:up|down)|f\d{1,2}"
 )
+_MOD_KEY = r"cmd|command|ctrl|control|opt|option|alt|shift|fn"
+# A chord: modifiers, then at most one key, joined by "+", "-" or plain spaces ("cmd space", "ctrl shift").
+_CHORD = rf"(?:{_MOD_KEY})(?:\s*[+-]?\s*(?:{_MOD_KEY}))*(?:\s*[+-]?\s*(?:(?:{_NAMED_KEY})\b|\S))?"
+_KEY = rf"(?:{_NAMED_KEY}|all|{_CHORD})"
 _KEY_NAME = re.compile(rf"^(?:the\s+)?{_KEY}(?:\s+(?:key|button))?(?:\s*(?:\+|and)\s*{_KEY})*$", re.I)
 _VAGUE = frozenset(
     ["it", "this", "that", "these", "those", "them", "here", "there", "on", "in", "the", "a", "an", "one", "none", "me", "us", "you", "him", "her", "something", "anything", "everything", "nothing", "again", "away", "around", "through", "twice", "once", "text", "all", "yes", "no", "ok", "okay",

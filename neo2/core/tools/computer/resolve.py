@@ -236,7 +236,7 @@ class StringIndex(Protocol):
         ...
 
 
-# ---- settings (Step 0 adds the keys; until then the defaults) --------------------------------------
+# ---- settings (neo2.core.config; a broken config falls back to the defaults) ---------------------------
 def _setting(name: str, default: Any) -> Any:
     try:
         from neo2.core.config import settings

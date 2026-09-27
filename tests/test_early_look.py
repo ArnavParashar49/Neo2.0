@@ -117,22 +117,33 @@ def world(monkeypatch):
 
     monkeypatch.setattr(inv, "inventory", no_scan)
     monkeypatch.setattr(screen, "can_capture", lambda: True)
+    monkeypatch.setattr(screen, "shot_format", lambda: "png")  # (lossless: a test reads the pixels sent)
+    monkeypatch.setattr(screen, "_brains_limit", lambda: None)  # (no brain declares a picture limit)
+    monkeypatch.setattr(screen, "_last", None)
     monkeypatch.setattr(focus, "front_window_id", lambda pid: 7000 + pid)
-    monkeypatch.setattr(prefetch, "_window_bounds", lambda wid: (100.0, 50.0, 400.0, 300.0))
+    # The window server, as screen.window_shot (the screenshot tool's picture of a window) asks it: the
+    # window's frame, its own pixels, and the windows over it (none by default; None: it can't say).
+    monkeypatch.setattr(screen, "_window_bounds", lambda wid: (100.0, 50.0, 400.0, 300.0))
 
-    def capture_window(wid, region=None):
+    def grab_window(wid):
         w.shots += 1
-        return ImagePart(w.capture, "image/png")
+        return Image.open(io.BytesIO(w.capture)).convert("RGB"), "cli"
 
-    monkeypatch.setattr(screen, "capture_window", capture_window)
+    monkeypatch.setattr(screen, "_grab_window", grab_window)
 
-    def capture(region=None, display=None):  # a screenshot of a part of the screen: 2 px per point
+    def stack(wid):
+        if w.above is None:
+            return None
+        over = [x for x in w.above if float(x.get("kCGWindowAlpha", 1.0)) > 0]
+        return wid - 7000, [tuple(float(x["kCGWindowBounds"][k]) for k in ("X", "Y", "Width", "Height")) for x in over]
+
+    monkeypatch.setattr(screen, "_window_stack", stack)
+
+    def capture(region=None, display=None):  # a screenshot of a part of the screen (other apps' pixels too)
         w.region_shots.append(region)
         return ImagePart(w.capture, "image/png"), 0.5
 
     monkeypatch.setattr(screen, "capture", capture)
-    # the windows in front of the pictured one, as the window server lists them (none by default)
-    monkeypatch.setattr(prefetch, "_windows_above", lambda wid: [dict(x) for x in w.above], raising=False)
     monkeypatch.setattr(ax, "_web_held", {})
     monkeypatch.setattr(prefetch, "_last_warm", float("-inf"))
     monkeypatch.setattr(prefetch, "_slow_until", {})
@@ -381,15 +392,15 @@ def _bytes(img: Image.Image) -> bytes:
     return buf.getvalue()
 
 
-def test_a_window_another_app_covers_is_pictured_as_the_screen_shows_it(world, monkeypatch):
-    """The window's own pixels (screencapture -l) include the part another window covers, but a click
-    there lands in that other window: a picture whose pixels are clicked by must show what is really on
-    screen. Every sampled pixel of the attached picture shows the app a click at it would hit."""
+def test_a_window_another_app_covers_is_pictured_by_its_own_pixels_only(world, monkeypatch):
+    """The first look's picture goes to the model before any model asked for one: never another app's
+    pixels. A window another app's window is over part of is pictured the way the screenshot tool
+    pictures it (screen.window_shot) — its own pixels, nothing of the window in front, never the
+    screen's — and a click at a part the other window covered is refused: it would land there."""
     floaty = (250, 150, 200, 120)
     world.above = [_window(555, "Floaty", *floaty)]
-    screen_img = _screen_png(1512, 982, floaty)
-    own = _bytes(Image.new("RGB", (400, 300), (200, 200, 200)))  # the window's own pixels: nothing over it
-    monkeypatch.setattr(screen, "capture_window", lambda wid, region=None: ImagePart(own))
+    screen_img = _screen_png(1512, 982, floaty)  # (the screen: Floaty's red over the window)
+    world.capture = _bytes(Image.new("RGB", (800, 600), (200, 200, 200)))  # the window's own pixels
 
     def capture(region=None, display=None):
         world.region_shots.append(region)
@@ -398,56 +409,57 @@ def test_a_window_another_app_covers_is_pictured_as_the_screen_shows_it(world, m
 
     monkeypatch.setattr(screen, "capture", capture)
     look = _look("in quillpad, what does this page say", _decision(screen_p=0.9))
-    assert look is not None and look.picture is not None
-    assert world.region_shots == [(100, 50, 400, 300)]  # that window's part of the screen
+    assert look is not None and look.picture is not None and look.picture.covered
+    assert world.region_shots == [] and world.shots == 1  # the window alone, never a part of the screen
     pic = Image.open(io.BytesIO(look.picture.image.data)).convert("RGB")
+    assert pic.size == (800, 600) and (220, 0, 0) not in {c for _, c in pic.getcolors(1 << 20)}  # nothing of Floaty's
 
     def hit(x, y):
         fx, fy, fw, fh = floaty
-        return "Floaty" if fx <= x < fx + fw and fy <= y < fy + fh else "Quillpad"
+        return fx <= x < fx + fw and fy <= y < fy + fh
 
     ctx = ToolContext(user_text="in quillpad, what does this page say")
-    for px in range(10, 400, 37):
-        for py in range(10, 300, 29):
-            (sx, sy), = pointer.points({"x": px, "y": py, "shot": look.picture.shot}, ("x", "y"), ctx)[0]
-            shows = "Floaty" if pic.getpixel((px, py)) == (220, 0, 0) else "Quillpad"
-            assert shows == hit(sx, sy), (px, py, sx, sy)
+    for px in range(10, 800, 73):
+        for py in range(10, 600, 59):
+            sx, sy = 100 + px * 0.5, 50 + py * 0.5
+            if hit(sx, sy):  # under Floaty when the picture was taken: a click there would land on it
+                with pytest.raises(pointer.Refused, match="under another window"):
+                    pointer.points({"x": px, "y": py, "shot": look.picture.shot}, ("x", "y"), ctx)
+            else:
+                assert pointer.points({"x": px, "y": py, "shot": look.picture.shot}, ("x", "y"), ctx)[0] == [(sx, sy)]
     assert "in front of part of it" in look.block()
 
 
-def test_a_protected_app_over_the_window_keeps_the_picture_out(world, monkeypatch):
+def test_a_protected_app_over_the_window_is_never_in_the_picture(world, monkeypatch):
     from neo2.core import config
 
     monkeypatch.setenv("NEO_PROTECTED_APPS", '["test.vaultkeeper"]')
     monkeypatch.setattr(config, "_settings", None)
     world.above = [_window(103, "Vaultkeeper", 150, 100, 120, 80)]
     look = _look("in quillpad, what does this page say", _decision(screen_p=0.9))
-    assert look is not None and look.picture is None  # the list still goes; no pixels of that app do
-    assert world.shots == 0 and world.region_shots == []
-    world.above = [_window(0, "", 150, 100, 120, 80)]  # a window the window server names no owner for
-    look = _look("in quillpad, what does this page say", _decision(screen_p=0.9))
-    assert look is not None and look.picture is None and world.shots == 0 and world.region_shots == []
+    assert look is not None and look.picture is not None and look.picture.covered  # Quillpad's own pixels only
+    assert world.shots == 1 and world.region_shots == []  # no pixels of the screen, so none of Vaultkeeper's
+    ctx = ToolContext(user_text="in quillpad, what does this page say")
+    with pytest.raises(pointer.Refused, match="under another window"):  # (a click there would land on it)
+        pointer.points({"x": 200, "y": 150, "shot": look.picture.shot}, ("x", "y"), ctx)
 
 
-def test_neos_own_window_a_clear_one_or_one_beside_it_is_no_cover(world):
+def test_a_clear_window_or_one_beside_it_is_no_cover(world):
     world.above = [
-        _window(99, "NEO", 0, 0, 1512, 982),  # NEO's own overlay: no screenshot shows it, no click lands on it
-        _window(555, "Floaty", 150, 100, 120, 80, alpha=0.0),  # fully transparent: no screenshot shows it either
+        _window(555, "Floaty", 150, 100, 120, 80, alpha=0.0),  # fully transparent: no screenshot shows it
         _window(555, "Floaty", 600, 400, 120, 80),  # beside the window, not over it
         _window(555, "Floaty", 500, 50, 100, 100),  # touching its edge only
     ]
     look = _look("in quillpad, what does this page say", _decision(screen_p=0.9))
-    assert look.picture is not None and world.shots == 1 and world.region_shots == []
+    assert look.picture is not None and not look.picture.covered and world.shots == 1 and world.region_shots == []
     assert "in front of part of it" not in look.block()
+    assert pointer.get_shot(look.picture.shot).covered == ()
 
 
-def test_when_the_window_server_cant_say_what_is_over_it_no_picture(world, monkeypatch):
-    def broken(wid):
-        raise RuntimeError("window server")
-
-    monkeypatch.setattr(prefetch, "_windows_above", broken)
+def test_when_the_window_server_cant_say_what_is_over_it_no_picture(world):
+    world.above = None  # (it can't say: the picture can't be mapped to the screen, so nothing is sent)
     look = _look("in quillpad, what does this page say", _decision(screen_p=0.9))
-    assert look is not None and look.picture is None and world.shots == 0 and world.region_shots == []
+    assert look is not None and look.picture is None and world.region_shots == []
 
 
 # ---- start, collect, attach -----------------------------------------------------------------------
@@ -790,10 +802,13 @@ class _FakeLaya:
 
 @pytest.fixture
 def laya(monkeypatch):
-    """Laya on, the zero-shot checkpoint faked: a load takes ``laya.load_s``."""
+    """Laya on, the zero-shot checkpoint faked: a load takes ``laya.load_s``. The resolver's meaning
+    stage, the one that reads it, promoted and live (the only time it is prewarmed)."""
     from neo2.core import config
 
     monkeypatch.setenv("NEO_REFLEX", "laya")
+    monkeypatch.setenv("NEO_RESOLVER", "live")
+    monkeypatch.setenv("NEO_RESOLVER_PROMOTED", "meaning")
     monkeypatch.setattr(config, "_settings", None)
     state = types.SimpleNamespace(load_s=0.15, opened=[])
 
@@ -857,7 +872,7 @@ def test_prewarm_is_rate_limited_and_never_blocks_on_a_busy_laya(laya, monkeypat
     prefetch._last_warm = float("-inf")
     done = threading.Event()
     real = prefetch._warm
-    monkeypatch.setattr(prefetch, "_warm", lambda reason: (real(reason), done.set()))
+    monkeypatch.setattr(prefetch, "_warm", lambda *a: (real(*a), done.set()))
     with neo2.core.reflex.laya_lock():  # the reflex is deciding: the prewarm doesn't queue behind it
         assert prefetch.prewarm("wake")
         assert done.wait(1.0)  # it gave up at once, with Laya still busy
@@ -880,6 +895,31 @@ def test_no_prewarm_with_laya_off_the_setting_off_or_embedded(laya, monkeypatch)
     monkeypatch.setattr(config, "_settings", None)
     assert not prefetch.prewarm("wake")
     assert not laya.opened
+
+
+@pytest.mark.parametrize("resolver, promoted", [("shadow", ""), ("shadow", "meaning"), ("live", ""), ("live", "alias,os_strings")])
+def test_no_laya_is_loaded_or_kept_for_a_resolver_that_only_logs_it(laya, monkeypatch, resolver, promoted):
+    """The meaning stage reads Laya only when it is loaded anyway while it is in shadow (or not
+    promoted): a 1.7 GB load at every wake — and a pass that keeps it from ever being let go — would
+    buy only shadow logs. The other warmers still run."""
+    ran = threading.Event()
+    monkeypatch.setattr(prefetch, "_warmers", [ran.set])
+    _env(monkeypatch, "NEO_RESOLVER", resolver)
+    _env(monkeypatch, "NEO_RESOLVER_PROMOTED", promoted)
+    assert prefetch.prewarm("wake") and ran.wait(2)
+    time.sleep(0.05)
+    assert not zeroshot.loaded() and not laya.opened
+    zeroshot.ask({"request": "x"}, Q, wait_s=1.0)  # (loaded by whoever needs it: an app choice)
+    agent, used = laya.opened[0], zeroshot._used
+    n = len(agent.calls)
+    prefetch._last_warm = float("-inf")
+    ran.clear()
+    assert prefetch.prewarm("speech") and ran.wait(2)
+    time.sleep(0.05)
+    assert len(agent.calls) == n and zeroshot._used == used  # no pass that would keep it loaded
+    monkeypatch.setattr(prefetch, "_warmers", [])
+    prefetch._last_warm = float("-inf")
+    assert not prefetch.prewarm("wake")  # nothing to warm: no thread
 
 
 def test_other_warmers_run_in_the_prewarm_thread_and_their_errors_stay_there(laya, monkeypatch):

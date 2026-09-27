@@ -18,9 +18,10 @@ model call. It is read-only, and it only happens where the model would look anyw
 * what: the window's elements as a compact list — ids, roles, labels, no coordinates, so a brain
   that can't see is never handed any — and a picture of that window only when Laya says the screen
   itself is needed, the brain can see, and Screen Recording is already allowed (it is never asked
-  for from here). Its pixels are clicked by, so it shows what a click there hits: the window's own
-  pixels when nothing is in front of it; the screen's, cut to the window, when another window is
-  over part of it — and no picture when that is a protected app's (or the window server can't say);
+  for from here). It is the window's own pixels, as the screenshot tool pictures that window —
+  never another app's, not even where another window is in front of part of it (a click at such a
+  part is refused: it would land on that window) — and none when the window server can't say where
+  the window is or what is in front of it;
 * how long: a hard deadline (``prefetch_look_s``); a look that isn't ready by then is dropped —
   except that a Chromium or Electron app's first look in a while also waits out the moment its web
   tree needs once switched on (a one-time cost, not a slow app).
@@ -34,7 +35,8 @@ screen (:func:`supersede`), and a finished run keeps only a stub of it (:func:`f
 let go after ten idle minutes, and a question that finds it unloaded pays a 0.4-0.7 s load. The
 early actor (neo2.core.agent.early) calls :func:`prewarm` when the user starts talking to NEO (wake word,
 push-to-talk, the first words of an utterance), so the load happens while they speak and the
-resolver answers warm.
+resolver answers warm — only once the stage that reads it (meaning) is promoted and live; in shadow
+it reads Laya only when something else loaded it. Other warmers (text recognition) run either way.
 """
 
 from __future__ import annotations
@@ -314,116 +316,36 @@ def _elements(app: str, pid: int) -> _Listed | None:
     return _Listed(compact(raw), canvas)  # type: ignore[arg-type]
 
 
-def _window_bounds(window_id: int) -> tuple[float, float, float, float] | None:
-    """(x, y, width, height) of a window, in screen points (None: unknown)."""
-    import Quartz as Q
-
-    info = Q.CGWindowListCopyWindowInfo(Q.kCGWindowListOptionIncludingWindow, int(window_id)) or []
-    b = info[0].get("kCGWindowBounds") if len(info) else None
-    if not b or float(b["Width"]) <= 0 or float(b["Height"]) <= 0:
-        return None
-    return float(b["X"]), float(b["Y"]), float(b["Width"]), float(b["Height"])
-
-
-def _windows_above(window_id: int) -> list[dict]:
-    """The windows on screen in front of this one, as the window server describes them."""
-    import Quartz as Q
-
-    return list(Q.CGWindowListCopyWindowInfo(Q.kCGWindowListOptionOnScreenAboveWindow, int(window_id)) or [])
-
-
-def _overlap(a: tuple[float, float, float, float], b: tuple[float, float, float, float]) -> bool:
-    """Do two rectangles (x, y, width, height) share an area (more than an edge)?"""
-    return min(a[0] + a[2], b[0] + b[2]) - max(a[0], b[0]) >= 1 and min(a[1] + a[3], b[1] + b[3]) - max(a[1], b[1]) >= 1
-
-
-def _in_front(window_id: int, bounds: tuple[float, float, float, float]) -> list[tuple[str, int]]:
-    """Whose windows are in front of any part of this one — where a click hits them, not it: (owner,
-    pid) of each. Not NEO's own (no screenshot shows it, and no click is ever made on it) and not a
-    fully transparent one (no screenshot shows that either). Raises when the window server can't say."""
-    from neo2.core.tools.computer import ax
-
-    out = []
-    for w in _windows_above(window_id):
-        b = w.get("kCGWindowBounds") or {}
-        frame = (float(b.get("X", 0)), float(b.get("Y", 0)), float(b.get("Width", 0)), float(b.get("Height", 0)))
-        if int(w.get("kCGWindowNumber", 0)) == int(window_id) or float(w.get("kCGWindowAlpha", 1.0)) <= 0.0:
-            continue
-        if not _overlap(frame, bounds):
-            continue
-        owner, pid = str(w.get("kCGWindowOwnerName") or ""), int(w.get("kCGWindowOwnerPID", 0) or 0)
-        if pid and ax.is_neo(pid, owner):
-            continue
-        out.append((owner, pid))
-    return out
-
-
-def _on_screen(bounds: tuple[float, float, float, float]) -> tuple[int, int, int, int] | None:
-    """The part of a window on the display that shows most of it, in whole screen points (None: none
-    of it is on any display)."""
-    from neo2.core.tools.computer import screen
-
-    x, y, w, h = bounds
-    best, most = None, 0.0
-    for d in screen.displays():
-        left, top = max(x, d.x), max(y, d.y)
-        right, bottom = min(x + w, d.x + d.w), min(y + h, d.y + d.h)
-        if right - left >= 1 and bottom - top >= 1 and (right - left) * (bottom - top) > most:
-            best, most = (left, top, right, bottom), (right - left) * (bottom - top)
-    if best is None:
-        return None
-    left, top, right, bottom = (round(v) for v in best)
-    return (left, top, right - left, bottom - top) if right > left and bottom > top else None
-
-
 @dataclass(frozen=True)
 class Picture:
     image: ImagePart
     shot: str  # the shot id its pixels are clicked by
     size: tuple[int, int]  # pixels
-    covered: bool = False  # another window is in front of part of it: the screen's pixels, not its own
+    covered: bool = False  # another window is in front of part of it: a click there lands on that window
     window: tuple[float, float, float, float] | None = None  # the window's frame on screen (points)
 
 
 def _picture(pid: int) -> Picture | None:
-    """A picture of the app's front window, with a shot id so a seeing model can click by its pixels —
-    so it shows what a click at each pixel hits. With nothing in front of the window: its own pixels
-    (nothing of another app). With another window over part of it: that part of the screen, as a
-    screenshot of it would show it — never when that window is a protected app's (or anyone's the
-    gate can't clear), and never when the window server can't say what is in front of it. None
-    without Screen Recording — which is never asked for from here."""
-    from PIL import Image
-
+    """A picture of the app's front window, with a shot id so a seeing model can click by its pixels:
+    the window's own pixels, as the screenshot tool pictures that window (screen.window_shot) —
+    nothing of any other app's, even where another window is in front of part of it. A click at such
+    a part would land on that other window: the shot refuses it (its ``covered`` parts). None without
+    Screen Recording (never asked for from here), when the window isn't the app's any more, or when
+    the picture can't be mapped to the screen (the window server can't say where the window is or
+    what is in front of it)."""
     from neo2.core.tools.computer import focus, pointer, screen
 
     if not screen.can_capture():
         return None
     wid = focus.front_window_id(pid)
-    bounds = _window_bounds(wid) if wid else None
-    if bounds is None:
+    if not wid:
         return None
-    try:
-        over = _in_front(wid, bounds)
-    except Exception:  # noqa: BLE001 - can't tell what a click would hit: no picture to click by
-        return None
-    if not over:
-        img = screen.capture_window(wid)
-        w, h = Image.open(io.BytesIO(img.data)).size
-        if not w or not h:
-            return None
-        shot = pointer.remember(bounds[0], bounds[1], bounds[2] / w, w, h)
-        return Picture(img, shot.id, (w, h), window=bounds)
-    if any(not opid or _protected(owner, opid) for owner, opid in over):
-        return None  # a protected app's window (or nobody's) is in front of it: none of its pixels go anywhere
-    region = _on_screen(bounds)
-    if region is None:
-        return None
-    img, ppp = screen.capture(region)
-    w, h = Image.open(io.BytesIO(img.data)).size
-    if not w or not h:
-        return None
-    shot = pointer.remember(region[0], region[1], ppp, w, h)
-    return Picture(img, shot.id, (w, h), covered=True, window=bounds)
+    cap = screen.window_shot(wid)
+    if not cap.clickable or not cap.w or not cap.h or (cap.pid and cap.pid != pid):
+        return None  # nothing to click by (or another app's window now): nothing sent
+    shot = pointer.remember(cap.x0, cap.y0, cap.ppp, cap.w, cap.h, covered=cap.covered)
+    frame = (cap.x0, cap.y0, cap.w * cap.ppp, cap.h * cap.ppp)
+    return Picture(cap.part, shot.id, (cap.w, cap.h), covered=bool(cap.covered), window=frame)
 
 
 def _board(pic: Picture, canvas: tuple[float, float, float, float] | None) -> str:
@@ -485,7 +407,7 @@ class Look:
         if self.picture is not None:
             w, h = self.picture.size
             what = (
-                "that window as the screen shows it (another window is in front of part of it)"
+                "that window's own pixels (another window is in front of part of it: a click there lands on that window)"
                 if self.picture.covered
                 else "that window alone"
             )
@@ -754,38 +676,54 @@ def register_warmer(fn: Callable[[], object]) -> None:
 
 def prewarm(reason: str = "wake") -> bool:
     """The user started talking to NEO: load the resolver's Laya (neo2.core.reflex.zeroshot) now if it
-    was let go, or keep it from being let go if it's loaded, in a thread of its own — never waited
-    for. True when a prewarm was started. Not in an embedded agent (no voice there), not with Laya
-    off, not more than once per :data:`PREWARM_EVERY_S`; ``prewarm_resolver`` turns it off."""
+    was let go, or keep it from being let go if it's loaded — only while a resolver stage that acts
+    reads it (:func:`_resolver_reads_laya`) — and run the other warmers, in a thread of its own,
+    never waited for. True when a prewarm was started. Not in an embedded agent (no voice there),
+    not with Laya off, not more than once per :data:`PREWARM_EVERY_S`; ``prewarm_resolver`` turns
+    it off."""
     global _last_warm
     try:
         if runtime.library_bound() or settings().reflex != "laya":
             return False
         if not _setting("prewarm_resolver", True, False):
             return False
+        laya = _resolver_reads_laya()
     except Exception:  # noqa: BLE001 - never in the way of listening
+        return False
+    if not laya and not _warmers:
         return False
     now = time.monotonic()
     with _warm_mu:
         if now - _last_warm < PREWARM_EVERY_S:
             return False
         _last_warm = now
-    threading.Thread(target=_warm, args=(reason,), name="neo-prewarm", daemon=True).start()
+    threading.Thread(target=_warm, args=(reason, laya), name="neo-prewarm", daemon=True).start()
     return True
 
 
-def _warm(reason: str) -> None:
-    t0 = time.perf_counter()
-    try:
-        from neo2.core.reflex import zeroshot
+def _resolver_reads_laya() -> bool:
+    """Does a resolver stage that acts read Laya — the meaning stage, promoted and live
+    (resolve.live_stages)? In shadow it reads Laya only when Laya is loaded anyway (resolve's
+    _ask_if_loaded): loading it for that, 1.7 GB at every wake and a pass that keeps it from ever
+    being let go, would buy only shadow logs (decision 40)."""
+    from neo2.core.tools.computer import resolve
 
-        was = zeroshot.loaded()
-        # wait 0: a load starts in zeroshot's own thread and this returns at once; a loaded model
-        # answers one tiny question (if Laya is free), which counts as use and keeps it loaded.
-        zeroshot.ask({"text": "warm up"}, _WARM_Q, wait_s=0.0)
-        log.info(f"  ~ prewarm ({reason}): resolver Laya {'kept warm' if was else 'loading'} ({(time.perf_counter() - t0) * 1000:.0f} ms)")
-    except Exception as e:  # noqa: BLE001
-        log.info(f"  ~ prewarm ({reason}) failed: {str(e)[:80]}")
+    return "meaning" in resolve.live_stages()
+
+
+def _warm(reason: str, laya: bool = True) -> None:
+    t0 = time.perf_counter()
+    if laya:
+        try:
+            from neo2.core.reflex import zeroshot
+
+            was = zeroshot.loaded()
+            # wait 0: a load starts in zeroshot's own thread and this returns at once; a loaded model
+            # answers one tiny question (if Laya is free), which counts as use and keeps it loaded.
+            zeroshot.ask({"text": "warm up"}, _WARM_Q, wait_s=0.0)
+            log.info(f"  ~ prewarm ({reason}): resolver Laya {'kept warm' if was else 'loading'} ({(time.perf_counter() - t0) * 1000:.0f} ms)")
+        except Exception as e:  # noqa: BLE001
+            log.info(f"  ~ prewarm ({reason}) failed: {str(e)[:80]}")
     for fn in list(_warmers):
         try:
             fn()

@@ -60,10 +60,11 @@ async def click_text(a: dict, c: ToolContext) -> str | ToolOutput:
     # to it) and NEO hasn't worked in an app lately: then the app whose window is in front behind it
     # (ax.working_app) is the one meant. A click sends no keystroke; its target is still checked
     # below (protected apps, NEO's own window at the spot, the gate) like any other.
-    behind = ""
+    behind, behind_pid = "", 0
     if not apps.target() and await asyncio.to_thread(_neo_in_front):
         name, pid = await asyncio.to_thread(ax.working_app)
-        behind = name if pid and not ax.is_neo(pid, name) else ""
+        if pid and not ax.is_neo(pid, name):
+            behind, behind_pid = name, pid
     if not behind and (err := await gates._guard_front()):
         return err
     app, frame, els = await asyncio.to_thread(ax.window_elements, behind or None)
@@ -88,7 +89,9 @@ async def click_text(a: dict, c: ToolContext) -> str | ToolOutput:
                 return out
             # Nothing Accessibility names so: the window's words read off the screen (a canvas, a
             # board, a dialog the app draws itself), clicked through the same checks as any click.
-            if (out := await ocr.click_text_fallback(a, c, app=app, window=frame, els=els)) is not None:
+            # Behind NEO's window the front app is NEO's, so the app read is told by its pid.
+            seen = (pid or behind_pid) if behind else 0
+            if (out := await ocr.click_text_fallback(a, c, app=app, window=frame, els=els, pid=seen, behind=bool(behind))) is not None:
                 return out
             if c.origin != "user" or not res.shortlist:
                 return f"Error: nothing in the front window of {app} is called '{a.get('label')}'."
@@ -141,21 +144,31 @@ async def click_text(a: dict, c: ToolContext) -> str | ToolOutput:
     spot = await asyncio.to_thread(pointer.spot, (e.x, e.y, e.w, e.h))
     if spot is None:
         return f"Error: '{name}' isn't on screen — scroll to it or move its window first."
+    blind = bool(c.get("blind"))
     try:
         t = await pointer.probe([spot])  # never NEO's own window over it
+        # The click lands on whatever is at the spot now: that must be the element's app, and what is
+        # there is gated like the element was (another control can sit over part of it).
+        h = t.hits[0]
+        if (h.pid and mine and h.pid != mine) or (not (h.pid and mine) and h.app and app and h.app != app):
+            return ToolOutput(f"Error: {h.app or 'another window'} covers '{name}' — look again (ax_tree) before clicking.", ok=False)
+        if gate := await gates._gate_click(staged, [(h.label, h.app or app)]):
+            return gate
+        # A click on a window whose app isn't in front may only bring it forward: the element's app
+        # comes to the front first (as for click and the OCR fallback), and what is at the spot then
+        # is gated again. Behind NEO's own window, never a click while NEO's window is still in front.
+        await pointer.bring(t, [spot], want_pid=mine, blind=blind)
+        if t.relabeled and (gate := await gates._gate_click(staged, [(t.hits[0].label, t.hits[0].app or app)])):
+            return gate
+        if behind and not t.brought and not await asyncio.to_thread(_in_front, mine or t.hits[0].pid):
+            raise _stayed_behind(t.hits[0].app or app)
     except pointer.Refused as r:
         return gates._refused(c, r)
-    # The click lands on whatever is at the spot now: that must be the element's app, and what is
-    # there is gated like the element was (another control can sit over part of it).
-    h = t.hits[0]
-    if (h.pid and mine and h.pid != mine) or (not (h.pid and mine) and h.app and app and h.app != app):
-        return ToolOutput(f"Error: {h.app or 'another window'} covers '{name}' — look again (ax_tree) before clicking.", ok=False)
-    if gate := await gates._gate_click(staged, [(h.label, h.app or app)]):
-        return gate
     await asyncio.to_thread(inp.click, *spot)
     outcomes.signature("", resolve.after_press(res, verified=None, bundle=bundle, ctx=c))
-    at = "" if c.get("blind") else f" at {tuple(map(int, spot))}"  # (no coordinates for a brain that can't see)
-    return f"Clicked '{name}' ({e.role.removeprefix('AX')}){at}" + gates._input_doubt()
+    at = "" if blind else f" at {tuple(map(int, spot))}"  # (no coordinates for a brain that can't see)
+    brought = f" (brought {t.brought} to the front first)" if t.brought else ""
+    return f"Clicked '{name}' ({e.role.removeprefix('AX')}){at}{brought}" + gates._input_doubt()
 
 
 def _neo_in_front() -> bool:
@@ -164,6 +177,22 @@ def _neo_in_front() -> bool:
 
     name, pid = front_app()
     return bool(pid) and ax.is_neo(pid, name)
+
+
+def _in_front(pid: int) -> bool:
+    """Is this app the one in front now (0: can't tell — no)?"""
+    from neo2.core.tools.computer.focus import front_app
+
+    return bool(pid) and front_app()[1] == pid
+
+
+def _stayed_behind(name: str) -> pointer.Refused:
+    name = name or "that app"
+    return pointer.Refused(
+        f"Error: {name} didn't come to the front (NEO's own window is still there), so I didn't click it — a "
+        f"click on a window in the background may only bring it forward. Ask the user to click {name} once, "
+        "then try again."
+    )
 
 
 def _owner(els: list) -> tuple[int, str]:

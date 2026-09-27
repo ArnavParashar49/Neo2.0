@@ -40,7 +40,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from neo2.core.agent.registry import USERS_WORDS, ToolContext, fence
+from neo2.core.agent.registry import USERS_WORDS, Effect, ToolContext, fence
 from neo2.core.decide._objc import pooled
 from neo2.core.tools.computer import apps, ax, screen, wait
 
@@ -1350,28 +1350,11 @@ def report(head: str, out: Outcome, under: list[str], doubt: str = "") -> tuple[
 
 # ---- what an input did: the Effect, and the after-look for a brain that can see -------------------
 
-try:  # Step 0's seam (ToolOutput.effect): the same fields, whichever lands first
-    from neo2.core.agent.registry import Effect  # type: ignore[attr-defined]
-except ImportError:  # pragma: no cover - until the seam lands
-
-    @dataclass
-    class Effect:  # type: ignore[no-redef]
-        """What an input did, for the loop (a batch stops at the first input that changed nothing,
-        a verify turn is skipped when the result already carried a look)."""
-
-        changed: bool | None = None  # something visibly changed (None: couldn't tell)
-        scene_changed: bool = False  # the front app, the window, a sheet or the focus changed
-        sheet: str = ""  # a sheet or dialog open after it (its words: screen data)
-        looked: bool = False  # the result carries an after-picture
-
-
 def with_effect(out, eff: Effect):
-    """``out`` (a ToolOutput) carrying ``eff`` — the ToolOutput.effect field once Step 0 adds it,
-    the same attribute before (a plain dataclass takes it)."""
-    try:
-        out.effect = eff
-    except Exception:  # noqa: BLE001 - (a frozen or slotted output: nothing to carry it)
-        pass
+    """``out`` (a ToolOutput) carrying ``eff`` (registry.Effect) in its ``effect`` field: what the input
+    did, for the loop (a batch stops at the first input that changed nothing, a verify turn is
+    skipped when the result already carried a look)."""
+    out.effect = eff
     return out
 
 
@@ -1382,15 +1365,10 @@ def effect_of(out: Outcome | None, looked: bool = False) -> Effect:
 
 
 def detail(img, level: str):
-    """``img`` with ImagePart.detail set (Step 0's seam: "auto" by default) — unchanged before it lands."""
+    """``img`` (an ImagePart) asking for ``level`` of detail (ImagePart.detail)."""
     import dataclasses
 
-    try:
-        if any(f.name == "detail" for f in dataclasses.fields(img)):
-            return dataclasses.replace(img, detail=level)
-    except TypeError:
-        pass
-    return img
+    return dataclasses.replace(img, detail=level)
 
 
 _LOOK_BOX = (480.0, 320.0)  # the after-look around the point when no window is known (points)

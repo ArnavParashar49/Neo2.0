@@ -1878,18 +1878,31 @@ def _refusal(g: Any, c: Any, r: Any) -> Any:
     return g._refused(c, r)
 
 
-async def _bring(t: Any, pts: list[tuple[float, float]], pid: int, blind: bool) -> None:
-    """pointer.bring for the app whose words they are — told the brain can't see when it takes that."""
+async def _bring(t: Any, pts: list[tuple[float, float]], pid: int, blind: bool, behind: bool = False) -> None:
+    """pointer.bring for the app whose words they are, told whether the brain can see. ``behind``:
+    NEO's own window was in front — an app the bring passed over is still behind it, where a click
+    may only bring it forward: refused (nothing clicked)."""
     from neo2.core.tools.computer import pointer
 
-    if _takes(pointer.bring, "blind"):
-        await pointer.bring(t, pts, want_pid=pid, blind=blind)
-    else:
-        await pointer.bring(t, pts, want_pid=pid)
+    await pointer.bring(t, pts, want_pid=pid, blind=blind)
+    if behind and not t.brought and not await asyncio.to_thread(_in_front, pid):
+        name = t.hits[0].app or "that app"
+        raise pointer.Refused(
+            f"Error: {name} didn't come to the front (NEO's own window is still there), so I didn't click it — a "
+            f"click on a window in the background may only bring it forward. Ask the user to click {name} once, "
+            "then try again."
+        )
+
+
+def _in_front(pid: int) -> bool:
+    """Is this app the one in front now (0: can't tell — no)?"""
+    from neo2.core.tools.computer.focus import front_app
+
+    return bool(pid) and front_app()[1] == pid
 
 
 async def click_text_fallback(
-    a: dict, c: Any, *, app: str, window: Box | None, els: list | None = None, pid: int = 0
+    a: dict, c: Any, *, app: str, window: Box | None, els: list | None = None, pid: int = 0, behind: bool = False
 ) -> Any | None:
     """click_text when Accessibility names nothing with the label: read the front window's words and
     click the place showing them — through the same checks as any click (NEO's own window and protected
@@ -1897,8 +1910,10 @@ async def click_text_fallback(
     with nothing over them, the confirmation gate on every version of the words the reads saw AND on
     what is under the point, the words of the dialog as its context; only ``app`` ever brought forward).
     ``pid``: ``app``'s process (the window's owner); when 0 it is asked (ax.frontmost_app, under the
-    same name). Returns the tool's result, or None when the screen couldn't be read or whose window it
-    is can't be told (the handler keeps its own answer)."""
+    same name). ``behind``: NEO's own window is in front (click_text works in the app behind it, by
+    ``pid``) — nothing is clicked unless that app comes to the front. Returns the tool's result, or
+    None when the screen couldn't be read or whose window it is can't be told (the handler keeps its
+    own answer)."""
     from neo2.core.agent.registry import ToolOutput, fence
     from neo2.core.tools.computer import input as inp
     from neo2.core.tools.computer import pointer
@@ -1959,7 +1974,7 @@ async def click_text_fallback(
                 return gate
         if gate := await g._gate_click(a, [(h.label, h.app or app)]):
             return gate
-        await _bring(t, pts, pid, blind)
+        await _bring(t, pts, pid, blind, behind)
         if t.relabeled and (gate := await g._gate_click(a, [(t.hits[0].label, t.hits[0].app or app)])):
             return gate
     except pointer.Refused as r:
@@ -1989,9 +2004,7 @@ async def click_text_fallback(
 
 
 def _with_effect(result: Any, outcome: Any) -> Any:
-    """The result carrying what changed (Step 0's ToolOutput.effect, through the pointer's helpers once
-    they are there); unchanged before."""
+    """The result carrying what changed (ToolOutput.effect, from the pointer's outcome)."""
     from neo2.core.tools.computer import pointer
 
-    carry, of = getattr(pointer, "with_effect", None), getattr(pointer, "effect_of", None)
-    return carry(result, of(outcome)) if callable(carry) and callable(of) else result
+    return pointer.with_effect(result, pointer.effect_of(outcome))
