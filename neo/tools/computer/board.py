@@ -15,19 +15,26 @@ grid itself, from one picture it already took, and maps every square to a point 
   and fits a perspective mapping (homography) board → screen (``find_tilted``, NEO's own), or it
   starts from the 4 corners a model that can see gave once (``from_corners``) and refines the
   mapping on the X-corners near where they should be. Either way the result is checked: the
-  squares' colours must alternate, the rows and columns just outside must not (else the board is
-  shifted by a square), and a board mapped from a model's corners is marked as such.
+  squares' colours must alternate — in the same places, square after square, so a frame and the
+  window behind it are never taken for a row of squares — the rows and columns just outside must
+  not (else the board is shifted by a square, or it is a texture that goes on), and a board mapped
+  from a model's corners is marked as such (and refused when it doesn't fill them).
 
 Square names: row and column always (``r1c1`` = top-left as seen); chess names (a1–h8) only on an
-8×8 board whose orientation is known — from where the light and dark pieces stand, or said by a
-model that can see. After a move NEO compares the board with how it looked before
-(``changed_cells``) and says what is where now (``occupancy``).
+8×8 board whose orientation is known — from where the light and dark pieces stand, said by a model
+that can see, or kept from the last look across a move or two. After a move NEO compares the board
+with how it looked before (``changed_cells``: exact area means of small cells, so two pictures at
+different scales agree) and says what is where now (``occupancy``).
 
 The rules the tools keep (the wiring lives in the pointer tools):
 
 - A brain that can't see never gets or sends coordinates: square names only, and only on a board
   NEO found itself in a fresh picture (``points_for``); a board mapped from a seeing model's
   corners is refused to it.
+- A board that may be out of date is never acted on: one seen covered or moved after a move, one
+  its window no longer shows, one in a window that scrolled or took keys (``forget_window``), one
+  named by a screenshot that had none; ``before_move`` checks it is still there just before the
+  input; a square off every display is refused.
 - Nothing here names an app: a board is found from the pixels and the caller's evidence (a large
   area of a window with no accessible elements), whatever draws it.
 - numpy only: no capture, no events, no threads, nothing process-wide — library mode may import it.

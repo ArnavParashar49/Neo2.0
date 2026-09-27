@@ -374,6 +374,20 @@ def test_nothing_a_blind_brain_reads_about_a_board_carries_coordinates():
         B.covered_note(),
         B.blind_refusal(),
     ]
+    covered, _ = _tilted(elev=55, yaw=0, sheet=True)
+    texts.append(B.after_move(s.board, B.Picture.of(covered), "e2", "e4").said)  # (and the board is dropped)
+    for call in (
+        lambda: B.points_for({"cell": "e2"}, ("cell",), blind=True),
+        lambda: B.points_for({"cell": "e2", "shot": "s404"}, ("cell",), blind=True),
+        lambda: B.before_move(s.board, B.Picture.of(covered)),
+    ):
+        with pytest.raises(B.BoardError) as e:
+            call()
+        texts.append(str(e.value))
+    B.survey(B.Picture.of(_flat()[0].crop((300, 100, 1200, 900)), x0=-400, y0=100), shot="w1")
+    with pytest.raises(B.BoardError) as e:
+        B.points_for({"cell": "a2"}, ("cell",), blind=True, displays=[(0, 0, 1512, 982)])
+    texts.append(str(e.value))
     for t in texts:
         assert not _COORD.search(t), t
     assert "corners" not in B.hint_note("s1", blind=True)
