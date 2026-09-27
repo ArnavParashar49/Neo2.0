@@ -11,7 +11,7 @@ import time
 from typing import Any
 
 from neo import health
-from neo.agent import confirm
+from neo.agent import confirm, grants
 from neo.agent.session import Session, answer_of
 from neo.config import settings
 from neo.events import NeoState, bus
@@ -69,6 +69,7 @@ class App:
                     await v._close_session()
         early().new_utterance()
         early()._claims.clear()
+        grants.reset()  # every "yes for this task" given so far ends with what it was given in
         counts = await forget_everything()  # bumps the erase generation before anything else
         self.session.history.clear()
         self.session._summarized = 0

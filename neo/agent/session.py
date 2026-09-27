@@ -50,15 +50,26 @@ _NO = re.compile(
 # allow karo", "is task ke liye haan". It answers the question like any yes; the calls of the same
 # kind on the same app that follow in this task then run without asking (never a risky one).
 _YES_WORD = r"(?:yes|yeah|yep|yup|sure|ok(?:ay)?|go ahead|allow(?:\s+it)?|haan|haan?\s+ji|ji\s+haan?|th(?:ee|i)k\s+hai|हाँ|हां|जी\s+(?:हाँ|हां))"
-_TASK_YES = re.compile(
-    rf"^\s*(?:{_YES_WORD}[\s,]+)?(?:"
+# Words that approve by themselves: "for this task", "allow all", "sab allow karo".
+_SCOPE_ALONE = (
     r"(?:for|to)\s+(?:this|the)\s+(?:whole\s+|entire\s+)?task|for\s+the\s+rest\s+of\s+(?:this|the)\s+task"
-    r"|to\s+(?:all|everything)|for\s+(?:all|everything)|allow\s+(?:all|everything)(?:\s+for\s+(?:this|the)\s+task)?"
+    r"|allow\s+(?:all|everything)(?:\s+for\s+(?:this|the)\s+task)?"
     r"|(?:sab|sabhi|sab\s+kuch)\s+(?:allow|ok)\s+(?:karo|kar\s+do|kardo|kar\s+dijiye)"
-    r"|(?:sab|sabhi)\s+ke\s+liye(?:\s+haan)?"
-    r"|(?:is|iss|poore|pure)\s+task\s+ke\s+liye(?:\s+(?:haan|haan?\s+ji|allow\s+karo|allow\s+kar\s+do))?"
-    r"|(?:इस|पूरे)\s+(?:टास्क|काम)\s+के\s+लिए(?:\s+(?:हाँ|हां))?|सब\s+के\s+लिए(?:\s+(?:हाँ|हां))?|सब\s+(?:allow|अलाउ)\s+(?:करो|कर\s+दो)"
-    r")(?:[\s,]+(?:please|thanks|ji|जी))*[\s.!।]*$",
+    r"|(?:is|iss|poore|pure)\s+task\s+ke\s+liye\s+allow\s+(?:karo|kar\s+do)"
+    r"|सब\s+(?:allow|अलाउ)\s+(?:करो|कर\s+दो)"
+)
+# Words that only say how far, and are a yes only next to one: alone, "to all" is "reply to all"
+# and "sab ke liye" is "for everyone" — an answer about the card, not an approval.
+_SCOPE_WITH_YES = (
+    r"to\s+(?:all|everything)|for\s+(?:all|everything)"
+    r"|(?:sab|sabhi)\s+ke\s+liye|(?:is|iss|poore|pure)\s+task\s+ke\s+liye"
+    r"|(?:इस|पूरे)\s+(?:टास्क|काम)\s+के\s+लिए|सब\s+के\s+लिए"
+)
+_TASK_YES = re.compile(
+    rf"^\s*(?:(?:{_YES_WORD}[\s,]+)?(?:{_SCOPE_ALONE})(?:[\s,]+{_YES_WORD})?"
+    rf"|{_YES_WORD}[\s,]+(?:{_SCOPE_WITH_YES})(?:[\s,]+{_YES_WORD})?"
+    rf"|(?:{_SCOPE_WITH_YES})[\s,]+{_YES_WORD})"
+    r"(?:[\s,]+(?:please|thanks|ji|जी))*[\s.!।]*$",
     re.I,
 )
 # "kyun nahi" ("why not") agrees, but it's no pure yes: neither a yes nor, for its "nahi", a no.

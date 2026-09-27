@@ -328,9 +328,11 @@ def gated(
         return params
     released = consume(op_key(tool, params, summary, detail))
     if released is not None:
+        grants.ran_under(grants.for_card(approving()))  # the card answered "for this task" itself
         return released
     if target is not None and not always and (g := grants.covering(tool, target)) is not None:
         audit(f"{tool}:{secrets.token_hex(8)}", tool, params, f"ran under the task grant of {g.action_id} ({g.app})")
+        grants.ran_under(g)
         return params
     return stage(tool, params, summary, detail, target=target)
 

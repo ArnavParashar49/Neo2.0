@@ -314,6 +314,11 @@ def _terms(text: str) -> frozenset[str]:
     return frozenset(text.split())
 
 
+def _phrases(text: str) -> frozenset[str]:
+    """ "a b|c d|…" over several lines: each phrase with its words one space apart."""
+    return frozenset(" ".join(p.split()) for p in text.replace("\n", " ").split("|") if p.strip())
+
+
 _AS_READ = _terms(
     """
     of in every whose where first second third fourth fifth sixth seventh eighth ninth tenth last
@@ -373,12 +378,14 @@ _AS_PHRASES = frozenset(
     ends with|comes before|comes after|is not|is in|is not in|is equal to|is not equal to|
     is greater than|is less than|greater than|less than|greater than or equal to|
     less than or equal to|is greater than or equal to|is less than or equal to|does not contain|
-    doesn't contain|does not equal|doesn't equal|number of|count of
+    doesn't contain|does not equal|doesn't equal|number of|count of|folder action|folder actions
     """.replace("\n", "").split("|")
 )
 _AS_PHRASES = frozenset(" ".join(p.split()) for p in _AS_PHRASES if p.strip())
 # Commands that read like terms, and must never pass for one: kept whole so they are refused.
-_AS_DENIED_PHRASES = frozenset({"list folder", "list disks", "info for", "open location", "set volume", "the clipboard"})
+_AS_DENIED_PHRASES = frozenset(
+    {"list folder", "list disks", "info for", "open location", "set volume", "the clipboard", "back track"}
+)
 _AS_PHRASE_MAX = max(len(p.split()) for p in _AS_PHRASES | _AS_DENIED_PHRASES)
 _AS_PHRASE_WORDS = frozenset(w for p in _AS_PHRASES for w in p.split())
 # Properties a model may mean to change with `set <word> to …` inside a tell block: never taken
@@ -423,6 +430,103 @@ _AS_AFTER_LOCAL = _terms(
 _AS_WORD = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _AS_NUM = re.compile(r"\d+(?:\.\d+)?(?:[eE][+-]?\d+)?|\.\d+(?:[eE][+-]?\d+)?")
 _AS_QUOTES = '"“”'
+# Apps and processes named by what they are at run time, not by name: whichever is in front, all
+# of them. A script with one of these never counts as reading, and no grant ever covers it.
+_AS_PICKED = frozenset({"processes", "application processes", "applications", "frontmost application"})
+_AS_APP_WORDS = ("application", "app")
+_AS_PROC_WORDS = ("process", "application process")
+_SE = "system events"
+
+# The language's own words: they say nothing about which app's objects a statement touches.
+_AS_GENERIC = _terms(
+    """
+    of in every whose where first second third fourth fifth sixth seventh eighth ninth tenth last
+    middle front back some index named id thru through before after beginning end it its me my
+    the a an is isn't not and or equal equals than greater less contains contain does doesn't
+    aren't wasn't begins starts ends comes as mod div true false null yes no result return
+    linefeed tab space quote pi get count exists exist with number length reverse rest contents
+    text string list lists record records integer real boolean date dates class reference item
+    items character characters word words paragraph paragraphs applescript value values
+    weekday month day year hours minutes seconds days weeks
+    january february march april may june july august september october november december
+    monday tuesday wednesday thursday friday saturday sunday
+    """
+) | {
+    p for p in _AS_PHRASES
+    if p.split()[0] in ("is", "begins", "starts", "ends", "comes", "greater", "less", "does", "doesn't", "equal")
+} | {
+    "number of", "count of", "missing value", "text item", "text items", "text item delimiters", "unicode text",
+    "current date", "time string", "date string", "short date string", "quoted form",
+}
+# System Events' words for an app's window and what is in it (reading them takes Accessibility).
+_AS_UI_ELEMENTS = _terms(
+    """
+    window windows sheet sheets drawer drawers button buttons checkbox checkboxes group groups image
+    images menu menus row rows column columns cell cells table tables outline outlines slider sliders
+    splitter splitters toolbar toolbars incrementor incrementors browser browsers attribute
+    attributes action actions
+    """
+) | _phrases(
+    """
+    ui element|ui elements|ui elements enabled|pop up button|pop up buttons|menu button|menu buttons|
+    menu bar|menu bars|menu bar item|menu bar items|menu item|menu items|text field|text fields|
+    text area|text areas|static text|static texts|scroll area|scroll areas|scroll bar|scroll bars|
+    radio button|radio buttons|radio group|radio groups|check box|check boxes|tab group|tab groups|
+    splitter group|splitter groups|combo box|combo boxes|busy indicator|progress indicator|
+    progress indicators|value indicator|level indicator|relevance indicator|color well|grow area|
+    list item|list items
+    """
+)
+# …and what System Events knows about a process and its elements.
+_AS_UI_PROPS = _terms(
+    """
+    name class role subrole title description help position size enabled focused selected value
+    frontmost visible orientation properties process
+    """
+) | {
+    "application process", "role description", "accessibility description", "minimum value", "maximum value",
+    "entire contents", "bundle identifier", "displayed name", "unix id", "background only", "short name",
+}
+# Acts a yes "for this task" may cover inside System Events: clicking, pressing, choosing and filling
+# in one named app's window. Everything else a script does is asked about every time.
+_AS_UI_VERBS = frozenset({"click", "perform", "select"})
+_AS_UI_SET = frozenset({"value", "selected", "focused", "frontmost"})
+# Apps no task-wide yes ever covers, whatever the script does in them: they run commands or
+# scripts (a click or a typed line there is a shell), or hold NEO's own cards and the Mac's
+# security settings. Names and bundle ids, compared case-insensitively.
+_NEVER_GRANT = _phrases(
+    """
+    terminal|iterm|iterm2|warp|ghostty|kitty|alacritty|wezterm|hyper|tabby|script editor|
+    applescript editor|script debugger|automator|shortcuts|shortcuts events|system events|osascript|
+    neo|neo-ui|system settings|system preferences|keychain access|passwords|installer|
+    com.apple.terminal|com.googlecode.iterm2|dev.warp.warp-stable|com.mitchellh.ghostty|
+    net.kovidgoyal.kitty|org.alacritty|io.alacritty|com.github.wez.wezterm|co.zeit.hyper|
+    com.apple.scripteditor2|com.latenightsw.scriptdebugger8|com.apple.automator|com.apple.shortcuts|
+    com.apple.shortcuts.events|com.apple.systemevents|com.arnav.neo|com.apple.systempreferences|
+    com.apple.keychainaccess|com.apple.passwords|com.apple.installer
+    """
+)
+
+
+def _app_key(name: str) -> str:
+    n = " ".join(name.split()).casefold()
+    return n[:-4] if n.endswith(".app") else n
+
+
+def _is_se(name: str, by_id: bool = False) -> bool:
+    return _app_key(name) == ("com.apple.systemevents" if by_id else _SE)
+
+
+def never_grant(app: str) -> bool:
+    """An app no yes "for this task" may ever cover (see _NEVER_GRANT)."""
+    return _app_key(app) in _NEVER_GRANT
+
+
+def _by_path(name: str) -> bool:
+    """`application "/Users/me/Downloads/Thing.app"` (or an HFS path, or "Thing.app"): AppleScript
+    launches whatever bundle that is to send it the event — open_app's check never sees it."""
+    n = name.strip()
+    return "/" in n or ":" in n or n.casefold().endswith(".app") or n.startswith("~")
 
 
 class _Tok:
@@ -569,31 +673,57 @@ def _valid_local(t: _Tok) -> bool:
     )
 
 
-def _looks_like_variable(raw: str) -> bool:
-    """A name no app's dictionary uses: its terms are plain English words, never `winNames`,
-    `list2` or `out_text`."""
-    return bool(re.search(r"[0-9_]", raw) or re.match(r"[a-z]+[A-Z]", raw))
+# Where a statement is: (terms, app, proc). `terms`: whose terminology its words are — the
+# innermost `tell application "X"`'s name folded ("id:…" for an app named by its id), "" at the
+# top. `app`: that app as written. `proc`: inside System Events, the process "X" a `tell` block is
+# about ("" = none: System Events' own objects).
+_Ctx = tuple[str, str, str]
+_TOP: _Ctx = ("", "", "")
+
+
+def _is_term(t: _Tok) -> bool:
+    return t.kind == "w" and (t.text in _AS_READ or t.text in _AS_PHRASES)
+
+
+def _literal_after(toks: list[_Tok], i: int) -> str | None:
+    """The name in `application "X"`, `application id "X"` or `process "X"` at toks[i]; None when
+    the app or process is picked by an expression (`process 1`, `every process whose …`, a variable)."""
+    nxt = toks[i + 1] if i + 1 < len(toks) else None
+    if nxt is not None and nxt.kind == "s" and nxt.text.strip():
+        return nxt.text.strip()
+    if toks[i].text in _AS_APP_WORDS and nxt is not None and nxt.is_("id") and i + 2 < len(toks):
+        after = toks[i + 2]
+        if after.kind == "s" and after.text.strip():
+            return after.text.strip()
+    return None
 
 
 class _ScriptReader:
-    """Reads a script statement by statement; `ok` says whether every one only reads.
+    """Reads a script statement by statement; `ok` says whether every one only reads — or, with
+    `grant`, only reads or clicks, presses, chooses and fills in one named app's window (what a
+    yes "for this task" may cover). As it reads, it notes what each statement touches (`targets`)
+    and whether it reaches into an app's UI through System Events (`ui`).
 
     Terminology follows the innermost `tell application "…"`: inside it, a word the app
     defines means the app's command or property. So a variable counts as the script's own only
-    where it was assigned (a compiled `set x to` there shows x isn't the app's command), at the
-    top level, or when its name is one no dictionary uses."""
+    where it was assigned (a compiled `set x to` there shows x isn't the app's command) or at
+    the top level."""
 
-    def __init__(self, lines: list[list[_Tok]]) -> None:
+    def __init__(self, lines: list[list[_Tok]], *, grant: bool = False) -> None:
         self.lines = lines
+        self.grant = grant
         self.assigned: dict[str, set[str]] = {}
         self.collect = True
-        self.stack: list[tuple[str, str]] = []
+        self.stack: list[tuple[str, _Ctx]] = []
+        self.targets: dict[str, str] = {}  # every app and process a statement touches (folded → as written)
+        self.ui = False
 
     def ok(self) -> bool:
         for collect in (True, False):  # first learn the variables, then check every use
             self.collect, self.stack = collect, []
+            self.targets, self.ui = {}, False
             for line in self.lines:
-                ctx = self.stack[-1][1] if self.stack else ""
+                ctx = self.stack[-1][1] if self.stack else _TOP
                 if not self._stmt(line, ctx, line=True):
                     return False
             if self.stack:
@@ -601,22 +731,59 @@ class _ScriptReader:
         return True
 
     # ---- variables ----------------------------------------------------------------------
-    def _assign(self, t: _Tok, ctx: str) -> bool:
+    def _assign(self, t: _Tok, ctx: _Ctx) -> bool:
         if not _valid_local(t):
             return False
-        self.assigned.setdefault(t.text, set()).add(ctx)
+        self.assigned.setdefault(t.text, set()).add(ctx[0])
         return True
 
-    def _local_ok(self, t: _Tok, ctx: str) -> bool:
+    def _local_ok(self, t: _Tok, ctx: _Ctx) -> bool:
         if not _valid_local(t):
             return False
         if self.collect:
             return True
         where = self.assigned.get(t.text)
-        return bool(where) and (ctx == "" or ctx in where or _looks_like_variable(t.raw))
+        # Inside an app's tell, only a name assigned in that app's terms: `set volumeUp to 0` at
+        # the top says nothing about VLC, whose volumeUp is a command.
+        return bool(where) and (ctx[0] == "" or ctx[0] in where)
+
+    # ---- what a statement touches -------------------------------------------------------
+    def _add(self, name: str) -> None:
+        self.targets.setdefault(_app_key(name), name)
+
+    def _hit(self, toks: list[_Tok], ctx: _Ctx, *, act: bool = False) -> None:
+        """Note the apps and processes a statement reads or acts on (the checking pass). Inside
+        System Events a statement belongs to a process only when all it touches is that named
+        process's window: anything else (login items, preferences, disks, the Mac itself) is
+        System Events' own, and it stays a target — a process name never relabels it."""
+        if self.collect:
+            return
+        terms, app, proc = ctx
+        procs: list[str] = []
+        for i, x in enumerate(toks):
+            if x.kind == "w" and x.text in _AS_APP_WORDS + _AS_PROC_WORDS and (name := _literal_after(toks, i)):
+                if x.text in _AS_APP_WORDS:
+                    self._add(name)
+                else:
+                    procs.append(name)
+        content = [x.text for x in toks if _is_term(x) and x.text not in _AS_GENERIC]
+        if terms == _SE:
+            about = procs + ([proc] if proc else [])
+            if act or content:
+                if not about or any(w not in _AS_UI_ELEMENTS and w not in _AS_UI_PROPS for w in content):
+                    self._add("System Events")
+                for p in about:
+                    self._add(p)
+            if act or any(w in _AS_UI_ELEMENTS for w in content):
+                self.ui = True
+            return
+        for p in procs:
+            self._add(p)
+        if app and (act or content):
+            self._add(app)
 
     # ---- expressions --------------------------------------------------------------------
-    def _expr(self, toks: list[_Tok], ctx: str) -> bool:
+    def _expr(self, toks: list[_Tok], ctx: _Ctx) -> bool:
         if not toks:
             return False
         depth: list[str] = []
@@ -633,6 +800,13 @@ class _ScriptReader:
                 continue
             if t.kind != "w":
                 return False
+            if t.text in _AS_PICKED:
+                return False  # whichever app is in front, every process: not one NEO can name
+            if t.text in _AS_APP_WORDS + _AS_PROC_WORDS:
+                name = _literal_after(toks, i)
+                if name is None or (t.text in _AS_APP_WORDS and _by_path(name)):
+                    return False
+                continue
             if t.text in _AS_READ or t.text in _AS_PHRASES:
                 continue
             if not self._local_ok(t, ctx):
@@ -645,7 +819,7 @@ class _ScriptReader:
         return not depth
 
     # ---- statements ---------------------------------------------------------------------
-    def _stmt(self, t: list[_Tok], ctx: str, *, line: bool) -> bool:
+    def _stmt(self, t: list[_Tok], ctx: _Ctx, *, line: bool) -> bool:
         if not t:
             return False
         h = t[0].text if t[0].kind == "w" else ""
@@ -662,6 +836,7 @@ class _ScriptReader:
                 return False
             kind = self.stack.pop()[0]
             return len(t) == 1 or (len(t) == 2 and t[1].is_(kind))
+        self._hit(t, ctx)
         if h == "if":
             k = _find(t, "then")
             if k == -1 or not self._expr(t[1:k], ctx):
@@ -721,33 +896,70 @@ class _ScriptReader:
             return words == ["wscripting", "wadditions"] or (
                 len(t) == 4 and t[1].is_("applescript") and t[2].is_("version") and t[3].kind == "s"
             )
+        if self.grant and (acted := self._act(t, ctx)) is not None:
+            return acted
         # A plain expression as a statement: `count windows`, `name of window 1`. It must start
         # with a word of reading — a statement that starts with anything else is a command.
         if t[0].kind == "w" and t[0].text not in _AS_READ and t[0].text not in _AS_PHRASES:
             return False
         return self._expr(t, ctx)
 
-    def _open(self, kind: str, ctx: str) -> bool:
+    def _act(self, t: list[_Tok], ctx: _Ctx) -> bool | None:
+        """The acts a yes for this task may cover (None: the statement isn't one of them).
+        `activate` inside an app's tell; inside System Events, `click` / `select` / `perform
+        action "AX…" of` an element of a named process's window."""
+        terms, app, proc = ctx
+        h = t[0].text if t[0].kind == "w" else ""
+        if h == "activate" and len(t) == 1 and app and terms != _SE and not proc:
+            self._hit([], ctx, act=True)
+            return True
+        if terms == _SE and h in _AS_UI_VERBS and len(t) > 1:
+            obj = t[1:]
+            if h == "perform" and not obj[0].is_("action"):
+                return False
+            if not self._expr(obj, ctx):
+                return False  # `click at {x, y}`: a point on the screen, in whichever app is there
+            self._hit(obj, ctx, act=True)
+            return True
+        return None
+
+    def _open(self, kind: str, ctx: _Ctx) -> bool:
         self.stack.append((kind, ctx))
         return True
 
-    def _tell_target(self, t: list[_Tok], ctx: str) -> str | None:
-        """The terminology a tell block speaks: the app's for `tell application "X"`, else the
-        enclosing one's (a process, a window, a sheet). None: not a target NEO can read."""
+    def _tell_target(self, t: list[_Tok], ctx: _Ctx) -> _Ctx | None:
+        """Where a tell block's statements are: the app's terms for `tell application "X"`, else
+        the enclosing block's (a process, a window, a sheet). None: not a target NEO can read."""
         if not t or not self._expr(t, ctx):
             return None
-        if t[0].kind == "w" and t[0].text not in _AS_READ and t[0].text not in _AS_PHRASES:
+        if t[0].kind == "w" and not _is_term(t[0]):
             return None  # tell <variable>: whatever it holds
-        apps = [i for i, x in enumerate(t) if x.is_("application", "app")]
-        if not apps:
-            return ctx
-        if len(apps) == 1 and apps[0] + 2 == len(t) and t[-1].kind == "s":
-            return t[-1].text.casefold()  # tell application "X" / tell window 1 of application "X"
-        if len(apps) == 1 and apps[0] + 3 == len(t) and t[-2].is_("id") and t[-1].kind == "s":
-            return "id:" + t[-1].text.casefold()
-        return None  # an app picked by an expression
+        terms, app, proc = ctx
+        apps = [i for i, x in enumerate(t) if x.kind == "w" and x.text in _AS_APP_WORDS]
+        procs = [i for i, x in enumerate(t) if x.kind == "w" and x.text in _AS_PROC_WORDS]
+        if len(apps) > 1 or len(procs) > 1:
+            return None
+        if apps:
+            i = apps[0]
+            name = _literal_after(t, i) or ""
+            by_id = t[i + 1].is_("id")
+            if i + (3 if by_id else 2) != len(t):
+                return None  # the app ends the target: tell window 1 of application "X"
+            terms, app, proc = ("id:" if by_id else "") + name.casefold(), name, ""
+            if _is_se(name, by_id):
+                terms = _SE  # what it touches is worked out statement by statement
+            elif not self.collect:
+                self._add(name)  # compiling `tell application "X"` may launch X: it counts
+        if procs:
+            proc = _literal_after(t, procs[0]) or ""
+        elif terms == _SE and any(
+            _is_term(x) and x.text not in _AS_GENERIC and x.text not in _AS_UI_ELEMENTS and x.text not in _AS_UI_PROPS
+            for x in t
+        ):
+            proc = ""  # tell disk 1 / tell folder "x": System Events' own objects
+        return (terms, app, proc)
 
-    def _repeat(self, t: list[_Tok], ctx: str) -> bool:
+    def _repeat(self, t: list[_Tok], ctx: _Ctx) -> bool:
         if not t:
             return True
         if t[0].is_("while", "until"):
@@ -768,12 +980,19 @@ class _ScriptReader:
                 return self._assign(var, ctx) and self._expr(t[3:k], ctx) and self._expr(end, ctx) and step_ok
         return False
 
-    def _set(self, t: list[_Tok], ctx: str) -> bool:
+    def _set(self, t: list[_Tok], ctx: _Ctx) -> bool:
         k = _find(t, "to")
         if k <= 0 or not self._expr(t[k + 1 :], ctx):
             return False
         target = t[:k]
         words = [x.kind + x.text for x in target]
+        if self.grant and ctx[0] == _SE and target[0].kind == "w" and target[0].text in _AS_UI_SET:
+            # set value of text field 1 of window 1 to …; set frontmost of process "X" to true;
+            # inside tell process "X": set frontmost to true
+            if (len(target) == 1 and ctx[2]) or (len(target) >= 3 and target[1].is_("of") and self._expr(target[2:], ctx)):
+                self._hit(target, ctx, act=True)
+                return True
+            return False
         if len(target) == 1:
             return self._assign(target[0], ctx)
         if words[0] == "p{" and words[-1] == "p}":  # set {a, b} to {1, 2}
@@ -800,8 +1019,9 @@ def _as_lines(toks: list[_Tok]) -> list[list[_Tok]]:
     return [ln for ln in lines if ln]
 
 
-# Why a task-wide "yes" can never cover a script (see neo/agent/grants.py). Over the whole text,
-# strings included: a button called "Send" is clicked with a string.
+# Why a task-wide "yes" can never cover a script (see neo/agent/grants.py), before the allowlist
+# (_ScriptReader with `grant`) is even asked. Over the whole text, strings included: a button
+# called "Send" is clicked with a string.
 _SCRIPT_RUNS_CODE = re.compile(
     r"«|»|\||\bdo\s+(?:shell\s+)?(?:script|javascript)\b|\b(?:run|load|store)\s+script\b|\bcall\s+method\b|"
     r"\bcurrent\s+application\b|\buse\s+framework\b|\bexecute\b|\bdo\b|\bwith\s+administrator\b",
@@ -814,21 +1034,46 @@ _SCRIPT_REACHES_OUT = re.compile(
     r"log\s*out|sleep|mount|set\s+volume|clipboard)\b",
     re.I,
 )
-_UI_WORDS = re.compile(
-    r"\b(?:window|sheet|ui\s+element|button|menu|text\s+field|text\s+area|static\s+text|"
-    r"group|scroll\s+area|table|row|column|check\s*box|radio|toolbar|tab\s+group|slider|"
-    r"attribute|action|keystroke|key\s+code|click|perform|focused)",
+# Strings included: the Mac's own menus, whichever app's menu bar they are reached through — the
+# Apple menu (sleep, restart, shut down, lock, recent items) and Services (other apps' workflows).
+_SCRIPT_MAC_MENUS = re.compile(
+    r"\bmenu\s+bar\s+item\s+(?:1\b|[\"“”]\s*apple\b)|\b(?:services|restart|shut\s*down|sleep|lock\s+screen|"
+    r"force\s+quit|recent\s+items)\b",
     re.I,
 )
+
+
+def _ui_anyway(toks: list[_Tok] | None) -> bool:
+    """For a script the reader can't follow: does it drive an app's UI through System Events?
+    Read from the code alone (never its strings or comments), whole words only."""
+    if not toks:
+        return False
+    if not any(
+        t.kind == "w"
+        and t.text in _AS_APP_WORDS
+        and _is_se(_literal_after(toks, i) or "", i + 1 < len(toks) and toks[i + 1].is_("id"))
+        for i, t in enumerate(toks)
+    ):
+        return False
+    return any(
+        t.kind == "w"
+        and (
+            t.text in _AS_UI_ELEMENTS
+            or t.text in ("click", "perform", "keystroke")
+            or (t.text == "key" and i + 1 < len(toks) and toks[i + 1].is_("code", "down", "up"))
+        )
+        for i, t in enumerate(toks)
+    )
 
 
 class ScriptFacts:
     """What NEO knows about a script before running it.
 
-    `read_only`: every statement only reads. `apps`: the apps it names (System Events' processes
-    in its place when it drives their UI). `app`: the one app it acts on ("" = none, several, or
-    picked at run time). `ui`: it reads or drives an app's UI through System Events, which takes
-    Accessibility. `danger`: why a task-wide yes never covers it ("" = one can)."""
+    `read_only`: every statement only reads. `apps`: what it touches — the apps it names, and a
+    process "X" in System Events' place only where all a statement touches is that process's window.
+    `app`: the one app it acts on ("" = none, several, or picked at run time). `ui`: it reads or
+    drives an app's UI through System Events, which takes Accessibility. `danger`: why a task-wide
+    yes never covers it ("" = one can: it only reads, clicks or fills in one ordinary app's window)."""
 
     __slots__ = ("read_only", "apps", "app", "ui", "danger")
 
@@ -842,33 +1087,29 @@ class ScriptFacts:
 def script_facts(script: str) -> ScriptFacts:
     src = script or ""
     toks = _as_lex(src)
-    read_only = bool(toks) and _ScriptReader(_as_lines(toks)).ok()
+    lines = _as_lines(toks or [])
+    reader = _ScriptReader(lines, grant=True)
+    shaped = bool(toks) and reader.ok()  # only reads, or reads and clicks in a named app's window
+    read_only = shaped and _ScriptReader(lines).ok()
     code = src if toks is None else " ".join(t.text for t in toks if t.kind != "s")  # strings left out
-    ui = "system events" in src.casefold() and bool(_UI_WORDS.search(src))
-    # The apps it names: application "X" / app "X" / application id "X", and process "X".
-    apps: list[str] = []
-    procs: list[str] = []
-    picked = toks is None  # an app or process chosen by an expression, or a script NEO can't read
+    # Every app and process it names; one picked while it runs (or a script NEO can't read); an app
+    # named by where it's stored.
+    named: dict[str, str] = {}
+    picked, by_path = toks is None, False
     for i, t in enumerate(toks or []):
-        if not t.is_("application", "app", "process", "application process"):
+        if t.kind != "w":
             continue
-        nxt = toks[i + 1] if i + 1 < len(toks) else None
-        after = toks[i + 2] if i + 2 < len(toks) else None
-        if nxt is not None and nxt.kind == "s":
-            name = nxt.text.strip()
-        elif nxt is not None and nxt.is_("id") and after is not None and after.kind == "s":
-            name = after.text.strip()
-        else:
-            picked = True  # `every process`, `first process whose frontmost is true`, `application (x)`
-            continue
-        into = procs if t.text in ("process", "application process") else apps
-        if name.casefold() not in (x.casefold() for x in into):
-            into.append(name)
-    if any(a.casefold() == "system events" for a in apps) and (procs or ui):
-        apps = [a for a in apps if a.casefold() != "system events"]  # it only stands in for them
-    for p in procs:
-        if p.casefold() not in (a.casefold() for a in apps):
-            apps.append(p)
+        if t.text in _AS_PICKED:
+            picked = True
+        elif t.text in _AS_APP_WORDS + _AS_PROC_WORDS:
+            name = _literal_after(toks or [], i)
+            if name is None:
+                picked = True  # `every process`, `process 1`, `application (x)`, `process appName`
+                continue
+            by_path = by_path or (t.text in _AS_APP_WORDS and _by_path(name))
+            named.setdefault(_app_key(name), name)
+    apps = list(reader.targets.values()) if shaped else list(named.values())
+    ui = reader.ui if shaped else _ui_anyway(toks)
     danger = ""
     if toks is None or _SCRIPT_RUNS_CODE.search(src):
         danger = "it runs code or raw Apple events"
@@ -878,13 +1119,21 @@ def script_facts(script: str) -> ScriptFacts:
         danger = "it may send, buy, delete or grant something"
     elif _SCRIPT_REACHES_OUT.search(code):
         danger = "it reaches outside the app (files, links or the Mac itself)"
+    elif _SCRIPT_MAC_MENUS.search(src):
+        danger = "it reaches the Mac's own menus (the Apple menu, Services)"
     elif picked:
         danger = "it picks its app while it runs"
+    elif by_path:
+        danger = "it names an app by where it's stored"
     elif len(apps) > 1:
         danger = "it talks to more than one app"
-    elif [a.casefold() for a in apps] == ["system events"]:
+    elif [_app_key(a) for a in apps] == [_SE]:
         danger = "System Events acts on the whole Mac"
-    app = apps[0] if len(apps) == 1 and not picked else ""
+    elif any(never_grant(a) for a in apps):
+        danger = "that app runs commands, or holds NEO's or the Mac's own settings"
+    elif not shaped:
+        danger = "it does more than read, click or fill in one app's window"
+    app = apps[0] if len(apps) == 1 and not picked and not by_path else ""
     return ScriptFacts(read_only, tuple(apps), app, ui, danger)
 
 

@@ -19,8 +19,12 @@ export type Item =
   | { kind: "browser"; id: number; sid: string; job?: string; ts: number };
 
 export interface NeoEvent { type: string; data: Record<string, any>; ts: number }
-/** A question NEO is waiting on: exactly what will run if the user says yes. */
-export interface ConfirmCard { action_id: string; tool: string; summary: string; detail: string }
+/** A question NEO is waiting on: exactly what will run if the user says yes. `scopes`: how else
+ *  it may be answered — "task" = a yes for this task, which lets the next calls like it on `app`
+ *  run without asking until the task ends (never a risky one). Older cores send neither. */
+export interface ConfirmCard { action_id: string; tool: string; summary: string; detail: string; scopes?: string[]; app?: string }
+/** How far a yes reaches: just this card, or (when the card offers it) the rest of the task. */
+export type ConfirmScope = "task";
 
 // Dev builds only: `VITE_NEO_WS_URL` / `VITE_NEO_WS_TOKEN` point `npm run dev` at a test core (its own port
 // and scratch token), so a dev tab never talks to the NEO the user is running. Release builds use NEO.app's.

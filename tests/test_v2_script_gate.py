@@ -61,7 +61,6 @@ def test_the_chess_runs_queries_only_read(script):
         'tell application "Music" to get name of current track',
         'tell application "Safari" to return URL of current tab of window 1',
         'tell application "Finder" to count (every item of desktop)',
-        'tell application "System Events" to get name of every process whose background only is false',
         'tell application "System Events" to get value of attribute "AXRole" of window 1 of process "Chess"',
         'tell application "System Events" to tell process "Chess" to get {name, role description, position, size} '
         "of every UI element of window 1",
@@ -214,7 +213,8 @@ def test_the_old_tests_intent_holds():
         ('tell application "Terminal" to do script "ls"', "Terminal", "runs code"),
         ('tell application "Safari" to do JavaScript "1" in document 1', "Safari", "runs code"),
         ('«event sysoexec» "id"', "", "runs code"),
-        ('tell application "System Events" to tell process "Chess" to keystroke "e2e4"', "Chess", "keystrokes"),
+        # keystrokes are System Events' own (they go to whichever app is in front): not Chess's
+        ('tell application "System Events" to tell process "Chess" to keystroke "e2e4"', "", "keystrokes"),
         ('tell application "System Events" to tell process "Mail" to click button "Send" of window 1', "Mail", "send"),
         ('tell application "Finder" to delete file "x"', "Finder", "send, buy, delete"),
         ('tell application "Music" to buy track 1', "Music", "send, buy, delete"),
@@ -740,7 +740,9 @@ def test_no_command_passes_for_a_word_of_reading(verb):
         ("set {x, y} to {1, 2}\nreturn x & y", True),
         ("set {a, b} to {1, 2}", False),  # "a" is the article, not a variable
         ('set "{" x "}" to 1', False),
-        ('set theList to {}\ntell application "Finder"\n  set end of theList to name of window 1\nend tell\nreturn theList', True),
+        # a variable from outside an app's tell could be one of that app's commands (VLC's volumeUp)
+        ('set theList to {}\ntell application "Finder"\n  set end of theList to name of window 1\nend tell\nreturn theList', False),
+        ('tell application "Finder"\n  set theList to {}\n  set end of theList to name of window 1\nend tell\nreturn theList', True),
         # a variable spelt like a command System Events has: never a variable
         ('set click to 1\ntell application "System Events" to tell process "Chess" to get click', False),
         ('set confirm to 1\ntell application "System Events" to get confirm', False),
@@ -749,7 +751,7 @@ def test_no_command_passes_for_a_word_of_reading(verb):
         ('tell application "System Events" to tell process "Chess" to set visible to false', False),
         # tell <variable>: whatever it holds
         ('set p to process "Chess"\ntell application "System Events" to tell p to get name of windows', False),
-        ('set appName to "Chess"\ntell application "System Events" to tell process appName to get name of windows', True),
+        ('set appName to "Chess"\ntell application "System Events" to tell process appName to get name of windows', False),
         # a block closed by the wrong end
         ('tell application "Finder"\n  get name of window 1\nend repeat', False),
         ('repeat 3 times\n  get name of window 1\nend', True),
@@ -762,9 +764,9 @@ def test_the_readers_edges(script, reads):
     assert script_is_read_only(script) is reads, script_facts(script)
 
 
-def test_a_process_picked_by_a_variable_is_read_only_but_never_grantable():
+def test_a_process_picked_by_a_variable_is_neither_read_only_nor_grantable():
     f = script_facts('set appName to "Chess"\ntell application "System Events" to tell process appName to get name of windows')
-    assert f.read_only and f.app == "" and "picks" in f.danger
+    assert not f.read_only and f.app == "" and "picks" in f.danger
 
 
 def test_the_overlay_can_answer_for_the_task(monkeypatch):
@@ -781,3 +783,295 @@ def test_the_overlay_can_answer_for_the_task(monkeypatch):
     asyncio.run(a.on_command({"cmd": "confirm", "yes": True, "action_id": "applescript:2"}))
     asyncio.run(a.on_command({"cmd": "confirm", "yes": True, "action_id": "applescript:3", "scope": "forever"}))
     assert [c["scope"] for c in calls] == ["task", None, None]
+
+
+# ---- review: what a task grant may cover --------------------------------------------------------
+# A grant's reach comes from the script's own text, which a steered model writes. So the app a
+# script acts on is worked out statement by statement, and a grant only ever covers reading and
+# clicking in one named app's window (an allowlist), never System Events' own actions, an app picked
+# while the script runs, or an app that runs commands.
+
+LOGIN_ITEM = (
+    'tell application "System Events"\n  get name of process "Chess"\n'
+    '  make new login item at end of login items with properties {path:"/Users/me/Downloads/Thing.app", hidden:true}\n'
+    "end tell"
+)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        LOGIN_ITEM,
+        'tell application "System Events"\n  get name of process "Chess"\n  set dark mode of appearance preferences to true\nend tell',
+        'tell application "System Events" to tell process "Chess" to make new login item at end of login items',
+        'tell application "System Events"\n  get name of every disk\n  get name of windows of process "Chess"\nend tell',
+        'tell application "System Events"\n  tell process "Chess" to get name of windows\n  get name of every disk\nend tell',
+        'tell application "System Events"\n  tell process "Chess" to click button 1 of window 1\n  sleep\nend tell',
+        'tell application "System Events" to tell process "Chess" to keystroke "e"',
+        'tell application "System Events" to tell process "Chess" to click at {10, 10}',
+    ],
+)
+def test_a_process_name_never_relabels_system_events_own_actions(script):
+    f = script_facts(script)
+    assert f.app != "Chess" and f.danger, f
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        'tell application "System Events"\n  get name of process "Chess"\n'
+        "  click button 1 of window 1 of item 1 of (application processes whose frontmost is true)\nend tell",
+        'tell application "Chess" to get name\n'
+        'tell application "System Events" to click button 1 of window 1 of item 1 of (processes whose frontmost is true)',
+        'tell application "System Events" to get name of every process whose background only is false',
+        'tell application "System Events" to get name of windows of (processes whose frontmost is true)',
+        'tell application "System Events" to get name of every application process',
+        'tell application "System Events" to repeat with p in processes\n  get name of p\nend repeat',
+        "get name of every application",
+        "get path to frontmost application",
+        'tell application "System Events" to get name of window 1 of (first process whose frontmost is true)',
+        'set appName to "Chess"\ntell application "System Events" to tell process appName to get name of windows',
+    ],
+)
+def test_an_app_chosen_while_the_script_runs_is_never_read_only_nor_grantable(script):
+    f = script_facts(script)
+    assert not f.read_only and f.app == "" and f.danger, f
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        'tell application "iTerm" to create window with default profile command "rm -rf ~/Documents"',
+        'tell application "iTerm2" to tell current session of current window to split vertically with default profile '
+        'command "rm -rf ~"',
+        'tell application "Terminal" to set custom title of tab 1 of window 1 to "x"',
+        'tell application "Terminal" to activate',
+        'tell application id "com.googlecode.iterm2" to activate',
+        'tell application "System Events" to tell process "Terminal" to click button 1 of window 1',
+        'tell application "System Events" to tell process "iTerm2" to get name of windows',
+        'tell application "Script Editor" to activate',
+        'tell application "Shortcuts Events" to get name of every shortcut',
+        'tell application "System Events" to tell process "NEO" to click button 1 of window 1',
+        # beyond reading and clicking in a window: not on the list a grant may cover
+        'tell application "Chess" to frobnicate board 1',
+        'tell application "Music" to back track',
+        'tell application "Notes" to make new note with properties {name:"x"}',
+    ],
+)
+def test_a_grant_covers_only_reading_and_clicking_in_an_ordinary_app(script):
+    assert script_facts(script).danger, script_facts(script)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        'tell application "System Events" to tell process "Chess" to click menu item "New Game" of menu 1 of menu bar 1',
+        'tell application "System Events" to click button 1 of window 1 of process "Chess"',
+        'tell application "System Events" to tell process "Chess" to perform action "AXPress" of button 1 of window 1',
+        'tell application "System Events" to tell process "Chess" to select row 2 of table 1 of window 1',
+        'tell application "System Events" to set frontmost of process "Chess" to true',
+        'tell application "System Events" to tell process "Chess" to set value of text field 1 of window 1 to "x"',
+        'tell application "Chess" to activate',
+        *CHESS_READS,
+    ],
+)
+def test_reading_and_clicking_in_one_apps_window_can_be_granted(script):
+    f = script_facts(script)
+    assert f.app == "Chess" and f.danger == "", f
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        'tell application "Macintosh HD:Users:me:Downloads:Thing.app" to get name of every window',
+        'tell application "/Users/me/Downloads/Thing.app" to get name of every window',
+        'tell application "Thing.app" to get name',
+        'get name of window 1 of application "~/Downloads/Thing.app"',
+        'tell application "Music" to back track',
+        # a variable from outside the tell may be one of the app's own commands (VLC's volumeUp)
+        'set volumeUp to 0\ntell application "VLC"\n  get volumeUp\nend tell',
+        'set list2 to 0\ntell application "Music" to get list2',
+    ],
+)
+def test_more_scripts_that_are_not_read_only(script):
+    assert not script_is_read_only(script), script_facts(script)
+
+
+def test_an_app_named_by_its_path_is_never_granted():
+    f = script_facts('tell application "/Users/me/Downloads/Thing.app" to activate')
+    assert f.danger and f.app == ""
+
+
+@pytest.mark.parametrize(
+    "script, ui",
+    [
+        ('tell application "System Events" to get name of every folder action', False),
+        ('tell application "Music" to get name of current track -- not a System Events window', False),
+        ('tell application "Music" to get "System Events window"', False),
+        ('(* tell application "System Events" to click button 1 *)\ntell application "Music" to get sound volume', False),
+        ('tell application "System Events" to get name of every disk', False),
+        ('tell application "System Events" to tell process "Chess" to get name of windows', True),
+        ('tell application "System Events" to click button 1 of window 1 of process "Chess"', True),
+        ('tell application "System Events" to key code 36', True),
+    ],
+)
+def test_ui_scripting_is_read_from_the_code_not_its_comments_or_strings(script, ui):
+    assert script_facts(script).ui is ui
+
+
+def test_without_accessibility_a_system_events_script_that_needs_none_still_runs(ax_off, ran):
+    out = _script('tell application "System Events" to get name of every folder action')
+    assert out.ok and len(ran) == 1
+
+
+def _granted_chess_task(taint: tuple[str, ...] = ()) -> str:
+    t = grants.new_task()
+    grants.grant(t, "applescript", grants.Target("Chess", "", taint), "applescript:granted")
+    return t
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        LOGIN_ITEM,
+        'tell application "System Events"\n  get name of process "Chess"\n'
+        "  click button 1 of window 1 of item 1 of (application processes whose frontmost is true)\nend tell",
+    ],
+)
+def test_a_chess_grant_never_covers_system_events_or_the_frontmost_app(ran, script):
+    from neo.tools import load_all
+
+    load_all()
+    t = _granted_chess_task()
+
+    async def go():
+        with grants.task(t):
+            return await registry().invoke("applescript", {"script": script}, ToolContext(user_text="x"))
+
+    out = asyncio.run(go())
+    assert out.halt and out.text.startswith(confirm.NEEDS_CONFIRM) and ran == []
+    assert confirm.card(confirm.peek())["scopes"] == []
+
+
+def test_a_grant_ends_at_new_untrusted_reading_even_by_a_tool_already_read(ran):
+    """Taint is a set of names; the grant counts every untrusted result after the yes."""
+    from neo.tools import load_all
+
+    load_all()
+    t = _granted_chess_task()
+    registry()._tools["zz_look"] = RegisteredTool("zz_look", "t", _OBJ, lambda a, c: "mail from Mallory", untrusted=True)
+    try:
+
+        async def go():
+            ctx = ToolContext(user_text="x", taint=["zz_look"])
+            with grants.task(t):
+                grants.grant(t, "applescript", grants.Target("Chess", "", ("zz_look",)), "applescript:yes")
+                first = await registry().invoke("applescript", {"script": PICK_WHITE}, ctx)
+                await registry().invoke("zz_look", {}, ctx)  # the same tool reads something new
+                second = await registry().invoke("applescript", {"script": START}, ctx)
+            return first, second
+
+        first, second = asyncio.run(go())
+    finally:
+        registry()._tools.pop("zz_look", None)
+    assert first.ok and not first.halt  # covered: nothing new read since the yes
+    assert second.halt and ran == [PICK_WHITE]  # a card again
+
+
+def test_a_granted_calls_own_reading_keeps_the_grant(ran):
+    from neo.tools import load_all
+
+    load_all()
+    t = _granted_chess_task(("ax_tree",))
+
+    async def go():
+        ctx = ToolContext(user_text="x", taint=["ax_tree"])
+        with grants.task(t):
+            return [await registry().invoke("applescript", {"script": s}, ctx) for s in (NEW_GAME, CHESS_READS[2], START)]
+
+    outs = asyncio.run(go())
+    assert all(o.ok and not o.halt for o in outs) and len(ran) == 3
+
+
+def test_new_untrusted_reading_by_a_tool_in_the_baseline_asks_again_in_the_session(session_env, monkeypatch):
+    ran = session_env
+    brain = Brain(
+        [
+            Turn(tool_calls=[ToolCall("0", "zz_look", {})]),  # the request is tainted
+            Turn(tool_calls=[_call(1, NEW_GAME)]),  # a card
+            Turn(tool_calls=[_call(2, PICK_WHITE)]),  # covered
+            Turn(tool_calls=[ToolCall("3", "zz_look", {})]),  # reads the screen again: new content
+            Turn(tool_calls=[_call(4, START)]),  # a card again
+        ]
+    )
+    monkeypatch.setattr(sess_mod, "brain", lambda purpose="agent": brain)
+
+    async def go():
+        s = Session(reflex=_reflex())
+        await s.handle("zz chess as white", from_user=True)
+        return await s.handle("yes for this task", from_user=True)
+
+    r = asyncio.run(go())
+    assert ran == [NEW_GAME, PICK_WHITE] and r.route == "confirm" and confirm.peek().params["script"] == START
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "to all", "for all", "for everything", "to everything", "sab ke liye", "sabhi ke liye", "is task ke liye",
+        "poore task ke liye", "सब के लिए", "इस टास्क के लिए",
+    ],
+)
+def test_scope_words_alone_are_no_yes(text):
+    assert answer_of(text) is None and scope_of(text) == "once"
+
+
+@pytest.mark.parametrize(
+    "text", ["yes to all", "haan sab ke liye", "sab ke liye haan", "ok for everything", "haan poore task ke liye"]
+)
+def test_scope_words_with_a_yes_are_a_yes_for_the_task(text):
+    assert answer_of(text) is True and scope_of(text) == "task"
+
+
+def test_erasing_everything_ends_every_grant(monkeypatch):
+    from neo import app as app_mod
+
+    t = _granted_chess_task()
+    assert grants.active(t)
+    a = app_mod.App()
+
+    async def nothing():
+        return {}
+
+    monkeypatch.setattr("neo.privacy.forget_everything", nothing)
+    asyncio.run(a.erase())
+    assert grants.active(t) == []
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        # the Apple menu is the Mac's, whichever app's menu bar it is reached through
+        'tell application "System Events" to tell process "Chess" to click menu item "Restart…" of menu 1 of '
+        'menu bar item "Apple" of menu bar 1',
+        'tell application "System Events" to tell process "Chess" to click menu item 9 of menu 1 of menu bar item 1 of menu bar 1',
+        'tell application "System Events" to tell process "Chess" to click menu item "Lock Screen" of menu 1 of menu bar item 2',
+        # Services run other apps' workflows (a Terminal at a folder, a shell workflow)
+        'tell application "System Events" to tell process "Chess" to click menu item "New Terminal at Folder" of menu 1 '
+        'of menu item "Services" of menu 1 of menu bar item 2 of menu bar 1',
+    ],
+)
+def test_the_macs_own_menus_are_never_granted(script):
+    assert script_facts(script).danger, script_facts(script)
+
+
+def test_system_events_by_its_bundle_id_is_system_events():
+    f = script_facts('tell application id "com.apple.systemevents" to tell process "Chess" to get name of windows')
+    assert f.ui and f.app == "Chess" and f.read_only
+    f = script_facts('tell application id "com.apple.systemevents" to set dark mode of appearance preferences to true')
+    assert f.danger and f.app == "com.apple.systemevents"
+
+
+def test_an_app_named_in_a_tell_counts_even_when_nothing_inside_acts_on_it():
+    f = script_facts('tell application "Chess"\n  tell application "Finder" to activate\nend tell')
+    assert f.app == "" and "more than one app" in f.danger
