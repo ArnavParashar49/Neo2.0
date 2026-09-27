@@ -254,3 +254,26 @@ def test_finds_across_many_framings_never_pick_the_wrong_copy(vision):
         print(f"[ocr] {k:6} 150 finds: {tally[k]}, median {statistics.median(ms):.0f} ms, p90 {sorted(ms)[int(len(ms) * 0.9)]:.0f} ms")
     assert tally["after"]["wrong"] == 0
     assert tally["after"]["right"] >= tally["before"]["right"]
+
+
+def test_the_words_around_a_click_before_and_after(vision):
+    """A click's change samples (120×120 pt around the point, kept at full detail): the words that
+    changed, read only where the samples differ."""
+    from neo.tools.computer import screen
+
+    def crop(word, fill=(255, 255, 255)):
+        img = Image.new("RGB", (240, 240), (250, 250, 250))
+        d = ImageDraw.Draw(img)
+        d.rounded_rectangle([60, 100, 180, 150], 12, fill=fill, outline=(170, 170, 170))
+        d.text((88, 110), word, fill=(0, 0, 0), font=_font(SF, 26))
+        s = img.convert("L").resize((24, 24), Image.BILINEAR)
+        s.info.update({"full": img, "ppp": 0.5})
+        return s
+
+    before, after = crop("Start"), crop("Stop", fill=(170, 200, 250))  # (the button lit up as it changed)
+    assert screen.differs(before, after)
+    with effects.allow("model"):
+        ms, said = _ms(lambda: ocr.sample_change([before], [after]), 5)
+        same_ms, same = _ms(lambda: ocr.sample_change([before], [crop("Start")]), 5)
+    print(f"[ocr] words around a click: {said} in {ms:.1f} ms; unchanged samples: {same!r} in {same_ms:.2f} ms")
+    assert said == "“Start” → “Stop”" and same == ""
