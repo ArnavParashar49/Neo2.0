@@ -836,6 +836,8 @@ async def after_look(ctx: ToolContext, where: list[Aim], pts: list[tuple[float, 
 
     if not any(w.pictured or w.numbers or (w.form == "id" and marks.is_mark(getattr(w.element, "id", ""))) for w in where):
         return None
+    if not await asyncio.to_thread(screen.can_capture):
+        return None  # (never asks for Screen Recording: that question is the screenshot tool's)
     shot = next((w.shot for w in where if w.shot is not None), None)
     window = await asyncio.to_thread(_window_frame, hit)
     area = look_area(pts, shot, window)
