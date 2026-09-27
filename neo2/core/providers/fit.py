@@ -19,12 +19,11 @@ doesn't fit:
    far as the request must shrink (the room that frees is theirs, it doesn't go back to tools)
 
 Before any of that, every agent request (one that offers tools) goes on the context diet
-(neo2.core.providers.diet), whatever the brain: only the newest picture, a look a newer look at the
-same thing replaced as a one-line note, older steps' results cut short. And it is held to a soft
-budget (diet.soft_budget) the same way, only never at the cost of what the model needs: what the
-diet keeps whole (the newest steps, the newest look at each thing, questions, errors), the answer's
-room and the tools stay; results older than that get shorter (2), then older conversation text (5).
-Over it is still sent: only the brain's own budget refuses.
+(neo2.core.providers.diet), whatever the brain: older pictures and a look a newer look at the same
+thing replaced as one-line notes, an earlier request's results cut short. And it is held to a soft
+budget (diet.soft_budget) by cutting an earlier request's results shorter still (2) — only those:
+the task being worked on, anything the user or NEO said, the answer's room and the tools stay.
+Over it is still sent: only the brain's own budget refuses (and only then do the steps below run).
 
 A budget that is a per-minute rate (Groq's free tier) is paid back before the next step can go:
 a prompt of half of it already means a wait of ~30s per step. For such a brain the tools that
@@ -55,7 +54,7 @@ _MIN_OUTPUT = 512
 _MIN_RESULT = 600  # chars a result kept whole is cut to, at the very least, before giving up
 _PER_MINUTE_SHARE = 0.5  # a per-minute budget: tools come back while the prompt is under this…
 _PER_MINUTE_TOOLS = 0.1  # …or while they add no more than this to it
-_SOFT_RESULT = 160  # chars an older result keeps when an agent request is over its soft budget
+_SOFT_RESULT = 160  # chars an earlier request's result keeps when an agent request is over its soft budget
 _ENABLED = re.compile(r"^Enabled: (.*?)\. They are available", re.S)
 
 log = logger(__name__)
@@ -272,25 +271,17 @@ def fit(
         return prompt() + out <= limit
 
     def soften() -> None:
-        """An agent request over its soft budget: steps 2 and 5, sparing what the diet keeps whole."""
+        """An agent request over its soft budget: an earlier request's results cut short (diet.cap)."""
         nonlocal msgs
         soft = _diet.soft_budget(msgs)
         if (was_tokens := prompt()) <= soft:
             return
-        start = request_start(msgs)
-        for what, shed in (
-            (f"older results to {_SOFT_RESULT} chars", lambda m: _diet.cap(m, _SOFT_RESULT)),
-            ("older conversation text", lambda m: _shorten_text(m, start, 300)),
-        ):
-            was, msgs = msgs, shed(msgs)
-            if any(a is not b for a, b in zip(was, msgs, strict=True)):
-                trimmed.append(what)
-            if prompt() <= soft:
-                break
-        if trimmed:
+        was, msgs = msgs, _diet.cap(msgs, _SOFT_RESULT)
+        if any(a is not b for a, b in zip(was, msgs, strict=True)):
+            trimmed.append(f"earlier requests' results to {_SOFT_RESULT} chars")
             log.info(
                 f"[brain] {name}: request over its soft budget ({soft}) ~{was_tokens}→{prompt()} tokens by "
-                f"trimming {', '.join(trimmed)}"
+                f"trimming {trimmed[-1]}"
             )
 
     if tools is not None:

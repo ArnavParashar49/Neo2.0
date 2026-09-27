@@ -6,8 +6,10 @@ Two brains on one account (CEREBRAS_API_KEY, which the user adds to ~/.neo/.env)
   tried ahead of Groq;
 - ``cerebras_vision`` — qwen-3.8-27b, which sees: a seeing fallback when Gemini is overloaded,
   tried ahead of Groq's vision brain. At most 2 pictures and 10 MiB per request (the API's
-  limits): older pictures are left out with a note, and when even the newest can't go the request
-  is refused (RequestTooLarge) — a brain that answers as if it saw must have seen.
+  limits): the newest and the user's own go first, others are left out with a note, and when even
+  the newest can't go the request is refused (RequestTooLarge) — a brain that answers as if it saw
+  must have seen. An agent's step goes on the context diet (neo2.core.providers.diet) before its
+  pictures are counted, and before its size is checked against the rate limits.
 
 Both speak the OpenAI chat-completions protocol at https://api.cerebras.ai/v1
 (neo2.core.providers.openai_compat), with these differences:
@@ -22,12 +24,12 @@ Cerebras is asked: first for chat ("fast"), after Gemini for an agent's steps. A
 while the prewarm is still connecting waits for its connection rather than open a second one.
 
 Thinking. Both models reason inside ``max_tokens`` (``max_tokens=16`` came back with no text and
-finish_reason "length"). Every request starts at ``reasoning_effort`` low, whatever effort the caller
-asked for, with :data:`ROOM` tokens of room — unused room costs nothing. (The chess log: an agent
-task's "high" ran qwen past 4096 tokens of thinking twice in one task, and each time the whole
-prompt was sent and paid for again.) A reply that runs out of room anyway is asked once more with
-twice the room before it counts as a failure (Truncated: request-shaped, so the chain tries the next
-brain without benching this one).
+finish_reason "length"). A request passes ``reasoning_effort`` (the effort the caller asked for: high
+for an agent task, low for UI steps) and always leaves room for that thinking (:data:`ROOM`, by
+effort) — unused room costs nothing. (The chess log: "high" in 4096 tokens ran qwen out of room twice
+in one task, and each time the whole prompt was sent and paid for again.) A reply that runs out of
+room anyway is asked once more with low effort and twice the room before it counts as a failure
+(Truncated: request-shaped, so the chain tries the next brain without benching this one).
 
 Limits. Every response's ``x-ratelimit-*`` headers (limit / remaining / reset, per window) are kept
 per model; a request that would not fit a window is not sent: a wait of up to
@@ -68,7 +70,7 @@ from openai import APIConnectionError, APIStatusError, APITimeoutError, AsyncOpe
 
 from neo2.core import logger, runtime
 from neo2.core.providers import cerebras_hooks as hooks
-from neo2.core.providers import spend
+from neo2.core.providers import diet, spend
 from neo2.core.providers.base import (
     BadRequest,
     Message,
@@ -77,7 +79,6 @@ from neo2.core.providers.base import (
     QuotaExhausted,
     RateLimited,
     RequestTooLarge,
-    ToolResult,
     ToolSpec,
     Turn,
     Unavailable,
@@ -97,6 +98,7 @@ from neo2.core.providers.cerebras_hooks import (  # noqa: F401 — re-exported
     with_spoken_notes,
 )
 from neo2.core.providers.fit import Fitted, estimate
+from neo2.core.providers.history import normalize
 from neo2.core.providers.openai_compat import OpenAICompatProvider, Truncated, _retry_after
 
 log = logger(__name__)
@@ -113,10 +115,8 @@ DEFAULT_CONTEXT = 65_536
 MAX_PICTURES = 2
 MAX_REQUEST_BYTES = 10 * 1024 * 1024
 _REQUEST_SLACK = 64 * 1024  # JSON framing, tool schemas' escaping: the estimate is an estimate
-# The effort every request starts at, and the room a reply always gets: the reasoning is spent from
-# max_tokens before the answer (low effort on a UI step: well under 2K).
-EFFORT = "low"
-ROOM = 8192
+# Room a reply always gets, by effort: the reasoning is spent from max_tokens before the answer.
+ROOM: dict[str, int] = {"low": 8192, "medium": 8192, "high": 16_384}
 MAX_ROOM = 32_768  # a retry's room never grows past this (paid-tier output limit: 40K)
 _STREAM_REASONING = 256  # a streamed answer's unseen reasoning, when the server reports no usage
 
@@ -687,14 +687,16 @@ class CerebrasProvider(OpenAICompatProvider):
         max_tokens: int = 4096,
         **extra: Any,  # whatever else the chain passes (brain-effort's seams): handed on as is
     ) -> Turn:
-        effort = EFFORT
+        effort = effort if effort in ROOM else "low"  # (the values both models take)
         try:
+            if tools is not None:  # an agent's step: what it sends is what's counted (fit diets it again: a no-op)
+                messages = diet.diet(normalize(messages))
             messages = self._prepare(messages, system, tools)
             await self.account.join_prewarm()
             await self.account.admit(
                 self.model, estimate(messages, system, tools, vision=self.supports_vision), self.name
             )
-            room = max(max_tokens, ROOM)
+            room = max(max_tokens, ROOM[effort])
             retried: set[str] = set()
             while True:
                 try:
@@ -736,7 +738,7 @@ class CerebrasProvider(OpenAICompatProvider):
             await self.account.admit(
                 self.model, estimate(messages, system, None, vision=self.supports_vision), self.name
             )
-            room = max(max_tokens, ROOM)
+            room = max(max_tokens, ROOM["low"])
             produced = False
             try:
                 async for chunk in super().stream(messages, system=system, max_tokens=room):
@@ -796,49 +798,45 @@ def _b64(n: int) -> int:
 def cap_pictures(
     messages: list[Message], *, most: int, max_bytes: int, name: str = VISION_BRAIN
 ) -> list[Message]:
-    """`messages` with at most `most` pictures, newest first, whose base64 fits in `max_bytes`; the
-    older ones are left out with a note. RequestTooLarge when even the newest can't go: a brain
-    that sees must not answer about a picture it never got. Never mutates `messages`."""
+    """`messages` with at most `most` pictures whose base64 fits in `max_bytes`: the newest, then the
+    user's own (the photo a request is about), then the newest of the rest; the others are left out
+    with a note. RequestTooLarge when even the newest can't go: a brain that sees must not answer
+    about a picture it never got. Never mutates `messages`."""
     out = list(messages)
-    kept = size = 0
-    first = True
     note = f" [older picture left out: this brain takes at most {most} per request]"
-
-    def take(images: list) -> list:
-        nonlocal kept, size, first
-        keep = []
-        for im in reversed(images):  # newest last
-            b = _b64(len(im.data))
-            if kept < most and size + b <= max_bytes:
-                keep.append(im)
-                kept += 1
-                size += b
-            elif first:
-                raise RequestTooLarge(
-                    f"{name}: the picture is too large to send ({b / 1048576:.1f} MiB as base64)"
-                )
-            first = False
-        return list(reversed(keep))
-
+    slots: list[tuple[int, int, int]] = []  # (turn, result or -1 for the turn's own, picture): newest first
     for i in range(len(out) - 1, -1, -1):
         m = out[i]
-        if m.role == "tool" and any(r.images for r in m.tool_results):
-            results: list[ToolResult] = []
-            for r in reversed(m.tool_results):
-                if not r.images:
-                    results.append(r)
-                    continue
-                ims = take(r.images)
-                results.append(
-                    r if len(ims) == len(r.images) else replace(r, content=r.content + note, images=ims)
-                )
-            results.reverse()
-            if any(a is not b for a, b in zip(results, m.tool_results, strict=True)):
-                out[i] = replace(m, tool_results=results)
-        elif m.images:
-            ims = take(m.images)
-            if len(ims) != len(m.images):
-                out[i] = replace(m, text=m.text + note, images=ims)
+        for j in range(len(m.tool_results) - 1, -1, -1):
+            slots += [(i, j, k) for k in range(len(m.tool_results[j].images) - 1, -1, -1)]
+        slots += [(i, -1, k) for k in range(len(m.images) - 1, -1, -1)]
+
+    def image(s: tuple[int, int, int]):
+        i, j, k = s
+        return (out[i].images if j < 0 else out[i].tool_results[j].images)[k]
+
+    users = [s for s in slots[1:] if s[1] < 0 and out[s[0]].role == "user"]
+    kept: set[tuple[int, int, int]] = set()
+    size = 0
+    for s in slots[:1] + users + [s for s in slots[1:] if s not in users]:
+        b = _b64(len(image(s).data))
+        if len(kept) < most and size + b <= max_bytes:
+            kept.add(s)
+            size += b
+        elif s == slots[0]:
+            raise RequestTooLarge(f"{name}: the picture is too large to send ({b / 1048576:.1f} MiB as base64)")
+    for i, m in enumerate(out):
+        results = [
+            replace(r, content=r.content + note, images=ims)
+            if len(ims := [im for k, im in enumerate(r.images) if (i, j, k) in kept]) < len(r.images)
+            else r
+            for j, r in enumerate(m.tool_results)
+        ]
+        if any(a is not b for a, b in zip(results, m.tool_results, strict=True)):
+            m = replace(m, tool_results=results)
+        if len(ims := [im for k, im in enumerate(m.images) if (i, -1, k) in kept]) < len(m.images):
+            m = replace(m, text=m.text + note, images=ims)
+        out[i] = m
     return out
 
 

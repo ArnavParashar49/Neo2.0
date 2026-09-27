@@ -8,6 +8,7 @@ server this test process runs on 127.0.0.1) — no key is real, nothing leaves t
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import math
 import time
@@ -24,7 +25,7 @@ from neo2.core import config
 from neo2.core import providers as prov
 from neo2.core.providers import cerebras as cb
 from neo2.core.providers import cerebras_hooks as hooks
-from neo2.core.providers import spend
+from neo2.core.providers import diet, spend
 from neo2.core.providers.base import (
     AllBrainsFailed,
     BadRequest,
@@ -39,6 +40,7 @@ from neo2.core.providers.base import (
     Turn,
     Unavailable,
 )
+from neo2.core.providers.fit import estimate
 from neo2.core.providers.openai_compat import OpenAICompatProvider, Truncated
 
 KEY = "csk-test-not-a-real-key"
@@ -216,7 +218,7 @@ async def test_a_text_step_goes_through_with_low_effort_and_room_to_think(cset, 
     assert turn.sees is False  # text only: the loop refuses any coordinates from it
     body = fake.bodies[0]
     assert body["model"] == "gpt-oss-120b" and body["reasoning_effort"] == "low"
-    assert body["max_tokens"] >= cb.ROOM  # 64 would all go to thinking
+    assert body["max_tokens"] >= cb.ROOM["low"]  # 64 would all go to thinking
     assert str(fake.requests[0].url) == "https://api.cerebras.ai/v1/chat/completions"
     day = ledger_file(s)
     assert day["tokens"]["gpt-oss-120b"] == [1000, 200]
@@ -231,9 +233,11 @@ async def test_a_reply_that_spent_all_its_room_thinking_is_asked_again_once(cset
     turn = await p.complete(ASK, effort="high", max_tokens=1000)
     assert turn.text == "Done."
     first, second = fake.bodies
-    # An agent task's "high" starts low, with room to think: the retry (the whole prompt again) is rare.
-    assert first["reasoning_effort"] == "low" and first["max_tokens"] >= cb.ROOM >= 8192
-    assert second["reasoning_effort"] == "low" and second["max_tokens"] >= 2 * first["max_tokens"]
+    # An agent task thinks at the effort it asked for, with room for that thinking (the chess log:
+    # "high" in 4096 tokens ran out twice, and each retry sent the whole prompt again)…
+    assert first["reasoning_effort"] == "high" and first["max_tokens"] >= cb.ROOM["high"] >= 16_384
+    # …and a reply that ran out anyway goes again once, at low effort with twice the room
+    assert second["reasoning_effort"] == "low" and second["max_tokens"] == 2 * first["max_tokens"]
     assert ledger_file(s)["tokens"]["gpt-oss-120b"] == [1500, 1224]  # the empty reply was paid for too
 
     fake.reply(payload=completion(None, finish="length"))
@@ -495,7 +499,7 @@ async def test_a_streamed_answer_is_counted_even_without_usage(cset, fake):
     fake.reply(payload=f"data: {json.dumps(chunk)}\n\ndata: [DONE]\n\n")
     out = [c async for c in cb.cerebras().stream(ASK, max_tokens=64)]
     assert out == ["Hello there"]
-    assert fake.bodies[0]["reasoning_effort"] == "low" and fake.bodies[0]["max_tokens"] >= cb.ROOM
+    assert fake.bodies[0]["reasoning_effort"] == "low" and fake.bodies[0]["max_tokens"] >= cb.ROOM["low"]
     tin, tout = ledger_file(s)["tokens"]["gpt-oss-120b"]
     assert tin > 0 and tout >= 4  # estimated: the prompt as fitted, the text plus unseen thinking
 
@@ -504,7 +508,7 @@ async def test_a_streamed_answer_is_counted_even_without_usage(cset, fake):
         _ = [c async for c in cb.cerebras().stream(ASK)]
     # ...and was paid for all the same: the prompt, and the room it spent thinking
     tin2, tout2 = ledger_file(s)["tokens"]["gpt-oss-120b"]
-    assert tin2 >= 2 * tin and tout2 - tout >= cb.ROOM
+    assert tin2 >= 2 * tin and tout2 - tout >= cb.ROOM["low"]
 
 
 def _sse(*chunks: dict) -> str:
@@ -575,6 +579,10 @@ def test_at_most_two_pictures_newest_first_and_never_blind():
     # bytes: only what fits (base64) goes
     out = cb.cap_pictures(_history(3000, 3000), most=2, max_bytes=4100)
     assert [len(r.images) for m in out for r in m.tool_results] == [0, 1]
+    # the user's own photo (what the request is about) goes before an older picture the tools took
+    photo = [Message.user("what lamp is this?", images=[_shot(100, b"L")]), *_history(100, 100)[1:]]
+    out = cb.cap_pictures(photo, most=2, max_bytes=10_000)
+    assert len(out[0].images) == 1 and [len(r.images) for m in out for r in m.tool_results] == [0, 1]
     # the newest can't go: refused, not answered blind
     with pytest.raises(RequestTooLarge):
         cb.cap_pictures(_history(100, 9000), most=2, max_bytes=4000)
@@ -592,6 +600,47 @@ async def test_the_seeing_brain_sends_at_most_two_pictures(cset, fake):
     assert sum(p["type"] == "image_url" for p in parts) == 2
     assert body["model"] == "qwen-3.8-27b" and body["reasoning_effort"] == "low"  # not its default xhigh
     assert len(fake.requests[0].content) < 10 * 1024 * 1024
+
+
+async def test_an_agent_step_goes_on_the_diet_before_its_pictures_and_its_rate_are_counted(cset, fake, monkeypatch):
+    """The user's photo, then a desktop screenshot and a picture of NEO's browser: the two pictures
+    that go are the user's photo and the newest — not the two newest, which left out the photo the
+    request is about. And the rate check counts what is sent (an older tree the diet leaves out
+    isn't in it)."""
+    cset()
+    fake.default = (200, completion("found it", model=cb.VISION_MODEL), {})
+    v = cb.cerebras_vision()
+
+    def step(cid: str, name: str, content: str, images=(), args=None) -> list[Message]:
+        return [
+            Message.assistant(tool_calls=[ToolCall(cid, name, args or {})]),
+            Message.tool([ToolResult(cid, name, content, images=list(images))]),
+        ]
+
+    tree = 'App: Safari — window "Lamps"\n' + '  e1 Button "Buy" @(1,1 2x2)\n' * 400
+    msgs = [
+        Message.user("what lamp is this?", images=[_shot(300, b"L")]), Message.assistant("An Anglepoise."),
+        Message.user("find that exact lamp on a shopping site"),
+        *step("c0", "ax_tree", tree, args={"app": "Safari"}),
+        *step("c1", "screenshot", "Screenshot s1 attached", [_shot(300, b"S")]),
+        *step("c2", "ax_tree", tree, args={"app": "Safari"}),
+        *step("c3", "browser_screenshot", "Screenshot of https://shop.example (1280×800).", [_shot(300, b"B")]),
+    ]  # fmt: skip
+    counted: list[int] = []
+    real = v.account.admit
+
+    async def admit(model: str, tokens: int, name: str) -> None:
+        counted.append(tokens)
+        await real(model, tokens, name)
+
+    monkeypatch.setattr(v.account, "admit", admit)
+    await v.complete(msgs, tools=TOOLS, effort="high")
+    body = fake.bodies[0]
+    parts = [p for m in body["messages"] if isinstance(m["content"], list) for p in m["content"]]
+    sent = [base64.b64decode(p["image_url"]["url"].split(",", 1)[1])[:1] for p in parts if p["type"] == "image_url"]
+    assert sent == [b"L", b"B"]
+    dieted = cb.cap_pictures(diet.diet(msgs), most=2, max_bytes=10 * 1024 * 1024)
+    assert counted == [estimate(dieted, "", TOOLS, vision=True)] and counted[0] < estimate(msgs, "", TOOLS) - 2000
 
 
 # ---- one account per agent, one warm connection per account ----------------------------------
