@@ -13,16 +13,23 @@ dialog an app draws itself. There NEO reads the pixels it captured itself, three
 * **checking effects** — the words around a click before and after (:func:`sample_change`,
   :func:`words_changed`): “Start a New Game?” is gone, “Start” → “Stop”.
 
-Speed by need (synthetic Retina frames, macOS 26, recognition revision 3; tests/test_eyes_ocr_live.py):
+Speed and accuracy by need (synthetic Retina frames, macOS 26, recognition revision 3; measured by
+tests/test_eyes_ocr_live.py):
 
-* fast mode: about 6 ms for a 560×200 pt dialog crop, about 23 ms for a whole Retina display. It needs
-  about two pixels per point — on a picture shrunk to one pixel per point it garbles (“CarKel”) — so a
-  picture with fewer is scaled up 2× before a fast read (1–14 ms);
-* accurate mode: about 36 ms for the crop, about 95 ms for the display, 30 languages;
-* fast for change checks and the first try at a target (taken only when it reads the words exactly);
-  accurate when fast missed or was unsure, for marks, and for any script fast doesn't read.
-* The picture reaches Vision as raw grey pixels (about 1.5 ms for a Retina display), never through a
-  PNG (about 35 ms).
+* fast mode: about 6 ms for a 500×170 pt dialog, 10 ms for a window, 23 ms for a whole Retina display,
+  six Latin-script languages. It needs about two pixels per point — on a picture shrunk to one pixel
+  per point it read 2 of 9 labels — so a picture with fewer is scaled up 2× first (8 of 9);
+* accurate mode: about 32 ms for the dialog, 60–80 ms for a window, 30 languages. Whole, a Retina
+  display drops small stacked labels (2 of 6), so a big accurate read is cut into overlapping pieces
+  (6 of 6, about 170 ms);
+* either mode now and then drops or garbles a word (2–3 in 30 framings of the same window), so a find
+  is never one read's word: a fast find is taken when a second, differently framed fast read agrees
+  (about 2 × 6–14 ms); otherwise an accurate read decides over the union of all three. On 150 finds
+  over 30 framings: one fast read, 140 right, 5 wrong, 5 missed; find_in, 150 right (median 22 ms);
+* change checks read fast; marks read accurately plus fast (the union); scripts fast can't read,
+  accurately in their own languages;
+* the picture reaches Vision as raw grey pixels (about 1.5 ms for a Retina display), never through a
+  PNG (about 31 ms).
 
 Languages: whatever this Mac's Vision reads, asked once. Hindi is not among them on macOS 26: words in
 Devanagari are never searched for (a Hindi target relies on Accessibility's labels), and the answer
@@ -288,8 +295,10 @@ def warm() -> bool:
     def run() -> None:
         try:
             e = engine()
-            if e is not None:
-                e.recognize(Image.new("L", (64, 32), 255), fast=True, languages=["en-US"], auto=False, ranges=None)
+            blank = Image.new("L", (64, 32), 255)
+            for fast in (True, False):  # (each mode loads its own model: the accurate one 0.4–0.6 s)
+                if e is not None:
+                    e.recognize(blank, fast=fast, languages=["en-US"], auto=False, ranges=None)
         except BaseException as ex:  # noqa: BLE001 - a warm-up that failed costs the first read its load, nothing else
             log.info("text recognition warm-up failed: %s", ex)
 
@@ -1042,6 +1051,26 @@ def text_marks(
     return remember_marks(chosen, app=app, pid=pid, context=reading.text())
 
 
+async def look_marks(
+    frame: Any,
+    area: Box | None = None,
+    *,
+    named: Iterable[Any] = (),
+    window: Box | None = None,
+    blind: bool = False,
+    sheet: Box | None = None,
+    app: str = "",
+    pid: int = 0,
+) -> list[TextMark]:
+    """Text marks for a look (a screenshot, observe) when they are worth reading (:func:`worth_reading`:
+    always for a brain that can't see; for one that can, when Accessibility names little of the window),
+    off the event loop. ``named``: Accessibility's marks or elements for the same area."""
+    named = list(named)
+    if not available() or not worth_reading(window or area, named, blind=blind):
+        return []
+    return await asyncio.to_thread(text_marks, frame, area, covered=named, sheet=sheet, app=app, pid=pid)
+
+
 def install() -> bool:
     """Register the text marks with the pointer's id seam (the Element marks' branch adds it). True
     when registered."""
@@ -1424,10 +1453,10 @@ async def click_text_fallback(
                 f"Error: another window ({h.app or 'another app'}) is over the words '{label}' in {app or 'the front app'} "
                 "— look again (screenshot) before clicking.",
             )
-        said = [_Said(found.context or found.line)] + list(els or [])  # (the dialog's words: what an "OK" does)
-        if gate := await g._ask_first("click_text", a, found.line if not found.exact else found.text, app, said):
-            return gate
-        if not found.exact and (gate := await g._ask_first("click_text", a, found.text, app, said)):
+        # The gate judges the whole line the words are in (a "Delete" inside "Delete All" is one card, not
+        # two), with the dialog's words as the context of a plain "OK"; then what is under the point.
+        said = [_Said(found.context or found.line)] + list(els or [])
+        if gate := await g._ask_first("click_text", a, found.line, app, said):
             return gate
         if gate := await g._gate_click(a, [(h.label, h.app or app)]):
             return gate
@@ -1437,7 +1466,10 @@ async def click_text_fallback(
     except pointer.Refused as r:
         return g._refused(c, r)
     h = t.hits[0]
-    head = f"Clicked the words '{label}' at {_at(pts[0])}" + (f" in {h.app or app}" if (h.app or app) else "")
+    # (never a number for a brain that can't see: it would only copy it into a click)
+    spot = "the words" if c.get("blind") else _at(pts[0])
+    head = f"Clicked the words '{label}'" + ("" if c.get("blind") else f" at {spot}")
+    head += f" in {h.app or app}" if (h.app or app) else ""
     if t.brought:
         head += f" (brought {t.brought} to the front first)"
     head += " — found by reading the screen (Accessibility has no such label)."
@@ -1447,7 +1479,16 @@ async def click_text_fallback(
     read_there = f"read there: {_q(found.line)}" + (" [in the open sheet]" if found.where else "")
     if before is None:
         return ToolOutput(head + g._input_doubt() + "\n" + fence("screen", read_there))
-    out = await pointer.outcome(before, pid or h.pid, pts, [_at(pts[0])])
-    out = pointer.maybe_elsewhere(out, _at(pts[0]))
+    out = await pointer.outcome(before, pid or h.pid, pts, [spot])
+    out = pointer.maybe_elsewhere(out, spot)
     text, ok = pointer.report(head, out, [pointer.words(h), read_there], g._input_doubt())
-    return ToolOutput(text, ok=ok)
+    return _with_effect(ToolOutput(text, ok=ok), out)
+
+
+def _with_effect(result: Any, outcome: Any) -> Any:
+    """The result carrying what changed (Step 0's ToolOutput.effect, through the pointer's helpers once
+    they are there); unchanged before."""
+    from neo.tools.computer import pointer
+
+    carry, of = getattr(pointer, "with_effect", None), getattr(pointer, "effect_of", None)
+    return carry(result, of(outcome)) if callable(carry) and callable(of) else result

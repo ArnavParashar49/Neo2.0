@@ -460,6 +460,18 @@ def test_text_marks_read_accurately_and_leave_out_protected_windows(monkeypatch)
     assert ocr.text_marks(frame) == []
 
 
+def test_a_look_lists_text_marks_for_a_blind_brain_or_a_canvas_only(monkeypatch):
+    frame, eng = scene([("Score 12", (20.0, 20.0, 80.0, 14.0)), ("Hint", (300.0, 200.0, 40.0, 14.0))])
+    use(eng)
+    monkeypatch.setattr(ocr, "protected_rects", lambda area: [])
+    win = (0.0, 0.0, 400.0, 300.0)
+    panes = [((0.0, 0.0, 200.0, 300.0), "Sidebar"), ((200.0, 0.0, 200.0, 300.0), "Editor")] + [((x, 0.0, 10.0, 10.0), f"B{x}") for x in (0.0, 20.0, 40.0)]
+    assert asyncio.run(ocr.look_marks(frame, named=panes, window=win)) == [] and eng.calls == []
+    got = asyncio.run(ocr.look_marks(frame, named=panes, window=win, blind=True))
+    assert [m.text for m in got] == ["Score 12", "Hint"]
+    assert [m.text for m in asyncio.run(ocr.look_marks(frame, window=win))] == ["Score 12", "Hint"]  # a canvas
+
+
 def test_worth_reading_when_accessibility_names_little():
     win = (0.0, 0.0, 1000.0, 800.0)
     buttons = [((x, 10.0, 80.0, 24.0), f"B{x}") for x in (10.0, 100.0, 200.0, 300.0)]
@@ -695,6 +707,15 @@ def test_a_models_click_looks_before_and_after(desk, monkeypatch):
     out, _ = _fallback("hint", ctx=ToolContext(user_text="play", origin="agent"))
     assert len(desk.clicks) == 1 and desk.moves and looks and looks[0] == PID  # the pointer rested there first
     assert "couldn't" in out.text  # (no picture, no Accessibility answer: it says so, never "ok")
+
+
+def test_a_blind_brain_is_told_what_was_clicked_never_where(desk, monkeypatch):
+    _show(monkeypatch, [("Hint", (300.0, 40.0, 40.0, 16.0))])
+    monkeypatch.setattr(pointer, "look", lambda pid, pts: asyncio.sleep(0, pointer.Look(ax.Scene(), None)))
+    ctx = ToolContext(user_text="play", origin="agent", extras={"blind": True})
+    out, _ = _fallback("hint", ctx=ctx)
+    assert len(desk.clicks) == 1 and "Clicked the words 'hint' in Board" in out.text
+    assert not any(ch.isdigit() for ch in out.text)  # no coordinates in any form
 
 
 def test_the_gate_helpers_are_the_packages_own():
