@@ -328,7 +328,10 @@ def ground_eval(
     it does (precision) — overall, per script, per stage (in cascade order) and per window size —,
     whether every commit label it acted on reached the gate, and its latency. ``stages``: the ones
     that act (None: every stage). ``index``: the eval's own OS strings as the string index (False:
-    none, as before it is built). ``embed`` / ``choose``: MiniLM and Laya's choice (False: none)."""
+    none, as before it is built). ``embed`` / ``choose``: MiniLM and Laya's choice (False: none).
+
+    Also "agent label": each window's right label given as a model gives it (click_text(label=…),
+    origin "agent"): that exact control every time it acts — a label is never read as a shorter one."""
     from neo.tools.computer import resolve as rs
 
     head, all_rows = load_ground(path)
@@ -339,6 +342,7 @@ def ground_eval(
     ms: dict[str, list[float]] = {}
     commit_seen = commit_unflagged = asked = 0
     wrong: list[dict] = []
+    agent_seen: dict[str, set[tuple[str, str]]] = {}
 
     def add(key: str, acted: bool, right: bool) -> None:
         t = tally.setdefault(key, {"n": 0, "acted": 0, "right": 0})
@@ -351,7 +355,7 @@ def ground_eval(
             t0 = time.perf_counter()
             res = rs.resolve(
                 row["text"], cands, origin="user", stages=acting, index=idx, embed=embed, choose=choose,
-                alias=False, log_it=False,
+                alias=False, log_it=False, budget_s=None if embed is False else 60.0,
             )  # fmt: skip
             ms.setdefault(size, []).append((time.perf_counter() - t0) * 1000)
             acted = isinstance(res, rs.Resolved)
@@ -364,6 +368,16 @@ def ground_eval(
                 if lab is not None and sh != stage:
                     add(f"shadow {sh}", True, lab in set(row["gold"]))
                     add(f"shadow {sh} {row['script']}", True, lab in set(row["gold"]))
+            for gi in sorted(gold):
+                lab = cands[gi].label
+                if (size, lab) in agent_seen.setdefault(row["id"], set()):
+                    continue
+                agent_seen[row["id"]].add((size, lab))
+                got = rs.resolve(lab, cands, origin="agent", stages=acting, index=idx, embed=False, choose=False, alias=False, log_it=False)
+                ok = isinstance(got, rs.Resolved) and got.label == lab
+                add("agent label", isinstance(got, rs.Resolved), ok)
+                if isinstance(got, rs.Resolved) and not ok and len(wrong) < 40:
+                    wrong.append({"text": lab, "size": size, "stage": "agent label", "picked": got.label, "gold": [lab]})
             if acted:
                 add(f"stage {stage}", True, right)
                 add(f"stage {stage} {row['script']}", True, right)

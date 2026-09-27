@@ -29,6 +29,16 @@ def lex(text, screen, origin="user"):
     return res.label if isinstance(res, rs.Resolved) else f"<{res.reason}>"
 
 
+@pytest.fixture(autouse=True)
+def _no_meaning_worker_left():
+    """A worker a slow fake MiniLM held past its request finishes before the next test starts."""
+    assert rs._meaning_busy.acquire(timeout=5.0)
+    rs._meaning_busy.release()
+    yield
+    assert rs._meaning_busy.acquire(timeout=5.0)
+    rs._meaning_busy.release()
+
+
 class Ctx:
     def __init__(self, origin="user", user_text="", **extras):
         self.origin, self.user_text, self.extras, self.taint = origin, user_text, extras, []
@@ -381,3 +391,12 @@ def test_the_success_text_names_the_control_never_a_position():
     res = rs.resolve("click new game", cands("New Game"), log_it=False)
     assert rs.clicked_text(res) == "Clicked “New Game” (button)"
     assert rs.clicked_text(res, note="the app didn't answer in time") == "Clicked “New Game” (button) — the app didn't answer in time"
+
+
+def test_an_offline_benchmark_can_wait_for_the_models():
+    def slowish(texts):
+        time.sleep(0.35)  # past the shadow wait, well inside the benchmark's
+        return np.ones((len(texts), 4), dtype=np.float32) / 2.0
+
+    res = rs.resolve("start the new game", cands("Start", "New Game"), embed=slowish, choose=lambda r, o, w: (0, 0.99), index=False, log_it=False, budget_s=5.0)
+    assert isinstance(res, rs.Ambiguous) and res.shadow.get("meaning") != "late" and "meaning" in res.shadow["picks"]

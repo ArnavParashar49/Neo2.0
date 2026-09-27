@@ -12,6 +12,9 @@ Deterministic (sha256 seeds). Sources:
   requests on a Hindi-localized window (its labels are the OS Hindi forms), in both scripts.
 * **hand** — the design-grounding track's 45 hand-built cases (dialogs, modal duplicates, icons).
 * **selftest** — phrases for the controls self-test window (neo/selftest/layout.py).
+* **nested** — labels that hold a frame word next to the shorter label it contains ("Copy" and
+  "Copy Link", "New" and "New Tab", "Try" and "Try Again", "नया" and "नया टैब"): the frame stripper
+  must never turn the longer one into the shorter one.
 
 The OS forms (macOS's own English→Hindi UI strings, from system .loctable files) of the bank's
 labels are stored in the first line, so the file is self-contained. Evaluation data only: no
@@ -209,6 +212,23 @@ HAND_SCREENS = {
         ("MenuBarItem", "Test", "menu bar"), ("MenuItem", "Test Action", "menu"),
         *[("Row", f"Row {i}", "list") for i in range(1, 25)],
     ],
+    # a label that holds a frame word, beside the shorter label it contains
+    "nested": [
+        ("MenuItem", "Copy", "menu"), ("MenuItem", "Copy Link", "menu"), ("MenuItem", "New", "menu"),
+        ("MenuItem", "New Tab", "menu"), ("MenuItem", "Close", "menu"), ("MenuItem", "Close Tab", "menu"),
+        ("Button", "Try", "page"), ("Button", "Try Again", "page"), ("Button", "Buy", "page"),
+        ("Button", "Buy Now", "page"), ("Button", "Select", "toolbar"), ("Button", "Select All", "toolbar"),
+        ("Button", "Main", "page"), ("Button", "Main Menu", "page"), ("Button", "Remove", "page"),
+        ("Button", "Remove Item", "page"), ("Link", "Open", "page"), ("Link", "Open Link", "page"),
+    ],
+    "nested_long": [
+        ("MenuItem", "Copy", "menu"), ("MenuItem", "Copy Link Address", "menu"), ("MenuItem", "Paste", "menu"),
+        ("Button", "Start", "page"), ("Link", "Start Button Tutorial", "page"), ("Button", "Cancel", "page"),
+    ],
+    "nested_hi": [
+        ("MenuItem", "नया", "menu"), ("MenuItem", "नया टैब", "menu"), ("MenuItem", "बंद करें", "menu"),
+        ("MenuItem", "टैब बंद करें", "menu"), ("Button", "फिर से कोशिश करें", "page"), ("Button", "कोशिश करें", "page"),
+    ],
 }  # fmt: skip
 # (screen, request, index of the right element, the gold label commits)
 HAND_CASES = [
@@ -232,6 +252,15 @@ HAND_CASES = [
     ("selftest", "bravo dabao", 2), ("selftest", "tap alpha", 1), ("selftest", "hit bravo", 2),
     ("selftest", "click the test action menu item", 5), ("selftest", "click row 12", 17), ("selftest", "row 3 pe click karo", 8),
     ("selftest", "run the test action", 5), ("selftest", "अल्फा दबाओ", 1), ("selftest", "click in the type here field", 3),
+    ("nested", "click copy link", 1), ("nested", "click copy", 0), ("nested", "click new tab", 3),
+    ("nested", "new tab pe click karo", 3), ("nested", "click the new button", 2), ("nested", "close tab dabao", 5),
+    ("nested", "click the close tab button", 5), ("nested", "close pe click karo", 4), ("nested", "click try again", 7),
+    ("nested", "tap try", 6), ("nested", "buy now pe click karo", 9), ("nested", "hit the buy button", 8),
+    ("nested", "click select all", 11), ("nested", "main menu pe click karo", 13), ("nested", "remove item dabao", 15),
+    ("nested", "click remove", 14), ("nested", "click open link", 17), ("nested", "click buy now please", 9),
+    ("nested_long", "click copy link", 1), ("nested_long", "click the start button", 3), ("nested_long", "press start", 3),
+    ("nested_hi", "नया टैब दबाओ", 1), ("nested_hi", "नया दबाओ", 0), ("nested_hi", "टैब बंद करें पर क्लिक करो", 3),
+    ("nested_hi", "बंद करें दबाओ", 2), ("nested_hi", "फिर से कोशिश करें दबाओ", 4), ("nested_hi", "कोशिश करें पर क्लिक करो", 5),
 ]  # fmt: skip
 _HAND_COMMIT = {"Forward", "Delete", "Accept all", "Share", "Send"}
 
@@ -366,7 +395,8 @@ def build(os_map: dict[str, list[str]]) -> list[dict]:
         rows.append({
             "kind": "row", "id": f"h{i:02d}", "text": req, "lang": lang_of(req),
             "script": "devanagari" if lang_of(req) == "hi" else "latin", "type": scr,
-            "source": "selftest" if scr == "selftest" else "hand", "commit": gold in _HAND_COMMIT, "gold": [gold],
+            "source": "selftest" if scr == "selftest" else "nested" if scr.startswith("nested") else "hand",
+            "commit": gold in _HAND_COMMIT, "gold": [gold],
             "screen": [[roles.get(r, "AX" + r), lab, where in ("sheet",)] for r, lab, where in els],
         })  # fmt: skip
     head = {

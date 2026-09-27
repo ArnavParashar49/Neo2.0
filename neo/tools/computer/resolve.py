@@ -868,6 +868,7 @@ def resolve(
     alias: Callable[[str, str], str | None] | None | Literal[False] = None,
     stages: Collection[str] | None = None,
     log_it: bool = True,
+    budget_s: float | None = None,
 ) -> Result:
     """The control ``utterance`` (the user's whole request, or a label) means among ``items``
     (Candidates, or ax.Element-like objects run through :func:`candidates`).
@@ -878,7 +879,9 @@ def resolve(
     ``index`` / ``embed`` / ``choose`` / ``alias``: the OS string index, MiniLM, Laya's choice and the
     alias lookup — None for NEO's own (only when already loaded or built), False for none.
     ``stages``: the stages that act (default :func:`live_stages`); the others run in shadow when the
-    mode isn't "off" (and not in library mode)."""
+    mode isn't "off" (and not in library mode). ``budget_s``: how long the by-meaning stages may
+    hold the request (default BUDGET_S when the stage acts, SHADOW_WAIT_S when it only logs; an
+    offline benchmark passes more)."""
     m = mode()
     cands = _as_candidates(items, want)
     user = origin == "user"
@@ -981,13 +984,13 @@ def resolve(
         run.notes["os_strings"] = "no_index"  # fail closed: nothing reads Hindi without it
     # 4. meaning (Latin script), in a worker the request waits for at most the budget left
     meaning: _Meaning | None = None
-    left = BUDGET_S - (time.perf_counter() - run.t0)
+    left = (BUDGET_S if budget_s is None else budget_s) - (time.perf_counter() - run.t0)
     emb = (_default_embed() if embed is None else (embed or None)) if phrases.script(utterance) == "latin" else None
     if emb is None or left <= 0:
         run.notes.setdefault("meaning", "skipped")
     else:
         ch = _default_choose if choose is None else (choose or (lambda r, o, w: (None, 0.0)))
-        if "meaning" not in acting:
+        if "meaning" not in acting and budget_s is None:
             left = min(left, SHADOW_WAIT_S)
         wait = min(LAYA_WAIT_LIVE_S if "meaning" in acting else LAYA_WAIT_SHADOW_S, left)
         meaning = _meaning_in_time(run, emb, ch, wait, left, log_it and shadow_ok)

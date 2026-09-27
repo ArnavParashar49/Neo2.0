@@ -652,3 +652,11 @@ def test_no_app_names_or_bundle_ids_in_the_resolvers_code(mod):
     names = [n.id for n in ast.walk(tree) if isinstance(n, ast.Name)] + [n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)]
     assert [s for s in strings + names if _APP_NAMES.search(s)] == []
     assert [s for s in strings if _APP_WORDS.search(s)] == []
+
+
+def test_nested_labels_and_a_models_own_label_are_never_read_as_a_shorter_one(default_report):
+    rep = default_report
+    nested = rep["source nested"]
+    assert nested["n"] >= 25 and nested["coverage"] == 1.0 and nested["precision"] == 1.0
+    agent = rep["agent label"]
+    assert agent["n"] >= 1500 and agent["precision"] == 1.0 and agent["coverage"] >= 0.99
