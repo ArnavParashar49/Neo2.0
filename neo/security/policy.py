@@ -15,6 +15,7 @@ import re
 import shlex
 import socket
 import unicodedata
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -1299,12 +1300,87 @@ _CONSEQUENCE = re.compile(
 )
 
 
-def commits(label: str, context: str = "") -> bool:
-    """A button that sends, buys, deletes, grants or publishes something — or a plain "OK" /
-    "Continue" in a dialog whose text says it does."""
-    if _COMMIT.search(label or ""):
+# What a press in an app's own UI can't take back, that scripts and drops were never gated on: a
+# forward (it sends), ending the app, the session or the Mac (Quit, Restart…, Shut Down…, Log Off,
+# Force Quit), throwing work away (Revert, Don't Save, Clear History), giving a game up (Resign).
+# Labels only: commits() reads it; the AppleScript and drop checks don't.
+_UI_COMMIT = re.compile(
+    r"\b(?:forward|quit|restart|reboot|shut\s*down|power\s+off|log\s+off|sign\s+off|force\s+quit|kill|"
+    r"terminate|revert|don['’]?t\s+save|do\s+not\s+save|resign|forfeit|surrender|concede|abandon|"
+    r"end\s+(?:game|match|call|meeting|session)|clear\s+(?:all|history|browsing|everything|cache|cookies|data|recents?)|"
+    r"update\s+now)\b",
+    re.I,
+)
+# Words in a sheet or dialog saying that answering it ends, loses or throws away something (the
+# current game, unsaved changes): with them NEO never answers the sheet by itself, whatever button.
+_LOSS = re.compile(
+    r"\b(?:lose|loses|lost|losing|unsaved|not\s+(?:been\s+)?saved|won['’]?t\s+be\s+saved|will\s+not\s+be\s+saved|"
+    r"can(?:not|['’]?t)\s+be\s+(?:undone|recovered|restored|reversed)|irreversibl[ey]|permanent(?:ly)?|"
+    r"will\s+be\s+(?:closed|deleted|removed|erased|lost|replaced|overwritten|ended|reset|discarded|cancell?ed|stopped)|"
+    r"(?:current|unfinished|ongoing)\s+(?:game|match|document|changes|session|progress|call|download)|"
+    r"in\s+progress|resign|forfeit|quit|restart|shut\s*down|log\s+(?:out|off)|sign\s+out|end\s+(?:the|this|your))\b",
+    re.I,
+)
+
+# English source strings of a localized label or dialog text (a Hindi "भेजें" is the OS's "Send"):
+# registered by the Mac side (neo.decide.uistrings, from the OS's own string tables). Data handed
+# in, never imported: this module stays pure stdlib.
+_back_translate: Callable[[str], Iterable[str]] | None = None
+
+
+def use_back_translations(fn: Callable[[str], Iterable[str]] | None) -> None:
+    """Register (None: drop) where a localized label's English source strings come from."""
+    global _back_translate
+    _back_translate = fn
+
+
+def back_translations(text: str) -> tuple[str, ...]:
+    """The English source strings of a localized label or dialog text, from the registered source;
+    () for plain ASCII (it is English already), without a source, or when it fails."""
+    fn = _back_translate
+    if fn is None or not text or text.isascii():
+        return ()
+    try:
+        return tuple(s for s in fn(text) if isinstance(s, str) and s)[:32]
+    except Exception:  # noqa: BLE001 - a broken lookup adds nothing; today's checks still run
+        return ()
+
+
+def generic_ok(label: str, sources: Iterable[str] | None = None) -> bool:
+    """A plain "OK" / "Continue" / "Yes" (in any language the back-translations know): it says
+    nothing about what it confirms, so the dialog's own words decide."""
+    srcs = back_translations(label or "") if sources is None else tuple(sources)
+    return any(_GENERIC_OK.match(t or "") for t in (label or "", *srcs))
+
+
+def commits(
+    label: str,
+    context: str = "",
+    *,
+    sources: Iterable[str] | None = None,
+    context_sources: Iterable[str] | None = None,
+) -> bool:
+    """A button that sends, buys, deletes, grants or publishes something, or ends or throws away
+    something (Quit, Restart…, Don't Save, Resign) — or a plain "OK" / "Continue" in a dialog whose
+    text says it does. A localized label (or dialog text) also counts as its English source strings
+    (`sources` / `context_sources`; by default the registered back-translations): they are only
+    ever OR'd in, so the gate never gets looser."""
+    label, context = label or "", context or ""
+    srcs = back_translations(label) if sources is None else tuple(sources)
+    if any(_COMMIT.search(t or "") or _UI_COMMIT.search(t or "") for t in (label, *srcs)):
         return True
-    return bool(_GENERIC_OK.match(label or "") and _CONSEQUENCE.search(context or ""))
+    if not generic_ok(label, srcs):
+        return False
+    ctx = back_translations(context) if context_sources is None else tuple(context_sources)
+    return any(_CONSEQUENCE.search(t or "") for t in (context, *ctx))
+
+
+def sheet_consequence(text: str, sources: Iterable[str] | None = None) -> bool:
+    """Does a sheet's or dialog's own text say that answering it commits, ends or loses something
+    ("the current game will be lost", "can't be undone", "send to 40 people")? Checked for every
+    button before NEO answers a sheet by itself, not only for a plain OK."""
+    srcs = back_translations(text or "") if sources is None else tuple(sources)
+    return any(_CONSEQUENCE.search(t or "") or _LOSS.search(t or "") for t in (text or "", *srcs))
 
 
 def drop_commits(label: str, window_words: str = "") -> bool:
