@@ -14,8 +14,12 @@ Both speak the OpenAI chat-completions protocol at https://api.cerebras.ai/v1
 
 Speed. The server answers in ~15 ms, but a cold round trip (TCP + TLS) is ~0.9 s. So an agent's
 two Cerebras brains share one connection pool (one per agent, per event loop), kept open for two
-minutes between steps, and :func:`prewarm` opens it when a screen task starts: ``GET /v1/models``,
-which spends no tokens and also refreshes which models this key may use.
+minutes between steps, and :func:`prewarm_soon` opens it at the wake word (the start of the user's
+speech): ``GET /v1/models``, which spends no tokens and also refreshes which models this key may
+use. It pays off only when it has that head start — the utterance and its transcript take longer
+than the handshake; one started a few ms before the first request saves nothing — and only where
+Cerebras is asked: first for chat ("fast"), after Gemini for an agent's steps. A step that starts
+while the prewarm is still connecting waits for its connection rather than open a second one.
 
 Thinking. Both models reason inside ``max_tokens`` (``max_tokens=16`` came back with no text and
 finish_reason "length"). A request always leaves room for that (:data:`ROOM`, by effort), passes
@@ -29,10 +33,13 @@ per model; a request that would not fit a window is not sent: a wait of up to
 or sits it out when every brain is down). Nothing is hardcoded: what the server says is the limit.
 
 Money. Each answer's usage × the price table (neo.providers.spend) is added to today's total,
-against a daily budget (``cerebras_daily_budget``, $0.50 by default). Crossing 80% is said once a
-day; once it's spent, Cerebras is skipped until midnight, and NEO says so. An invalid key (401) or
-an account out of credits (402, or a billing message) is refused for the day with the reason
-spoken; a model this key may not use (403, 404) takes only that brain out.
+against a daily budget (``cerebras_daily_budget``, $0.50 by default; 0 turns Cerebras off: no
+chain names it). Crossing 80% is said once a day; once it's spent, Cerebras is skipped until
+midnight, and NEO says so. An invalid key (401) or an account out of credits (402, or a billing
+code; billing words only on a 403 or 429) is refused for the day with the reason said; a model
+this key may not use (403, 404) takes only that brain out. Said: shown as the turn's progress
+line (:meth:`Account.announce`) and heard with the reply (:func:`add_spoken_notes`); in a stop
+message, a refusal's own words (``Refused.words``).
 
 Settings (read with defaults, so this module works before and after they are declared in
 neo/config.py): ``cerebras_api_key`` (CEREBRAS_API_KEY), ``cerebras_model``,
@@ -833,12 +840,12 @@ def hosted(
 
 
 async def prewarm() -> bool:
-    """Open the connection to Cerebras before the first step of a screen task needs it (a cold
-    round trip is ~0.9 s of the step). Nothing without a key, after a refusal, or when the
-    connection is still warm; never raises."""
+    """Open the connection to Cerebras before a request needs it (a cold round trip is ~0.9 s of
+    it). Nothing when Cerebras isn't :func:`enabled`, after a refusal, or when the connection is
+    still warm; never raises."""
     try:
         c = conf()
-        if not c.api_key:
+        if not c.api_key or c.daily_budget <= 0:
             return False
         return await account(c).prewarm()
     except Exception as e:  # noqa: BLE001 — a warm-up must never fail the task it's for
@@ -850,10 +857,11 @@ _warming: set[asyncio.Task] = set()
 
 
 def prewarm_soon() -> None:
-    """:func:`prewarm` in the background: the caller (a screen task starting, the wake word)
-    goes on at once. Nothing without a key or a running event loop; never raises."""
+    """:func:`prewarm` in the background: the caller (the wake word, the start of the user's
+    speech or typing) goes on at once. Nothing when Cerebras isn't :func:`enabled` or there's no
+    running event loop; never raises."""
     try:
-        if not conf().api_key:
+        if not enabled():
             return
         loop = asyncio.get_running_loop()
     except Exception:  # noqa: BLE001 — no loop, no agent bound (library mode): nothing to warm
@@ -948,6 +956,20 @@ def with_spoken_notes(reply: str, notes: str, *, question: bool = False) -> str:
     if not reply:
         return notes
     return f"{notes} {reply}" if question else f"{reply} {notes}"
+
+
+def add_spoken_notes(reply: Any) -> Any:
+    """The session's Reply (neo.agent.session: text, route, silent) with :func:`spoken_notes` in
+    what the user hears: after its words, before them when it asks a question ("confirm"); a
+    quiet reply (nothing to say) says just the notes. The same Reply when there are none."""
+    notes = spoken_notes()
+    if not notes:
+        return reply
+    silent = bool(getattr(reply, "silent", False))
+    text = with_spoken_notes(
+        "" if silent else reply.text, notes, question=getattr(reply, "route", "") == "confirm"
+    )
+    return replace(reply, text=text, silent=False)
 
 
 def status() -> dict[str, Any]:

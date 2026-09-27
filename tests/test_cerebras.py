@@ -830,7 +830,9 @@ async def test_words_in_a_request_error_never_refuse_the_account(cset, fake, sta
 
 async def test_a_billing_code_on_a_403_refuses_the_account(cset, fake):
     cset()
-    fake.reply(403, {"message": "Access denied", "type": "invalid_request_error", "code": "insufficient_funds"})
+    fake.reply(
+        403, {"message": "Access denied", "type": "invalid_request_error", "code": "insufficient_funds"}
+    )
     with pytest.raises(cb.Refused, match="out of credits"):
         await cb.cerebras().complete(ASK)
     with pytest.raises(cb.Refused):
@@ -913,6 +915,23 @@ def test_spoken_notes_put_a_question_last():
     assert cb.with_spoken_notes("Done.", "") == "Done."
 
 
+async def test_the_session_s_reply_carries_them(cset, fake):
+    from neo.agent.session import Reply
+
+    cset(NEO_CEREBRAS_DAILY_BUDGET="0.001")
+    done = Reply("Done.", "agent")
+    assert cb.add_spoken_notes(done) is done  # nothing to say: the same reply
+    fake.reply(payload=completion(usage=(2000, 200)))
+    await cb.cerebras().complete(ASK)  # 85%
+    quiet = cb.add_spoken_notes(Reply("Opened it.", "quick", silent=True))
+    assert quiet.text.startswith("Cerebras has used") and not quiet.silent  # said, though the step was quiet
+    fake.reply(payload=completion(usage=(2000, 200)))
+    await cb.cerebras().complete(ASK)  # spent
+    ask = cb.add_spoken_notes(Reply("Delete the file — should I go ahead?", "confirm"))
+    assert ask.text.endswith("should I go ahead?") and "used up" in ask.text  # the question stays last
+    assert cb.add_spoken_notes(done) is done  # each said once
+
+
 def test_nothing_is_spoken_without_a_key(monkeypatch):
     monkeypatch.delenv("CEREBRAS_API_KEY", raising=False)
     assert cb.spoken_notes() == ""
@@ -923,15 +942,16 @@ def test_nothing_is_spoken_without_a_key(monkeypatch):
 
 def test_no_key_or_a_zero_budget_leaves_every_order_alone(cset, monkeypatch):
     s = cset()
-    assert cb.with_cerebras(["gemini", "groq", "local"], "agent", s) == ["gemini", "cerebras", "groq", "local"]
+    agent, vision = ["gemini", "groq", "local"], ["gemini", "groq_vision", "groq"]
+    assert cb.with_cerebras(agent, "agent", s) == ["gemini", "cerebras", "groq", "local"]
     assert cb.with_cerebras_eyes(("gemini", "gemini_lite", "claude", "groq_vision"), s) == (
         "gemini", "gemini_lite", "claude", "cerebras_vision", "groq_vision")  # fmt: skip
     assert cb.with_cerebras_eyes(("gemini", "claude"), s) == ("gemini", "claude", "cerebras_vision")
     assert cb.with_cerebras_eyes(("gemini", "cerebras_vision", "groq_vision"), s) == (
         "gemini", "cerebras_vision", "groq_vision")  # fmt: skip
     for off in (cset(CEREBRAS_API_KEY=""), cset(NEO_CEREBRAS_DAILY_BUDGET="0")):
-        assert cb.with_cerebras(["gemini", "groq", "local"], "agent", off) == ["gemini", "groq", "local"]
-        assert cb.with_cerebras(["gemini", "groq_vision", "groq"], "vision", off) == ["gemini", "groq_vision", "groq"]
+        assert cb.with_cerebras(agent, "agent", off) == agent
+        assert cb.with_cerebras(vision, "vision", off) == vision
         eyes = ("gemini", "gemini_lite", "claude", "groq_vision")
         assert cb.with_cerebras_eyes(eyes, off) == eyes
 
@@ -1037,7 +1057,9 @@ def _screenshot_step() -> list[Message]:
 
 
 @on_the_chain
-async def test_wired_a_picture_step_goes_to_cerebras_vision_when_gemini_is_overloaded(cset, fake, monkeypatch):
+async def test_wired_a_picture_step_goes_to_cerebras_vision_when_gemini_is_overloaded(
+    cset, fake, monkeypatch
+):
     cset(GEMINI_API_KEY="g-test")
     _busy(monkeypatch, "gemini", "gemini_lite", "local")
     fake.default = (200, completion("A save dialog is open.", model=cb.VISION_MODEL), {})
@@ -1081,8 +1103,9 @@ async def test_wired_without_a_key_no_chain_names_cerebras(monkeypatch):
 
 
 def _spend_it(s) -> None:
-    """Today's (tiny) budget, all spent already."""
-    spend.Ledger(s.data_dir / spend.FILE, daily_budget=0.001, key=KEY).add(cb.TEXT_MODEL, 10_000, 0)
+    """Today's spend is past the (tiny) budget: the budget was lowered below what was already spent,
+    so nothing has said so yet."""
+    spend.Ledger(s.data_dir / spend.FILE, daily_budget=1.0, key=KEY).add(cb.TEXT_MODEL, 10_000, 0)
 
 
 @on_the_chain
@@ -1095,7 +1118,10 @@ async def test_wired_the_stop_message_gives_cerebras_own_reason(cset, fake, monk
     said = e.value.spoken()
     assert "Cerebras' daily budget of $0.0010 is used up" in said and "free quota" not in said
     assert fake.chats == 0
-    assert "skip" in cb.spoken_notes()  # and the skip itself is said once, with the reply
+    assert "skipping it until tomorrow" in cb.spoken_notes()  # the skip is said, with the reply
+    with pytest.raises(AllBrainsFailed):
+        await prov.brain("agent").complete(ASK)
+    assert cb.spoken_notes() == ""  # once a day
     from neo.providers.base import spoken_name
 
     assert spoken_name(cb.VISION_BRAIN) == "Cerebras vision" and spoken_name(cb.TEXT_BRAIN) == "Cerebras"
@@ -1113,3 +1139,26 @@ async def test_wired_a_spent_budget_inside_a_run_is_the_budget_not_the_time(cset
     assert e.value.kind != "budget"  # not OutOfTime: the run had time; Cerebras had no budget
     said = e.value.spoken()
     assert "daily budget of $0.0010 is used up" in said and "time" not in said
+    assert "skipping it until tomorrow" in cb.spoken_notes()
+
+
+@on_the_chain
+async def test_wired_the_session_says_the_notes_with_its_reply(tmp_path, fake, monkeypatch):
+    from neo import runtime
+    from neo.agent.registry import catalog
+    from neo.agent.session import Session
+    from tests.neo_lib import scripted
+
+    monkeypatch.setattr(cb, "_accounts", weakref.WeakKeyDictionary())
+    L = _library_settings_class()
+    s = L(data_dir=tmp_path / "agent", cerebras_api_key=KEY, cerebras_daily_budget=0.001, fast_paths=False)
+    s.ensure_dirs()
+    rt = runtime.Runtime("agent", s, catalog().subset(()))
+    scripted(rt, ["The brain answered.", "The brain answered."])
+    with runtime.bind(rt.scope()):
+        cb.account(cb.conf()).spent(cb.TEXT_MODEL, 2000, 200)  # 85% of the day's budget
+        r = await Session().handle("what's new")
+        assert r.text.startswith("The brain answered.") and "Cerebras has used $0.0008" in r.text
+        assert not r.silent
+        again = await Session().handle("and now?")
+        assert again.text == "The brain answered."  # said once
