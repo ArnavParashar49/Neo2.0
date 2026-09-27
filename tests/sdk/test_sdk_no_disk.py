@@ -104,6 +104,37 @@ async def test_memory_in_a_file_of_the_hosts_choosing(tmp_path):
     assert mem.exists()  # the host's file stays
 
 
+async def test_memory_is_never_a_database_neo_didnt_make(tmp_path):
+    """A host's own SQLite file (NEO would add its tables to it, and an erase would delete it), a
+    file that isn't SQLite, NEO.app's own memory: refused, untouched. A new or empty file is fine."""
+    import sqlite3
+
+    app_db = tmp_path / "app.db"
+    db = sqlite3.connect(app_db)
+    db.execute("CREATE TABLE customers (id INTEGER, name TEXT)")
+    db.execute("INSERT INTO customers VALUES (1, 'Ada')")
+    db.commit()
+    db.close()
+    notes = tmp_path / "notes.bin"
+    notes.write_bytes(b"not a database")
+    (tmp_path / "notes.bin-journal").write_bytes(b"x")
+    neo_apps = tmp_path / "neo-app-memory.sqlite3"  # NEO.app's own memory: a NEO database, not an agent's
+    from neo.memory.store import Store
+
+    Store(neo_apps).close()
+    (tmp_path / "a-folder").mkdir()
+    before = sorted(p.name for p in tmp_path.iterdir())
+    for path in (app_db, notes, neo_apps, tmp_path / "a-folder"):
+        with pytest.raises(ValueError, match="didn't make"):
+            neo2.AsyncAgent(neo2.AgentConfig(tools="none", memory=neo2.MemoryConfig(path=path)), provider=ScriptedBrain())
+    assert sorted(p.name for p in tmp_path.iterdir()) == before  # not even a -wal left next to them
+    assert sqlite3.connect(app_db).execute("SELECT name FROM customers").fetchall() == [("Ada",)]
+    empty = tmp_path / "empty.sqlite3"
+    empty.write_bytes(b"")
+    async with neo2.AsyncAgent(neo2.AgentConfig(tools="none", memory=neo2.MemoryConfig(path=empty)), provider=ScriptedBrain()):
+        pass
+
+
 async def test_the_agents_folders_are_never_neo_apps(home):
     for bad in (home / ".neo", home / ".neo" / "agents" / "x", home / ".NEO"):
         with pytest.raises(ValueError, match="NEO.app's own data"):

@@ -128,13 +128,20 @@ class Store:
     public method holds one lock for its SQL. Embeddings are computed before taking it — the
     lock is never held while a model runs."""
 
-    def __init__(self, path: Path | None = None) -> None:
+    def __init__(self, path: Path | None = None, *, agent: bool = False) -> None:
+        """`agent`: an embedded agent's memory — a database it creates is marked as NEO's own
+        (neo.config.AGENT_DB_ID), so it's never mistaken for a host's, nor a host's for it."""
         self.path = path or settings().memory_db
+        fresh = not os.path.exists(self.path) or os.path.getsize(self.path) == 0
         if not os.path.exists(self.path):  # private from the start, whatever the process umask
             os.close(os.open(self.path, os.O_CREAT | os.O_WRONLY, 0o600))
         self._lock = threading.RLock()
         self._db = sqlite3.connect(self.path, check_same_thread=False, timeout=5)
         with self._lock:
+            if agent and fresh:  # before WAL: the mark goes into the file's own header at once
+                from neo.config import AGENT_DB_ID
+
+                self._db.execute(f"PRAGMA application_id = {int(AGENT_DB_ID)}")
             self._db.execute("PRAGMA journal_mode=WAL")
             self._db.execute("PRAGMA busy_timeout=5000")
             self._db.execute("PRAGMA secure_delete=ON")  # what's deleted is overwritten, not left in free pages
@@ -423,7 +430,7 @@ def store() -> Store:
     if rt is not None:
         if not rt.settings.memory_enabled:
             raise MemoryDisabled(f"memory is off for the agent {rt.name!r}")
-        return rt.get_or_create("store", lambda: Store(rt.settings.memory_db))
+        return rt.get_or_create("store", lambda: Store(rt.settings.memory_db, agent=rt.library))
     runtime.check_unbound("store()")
     global _store
     if _store is None:

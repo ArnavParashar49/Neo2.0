@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import unicodedata
 from collections.abc import Mapping
@@ -298,6 +299,8 @@ class LibrarySettings(Settings):
             _refuse_neo_home(self.memory_path, "memory_path")
         _refuse_real_data_under_tests(self.data_dir)
         _refuse_foreign_folder(self.data_dir)
+        if self.memory_path is not None:
+            _refuse_foreign_db(self.memory_path)
         for k, v in self._pins().items():
             object.__setattr__(self, k, v)  # frozen: set while it's being built
         if self.reflex == "lite" and not self.gemini_keys:
@@ -437,6 +440,53 @@ def _refuse_foreign_folder(data_dir: Path) -> None:
             f"data_dir {data_dir} already holds other files: give the agent its own folder (a new "
             "or empty one; NEO marks it as its own)"
         )
+
+
+# The SQLite application id of a memory database NEO made for an embedded agent ("NEOA"): a
+# database it didn't make — a host's own, NEO.app's — is never an agent's memory, nor erased.
+AGENT_DB_ID = 0x4E454F41
+_SQLITE_MAGIC = b"SQLite format 3\x00"
+_NEO_TABLES = re.compile(r"memory|memory_vec|memory_fts(?:_[a-z]+)?|playbook|playbook_vec|sessions|sqlite_\w+")
+
+
+def agent_memory_db(path: str | os.PathLike) -> bool:
+    """`path` is a memory database NEO made for an embedded agent (neo.memory.store.Store with
+    agent=True): SQLite, marked with AGENT_DB_ID, holding NEO's tables and nothing else. Read
+    without leaving a trace: the header first, and SQLite only for NEO's own file."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(100)
+    except OSError:  # missing, a folder, unreadable
+        return False
+    if len(head) < 100 or head[:16] != _SQLITE_MAGIC or int.from_bytes(head[68:72], "big") != AGENT_DB_ID:
+        return False
+    import sqlite3
+    from urllib.parse import quote
+
+    try:
+        db = sqlite3.connect(f"file:{quote(os.path.abspath(path))}?mode=ro&immutable=1", uri=True)
+        try:
+            names = [r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type = 'table'")]
+        finally:
+            db.close()
+    except sqlite3.Error:
+        return False
+    return all(_NEO_TABLES.fullmatch(n) for n in names)
+
+
+def _refuse_foreign_db(path: Path) -> None:
+    """An agent's memory_path is missing, empty, or a memory database NEO made for an agent: never
+    a file of the host's own (NEO would add its tables to it, and an erase would delete it)."""
+    try:
+        empty = os.path.isfile(path) and os.path.getsize(path) == 0
+    except OSError:
+        empty = False
+    if not os.path.lexists(path) or empty or agent_memory_db(path):
+        return
+    raise ValueError(
+        f"memory path {path} is a file NEO didn't make for an agent's memory: give the agent a new "
+        "(or empty) file — NEO marks the database it makes as its own"
+    )
 
 
 def _mkdirs_private(path: Path) -> None:

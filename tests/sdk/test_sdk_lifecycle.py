@@ -174,6 +174,35 @@ async def test_forget_all_erases_only_this_agents_own_files(tmp_path, monkeypatc
             assert [m.text for m in store().recall("bike")] == ["my bike is blue"]
 
 
+async def test_forget_all_deletes_a_memory_file_only_while_its_neos_own(tmp_path):
+    import sqlite3
+
+    from neo.config import agent_memory_db
+
+    mem = tmp_path / "db" / "u42.sqlite3"
+    cfg = neo2.AgentConfig(tools="none", memory=neo2.MemoryConfig(path=mem))
+    async with neo2.AsyncAgent(cfg, provider=ScriptedBrain()) as agent:
+        await agent.ask("remember that my locker is 42")  # a fast path: straight into memory
+        assert agent_memory_db(mem)  # NEO's own, marked so
+        counts = await agent.forget_all()
+        assert counts["memory"] == 1 and counts["files"] == 1 and list(mem.parent.iterdir()) == []
+        await agent.ask("remember that my bike is blue")  # a new database: NEO's own again
+        assert agent_memory_db(mem)
+        host = sqlite3.connect(mem)
+        host.execute("CREATE TABLE orders (id INTEGER)")  # the host kept something of its own in it
+        host.execute("INSERT INTO orders VALUES (7)")
+        host.commit()
+        host.close()
+        counts = await agent.forget_all()
+        assert counts["memory"] == 1 and counts["files"] == 0 and mem.exists()  # NEO's rows only
+        db = sqlite3.connect(mem)
+        assert db.execute("SELECT id FROM orders").fetchall() == [(7,)]
+        assert db.execute("SELECT count(*) FROM memory").fetchone() == (0,)
+        db.close()
+    with pytest.raises(ValueError, match="didn't make"):  # no longer only NEO's: not an agent's memory
+        neo2.AsyncAgent(cfg, provider=ScriptedBrain())
+
+
 async def test_close_closes_the_cards_and_is_final(tmp_path):
     calls: list = []
     audit: list = []

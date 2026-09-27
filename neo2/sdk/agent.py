@@ -879,6 +879,11 @@ class AsyncAgent:
                 with contextlib.suppress(Exception):
                     await rt.browser.close()
                 rt.browser = None
+            if rt.store is None and rt.settings.memory_enabled and Path(rt.settings.memory_db).exists():
+                from neo.memory.store import store
+
+                with contextlib.suppress(Exception):
+                    store()  # a database from before: its rows go even when its file must stay
             if rt.store is not None:
                 with contextlib.suppress(Exception):
                     counts.update(rt.store.forget_all())
@@ -1092,7 +1097,7 @@ _OWN_DIRS = ("browser", "decide_learned", "tmp")
 
 
 def _erase_files(s: Any) -> int:
-    from neo.config import AGENT_MARKER
+    from neo.config import AGENT_MARKER, agent_memory_db
 
     d = Path(s.data_dir)
     n = 0
@@ -1108,7 +1113,9 @@ def _erase_files(s: Any) -> int:
                 shutil.rmtree(p, ignore_errors=True)
                 n += 1
     mp = getattr(s, "memory_path", None)
-    if mp is not None:  # memory kept elsewhere (MemoryConfig.path): that file and its side files
+    # Memory kept elsewhere (MemoryConfig.path): that file and its side files, only while it's the
+    # database NEO made for the agent (a table the host added since keeps it: its rows are gone).
+    if mp is not None and agent_memory_db(mp):
         for p in (Path(mp), *(Path(str(mp) + x) for x in ("-wal", "-shm", "-journal"))):
             if p.is_file():
                 p.unlink(missing_ok=True)
