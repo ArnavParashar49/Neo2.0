@@ -169,7 +169,9 @@ class EarlyActor:
             return next((r for r in self.executed if key(r.tool, r.args) == k), Ran(tool, args, True, ""))
         self._ran_keys.add(k)
         if self.executed and self.executed[-1].tool in _APP_TOOLS and tool not in _APP_TOOLS:
-            await asyncio.sleep(_SETTLE_AFTER_APP_S)
+            from neo2.core.agent import settle
+
+            await settle.app_ready(typing=tool in settle.TYPING)  # (the app just opened: ready, not 0.8 s)
         await bus().tool_start(tool, args, job="early")
         out = await registry().invoke(tool, args, ToolContext(user_text=self._text, origin="user"))
         await bus().tool_end(tool, out.ok, out.text, job="early")

@@ -20,7 +20,17 @@ from neo2.core.agent.registry import registry as default_registry
 from neo2.core.config import settings
 from neo2.core.events import EventBus, NeoState
 from neo2.core.events import bus as default_bus
-from neo2.core.providers.base import AllBrainsFailed, Message, Provider, ToolCall, ToolResult, ToolSpec, Turn
+from neo2.core.providers import budget as run_budget
+from neo2.core.providers.base import (
+    AllBrainsFailed,
+    Level,
+    Message,
+    Provider,
+    ToolCall,
+    ToolResult,
+    ToolSpec,
+    Turn,
+)
 from neo2.core.providers.history import OBSERVATIONS
 
 Stopped = Literal["done", "max_steps", "needs_confirm", "needs_user", "thrash", "error"]
@@ -223,7 +233,9 @@ async def _run_calls(
             # Third-party words — a failure too can quote them (a page's element names, a report
             # that starts with "Error"): data for the model, never orders.
             content = fence(c.name, content)
-        return ToolResult(call_id=c.id, name=c.name, content=content, ok=out.ok, images=out.images)
+        return ToolResult(
+            call_id=c.id, name=c.name, content=content, ok=out.ok, images=out.images, effect=getattr(out, "effect", None)
+        )
 
     # Keep the model's order: consecutive read-only (parallel_safe) calls run together, any
     # side-effect call runs at its own position. Once a call asks the human, nothing after it
@@ -263,7 +275,7 @@ async def run_agent(
     reg: Registry | None = None,
     ev: EventBus | None = None,
     max_steps: int | None = None,
-    effort: Literal["low", "medium", "high"] = "medium",
+    effort: Level = "medium",
     images: list | None = None,
     verify: bool = True,
     idle_on_finish: bool = True,
@@ -319,7 +331,12 @@ async def run_agent(
         await ev.set_state(NeoState.THINKING, job=job)
         _supersede_observations(messages, start=len(history or []))
         try:
-            turn: Turn = await provider.complete(messages, system=system, tools=tools, effort=effort)
+            # The run's clock, as the brains see it (neo2.core.providers.budget): the chain asks no
+            # brain whose wait alone is past the time left, and gives up on a call still out then.
+            with run_budget.run(
+                lambda: deadline - (_time.monotonic() - (paused() - paused0)), limit_s=max_seconds or s.max_seconds
+            ):
+                turn: Turn = await provider.complete(messages, system=system, tools=tools, effort=effort)
         except Exception as e:  # noqa: BLE001
             await _settle(ev, idle_on_finish, job)
             return AgentResult(_model_trouble(e, steps), "error", steps, messages)

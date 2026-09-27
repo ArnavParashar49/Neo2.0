@@ -153,6 +153,10 @@ def _no_real_screen(monkeypatch):
 
     monkeypatch.setattr(apps, "_target", None)
     monkeypatch.setattr(focus, "hosts_shell", lambda pid, depth=3: False)
+    # The wait after an app opens reads the front app and its focus: in the suite, it is ready at once.
+    from neo2.core.agent import settle
+
+    monkeypatch.setattr(settle, "probe", lambda app, typing: settle.Ready(True, True, True))
 
 
 @pytest.fixture(autouse=True)

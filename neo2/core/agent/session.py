@@ -397,7 +397,8 @@ class Session:
     async def _quick_steps(
         self, text: str, d: Decision, steps: list[tuple[str, dict]], *, job: str, t0: float, origin: Origin
     ) -> Reply:
-        from neo2.core.agent.early import _APP_TOOLS, _SETTLE_AFTER_APP_S, early
+        from neo2.core.agent import settle
+        from neo2.core.agent.early import _APP_TOOLS, early
 
         outs: list[tuple[str, str, bool]] = []  # (tool, its text, read from an untrusted source)
         spoken: list[int] = []  # the steps whose text is said
@@ -415,7 +416,7 @@ class Session:
                 outcomes.step(job, tool, True)
             else:
                 if prev in _APP_TOOLS and tool not in _APP_TOOLS:
-                    await asyncio.sleep(_SETTLE_AFTER_APP_S)
+                    await settle.app_ready(typing=tool in settle.TYPING)  # (the app just opened: ready, not 0.8 s)
                 await bus().tool_start(tool, args, job=job)
                 ctx = ToolContext(user_text=text, taint=taint, origin=origin, extras=dict(_request_extras.get()))
                 out = await registry().invoke(tool, args, ctx)
@@ -520,7 +521,6 @@ class Session:
             purpose = "light"  # one simple action the regex fast path didn't cover
         else:
             purpose = "agent"
-        effort = "high" if (d and d.intent == "agent_task") else "medium"
         outcomes.route(job, "agent")
         t0 = time.time()
         chain = brain(purpose)
@@ -534,6 +534,14 @@ class Session:
                     tools = [registry().get(n).spec() for n in only if registry().get(n)] + [MORE_TOOLS]
                 else:
                     tools = await asyncio.to_thread(self._tools_for, text, needs_screen, playbook_ctx, also)
+                # How hard each step thinks (neo2.core.providers.effort): where the run starts — today's
+                # level unless settings.screen_effort says otherwise for a screen task — then one up
+                # after a miss, back down after an action that worked.
+                from neo2.core.agent.toolselect import SCREEN
+                from neo2.core.providers.effort import Effort, start_level
+
+                screen = needs_screen or purpose == "vision" or any(t.name in SCREEN for t in tools)
+                chain.effort = Effort(start_level(d, screen=screen, light=purpose == "light"))
                 snapshot = self._trimmed()
                 ctx = ToolContext(user_text=text, taint=list(_request_taint.get()), extras=dict(_request_extras.get()))
                 res = await run_agent(
@@ -543,7 +551,7 @@ class Session:
                     tools=tools,
                     history=snapshot,
                     ctx=ctx,
-                    effort=effort,
+                    effort=chain.effort.start,
                     images=images,
                     job=job,
                 )

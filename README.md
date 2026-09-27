@@ -172,6 +172,8 @@ Everything is an environment variable with the `NEO_` prefix (or a line in `.env
 |---|---|---|
 | `NEO_BRAIN` | `gemini` | primary agentic brain: `gemini` · `groq` · `local` · `claude` |
 | `NEO_FAST_BRAIN` | `groq` | brain for chat-only turns |
+| `NEO_GROQ_VISION_MODEL` | `qwen/qwen3.8-27b` | Groq's model that sees: with a Groq key, the last model a screenshot goes to when Gemini (and Flash-Lite, Claude) can't answer; empty turns it off |
+| `NEO_CLOUD_EYES` | `auto` | with `NEO_BRAIN=local` and no cloud brain that sees named, pictures never go to a cloud fallback (the step stops and says so); `on` lets them |
 | `NEO_VOICE` | `auto` | `auto` (Live if the key allows it, else local) · `live` · `local` · `off` |
 | `NEO_REFLEX` | `laya` | `laya` · `lite` (Gemini Flash-Lite) · `off` |
 | `NEO_LISTEN_TIMEOUT_S` | `5` | stop listening after this many seconds without speech from you (silero VAD; noise doesn't count) |
@@ -192,7 +194,7 @@ NEO keeps its data on this Mac, in `~/.neo` (readable only by you). What leaves 
 | Goes to | What | When |
 |---|---|---|
 | **Google** (Gemini API, Gemini Live) | what you say and type, the recent conversation, NEO's memory about you (see `NEO_CLOUD_MEMORY`), tool results, and screenshots when a task needs to see the screen | every request that needs a model; voice sessions stream your microphone audio while listening |
-| **Groq** (optional key) | chat turns, and the conversation text when NEO writes a session summary | quick answers and summaries |
+| **Groq** (optional key) | chat turns, and the conversation text when NEO writes a session summary; a screenshot only when no other model that sees can answer (its vision model, `NEO_GROQ_VISION_MODEL`) | quick answers and summaries; a screen step while Gemini is overloaded or out of quota |
 | **DuckDuckGo, Brave, Bing** | your search queries (raced for speed) | web searches |
 | **Open-Meteo**, and **ipinfo.io** if NEO doesn't know your city | the place, or your IP address to guess it | weather |
 | any website NEO opens or fetches for you | normal web requests | browsing tasks |

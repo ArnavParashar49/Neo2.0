@@ -37,7 +37,7 @@ def _env_files(root: Path) -> tuple[Path, ...]:
 
 _ENV_FILES = _env_files(PROJECT_ROOT)
 
-BrainName = Literal["gemini", "gemini_lite", "groq", "local", "claude"]
+BrainName = Literal["gemini", "gemini_lite", "groq", "local", "claude", "groq_vision"]
 VoiceBackend = Literal["auto", "live", "local", "off"]
 DecideMode = Literal["legacy", "shadow", "on", "off"]
 
@@ -79,6 +79,14 @@ class Settings(BaseSettings):
     gemini_lite_model: str = "gemini-3.5-flash-lite"
     gemini_live_model: str = "gemini-3.8-live"
     groq_model: str = "openai/gpt-oss-120b"
+    # Groq's model that sees pictures: the last seeing fallback (neo2.core.providers.EYES), on GROQ_API_KEY.
+    # It is sent a screenshot only when no other brain that sees can answer. "" = none.
+    groq_vision_model: str = "qwen/qwen3.8-27b"
+    # The seeing fallbacks (Flash-Lite, Claude, Groq's vision model) for a picture the chain's own
+    # brains can't answer. "auto": they join — except for a user who put the local brain first and
+    # named no cloud brain that sees (their pictures stayed on the Mac: a fallback doesn't change
+    # that on its own). "on": they join for that user too.
+    cloud_eyes: Literal["auto", "on"] = "auto"
     local_model: str = "mlx-community/gemma-4-12B-it-4bit"
     claude_model: str = "claude-opus-5"
 
@@ -148,8 +156,10 @@ class Settings(BaseSettings):
     fast_paths: bool = True  # zero-LLM regex commands (neo2.core.agent.fastpath)
 
     # ---- computer controls (neo2/core/tools/computer) -----------------------------------------
-    # The thinking level a step on the screen starts at. Today's is the agent's own ("high"); it
-    # changes only after a measured A/B on the controls self-test's window.
+    # The thinking level a step on the screen starts at (then one up after a miss, back down after
+    # a success — neo2.core.providers.effort). Today's is the agent's own ("high"); "low" answers in
+    # ~1–2 s instead of ~10–24 s. It changes only after a measured A/B on the controls self-test's
+    # window (≥10 runs per arm).
     screen_effort: Literal["minimal", "low", "medium", "high"] = "high"
     # A first look at the requested app, taken before the first model call — only when that app
     # is already in front (or none is named and the front one is where NEO last worked), never a
@@ -177,6 +187,13 @@ class Settings(BaseSettings):
         default = {"screen_effort": "high", "shot_format": "jpeg", "resolver": "shadow"}[info.field_name]
         s = {"jpg": "jpeg"}.get(s, s)
         return s if s in allowed else default
+
+    @field_validator("cloud_eyes", mode="before")
+    @classmethod
+    def _cloud_eyes(cls, v):
+        """Only a clear yes sends a local-first user's pictures to a cloud fallback: anything else
+        (a typo too) is auto."""
+        return "on" if str(v or "").strip().lower() in ("on", "true", "yes", "1", "always") else "auto"
 
     # ---- memory & prompt ---------------------------------------------------------------
     embeddings: Literal["local", "off"] = "local"  # off: keyword-only recall, no local model
@@ -312,6 +329,9 @@ class LibrarySettings(Settings):
     # No brain but the ones the host gave: the local model server is one only when named here.
     # (Whatever answers on 127.0.0.1:8080 of a server is some other service.)
     offline_brain: BrainName | None = None
+    # Nor a model the host didn't name: its Groq key sends no picture to Groq's vision model unless
+    # it names one (a seeing fallback: neo2.core.providers.EYES).
+    groq_vision_model: str = ""
     embeddings: Literal["local", "off"] = "off"
     memory_enabled: bool = False
     learn: bool = False

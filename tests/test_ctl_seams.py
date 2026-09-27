@@ -110,7 +110,8 @@ def test_image_limit_covers_a_hosts_own_brains(monkeypatch):
 
     assert providers.image_limit("vision") is None  # NEO.app with no keys: nothing declared
     monkeypatch.setattr(providers, "_hosts", lambda purpose: [_Brain("host", limit=(1024, 800_000))])
-    assert providers.image_limit("vision") == (1024, 800_000)
+    # (brain-effort: the limit is an ImageLimit — edge, pixels and bytes; a declared pair still counts)
+    assert providers.image_limit("vision") == providers.ImageLimit(1024, 800_000)
 
 
 # ---- wait.until on a fake clock ------------------------------------------------------------------
