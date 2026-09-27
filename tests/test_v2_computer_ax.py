@@ -502,6 +502,20 @@ def test_sheet_words_and_a_point_outside_the_sheet(fake, monkeypatch):
     assert _REAL_HIT(600.0, 100.0).sheet == ""  # a point on the sheet itself is fine
 
 
+def test_an_app_modal_alert_blocks_clicks_on_its_other_windows(fake, monkeypatch):
+    board = El("AXGroup", frame=(0, 60, 1512, 900))
+    main = window("Chess", board)
+    alert = El("AXWindow", "", frame=(500, 300, 400, 150), AXModal=True, children=[
+        El("AXStaticText", value="Resign this game?", frame=(520, 320, 200, 20)), button("Resign", frame=(800, 400, 60, 24)),
+    ])  # fmt: skip
+    fake.add_app("Chess", 42, El("AXApplication", children=[main, alert], AXFocusedWindow=alert))
+    board.attrs["AXWindow"] = main
+    fake.AXUIElementCopyElementAtPosition = lambda sys, x, y, _: (OK, board)
+    monkeypatch.setattr(ax, "_running", lambda pid: None)
+    h = _REAL_HIT(100.0, 700.0)
+    assert "Resign this game?" in h.sheet and "Resign" in h.sheet
+
+
 def test_the_real_pointer_pipeline_never_brings_neo_forward(monkeypatch):
     monkeypatch.setattr(ax, "hit", lambda x, y: ax.Hit(pid=900, app="NEO", regular=True))
     monkeypatch.setattr(ax, "is_neo", lambda pid, name="": pid == 900)

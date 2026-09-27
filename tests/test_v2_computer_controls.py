@@ -207,7 +207,7 @@ def test_a_click_on_a_window_a_sheet_blocks_is_refused_and_says_what_the_sheet_w
     world.regions[3] = (0, 25, 1512, 915, CHESS, "", "AXGroup", "“Start a New Game?” (buttons: Start, Cancel)")
     out = run("click", {"x": 612, "y": 540})
     assert not out.ok and world.events() == []
-    assert "sheet open" in out.text and "Start, Cancel" in out.text and '<untrusted source="screen">' in out.text
+    assert "open sheet or dialog" in out.text and "Start, Cancel" in out.text and '<untrusted source="screen">' in out.text
 
 
 def test_a_point_off_every_display_is_refused(world):

@@ -173,7 +173,7 @@ def _neo_words() -> str:
 
 def _sheet_refusal(h: ax.Hit) -> Refused:
     return Refused(
-        f"Error: {h.app or 'that app'}'s window has a sheet open — "
+        f"Error: {h.app or 'that app'} is waiting on an open sheet or dialog — "
         + fence("screen", h.sheet)
         + "\nIt blocks clicks on the window behind it: answer it first (click one of its buttons)."
     )

@@ -380,6 +380,7 @@ _web_lock = threading.Lock()
 _web_held: dict[int, tuple[Any, list, threading.Timer]] = {}
 
 
+@pooled
 def _release_web(pid: int) -> None:
     with _web_lock:
         held = _web_held.pop(pid, None)
@@ -936,6 +937,11 @@ def hit(x: float, y: float) -> Hit:
             sx, sy, sw, sh = _point_size(sheet)
             if not (sx <= x < sx + sw and sy <= y < sy + sh):
                 h.sheet = summary(sheet)
+        elif pid:
+            # An app-modal dialog (an alert in its own window) blocks every other window of the app.
+            focused = _attr(_app_el(pid), AS.kAXFocusedWindowAttribute)
+            if focused is not None and not _same(focused, win) and _attr(focused, "AXModal") is True:
+                h.sheet = summary(focused)
     return h
 
 
@@ -948,8 +954,8 @@ def raise_window(h: Hit) -> bool:
     if _str(_attr(h.window, AS.kAXRoleAttribute)) != "AXWindow":
         return False
     focused = _attr(_app_el(h.pid), AS.kAXFocusedWindowAttribute)
-    if focused is None or _same(focused, h.window):
-        return False
+    if focused is None or _same(focused, h.window) or _attr(focused, "AXModal") is True:
+        return False  # (a modal window stays on top: never raise another over it)
     try:
         AS.AXUIElementPerformAction(h.window, "AXRaise")
         AS.AXUIElementSetAttributeValue(h.window, "AXMain", True)
