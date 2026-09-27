@@ -20,6 +20,12 @@ from the host's own UI, or an inline ``approver`` that returns an ``Approval``. 
 own approval step (OpenAI Agents ``needs_approval``, a LangGraph interrupt, an MCP client's tool
 confirmation) approves handing the task to NEO, never NEO's staged action.
 
+Taint carries through: what NEO wrote after reading third-party content (a page, a host tool's
+output) — its answer, a card's summary, a question — reaches the outer model inside
+``<untrusted source="...">``, and an individual untrusted tool's output stays fenced as
+``call_tool`` returned it. Every request an adapter makes starts as a model's words
+(``source="model"``), so memory writes and data-carrying links ask the human first.
+
 Nothing here imports a vendor SDK; :mod:`~neo2.adapters.langchain` imports langchain-core when
 called.
 """

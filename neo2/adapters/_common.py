@@ -270,23 +270,25 @@ def parse_args(
 def result_text(result: Result, *, name: str = DEFAULT_NAME) -> str:
     """What the outer model reads for one NEO request (``ask``, or ``approve``/``deny`` of a card).
 
-    done: the answer — inside ``<untrusted source="{name}">`` when NEO read third-party content
-    (a page, a host tool's output) while answering, since that content may have shaped it;
-    needs_approval: ``NEEDS_CONFIRM: <summary> — waiting for the user's decision in the app. Don't
-    retry or work around it.``; denied: ``The user's OK is required and was not given: <summary>.
-    Nothing was done; don't retry.``; needs_user: ``NEEDS_USER: <question>``. Never an action id.
+    done: the answer; needs_approval: ``NEEDS_CONFIRM: <summary> — waiting for the user's decision
+    in the app. Don't retry or work around it.``; denied: ``The user's OK is required and was not
+    given: <summary>. Nothing was done; don't retry.``; needs_user: ``NEEDS_USER: <question>``.
+    When NEO read third-party content (a page, a host tool's output) during the request, what it
+    wrote after — the answer, a card's summary, a question — comes inside ``<untrusted
+    source="{name}">``: that content may have shaped it. Never an action id.
     After the host's approve(), hand the model ``result_text(result)`` to say how it went."""
     from neo2.sdk.results import Result
 
     if not isinstance(result, Result):
         raise TypeError("result_text() takes a neo2.Result (for a ToolOutcome use outcome_text())")
     st = result.status
+    read = (*result.read_untrusted, *(result.approval.after_reading if result.approval is not None else ()))
     if st == "needs_approval":
-        text = _CONFIRM.format(summary=_summary(result.approval))
+        text = _CONFIRM.format(summary=_summary(result.approval, read, name))
     elif st == "denied":
-        text = _DENIED.format(summary=_summary(result.approval, end=True))
+        text = _DENIED.format(summary=_summary(result.approval, read, name, end=True))
     elif st == "needs_user":
-        text = _NEEDS_USER.format(question=result.text.strip() or "What should I do?")
+        text = _NEEDS_USER.format(question=_shaped(result.text.strip() or "What should I do?", read, name))
     elif st == "expired":
         text = _EXPIRED
     elif st == "stopped":
@@ -303,16 +305,20 @@ def outcome_text(outcome: ToolOutcome) -> str:
     """What the host's model reads for one NEO tool it called (``call_tool``).
 
     ok / error: the tool's text as call_tool gave it (an untrusted tool's already fenced);
-    needs_approval, denied and needs_user read as in :func:`result_text`. Never an action id."""
+    needs_approval, denied and needs_user read as in :func:`result_text` (a card's summary fenced
+    when its turn had read third-party content). Never an action id."""
     from neo2.sdk.results import ToolOutcome
 
     if not isinstance(outcome, ToolOutcome):
         raise TypeError("outcome_text() takes a neo2.ToolOutcome (for a Result use result_text())")
     st = outcome.status
+    card = outcome.approval
+    read = card.after_reading if card is not None else ()
+    source = card.tool if card is not None else DEFAULT_NAME
     if st == "needs_approval":
-        text = _CONFIRM.format(summary=_summary(outcome.approval))
+        text = _CONFIRM.format(summary=_summary(card, read, source))
     elif st == "denied":
-        text = _DENIED.format(summary=_summary(outcome.approval, end=True))
+        text = _DENIED.format(summary=_summary(card, read, source, end=True))
     elif st == "needs_user":
         text = _NEEDS_USER.format(question=outcome.text.strip() or "What should I do?")
     elif st == "stopped":
@@ -368,9 +374,17 @@ def pairs(results: Iterable[tuple[ToolOutcome, str]]) -> list[tuple[ToolOutcome,
     return out
 
 
-def _summary(approval: ApprovalRequest | None, *, end: bool = False) -> str:
-    s = " ".join((approval.summary if approval is not None else "").split()) or "that action"
-    return s.rstrip(".") if end else s
+def _summary(approval: ApprovalRequest | None, read: Iterable[str], name: str, *, end: bool = False) -> str:
+    """A card's summary for a model: NEO wrote it from what its model chose — after reading
+    third-party content, possibly shaped by it (fenced then)."""
+    s = " ".join((approval.summary if approval is not None else "").split())
+    if not s:
+        return "that action"
+    return _shaped(s.rstrip(".") if end else s, read, name)
+
+
+def _shaped(text: str, read: Iterable[str], name: str) -> str:
+    return _fence(name, text) if _third_party(read) and not _fenced(text) else text
 
 
 def _neutral(text: str) -> str:
