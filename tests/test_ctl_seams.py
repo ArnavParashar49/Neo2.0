@@ -60,6 +60,17 @@ def test_the_utterance_lane_is_for_the_users_own_words_only():
     assert not utterance_lane(plain, "user") and not utterance_lane(None, "user")
 
 
+def test_the_utterance_lane_is_closed_to_an_embedded_agent(monkeypatch):
+    """neo2 says "user" for its default source: an embedded agent's words are a host's, never the
+    user's own to NEO.app (tests/sdk/test_sdk_restriction.py goes through ask() with both sources)."""
+    t = RegisteredTool("t_utt", "", {}, lambda a, c: "", by_utterance=True)
+    monkeypatch.setattr(runtime, "library_bound", lambda: True)  # an embedded agent's request runs
+    assert not utterance_lane(t, "user")
+    monkeypatch.setattr(runtime, "library_bound", lambda: False)
+    monkeypatch.setattr(runtime, "_library", True)  # an embedded agent exists in this process
+    assert not utterance_lane(t, "user")
+
+
 def test_the_tool_decorator_takes_by_utterance():
     import inspect
 

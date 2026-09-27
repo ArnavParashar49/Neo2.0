@@ -346,10 +346,12 @@ def tool(
 
 def utterance_lane(t: RegisteredTool | None, origin: Origin) -> bool:
     """May this tool run straight from the user's sentence (its by_utterance lane)? Only a
-    by_utterance tool, and only for the user's own words: text from a model — the agent loop, an
-    embedding host's model (neo2 always hands over a model's words), Gemini Live relaying — or an
-    approval replay never picks and presses on its own; those keep the exact fast paths."""
-    return bool(t is not None and t.by_utterance and origin == "user")
+    by_utterance tool, and only for the user's own words to NEO.app: text from a model — the agent
+    loop, Gemini Live relaying — an approval replay, or anything an embedded agent is handed (neo2
+    passes origin "user" for its source="user", but it is a host's text all the same, whoever
+    typed it) never picks and presses on its own; those keep the exact fast paths."""
+    embedded = runtime.library_mode() or runtime.library_bound()
+    return bool(t is not None and t.by_utterance and origin == "user" and not embedded)
 
 
 def fence(name: str, text: str) -> str:
