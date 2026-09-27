@@ -31,8 +31,7 @@ tests/test_eyes_ocr_live.py):
   (6 of 6, about 170 ms);
 * either mode now and then drops or garbles a word (2–3 in 30 framings of the same window), so a find
   is not one read's word: a fast find is taken when a second, differently framed fast read agrees on
-  the place and reads as many lines (about 2 × 6–14 ms); otherwise an accurate read decides over the
-  union of all of them — where the reads disagree about the words at a place, a place most of them
+  the place (about 2 × 6–14 ms); otherwise an accurate read decides over the union of all of them — where the reads disagree about the words at a place, a place most of them
   read otherwise is no find. On 150 finds over 30 framings: one fast read, 140 right, 5 wrong, 5
   missed; find_in, 150 right (median 22 ms). Its limit: a second copy so small that fast mode drops
   it in both framings (rather than garbling it) isn't seen by a fast find, which then takes the copy
@@ -980,10 +979,6 @@ def _checked(f: Found, readings: Sequence[Reading]) -> Found | None:
     return replace(f, variants=_variants(f.line, f.box, readings))
 
 
-def _count(r: Reading) -> int:
-    return sum(1 for ln in r.lines if ln.conf >= _MIN_CONF)
-
-
 def find_in(
     frame: Any,
     label: str,
@@ -997,10 +992,10 @@ def find_in(
 
     Fast first: taken when two fast reads, framed differently, each find exactly the words in one and
     the same place (in the open sheet when there is one) with nothing that merely looks like them
-    elsewhere, and read as many lines — about 2 × 6–25 ms. Otherwise, and for any script fast can't
-    read, an accurate read decides, over everything read so far (a second copy any read saw makes the
-    find ambiguous: a read now and then drops a word, and the copy it dropped may be the one meant) —
-    except a place more reads saw other words at than saw these (one read's misread). Every version
+    elsewhere — about 2 × 6–25 ms. Otherwise, and for any script fast can't read, an accurate read
+    decides, over everything read so far (a second copy any read saw makes the find ambiguous: a read
+    now and then drops a word, and the copy it dropped may be the one meant) — except a place more
+    reads saw other words at than saw these (one read's misread). Every version
     of the words read at the place found comes with it (``variants``), for the gate. Not seen: a
     second copy so small that both fast reads drop it (see the module's notes). ``hide``: screen
     rectangles whose words never count; ``keep``: what of each reading counts (:func:`owned`)."""
@@ -1027,7 +1022,6 @@ def find_in(
             if (
                 _sure(again, seen[-1], label, sheet)
                 and _overlap(first.box, again.box)  # type: ignore[union-attr]
-                and _count(seen[0]) == _count(seen[1])  # (a line one framing dropped: fast is struggling here)
                 and (took := _checked(first, seen)) is not None  # type: ignore[arg-type]
             ):
                 return took

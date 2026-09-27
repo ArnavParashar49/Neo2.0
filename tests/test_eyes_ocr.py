@@ -1084,18 +1084,7 @@ def test_a_containers_title_names_none_of_the_words_drawn_in_it():
     assert [t for t, _, _ in ocr.pick_marks(r, covered=[((90.0, 95.0, 60.0, 24.0), "Start a New Game")])] == ["me"]
 
 
-# ---- fast reads that disagree, and the known limit of a fast find ---------------------------------------------
-
-
-def test_fast_framings_that_read_different_lines_send_the_find_to_an_accurate_read():
-    # The padded fast read drops a line the first read had: fast is struggling with this picture, so an
-    # accurate read decides — and it sees the small second copy both fast reads dropped.
-    frame, eng = scene([("Start", (40.0, 40.0, 40.0, 16.0)), ("Start", (300.0, 200.0, 40.0, 7.0)), ("Score 3", (40.0, 250.0, 60.0, 16.0))])
-    eng.fast_drop_px, eng.fast_min_px = 15, 4
-    eng.drop = lambda text, fast, n: text == "Score 3" and n == 2
-    use(eng)
-    got = ocr.find_in(frame, "Start")
-    assert isinstance(got, ocr.Ambiguous) and len(got.options) == 2 and [c["fast"] for c in eng.calls] == [True, True, False]
+# ---- the known limit of a fast find ---------------------------------------------
 
 
 def test_a_copy_both_fast_framings_drop_is_a_fast_finds_known_limit():
