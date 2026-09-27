@@ -459,7 +459,8 @@ async def test_the_budget_warns_at_80_percent_then_skips_cerebras_until_tomorrow
 
 
 async def test_a_chain_fails_over_past_a_spent_budget(cset, fake, monkeypatch):
-    cset(NEO_CEREBRAS_DAILY_BUDGET="0", GEMINI_API_KEY="g-test")  # (a key NEO knows: see the wiring)
+    s = cset(NEO_CEREBRAS_DAILY_BUDGET="0.001", GEMINI_API_KEY="g-test")  # (a key NEO knows: see the wiring)
+    _spend_it(s)
 
     class Backup:
         name, model, supports_vision, supports_tools = "groq", "m", False, True
@@ -473,12 +474,13 @@ async def test_a_chain_fails_over_past_a_spent_budget(cset, fake, monkeypatch):
     turn = await chain.complete(ASK)
     assert turn.text == "from groq" and chain.last_used == "groq" and fake.chats == 0
     assert chain._providers()[-1].name == cb.TEXT_BRAIN  # it knows it's out: asked last, no round trip
-    # every brain out: the spoken reason is Cerebras' own (base.failure_words reads `words`)
+    # every brain out: the failure carries Cerebras' own reason, in `words` (what the stop message
+    # says once base.failure_words reads it: test_wired_the_stop_message_gives_cerebras_own_reason)
     chain2 = prov.Chain([cb.TEXT_BRAIN])
     with pytest.raises(AllBrainsFailed) as e:
         await chain2.complete(ASK)
     out = e.value.failures[0][1]
-    assert out.words.startswith("Cerebras' daily budget") and out.kind == "quota"
+    assert out.words == "Cerebras' daily budget of $0.0010 is used up" and out.kind == "quota"
     assert prov._demoted[cb.TEXT_BRAIN] >= out.until  # benched until midnight, not for 5 minutes
 
 
