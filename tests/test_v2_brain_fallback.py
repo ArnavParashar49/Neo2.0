@@ -794,6 +794,21 @@ def test_the_chess_run_survives_on_groq_when_gemini_is_spent(monkeypatch):
     gem_p = prov.make("gemini")
     gem_p._clients = [spent(0), spent(1)]
 
+    # The seeing fallbacks are spent too (Flash-Lite's own quota, Groq's vision model's own limit):
+    # the run's steps carry no picture, so Groq's text model carries it.
+    async def lite_spent(*, model, contents, config):
+        raise _err(429, "quota", _per_day())
+
+    prov.make("gemini_lite")._clients = [
+        SimpleNamespace(aio=SimpleNamespace(models=SimpleNamespace(generate_content=lite_spent)))
+    ]
+
+    async def vision_spent(**kw):
+        req = httpx.Request("POST", "https://api.groq.com/openai/v1/chat/completions")
+        raise openai.RateLimitError("rate limited", response=httpx.Response(429, request=req), body=None)
+
+    monkeypatch.setattr(prov.make("groq_vision")._client.chat.completions, "create", vision_spent)
+
     groq_p = prov.make("groq")
     sizes: list[int] = []
     offered: list[set[str]] = []
