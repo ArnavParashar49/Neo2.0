@@ -1238,7 +1238,7 @@ def forget(pid: int | None = None) -> None:
 
 
 @pooled
-def find(query: str, app: str | None = None) -> str:
+def find(query: str, app: str | None = None, *, cancel: threading.Event | None = None) -> str:
     """Elements whose title/value/role contains `query` (case-insensitive).
 
     Searches the tree the model is already holding ids for; a fresh walk (new ids) only when
@@ -1250,7 +1250,7 @@ def find(query: str, app: str | None = None) -> str:
         same = bool(want_pid) and want_pid == _last_tree_pid
     looked = ""
     if not _last_tree or not same or time.time() - _last_tree_ts > _FIND_MAX_AGE_S:
-        out = snapshot(app)
+        out = snapshot(app, cancel=cancel)
         if isinstance(out, str) and out.startswith(("Error", "NEEDS_")):
             return out
         looked = f"(looked at {app or 'the front app'} again: these ids are new)\n"
@@ -1263,6 +1263,11 @@ def find(query: str, app: str | None = None) -> str:
     if not hits:
         return f"{looked}No element matching '{query}' (tree from {int(time.time() - _last_tree_ts)}s ago)."
     return looked + "\n".join(e.line() for e in hits[:40])
+
+
+async def find_async(query: str, app: str | None = None) -> str:
+    """:func:`find` off the event loop, stopped when the call awaiting it is cancelled."""
+    return await wait.in_thread(find, query, app)
 
 
 def get(eid: str) -> Element | None:
@@ -2036,26 +2041,40 @@ def _as_blocker(b: _Within, pid: int) -> Blocker:
     return Blocker(b.kind, title, ctl, pid, " ".join(" ".join(t.split()) for t in texts)[:400], b.frame, b.ref)
 
 
+def _layer_at(pid: int, x: float, y: float) -> int | None:
+    """The window-server layer of the app's frontmost window at a point (None: can't tell)."""
+    try:
+        import Quartz as Q
+
+        wins = Q.CGWindowListCopyWindowInfo(Q.kCGWindowListOptionOnScreenOnly | Q.kCGWindowListExcludeDesktopElements, Q.kCGNullWindowID) or []
+    except Exception:  # noqa: BLE001
+        return None
+    for w in wins:  # front to back
+        b = w.get("kCGWindowBounds") or {}
+        wx, wy, ww, wh = (float(b.get(k, 0) or 0) for k in ("X", "Y", "Width", "Height"))
+        if int(w.get("kCGWindowOwnerPID", 0) or 0) == pid and wx <= x < wx + ww and wy <= y < wy + wh:
+            return int(w.get("kCGWindowLayer", 0) or 0)
+    return None
+
+
 def _covering(pid: int, frame: tuple[float, float, float, float] | None) -> list[Blocker]:
-    """Another app's window over much of this app's window, as the window server tells it (the
-    window on top at points across it): evidence, never names. NEO's own windows don't count."""
+    """Another app's window floating over the middle of this app's window (a higher window-server
+    layer than a normal window: a panel, an alert, an overlay), as the window server tells it:
+    evidence, never names. An ordinary window of an app in front isn't one (bringing this app
+    forward uncovers it), nor is any of NEO's own."""
     if not pid or frame is None or frame[2] <= 0 or frame[3] <= 0:
         return []
-    x, y, fw, fh = frame
-    pts = [(x + fw / 2, y + fh / 2)] + [(x + fw * a, y + fh * b) for a in (0.25, 0.75) for b in (0.25, 0.75)]
-    over: dict[int, list[str]] = {}
-    middle = 0
-    for i, (px, py) in enumerate(pts):
-        got = window_owner_at(px, py)
-        if not got:
-            continue
-        name, owner = got
-        if owner and owner != pid and not is_neo(owner, name):
-            over.setdefault(owner, []).append(name)
-            if i == 0:
-                middle = owner
-    # over the middle of the window, or most of it: a banner in a corner isn't in the way
-    return [Blocker("covering", names[0], [], owner) for owner, names in over.items() if owner == middle or len(names) >= 3]
+    mx, my = frame[0] + frame[2] / 2, frame[1] + frame[3] / 2
+    got = window_owner_at(mx, my)
+    if not got:
+        return []
+    name, owner = got
+    if not owner or owner == pid or is_neo(owner, name):
+        return []
+    layer = _layer_at(owner, mx, my)
+    if layer is not None and layer <= 0:
+        return []
+    return [Blocker("covering", name, [], owner)]
 
 
 @pooled

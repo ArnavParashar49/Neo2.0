@@ -820,15 +820,21 @@ def test_blockers_sheet_modal_dialog_and_another_apps_window(fake, monkeypatch):
     # another process's window over the middle of this one (the window server's evidence)
     fake.add_app("Plain", 53, app_root(window("Plain", button("Go"))))
     monkeypatch.setattr(ax, "window_owner_at", lambda x, y: ("Overlay", 900) if 500 < x < 1000 and 300 < y < 700 else ("Plain", 53))
+    monkeypatch.setattr(ax, "_layer_at", lambda pid, x, y: 3)
     got = ax.blockers(53)
     assert [(b.kind, b.owner_pid) for b in got] == [("covering", 900)]
     assert "Another app's window covers this one" in ax.snapshot("Plain")
 
 
-def test_a_banner_in_a_corner_is_not_in_the_way(fake, monkeypatch):
+def test_a_banner_in_a_corner_or_an_ordinary_window_in_front_is_not_in_the_way(fake, monkeypatch):
     fake.add_app("Plain", 53, app_root(window("Plain", button("Go"))))
     monkeypatch.setattr(ax, "window_owner_at", lambda x, y: ("Banner", 901) if x > 1100 and y < 300 else ("Plain", 53))
     assert ax.blockers(53) == []
+    monkeypatch.setattr(ax, "window_owner_at", lambda x, y: ("Editor", 902))  # another app's window, in front…
+    monkeypatch.setattr(ax, "_layer_at", lambda pid, x, y: 0)  # …an ordinary one: bringing this app forward uncovers it
+    assert ax.blockers(53) == []
+    monkeypatch.setattr(ax, "_layer_at", lambda pid, x, y: 8)  # a floating panel
+    assert [b.owner_pid for b in ax.blockers(53)] == [902]
 
 
 def test_a_modal_dialog_blocks_a_point_accessibility_cannot_see(fake, monkeypatch):

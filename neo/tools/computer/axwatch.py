@@ -74,7 +74,9 @@ class _RealBackend(Backend):
         try:
             import ApplicationServices as AS
             import CoreFoundation as CF
+            import objc
 
+            @objc.callbackFor(AS.AXObserverCreate)
             def callback(_observer, _element, name, _refcon) -> None:
                 try:
                     on_note(pid, str(name))
