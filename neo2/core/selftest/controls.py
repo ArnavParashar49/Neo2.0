@@ -1299,8 +1299,16 @@ REPEAT: tuple[Callable[[_Run], Awaitable[Check]], ...] = (
 def _feedback(checks: list[Check]) -> Check:
     """Did NEO's tools say they worked when they didn't? (The Chess run: every call "ok", the game
     never moved.)"""
+    from neo2.core.tools.computer.pointer import said_only_brought
+
     c = Check("feedback", "NEO's tools report failures")
-    liars = [ch for ch in checks if ch.status == "fail" and ch.said and not ch.said.lstrip().startswith(("Error", "NEEDS_"))]
+    # An answer that says it failed, or in NEO's own words that the click only brought the window
+    # forward (not words read off the screen), told the truth.
+    liars = [
+        ch
+        for ch in checks
+        if ch.status == "fail" and ch.said and not ch.said.lstrip().startswith(("Error", "NEEDS_")) and not said_only_brought(ch.said)
+    ]
     if liars:
         names = ", ".join(ch.title.lower() for ch in liars)
         return c.fail(

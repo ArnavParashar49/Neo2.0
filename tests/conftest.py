@@ -150,6 +150,9 @@ def _no_real_screen(monkeypatch):
     monkeypatch.setattr(inp, "can_post", lambda: True)
     monkeypatch.setattr(ax, "hit", lambda x, y: ax.Hit())
     monkeypatch.setattr(ax, "window_owner_at", lambda x, y: ("", 0))  # (the window server: no window there)
+    monkeypatch.setattr(ax, "windows_at", lambda x, y: [])
+    monkeypatch.setattr(ax, "key_window", lambda pid: None)  # (no app is seen active with a window key)
+    monkeypatch.setattr(ax, "is_key", lambda h: False)
     monkeypatch.setattr(ax, "scene", lambda pid, front=None: ax.Scene())
     monkeypatch.setattr(ax, "raise_window", lambda h: False)
     monkeypatch.setattr(ax, "focused_element_text", lambda: "")
@@ -161,6 +164,7 @@ def _no_real_screen(monkeypatch):
     monkeypatch.setattr(pointer, "LOOK_S", 0.0)
     monkeypatch.setattr(pointer, "LOOK_AGAIN_S", 0.0)
     monkeypatch.setattr(pointer, "SETTLE_S", 0.0)
+    monkeypatch.setattr(pointer, "KEY_S", 0.0)  # (a wait for an app to come forward: one look)
     # The app NEO works in is per test (bringing a real one forward is refused: neo2/core/effects.py), and
     # no app runs a shell unless a test says so.
     from neo2.core.tools.computer import apps, focus

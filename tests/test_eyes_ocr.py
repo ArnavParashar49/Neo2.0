@@ -614,12 +614,20 @@ class Desk:
         self.clicks: list = []
         self.moves: list = []
         self.brought: list = []
+        self.front = (APP, PID)  # the app in front (active): an app brought forward is
 
     def hit(self, x, y):
         for rx, ry, rw, rh, pid, app, label, role, sheet in self.regions:
             if rx <= x < rx + rw and ry <= y < ry + rh:
                 return ax.Hit(pid=pid, app=app, label=label, role=role, regular=True, sheet=sheet)
         return ax.Hit()
+
+    def windows_at(self, x, y):  # the window server: each region is an app's normal window (layer 0)
+        return [
+            ax.Win(pid, app, 0, (rx, ry, rw, rh))
+            for rx, ry, rw, rh, pid, app, *_ in self.regions
+            if rx <= x < rx + rw and ry <= y < ry + rh
+        ]
 
 
 @pytest.fixture
@@ -628,11 +636,13 @@ def desk(monkeypatch):
     monkeypatch.setattr(ax, "hit", d.hit)
     monkeypatch.setattr(ax, "is_neo", lambda pid, name="": pid == NEO)
     monkeypatch.setattr(ax, "app_names", lambda pid: set())
-    monkeypatch.setattr(focus, "front_app", lambda: (APP, PID))
+    monkeypatch.setattr(focus, "front_app", lambda: d.front)
     monkeypatch.setattr(ax, "frontmost_app", lambda: (APP, PID))
+    monkeypatch.setattr(ax, "windows_at", d.windows_at)
 
     async def bring(pid):  # (async, like apps.bring_pid_front)
         d.brought.append(pid)
+        d.front = (APP, pid)
         return True, APP
 
     monkeypatch.setattr(apps, "bring_pid_front", bring)
@@ -864,7 +874,7 @@ def test_a_banner_in_front_doesnt_lose_the_app_whose_window_was_read(desk, monke
     # LaunchServices names the banner's app; ax.frontmost_app — what the handler's window_elements went
     # by — names the app the user is in. Its pid is the one used, and only it is brought forward.
     _show(monkeypatch, [("Hint", (300.0, 40.0, 40.0, 16.0))])
-    monkeypatch.setattr(focus, "front_app", lambda: ("NotificationCenter", 77))
+    desk.front = ("NotificationCenter", 77)
     out, _ = _fallback("hint")
     assert out.ok and desk.brought == [PID] and len(desk.clicks) == 1 and f"brought {APP} to the front first" in out.text
 
@@ -883,14 +893,14 @@ def test_an_app_that_isnt_the_one_read_is_never_guessed(desk, monkeypatch):
 
 def test_an_app_not_in_front_is_brought_forward_first(desk, monkeypatch):
     _show(monkeypatch, [("Hint", (300.0, 40.0, 40.0, 16.0))])
-    monkeypatch.setattr(focus, "front_app", lambda: ("Finder", 11))
+    desk.front = ("Finder", 11)
     out, _ = _fallback("hint")
     assert out.ok and desk.brought == [PID] and len(desk.clicks) == 1 and f"(brought {APP} to the front first)" in out.text
 
 
 def test_whats_there_once_the_app_is_in_front_is_gated_again(desk, monkeypatch):
     _show(monkeypatch, [("Hint", (300.0, 40.0, 40.0, 16.0))])
-    monkeypatch.setattr(focus, "front_app", lambda: ("Finder", 11))
+    desk.front = ("Finder", 11)
     first = desk.hit
 
     def hit(x, y):  # once Board is in front, its "Send" button is what's under the point
@@ -906,7 +916,7 @@ def test_a_protected_apps_window_over_the_words_is_refused_and_never_brought_for
     _show(monkeypatch, [("Hint", (300.0, 40.0, 40.0, 16.0))])
     _protect(monkeypatch, "MyApprover")
     desk.regions.insert(0, (250.0, 0.0, 150.0, 150.0, 99, "MyApprover", "Approve", "AXButton", ""))
-    monkeypatch.setattr(focus, "front_app", lambda: ("Finder", 11))
+    desk.front = ("Finder", 11)
     out, _ = _fallback("hint")
     assert not out.ok and desk.clicks == [] and desk.brought == []
 
@@ -917,7 +927,7 @@ def test_a_protected_apps_window_over_the_words_is_refused_and_never_brought_for
 @pytest.mark.parametrize("case", ["spot changed", "covered", "stays behind", "another window", "sheet", "protected"])
 def test_a_blind_brain_is_never_told_a_point_when_a_click_is_refused(desk, monkeypatch, case):
     _show(monkeypatch, [("Hint", (300.0, 40.0, 40.0, 16.0))])
-    monkeypatch.setattr(focus, "front_app", lambda: ("Finder", 11))  # (Board isn't in front: it is brought)
+    desk.front = ("Finder", 11)  # (Board isn't in front: it is brought)
     if case == "spot changed":  # (the pointer names the spot it looked at again)
 
         async def bring(t, pts, **kw):

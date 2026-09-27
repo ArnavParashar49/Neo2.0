@@ -286,7 +286,10 @@ class AllBrainsFailed(ProviderError):
         return f"I had to stop: {said}."
 
     def _said(self, failures: list[tuple[str, ProviderError]] | None = None) -> str:
-        parts = [failure_words(n, e) for n, e in (self.failures if failures is None else failures)]
+        # (each reason once: two brains on one account refused for one reason say it once)
+        parts = list(
+            dict.fromkeys(failure_words(n, e) for n, e in (self.failures if failures is None else failures))
+        )
         if not parts:
             return ""
         return parts[0] if len(parts) == 1 else ", ".join(parts[:-1]) + " and " + parts[-1]

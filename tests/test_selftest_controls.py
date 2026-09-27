@@ -143,6 +143,7 @@ class Desk:
         self.on_post = None  # scenario hook: (desk, event) after each posted event
         self.activations: list[int] = []
         self.brought: list[int] = []  # apps NEO's pointer tools brought forward before an input (pids)
+        self.forced: list[int] = []  # apps made active with the window server's switch (pids)
         self.commands: list[str] = []
         self.held: set[str] = set()  # mouse buttons down, whoever pressed them (Quartz's combined state)
         self._last_state = None
@@ -198,10 +199,12 @@ class Desk:
             "active": False,
         }
         self.write("ready", **ready)
+        if self.opts.get("ls_front"):  # LaunchServices calls it frontmost; it was never activated
+            self.front = (self.name, TEST_PID)
         self.state()
 
     def activate_test(self):
-        if self.front[1] != TEST_PID:
+        if self.front[1] != TEST_PID or not self.active:
             self.front = (self.name, TEST_PID)
             self.active = True
             self.write("focus", active=True)
@@ -209,7 +212,7 @@ class Desk:
 
     def command(self, cmd):
         self.commands.append(cmd)
-        if cmd == "deactivate" and self.front[1] == TEST_PID:
+        if cmd == "deactivate" and self.front[1] == TEST_PID and not self.opts.get("ls_front"):
             self.front = ("Safari", USER_PID)
             self.active = False
             self.write("focus", active=False)
@@ -670,9 +673,22 @@ def mac(monkeypatch, tmp_path):
         blocked = own and desk.sheet and not inside(SHEET, x, y)
         return ax.Hit(
             pid=pid, app=top["name"], label=label_at(x, y) if own else "Reload",
-            role=roles.get(desk.target_at(x, y), "AXGroup") if own else "AXButton", regular=True,
+            role=roles.get(desk.target_at(x, y), "AXGroup") if own else "AXButton",
+            regular=not (own and desk.opts.get("accessory")), window=("win", pid),
             sheet=f"“{L.SHEET_TITLE}” (buttons: {L.SHEET_START}, {L.SHEET_CANCEL})" if blocked else "",
         )  # fmt: skip
+
+    def windows_at(x, y):  # the window server's list: pid, owner, layer, frame
+        return [
+            types.SimpleNamespace(pid=w["pid"], owner=w["name"], layer=w["layer"], frame=tuple(w["bounds"]))
+            for w in desk.windows()
+            if inside(w["bounds"], x, y)
+        ]
+
+    def key_window(pid):  # the app's key window while it is really active
+        if pid == TEST_PID:
+            return ("win", TEST_PID) if desk.active else None
+        return ("win", pid) if desk.front[1] == pid else None
 
     def owner_at(x, y):
         top = desk.top(x, y)
@@ -692,15 +708,28 @@ def mac(monkeypatch, tmp_path):
         if pid != TEST_PID or not desk.alive:
             raise AssertionError(f"brought pid {pid} forward — only the test window may be")
         desk.brought.append(pid)
-        if not desk.opts.get("bring_lies"):  # (macOS said yes, but the window never became active)
+        if desk.opts.get("bring_front_only"):  # frontmost by LaunchServices' word, never active
+            desk.front = (desk.name, TEST_PID)
+        elif not desk.opts.get("bring_lies"):  # (macOS said yes, but the window never became active)
             desk.activate_test()
         return True, desk.name
+
+    def force_front(pid):
+        if pid != TEST_PID or not desk.alive:
+            raise AssertionError(f"forced pid {pid} to the front — only the test window may be")
+        desk.forced.append(pid)
+        desk.activate_test()
+        return True
 
     monkeypatch.setattr(ax, "hit", hit)
     monkeypatch.setattr(ax, "window_owner_at", owner_at)
     monkeypatch.setattr(ax, "pid_of", lambda ref: ref[0] if isinstance(ref, tuple) else 0)
     monkeypatch.setattr(ax, "visible_frame", frame_of)
-    monkeypatch.setattr(ax, "regular", lambda pid: pid in (TEST_PID, USER_PID))
+    monkeypatch.setattr(ax, "regular", lambda pid: pid == USER_PID or (pid == TEST_PID and not desk.opts.get("accessory")))
+    monkeypatch.setattr(ax, "windows_at", windows_at, raising=False)
+    monkeypatch.setattr(ax, "key_window", key_window, raising=False)
+    monkeypatch.setattr(ax, "is_key", lambda h: h.window is not None and key_window(h.pid) == h.window, raising=False)
+    monkeypatch.setattr(focus, "force_front", force_front)
     monkeypatch.setattr(ax, "focus_el", focus_el)
     def press_ref(e):
         if e.ref[0] != TEST_PID:
@@ -920,22 +949,87 @@ def test_the_exact_events_for_a_click_a_drag_and_typing(mac):
 # ---- what the report catches ------------------------------------------------------------------
 
 
-def test_a_first_click_that_only_activates_the_window_is_caught(mac):
+def _failed(said: str) -> controls.Check:
+    c = controls.Check("first_click", "First click on a window that isn't in front").fail("nothing arrived")
+    c.said = said
+    return c
+
+
+def test_the_feedback_gate_fails_an_answer_that_sounded_like_success():
+    """The run of 2026-09-27: the board never saw the click, and the tool said it clicked."""
+    got = controls._feedback([_failed("Left-clicked at (255, 186) in python.")])
+    assert got.status == "fail" and "first click" in got.arrived
+
+
+def test_the_feedback_gate_takes_only_neos_own_words_that_the_click_only_brought_the_app_forward():
+    from neo2.core.agent.registry import fence
+    from neo2.core.tools.computer import pointer
+
+    for label in ("only brought", "The click only brought python to the front"):  # words read off the screen
+        liar = "Dragged (105, 336) → (195, 246) in python. Changed: the window changed.\n" + fence("screen", f"under the pointer: Button “{label}”")
+        assert controls._feedback([_failed(liar)]).status == "fail", label
+    for looked in (True, False):
+        honest = "Left-clicked at (255, 186) in python. " + pointer.brought_only("python", looked=looked).said
+        assert controls._feedback([_failed(honest)]).status == "pass"
+    assert controls._feedback([_failed("Error: python didn't come to the front")]).status == "pass"
+
+
+def test_a_first_click_that_only_activates_the_window_is_caught_and_the_tool_says_so(mac):
     """Chess: the board ignores the click that brings its window forward. NEO brings the window
-    forward first — but when that didn't really happen (macOS said yes), the click only activates it:
-    NEO's click tool says it clicked; the report says what really happened, and that the answer hid it."""
-    mac.set(swallow_first_click=True, bring_lies=True)
+    forward first — but when macOS only put it in front by LaunchServices' word and never made it
+    active, the click only activates it: the report says what really happened, and NEO's click tool
+    said so too (it only brought the window forward), so no answer hid a failure."""
+    mac.set(swallow_first_click=True, bring_front_only=True)
     report = _run(mac)
     checks = _by_name(report)
     first = checks["first_click"]
     assert first.status == "fail"
     assert "only brought the window to the front" in first.arrived
-    assert first.said.startswith("Left-clicked at")
-    assert checks["click_point"].status == "pass"  # in front now, clicks land
-    assert checks["feedback"].status == "fail" and "first click" in checks["feedback"].arrived
+    assert first.said.startswith("Left-clicked at") and "only brought" in first.said
+    assert checks["click_point"].status == "pass"  # active now, clicks land
+    assert checks["feedback"].status == "pass"
     reply = report.reply()
     assert "First click on a window that isn't in front" in reply and "Didn't work" in reply
     assert not report.ok
+
+
+def test_a_window_that_never_comes_forward_is_not_clicked_and_the_tool_says_so(mac):
+    """macOS says yes to bringing the test window forward, but it stays behind: NEO doesn't click a
+    window whose app isn't in front (the click would only activate it) and answers with an error."""
+    mac.set(swallow_first_click=True, bring_lies=True)
+    report = _run(mac)
+    checks = _by_name(report)
+    first = checks["first_click"]
+    assert first.status == "fail" and first.said.startswith("Error") and "didn't come to the front" in first.said
+    assert first.arrived == "nothing arrived"
+    assert checks["feedback"].status == "pass"
+    assert not report.ok
+
+
+def test_a_test_window_whose_process_isnt_a_regular_app_is_brought_forward_before_the_first_click(mac):
+    """The run of 2026-09-27: another app was active, and the test window's python process has no
+    Dock icon (not a regular app). NEO only ever brought regular apps forward, so the first click only
+    activated the window and the board never saw it."""
+    mac.set(swallow_first_click=True, accessory=True)
+    report = _run(mac)
+    checks = _by_name(report)
+    first = checks["first_click"]
+    assert first.status == "pass", report.text()
+    assert "brought" in first.said and "to the front first" in first.said
+    assert mac.desk.brought[:1] == [TEST_PID]
+    assert checks["feedback"].status == "pass"
+
+
+def test_a_test_window_frontmost_by_launchservices_word_only_is_made_active_before_the_first_click(mac):
+    """The same run's report: "(the window was already in front)" — LaunchServices called the test
+    app frontmost — yet the click only activated its window: the app wasn't active, no window of it
+    key. NEO makes it active (the window server's switch) before clicking."""
+    mac.set(swallow_first_click=True, accessory=True, ls_front=True)
+    report = _run(mac)
+    first = _by_name(report)["first_click"]
+    assert first.status == "pass", report.text()
+    assert "(the window was already in front)" in first.sent
+    assert mac.desk.forced[:1] == [TEST_PID] and mac.desk.brought == []
 
 
 def test_a_window_that_swallows_its_activating_click_gets_the_click_once_brought_forward(mac):

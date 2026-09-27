@@ -75,13 +75,29 @@ def prices(extra: Any = None) -> dict[str, tuple[float, float]]:
     return out
 
 
+_OFF = frozenset({"off", "false", "no", "none", "disabled", "never"})
+
+
 def budget(v: Any, default: float = 0.5) -> float:
-    """The daily budget in dollars from a setting: a number ≥ 0 (0: never spend), else the default."""
+    """The daily budget in dollars from a setting (NEO_CEREBRAS_DAILY_BUDGET): a number ≥ 0 ("$1.25"
+    too; 0: never spend). Only an unset (empty) value is `default`: the cap fails closed, so "off",
+    a negative number or a typo is 0 — Cerebras off, and the log says why — never a day of paid
+    calls the user didn't mean to allow. A typo still never stops NEO from starting."""
+    if v is None or (isinstance(v, str) and not v.strip()):
+        return default
+    if isinstance(v, str):
+        if v.strip().lower() in _OFF:
+            log.info("[spend] NEO_CEREBRAS_DAILY_BUDGET is off: Cerebras isn't used")
+            return 0.0
+        v = v.strip().lstrip("$").strip()
     try:
         f = float(v)
     except (TypeError, ValueError):
-        return default
-    return f if math.isfinite(f) and f >= 0 else default
+        f = math.nan
+    if math.isfinite(f) and f >= 0:
+        return f
+    log.warning("[spend] NEO_CEREBRAS_DAILY_BUDGET isn't a dollar amount of 0 or more: Cerebras stays off")
+    return 0.0
 
 
 class Ledger:

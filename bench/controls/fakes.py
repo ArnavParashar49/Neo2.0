@@ -1336,7 +1336,10 @@ class Env:
 # pictures, no waiting), as the code has it: the bench measures the real thing. Taken when this module
 # is first imported — at collection time under pytest, before any fixture runs.
 _PRISTINE_NAMES = {
-    "neo2.core.tools.computer.ax": ("hit", "window_owner_at", "scene", "raise_window", "focused_element_text", "working_app"),
+    "neo2.core.tools.computer.ax": (
+        "hit", "window_owner_at", "scene", "raise_window", "focused_element_text", "working_app",
+        "windows_at", "key_window", "is_key",
+    ),
     "neo2.core.tools.computer.screen": ("sample_points",),
     "neo2.core.tools.computer.pointer": ("LOOK_S", "LOOK_AGAIN_S", "SETTLE_S", "HOVER_S", "POLL_S", "protected_in"),
     "neo2.core.agent.settle": ("probe",),

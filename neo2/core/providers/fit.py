@@ -18,6 +18,13 @@ doesn't fit:
 7. the looks kept whole behind newer steps, then the newest steps themselves: each cut only as
    far as the request must shrink (the room that frees is theirs, it doesn't go back to tools)
 
+Before any of that, every agent request (one that offers tools) goes on the context diet
+(neo2.core.providers.diet), whatever the brain: older pictures and a look a newer look at the same
+thing replaced as one-line notes, an earlier request's results cut short. And it is held to a soft
+budget (diet.soft_budget) by cutting an earlier request's results shorter still (2) — only those:
+the task being worked on, anything the user or NEO said, the answer's room and the tools stay.
+Over it is still sent: only the brain's own budget refuses (and only then do the steps below run).
+
 A budget that is a per-minute rate (Groq's free tier) is paid back before the next step can go:
 a prompt of half of it already means a wait of ~30s per step. For such a brain the tools that
 come back in 6 are the first few in the order given (a tenth of the budget; the agent loop lists
@@ -40,6 +47,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 
 from neo2.core import logger
+from neo2.core.providers import diet as _diet
 from neo2.core.providers.base import BLIND_PICTURE, ImagePart, Message, RequestTooLarge, ToolCall, ToolSpec
 from neo2.core.providers.history import OBSERVATIONS, halted, normalize, request_start
 
@@ -61,6 +69,7 @@ _MIN_OUTPUT = 512
 _MIN_RESULT = 600  # chars a result kept whole is cut to, at the very least, before giving up
 _PER_MINUTE_SHARE = 0.5  # a per-minute budget: tools come back while the prompt is under this…
 _PER_MINUTE_TOOLS = 0.1  # …or while they add no more than this to it
+_SOFT_RESULT = 160  # chars an earlier request's result keeps when an agent request is over its soft budget
 _ENABLED = re.compile(r"^Enabled: (.*?)\. They are available", re.S)
 
 log = logger(__name__)
@@ -341,6 +350,8 @@ def fit(
     brain refills per minute (see the module docstring). Raises RequestTooLarge when nothing
     more can go."""
     msgs = normalize(messages)
+    if tools is not None:  # an agent's request: the diet, for every brain
+        msgs = _diet.diet(msgs)
     specs = list(tools) if tools else tools
     out = max_tokens
     limit = int(budget * _HEADROOM)
@@ -354,8 +365,24 @@ def fit(
     def fits() -> bool:
         return prompt() + out <= limit
 
+    def soften() -> None:
+        """An agent request over its soft budget: an earlier request's results cut short (diet.cap)."""
+        nonlocal msgs
+        soft = _diet.soft_budget(msgs)
+        if (was_tokens := prompt()) <= soft:
+            return
+        was, msgs = msgs, _diet.cap(msgs, _SOFT_RESULT)
+        if any(a is not b for a, b in zip(was, msgs, strict=True)):
+            trimmed.append(f"earlier requests' results to {_SOFT_RESULT} chars")
+            log.info(
+                f"[brain] {name}: request over its soft budget ({soft}) ~{was_tokens}→{prompt()} tokens by "
+                f"trimming {trimmed[-1]}"
+            )
+
+    if tools is not None:
+        soften()
     if fits():
-        return Fitted(msgs, specs, out, prompt())
+        return Fitted(msgs, specs, out, prompt(), list(trimmed))
     before = prompt()
 
     def refill() -> None:

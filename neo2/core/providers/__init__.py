@@ -408,13 +408,17 @@ class Chain:
             return not getattr(q, "on_device", False)
 
         # A brain here guards the screen where the user put it before a cloud brain, and a cloud
-        # brain that sees would come after it (one of the chain's own, or a fallback).
+        # brain that sees would come after it (one of the chain's own, or a fallback). Where the
+        # user put it: the chain's order, not the one a failure's demotion left (a Gemini that just
+        # failed, moved behind the local brain, doesn't make that brain a guard).
+        at = {_key(n): i for i, n in enumerate(self.names)}
+        placed = sorted(providers, key=lambda p: at.get(p.name, len(at)))
         guards = {
             p.name
-            for i, p in enumerate(providers)
+            for i, p in enumerate(placed)
             if not cloud(p)
-            and any(cloud(q) for q in providers[i + 1 :])
-            and any(cloud(q) and q.supports_vision for q in providers[i + 1 :] + extra)
+            and any(cloud(q) for q in placed[i + 1 :])
+            and any(cloud(q) and q.supports_vision for q in placed[i + 1 :] + extra)
         }
         out: list[Provider] = []
         for p in _eyes_first(providers):

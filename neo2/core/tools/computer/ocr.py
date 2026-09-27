@@ -1797,7 +1797,7 @@ async def click_text_fallback(
     spot = "the words" if blind else _at(pts[0])
     head = f"Clicked the words '{label}'" + ("" if blind else f" at {spot}")
     head += f" in {h.app or app}" if (h.app or app) else ""
-    if t.brought:
+    if t.brought and not getattr(t, "cold", False):
         head += f" (brought {t.brought} to the front first)"
     head += " — found by reading the screen (Accessibility has no such label)."
     before = await g._watch(c, pid, pts, hover=pts[0])
@@ -1805,8 +1805,12 @@ async def click_text_fallback(
     g._taint(c, "screen")
     read_there = f"read there: {_q(found.line)}" + (" [in the open sheet]" if found.where else "")
     if before is None:
+        if await pointer.woke(t, pid):  # nothing looked at, but the click itself brought its app forward
+            only = pointer.brought_only(h.app or t.brought or app or "the app", looked=False)
+            out = ToolOutput(f"{head} {only.said}{g._input_doubt()}\n" + fence("screen", read_there))
+            return _with_effect(out, only)
         return ToolOutput(head + g._input_doubt() + "\n" + fence("screen", read_there))
-    out = await pointer.outcome(before, pid, pts, [spot])
+    out = await pointer.outcome(before, pid, pts, [spot], target=t)
     out = pointer.maybe_elsewhere(out, spot)
     text, ok = pointer.report(head, out, [pointer.words(h), read_there], g._input_doubt())
     return _with_effect(ToolOutput(text, ok=ok), out)
