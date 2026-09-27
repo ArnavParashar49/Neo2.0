@@ -910,6 +910,7 @@ async def run(
     child: Child | None = None
     watch: Watch | None = None
     front_end: tuple[str, int] | None = None
+    front_armed: tuple[str, int] | None = None  # in front when the test took the mouse
     try:
         child = await asyncio.to_thread(mac.launch, log, secrets.token_hex(2).upper())
         reader = LogReader(log)
@@ -950,6 +951,7 @@ async def run(
                 await _maybe_await(notify("Checking my computer controls in a test window: please don't touch the mouse or keyboard."))
         r = _Run(mac, child, reader, ready, watch, main)
         r.can_capture = bool(await asyncio.to_thread(_can_capture, mac))
+        front_armed = await asyncio.to_thread(mac.front)
         try:
             mode = await asyncio.to_thread(watch.arm, r.cell(6, 1))
         except Stop as e:
@@ -997,7 +999,9 @@ async def run(
             _forget_test_tree(started)
             if child is not None:
                 await asyncio.to_thread(child.stop)
-            await _clean_up(mac, report, watch, (prev_name, prev_pid), child.pid if child else 0, front_end, pointer0)
+            await _clean_up(
+                mac, report, watch, (prev_name, prev_pid), child.pid if child else 0, front_end, pointer0, front_armed
+            )
         finally:
             if watch is not None:
                 await asyncio.to_thread(watch.stop_listening)
@@ -1013,16 +1017,19 @@ async def _clean_up(
     test_pid: int,
     front_end: tuple[str, int] | None,
     pointer0: tuple[float, float] | None,
+    front_armed: tuple[str, int] | None = None,
 ) -> None:
     """The Mac back as the user left it: the app that was in front, and the pointer — unless it is
     theirs now. The user took over (the watch saw them, or the pointer isn't where NEO left it) or
-    another app came to the front during the run: nothing is moved or brought forward over them.
-    Only when the user took over while the test window was in front, and has let go since, does
-    their app come back (macOS picked some app when the test window closed)."""
+    another app came to the front during the run (not the test window, not theirs, not the one in
+    front when the test began): nothing is moved or brought forward over them. Only when the user
+    took over while the test window was in front, and has let go since, does their app come back
+    (macOS picked some app when the test window closed)."""
     from neo.tools.computer import input as inp
 
     name, pid = prev
-    elsewhere = front_end is not None and int(front_end[1]) not in (test_pid, pid)
+    known = {test_pid, pid} | ({int(front_armed[1])} if front_armed else set())
+    elsewhere = front_end is not None and int(front_end[1]) not in known
     was_front = front_end is not None and int(front_end[1]) == test_pid
     took_over = active = False
     with contextlib.suppress(Exception):

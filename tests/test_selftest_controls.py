@@ -1095,3 +1095,25 @@ def test_a_test_window_that_dies_mid_drag_gets_none_of_the_rest(mac):
     assert after[1]["pos"] == (900.0, 700.0)
     assert "the test window closed in the middle of a drag" in report.stopped
     assert _by_name(report)["drag_board"].status == "stopped"
+
+
+def test_only_an_app_that_came_forward_during_the_run_is_left_in_front():
+    """Finder in front at the end: if it was already there when the test began (macOS chose it when
+    the test window stepped back), the user's app comes back; if it came forward during the run, it
+    stays."""
+
+    class M:
+        def __init__(self):
+            self.activations = []
+
+        def front(self):
+            return ("Finder", 1)
+
+        def activate(self, pid):
+            self.activations.append(pid)
+            return True
+
+    for armed, want in ((("Finder", 1), [USER_PID]), (("Safari", USER_PID), [])):
+        m, report = M(), controls.Report()
+        asyncio.run(controls._clean_up(m, report, None, ("Safari", USER_PID), TEST_PID, ("Finder", 1), None, armed))
+        assert m.activations == want, armed
