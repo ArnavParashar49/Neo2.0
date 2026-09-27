@@ -103,6 +103,8 @@ class Ledger:
         self._lock = threading.Lock()
         self._state: dict[str, Any] = self._fresh()
         self._unknown: set[str] = set()
+        self._warned_unreadable = False
+        self._unsaved = False  # the last save failed: this object's state is the newer one
 
     # ---- the day --------------------------------------------------------------------------
     def day(self) -> str:
@@ -122,7 +124,7 @@ class Ledger:
         """Today's state: from the file when there is one (another process may have added to it),
         else what this object has. Another day's state starts over."""
         st = self._state
-        if self.path is not None:
+        if self.path is not None and not self._unsaved:
             try:
                 raw = json.loads(self.path.read_text())
                 if isinstance(raw, dict) and raw.get("version") == _VERSION:
@@ -130,9 +132,11 @@ class Ledger:
             except FileNotFoundError:
                 pass
             except (OSError, ValueError) as e:
-                log.warning(
-                    f"[spend] {self.path.name} unreadable ({type(e).__name__}): today's total starts over"
-                )
+                if not self._warned_unreadable:  # (once: it's read before every request)
+                    self._warned_unreadable = True
+                    log.warning(
+                        f"[spend] {self.path.name} unreadable ({type(e).__name__}): today's total starts over"
+                    )
         if st.get("day") != self.day():
             st = self._fresh()
         try:
@@ -157,7 +161,9 @@ class Ledger:
             with os.fdopen(fd, "w") as f:
                 json.dump(st, f)
             os.replace(tmp, self.path)
+            self._unsaved = False
         except OSError as e:  # a full disk must not fail the answer that was just paid for
+            self._unsaved = True
             log.warning(f"[spend] couldn't save {self.path.name}: {type(e).__name__}")
 
     # ---- spending -------------------------------------------------------------------------

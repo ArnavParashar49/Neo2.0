@@ -388,6 +388,10 @@ class Account:
     def _refuse(self, scope: str, words: str, name: str, e: Exception) -> Refused:
         until = self.ledger.refuse(scope, words)
         self.say_once(f"refused:{scope}", f"{words}; skipping it for today")
+        if scope == "account" and self.ledger.path is not None and not runtime.library_mode():
+            from neo import health  # NEO.app's problem list: something only the user can fix
+
+            health.report("cerebras", f"{words}. NEO skips Cerebras until midnight (Settings & API Keys…).")
         log.warning(
             f"[brain] {name}: {words} (HTTP {getattr(e, 'status_code', '?')}); refused until midnight"
         )
@@ -551,6 +555,7 @@ class CerebrasProvider(OpenAICompatProvider):
         tools: list[ToolSpec] | None = None,
         effort: Literal["low", "medium", "high"] = "medium",
         max_tokens: int = 4096,
+        **extra: Any,  # whatever else the chain passes (brain-effort's seams): handed on as is
     ) -> Turn:
         effort = effort if effort in ROOM else "low"  # (the values both models take)
         try:
@@ -563,7 +568,7 @@ class CerebrasProvider(OpenAICompatProvider):
             while True:
                 try:
                     return await super().complete(
-                        messages, system=system, tools=tools, effort=effort, max_tokens=room
+                        messages, system=system, tools=tools, effort=effort, max_tokens=room, **extra
                     )
                 except Truncated:
                     if "room" in retried:

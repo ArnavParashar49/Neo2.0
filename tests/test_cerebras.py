@@ -345,6 +345,10 @@ async def test_an_invalid_key_is_refused_for_the_day_and_said_once(cset, fake, m
         await p.complete(ASK)
     assert fake.chats == 1  # the second one never left
     assert len([n for n in notes if "API key" in n]) == 1
+    from neo import health
+
+    assert any("refused the API key" in x for x in health.problems())  # the overlay's problem list
+    health.report("cerebras", None)
     assert KEY not in json.dumps(ledger_file(s))  # the ledger keeps a fingerprint, never the key
 
     # a restart the same day: still refused, without a round trip
@@ -711,3 +715,21 @@ async def test_prewarm_soon_runs_in_the_background_and_only_with_a_key(cset, fak
     assert len(cb._warming) == 1
     await asyncio.gather(*cb._warming)
     assert [r.url.path for r in fake.requests] == ["/v1/models"] and not cb._warming
+
+
+def test_a_damaged_or_unwritable_ledger_never_fails_an_answer(tmp_path, monkeypatch, caplog):
+    f = tmp_path / spend.FILE
+    f.write_text("{not json")
+    led = spend.Ledger(f, daily_budget=0.5, key=KEY)
+    assert led.today() == 0.0 and led.refusal("account") is None
+    assert led.add("gpt-oss-120b", 1000, 0) == []
+    assert json.loads(f.read_text())["tokens"]["gpt-oss-120b"] == [1000, 0]  # rewritten whole
+    assert sum("unreadable" in r.message for r in caplog.records) == 1
+
+    def full(*a, **k):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(spend.os, "open", full)
+    assert led.add("gpt-oss-120b", 1000, 0) == []  # counted in memory; the answer isn't lost
+    assert led.add("gpt-oss-120b", 1000, 0) == []
+    assert led._state["tokens"]["gpt-oss-120b"][0] == 3000  # (not the file's stale 1000 again)
