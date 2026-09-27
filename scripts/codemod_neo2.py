@@ -618,6 +618,9 @@ def rewrite_file(rel: str, text: str, ctx: Ctx) -> Outcome:
 
 
 def main(argv: list[str] | None = None) -> int:
+    if sys.version_info < (3, 12):  # noqa: UP036 — NEO is 3.12 syntax (PEP 695): an older ast can't read it
+        print("codemod_neo2: run it with Python 3.12 (the repo's .venv/bin/python)", file=sys.stderr)
+        return 2
     ap = argparse.ArgumentParser(
         description=__doc__.split("\n\n")[0], formatter_class=argparse.RawDescriptionHelpFormatter
     )
