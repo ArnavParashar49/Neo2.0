@@ -437,8 +437,9 @@ def test_the_agent_prompt_covers_play_a_game_as_a_side():
     from neo.agent.prompt import persona
 
     p = persona()
-    assert '"Play <game>" ("play chess as white"' in p
+    assert '"Play <game>" (as a side, at a level, against the user)' in p
     assert "New Game" in p and "the side the user plays" in p and "never music or a video" in p
+    assert "chess" not in p.lower()  # no game or app is named in the rules: evidence only
 
 
 def test_live_is_told_a_game_is_no_music():

@@ -3,17 +3,24 @@
 Model picks tool calls → we run them (parallel when safe) → results go back → repeat, until
 the model answers in text. Guardrails are structural: step budget, thrash guard, and a hard
 stop on NEEDS_CONFIRM / NEEDS_USER that hands control to the human.
+
+Several actions in one reply run in order and stop at the first that failed, changed nothing or
+changed the screen under the rest (neo.agent.batch). The model is asked to check its work before
+it reports only when it hasn't seen the state after its last action — and then with a look
+attached. A run may end on the model's own final words when NEO verified its last actions itself.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
-from typing import Literal
+from typing import Any, Literal
 
+from neo.agent import batch
 from neo.agent.confirm import NEEDS_CONFIRM, NEEDS_USER
 from neo.agent.registry import Registry, ToolContext, ToolOutput, fence
 from neo.agent.registry import registry as default_registry
@@ -23,14 +30,11 @@ from neo.events import bus as default_bus
 from neo.providers.base import AllBrainsFailed, Message, Provider, ToolCall, ToolResult, ToolSpec, Turn
 from neo.providers.history import OBSERVATIONS
 
+log = logging.getLogger(__name__)
+
 Stopped = Literal["done", "max_steps", "needs_confirm", "needs_user", "thrash", "error"]
 
-_VERIFY_NOTE = (
-    "[verify] Before you report, confirm the goal was actually achieved with a read-only check "
-    "(ax_tree, read_file, browser_read, mail_unread, calendar_today…; after clicks or drags on a "
-    "board, canvas or picture, a new screenshot of the same area, compared with the one before). If "
-    "it is done, give the final answer. If something is off, fix it first. Do not mention this note."
-)
+_VERIFY_NOTE = batch.VERIFY_NOTE
 
 _SEARCHY = ("search", "fetch", "web", "lookup", "find")
 
@@ -60,6 +64,7 @@ class Step:
     args: dict
     result: str
     ok: bool
+    effect: Any = None  # what the action did, as NEO saw it (ToolOutput.effect), when it said
 
 
 @dataclass
@@ -101,7 +106,7 @@ def _model_trouble(e: Exception, steps: list[Step]) -> str:
 
 
 # Looks that aren't parallel_safe (one screen, one picture at a time) but change nothing.
-_LOOK_ONLY = frozenset({"screenshot", "browser_screenshot"})
+_LOOK_ONLY = frozenset({"screenshot", "browser_screenshot", "look"})
 
 
 def _looks(reg: Registry, name: str) -> bool:
@@ -215,31 +220,47 @@ async def _run_calls(
             # Third-party words — a failure too can quote them (a page's element names, a report
             # that starts with "Error"): data for the model, never orders.
             content = fence(c.name, content)
-        return ToolResult(call_id=c.id, name=c.name, content=content, ok=out.ok, images=out.images)
+        r = ToolResult(call_id=c.id, name=c.name, content=content, ok=out.ok, images=out.images)
+        if (eff := batch.effect(out)) is not None:
+            r.effect = eff  # (ToolResult.effect once the seam lands; the same attribute before)
+        return r
 
     # Keep the model's order: consecutive read-only (parallel_safe) calls run together, any
     # side-effect call runs at its own position. Once a call asks the human, nothing after it
     # runs — the rest get synthetic results so every tool_call still has a matching result.
+    # An action that failed, changed nothing or changed the screen under the rest stops the
+    # actions after it (neo.agent.batch): they were chosen for a screen that isn't there any more.
+    # Looks after it still run — they change nothing, and they are what the model needs next.
     results: list[ToolResult] = []
     halted = False
+    stop = ""  # why the actions after the one that went wrong don't run
     i = 0
     while i < len(calls):
+        c = calls[i]
         if halted:
-            c = calls[i]
             results.append(ToolResult(c.id, c.name, "skipped: waiting for the user's confirmation", ok=False))
             i += 1
             continue
-        t = reg.get(calls[i].name)
+        t = reg.get(c.name)
+        if stop and not _looks(reg, c.name):
+            results.append(batch.skipped(c, stop))
+            i += 1
+            continue
         if t and t.parallel_safe:
             j = i
             while j < len(calls) and (tj := reg.get(calls[j].name)) and tj.parallel_safe:
                 j += 1
-            batch = await asyncio.gather(*(one(c) for c in calls[i:j]))
-            results.extend(batch)
+            looks = await asyncio.gather(*(one(c) for c in calls[i:j]))
+            results.extend(looks)
             i = j
         else:
-            results.append(await one(calls[i]))
+            r = await one(c)
+            results.append(r)
             i += 1
+            if i < len(calls) and not _halt_kind(r.content) and not stop:
+                stop = batch.stop_reason(r)
+                if stop:
+                    log.info(f"  ~ {c.name} {stop}: the {len(calls) - i} call(s) after it wait for the model")
         if any(_halt_kind(r.content) for r in results):
             halted = True
     return results
@@ -263,13 +284,18 @@ async def run_agent(
     tools: list[ToolSpec] | None = None,
     job: str = "",
     strict: bool = False,
+    finish_verified: bool = False,
 ) -> AgentResult:
     """`strict`: only the `tools` given ever run — whatever else the model names gets an error,
     and `more_tools` isn't answered (a run fenced off from the rest of NEO, like `browse`).
 
     A brain with little room may be shown only some of the tools (neo.providers.fit). A strict
     run's tools are all essential — nothing could get one back. Any other run always offers
-    `more_tools`, which hands back what that brain wasn't shown."""
+    `more_tools`, which hands back what that brain wasn't shown.
+
+    `finish_verified`: a command nobody waits to hear an answer to — when the model writes its
+    final answer in the same reply as its last actions and NEO verified every one of them through
+    Accessibility (neo.agent.batch.finished), the run ends there, without one more model call."""
     s = settings()
     reg = reg or default_registry()
     ev = ev or default_bus()
@@ -294,8 +320,10 @@ async def run_agent(
         tools.append(MORE_TOOLS)
     enabled = {t.name for t in tools}
     effectful = False  # a side-effect tool ran this run
-    last_readonly = True  # the most recent tool call was an observation
+    last_readonly = True  # the model has seen the state after the most recent call that ran
+    last_action: ToolCall | None = None  # the most recent side-effect call that ran
     verified = False
+    sees = True  # the brain that answered last can see pictures
 
     for _ in range(max_steps):
         if _time.monotonic() - (paused() - paused0) > deadline:
@@ -310,6 +338,7 @@ async def run_agent(
             )
         await ev.set_state(NeoState.THINKING, job=job)
         _supersede_observations(messages, start=len(history or []))
+        batch.drop_stale_after_looks(messages, len(history or []), _OBSERVATIONS)
         try:
             turn: Turn = await provider.complete(messages, system=system, tools=tools, effort=effort)
         except Exception as e:  # noqa: BLE001
@@ -317,11 +346,13 @@ async def run_agent(
             return AgentResult(_model_trouble(e, steps), "error", steps, messages)
 
         messages.append(Message.assistant(turn.text, turn.tool_calls, raw=turn.raw))
+        sees = getattr(turn, "sees", True)
         if not turn.tool_calls:
-            # Acted without looking afterwards? Make it check its work once before reporting.
+            # Acted without seeing the state afterwards? Make it check its work once before
+            # reporting — with a look at the screen attached when it acted there.
             if verify and effectful and not last_readonly and not verified:
                 verified = True
-                messages.append(Message.user(_VERIFY_NOTE))
+                messages.append(await batch.verify_message(reg, enabled, ctx, last_action, sees=sees))
                 continue
             await _settle(ev, idle_on_finish, job)
             return AgentResult(turn.text.strip(), "done", steps, messages)
@@ -385,10 +416,16 @@ async def run_agent(
         results.sort(key=lambda r: [c.id for c in turn.tool_calls].index(r.call_id))
         messages.append(Message.tool(results))
         for c, r in zip(turn.tool_calls, results, strict=False):
-            steps.append(Step(c.name, c.args, r.content, r.ok))
+            steps.append(Step(c.name, c.args, r.content, r.ok, batch.effect(r)))
+            if batch.halted(r):
+                continue  # skipped, or stopped to ask: nothing ran that the model hasn't seen
             readonly = _looks(reg, c.name)
             effectful = effectful or (not readonly and r.ok)
-            last_readonly = readonly
+            # A look, or an action whose result already shows the state after it (a picture of
+            # it, or NEO's own check through Accessibility): no separate check turn needed.
+            last_readonly = readonly or batch.seen(c.name, r)
+            if not readonly:
+                last_action = c
 
         for r in results:
             kind = _halt_kind(r.content)
@@ -408,6 +445,19 @@ async def run_agent(
                     question=question,
                     pending_action=p.action_id if p else "",
                 )
+
+        # The model's final words came with these actions, and NEO saw each one work: done, with
+        # no model call just to say so. Never for a strict run (a job fenced off, like `browse`).
+        if (
+            finish_verified
+            and not strict
+            and turn.text.strip()
+            and not meta
+            and batch.finished(turn.tool_calls, results)
+        ):
+            messages.append(Message.assistant(turn.text))  # the run's answer, after its results
+            await _settle(ev, idle_on_finish, job)
+            return AgentResult(turn.text.strip(), "done", steps, messages)
 
     await _settle(ev, idle_on_finish, job)
     summary = "; ".join(f"{st.tool}: {'ok' if st.ok else 'failed'}" for st in steps[-4:])

@@ -814,7 +814,7 @@ class Session:
         # Shown in the overlay either way; spoken only if it didn't go as approved.
         await bus().say(res.text, final=True, job=job)
         await bus().end_job(job)
-        done = res.stopped == "done" and not res.question and all(st.ok for st in res.steps)
+        done = res.stopped == "done" and not res.question and _worked(res)
         failed_words = ("couldn't", "could not", "can't", "cannot", "unable", "error", "failed", "didn't")
         silent = out.ok and done and not any(w in res.text.lower() for w in failed_words)
         return Reply(
@@ -1044,7 +1044,11 @@ def _learn_from(job: str, res: AgentResult) -> None:
     the run ended — so Laya learns from what actually happened, not from what was guessed
     (neo/reflex/outcomes.py). A request relayed by Gemini Live counts for the user's own words
     there. The question a halted run asks isn't a step: the user's answer decides that one."""
-    steps = [(st.tool, st.ok) for st in res.steps if not st.result.startswith(("NEEDS_CONFIRM", "NEEDS_USER"))]
+    steps = [
+        (st.tool, st.ok and not _changed_nothing(st))
+        for st in res.steps
+        if not st.result.startswith(("NEEDS_CONFIRM", "NEEDS_USER", "skipped: "))
+    ]
     outcomes.agent_done(job, steps, stopped=res.stopped, answer=res.text, question=bool(res.question))
 
 
@@ -1064,14 +1068,25 @@ def _on_screen(st) -> bool:
     return st.tool in ("click", "drag", "scroll") and any(k in st.args for k in ("x", "x1", "shot"))
 
 
+def _changed_nothing(st) -> bool:
+    """A step NEO saw change nothing (its Effect says so): a miss, whatever the step returned."""
+    return getattr(getattr(st, "effect", None), "changed", None) is False
+
+
+def _worked(res: AgentResult) -> bool:
+    """Every step of the run worked: none failed, and none that NEO checked changed nothing. A
+    call skipped after an earlier one in its turn (neo.agent.batch) never ran: it doesn't count."""
+    return all(st.ok and not _changed_nothing(st) for st in res.steps if not st.result.startswith("skipped: "))
+
+
 def _quietly(d: Decision | None, res: AgentResult) -> bool:
     """Was this a command that simply got done? Then there's nothing to say.
 
-    Questions, information requests, failures, budget stops and anything the model asks back
-    are always spoken."""
+    Questions, information requests, failures, budget stops, an action NEO saw change nothing,
+    and anything the model asks back are always spoken."""
     if d is None or d.reply or res.stopped != "done" or res.question:
         return False
-    if not res.steps or not all(st.ok for st in res.steps):
+    if not res.steps or not _worked(res):
         return False
     if any(st.tool in _INFO_TOOLS or (st.tool == "memory" and st.args.get("action") == "recall") for st in res.steps):
         return False
