@@ -199,7 +199,7 @@ def rewrite_text(text: str, ctx: Ctx, *, light: bool = False) -> Outcome:
     keep = keep_lines(text)
     new, counts = apply(text, edits, keep)
     return Outcome(
-        new, counts, [(line_of(text, o), why) for o, why in refused if line_of(text, o) not in keep]
+        new, counts, sorted((line_of(text, o), why) for o, why in refused if line_of(text, o) not in keep)
     )
 
 

@@ -61,11 +61,13 @@ def test_import_neo2_loads_only_the_standard_library(tmp_path):
         "before = set(sys.modules)\n"
         "import neo2\n"
         "new = sorted({m.split('.')[0] for m in set(sys.modules) - before})\n"
-        "print(json.dumps({'new': new, 'std': sorted(sys.stdlib_module_names)}))\n",
+        "ours = sorted(m for m in sys.modules if m.startswith('neo2'))\n"
+        "print(json.dumps({'new': new, 'std': sorted(sys.stdlib_module_names), 'ours': ours}))\n",
         tmp_path,
     )
     outside = [m for m in got["new"] if m not in set(got["std"]) and m != "neo2"]
     assert outside == [], outside
+    assert got["ours"] == ["neo2"]  # not even NEO's own package (neo2.core) until something is used
 
 
 def test_from_neo2_import_asyncagent_is_light(tmp_path):

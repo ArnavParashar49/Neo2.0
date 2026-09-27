@@ -181,3 +181,28 @@ def test_neo_apps_close_line_still_reaches_stdout(neo_stdout, capsys, silent_saf
     neo_stdout()
     asyncio.run(close.close_target("youtube"))
     assert capsys.readouterr().out == "[close] Safari didn't answer (execution error: Safari got an error (-1712))\n"
+
+
+def test_neos_modules_log_under_the_neo_logger_they_always_had():
+    """NEO's package moved to neo2.core, its log lines didn't: NEO.app (log_to_stdout) and hosts
+    configure the `neo` logger and `neo.audit`, so a module there logs as neo.<module>."""
+    import ast
+    from pathlib import Path
+
+    import neo2.core
+    from neo2.core import providers
+    from neo2.core.agent import session
+
+    assert neo2.core.logger("neo2.core.agent.session").name == "neo.agent.session"  # neo2-codemod: keep
+    assert neo2.core.logger("neo2.core").name == "neo"
+    assert neo2.core.logger("neo2.sdk.agent").name == "neo2.sdk.agent"  # not NEO's own package: as it is
+    assert neo2.core.logger("__main__").name == "__main__"  # python -m neo2.core.reflex.finetune
+    assert (session.log.name, providers.log.name) == ("neo.agent.session", "neo.providers")  # neo2-codemod: keep
+    root = Path(neo2.core.__file__).parent
+    by_module_name = [
+        f"{f.relative_to(root)}:{n.lineno}"
+        for f in sorted(root.rglob("*.py"))
+        for n in ast.walk(ast.parse(f.read_text()))
+        if isinstance(n, ast.Call) and ast.unparse(n.func).endswith("getLogger") and n.args and ast.unparse(n.args[0]) == "__name__"
+    ]
+    assert by_module_name == []  # logger(__name__) instead: logging.getLogger(__name__) would say neo2.core.…
