@@ -309,18 +309,23 @@ def _grab(cmd_extra: list[str]) -> Image.Image:
     return _grab(cmd_extra)
 
 
-def _grab_rect(x: int, y: int, w: int, h: int, *, native: bool = True) -> tuple[Image.Image, str]:
+def _grab_rect(x: int, y: int, w: int, h: int, *, native: bool = True, fallback: bool = True) -> tuple[Image.Image, str]:
     """The pixels of a rectangle in global points (on one display). ``native`` False: points are
-    enough (a change sample), which ScreenCaptureKit can scale for free."""
+    enough (a change sample), which ScreenCaptureKit can scale for free. ``fallback`` False: when the
+    in-process capture is on and fails, no picture (sck.Failed) rather than the CLI's — a before/after
+    pair of change samples must come from the same capture path to be compared."""
     if _sck_on():
         from neo.tools.computer import sck
 
         d = display_at(x + w / 2, y + h / 2) or display_at(x, y)
-        if d is not None:
-            try:
-                return sck.capture_rect(x, y, w, h, d, scale=None if native else 1.0), "sck"
-            except sck.Failed as e:
-                log.info("in-process capture failed (%s): the CLI instead", e)
+        try:
+            if d is None:
+                raise sck.Failed("that rectangle isn't on a display")
+            return sck.capture_rect(x, y, w, h, d, scale=None if native else 1.0), "sck"
+        except sck.Failed as e:
+            if not fallback:
+                raise
+            log.info("in-process capture failed (%s): the CLI instead", e)
     return _grab(["-R", f"{x},{y},{w},{h}"]), "cli"
 
 
@@ -492,9 +497,11 @@ def after_look(
     r: float | None = None,
     *,
     fmt: str | None = None,
+    like: list[Image.Image] | None = None,
 ) -> tuple[Capture, list[Image.Image] | None]:
     """One capture for a look after an action: the picture of ``rect`` (medium detail) and the change
-    samples around ``points`` (see sample_points), all cut from the same frame."""
+    samples around ``points`` (see sample_points), all cut from the same frame. ``like``: the samples
+    taken before — no samples come back when this frame was taken another way (can't compare)."""
     _need_permission()
     x, y, w, h = rect
     pts = list(points or [])
@@ -514,7 +521,9 @@ def after_look(
     frame = grab(region)
     _keep(frame)
     cap = render(frame, "after", rect=rect, fmt=fmt)
-    return cap, samples_from(frame, pts, rr) if pts else None
+    if not pts or _via(like) not in ("", frame.backend):
+        return cap, None
+    return cap, samples_from(frame, pts, rr)
 
 
 # ---- windows -------------------------------------------------------------------------------------
@@ -587,26 +596,38 @@ _CELLS_CHANGED = 3  # …and this many changed cells are a change
 
 
 def samples_from(frame: Frame, points: list[tuple[float, float]], r: float = _SAMPLE_R) -> list[Image.Image]:
-    """The change samples around each point, cut from a frame that shows them (no capture)."""
+    """The change samples around each point, cut from a frame that shows them (no capture). Each
+    says which capture path it came from (``info["via"]``): only samples of one path compare."""
     out = []
     for px, py in points:
         box = frame.box(px - r, py - r, 2 * r, 2 * r)
-        out.append(frame.image.crop(box).convert("L").resize((_SAMPLE_GRID, _SAMPLE_GRID), Image.BILINEAR))
+        sample = frame.image.crop(box).convert("L").resize((_SAMPLE_GRID, _SAMPLE_GRID), Image.BILINEAR)
+        sample.info["via"] = frame.backend
+        out.append(sample)
     return out
 
 
+def _via(like: list[Image.Image] | None) -> str:
+    return str(like[0].info.get("via", "")) if like else ""
+
+
 def sample_points(
-    points: list[tuple[float, float]], r: float = _SAMPLE_R, frame: Frame | None = None
+    points: list[tuple[float, float]],
+    r: float = _SAMPLE_R,
+    frame: Frame | None = None,
+    like: list[Image.Image] | None = None,
 ) -> list[Image.Image] | None:
     """A small grey picture of the screen around each point (None without Screen Recording, or
     when the capture fails: nothing can be said about change). Never asks for the permission. All
     the points come from one capture; with ``frame`` (one taken after the input, showing them all)
-    from that frame, with no capture at all."""
+    from that frame, with no capture at all. ``like``: the samples these will be compared with —
+    taken the same way (the in-process capture and the CLI see colours differently), or None."""
     try:
         if not points:
             return None
+        via = _via(like)
         if frame is not None and all(frame.covers(p[0] - r, p[1] - r, 2 * r, 2 * r) for p in points):
-            return samples_from(frame, points, r)
+            return samples_from(frame, points, r) if via in ("", frame.backend) else None
         if not can_capture():
             return None
         left = min(p[0] for p in points) - r
@@ -620,8 +641,13 @@ def sample_points(
         if right - left < 2 or bottom - top < 2:
             return None
         x, y, w, h = int(left), int(top), int(right - left), int(bottom - top)
-        img, _ = _grab_rect(x, y, w, h, native=False)
-        return samples_from(Frame(img, left, top, (right - left) / max(1, img.width)), points, r)
+        if via == "cli":
+            img, backend = _grab(["-R", f"{x},{y},{w},{h}"]), "cli"
+        else:  # (the in-process path when it's on, with no CLI fallback: a pair never mixes the two)
+            img, backend = _grab_rect(x, y, w, h, native=False, fallback=False)
+            if via and backend != via:
+                return None
+        return samples_from(Frame(img, left, top, (right - left) / max(1, img.width), backend=backend), points, r)
     except Exception:  # noqa: BLE001 - no picture: unknown, not "unchanged"
         return None
 

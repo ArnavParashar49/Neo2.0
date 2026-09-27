@@ -574,6 +574,30 @@ def test_screen_uses_screencapturekit_when_on_and_the_cli_when_it_fails(fake_sck
     assert (c.w, c.h) == (1512, 982)
 
 
+def test_a_before_and_after_pair_of_change_samples_never_mixes_capture_paths(fake_sck, cli, monkeypatch):
+    """The in-process capture renders colours in sRGB, the CLI's file in the display's own space: a
+    sample of each, of an unchanged screen, could look like a change. So a pair is one path or none."""
+    _settings(monkeypatch, sck_capture=True)
+    before = _REAL_SAMPLE([(700.0, 500.0)])
+    assert before[0].info["via"] == "sck" and cli.runs == []
+    fake_sck.error = "stopped"
+    assert _REAL_SAMPLE([(700.0, 500.0)], like=before) is None and cli.runs == []  # unknown, never the CLI's
+    assert _REAL_SAMPLE([(700.0, 500.0)]) is None and cli.runs == []  # (no fallback for samples at all)
+    fake_sck.error = None
+    cli_before = screen.samples_from(screen.Frame(synthetic_screen("ui"), 0.0, 0.0, 0.5), [(700.0, 500.0)])
+    assert cli_before[0].info["via"] == "cli"
+    after = _REAL_SAMPLE([(700.0, 500.0)], like=cli_before)  # the pair began on the CLI: it ends there
+    assert cli.runs == [["-R", "640,440,120,120"]] and after[0].info["via"] == "cli"
+    shots = len(fake_sck.shots)
+    look, samples = screen.after_look((600.0, 400.0, 200.0, 200.0), [(700.0, 500.0)], like=cli_before)
+    assert len(fake_sck.shots) == shots + 1 and look.frame.backend == "sck" and samples is None
+    look, samples = screen.after_look((600.0, 400.0, 200.0, 200.0), [(700.0, 500.0)], like=before)
+    assert samples is not None and samples[0].info["via"] == "sck"
+    fresh = screen.last_frame()
+    assert _REAL_SAMPLE([(700.0, 500.0)], frame=fresh, like=cli_before) is None
+    assert _REAL_SAMPLE([(700.0, 500.0)], frame=fresh, like=before)[0].info["via"] == "sck"
+
+
 def test_an_in_process_capture_is_a_guarded_effect(fake_sck, monkeypatch):
     kinds: list[str] = []
     real_guard = effects.guard
