@@ -373,10 +373,13 @@ class Look:
 
     def block(self) -> str:
         """The look as it goes into the goal message: NEO's own words, then the screen's, fenced."""
+        which = {
+            "named": "the app in front, which the request names",
+            "game": "the game in front, the one to play",
+        }.get(self.why, "the app in front, the one NEO last worked in")
         head = (
-            f"{MARK}, taken as the request came in: the app in front, which is the app this request "
-            "is about. It isn't refreshed — look again after you act. Its element ids work with the "
-            "tools that take an element id.]"
+            f"{MARK}, taken as the request came in: {which}. It isn't refreshed — look again after "
+            "you act. Its element ids work with the tools that take an element id.]"
         )
         parts = [head, fence("ax_tree", self.elements)]
         if self.picture is not None:
