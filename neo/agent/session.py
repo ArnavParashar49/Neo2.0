@@ -13,11 +13,11 @@ import contextvars
 import itertools
 import re
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Literal
 
 from neo.agent import confirm, fastpath
-from neo.agent.loop import AgentResult, run_agent
+from neo.agent.loop import AgentResult, _supersede_observations, run_agent
 from neo.agent.prompt import build as build_prompt
 from neo.agent.registry import Origin, ToolContext, ToolOutput, fence, registry, voiced
 from neo.config import settings
@@ -654,8 +654,16 @@ class Session:
                 if sum(1 for m in gone if m.role == "user") >= 1:
                     self._spawn(self._summarize(gone, self._chunk_started))
                     self._chunk_started = time.time()
-                self.history = self.history[cut:]
-                self._summarized = max(0, self._summarized - cut)
+                kept = self.history[cut:]
+                ask = _request_of(self.history, cut)
+                if ask is not None:
+                    # Cut at "[User confirmed …]" deep in a long approval chain: the request it
+                    # continues stays, or every later follow-up says "continue the task" about
+                    # a task nobody remembers. (It's summarised either way.)
+                    kept = [ask, *kept]
+                    cut -= 1
+                self.history = kept
+                self._summarized = max(1 if ask is not None else 0, self._summarized - cut)
 
     def _spawn(self, coro) -> None:
         t = asyncio.create_task(coro)
@@ -697,32 +705,45 @@ class Session:
         if cut is None:  # one turn longer than the window: keep that turn whole
             cut = next((i for i in range(start - 1, -1, -1) if hist[i].role == "user"), len(hist))
         h = hist[cut:]
-        if h and continues_request(h[0]):
+        if (ask := _request_of(hist, cut)) is not None:
             # Opened on "[User confirmed …]" after many approvals: the request itself stays in view,
             # or the model is told to "continue the task" without being told which.
-            ask = next((m for m in reversed(hist[:cut]) if m.role == "user" and not continues_request(m)), None)
-            if ask is not None:
-                h = [ask, *h]
-        keep_from = _last_user_index(h, 2)
+            h = [ask, *h]
+        # Results of the last two *requests* stay: an approval note carries a request on, it doesn't
+        # start one — counting those, the only look at the board went after two approvals.
+        keep_from = _last_request_index(h, 2)
         out: list[Message] = []
         for i, m in enumerate(h):
-            if m.role == "tool" and i < keep_from:
+            if m.role != "tool":
+                out.append(m)
+            elif i < keep_from:
                 stubbed = [ToolResult(r.call_id, r.name, _stub(r.content), r.ok) for r in m.tool_results]
                 out.append(Message.tool(stubbed))
-            else:
-                out.append(m)
+            else:  # a copy: superseding below must never touch the session's own history
+                out.append(Message.tool([replace(r, images=list(r.images)) for r in m.tool_results]))
+        # …but within the request being worked on (a run and its follow-ups after each yes, as the
+        # loop does within one run) an observation a newer one replaced is only its first lines.
+        _supersede_observations(out, start=_last_request_index(out, 1))
         return out
 
 
-def _last_user_index(h: list[Message], n: int) -> int:
-    """Index of the n-th most recent user message (0 if fewer)."""
+def _last_request_index(h: list[Message], n: int) -> int:
+    """Index of the n-th most recent user message that starts a request (0 if fewer)."""
     seen = 0
     for i in range(len(h) - 1, -1, -1):
-        if h[i].role == "user":
+        if h[i].role == "user" and not continues_request(h[i]):
             seen += 1
             if seen == n:
                 return i
     return 0
+
+
+def _request_of(hist: list[Message], cut: int) -> Message | None:
+    """When hist[cut:] opens on one of NEO's notes carrying a request on ("[User confirmed …]"),
+    the request it continues: the latest user turn before the cut in the user's own words."""
+    if cut >= len(hist) or not continues_request(hist[cut]):
+        return None
+    return next((m for m in reversed(hist[:cut]) if m.role == "user" and not continues_request(m)), None)
 
 
 def _with_conversation(text: str) -> str:

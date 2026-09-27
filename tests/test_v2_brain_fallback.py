@@ -477,9 +477,9 @@ def test_quota_is_kept_for_its_whole_window(gem):
     gem.rules["*"] = _reply(text="ok")
     now = time.time()
     asyncio.run(p.complete([Message.user("hi")]))
-    day = p._exhausted[("gemini-3.8-flash", 0)] - now
+    day = p._until("gemini-3.8-flash", 0) - now
     assert abs(day - g._to_daily_reset(now)) < 5 and 60 < day <= 25 * 3600  # to midnight Pacific
-    assert 20 <= p._exhausted[("gemini-3.8-flash", 1)] - now <= 25  # the server's own delay
+    assert 20 <= p._until("gemini-3.8-flash", 1) - now <= 25  # the server's own delay
 
 
 def test_every_key_spent_fails_at_once_without_a_round_trip(gem):
@@ -565,8 +565,10 @@ def test_the_follow_up_request_fits_groqs_budget_keeping_the_latest_steps(monkey
     assert results[-1].content == msgs[-2].tool_results[0].content  # the newest step is whole
     assert all(not r.images for r in results)  # a text-only brain gets no pictures
     assert results[0].content != msgs[2].tool_results[0].content  # older observations are cut
-    used = {"zz_script", "ax_tree"}
-    assert {s.name for s in f.tools} <= used | {"more_tools"} and len(f.tools) < len(tools)
+    # The tools it used stay; of the rest, only as many as the room left takes (in the order given).
+    names = [s.name for s in f.tools]
+    assert "ax_tree" in names and len(f.tools) < len(tools)
+    assert names == [s.name for s in tools if s.name in names]
     assert f.max_tokens < 4096 and f.messages[0].text == "play chess as white"
     # The caller's history is untouched.
     assert (
@@ -794,6 +796,7 @@ def test_the_chess_run_survives_on_groq_when_gemini_is_spent(monkeypatch):
 
     groq_p = prov.make("groq")
     sizes: list[int] = []
+    offered: list[set[str]] = []
     k = {"n": 0}
 
     async def create(*, model, messages, max_tokens, tools=None, **kw):
@@ -809,6 +812,7 @@ def test_the_chess_run_survives_on_groq_when_gemini_is_spent(monkeypatch):
                 body=None,
             )
         k["n"] += 1
+        offered.append({t["function"]["name"] for t in tools or []})
         goal = max(i for i, m in enumerate(messages) if str(m.get("content") or "").startswith("play chess"))
         done = [c["function"]["name"] for m in messages[goal:] for c in m.get("tool_calls") or []]
         plan = ["open_app", "ax_tree", "hotkey", "ax_tree"]
@@ -829,10 +833,13 @@ def test_the_chess_run_survives_on_groq_when_gemini_is_spent(monkeypatch):
     )  # fmt: skip
     monkeypatch.setattr(sess_mod.fastpath, "plan", lambda text: None)
 
+    first_run: list[int] = []
+
     async def go():
         s = Session(reflex=_agent_reflex())
         _earlier_runs(s)
         r = await s.handle("play chess as white", from_user=True)
+        first_run.append(len(offered))
         for _ in range(8):
             assert r.route == "confirm", r.text
             r = await s.handle("yes", from_user=True)
@@ -844,3 +851,391 @@ def test_the_chess_run_survives_on_groq_when_gemini_is_spent(monkeypatch):
     assert len(gemini_asked) == 6
     # Groq: every request it answered fitted its 8K (a 413, if any, was learned from and refitted).
     assert k["n"] >= 12 and all(sz <= 8000 for sz in sizes[-5:])
+    # …and every one could ask for the tools it wasn't shown; every follow-up after a yes (offered
+    # all of NEO's tools) could still act on the screen, not only script it.
+    assert all("more_tools" in names for names in offered)
+    assert all({"click", "type_text"} <= names for names in offered[first_run[0] :])
+
+
+# ---- review: tools a fitted request keeps, and more_tools to get the rest back ----------------------
+
+
+def _chess_follow_up(tree_chars: int = 6000, approvals: int = 1) -> list[Message]:
+    """open Chess, new game, read it (a full tree), a staged AppleScript, the user's yes."""
+    msgs = [
+        Message.user("play chess as white"),
+        *_pair("a", "open_app", "Opened Chess."),
+        *_pair("b", "hotkey", "Pressed cmd+n."),
+        *_pair("c", "ax_tree", ("AXButton “Board” " * 400)[:tree_chars]),
+    ]
+    for k in range(approvals):
+        msgs += [
+            Message.assistant("", [ToolCall(f"d{k}", "applescript", {"script": "get name of windows"})]),
+            Message.tool(
+                [ToolResult(f"d{k}", "applescript", "NEEDS_CONFIRM: run an AppleScript — Should I go ahead?")]
+            ),
+            Message.user(
+                f"[User confirmed. applescript result: Chess, New Game {k}] Continue and finish the task."
+            ),
+        ]
+    return msgs
+
+
+def test_a_fitted_request_keeps_more_tools_and_fills_its_room_with_the_tools_it_dropped():
+    from neo.agent.prompt import build
+    from neo.agent.toolselect import MORE_TOOLS
+    from neo.providers.fit import estimate, fit
+
+    msgs = _chess_follow_up()
+    tools = [*registry().specs(), MORE_TOOLS]  # the approval follow-up: every tool, and more_tools
+    system = build("")
+    f = fit(msgs, system=system, tools=tools, budget=8000, max_tokens=4096, vision=False, name="groq")
+    names = [s.name for s in f.tools]
+    limit = int(8000 * 0.9)
+    total = estimate(f.messages, system, f.tools, vision=False) + f.max_tokens
+    assert total <= limit
+    assert "more_tools" in names and {"open_app", "hotkey", "ax_tree", "applescript"} <= set(names)
+    # Room left after the cut goes back to the tools that were dropped (the observe/act ones first,
+    # the order they were given in): the model can click and type, not only script.
+    assert {"click", "type_text", "ax_press"} <= set(names)
+    dropped = [s for s in tools if s.name not in names]
+    assert not dropped or limit - total < min(estimate([], "", [s], vision=False) for s in dropped) + 20
+    assert names == [s.name for s in tools if s.name in names]  # in the order given
+    tree = [r.content for m in f.messages for r in m.tool_results if r.name == "ax_tree"]
+    assert tree == [msgs[6].tool_results[0].content]  # the tree, whole
+
+
+def test_older_conversation_goes_before_the_tools_the_run_has_not_used():
+    from neo.providers.fit import fit
+
+    earlier = []
+    for j in range(3):
+        earlier += [Message.user(f"earlier request {j} " + "words " * 300), Message.assistant("Done. " * 200)]
+    msgs = earlier + _chess_follow_up(tree_chars=2000)
+    tools = [ToolSpec(f"t{i}", "Does a thing.", _OBJ) for i in range(30)]
+    tools += [ToolSpec(n, "Used.", _OBJ) for n in ("open_app", "hotkey", "ax_tree", "applescript")]
+    f = fit(msgs, system="sys", tools=tools, budget=3000, max_tokens=512, vision=False, name="groq")
+    assert f.messages[0].text == "play chess as white"  # earlier requests went…
+    assert len(f.tools) == len(tools) and not any("tools" in t for t in f.trimmed)  # …every tool stayed
+
+
+def test_essential_tools_are_never_dropped():
+    from neo.providers.fit import fit
+
+    fence = [ToolSpec(f"b{i}", "A browser tool. " * 20, _OBJ, essential=True) for i in range(12)]
+    f = fit(_chess_follow_up(), system="sys", tools=fence, budget=4000, max_tokens=512, vision=False)
+    assert [s.name for s in f.tools] == [s.name for s in fence]
+    with pytest.raises(RequestTooLarge):  # a fence that can't fit is refused, not quietly thinned
+        fit(_chess_follow_up(), system="sys", tools=fence * 8, budget=2000, max_tokens=512, vision=False)
+
+
+class ShownBrain:
+    """Answers with what a fitted brain reports: it was shown only some of the tools."""
+
+    name = "fake"
+    supports_vision = False
+    supports_tools = True
+
+    def __init__(self, turns, hide=()):
+        self.turns, self.hide, self.seen = list(turns), set(hide), []
+
+    async def complete(self, messages, *, tools=None, **kw):
+        self.seen.append([t.name for t in tools or []])
+        t = self.turns.pop(0)
+        t.offered = [n for n in self.seen[-1] if n not in self.hide]
+        return t
+
+    async def stream(self, messages, **kw):
+        yield ""
+
+
+def test_more_tools_is_offered_in_a_follow_up_and_gives_back_what_fitting_dropped():
+    from neo.agent.loop import run_agent
+
+    b = ShownBrain(
+        [Turn(tool_calls=[ToolCall("m1", "more_tools", {"query": "click"})]), Turn(text="Your move.")],
+        hide={"click"},
+    )
+    res = asyncio.run(
+        run_agent(
+            "[User confirmed. applescript result: ok] Continue.",
+            provider=b,
+            system="",
+            ev=EventBus(),
+            verify=False,
+        )
+    )
+    assert res.stopped == "done"
+    assert "more_tools" in b.seen[0]  # the approval follow-up (tools=None) can ask for more…
+    said = res.messages[2].tool_results[0].content
+    assert said.startswith("Enabled: ") and "click" in said  # …and gets back what the brain wasn't shown
+    assert b.seen[1].count("click") == 1
+
+
+def test_a_strict_run_marks_its_whole_fence_essential():
+    from neo.agent.loop import run_agent
+
+    fence = [ToolSpec("browser_read", "Read.", _OBJ), ToolSpec("browser_click", "Click.", _OBJ)]
+    got = {}
+
+    class B(ShownBrain):
+        async def complete(self, messages, *, tools=None, **kw):
+            got["tools"] = tools
+            return Turn(text="done")
+
+    asyncio.run(
+        run_agent("x", provider=B([]), system="", tools=fence, ev=EventBus(), strict=True, verify=False)
+    )
+    assert [t.name for t in got["tools"]] == ["browser_read", "browser_click"]
+    assert all(t.essential for t in got["tools"]) and not fence[0].essential  # (the caller's specs untouched)
+
+
+# ---- review: the lite brain is its own brain --------------------------------------------------------
+
+
+def test_the_lite_brain_is_demoted_under_its_own_name(monkeypatch):
+    import neo.providers as prov
+    from neo import config
+
+    g = pytest.importorskip("neo.providers.gemini")
+    monkeypatch.setattr(config, "_settings", None)
+    monkeypatch.setenv("GEMINI_API_KEY", "k1")
+    monkeypatch.setattr(prov, "_cache", {})
+    monkeypatch.setattr(prov, "_demoted", {})
+
+    async def quiet(text):
+        pass
+
+    monkeypatch.setattr(g, "_note", quiet)
+
+    async def spent(*, model, contents, config):
+        raise _err(429, "quota", _per_day())
+
+    lite = prov.make("gemini_lite")
+    lite._clients = [SimpleNamespace(aio=SimpleNamespace(models=SimpleNamespace(generate_content=spent)))]
+    groq = FakeBrain("groq", answer="from groq")
+    monkeypatch.setattr(prov, "make", lambda n: {"gemini_lite": lite, "groq": groq}[n])
+    assert asyncio.run(prov.Chain(["gemini_lite", "groq"]).complete([Message.user("hi")])).text == "from groq"
+    assert lite.name == "gemini_lite" and set(prov._demoted) == {"gemini_lite"}
+    assert prov.brain("agent")._order()[0] == "gemini"  # the main brain still goes first
+    from neo.providers.base import failure_words
+
+    assert failure_words(lite.name, QuotaExhausted("x")).startswith("Gemini Lite ")
+
+
+# ---- review: Gemini quota and bad keys follow the key, not its place in the list ------------------
+
+
+def test_quota_follows_the_key_not_its_place_in_the_list(gem, monkeypatch):
+    from neo import config
+
+    g = gem.g
+    gem.rules["*"] = _err(429, "quota", _per_day())
+    with pytest.raises(QuotaExhausted):
+        asyncio.run(gem.p.complete([Message.user("hi")]))
+
+    def fresh(keys: list[str]):
+        monkeypatch.setattr(config, "_settings", None)
+        monkeypatch.setenv("GEMINI_API_KEY", keys[0])
+        monkeypatch.setenv("GEMINI_API_KEYS", ",".join(keys[1:]))
+        p = g.GeminiProvider(model="gemini-3.8-flash")  # a restart after the .env changed
+        asked: list[int] = []
+
+        def client(ki):
+            async def generate_content(*, model, contents, config):
+                asked.append(ki)
+                return _reply(text="ok")
+
+            return SimpleNamespace(
+                aio=SimpleNamespace(models=SimpleNamespace(generate_content=generate_content))
+            )
+
+        p._clients = [client(i) for i in range(len(keys))]
+        return p, asked
+
+    p, asked = fresh(["NEW-fresh-key"])  # the spent key replaced: the new one is asked at once
+    assert asyncio.run(p.complete([Message.user("hi")])).text == "ok" and asked == [0]
+    p, asked = fresh(["NEW-fresh-key", "k2"])  # a spent key moved to another place is still spent…
+    assert p._blocked("gemini-3.8-flash", 1, time.time()) and not p._blocked(
+        "gemini-3.8-flash", 0, time.time()
+    )
+
+
+def test_a_key_gemini_calls_invalid_is_skipped_for_the_next(gem):
+    from neo.providers.base import failure_words
+
+    bad = _err(
+        400,
+        "API key not valid. Please pass a valid API key.",
+        [{"@type": "type.googleapis.com/google.rpc.ErrorInfo", "reason": "API_KEY_INVALID"}],
+    )
+    gem.rules[("gemini-3.8-flash", 0)] = bad
+    gem.rules["*"] = _reply(text="ok")
+    for _ in range(3):
+        assert asyncio.run(gem.p.complete([Message.user("hi")])).text == "ok"
+    assert [k for _m, k, _c in gem.sent] == [0, 1, 1, 1]  # the revoked key is asked once, not every step
+
+    gem.sent.clear()
+    gem.p._bad_keys.clear()
+    gem.rules.clear()
+    gem.rules["*"] = _err(403, "Permission denied: consumer has been suspended.")
+    with pytest.raises(Unavailable) as e:
+        asyncio.run(gem.p.complete([Message.user("hi")]))
+    assert len(gem.sent) == 2  # each key once, then no model is asked with a key that can't work
+    assert "API key" in failure_words("gemini", e.value)
+
+
+# ---- review: the request stays in memory through a long approval chain ------------------------------
+
+
+def test_the_memory_cap_keeps_the_request_a_confirmation_note_continues(monkeypatch):
+    async def no_summary(msgs, started, budget_s=8.0):
+        return ""
+
+    monkeypatch.setattr(Session, "_summarize", staticmethod(no_summary))
+
+    async def go():
+        s = Session(reflex=_agent_reflex())
+        s.history.append(Message.user("play chess as white"))
+        trims = 0
+        for k in range(1, 41):  # 40 approvals of 11 messages: the cap trims several times
+            before = len(s.history)
+            turns = [
+                Message.user(f"[User confirmed. applescript result: moved {k}] Continue and finish the task.")
+            ]
+            for j in range(5):
+                turns += [
+                    Message.assistant("", [ToolCall(f"c{k}.{j}", "ax_tree", {})]),
+                    Message.tool([ToolResult(f"c{k}.{j}", "ax_tree", "board")]),
+                ]
+            await s._remember(*turns)
+            trims += len(s.history) < before
+            assert s.history[0].text == "play chess as white", k
+            assert s._trimmed()[0].text == "play chess as white"
+            assert not wire_violations(s._trimmed())
+        return s, trims
+
+    s, trims = asyncio.run(go())
+    assert trims >= 3 and len(s.history) <= sess_mod._HISTORY_CAP
+
+
+# ---- review: consecutive assistant turns ---------------------------------------------------------------
+
+
+def test_normalize_merges_consecutive_assistant_turns():
+    call, res = _pair("x")
+    msgs = [Message.user("hi"), Message.tool([ToolResult("o", "ax_tree", "orphan")]), Message.assistant("ok"),
+            Message.tool([ToolResult("o2", "ax_tree", "orphan")]),
+            Message.assistant("looking", [ToolCall("x", "ax_tree", {})]), res]  # fmt: skip
+    out = normalize(msgs)
+    assert not wire_violations(msgs)
+    assert [m.role for m in out] == ["user", "assistant", "tool"]
+    assert out[1].text == "ok\n\nlooking" and [c.id for c in out[1].tool_calls] == ["x"]
+    assert normalize(out) == out and msgs[2].text == "ok"
+
+
+def test_normalize_keeps_every_random_history_valid():
+    import random
+
+    rng = random.Random(7)
+    for _ in range(2000):
+        msgs: list[Message] = []
+        for n in range(1, rng.randint(2, 13)):
+            r = rng.random()
+            if r < 0.25:
+                msgs.append(Message.user(f"u{n}"))
+            elif r < 0.5:
+                calls = [ToolCall(f"c{n}.{j}", "ax_tree", {}) for j in range(rng.randint(0, 2))]
+                msgs.append(Message.assistant(rng.choice(["", "t"]), calls))
+            else:
+                ids = [f"c{rng.randint(1, n)}.{rng.randint(0, 1)}" for _ in range(rng.randint(1, 2))]
+                msgs.append(Message.tool([ToolResult(i, "ax_tree", "r") for i in ids]))
+        assert not wire_violations(msgs), msgs
+        assert normalize(normalize(msgs)) == normalize(msgs)
+
+
+# ---- review: the latest observation survives approvals --------------------------------------------------
+
+
+def test_the_only_observation_of_a_run_is_kept_whole_through_approvals():
+    s = Session(reflex=_agent_reflex())
+    board = "AXButton “e2” " * 180
+    s.history = [
+        Message.user("an earlier request"),
+        *_pair("e", "ax_tree", "old tree " * 100),
+        Message.assistant("Done."),
+        Message.user("play chess as white"),
+        *_pair("t", "ax_tree", board),
+    ]
+    for k in range(3):  # three approvals, each note a user turn
+        s.history += [
+            Message.assistant("", [ToolCall(f"s{k}", "applescript", {"script": "x"})]),
+            Message.tool(
+                [ToolResult(f"s{k}", "applescript", "NEEDS_CONFIRM: run an AppleScript — go ahead?")]
+            ),
+            Message.user(f"[User confirmed. applescript result: ok {k}] Continue and finish the task."),
+        ]
+    h = s._trimmed()
+    trees = [r.content for m in h for r in m.tool_results if r.name == "ax_tree"]
+    assert trees[-1] == board  # the board the model is playing on, whole
+    assert trees[0] == "old tree " * 100  # the earlier request is one of the last two: whole
+
+    # A newer look at the same thing supersedes the older one — in the copy the model gets only.
+    s.history += list(_pair("t2", "ax_tree", board + " moved"))
+    h = s._trimmed()
+    trees = [r.content for m in h for r in m.tool_results if r.name == "ax_tree"]
+    assert trees[-1] == board + " moved" and len(trees[-2]) < 300 and trees[0] == "old tree " * 100
+    assert s.history[6].tool_results[0].content == board  # the session's own history is untouched
+
+
+def test_fit_spares_the_newest_observation_behind_the_halted_steps():
+    from neo.providers.fit import fit
+
+    msgs = _chess_follow_up(tree_chars=6000, approvals=3)
+    msgs = [Message.user("before " * 10), *_pair("z", "ax_tree", "stale tree " * 500)] + msgs
+    f = fit(msgs, system="sys", tools=None, budget=6000, max_tokens=2048, vision=False, name="groq")
+    trees = [r.content for m in f.messages for r in m.tool_results if r.name == "ax_tree"]
+    assert trees[-1] == ("AXButton “Board” " * 400)[:6000]  # the newest tree, whole
+    assert len(trees[0]) < 2000  # the stale one from before went first
+
+
+# ---- review: a learned size can come back down ----------------------------------------------------------
+
+
+def test_a_learned_size_is_capped_and_comes_back_down(monkeypatch):
+    import httpx
+    import openai
+
+    from neo.providers import openai_compat as oc
+
+    p = oc.OpenAICompatProvider(name="local", base_url="https://api.local.test/v1", api_key="k", model="m",
+                                token_budget=8000)  # fmt: skip
+    state = {"refuse": 0, "prompt": None}
+
+    async def create(**kw):
+        if state["refuse"]:
+            state["refuse"] -= 1
+            req = httpx.Request("POST", "https://api.local.test/v1/chat/completions")
+            raise openai.APIStatusError(
+                "context_length_exceeded", response=httpx.Response(400, request=req), body=None
+            )
+        msg = SimpleNamespace(content="ok", tool_calls=None)
+        usage = (
+            SimpleNamespace(prompt_tokens=state["prompt"], completion_tokens=5) if state["prompt"] else None
+        )
+        return SimpleNamespace(choices=[SimpleNamespace(message=msg)], usage=usage)
+
+    monkeypatch.setattr(p._client.chat.completions, "create", create)
+    msgs = [Message.user("hello " * 300)]
+    for _ in range(6):  # 413s that say no numbers, over and over
+        state["refuse"] = 2
+        asyncio.run(p.complete(msgs, max_tokens=256))
+    assert 1.0 < p._scale <= oc._MAX_SCALE  # not 1.4^12
+
+    # Requests that go through say how big they really were: the estimate walks back to that.
+    from neo.providers.fit import estimate
+
+    state["prompt"] = int(estimate(msgs, "", None, vision=False))
+    for _ in range(8):
+        asyncio.run(p.complete(msgs, max_tokens=256))
+    assert p._scale < 1.1

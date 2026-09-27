@@ -66,6 +66,9 @@ class ToolSpec:
     name: str
     description: str
     parameters: dict[str, Any]  # JSON schema (object)
+    # Never dropped when a request is fitted into a small brain (neo.providers.fit): `more_tools`,
+    # which gets any other tool back, and every tool of a run fenced to its tools (nothing could).
+    essential: bool = False
 
 
 @dataclass
@@ -83,6 +86,9 @@ class Turn:
     usage: Usage = field(default_factory=Usage)
     thinking: str = ""
     raw: Any = None
+    # The tools the brain was actually shown for this reply, when fitting its request left some
+    # out (None: all it was given). `more_tools` hands back from these, not from the full list.
+    offered: list[str] | None = None
 
 
 class Provider(Protocol):

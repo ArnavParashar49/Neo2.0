@@ -44,7 +44,7 @@ def make(name: BrainName) -> Provider:
     elif name == "gemini_lite":
         from neo.providers.gemini import GeminiProvider
 
-        p = GeminiProvider(model=settings().gemini_lite_model)
+        p = GeminiProvider(model=settings().gemini_lite_model, name="gemini_lite")  # its own brain
     elif name == "local":
         from neo.providers.openai_compat import local
 

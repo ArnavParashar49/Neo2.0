@@ -6,7 +6,9 @@ protocol with tool calling; Groq also honours ``reasoning_effort`` for gpt-oss m
 Both have little room per request (Groq's free tier: ~8K tokens a minute, prompt and answer
 together; the local server: its context), so every request is fitted to ``token_budget`` first
 (neo.providers.fit). When the server still says it's too large, it also says how large it
-really was: the estimate is corrected from that and the request fitted again.
+really was: the estimate is corrected from that and the request fitted again. The correction is
+capped, and every request that goes through reports its real size, so one odd refusal (a prompt of
+dense digits, a 413 with no numbers) doesn't leave every later request over-trimmed.
 """
 
 from __future__ import annotations
@@ -46,6 +48,9 @@ _GROQ_REQUEST_TOKENS = {
 }
 _GROQ_DEFAULT_TOKENS = 6000
 _LOCAL_CONTEXT_TOKENS = 32768
+_MAX_SCALE = 2.5  # the estimate is never believed to be further off than this
+_FOLLOW = 0.5  # a request that went through moves the correction this far toward its real size
+_DRIFT = 0.1  # …or, when the server didn't say, this far back toward none
 _LIMIT_REQUESTED = re.compile(r"Limit\s+(\d+),\s*Requested\s+(\d+)", re.I)
 _TRY_AGAIN = re.compile(r"try again in\s+(?:(\d+)h)?(?:(\d+)m(?!s))?(?:([\d.]+)s)?", re.I)
 
@@ -194,9 +199,21 @@ class OpenAICompatProvider:
             self._scale = max(self._scale, self._scale * real_prompt / max(1, f.tokens) * 1.05)
         else:
             self._scale *= 1.4
+        self._scale = min(self._scale, _MAX_SCALE)
         print(
             f"[brain] {self.name}: request too large; now budget {self.token_budget}, estimate ×{self._scale:.2f}"
         )
+
+    def _learn_real(self, f: Fitted, usage: Any) -> None:
+        """A request that went through: its real prompt size (when the server says) is what the
+        estimate is corrected toward, down as well as up; otherwise the correction fades."""
+        real = getattr(usage, "prompt_tokens", None) if usage is not None else None
+        raw = f.tokens / self._scale  # the uncorrected estimate of what was sent
+        if isinstance(real, int) and real > 0 and raw >= 1:
+            target, rate = min(_MAX_SCALE, max(1.0, real / raw * 1.05)), _FOLLOW
+        else:
+            target, rate = 1.0, _DRIFT
+        self._scale += (target - self._scale) * rate
 
     def _error(self, e: Exception) -> ProviderError:
         if isinstance(e, RateLimitError):
@@ -251,6 +268,7 @@ class OpenAICompatProvider:
             except Exception as e:  # noqa: BLE001
                 raise self._error(e) from e
 
+        self._learn_real(f, resp.usage)
         choice = resp.choices[0].message
         turn = Turn(text=choice.content or "")
         for tc in choice.tool_calls or []:
@@ -265,6 +283,7 @@ class OpenAICompatProvider:
             )
         if resp.usage:
             turn.usage = Usage(resp.usage.prompt_tokens or 0, resp.usage.completion_tokens or 0)
+        turn.offered = f.offered()
         return turn
 
     async def stream(

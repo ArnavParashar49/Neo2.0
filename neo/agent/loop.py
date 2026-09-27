@@ -244,7 +244,11 @@ async def run_agent(
     strict: bool = False,
 ) -> AgentResult:
     """`strict`: only the `tools` given ever run — whatever else the model names gets an error,
-    and `more_tools` isn't answered (a run fenced off from the rest of NEO, like `browse`)."""
+    and `more_tools` isn't answered (a run fenced off from the rest of NEO, like `browse`).
+
+    A brain with little room may be shown only some of the tools (neo.providers.fit). A strict
+    run's tools are all essential — nothing could get one back. Any other run always offers
+    `more_tools`, which hands back what that brain wasn't shown."""
     s = settings()
     reg = reg or default_registry()
     ev = ev or default_bus()
@@ -260,7 +264,13 @@ async def run_agent(
         messages.append(Message.user(goal, images=images or []))
     steps: list[Step] = []
     last_key, repeats = "", 0
+    from neo.agent.toolselect import MORE_TOOLS
+
     tools = list(tools) if tools is not None else reg.specs()
+    if strict:
+        tools = [t if t.essential else replace(t, essential=True) for t in tools]
+    elif not any(t.name == MORE_TOOLS.name for t in tools):
+        tools.append(MORE_TOOLS)
     enabled = {t.name for t in tools}
     effectful = False  # a side-effect tool ran this run
     last_readonly = True  # the most recent tool call was an observation
@@ -327,13 +337,17 @@ async def run_agent(
         meta = [] if strict else [c for c in turn.tool_calls if c.name == "more_tools"]
         real = [c for c in turn.tool_calls if strict or c.name != "more_tools"]
         meta_results: list[ToolResult] = []
+        # What the brain was shown: a small one may have been sent only some of `tools`, and a
+        # tool it wasn't shown is one it can ask for — named here, the next fitted request keeps it.
+        shown = set(turn.offered) if turn.offered is not None else enabled
         for c in meta:
             from neo.agent.toolselect import selector
 
-            found = selector().search(str(c.args.get("query", "")), exclude=enabled)
+            found = selector().search(str(c.args.get("query", "")), exclude=shown)
             for t in found:
-                tools.append(t.spec())
-                enabled.add(t.name)
+                if t.name not in enabled:
+                    tools.append(t.spec())
+                    enabled.add(t.name)
             listing = ", ".join(t.name for t in found) or "nothing new"
             meta_results.append(
                 ToolResult(c.id, "more_tools", f"Enabled: {listing}. They are available from your next step.")

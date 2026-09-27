@@ -154,6 +154,7 @@ class ClaudeProvider:
             elif b.type == "thinking" and getattr(b, "thinking", ""):
                 turn.thinking += b.thinking
         turn.usage = Usage(resp.usage.input_tokens, resp.usage.output_tokens)
+        turn.offered = f.offered()
         return turn
 
     async def stream(

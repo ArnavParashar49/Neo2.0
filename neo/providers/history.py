@@ -17,7 +17,8 @@ messages:
   turns in a row are merged into it;
 * a call nobody answered gets a stand-in failed result; a result no call asked for (or a second
   one for the same call) is dropped;
-* an assistant turn with nothing in it is dropped.
+* an assistant turn with nothing in it is dropped, and assistant turns in a row become one (Gemini
+  takes a call turn only right after a user or result turn).
 """
 
 from __future__ import annotations
@@ -64,6 +65,8 @@ def normalize(messages: list[Message]) -> list[Message]:
         if m.role == "assistant":
             if not m.text and not m.tool_calls and m.raw is None:
                 continue
+            if out and out[-1].role == "assistant":  # (the one before has no calls: settled above)
+                m = _merge(out.pop(), m)
             if m.tool_calls:
                 for i, c in enumerate(m.tool_calls):  # results name the ids the model gave
                     slots.setdefault(c.id, []).append(i)
@@ -71,6 +74,13 @@ def normalize(messages: list[Message]) -> list[Message]:
         out.append(m)
     settle()
     return out
+
+
+def _merge(a: Message, b: Message) -> Message:
+    """Two assistant turns in a row as one: both texts, the second one's calls. Neither turn's
+    provider replay payload describes the pair, so it goes."""
+    text = "\n\n".join(t for t in (a.text, b.text) if t)
+    return Message(role="assistant", text=text, images=[*a.images, *b.images], tool_calls=list(b.tool_calls))
 
 
 def _unique_ids(m: Message) -> Message:

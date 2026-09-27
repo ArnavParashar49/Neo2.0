@@ -7,7 +7,9 @@ It is also the one that gets overloaded, so every request walks a model list
 Free-tier quota is per key *and* per model. A (model, key) that says it's out of quota is left
 alone for the rest of its quota window — until the daily reset for a per-day quota, the delay the
 server names for a per-minute one — and once every pair is out, a request fails at once with
-QuotaExhausted instead of paying a round trip per pair on every agent step.
+QuotaExhausted instead of paying a round trip per pair on every agent step. That state follows the
+key itself (a short hash of it), not its place in the list: a key the user adds after hearing
+"out of quota" is asked at once. A key Gemini says isn't valid is skipped for the next one.
 
 Gemini 3 requires the ``thought_signature`` of every function call to be echoed back when the
 history is replayed. A signature is only good for the model that wrote it: calls that came from
@@ -18,7 +20,9 @@ Google's documented bypass value instead.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
+import re
 import time
 import uuid
 from collections.abc import AsyncIterator
@@ -64,6 +68,22 @@ _RESET_TZ = "America/Los_Angeles"  # free-tier daily quotas reset at midnight Pa
 # A 400 about the shape of the tool turns: the history is re-sent once with them written as text.
 _TURN_SHAPE = ("function response", "function call", "thought_signature", "thought signature")
 _TOO_LONG = ("exceeds the maximum number of tokens", "input token count", "too many tokens")
+# A key the server won't take at all (revoked, expired, suspended, the API off for its project):
+# no model will answer on it, so it is skipped for the next key rather than failing the request.
+_BAD_KEY = re.compile(r"api[ _]key[ _](?:not[ _]valid|invalid|expired)", re.I)
+_BAD_KEY_COOLDOWN_S = 3600.0
+_ANY_KEY = "*"  # a model's own trouble (overload), whichever key asked
+_SAVED = re.compile(r"\|(?:[0-9a-f]{12}|\*)$")  # "model|<key id>": older files named the key's place
+
+
+def _key_id(key: str) -> str:
+    """Which key a saved cooldown belongs to, without writing the key to disk."""
+    return hashlib.sha256(key.encode()).hexdigest()[:12]
+
+
+def _bad_key(e: Exception) -> bool:
+    code = _code(e)
+    return code in (401, 403) or (code == 400 and bool(_BAD_KEY.search(str(e))))
 
 
 def _signature(c: ToolCall, model: str) -> bytes:
@@ -209,16 +229,17 @@ def _quota_window(e: Exception) -> tuple[float, str]:
 
 
 class GeminiProvider:
-    name = "gemini"
     supports_vision = True
     supports_tools = True
     token_budget = _TOKEN_BUDGET
 
-    def __init__(self, model: str | None = None, api_key: str | None = None) -> None:
+    def __init__(self, model: str | None = None, api_key: str | None = None, *, name: str = "gemini") -> None:
         s = settings()
         key = api_key or s.gemini_api_key
         if not key:
             raise Unavailable("GEMINI_API_KEY is not set")
+        # The brain this is ("gemini", "gemini_lite"): what the chain demotes and the user hears.
+        self.name = name
         self.model = model or s.gemini_model
         lite = "lite" in self.model
         self.models = [self.model] + (
@@ -228,7 +249,10 @@ class GeminiProvider:
         http = gt.HttpOptions(timeout=_REQUEST_TIMEOUT_MS)
         self._clients = [genai.Client(api_key=k, http_options=http) for k in keys]
         self._client = self._clients[0]
-        self._exhausted: dict[tuple[str, int], float] = {}  # (model, key index | -1) → retry-after timestamp
+        self._key_ids = [_key_id(k) for k in keys]
+        # (model, key id | _ANY_KEY) → when it may be asked again
+        self._exhausted: dict[tuple[str, str], float] = {}
+        self._bad_keys: dict[str, float] = {}  # key id → when to try a key the server refused again
         self._load_cooldowns()
 
     # ---- cooldown persistence -------------------------------------------------------------
@@ -245,10 +269,15 @@ class GeminiProvider:
         except Exception:  # noqa: BLE001 — missing/corrupt file: start clean
             return
         now = time.time()
+        mine = {*self._key_ids, _ANY_KEY}
         for k, until in raw.items():
-            model, _, ki = k.rpartition("|")
-            if model and float(until) > now:
-                self._exhausted[(model, int(ki))] = float(until)
+            model, _, kid = str(k).rpartition("|")
+            try:
+                t = float(until)
+            except (TypeError, ValueError):
+                continue
+            if model and kid in mine and t > now:  # (a key no longer configured: forgotten)
+                self._exhausted[(model, kid)] = t
 
     def _save_cooldowns(self) -> None:
         import json
@@ -259,16 +288,29 @@ class GeminiProvider:
             disk = {k: float(t) for k, t in json.loads(self._cooldown_path().read_text()).items()}
         except Exception:  # noqa: BLE001
             disk = {}
-        disk.update({f"{m}|{ki}": t for (m, ki), t in self._exhausted.items()})
-        live = {k: t for k, t in disk.items() if t > now}
+        disk.update({f"{m}|{kid}": t for (m, kid), t in self._exhausted.items()})
+        live = {k: t for k, t in disk.items() if t > now and _SAVED.search(k)}
         try:
             self._cooldown_path().write_text(json.dumps(live))
         except Exception:  # noqa: BLE001 — best effort
             pass
 
     # ---- quota state ----------------------------------------------------------------------
+    def _kid(self, ki: int) -> str:
+        return self._key_ids[ki] if ki < len(self._key_ids) else f"#{ki}"
+
+    def _until(self, model: str, ki: int) -> float:
+        """When (model, key) may be asked again: the latest of its quota, the model's overload and
+        the key's own refusal."""
+        kid = self._kid(ki)
+        return max(
+            self._exhausted.get((model, _ANY_KEY), 0.0),
+            self._exhausted.get((model, kid), 0.0),
+            self._bad_keys.get(kid, 0.0),
+        )
+
     def _blocked(self, model: str, ki: int, now: float) -> bool:
-        return self._exhausted.get((model, -1), 0.0) > now or self._exhausted.get((model, ki), 0.0) > now
+        return self._until(model, ki) > now
 
     def cooling_until(self) -> float:
         """When some (model, key) can be asked again, if none can now (0: one can now)."""
@@ -278,18 +320,20 @@ class GeminiProvider:
             for ki in range(len(self._clients)):
                 if not self._blocked(model, ki, now):
                     return 0.0
-                ends.append(max(self._exhausted.get((model, -1), 0.0), self._exhausted.get((model, ki), 0.0)))
+                ends.append(self._until(model, ki))
         return min(ends) if ends else 0.0
 
     def _all_blocked_error(self) -> ProviderError:
-        """Nothing left to try: say whether that's quota (for how long) or overload."""
+        """Nothing left to try: say whether that's quota (for how long), overload or the keys."""
         now = time.time()
-        quota, busy = [], []
+        quota, busy, refused = [], [], 0
         for model in self.models:
-            over = self._exhausted.get((model, -1), 0.0)
+            over = self._exhausted.get((model, _ANY_KEY), 0.0)
             for ki in range(len(self._clients)):
-                q = self._exhausted.get((model, ki), 0.0)
-                if q > now:
+                q = self._exhausted.get((model, self._kid(ki)), 0.0)
+                if self._bad_keys.get(self._kid(ki), 0.0) > now:
+                    refused += 1
+                elif q > now:
                     quota.append(q)
                 elif over > now:
                     busy.append(over)
@@ -297,6 +341,8 @@ class GeminiProvider:
             return Overloaded("gemini: every model is overloaded", retry_after=min(busy) - now)
         if quota:
             return QuotaExhausted("429 gemini: every key is out of quota", until=min(quota))
+        if refused:
+            return Unavailable("API key not valid")
         if not self.models or not self._clients:
             return ProviderError("gemini: no models")
         return RateLimited(
@@ -305,9 +351,11 @@ class GeminiProvider:
 
     async def _call(self, fn, **kw):
         """Walk model × key. 5xx → short backoff then next model; 429 → next key for this model
-        (free-tier quota is per key *and* per model); other errors raise immediately. Pairs known
-        to be out of quota or overloaded are skipped without a round trip; when none is left, the
-        error says which (QuotaExhausted with its reset time, or Overloaded)."""
+        (free-tier quota is per key *and* per model); a key the server refuses (not valid, 401,
+        403) → the next key, for every model; other errors raise immediately. Pairs known to be
+        out of quota or overloaded, and refused keys, are skipped without a round trip; when none
+        is left, the error says which (QuotaExhausted with its reset time, Overloaded, or
+        Unavailable for keys that don't work)."""
         for model in self.models:
             overloaded = False
             for ki, client in enumerate(self._clients):
@@ -326,9 +374,14 @@ class GeminiProvider:
                         took = time.time() - t0
                         if code in _RETRY_CODES and i < len(_BACKOFF_S) and took < _SLOW_FAIL_S:
                             continue  # a quick blip is worth one retry; a slow 5xx is not
+                        if _bad_key(e):
+                            self._bad_keys[self._kid(ki)] = time.time() + _BAD_KEY_COOLDOWN_S
+                            print(f"[gemini] key#{ki + 1} refused ({code}: {str(e)[:80]}); trying next key")
+                            await _note(f"Gemini key {ki + 1} isn't accepted, trying next")
+                            break
                         if code == 429:
                             window, per = _quota_window(e)
-                            self._exhausted[(model, ki)] = time.time() + window
+                            self._exhausted[(model, self._kid(ki))] = time.time() + window
                             self._save_cooldowns()
                             span = "for today" if per == "day" else f"for {int(window)}s"
                             print(f"[gemini] {model} key#{ki + 1} quota exhausted ({span}); trying next key")
@@ -336,7 +389,7 @@ class GeminiProvider:
                             break
                         if code in _RETRY_CODES:
                             print(f"[gemini] {model} overloaded ({took:.0f}s); trying next model")
-                            self._exhausted[(model, -1)] = time.time() + _OVERLOAD_COOLDOWN_S
+                            self._exhausted[(model, _ANY_KEY)] = time.time() + _OVERLOAD_COOLDOWN_S
                             self._save_cooldowns()
                             await _note(f"{_pretty(model)} overloaded, trying next")
                             overloaded = True
@@ -407,6 +460,7 @@ class GeminiProvider:
         um = resp.usage_metadata
         if um:
             turn.usage = Usage(um.prompt_token_count or 0, um.candidates_token_count or 0)
+        turn.offered = f.offered()
         return turn
 
     async def stream(

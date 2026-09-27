@@ -7,11 +7,15 @@ a 413. So the request is shrunk, least useful first, and only refused when even 
 doesn't fit:
 
 1. pictures: none for a text-only brain (it gets a note); only the newest for one that sees
-2. older tool results — the latest steps stay whole — cut to head and tail, then to a stub
+2. older tool results, cut to head and tail, then to a stub — the latest steps stay whole, and so
+   does the newest result of each tool in this request (a halted step asking for approval doesn't
+   push the board the model is playing on out of view)
 3. the room reserved for the answer, down to a floor
-4. tool schemas: short descriptions, then only the tools this run has used (and more_tools)
+4. tool descriptions, down to their first sentence
 5. older conversation text; then earlier requests altogether
-6. the latest results themselves
+6. the tools this run hasn't used — never an essential one (`more_tools`, which gets any other
+   back; a fenced run's tools) — then as many of those as still fit come back, in the order given
+7. the latest results themselves
 
 Nothing here mutates the caller's messages (they are the session's history).
 """
@@ -20,7 +24,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from neo.providers.base import Message, RequestTooLarge, ToolCall, ToolResult, ToolSpec
 from neo.providers.history import continues_request, normalize
@@ -31,6 +35,8 @@ _MSG_OVERHEAD = 6
 _TOOL_OVERHEAD = 12
 _HEADROOM = 0.9  # estimates are estimates: aim under the limit, not at it
 _KEEP_WHOLE = 2  # the newest result turns are never trimmed before everything else is
+# A step that only asked the user (or waited on that) isn't a result worth keeping whole in its place.
+_HALTS = ("NEEDS_CONFIRM", "NEEDS_USER", "skipped: ")
 _MIN_OUTPUT = 512
 _ENABLED = re.compile(r"^Enabled: (.*?)\. They are available", re.S)
 
@@ -43,9 +49,19 @@ class Fitted:
     tokens: int  # estimated prompt tokens, as sent
     trimmed: list[str] = field(default_factory=list)  # what had to go, for the log
 
+    def offered(self) -> list[str] | None:
+        """The names of the tools sent (Turn.offered), None when the request had none."""
+        return None if self.tools is None else [s.name for s in self.tools]
+
 
 def _n(text: str) -> float:
     return len(text.encode("utf-8", "ignore")) / _BYTES_PER_TOKEN
+
+
+def _spec_tokens(s: ToolSpec) -> float:
+    return (
+        _n(s.name) + _n(s.description) + _n(json.dumps(s.parameters, separators=(",", ":"))) + _TOOL_OVERHEAD
+    )
 
 
 def estimate(
@@ -53,14 +69,13 @@ def estimate(
 ) -> int:
     """Rough prompt tokens for this request (conservative: better to trim a little early than
     to be refused)."""
+    return int(_estimate(messages, system, tools, vision))
+
+
+def _estimate(messages: list[Message], system: str, tools: list[ToolSpec] | None, vision: bool) -> float:
     t = _n(system)
     for s in tools or []:
-        t += (
-            _n(s.name)
-            + _n(s.description)
-            + _n(json.dumps(s.parameters, separators=(",", ":")))
-            + _TOOL_OVERHEAD
-        )
+        t += _spec_tokens(s)
     images = 0
     for m in messages:
         t += _MSG_OVERHEAD + _n(m.text)
@@ -70,7 +85,7 @@ def estimate(
         for r in m.tool_results:
             t += _MSG_OVERHEAD + _n(r.name) + _n(r.content)
             images += len(r.images)
-    return int(t) + images * (_IMAGE_TOKENS if vision else 8)
+    return t + images * (_IMAGE_TOKENS if vision else 8)
 
 
 def _cut(text: str, limit: int) -> str:
@@ -86,6 +101,27 @@ def _cut(text: str, limit: int) -> str:
 
 def _tool_turns(msgs: list[Message]) -> list[int]:
     return [i for i, m in enumerate(msgs) if m.role == "tool"]
+
+
+def _halted(r: ToolResult) -> bool:
+    return r.content.lstrip().startswith(_HALTS)
+
+
+def _latest(msgs: list[Message]) -> set[int]:
+    """The result turns kept whole until the very last step: the newest few that hold a real
+    result, and the one with the newest result of each tool in the request being worked on."""
+    turns = _tool_turns(msgs)
+    real = [i for i in turns if not all(_halted(r) for r in msgs[i].tool_results)]
+    keep = set(real[-_KEEP_WHOLE:])
+    start, seen = _request_start(msgs), set()
+    for i in reversed(real):
+        if i < start:
+            break
+        names = {r.name for r in msgs[i].tool_results if not _halted(r)}
+        if names - seen:
+            keep.add(i)
+        seen |= names
+    return keep
 
 
 def _user_turns(msgs: list[Message]) -> list[int]:
@@ -145,8 +181,12 @@ def _short_tools(tools: list[ToolSpec]) -> list[ToolSpec]:
     out = []
     for s in tools:
         first = re.split(r"(?<=[.!?])\s", s.description, maxsplit=1)[0][:200]
-        out.append(ToolSpec(s.name, first, strip(s.parameters)))
+        out.append(replace(s, description=first, parameters=strip(s.parameters)))
     return out
+
+
+def _essential(s: ToolSpec) -> bool:
+    return s.essential or s.name == "more_tools"
 
 
 def _used_tools(msgs: list[Message]) -> set[str]:
@@ -212,6 +252,7 @@ def fit(
     out = max_tokens
     limit = int(budget * _HEADROOM)
     trimmed: list[str] = []
+    cut_from: list[ToolSpec] | None = None  # the tool list before any were left out
 
     def prompt() -> int:
         return int(estimate(msgs, system, specs, vision=vision) * scale)
@@ -223,11 +264,31 @@ def fit(
         return Fitted(msgs, specs, out, prompt())
     before = prompt()
 
+    def refill() -> None:
+        """Room left once everything fits goes back to the tools that were left out."""
+        nonlocal specs
+        if cut_from is None or specs is None:
+            return
+        keep = {s.name for s in specs}
+        t = _estimate(msgs, system, specs, vision)
+        for s in cut_from:
+            if s.name not in keep and int((t + (c := _spec_tokens(s))) * scale) + out <= limit:
+                keep.add(s.name)
+                t += c
+        was, specs = specs, [s for s in cut_from if s.name in keep]
+        if not fits():  # (an estimate that doesn't add up: keep the list that fitted)
+            specs = was
+
     def done(what: str, was: list[Message] | None = None) -> Fitted | None:
         if was is None or len(was) != len(msgs) or any(a is not b for a, b in zip(was, msgs, strict=True)):
             trimmed.append(what)  # (a step that found nothing to cut isn't reported)
         if not fits():
             return None
+        refill()
+        if cut_from is not None and specs is not None:
+            trimmed[trimmed.index("tools not in use")] = (
+                f"tools not in use ({len(cut_from) - len(specs)} left out)"
+            )
         print(
             f"[brain] {name}: request fitted ~{before}→{prompt()} tokens (+{out} answer) by trimming {', '.join(trimmed)}"
         )
@@ -239,7 +300,8 @@ def fit(
         if r := done("pictures", was):
             return r
     # 2. older tool results, newest steps whole
-    older = _tool_turns(msgs)[:-_KEEP_WHOLE]
+    latest = _latest(msgs)
+    older = [i for i in _tool_turns(msgs) if i not in latest]
     for lim in (1500, 400, 160) if older else ():
         was, msgs = msgs, _shrink_results(msgs, lim, older)
         if r := done(f"older results to {lim} chars", was):
@@ -250,16 +312,11 @@ def fit(
         out = floor
         if r := done(f"answer room to {out}"):
             return r
-    # 4. tool schemas
+    # 4. tool descriptions
     if specs:
         specs = _short_tools(specs)
         if r := done("tool descriptions"):
             return r
-        used = _used_tools(msgs)
-        if used:
-            specs = [s for s in specs if s.name in used or s.name == "more_tools"]
-            if r := done("tools not in use"):
-                return r
     # 5. older conversation: its text, then earlier requests altogether
     start = _request_start(msgs)
     was, msgs = msgs, _shorten_text(msgs, start, 300)
@@ -269,7 +326,15 @@ def fit(
         msgs = msgs[start:]
         if r := done("earlier requests"):
             return r
-    # 6. the latest results too
+    # 6. tools this run hasn't used (the ones it has, and essential ones, stay); refilled in done()
+    if specs:
+        used = _used_tools(msgs)
+        kept = [s for s in specs if s.name in used or _essential(s)]
+        if len(kept) < len(specs):
+            cut_from, specs = specs, kept
+            if r := done("tools not in use"):
+                return r
+    # 7. the latest results too
     for lim in (2000, 600):
         was, msgs = msgs, _shrink_results(msgs, lim, _tool_turns(msgs))
         if r := done(f"latest results to {lim} chars", was):
