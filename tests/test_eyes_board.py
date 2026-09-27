@@ -421,3 +421,56 @@ def _timed(fn) -> float:
     t = time.perf_counter()
     fn()
     return time.perf_counter() - t
+
+
+# ---- evidence and the one-call helpers the screenshot tool uses ----------------------------------
+
+
+def test_a_large_view_with_no_accessible_elements_is_the_evidence_for_a_board():
+    win = (100.0, 50.0, 1000.0, 800.0)
+    toolbar = [(110 + i * 60, 60, 50, 24, "AXButton") for i in range(8)]
+    view = (150.0, 120.0, 700.0, 700.0, "AXGroup")  # one element, nothing inside it: drawn in one piece
+    side = [(900, 120, 180, 30, "AXButton"), (900, 160, 180, 30, "AXButton")]
+    assert B.canvas_area(win, [*toolbar, view, *side]) == view[:4]
+    # the view isn't exposed at all: the largest part of the window nothing covers
+    x, y, w, h = B.canvas_area(win, [*toolbar, *side])
+    assert w * h >= 0.4 * 1000 * 800 and y >= 84 - 800 / 32
+    assert B.canvas_area(win, []) == win  # a window with nothing accessible at all
+    rows = [(100, 50 + i * 20, 1000, 20, "AXRow") for i in range(40)]  # a list filling the window
+    assert B.canvas_area(win, rows) is None
+    scroll = (100.0, 50.0, 1000.0, 800.0, "AXScrollArea")  # a container: its rows are the content
+    assert B.canvas_area(win, [scroll, *rows]) is None
+    assert B.canvas_area(win, [(100, 90, 1000, 760, "AXWebArea")]) is None  # a page: read, not pixels
+    assert B.canvas_area(win, [(100, 90, 1000, 760, "AXTextArea"), *toolbar]) is None
+    assert B.canvas_area(None, [view]) is None
+
+
+def test_the_screenshot_note_part_says_what_neo_found_or_why_not():
+    img, _ = _flat()
+    text = B.look(B.Picture.of(img), shot="s1")
+    assert text.startswith("NEO found a board of 8×8 squares") and B.latest().shot == "s1"
+    assert B.look(B.Picture.of(img), shot="s2", sheet=True, canvas=True) == B.covered_note()
+    a = np.full((982, 1512, 3), 60, np.uint8)
+    assert "map_board" in B.look(B.Picture.of(a), shot="s3", canvas=True)
+    assert "needs a model that can see" in B.look(B.Picture.of(a), shot="s4", canvas=True, blind=True)
+    assert B.look(B.Picture.of(a), shot="s5") == ""  # no evidence, no board: nothing to say
+    x, y, w, h = B.region(B.latest())
+    assert x < 420 and y < 150 and x + w > 1028 and y + h > 758
+
+
+def test_a_window_crop_is_mapped_to_the_same_screen_points():
+    img, tr = _flat()
+    crop = img.crop((300, 100, 1200, 900))  # a window's own picture: its pixels start at its origin
+    b = B.survey(B.Picture.of(crop, x0=300, y0=100)).board
+    assert b is not None and _worst(b, tr) <= 0.5
+    retina = crop.resize((1800, 1600), Image.NEAREST)  # the same window at 2 px per point
+    b2 = B.survey(B.Picture.of(retina, x0=300, y0=100, ppp=0.5)).board
+    assert b2 is not None and _worst(b2, tr) <= 0.5
+
+
+def test_orientation_is_kept_for_the_same_board_when_the_pieces_no_longer_say():
+    img, _ = _flat()
+    assert B.survey(B.Picture.of(img)).board.orientation == "bottom"
+    few = ("....k...", "........", "........", "...q....", "....Q...", "........", "........", "....K...")
+    later = B.survey(B.Picture.of(_flat(position=few)[0])).board
+    assert B.orientation(later.occupancy) == "" and later.orientation == "bottom" and later.chess

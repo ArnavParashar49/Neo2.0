@@ -1231,6 +1231,70 @@ def _flat(pic: Picture, region, canvas: bool) -> Board | None:
     return b
 
 
+# ---- evidence: where a board may be ---------------------------------------------------------------
+
+
+# Roles whose content Accessibility reads out even when they hold no elements: never a drawn view.
+_READ_ROLES = frozenset({"AXTextArea", "AXTextField", "AXStaticText", "AXWebArea", "AXTable", "AXList", "AXOutline", "AXBrowser", "AXCell", "AXRow"})
+
+
+def canvas_area(
+    window: tuple[float, float, float, float] | None, elements, *, least: float = 0.2, grid: int = 32
+) -> tuple[float, float, float, float] | None:
+    """The part of a window drawn in one piece (screen points), when it is at least ``least`` of
+    the window: the evidence a board may be there. ``elements``: every element's frame from the
+    window's Accessibility tree, as (x, y, w, h) or (x, y, w, h, role). A large element holding no
+    others (and not text, a list or a page) is such a view; else, when the view isn't exposed at
+    all, the largest part of the window no element covers. An element that holds others is a
+    container, not content."""
+    if window is None or window[2] < 100 or window[3] < 100:
+        return None
+    wx, wy, ww, wh = (float(v) for v in window)
+    items = [e for e in elements if e and len(e) >= 4 and e[2] > 0 and e[3] > 0]
+    F = np.array([e[:4] for e in items], float).reshape(-1, 4)
+    roles = [str(e[4]) if len(e) > 4 else "" for e in items]
+    occ = np.zeros((grid, grid), bool)
+    if len(F):
+        cx, cy = F[:, 0] + F[:, 2] / 2, F[:, 1] + F[:, 3] / 2
+        holds = (cx[None, :] > F[:, None, 0]) & (cx[None, :] < F[:, None, 0] + F[:, None, 2])
+        holds &= (cy[None, :] > F[:, None, 1]) & (cy[None, :] < F[:, None, 1] + F[:, None, 3])
+        np.fill_diagonal(holds, False)
+        leaf = ~holds.any(axis=1)
+        # (clipped to the window: a view scrolled partly out of it counts for what shows)
+        x0, y0 = np.maximum(F[:, 0], wx), np.maximum(F[:, 1], wy)
+        x1, y1 = np.minimum(F[:, 0] + F[:, 2], wx + ww), np.minimum(F[:, 1] + F[:, 3], wy + wh)
+        shown = np.clip(x1 - x0, 0, None) * np.clip(y1 - y0, 0, None)
+        big = shown >= least * ww * wh
+        views = [i for i in np.nonzero(leaf & big)[0] if roles[i] not in _READ_ROLES]
+        if views:
+            i = max(views, key=lambda k: shown[k])
+            return float(x0[i]), float(y0[i]), float(x1[i] - x0[i]), float(y1[i] - y0[i])
+        if any(roles[i] in _READ_ROLES for i in np.nonzero(leaf & big)[0]):
+            return None  # a page, a text or a list fills it: read that, not pixels
+        for x, y, w, h in F[leaf & ~big]:
+            c0, c1 = int(np.floor((x - wx) / ww * grid)), int(np.ceil((x + w - wx) / ww * grid))
+            r0, r1 = int(np.floor((y - wy) / wh * grid)), int(np.ceil((y + h - wy) / wh * grid))
+            occ[max(0, r0) : max(0, min(grid, r1)), max(0, c0) : max(0, min(grid, c1))] = True
+    best, rect = 0, None
+    heights = np.zeros(grid, int)
+    for r in range(grid):  # the largest empty rectangle: a histogram of empty runs, row by row
+        heights = np.where(occ[r], 0, heights + 1)
+        stack: list[int] = []
+        for c in range(grid + 1):
+            hc = heights[c] if c < grid else 0
+            while stack and heights[stack[-1]] >= hc:
+                top = stack.pop()
+                left = stack[-1] + 1 if stack else 0
+                area = int(heights[top]) * (c - left)
+                if area > best:
+                    best, rect = area, (left, r - int(heights[top]) + 1, c - left, int(heights[top]))
+            stack.append(c)
+    if rect is None or best < least * grid * grid:
+        return None
+    c, r, w, h = rect
+    return (wx + c * ww / grid, wy + r * wh / grid, w * ww / grid, h * wh / grid)
+
+
 # ---- words for the model -----------------------------------------------------------------------
 
 
@@ -1299,6 +1363,35 @@ def hint_note(shot: str, *, blind: bool = False) -> str:
         "corners=[[x,y],[x,y],[x,y],[x,y]] (pixels of this screenshot; rows and cols if not 8×8) — NEO checks them "
         "and then maps every square."
     )
+
+
+def look(
+    pic: Picture,
+    *,
+    shot: str,
+    blind: bool = False,
+    sheet: bool = False,
+    area: tuple[float, float, float, float] | None = None,
+    canvas: bool = False,
+    window: tuple[float, float, float, float] | None = None,
+    now: float | None = None,
+) -> str:
+    """The screenshot note's board part in one call (NEO's own words; "" when there is nothing to
+    say): a board found (or seen again, with what changed), one under a sheet, or a board-like area
+    NEO couldn't map."""
+    s = survey(pic, shot=shot, area=area, canvas=canvas, sheet=sheet, window=window, now=now)
+    if s.covered:
+        return covered_note() if canvas or (_latest is not None and window is not None and _latest.window == window) else ""
+    if s.board is not None:
+        return note(s.board, s.since, blind=blind)
+    return hint_note(shot, blind=blind) if s.hint else ""
+
+
+def region(b: Board, margin: float = 0.03) -> tuple[int, int, int, int]:
+    """The screen rectangle (points: x, y, w, h) to capture to look at the board again."""
+    x, y, w, h = b.bbox()
+    mx, my = w * margin, h * margin
+    return int(math.floor(x - mx)), int(math.floor(y - my)), int(math.ceil(w + 2 * mx)), int(math.ceil(h + 2 * my))
 
 
 # ---- acting on squares -------------------------------------------------------------------------
