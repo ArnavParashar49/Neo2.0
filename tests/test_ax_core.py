@@ -22,6 +22,7 @@ DEFAULT_TIMEOUT_S = 6.0
 _REAL_HIT = ax.hit  # (the suite's conftest swaps these for "nothing there" in every test)
 _REAL_SCENE = ax.scene
 _REAL_RAISE = ax.raise_window
+_REAL_FRONTMOST = ax.frontmost_app  # (the fake below swaps it)
 
 
 # ---- a fake Accessibility layer ---------------------------------------------------------------------------
@@ -1207,3 +1208,25 @@ def test_the_choke_points_are_refused_while_effects_are_off(monkeypatch):
     with pytest.raises(effects.EffectRefused):
         ax._set(object(), "AXValue", "x", "write something")
 
+
+
+def test_a_labelled_look_ends_at_the_first_exact_match(fake, demo):
+    n_all, (_n, _f, every) = calls(fake, ax.window_elements)
+    n, (_n, _f, els) = calls(fake, lambda: ax.window_elements(early_exit="tool 2"))
+    assert els[-1].title == "Tool 2" and n < n_all / 4 and len(els) < len(every)
+    assert els[-1].actions == ["AXPress"]  # (read while walking: the gate and click_text use them)
+
+
+def test_something_frontmost_for_a_moment_is_told_by_how_it_runs_not_its_name(monkeypatch, fake):
+    import AppKit
+
+    panel = El("AXApplication", pid=31)
+    fake.add(31, panel)  # a notification: no windows, not a regular app
+    monkeypatch.setattr(focus, "front_app", lambda: ("Banners", 31))
+    monkeypatch.setattr(ax, "regular", lambda pid: pid != 31)
+    bar = SimpleNamespace(localizedName=lambda: "Editor", processIdentifier=lambda: 8)
+    monkeypatch.setattr(AppKit, "NSWorkspace", SimpleNamespace(sharedWorkspace=lambda: SimpleNamespace(menuBarOwningApplication=lambda: bar)))
+    monkeypatch.setattr(ax, "NSWorkspace", AppKit.NSWorkspace)
+    assert _REAL_FRONTMOST() == ("Editor", 8)
+    panel.add(window("Search"))  # …unless the user is in a window of it
+    assert _REAL_FRONTMOST() == ("Banners", 31)

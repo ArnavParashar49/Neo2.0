@@ -262,7 +262,7 @@ async def open_app(name: str) -> str:
                 if code == 0:
                     browser = default_browser()
                     ok, real = await bring_front(browser) if browser else (False, "")
-                    set_target(real or front_name())  # the browser that took the URL
+                    set_target(real or await asyncio.to_thread(front_name))  # the browser that took the URL
                     return f"No app called {name!r}; opened {site} in your browser"
             else:
                 return f"Error: {name!r} isn't an installed app and {host} doesn't exist"
@@ -270,8 +270,9 @@ async def open_app(name: str) -> str:
             ok, real = await bring_front(name)
             set_target(real)
             if not ok:
+                front = await asyncio.to_thread(front_name)
                 return ask_user(
-                    f"{real} is open but macOS kept {front_name() or 'another app'} in front — "
+                    f"{real} is open but macOS kept {front or 'another app'} in front — "
                     f"click {real} (I won't type anywhere else)."
                 )
             return f"Opened {real}"
@@ -285,7 +286,9 @@ async def open_app(name: str) -> str:
         if browser:
             ok, real = await bring_front(browser)
             set_target(real)
-            return f"Opened {name} in {real}" if ok else f"Opened {name} in {real} (it may be behind {front_name()})"
+            if ok:
+                return f"Opened {name} in {real}"
+            return f"Opened {name} in {real} (it may be behind {await asyncio.to_thread(front_name)})"
     set_target(await settle_opened(name, before))  # then whatever took it is where "type ..." goes next
     return f"Opened {name}"
 
@@ -306,13 +309,14 @@ def default_browser() -> str:
 async def activate(name: str) -> str:
     """Bring the app to the front and wait until it *is* frontmost, so the next ax_tree /
     type_text acts on it rather than on whatever was in front a moment ago."""
-    if _running(name) is None:
+    if await asyncio.to_thread(_running, name) is None:
         return f"Error: {name} is not running"
     ok, real = await bring_front(name, wait=0.3)
     set_target(real)
     if ok:
         return f"Activated {real} (frontmost)"
-    return ask_user(f"macOS kept {front_name() or 'another app'} in front instead of {real} — click {real}.")
+    front = await asyncio.to_thread(front_name)
+    return ask_user(f"macOS kept {front or 'another app'} in front instead of {real} — click {real}.")
 
 
 async def quit_app(name: str) -> str:
@@ -331,7 +335,9 @@ async def open_url(url: str, browser_id: str = "", browser_name: str = "") -> st
     if browser:
         ok, real = await bring_front(browser)
         set_target(real)
-        return f"Opened {url} in {real}" if ok else f"Opened {url} in {real} (it may be behind {front_name()})"
+        if ok:
+            return f"Opened {url} in {real}"
+        return f"Opened {url} in {real} (it may be behind {await asyncio.to_thread(front_name)})"
     return f"Opened {url}"
 
 

@@ -516,27 +516,15 @@ def is_neo(pid: int, name: str = "") -> bool:
         return False
 
 
-# Transient system UI that can be "frontmost" for a moment without being what the user works in.
-_TRANSIENT = {
-    "UserNotificationCenter",
-    "NotificationCenter",
-    "Notification Center",
-    "Control Center",
-    "Spotlight",
-    "loginwindow",
-    "Dock",
-}
-
-
 @pooled
 def frontmost_app() -> tuple[str, int]:
-    """The app the user is working in. A passing notification that happens to be frontmost is
-    skipped for the menu-bar app — but a system dialog the user is actually in (it has a
-    focused window) is kept."""
+    """The app the user is working in. Something frontmost for a moment that isn't a regular app
+    (a notification, Spotlight, the Control Center — told by how it runs, not by its name) is
+    skipped for the menu-bar app, unless it has a focused window the user is in (a system dialog)."""
     from neo.tools.computer.focus import front_app
 
     name, pid = front_app()  # always current, unlike NSWorkspace.frontmostApplication
-    if name in _TRANSIENT or not pid:
+    if not pid or not regular(pid):
         has_window = bool(pid) and _attr(_app_el(pid), AS.kAXFocusedWindowAttribute) is not None
         if not has_window:
             app = NSWorkspace.sharedWorkspace().menuBarOwningApplication()
