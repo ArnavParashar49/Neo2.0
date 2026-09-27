@@ -184,6 +184,11 @@ A 54-agent audit found 45 gaps across security, reliability, packaging, onboardi
 - `neo2/core/reflex/templates_hi.py`: romanised-Hindi templates for every class with explicit labels (Hinglish destructive recall was 0.17–0.33) and 250 Hinglish + 50 Devanagari stop phrases, added to `dataset.build()` as NEO's own rows.
 - Leyzer (the only public open_app / search_site set) is opt-in: the repository hosting its data is CC-BY-NC-ND although its HF card says CC-BY. `sentence_types` is opt-in too: it states no licence.
 
+### One name: neo2 (2026-09-27)
+
+- NEO's package moved into the library's: `neo2.core` (it was the top-level `neo`, which NeuralEnsemble's PyPI `neo` also installs). The distribution is `neo2` (2.1.0, unpublished until the owner publishes it); `python -m neo2` is NEO.app's core, and NEO.app starts it that way (its orphan check also knows an older app's core). Unchanged: `~/.neo`, every `NEO_*` variable, the bundle id, the websocket protocol, the audit log, the memory database and the `neo` / `neo.audit` logger names.
+- `scripts/codemod_neo2.py` did the rewrite and runs again after merging a branch that predates it (idempotent; lists what it won't decide). A checkout's `neo` shim keeps old imports and the old `-m` entry points working, as the same modules, with one DeprecationWarning; the wheel has no `neo`. `scripts/install-app.sh` replaces the old `neo` distribution in NEO.app's runtime.
+
 ### Next
 
 - Developer ID signing + notarization, so the app can be shared (bundle-id signing already keeps permissions across local rebuilds).

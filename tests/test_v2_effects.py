@@ -781,7 +781,7 @@ def test_the_suite_widens_nothing():
 def test_the_environment_cannot_widen_the_suite():
     """NEO_TEST_RENDER=1 left exported in a shell once let every test reach the network and start
     Chromium; NEO_REFLEX=laya would load the 1.7 GB model into any test that asked the reflex."""
-    root = Path(effects.__file__).resolve().parent.parent
+    root = Path(effects.__file__).resolve().parents[2]  # neo2/core/effects.py → the checkout
     env = {**os.environ, "NEO_TEST_RENDER": "1", "NEO_REFLEX": "laya", "NEO_VOICE": "local"}
     here = "tests/test_v2_effects.py::test_the_suite_widens_nothing"
     run = [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", here]
@@ -928,7 +928,7 @@ def test_a_spy_that_calls_the_real_api_is_no_fake(shape, s):
 def test_a_clean_process_is_neo_app_and_the_switch_turns_it_off(tmp_path):
     """Detected for real, not patched: a process that isn't pytest and doesn't set NEO_NO_EFFECTS
     has effects on and no audit hook; with NEO_NO_EFFECTS=1 a program it starts is refused."""
-    root = Path(effects.__file__).resolve().parent.parent
+    root = Path(effects.__file__).resolve().parents[2]  # neo2/core/effects.py → the checkout
     env = {k: v for k, v in os.environ.items() if k not in ("PYTEST_CURRENT_TEST", "NEO_NO_EFFECTS")}
     env["PYTHONPATH"] = str(root)
     marker = tmp_path / "ran"

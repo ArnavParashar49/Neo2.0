@@ -232,10 +232,11 @@ NEO's agent — its tools, its safety rules and its confirmation gate — is als
 
 ### Install
 
-Python 3.12. The distribution is still named `neo` (the move to `neo2` on PyPI hasn't happened yet), so install it from GitHub or a checkout, with the extras you need:
+Python 3.12. The distribution is `neo2`; install it with the extras you need:
 
 ```bash
-pip install "neo2[web,openai] @ git+https://github.com/ArnavParashar49/Neo2.0"
+pip install "neo2[web,openai]"
+pip install "neo2[web,openai] @ git+https://github.com/ArnavParashar49/Neo2.0"   # or the latest from GitHub
 uv pip install -e ".[web,openai]"      # or from a checkout
 ```
 
@@ -251,7 +252,9 @@ uv pip install -e ".[web,openai]"      # or from a checkout
 | `embeddings` | local embeddings for memory recall |
 | `app` | everything NEO.app runs. `all` is `app` plus `mcp` and `langchain`. |
 
-It also installs `neo`, the package NEO.app runs, as a top-level package. Until the rename, don't install it next to NeuralEnsemble's `neo`, which uses the same folder name.
+NEO.app's own package comes inside it, as `neo2.core`: nothing but `neo2` is installed at the top level. (Before 2.1 it was a top-level `neo`, the folder NeuralEnsemble's `neo` uses too.)
+
+NEO logs to the `neo` logger, the name it always had: a module logs as `neo.<module>`, and the audit lines go to `neo.audit`. The library's own lines go to `neo2` (the MCP server's to `neo2.mcp`). Nothing is printed unless your app configures logging.
 
 The snippets below use top-level `await`: run them inside an `async def`, or in `python -m asyncio`.
 
@@ -474,17 +477,19 @@ An agent with the Mac tools (`tools="mac"`) clicks and types on the real desktop
 ## Project layout
 
 ```
-neo2/core/
-  agent/      loop.py (the one agent loop) · session.py (routing) · confirm.py · registry.py · prompt.py
-  providers/  gemini.py · openai_compat.py (Groq, local) · claude.py · base.py (neutral message format)
-  reflex/     laya_reflex.py · features.py · finetune.py · generate.py · dataset.py · schema.py · templates_hi.py · hf_data.py + sources.py (public data)
-  tools/      computer/ (ax, input, screen, apps, shell) · browser.py · browser_live.py (the chat's live card) · system.py · web.py · memory_tool.py
-  voice/      wake.py · local.py · live.py · audio.py · pipeline.py
-  memory/     store.py (SQLite + FTS5 + vectors, playbooks, sessions) · embed.py · summarize.py
-  server/     ws.py (websocket to the overlay)
-neo2/         the library other apps embed: sdk/ (AsyncAgent, Agent, host tools) · adapters/ · mcp/ · providers.py
-ui/           Tauri 2 + React overlay (src/App.tsx, src/ws.ts, src-tauri/src/lib.rs)
-tests/        2,100+ tests, no network or real model (tests/sdk: the library)
+neo2/           the package: `python -m neo2` is NEO.app's core
+  core/         NEO itself (the top-level `neo` before 2.1)
+    agent/      loop.py (the one agent loop) · session.py (routing) · confirm.py · registry.py · prompt.py
+    providers/  gemini.py · openai_compat.py (Groq, local) · claude.py · base.py (neutral message format)
+    reflex/     laya_reflex.py · features.py · finetune.py · generate.py · dataset.py · schema.py · templates_hi.py · hf_data.py + sources.py (public data)
+    tools/      computer/ (ax, input, screen, apps, shell) · browser.py · browser_live.py (the chat's live card) · system.py · web.py · memory_tool.py
+    voice/      wake.py · local.py · live.py · audio.py · pipeline.py
+    memory/     store.py (SQLite + FTS5 + vectors, playbooks, sessions) · embed.py · summarize.py
+    server/     ws.py (websocket to the overlay)
+  sdk/ · adapters/ · mcp/ · providers.py    the library other apps embed (AsyncAgent, Agent, host tools)
+neo             a checkout's compatibility shim for the old name (not in the wheel)
+ui/             Tauri 2 + React overlay (src/App.tsx, src/ws.ts, src-tauri/src/lib.rs)
+tests/          2,100+ tests, no network or real model (tests/sdk: the library)
 ```
 
 ## Development
@@ -496,6 +501,8 @@ cd ui && npx tsc --noEmit && (cd src-tauri && cargo check)
 ```
 
 The suite can't act on your Mac: in NEO's own test runs (`tests/conftest.py` turns the switch on first thing, and so does any pytest run of NEO from its source tree), `neo2/core/effects.py` refuses every real effect (opening apps or pages, AppleScript, keystrokes and clicks, Accessibility actions, sound, permission prompts, model and web requests including web searches and loopback servers the suite didn't start, loading Laya or the on-device voice…) with `EffectRefused`, so a test fakes the step it needs; a test that means the real thing opts in for itself with `with neo2.core.effects.allow(kind):`. A scratch script gets the same with `NEO_NO_EFFECTS=1` in its environment (plus `NEO_DATA_DIR` pointing somewhere temporary), and never reads `~/.neo/.env` or the checkout's `.env`; NEO.app never sets it.
+
+NEO's package moved from `neo/` to `neo2/core/` in 2.1 (the distribution from `neo` to `neo2`). A checkout keeps a small `neo` shim, so an old import or `python -m neo` still works, with a DeprecationWarning, as the very same modules; the wheel has no `neo`. After merging a branch that still uses the old paths, run `python scripts/codemod_neo2.py` and review its diff: it rewrites imports, module paths in strings and docs, and `neo/…` paths, and lists anything it can't decide (`--check` changes nothing). A checkout's venv from before 2.1: `uv pip uninstall neo`, then install again; `scripts/install-app.sh` does the same for NEO.app's runtime. <!-- neo2-codemod: keep (names the old paths on purpose) -->
 
 An app with NEO installed isn't one of NEO's test runs, even under its own pytest: its programs and connections, and the actions its users approve for its agents, happen for real. To refuse them in its tests, it starts the test process with `NEO_NO_EFFECTS=1`. That covers the whole process, the app's own programs and connections too, and it takes effect when NEO is first imported. Wrap each step a test really means to make in `with neo2.core.effects.allow("network"):` (or another kind). The allowance is process-wide while the block runs and ends with it.
 

@@ -226,6 +226,14 @@ def test_what_it_refuses():
     assert [line for line, _ in out.refused] == [1] and out.text.startswith('if name.startswith("neo.")')
     out = py('for pkg in ("neo2", "neo"):\n    pass\nassert "/site/neo/" in f\nURL = "https://x.org/neo/y"\n')
     assert [line for line, _ in out.refused] == [1, 3]
+    out = py("ROOT = Path(effects.__file__).resolve().parent.parent\n")  # was the checkout, now neo2/
+    assert [line for line, _ in out.refused] == [1]
+    assert cm.rewrite_python("ROOT = Path(__file__).resolve().parent.parent\n", CTX, in_core=True).refused
+    assert not py("ROOT = Path(__file__).resolve().parents[1]\n").refused  # a test's own file
+    assert not py("ROOT = Path(effects.__file__).resolve().parents[2]\n").refused
+    three_up = "root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))\n"
+    assert not cm.rewrite_python(three_up, CTX, in_core=True).refused
+    assert cm.rewrite_python(three_up.replace("os.path.dirname(os.path.abspath", "os.path.abspath"), CTX, in_core=True).refused
     out = py("def f(:\n")  # not Python: left alone, and said so
     assert out.refused and out.text == "def f(:\n"
 

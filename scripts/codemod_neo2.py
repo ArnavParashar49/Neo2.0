@@ -84,6 +84,12 @@ R_IMPORT_BARE = re.compile(r"(?<![\w.])import\s+neo(?![\w.])")
 R_TOML_NAME = re.compile(r'(?m)^(?P<pre>name\s*=\s*)"neo"(?P<post>\s*(#.*)?)$')
 R_TOML_INCLUDE = re.compile(r'(?m)^(?P<pre>include\s*=\s*\[[^\]\n]*?)"neo\*"')
 
+# two folders up from a module's file: the checkout from neo/x.py, only neo2/ from neo2/core/x.py
+R_UP_TWO = re.compile(
+    r"(?<!\.parent)\.parent\.parent\b(?!\.parent)|\.parents\[1\]"
+    r"|(?<!dirname\(os\.path\.)dirname\(\s*os\.path\.dirname\((?!\s*os\.path\.dirname)"
+)
+R_MODULE_FILE = re.compile(r"\w\.__file__\b")
 MODULE_FUNCS = {"import_module", "importorskip", "find_spec", "__import__", "reload", "run_module"}
 
 
@@ -227,7 +233,7 @@ def _literal(tok: tokenize.TokenInfo) -> object:
         return None
 
 
-def rewrite_python(src: str, ctx: Ctx) -> Outcome:
+def rewrite_python(src: str, ctx: Ctx, *, in_core: bool = False) -> Outcome:
     if skipped(src):
         return Outcome(src)
     starts = [0] + [m.end() for m in re.finditer("\n", src)]
@@ -408,6 +414,13 @@ def rewrite_python(src: str, ctx: Ctx) -> Outcome:
         e, r = text_edits(src[a:b], ctx, a)
         edits += e
         refused += [(line_of(src, o), why) for o, why in r]
+
+    # A path worked out from a module's own file, two folders up: the package is a level deeper now
+    for n, line in enumerate(src.split("\n"), 1):
+        if "__file__" in line and R_UP_TWO.search(line) and (in_core or R_MODULE_FILE.search(line)):
+            refused.append(
+                (n, "two folders up from a module's file: neo2/core is one level deeper than neo/ was")
+            )
 
     keep = keep_lines(src)
     new, counts = apply(src, edits, keep)
@@ -598,7 +611,7 @@ def list_files(root: Path, only: list[str]) -> list[str]:
 def rewrite_file(rel: str, text: str, ctx: Ctx) -> Outcome:
     suffix = Path(rel).suffix
     if suffix in (".py", ".pyi"):
-        return rewrite_python(text, ctx)
+        return rewrite_python(text, ctx, in_core=rel.startswith(NEW_DIR + "/"))
     if rel == "pyproject.toml":
         return rewrite_pyproject(text, ctx)
     return rewrite_text(text, ctx, light=suffix in LIGHT)
