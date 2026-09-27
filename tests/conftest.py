@@ -1,4 +1,5 @@
-"""Test-wide defaults: no model downloads, no GPU, no network."""
+"""Test-wide defaults: no model downloads, no GPU, no network, no real effects on the Mac (neo/effects.py
+refuses every one under pytest: a test fakes the step it needs instead)."""
 
 import os
 
@@ -9,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from neo import effects
 from neo.config import Settings
 
 # A scratch conftest doing `from tests.conftest import *` must get the underscore fixtures too —
@@ -20,7 +22,6 @@ __all__ = [
     "_fresh_learning_state",
     "_no_shadow_dry_runs",
     "_app_mode",
-    "_no_real_browser",
     "_accessibility_on",
     "_no_task_grants",
 ]
@@ -30,6 +31,9 @@ Settings.model_config["env_file"] = None
 for _k in ("GEMINI_API_KEY", "GEMINI_API_KEYS", "GROQ_API_KEY", "ANTHROPIC_API_KEY", "NEO_DECIDE_MODES"):
     os.environ.pop(_k, None)
 
+if os.environ.get("NEO_TEST_RENDER") == "1":  # the one real check: a headless Chromium reading a public page
+    effects.allow("browser", "network")
+
 from neo.decide import shadow as _shadow  # noqa: E402
 
 _REAL_LATER = _shadow.later
@@ -37,11 +41,12 @@ _REAL_LATER = _shadow.later
 
 @pytest.fixture(autouse=True)
 def _isolated_data_dir(tmp_path, monkeypatch):
-    """Every test gets its own ~/.neo: nothing a test does may touch the user's real data
-    (memory, audit log, Laya's training examples, cooldowns)."""
+    """Every test gets its own ~/.neo (and notes folder): nothing a test does may touch the user's real
+    data (memory, audit log, Laya's training examples, cooldowns, notes)."""
     from neo import config
 
     monkeypatch.setenv("NEO_DATA_DIR", str(tmp_path / "neo_data"))
+    monkeypatch.setenv("NEO_NOTES_DIR", str(tmp_path / "notes"))  # never the user's ~/Documents
     monkeypatch.setattr(config, "_settings", None)
     yield
     monkeypatch.setattr(config, "_settings", None)
@@ -109,25 +114,13 @@ def _app_mode(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def _no_real_browser(monkeypatch):
-    """web_fetch renders a page its scripts build in a headless Chromium: never inside the suite
-    (the one real check runs with NEO_TEST_RENDER=1). Tests fake the browser instead."""
-    if os.environ.get("NEO_TEST_RENDER") == "1":
-        return
-    from neo.tools import render
-
-    async def refuse():
-        raise render.RenderError("no real browser in the test suite")
-
-    monkeypatch.setattr(render, "_start_playwright", refuse)
-
-
-@pytest.fixture(autouse=True)
 def _accessibility_on(monkeypatch):
     """The suite never depends on whether this Mac granted the test runner Accessibility: it is
     on, and a test that needs it off says so (monkeypatching ax.is_trusted)."""
-    from neo.tools.computer import ax
-
+    try:
+        from neo.tools.computer import ax
+    except ImportError:  # no macOS frameworks (the core install's portable run): nothing to fake
+        return
     monkeypatch.setattr(ax, "is_trusted", lambda: True)
 
 

@@ -302,6 +302,7 @@ def test_decide_modes_never_stop_neo_from_starting(monkeypatch, raw, want):
     from neo import config
 
     monkeypatch.setenv("NEO_DECIDE_MODES", raw)
+    monkeypatch.delenv("NEO_NOTES_DIR", raising=False)  # the release default, not the test's own folder
     monkeypatch.setattr(config, "_settings", None)
     s = config.settings()
     assert s.decide_modes == want and s.decide_kind_routing is False

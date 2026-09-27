@@ -159,6 +159,9 @@ async def test_nothing_it_loads_goes_to_a_local_address(tmp_path, monkeypatch):
     fake.async_playwright = lambda: _PW()  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "playwright.async_api", fake)
     import neo.tools.browser as br
+    from neo import effects
+
+    monkeypatch.setattr(effects, "_allowed", {"browser"})  # the Playwright above is the test's own fake
 
     rt = make_runtime(tmp_path / "a", "a")
     with runtime.bind(rt.scope()):

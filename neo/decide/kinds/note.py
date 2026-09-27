@@ -28,7 +28,8 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from neo.config import settings
+from neo import effects
+from neo.config import NOTES_DIR, settings
 from neo.decide import aescript, axkit, engine, run
 from neo.decide.run import Effect, Outcome, Req, Result
 
@@ -177,6 +178,8 @@ async def fallback(req: Req, key: str) -> Outcome | None:
         return None
     title, body, titled = _parts(req)
     folder = settings().notes_dir
+    if folder == NOTES_DIR.resolve():  # the user's own Documents (a test or a scratch run sets its own)
+        effects.guard("files", f"save a note file in {folder}")
     stem = f"{date.today().isoformat()} {_slug(title)}"
     content = f"# {title}\n\n{body}\n" if titled and body != title else f"{body}\n"
     for _race in range(3):  # another file may take the free name between the look and the write

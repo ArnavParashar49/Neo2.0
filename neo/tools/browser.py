@@ -37,7 +37,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import quote, quote_plus, urljoin, urlsplit
 
-from neo import runtime
+from neo import effects, runtime
 from neo.agent import confirm
 from neo.agent.registry import ToolContext, ToolOutput
 from neo.agent.registry import tool as _register
@@ -349,6 +349,7 @@ class _Browser:
     async def _launch(self) -> None:
         from playwright.async_api import async_playwright
 
+        effects.guard("browser", "start NEO's Chromium")
         profile = settings().data_dir / "browser"
         profile.mkdir(mode=0o700, parents=True, exist_ok=True)
         pw = await async_playwright().start()

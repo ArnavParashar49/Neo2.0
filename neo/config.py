@@ -13,7 +13,6 @@ from __future__ import annotations
 import json
 import os
 import re
-import sys
 import unicodedata
 from collections.abc import Mapping
 from pathlib import Path
@@ -22,13 +21,14 @@ from typing import Annotated, Any, Literal, get_args
 from pydantic import Field, ValidationError, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, PydanticBaseSettingsSource, SettingsConfigDict
 
-from neo import runtime
+from neo import effects, runtime
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 # Keys and settings: ~/.neo/.env (where NEO.app's installed runtime looks), and a checkout's own
 # .env on top when running from source (a checkout has a pyproject.toml; installed as a package,
 # PROJECT_ROOT is site-packages, whose .env is nobody's).
 USER_ENV = Path.home() / ".neo" / ".env"
+NOTES_DIR = Path.home() / "Documents" / "NEO Notes"  # where a note goes that no notes app could take
 
 
 def _env_files(root: Path) -> tuple[Path, ...]:
@@ -154,7 +154,7 @@ class Settings(BaseSettings):
     # NEO_DECIDE_MODES="add_event=on,read_calendar=shadow"
     decide_modes: Annotated[dict[str, DecideMode], NoDecode] = {}
     decide_kind_routing: bool = False  # Laya may name a task kind no fast path covered (after its eval)
-    notes_dir: Path = Path.home() / "Documents" / "NEO Notes"  # a note no notes app could take
+    notes_dir: Path = NOTES_DIR
     # "play …": "web" plays it in the browser (on play_site) unless the user names an app ("on
     # Spotify"); "apps" lets NEO pick among the players on this Mac first. The user's choice.
     play_default: Literal["web", "apps"] = "web"
@@ -325,7 +325,7 @@ class LibrarySettings(Settings):
             _refuse_neo_home(self.models_path, "models_path")
         if self.memory_path is not None:
             _refuse_neo_home(self.memory_path, "memory_path")
-        _refuse_real_data_under_tests(self.data_dir)
+        _refuse_real_data_without_effects(self.data_dir)
         _refuse_foreign_folder(self.data_dir)
         if self.memory_path is not None:
             _refuse_foreign_db(self.memory_path)
@@ -542,7 +542,7 @@ def settings() -> Settings:
     global _settings
     if _settings is None:
         s = Settings()
-        _refuse_real_data_under_tests(s.data_dir)
+        _refuse_real_data_without_effects(s.data_dir)
         s.ensure_dirs()
         _settings = s
     return _settings
@@ -562,11 +562,13 @@ def decide_mode(kind: str) -> DecideMode:
     return settings().decide_modes.get(kind, DECIDE_DEFAULTS.get(kind, "legacy"))
 
 
-def _refuse_real_data_under_tests(data_dir: Path) -> None:
-    """A test (or a scratch harness borrowing the suite's fixtures) that isn't isolated must fail
-    loudly, never read, train on or erase the user's real memory. This happened once: a scratch
-    conftest skipped the isolation fixture and an erase test wiped the real ~/.neo."""
-    if "pytest" not in sys.modules and "PYTEST_CURRENT_TEST" not in os.environ:
+def _refuse_real_data_without_effects(data_dir: Path) -> None:
+    """A test (or a scratch harness borrowing the suite's fixtures, or a scratch script run with
+    NEO_NO_EFFECTS=1) that isn't isolated must fail loudly, never read, train on or erase the user's
+    real memory. This happened once: a scratch conftest skipped the isolation fixture and an erase
+    test wiped the real ~/.neo."""
+    why = effects.why_off()
+    if not why:
         return
     if (real := _in_neo_home(data_dir, moved=False)) is not None:  # NEO_DATA_DIR is the test's own
-        raise RuntimeError(f"refusing to use the real {real} under pytest: set NEO_DATA_DIR to a temporary directory")
+        raise RuntimeError(f"refusing to use the real {real} ({why}): set NEO_DATA_DIR to a temporary directory")

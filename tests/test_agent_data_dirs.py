@@ -77,7 +77,7 @@ def test_the_login_home_counts_even_when_home_is_moved(tmp_path, monkeypatch):
         with pytest.raises(ValidationError, match=NEVER):
             LibrarySettings(data_dir=d)
     with pytest.raises(RuntimeError, match="refusing to use the real"):
-        config._refuse_real_data_under_tests(real / ".neo")
+        config._refuse_real_data_without_effects(real / ".neo")
 
 
 def test_models_never_go_into_neo_home(home, tmp_path):
@@ -89,9 +89,9 @@ def test_models_never_go_into_neo_home(home, tmp_path):
 
 def test_the_pytest_guard_sees_the_data_volume_too(home):
     with pytest.raises(RuntimeError, match="refusing to use the real"):
-        config._refuse_real_data_under_tests(_via_data_volume(home / ".neo"))
+        config._refuse_real_data_without_effects(_via_data_volume(home / ".neo"))
     with pytest.raises(RuntimeError, match="refusing to use the real"):
-        config._refuse_real_data_under_tests(home)  # a data dir holding ~/.neo
+        config._refuse_real_data_without_effects(home)  # a data dir holding ~/.neo
 
 
 def test_a_folder_of_someone_elses_files_is_refused(tmp_path):

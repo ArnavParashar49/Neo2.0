@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Literal
 
+from neo import effects
 from neo.decide._objc import pooled
 
 __all__ = [
@@ -161,7 +162,9 @@ def _the_store() -> Any:
     global _store_obj
     with _store_lock:
         if _store_obj is None:
-            _store_obj = _ek().EKEventStore.alloc().init()
+            cls = _ek().EKEventStore
+            effects.guard("calendar", "open the user's Calendar and Reminders store", via=cls)
+            _store_obj = cls.alloc().init()
         return _store_obj
 
 

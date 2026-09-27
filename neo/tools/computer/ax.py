@@ -13,6 +13,8 @@ from typing import Any
 import ApplicationServices as AS
 from AppKit import NSWorkspace
 
+from neo import effects
+
 # Roles worth showing to the model. Containers are walked but not listed unless titled.
 _INTERACTIVE = {
     "AXButton",
@@ -287,6 +289,7 @@ def press(eid: str) -> str:
     action = "AXPress" if "AXPress" in e.actions else (e.actions[0] if e.actions else "")
     if not action:
         return f"Error: {eid} has no actions; try clicking its center {tuple(map(int, e.center))}."
+    effects.guard("accessibility", f"press {action} in another app's UI", via=AS.AXUIElementPerformAction)
     err = AS.AXUIElementPerformAction(e.ref, action)
     return (
         f"Pressed {eid} ({e.role.removeprefix('AX')} {e.title!r})"
@@ -299,6 +302,7 @@ def set_value(eid: str, value: str) -> str:
     e = get(eid)
     if not e:
         return f"Error: unknown element {eid} — ids come from the latest ax_tree; call it again."
+    effects.guard("accessibility", "set a value in another app's UI", via=AS.AXUIElementSetAttributeValue)
     err = AS.AXUIElementSetAttributeValue(e.ref, AS.kAXValueAttribute, value)
     return (
         f"Set {eid} value."
@@ -410,6 +414,7 @@ def press_element(e: Element) -> str:
     action = "AXPress" if "AXPress" in e.actions else ""
     if not action:
         return "Error: no press action"
+    effects.guard("accessibility", f"press {action} in another app's UI", via=AS.AXUIElementPerformAction)
     err = AS.AXUIElementPerformAction(e.ref, action)
     return "Pressed" if err == 0 else f"Error: AX action failed ({err})"
 

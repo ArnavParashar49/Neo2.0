@@ -14,6 +14,8 @@ import ctypes
 import ctypes.util
 import subprocess
 
+from neo import effects
+
 _SKYLIGHT = "/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight"
 _HISERVICES = "/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices"
 _USER_GENERATED = 0x200  # kCPSUserGenerated: the switch counts as the user's own
@@ -66,6 +68,7 @@ def force_front(pid: int) -> bool:
     if hi.GetProcessForPID(pid, ctypes.byref(psn)) != 0:
         return False
     wid = front_window_id(pid)
+    effects.guard("focus", f"bring process {pid} to the front", via=sl._SLPSSetFrontProcessWithOptions)
     if sl._SLPSSetFrontProcessWithOptions(ctypes.byref(psn), wid, _USER_GENERATED) != 0:
         return False
     if wid:
@@ -84,6 +87,7 @@ def force_front(pid: int) -> bool:
         app = AS.AXUIElementCreateApplication(pid)
         err, win = AS.AXUIElementCopyAttributeValue(app, "AXFocusedWindow", None)
         if err == 0 and win is not None:
+            effects.guard("focus", f"raise process {pid}'s window", via=AS.AXUIElementPerformAction)
             AS.AXUIElementPerformAction(win, "AXRaise")
     except Exception:  # noqa: BLE001
         pass

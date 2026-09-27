@@ -274,6 +274,10 @@ async with neo2.AsyncAgent(neo2.AgentConfig(tools="web"), provider=brain) as neo
 
 `AgentConfig` takes the tools as presets, globs and names: `"web"`, `"browser"`, `"mac_read"`, `"mac"`, `"memory"`, `"all"`, `"none"`, `("web", "browser_*")`. It also takes `data_dir`, `memory=True` or `MemoryConfig(path=...)`, `persona`, `instructions`, `protected_apps`, `extra_secret_paths` and the step and time limits. `AgentConfig.from_env()` reads keys and settings from the environment, but only when you call it. Each `conversation=` is its own thread with its own gate. `pending()`, `cancel()`, `history()`, `reset()` and `forget_all()` work per agent; `forget_all()` deletes only files NEO made in the agent's folder.
 
+Each agent's brains keep what they learn to themselves: a Gemini key's quota window (in `<data_dir>/brain_cooldowns.json`), a model that was overloaded, a server's real request size. A provider object you build with `neo2.providers` keeps that in memory, in the object, and writes no file. Give each agent its own object if they must not share it. `OpenAICompatible(token_budget=...)` is the most one request may carry (prompt and answer): longer requests are trimmed to fit before they are sent.
+
+An agent's browser (`tools="browser"`) is its own Chromium with its profile in the agent's folder. It runs headless unless `browser_headless=False`, and it is never NEO.app's chat card.
+
 The sync twin needs no event loop:
 
 <!-- snippet: sync -->
@@ -321,6 +325,7 @@ The rules:
 - **Only host code approves.** Either `approve(action_id, via=neo2.Approval(channel, approver))` from your own route, or an `approver` that returns an `Approval`. Anything else declines: `None`, `True`, `"yes"`, an exception, or no answer within `approval_timeout_s` (110 s). `approver="deny"` declines everything at once; `"defer"`, the default, waits for `approve()` or `deny()`.
 - **Text never approves.** A "yes" passed to `ask()` is a new request, not an answer to the card. No tool, tool argument, exported spec, adapter or MCP tool can approve, and no action id ever appears in text a model reads.
 - **An approval runs exactly what the card showed, once.** It must come within 120 s, in the conversation that staged it. An unknown, superseded, expired or other agent's id gives `status="expired"` and runs nothing. A run that stages something new after an approval comes back as a new `needs_approval`.
+- **No "yes for this task".** NEO.app's user can answer a card for the rest of the task, so later calls of the same tool on the same app run without a card. An embedded agent never grants that: its cards offer no scope (`scopes: []`), `approve()` always covers one action, and the next one asks again, even in the same task. The task bookkeeping behind it, including the count of untrusted pages and mails a task has read, belongs to one conversation and never crosses to another conversation or agent.
 - **An approver is a person's answer.** Calling `ask()` or `stream()` from an approver raises `ApprovalReentryError`.
 - **Say where a request came from.** Pass `source="model"` when another model wrote the task; the adapters and the MCP server always do. Such a request, like one with `context=` or one that read a web page, asks first before saving to memory, opening links that could carry data out, or submitting in a chat app.
 - **Everything is audited.** Each staged, approved, denied or expired action is recorded with the agent's name and `via`, in `<data_dir>/audit.log` (mode 0600). An agent without a `data_dir` sends the records to `on_audit=` and the `neo.audit` logger.
@@ -453,14 +458,14 @@ The server speaks stdio only and opens no network listener. stdout carries nothi
 
 - **No way for a model to approve anything.** There is no approve, confirm, cancel or deny tool, tool argument, exported spec, adapter or MCP route, and no action id in text a model reads. Confirmation can't be switched off: there is no setting for it, and `NEO_CONFIRM_DESTRUCTIVE` isn't read.
 - **None of NEO.app's data.** Not `~/.neo`, NEO.app's `.env` and settings, its memory database, audit log or trained reflex, and not its `NEO_*` variables. A `data_dir`, memory file or `models_dir` inside `~/.neo` is refused, even through `from_env()`.
-- **No tools you didn't pick.** Not in a model's call, a fast path, `more_tools`, or the run that continues after an approval. `play_music` isn't available to embedded agents, and erasing everything is never a tool: `forget_all()` is host code and removes only the agent's own files.
+- **No tools you didn't pick.** Not in a model's call, a fast path, `more_tools`, or the run that continues after an approval. `play_music` and `browse` aren't available to embedded agents (their state is NEO.app's, process-wide), and erasing everything is never a tool: `forget_all()` is host code and removes only the agent's own files.
 - **None of NEO.app's own machinery.** Laya (the local reflex model) and its learning, voice, the overlay and macOS permission prompts stay in NEO.app, and task kinds run their plain scripts.
 - **No secrets.** NEO's file and shell tools don't touch SSH and GPG keys, `.env` files, cloud credentials, keychains, browser profiles, any agent's folder or memory file, or `extra_secret_paths`. Commands don't inherit API keys.
 - **No private network.** NEO's browser and `web_fetch` never reach private, loopback or link-local addresses.
 
 ### `protected_apps`
 
-An agent with the Mac tools (`tools="mac"`) clicks and types on the real desktop. NEO's input tools refuse any target owned by NEO's overlay or by an app in `AgentConfig(protected_apps=(...))`, matched by name, bundle id or executable. When they can't tell who owns a target, they refuse too. Keep your approval UI off that desktop or list your app there, or NEO could press your own "Approve" button. In NEO.app the setting is `NEO_PROTECTED_APPS='["Some App"]'`. The desktop is shared, so run one Mac-enabled agent per desktop.
+An agent with the Mac tools (`tools="mac"`) clicks and types on the real desktop. macOS asks your app's process for Accessibility, not NEO.app: while it is off, the first tool that needs it ends the request with `status="needs_user"` and a message that names your app (`neo2.macos.permission_status()` and `request_permissions()` check and ask). NEO's input tools refuse any target owned by NEO's overlay or by an app in `AgentConfig(protected_apps=(...))`, matched by name, bundle id or executable. When they can't tell who owns a target, they refuse too. Keep your approval UI off that desktop or list your app there, or NEO could press your own "Approve" button. In NEO.app the setting is `NEO_PROTECTED_APPS='["Some App"]'`. The desktop is shared, so run one Mac-enabled agent per desktop.
 
 ## Project layout
 
@@ -485,6 +490,10 @@ tests/        2,100+ tests, no network or real model (tests/sdk: the library)
 ruff check . && ruff format .
 cd ui && npx tsc --noEmit && (cd src-tauri && cargo check)
 ```
+
+The suite can't act on your Mac: under pytest, `neo/effects.py` refuses every real effect (opening apps or pages, AppleScript, keystrokes and clicks, Accessibility actions, sound, permission prompts, model and web requests…) with `EffectRefused`, so a test fakes the step it needs. A scratch script gets the same with `NEO_NO_EFFECTS=1` (plus `NEO_DATA_DIR` pointing somewhere temporary); NEO.app never sets it.
+
+The switch is process-wide, so an app that embeds NEO sees it too. While one of its tests runs (pytest sets `PYTEST_CURRENT_TEST`), real effects are refused for that whole process. Fake them, or call `neo.effects.allow("network")` (or another kind) for the ones the test means to make. Outside a test run, an app with an agent keeps its effects even if pytest happens to be imported, so its agents' approved actions really happen. `NEO_NO_EFFECTS=1` turns them off anywhere.
 
 ## Status and roadmap
 

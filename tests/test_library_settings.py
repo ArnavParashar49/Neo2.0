@@ -371,7 +371,10 @@ def test_the_browser_follows_the_agents_settings(two, monkeypatch):
     fake = types.ModuleType("playwright.async_api")
     fake.async_playwright = lambda: _PW()  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "playwright.async_api", fake)
+    from neo import effects
     from neo.tools.browser import _browser
+
+    monkeypatch.setattr(effects, "_allowed", {"browser"})  # the Playwright above is the test's own fake
 
     a, _ = two
     headed = make_runtime(a.settings.data_dir.parent / "c", "c", browser_headless=False)
