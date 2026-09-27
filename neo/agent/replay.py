@@ -9,16 +9,21 @@ already ran and what didn't work. A flow that misses twice in a row is dropped.
 
 What can be replayed is narrow on purpose:
 
-* only the user's own words start one (never a model's words: Gemini Live, an SDK host);
-* only actions whose arguments are the user's own words (an app, a menu item, a button they named)
-  or a key chord — never an element id or a position (both go stale), never text read off the
+* only the user's own words start one (never a model's words: Gemini Live, an SDK host), and only
+  as a command: words Laya reads as wanting an answer get a model;
+* only actions whose arguments are the user's own words, as they said them (an app, a menu item, a
+  button they named — punctuation and all, no control characters) or a key chord, and numbers they
+  said — never an element id, a position or "at the pointer" (all go stale), never text read off the
   screen or written by the model. A chord counts only from a run that read nothing untrusted;
 * only a run that ended done, without a question, with every action NEO saw change something, and
-  that was a command with nothing to say (neo.agent.session._quietly) — so a replay is silent too;
+  that was a command with nothing to say (neo.agent.session._quietly) — so a replay is silent too.
+  Never a run that took over from a replay or a fast path: it did only the tail of the request;
 * only in the app the flow was worked out in (the app in front when it started, by its name).
 
-Nothing is written to disk: flows live in memory, per NEO.app process, and an erase of NEO's memory
-(neo.privacy's generation) drops them all. An embedded agent never records or replays.
+Nothing is written to disk: flows live in memory, per NEO.app process. With learning off
+(NEO_LEARN=off) nothing is recorded or replayed; an erase of NEO's memory (neo.privacy) drops every
+flow; a stop during a replay, or right after a flow was learned or replayed, drops that flow. An
+embedded agent never records or replays.
 """
 
 from __future__ import annotations
@@ -27,6 +32,7 @@ import json
 import logging
 import re
 import time
+import unicodedata
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -46,6 +52,12 @@ _ID_VALUE = re.compile(r"^[A-Za-z]{1,3}\d+$")  # an element id (e12): stale by t
 _KEY = r"(?:cmd|command|ctrl|control|alt|opt|option|shift|fn|return|enter|escape|esc|tab|space|delete|backspace|up|down|left|right|home|end|pageup|pagedown|f\d{1,2}|[a-z0-9]|[\[\]\\;',./`=-])"
 _CHORD = re.compile(rf"^{_KEY}(?:\s*\+\s*{_KEY})*$", re.I)
 _WORDS = re.compile(r"[^\w\s]", re.UNICODE)
+# Positions by another name: where the pointer happens to be when the replay runs.
+_POSITION_FLAGS = frozenset({"at_pointer"})
+# Characters no one says: control characters, line breaks, text-direction overrides.
+_BIDI = frozenset("\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069\u200e\u200f")
+STOP_S = 3.0  # a stop this soon after a flow was learned or replayed says it was wrong (outcomes.EARLY_S)
+_clock = time.monotonic
 
 
 def _norm(text: str) -> str:
@@ -70,16 +82,22 @@ class Flow:
 
 _flows: dict[tuple[str, str], Flow] = {}
 _last: tuple[str, str] | None = None  # the flow the latest request recorded or replayed
+_last_at = float("-inf")  # when that flow was learned, or its replay ended (_clock)
+_running: set[tuple[str, str]] = set()  # flows being replayed right now
 
 
 def enabled() -> bool:
     """The replay lane is on (``replay_flows``; NEO_REPLAY_FLOWS=0 turns it off). On in NEO.app;
     off wherever real effects are off (a test, a scratch run) unless asked for — it reads which app
-    is in front. Never for an embedded agent."""
+    is in front. Never for an embedded agent, and never with learning off (NEO_LEARN=off: a flow is
+    something learned from the user's requests)."""
     if runtime.library_bound():
         return False
     from neo import effects
+    from neo.config import settings
 
+    if not settings().learn:
+        return False
     return bool(batch._setting("replay_flows", effects.on(), False))
 
 
@@ -90,17 +108,20 @@ def _generation() -> int:
 
 
 def forget() -> None:
-    """Drop every flow (NEO's memory was erased; a test's clean slate)."""
-    global _last
+    """Drop every flow (NEO's memory was erased — neo.privacy.forget_everything; a test's clean
+    slate)."""
+    global _last, _last_at
     _flows.clear()
-    _last = None
+    _running.clear()
+    _last, _last_at = None, float("-inf")
 
 
 def forget_last() -> None:
-    """The user stopped NEO right after a request: a flow it just learned or replayed is not
-    trusted any more."""
+    """The user said stop. During a replay, or right after a flow was learned or replayed (STOP_S),
+    that says the flow was wrong: it is dropped. A stop later on ("stop" to the music it started,
+    minutes after) says nothing about it."""
     global _last
-    if _last is not None:
+    if _last is not None and (_last in _running or _clock() - _last_at <= STOP_S):
         _flows.pop(_last, None)
     _last = None
 
@@ -123,27 +144,62 @@ def working_app() -> str:
 _CHORD_ARGS = frozenset({"keys", "key", "shortcut", "chord"})  # where a key chord may stand
 
 
-def _replayable_args(args: dict[str, Any], words: str, *, chords: bool) -> bool:
+def _said(text: str) -> str:
+    """The user's words as an argument is matched against them: case aside, one space between
+    words — punctuation kept."""
+    return " ".join((text or "").casefold().split())
+
+
+def _unsaid(s: str) -> bool:
+    """Characters no one says (a line break, a control character, a text-direction override)."""
+    return any(unicodedata.category(ch) in ("Cc", "Zl", "Zp") or ch in _BIDI for ch in s)
+
+
+def _in_words(s: str, said: str) -> bool:
+    """`s` stands in the user's words as they said them, whole words only (case aside)."""
+    return bool(s) and re.search(rf"(?<!\w){re.escape(s.casefold())}(?!\w)", said) is not None
+
+
+def _number_said(v: float, said: str) -> bool:
+    """A number the user said (its size: "scroll down 5" is dy=-5)."""
+    n = abs(v)
+    form = str(int(n)) if float(n).is_integer() else repr(float(n))
+    return re.search(rf"(?<![\w.]){re.escape(form)}(?!\w)(?!\.\d)", said) is not None
+
+
+def _replayable_args(args: dict[str, Any], text: str, *, chords: bool) -> bool:
+    """Is every argument the user's own words (`text`: their request, as they said it), a key chord
+    (`chords`: from a run that read nothing untrusted) or a number they said? Never an element id,
+    a position or "at the pointer"."""
+    said = _said(text)
     for k, v in (args or {}).items():
         if k in _PIXEL_OR_ID or k.startswith("_"):
             return False
-        if isinstance(v, bool | int | float) or v is None:
+        if v is None:
             continue
+        if isinstance(v, bool):
+            if v and k in _POSITION_FLAGS:
+                return False  # wherever the pointer happens to be: a position
+            continue
+        if isinstance(v, int | float):
+            if _number_said(v, said):
+                continue
+            return False
         if not isinstance(v, str):
             return False
-        s = v.strip()
-        if not s or _ID_VALUE.match(s):
+        if _unsaid(v) or v != " ".join(v.split()) or _ID_VALUE.match(v):
             return False
-        if _norm(s) and f" {_norm(s)} " in f" {words} ":
+        if _in_words(v, said):
             continue  # the user's own words
-        if chords and k in _CHORD_ARGS and _CHORD.match(s):
+        if chords and k in _CHORD_ARGS and _CHORD.match(v):
             continue  # a key chord (from a run that read nothing untrusted)
         return False
     return True
 
 
-def steps_of(res: Any, words: str, *, reg: Any, tainted: bool) -> tuple[tuple[str, str], ...] | None:
-    """The run's actions as a replayable flow, or None when any of it can't be replayed."""
+def steps_of(res: Any, text: str, *, reg: Any, tainted: bool) -> tuple[tuple[str, str], ...] | None:
+    """The run's actions as a replayable flow, or None when any of it can't be replayed. `text`:
+    the request, as the user said it."""
     out: list[tuple[str, str]] = []
     for st in getattr(res, "steps", []):
         t = reg.get(st.tool)
@@ -161,7 +217,7 @@ def steps_of(res: Any, words: str, *, reg: Any, tainted: bool) -> tuple[tuple[st
         )
         if not worked:
             return None  # NEO didn't see it change anything: nothing to check a replay against
-        if not _replayable_args(st.args, words, chords=not tainted):
+        if not _replayable_args(st.args, text, chords=not tainted):
             return None
         out.append((st.tool, json.dumps(st.args, sort_keys=True, ensure_ascii=False, default=str)))
     if not out or len(out) > MAX_STEPS:
@@ -191,13 +247,13 @@ class _AsResult:
 def learn(text: str, app: str, res: Any, *, reg: Any, tainted: bool) -> Flow | None:
     """Remember how a run that simply worked did it (see the module doc for what qualifies). The
     caller has checked the run was a quiet command from the user's own words."""
-    global _last
+    global _last, _last_at
     if not enabled() or not app:
         return None
     words = _norm(text)
     if not words or getattr(res, "stopped", "") != "done" or getattr(res, "question", ""):
         return None
-    steps = steps_of(res, words, reg=reg, tainted=tainted)
+    steps = steps_of(res, text, reg=reg, tainted=tainted)
     if steps is None:
         return None
     key = (words, app)
@@ -212,7 +268,7 @@ def learn(text: str, app: str, res: Any, *, reg: Any, tainted: bool) -> Flow | N
         if len(_flows) > MAX_FLOWS:
             for k, _v in sorted(_flows.items(), key=lambda kv: kv[1].at)[: len(_flows) - MAX_FLOWS]:
                 _flows.pop(k, None)
-    _last = key
+    _last, _last_at = key, _clock()
     log.info(f"[replay] learned a way to “{words[:40]}” in {app} ({len(steps)} steps, seen {f.seen}×)")
     return f
 
@@ -254,8 +310,17 @@ Invoke = Callable[[str, dict[str, Any]], Awaitable[Any]]
 async def replay(f: Flow, invoke: Invoke) -> Replayed:
     """Run the flow's actions in order through `invoke` (the registry, with the request's context),
     each checked for its effect, stopping at the first that asks the user or doesn't work."""
-    global _last
-    _last = (f.request, f.app)
+    global _last, _last_at
+    key = _last = (f.request, f.app)
+    _running.add(key)
+    try:
+        return await _replay(f, invoke)
+    finally:
+        _running.discard(key)
+        _last_at = _clock()
+
+
+async def _replay(f: Flow, invoke: Invoke) -> Replayed:
     ran: list[tuple[str, dict[str, Any], Any]] = []
     for tool, args in f.calls():
         out = await invoke(tool, args)

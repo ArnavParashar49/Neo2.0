@@ -394,13 +394,15 @@ def _d(reply=False):
     return Decision("agent_task", 0.95, False, 0.0, False, 0.0, "laya+head", reply=reply, reply_p=0.1)
 
 
-def test_quiet_requires_that_no_step_changed_nothing():
+def test_quiet_requires_that_no_step_missed():
     from neo.agent.session import _quietly
 
     ok = Step("ax_press", {"id": "e1"}, "Pressed e1.", True, _eff(True))
-    miss = Step("ax_press", {"id": "e1"}, "Pressed e1.", True, _eff(False))
+    miss = Step("click_text", {"label": "Start"}, "Clicked “Start”.", True, _eff(False))
+    said = Step("ax_press", {"id": "e1"}, "Pressed e1.", True, _eff(False, missed=True))
     assert _quietly(_d(), AgentResult("Done.", "done", [ok]))
-    assert not _quietly(_d(), AgentResult("Done.", "done", [miss]))  # "ok", but NEO saw nothing change
+    assert not _quietly(_d(), AgentResult("Done.", "done", [miss]))  # "ok", but the click changed nothing
+    assert not _quietly(_d(), AgentResult("Done.", "done", [said]))  # its Effect says it missed
     skipped = Step("hotkey", {}, "skipped: an earlier action in this turn changed the screen — look", False)
     assert _quietly(_d(), AgentResult("Done.", "done", [ok, skipped, ok]))  # a skip never ran: not a failure
 
@@ -412,12 +414,12 @@ def test_the_outcome_ledger_hears_misses_and_not_skips(monkeypatch):
     got = {}
     monkeypatch.setattr(outcomes, "agent_done", lambda job, steps, **kw: got.setdefault("steps", steps))
     res = AgentResult("Done.", "done", [
-        Step("ax_press", {}, "Pressed.", True, _eff(False)),
+        Step("click", {"x": 1, "y": 1}, "Clicked.", True, _eff(False)),
         Step("click", {}, "skipped: an earlier action in this turn changed nothing — look", False),
         Step("hotkey", {}, "Pressed cmd+n.", True),
     ])  # fmt: skip
     sess._learn_from("j1", res)
-    assert got["steps"] == [("ax_press", False), ("hotkey", True)]
+    assert got["steps"] == [("click", False), ("hotkey", True)]
 
 
 def test_after_a_yes_done_means_nothing_changed_nothing(monkeypatch):
@@ -596,3 +598,192 @@ def test_an_after_look_goes_stale_once_a_newer_picture_is_in_the_run():
     history = [Message.user("before"), Message.assistant("", [ToolCall("d", "click", {})]), Message.tool([kept])]
     batch.drop_stale_after_looks([*history, Message.user("now", images=[PNG])], len(history), OBSERVATIONS)
     assert kept.images  # before this run: not this run's to trim
+
+
+# ---- review fixes ---------------------------------------------------------------------------------------
+
+
+class _Events(EventBus):
+    """A host's view of the run: every tool_start / tool_end it is shown."""
+
+    def __init__(self):
+        super().__init__()
+        self.shown: list[tuple[str, str]] = []
+
+    async def tool_start(self, name, args, *, job=""):
+        self.shown.append(("start", name))
+        await super().tool_start(name, args, job=job)
+
+    async def tool_end(self, name, ok, summary, *, job=""):
+        self.shown.append(("end", name))
+        await super().tool_end(name, ok, summary, job=job)
+
+
+def test_the_verify_look_never_sends_a_picture_to_a_run_without_screenshot_or_look(fake_observe):
+    # the host left screenshot out: the check's look is the list only, never a picture of the screen
+    w = World()
+    w.answer("click", _out("Clicked. Changed: the screen changed around the point."))
+    reg = _reg(w)
+    b = Brain(Turn(tool_calls=[_call(1, "click", x=5, y=5)]), Turn(text="Moved."), Turn(text="Moved, checked."))
+    tools = [reg.get("ax_tree").spec(), reg.get("click").spec()]
+    asyncio.run(run_agent("x", provider=b, system="s", reg=reg, ev=EventBus(), tools=tools))
+    [note] = _verify_notes(b)
+    assert not note.images and fake_observe and fake_observe[0]["image"] is False
+    assert "NEO looked at the screen" in note.text  # a text look: the run was given ax_tree
+
+
+def test_the_check_turns_look_is_shown_to_the_host_like_any_tool(fake_observe):
+    w = World()
+    w.answer("click", _out("Clicked. Changed: the screen changed around the point."))
+    reg = _reg(w)
+    ev = _Events()
+    b = Brain(Turn(tool_calls=[_call(1, "click", x=5, y=5, shot="s1")]), Turn(text="Moved."), Turn(text="ok"))
+    asyncio.run(run_agent("x", provider=b, system="s", reg=reg, ev=ev, tools=[t.spec() for t in reg.all()]))
+    assert ev.shown == [("start", "click"), ("end", "click"), ("start", "look"), ("end", "look")]
+
+
+def test_the_check_turns_look_goes_through_a_registered_look_tool(fake_observe):
+    from neo.agent import grants
+
+    w = World()
+    w.answer("click", _out("Clicked. Changed: the screen changed around the point."))
+    reg = _reg(w, extra=("look",))
+    got = []
+
+    async def look(a, ctx):
+        got.append((dict(a), ctx.origin, bool(ctx.get("blind"))))
+        return ToolOutput("Look (read-only):\ne1 Button", images=[PNG], fence=False)
+
+    reg.get("look").handler = look
+    reg.get("look").untrusted = True
+    b = Brain(Turn(tool_calls=[_call(1, "click", x=5, y=5, shot="s1")]), Turn(text="Moved."), Turn(text="ok"))
+    ctx = ToolContext(user_text="x")
+    with grants.task(tid := grants.new_task()):
+        asyncio.run(run_agent("x", provider=b, system="s", reg=reg, ev=EventBus(), ctx=ctx,
+                              tools=[t.spec() for t in reg.all()]))  # fmt: skip
+        reads = grants._book().reads[tid]
+    grants.end(tid)
+    [note] = _verify_notes(b)
+    assert got == [({"image": True}, "agent", False)] and not fake_observe  # the run's own look tool
+    assert note.images == [PNG] and "e1 Button" in note.text
+    assert "look" in ctx.taint and reads >= 1  # read like the tool: taint, and a new reading for grants
+
+
+def test_a_command_that_rightly_changes_nothing_is_no_miss(monkeypatch):
+    """Effect.changed False from a command (a menu's Copy: nothing anyone sees changes) is no miss;
+    from a pointer input (the eyes: the move didn't land) it is; an Effect that says it missed is."""
+    from neo.agent import session as sess
+    from neo.reflex import outcomes
+
+    copy = Step("menu_command", {"path": "Edit > Copy"}, "Chose Edit > Copy.", True, _eff(False))
+    assert sess._worked(AgentResult("Done.", "done", [copy]))
+    assert sess._quietly(_d(), AgentResult("Done.", "done", [copy]))
+    r = ToolResult("c1", "menu_command", "Chose Edit > Copy.")
+    r.effect = _eff(False)
+    assert batch.stop_reason(r) == ""
+    click = Step("click", {"x": 1, "y": 1}, "Clicked.", True, _eff(False))
+    assert not sess._worked(AgentResult("Done.", "done", [click]))
+    said = Step("hotkey", {"keys": "cmd+n"}, "Pressed cmd+n.", True, _eff(False, missed=True))
+    assert not sess._worked(AgentResult("Done.", "done", [said]))
+    got = {}
+    monkeypatch.setattr(outcomes, "agent_done", lambda job, steps, **kw: got.setdefault("steps", steps))
+    sess._learn_from("j1", AgentResult("Done.", "done", [copy, click]))
+    assert got["steps"] == [("menu_command", True), ("click", False)]
+
+
+def test_a_command_that_changed_nothing_does_not_stop_the_batch():
+    w = World()
+    w.answer("menu_command", _out("Chose Edit > Copy.", effect=_eff(False)))
+    reg = _reg(w, extra=("menu_command", "activate_app"))
+    b = Brain(Turn(tool_calls=[_call(1, "menu_command", path="Edit > Copy"), ToolCall("c2", "activate_app", {"name": "Other"}),
+                               _call(3, "hotkey", keys="cmd+v")]), Turn(text="Done."))  # fmt: skip
+    _run(reg, b, verify=False)
+    assert [n for n, _ in w.ran] == ["menu_command", "activate_app", "hotkey"]
+
+
+def test_finish_with_duplicate_call_ids_pairs_each_result_with_its_own_call():
+    # a local server numbering every call "call_0": each result still belongs to its own call
+    w = World()
+    w.answer("ax_press", _out("Pressed e1.", effect=_eff(None)), _out("Pressed e2.", effect=_eff(True)))
+    reg = _reg(w)
+    calls = [ToolCall("call_0", "ax_press", {"id": "e1"}), ToolCall("call_0", "ax_press", {"id": "e2"}),
+             ToolCall("call_0", "finish", {"answer": "Pressed both."})]  # fmt: skip
+    b = Brain(Turn(tool_calls=calls), Turn(text="(the model again)"), Turn(text="(and again)"))
+    res = asyncio.run(run_agent("x", provider=b, system="s", reg=reg, ev=EventBus(),
+                                tools=[t.spec() for t in reg.all()], finish_verified=True))  # fmt: skip
+    assert res.text != "Pressed both." and len(b.seen) >= 2
+    rs = b.seen[1][-1].tool_results
+    assert [r.content for r in rs] == ["Pressed e1.", "Pressed e2.", batch.NOT_FINISHED]
+    assert [(st.tool, st.args, st.result) for st in res.steps][:2] == [
+        ("ax_press", {"id": "e1"}, "Pressed e1."), ("ax_press", {"id": "e2"}, "Pressed e2."),
+    ]  # fmt: skip
+
+
+def test_a_verified_last_action_does_not_skip_the_check_for_an_unverified_click_before_it():
+    w = World()
+    w.answer("click", _out("Clicked at (5, 5)."))  # no Effect: NEO couldn't tell
+    w.answer("ax_set_value", _out("Set e2 to “Arnav”."))  # read back: verified
+    reg = _reg(w)
+    b = Brain(Turn(tool_calls=[_call(1, "click", x=5, y=5), _call(2, "ax_set_value", id="e2", value="Arnav")]),
+              Turn(text="Done."), Turn(text="Done, checked."))  # fmt: skip
+    res = _run(reg, b)
+    assert len(_verify_notes(b)) == 1 and res.text == "Done, checked."
+
+
+def test_finish_is_refused_while_an_earlier_action_was_never_seen():
+    res, b, _w = _finish_run(
+        ("click", _out("Clicked at (5, 5).")), ("ax_set_value", _out("Set e2 to “Arnav”.")),
+        calls=[_call(1, "click", x=5, y=5)],
+        then=[Turn(tool_calls=[_call(2, "ax_set_value", id="e2", value="Arnav"), _fin(3)])],
+        finish_verified=True,
+    )  # fmt: skip
+    assert res.text != "Filled in your name." and len(b.seen) >= 3
+    [r] = [r for r in b.seen[2][-1].tool_results if r.name == "finish"]
+    assert r.content.startswith("Not finished")
+    # …while a look since then covers it
+    res, b, _w = _finish_run(
+        ("click", _out("Clicked at (5, 5).")), ("ax_set_value", _out("Set e2 to “Arnav”.")),
+        calls=[_call(1, "click", x=5, y=5), _call(2, "ax_tree")],
+        then=[Turn(tool_calls=[_call(3, "ax_set_value", id="e2", value="Arnav"), _fin(4)])],
+        finish_verified=True,
+    )  # fmt: skip
+    assert res.text == "Filled in your name." and len(b.seen) == 2
+
+
+def test_a_refused_finish_carries_neos_look_so_the_check_costs_one_round_trip(fake_observe):
+    res, b, _w = _finish_run(
+        ("click", _out("Clicked at (5, 5).")), ("ax_set_value", _out("Set e2 to “Arnav”.")),
+        calls=[_call(1, "click", x=5, y=5, shot="s1")],
+        then=[Turn(tool_calls=[_call(2, "ax_set_value", id="e2", value="Arnav"), _fin(3)]), Turn(text="Done, checked.")],
+        finish_verified=True,
+    )  # fmt: skip
+    [r] = [r for r in b.seen[2][-1].tool_results if r.name == "finish"]
+    assert r.content.startswith(batch.NOT_FINISHED_LOOKED) and 'e1 Button "New Game"' in r.content
+    assert r.images == [PNG] and fake_observe[0]["image"] is True  # the unseen click was at pixels
+    assert res.text == "Done, checked." and len(b.seen) == 3 and not _verify_notes(b)  # no second check
+
+
+def test_the_script_rule_comes_with_applescript_when_more_tools_brings_it_in(monkeypatch):
+    """A lean screen prompt has no guidance for applescript; when the model pulls it in mid-run, the
+    rule ("never drive an app's window through System Events scripts") arrives with it."""
+    from neo.agent import prompt, toolselect
+
+    w = World()
+    reg = _reg(w, extra=("applescript",))
+
+    class Sel:
+        def search(self, query, exclude=None, k=6):
+            return [reg.get("applescript")]
+
+    monkeypatch.setattr(toolselect, "selector", lambda: Sel())
+    lean = prompt.build(screen_tools=["ax_tree", "screenshot", "click"])
+    assert "System Events" not in lean
+    b = Brain(Turn(tool_calls=[_call(1, "more_tools", query="applescript")]), Turn(text="ok"))
+    tools = [reg.get(n).spec() for n in ("ax_tree", "screenshot", "click")]
+    asyncio.run(run_agent("x", provider=b, system=lean, reg=reg, ev=EventBus(), tools=tools))
+    [r] = b.seen[1][-1].tool_results
+    assert r.content.startswith("Enabled: applescript.") and "System Events" in r.content
+    # a full prompt already has the line: nothing repeated
+    b2 = Brain(Turn(tool_calls=[_call(1, "more_tools", query="applescript")]), Turn(text="ok"))
+    asyncio.run(run_agent("x", provider=b2, system=prompt.build(), reg=reg, ev=EventBus(), tools=tools))
+    assert "System Events" not in b2.seen[1][-1].tool_results[0].content

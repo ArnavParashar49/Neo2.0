@@ -36,6 +36,10 @@ os.environ.setdefault("NEO_REPLAY_FLOWS", "1")
 for _k in ("GEMINI_API_KEY", "GEMINI_API_KEYS", "GROQ_API_KEY", "ANTHROPIC_API_KEY", "CEREBRAS_API_KEY"):
     os.environ.pop(_k, None)
 
+from neo.config import Settings  # noqa: E402
+
+Settings.model_config["env_file"] = None  # never the user's ~/.neo/.env (their keys): hermetic, like the suite
+
 from neo.agent.registry import ToolOutput, registry  # noqa: E402
 from neo.providers.base import ImagePart, ToolCall, Turn  # noqa: E402
 

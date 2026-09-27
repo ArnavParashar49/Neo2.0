@@ -180,6 +180,27 @@ def persona(tools: Collection[str] | None = None, *, screen: bool = False) -> st
     )
 
 
+def guidance(tools: Collection[str], *, already: str = "") -> str:
+    """The how-to-work lines about `tools` that `already` (the run's system prompt) lacks — for tools
+    a run gains mid-run (more_tools) after its prompt was built without them (the lean screen
+    prompt): "never drive an app's window through System Events scripts" arrives with applescript.
+    NEO's own words; "" when there is nothing to add."""
+    from neo.agent import batch
+    from neo.config import decide_mode
+
+    names = set(tools)
+    out = []
+    for line, about in _HOW_TO_WORK:
+        if about is None or about is _ANY_TOOL or not (about & names):
+            continue
+        if batch.enabled() and line == _SCREEN_STEPS[0]:
+            line = _SCREEN_STEPS[1]
+        line = line.replace("{search_site}", _SEARCH_SITE[decide_mode("web_search") == "on"])
+        if line not in already:
+            out.append(line)
+    return "".join(out)
+
+
 def _agent_tools() -> list[str] | None:
     """An embedded agent's tools (neo.runtime); None for NEO.app (all of them)."""
     from neo import runtime
@@ -202,7 +223,8 @@ def system_context() -> str:
 
 def build(memory_context: str = "", extra: str = "", *, screen_tools: Collection[str] | None = None) -> str:
     """The system prompt. `screen_tools`: the tools of a run that works on the screen — it gets the
-    lean screen prompt (the shorter identity, guidance for those tools only, every safety rule)."""
+    lean screen prompt (the shorter identity, guidance for those tools only, every safety rule).
+    Guidance for a tool the run gains later comes with it (guidance(), from more_tools)."""
     from neo.config import settings
 
     tools = _agent_tools()

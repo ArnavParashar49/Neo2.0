@@ -4,18 +4,21 @@ A model may answer with several tool calls at once. The loop runs them in order 
 and this module says, from what each action did, when to stop and when the model has already seen
 enough:
 
-* **stop at the first action that went wrong** — it failed, it changed nothing, or it changed the
-  screen under the rest of the batch (a sheet or dialog opened or closed, another window or app came
-  forward). The actions after it are skipped with a note; looks still run (they change nothing).
-  This is how batched computer actions are run elsewhere too: in order, stopping at the first
-  failure, so a batch never runs blind past a miss;
-* **no separate check turn** when the model has already seen the state after its last action: the
-  result carried a picture of it (an after-look), or NEO checked it through Accessibility (a value
-  read back, a press whose element or window visibly changed). When a check is still needed, a
-  look is attached to the note, so it costs one round trip instead of two;
+* **stop at the first action that went wrong** — it failed, it missed (a click, drag or scroll
+  that changed nothing where it acted), or it changed the screen under the rest of the batch (a
+  sheet or dialog opened or closed, another window or app came forward). The actions after it are
+  skipped with a note; looks still run (they change nothing). This is how batched computer actions
+  are run elsewhere too: in order, stopping at the first failure, so a batch never runs blind past
+  a miss. A command that rightly changes nothing anyone sees (a menu's Copy) is no miss;
+* **no separate check turn** when the model has already seen the state after every action since
+  it last looked: each result carried a picture of it (an after-look), or NEO checked it through
+  Accessibility (a value read back, a press whose element or window visibly changed). When a check
+  is still needed, a look is attached to the note, so it costs one round trip instead of two — a
+  look the run could have taken itself (a picture only for a run given ``screenshot`` or ``look``),
+  shown to the host like any tool call;
 * **finishing without another model call**: the model called ``finish`` with its final answer in
-  the same reply as its last actions, and NEO confirmed through Accessibility that every one of
-  them worked;
+  the same reply as its last actions, NEO confirmed through Accessibility that every one of them
+  worked, and nothing done earlier is still unseen;
 * whether several actions per reply are invited at all (``batch_actions``, off until the user's
   A/B on the self-test window says otherwise — DECISIONS 47).
 
@@ -46,7 +49,7 @@ except ImportError:  # until the seam lands
     class Effect:  # type: ignore[no-redef]
         """What an input did, as NEO saw it."""
 
-        changed: bool | None = None  # something visibly changed (None: couldn't tell)
+        changed: bool | None = None  # something visibly changed where it acted (None: couldn't tell)
         scene_changed: bool = False  # the front app, the window, a sheet or the focus changed
         sheet: str = ""  # a sheet or dialog open after it (its words: screen data)
         looked: bool = False  # the result carries a picture of the state after it
@@ -56,6 +59,10 @@ except ImportError:  # until the seam lands
 
 # A tool that reports no Effect says it in words (neo.tools.computer.pointer / ax): the same words.
 _MISS_WORDS = ("Nothing visibly changed",)
+# The pointer inputs: their Effect is the eyes' outcome, where "nothing changed" means the move
+# didn't land. Anything else may rightly change nothing anyone sees (a menu's Copy, a keystroke):
+# its changed=False is no miss unless its Effect says so (``missed``, if Step 0 settles on one).
+_POINTER = frozenset({"click", "drag", "scroll", "click_text"})
 _SCENE_WORDS = (
     "a sheet or dialog opened",
     "the sheet or dialog closed",
@@ -83,11 +90,17 @@ def halted(r: ToolResult) -> bool:
     return r.content.lstrip().startswith(_HALTS)
 
 
-def changed_nothing(r: Any) -> bool:
-    """The action ran and NEO saw that nothing changed (not: couldn't tell)."""
+def missed(r: Any, tool: str = "") -> bool:
+    """The action ran and NEO saw that it didn't do what it was for (not: couldn't tell): its
+    Effect says it missed, or a pointer input changed nothing where it acted. `r`: a ToolResult,
+    a ToolOutput (with `tool`) or a loop Step."""
+    tool = tool or getattr(r, "name", "") or getattr(r, "tool", "") or ""
     eff = effect(r)
     if eff is not None:
-        return getattr(eff, "changed", None) is False
+        said = getattr(eff, "missed", None)
+        if isinstance(said, bool):
+            return said
+        return getattr(eff, "changed", None) is False and tool in _POINTER
     text = getattr(r, "content", None) or getattr(r, "text", "") or ""
     return any(w in text for w in _MISS_WORDS)
 
@@ -106,7 +119,7 @@ def stop_reason(r: ToolResult) -> str:
     """Why the actions after this one in the same turn must not run ("" = they may)."""
     if not r.ok:
         return "failed"
-    if changed_nothing(r):
+    if missed(r):
         return "changed nothing"
     if moved_scene(r):
         return "changed the screen"
@@ -162,20 +175,24 @@ NOT_FINISHED = (
     "Not finished: NEO couldn't confirm that every action in this reply worked (their results say "
     "why). Check them, then carry on or answer."
 )
+NOT_FINISHED_EARLIER = (
+    "Not finished: nothing has shown the screen since an earlier action NEO couldn't confirm. Check "
+    "it with a read-only look, then carry on or answer."
+)
+NOT_FINISHED_LOOKED = (
+    "Not finished yet: nothing had shown the screen since an earlier action NEO couldn't confirm, so "
+    "NEO looked now (below). If the task is done, answer; if something is off, fix it first."
+)
 
 
 def finished(calls: Sequence[ToolCall], results: Sequence[ToolResult]) -> bool:
     """Can the run end with these actions? Only when every one was an action NEO verified through
     Accessibility (none skipped, none asked the user, no look whose answer the model couldn't have
-    known, no sheet left open)."""
+    known, no sheet left open). `results` are the calls' own, in the same order: paired by position,
+    never by id (a local server may number every call "call_0")."""
     if not calls or len(calls) != len(results):
         return False
-    by_id = {r.call_id: r for r in results}
-    for c in calls:
-        r = by_id.get(c.id)
-        if r is None or not verified(c.name, r):
-            return False
-    return True
+    return all(verified(c.name, r) for c, r in zip(calls, results, strict=True))
 
 
 # ---- the settings ---------------------------------------------------------------------------------------
@@ -217,49 +234,114 @@ VERIFY_WITH_LOOK = (
     "it first. Do not mention this note."
 )
 LOOK_S = 0.6  # the attached look's element walk; the whole look is dropped past LOOK_S + 1 s
-_LOOK_TOOLS = frozenset({"look", "ax_tree", "screenshot"})
+LOOK = "look"  # the eyes' look tool (neo.tools.computer.observe), when the run has it
+LOOK_TOOL_S = 2.5  # the look tool's whole call (its own walk is bounded at 1.5 s)
+_LOOK_TOOLS = frozenset({LOOK, "ax_tree", "screenshot"})  # a run given one of these may be shown a look
+_PICTURE_TOOLS = frozenset({LOOK, "screenshot"})  # …and a picture only with one of these
 _SCREEN_CATEGORY = "computer"
 
 
-async def _observe(*, image: bool, ctx: Any) -> Any | None:
+def _observer() -> Any | None:
     """neo.tools.computer.observe.observe (the eyes' one-call look), when it is there."""
     try:
         from neo.tools.computer import observe as obs  # type: ignore[attr-defined]
     except ImportError:
         return None
-    fn = getattr(obs, "observe", None)
+    return getattr(obs, "observe", None)
+
+
+async def _observe(*, image: bool, ctx: Any) -> Any | None:
+    fn = _observer()
     if fn is None:
         return None
     return await asyncio.wait_for(fn(None, image=image, deadline_s=LOOK_S, ctx=ctx), LOOK_S + 1.0)
 
 
-async def verify_message(
-    reg: Any, enabled_tools: Collection[str], ctx: Any, last: ToolCall | None, *, sees: bool
-) -> Message:
-    """The note that asks the model to check its work before it reports — with a look at the app
-    it last acted on attached, when that action worked on the screen and the run may look at it
-    (it was given a look tool). The look is read-only and passes the same checks as the look tool
-    (never NEO's own window or a protected app, never a picture for a brain that can't see); it is
-    NEO's words with the screen's fenced, and it taints the request like the tool does."""
-    t = reg.get(last.name) if last is not None else None
-    if t is None or t.category != _SCREEN_CATEGORY or not (_LOOK_TOOLS & set(enabled_tools)):
-        return Message.user(VERIFY_NOTE)
-    from dataclasses import replace
-
-    # NEO takes this look for a model's run (the taint list stays shared: what it reads counts).
-    look_ctx = replace(ctx, origin="agent", extras={**ctx.extras, **({} if sees else {"blind": True})})
+async def _look(reg: Any, enabled: Collection[str], *, image: bool, ctx: Any, ev: Any, job: str) -> Any | None:
+    """NEO's look for the check, as a look call of the run's own: the run's registered look tool
+    (its checks, and what reading the screen counts for) when it has one, else the eyes' look with
+    the same bookkeeping — shown to the host (tool_start / tool_end) either way."""
+    args = {"image": image}
+    tool = LOOK in enabled and reg.get(LOOK) is not None
+    if not tool and _observer() is None:
+        return None
+    if ev is not None:
+        await ev.tool_start(LOOK, args, job=job)
+    out = None
     try:
-        out = await _observe(image=sees and last is not None and at_pixels(last), ctx=look_ctx)
+        if tool:
+            out = await asyncio.wait_for(reg.invoke(LOOK, dict(args), ctx), LOOK_TOOL_S)
+        else:
+            out = await _observe(image=image, ctx=ctx)
+            if out is not None and getattr(out, "ok", False):
+                from neo.agent import grants
+
+                grants.read_untrusted(LOOK)  # the screen's words, read for the model: a new reading
     except Exception as e:  # noqa: BLE001 - no look: the plain note, and the model looks itself
         log.info(f"[loop] no look for the check: {str(e)[:80]}")
         out = None
+    if ev is not None:
+        ok = bool(out is not None and getattr(out, "ok", False))
+        await ev.tool_end(LOOK, ok, str(getattr(out, "text", "") or "no look"), job=job)
+    return out
+
+
+async def check_look(
+    reg: Any,
+    enabled_tools: Collection[str],
+    ctx: Any,
+    actions: Sequence[ToolCall],
+    *,
+    sees: bool,
+    ev: Any = None,
+    job: str = "",
+) -> tuple[str, list[ImagePart]] | None:
+    """NEO's look for a check, as (its words, its picture): taken when an action the model hasn't
+    seen the result of (`actions`) worked on the screen and the run may look at it (it was given a
+    look tool). A picture only for a brain that sees, after an action at pixels, in a run given
+    ``screenshot`` or ``look``: a run given only ``ax_tree`` gets the list. The look is read-only and
+    passes the same checks as the look tool (never NEO's own window or a protected app); it is NEO's
+    words with the screen's fenced, and it taints the request like the tool does. None: no look."""
+    enabled = set(enabled_tools)
+    on_screen = [c for c in actions if (t := reg.get(c.name)) is not None and t.category == _SCREEN_CATEGORY]
+    if not on_screen or not (_LOOK_TOOLS & enabled):
+        return None
+    from dataclasses import replace
+
+    picture = sees and bool(_PICTURE_TOOLS & enabled) and any(at_pixels(c) for c in on_screen)
+    # NEO takes this look for a model's run (the taint list stays shared: what it reads counts).
+    look_ctx = replace(ctx, origin="agent", extras={**ctx.extras, **({} if sees else {"blind": True})})
+    out = await _look(reg, enabled, image=picture, ctx=look_ctx, ev=ev, job=job)
     if out is None or not getattr(out, "ok", False) or not getattr(out, "text", ""):
-        return Message.user(VERIFY_NOTE)
+        return None
     from neo.agent.registry import fence
 
-    text = out.text if not getattr(out, "fence", True) else fence("look", out.text)
-    images: list[ImagePart] = list(getattr(out, "images", []) or []) if sees else []
+    text = out.text if not getattr(out, "fence", True) else fence(LOOK, out.text)
+    return text, (list(getattr(out, "images", []) or []) if picture else [])
+
+
+async def verify_message(
+    reg: Any,
+    enabled_tools: Collection[str],
+    ctx: Any,
+    actions: Sequence[ToolCall],
+    *,
+    sees: bool,
+    ev: Any = None,
+    job: str = "",
+) -> Message:
+    """The note that asks the model to check its work before it reports — with NEO's look at the
+    app attached when it can take one (check_look)."""
+    got = await check_look(reg, enabled_tools, ctx, actions, sees=sees, ev=ev, job=job)
+    if got is None:
+        return Message.user(VERIFY_NOTE)
+    text, images = got
     return Message.user(VERIFY_WITH_LOOK + "\n" + text, images=images)
+
+
+def carries_look(m: Message) -> bool:
+    """A check note with NEO's look attached: the model now sees the state after its actions."""
+    return m.role == "user" and m.text.startswith(VERIFY_WITH_LOOK)
 
 
 # ---- pictures that went stale ---------------------------------------------------------------------------

@@ -105,7 +105,7 @@ _QUALIFIER = re.compile(
     re.I,
 )
 # A game to play (neo.decide.games): the run can open the app or bring it forward, whatever the
-# tool selector makes of "play chess as white".
+# tool selector makes of "play <game> as <side>".
 _GAME_TOOLS = ("open_app", "activate_app")
 _job_ids = itertools.count(1)
 # The recent voice conversation, when a request comes from Gemini Live: the agent can't hear
@@ -266,8 +266,9 @@ class Session:
         if from_user:  # the user's own words: learn from how this goes (a Live relay is Live's)
             outcomes.begin(job, text, decision=d)
 
-        # "play chess as white" with a chess game on this Mac: the agent opens it and plays, whatever
-        # the reflex made of it (music, a chat, the one-tool lane) and whatever a fast path would run.
+        # "play <game> as <side>" with that game installed on this Mac: the agent opens it and plays,
+        # whatever the reflex made of it (music, a chat, the one-tool lane) and whatever a fast path
+        # would run.
         if (game := await asyncio.to_thread(_game_to_play, text)) is not None:
             return await self._play_game(text, d, images, job, game)
 
@@ -281,8 +282,9 @@ class Session:
             return await self._chat(text, d, job)
 
         # The user asked for this before, in this app, and a model twice did it the same way: NEO
-        # does it itself (neo.agent.replay). Only the user's own words; never a model's.
-        if origin == "user" and not images and replay.enabled() and replay.candidate(text):
+        # does it itself (neo.agent.replay). Only the user's own words, never a model's; only a
+        # command — words Laya reads as wanting an answer get a model, never a silent "Done.".
+        if origin == "user" and not images and not d.reply and replay.enabled() and replay.candidate(text):
             flow = replay.recall(text, await asyncio.to_thread(replay.working_app))
             if flow is not None:
                 return await self._replay(text, d, flow, job)
@@ -317,7 +319,7 @@ class Session:
         # A command, by construction: if the agent has to rescue it and succeeds, there's still
         # nothing to say.
         d = Decision("agent_task", 1.0, False, 0.0, False, 0.0, source="lane", reply=False, reply_p=0.0)
-        # "open chess and play as white": not music, whatever the plan says
+        # "open <game> and play as <side>": not music, whatever the plan says
         if (game := await asyncio.to_thread(_game_to_play, text)) is not None:
             return await self._play_game(text, d, None, job, game)
         return await self._quick(text, d, steps, job=job, origin="user")
@@ -518,10 +520,16 @@ class Session:
             await bus().say(q, final=True, job=job)
             return Reply(q, "confirm", d, job=job, taint=tuple(taint))
         if got.how != "done":
-            # Not as before (or a question that isn't a card): the agent looks and finds a way.
+            # Not as before (or a question that isn't a card): the agent looks and finds a way. The
+            # note is NEO's words only — each step's tool and arguments (the user's own words, by
+            # what a flow may hold) — never the step's output, which can quote the screen: that has
+            # no place in a system prompt. The agent looks for itself.
             ran = f" These steps of the request already ran — don't repeat them: {before}." if before else ""
-            said = fence(tool, out.text[:300]) if (t := registry().get(tool)) and t.untrusted else out.text[:300]
-            note = f"\n[ALREADY DONE]{ran} Then {tool}({', '.join(f'{k}={v!r}' for k, v in args.items())}) didn't work as before: {said}"
+            how = "it failed" if not out.ok else "NEO saw no change"
+            note = (
+                f"\n[ALREADY DONE]{ran} Then {replay.describe([(tool, args, out)])} didn't work as before "
+                f"({how}): look at the screen before you go on."
+            )
             _request_taint.set(tuple(taint))
             return await self._agent(text, d, None, job, done_note=note)
         await self._remember(Message.user(text), Message.assistant("Done."))
@@ -588,8 +596,15 @@ class Session:
         chain = brain(purpose)
         # A command from the user's own words, done quietly, may become a flow NEO replays itself
         # next time (neo.agent.replay): which app it was worked out in is read as the run starts.
+        # Never a run that took over from a replay or a fast path (a done note): its steps are only
+        # the tail of the request, and a replay's misses must count until the flow is dropped.
         learnable = (
-            _request_origin.get() == "user" and d is not None and not d.reply and not only and replay.enabled()
+            _request_origin.get() == "user"
+            and d is not None
+            and not d.reply
+            and not only
+            and not done_note
+            and replay.enabled()
         )
         app_at = asyncio.create_task(asyncio.to_thread(replay.working_app)) if learnable else None
         self.jobs[job] = asyncio.current_task()  # type: ignore[assignment]
@@ -1136,7 +1151,7 @@ def _learn_from(job: str, res: AgentResult) -> None:
     (neo/reflex/outcomes.py). A request relayed by Gemini Live counts for the user's own words
     there. The question a halted run asks isn't a step: the user's answer decides that one."""
     steps = [
-        (st.tool, st.ok and not _changed_nothing(st))
+        (st.tool, st.ok and not batch.missed(st))
         for st in res.steps
         if not st.result.startswith(("NEEDS_CONFIRM", "NEEDS_USER", "skipped: "))
     ]
@@ -1159,22 +1174,19 @@ def _on_screen(st) -> bool:
     return st.tool in ("click", "drag", "scroll") and any(k in st.args for k in ("x", "x1", "shot"))
 
 
-def _changed_nothing(st) -> bool:
-    """A step NEO saw change nothing (its Effect says so): a miss, whatever the step returned."""
-    return getattr(getattr(st, "effect", None), "changed", None) is False
-
-
 def _worked(res: AgentResult) -> bool:
-    """Every step of the run worked: none failed, and none that NEO checked changed nothing. A
-    call skipped after an earlier one in its turn (neo.agent.batch) never ran: it doesn't count."""
-    return all(st.ok and not _changed_nothing(st) for st in res.steps if not st.result.startswith("skipped: "))
+    """Every step of the run worked: none failed, and none that NEO saw miss (neo.agent.batch.missed:
+    a click, drag or scroll that changed nothing where it acted, or an Effect that says it missed —
+    a command that rightly changes nothing anyone sees, like a menu's Copy, is no miss). A call
+    skipped after an earlier one in its turn never ran: it doesn't count."""
+    return all(st.ok and not batch.missed(st) for st in res.steps if not st.result.startswith("skipped: "))
 
 
 def _quietly(d: Decision | None, res: AgentResult) -> bool:
     """Was this a command that simply got done? Then there's nothing to say.
 
-    Questions, information requests, failures, budget stops, an action NEO saw change nothing,
-    and anything the model asks back are always spoken."""
+    Questions, information requests, failures, budget stops, an action NEO saw miss, and
+    anything the model asks back are always spoken."""
     if d is None or d.reply or res.stopped != "done" or res.question:
         return False
     if not res.steps or not _worked(res):
