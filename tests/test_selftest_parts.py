@@ -800,3 +800,263 @@ def test_the_self_test_never_touches_the_real_mac_under_tests(tmp_path):
     ):
         with pytest.raises(EffectRefused):
             call()
+
+
+# ---- the boards' geometry, the new window parts ---------------------------------------------------
+
+
+def test_square_names_and_the_tilted_boards_perspective():
+    from neo.selftest import geometry as G
+
+    assert G.square(0, 0) == "a8" and G.square(4, 6) == "e2" and G.cell_of("e2") == [4, 6] and G.cell_of("H1") == [7, 7]
+    for bad in ("i2", "e9", "e", "e0"):
+        with pytest.raises(ValueError):
+            G.cell_of(bad)
+    quad = G.tilt_quad(240, 240)
+    assert quad[0][0] > quad[3][0] and quad[1][0] < quad[2][0]  # the far edge is narrower
+    m = G.board_map(quad)
+    for (gx, gy), corner in zip(G.GRID, quad, strict=True):
+        assert G.apply(m, gx, gy) == pytest.approx(corner)
+    inv = G.invert(m)
+    assert G.apply(inv, *G.apply(m, 3.3, 5.7)) == pytest.approx((3.3, 5.7))
+    for c in range(8):
+        for r in range(8):
+            assert G.cell_at(quad, *G.cell_center(quad, c, r)) == [c, r]
+    assert G.cell_at(quad, 1, 1) is None  # (above the far edge: off the board)
+    near, far = G.cell_polygon(quad, 0, 7), G.cell_polygon(quad, 0, 0)
+    assert abs(near[2][1] - near[0][1]) > abs(far[2][1] - far[0][1])  # nearer squares look bigger
+
+
+def test_the_new_labels_never_read_as_commitments():
+    from neo.tools.computer import policy
+
+    for label in (L.HINDI_BUTTON, L.ROUND_MENU, L.SHEET_TITLE, L.SHEET_START, L.SHEET_CANCEL, *L.HINDI_PHRASES.values()):
+        assert not policy.commits(label, L.SHEET_TITLE), label
+
+
+def test_the_boards_pieces_and_moves():
+    pieces = testwin.start_pieces()
+    assert len(pieces) == 32 and pieces[(1, 6)] == "P" and pieces[(4, 0)] == "k" and tuple(L.PIECE) in pieces
+    assert testwin.move_piece(pieces, [2, 6], [2, 4]) and pieces[(2, 4)] == "P" and (2, 6) not in pieces
+    assert not testwin.move_piece(pieces, [2, 6], [2, 5])  # nothing there any more
+    assert not testwin.move_piece(pieces, [0, 0], [0, 0]) and not testwin.move_piece(pieces, None, [1, 1])
+
+
+def test_the_new_views_have_the_signatures_appkit_calls():
+    k = testwin.classes()
+    assert k["Tilt"].acceptsFirstMouse_.signature == b"B@:@" and k["Tilt"].isFlipped.signature == b"B@:"
+    for sel in ("newRound_", "buttonHindi_"):
+        assert getattr(k["Controller"], sel).signature == b"v@:@", sel
+
+
+# ---- timings and scores ------------------------------------------------------------------------------
+
+
+def test_timings_are_summarized_against_the_targets():
+    from neo.selftest import bench
+
+    t = [("click", 300.0, {}), ("click", 700.0, {}), ("click", 500.0, {}), ("type_text", 50.0, {"text": "x" * 20}),
+         ("ax_set_value", 5.0, {})]  # fmt: skip
+    s = bench.summarize(t)
+    assert s["click"]["n"] == 3 and s["click"]["p50_ms"] == 500.0 and s["click"]["p90_ms"] == 700.0
+    assert s["click"]["met_p0"] is True and s["click"]["met_p1"] is False
+    assert s["type_text"]["p50_ms"] == 100.0  # per 40 characters
+    assert s["ax_set_value"]["met_p0"] is None  # no target: not in the latency score
+    sc = bench.scores(["pass", "pass", "fail", "skip"], s)
+    assert sc["success"] == pytest.approx(0.667, abs=1e-3) and sc["skipped"] == 1
+    assert sc["latency"] == 1.0 and sc["timed"] == 2
+    assert bench.words(sc).startswith("Success 67% (2 of 3); speed targets met by 100% of 2 tools")
+    assert bench.scores([], {})["success"] is None and bench.words(bench.scores([], {})) == ""
+
+
+def test_the_report_carries_scores_and_timings():
+    r = _fake_report(ok=True)
+    r.timings = [("click", 200.0, {}), ("click", 400.0, {})]
+    r.repeats = [controls.Check("click_point", "Click at a point", "pass", rep=1)]
+    j = r.to_json()
+    assert j["scores"]["success"] == 1.0 and j["scores"]["passed"] == 2 and j["timings"]["click"]["n"] == 2
+    assert j["repeats"][0]["rep"] == 1
+    assert "scores: success 1.0" in r.text() and "tool timings" in r.text() and "click: 300.0 / 400.0 of 2" in r.text()
+    assert "Success 100% (2 of 2)" in r.reply()
+
+
+def test_the_ax_timing_walk_is_refused_under_tests():
+    from neo.effects import EffectRefused
+    from neo.selftest import bench
+
+    with pytest.raises(EffectRefused):
+        bench.ax_walk()
+
+
+def test_the_ax_timing_walk_keeps_numbers_only(monkeypatch):
+    import ApplicationServices as AS
+
+    from neo import effects
+    from neo.selftest import bench
+    from neo.tools import computer
+    from neo.tools.computer import ax
+
+    kids = {"root": ["a", "b"], "a": ["c"], "b": [], "c": []}
+
+    def get(el, attr, _):
+        if attr == "AXChildren":
+            return (0, kids[el]) if kids[el] else (-25212, None)
+        return (0, f"secret {attr} of {el}")
+
+    monkeypatch.setattr(AS, "AXUIElementCreateApplication", lambda pid: "root")
+    monkeypatch.setattr(AS, "AXUIElementCopyAttributeValue", get)
+    monkeypatch.setattr(AS, "AXUIElementCopyMultipleAttributeValues", lambda el, names, o, _: (0, []))
+    monkeypatch.setattr(AS, "AXUIElementSetMessagingTimeout", lambda el, t: 0)
+    monkeypatch.setattr(ax, "working_app", lambda: ("Notes", 77))
+    monkeypatch.setattr(ax, "is_neo", lambda pid, name="": False)
+    monkeypatch.setattr(computer, "_protected", lambda name, pid=0: False)
+    with effects.allow("selftest"):
+        out = bench.ax_walk()
+        assert out["nodes"] == 4 and out["calls"] == 20 and out["complete"] and out["errors"] == {-25212: 2}
+        assert "secret" not in json.dumps(out)  # timings, never what the app said
+        monkeypatch.setattr(computer, "_protected", lambda name, pid=0: True)
+        assert "never touches" in bench.ax_walk()["error"]
+        monkeypatch.setattr(ax, "is_neo", lambda pid, name="": True)
+        assert "NEO's own" in bench.ax_walk()["error"]
+
+
+# ---- Accessibility actions go through the watch ----------------------------------------------------------
+
+
+class _AxMac:
+    def __init__(self, owners):
+        self.owners = owners
+        self.posted = []
+
+    def element_pid(self, ref):
+        return self.owners.get(ref, 0)
+
+    def post(self, ev):
+        self.posted.append(ev)
+
+
+def test_accessibility_actions_are_shown_to_the_watch(monkeypatch):
+    from neo.tools.computer import ax
+    from neo.tools.computer import input as inp
+
+    w = watch_mod.Watch(_AxMac({"mine": 4242, "theirs": 111}), 4242, {1: (0, 0, 100, 100)})
+    pressed = []
+    monkeypatch.setattr(ax, "press_el", lambda e: pressed.append(e.ref) or "Pressed")
+    monkeypatch.setattr(ax, "_ax_watch", None, raising=False)
+    monkeypatch.setattr(inp, "_watch", w)
+    w._install_ax()
+    try:
+        assert ax._ax_watch == w.ax_hook  # NEO's AX choke point, when it has one, calls the watch
+        assert ax.press_el(types.SimpleNamespace(ref="mine")) == "Pressed"
+        with pytest.raises(watch_mod.Stop, match="another app"):
+            ax.press_el(types.SimpleNamespace(ref="theirs"))
+        assert pressed == ["mine"] and w.refused
+        assert [e["pid"] for e in w.ax_seen] == [4242]
+    finally:
+        w._uninstall_ax()
+    assert ax._ax_watch is None and not hasattr(ax.press_el, "__wrapped__")
+
+
+def test_a_watch_that_isnt_armed_checks_nothing(monkeypatch):
+    from neo.tools.computer import input as inp
+
+    w = watch_mod.Watch(_AxMac({}), 4242, {})
+    monkeypatch.setattr(inp, "_watch", None)
+    w.ax_hook("anything", "press")  # (a watch left over from a run that ended: no one's)
+    assert w.ax_seen == [] and not w.refused
+
+
+# ---- a local grounder, scored on a saved picture ------------------------------------------------------------
+
+
+def test_a_grounder_is_scored_on_the_windows_own_targets(tmp_path):
+    from neo.selftest import geometry as G
+    from neo.selftest import grounding
+
+    png = _png((500, 400), lambda d: None)
+    quad = [[300, 100], [400, 100], [420, 200], [280, 200]]
+    meta = {"region": [100, 50, 500, 400], "scale": 1.0,
+            "targets": {"button_a": [120, 60, 50, 20], "marker": [300, 300, 36, 36]}, "tilt_quad": quad}  # fmt: skip
+
+    def good(img, ask):
+        if ask.startswith("square"):
+            x, y = G.cell_center([tuple(p) for p in quad], *G.cell_of(ask.split()[1]))
+        else:
+            f = meta["targets"]["button_a" if "Alpha" in ask else "marker"]
+            x, y = f[0] + f[2] / 2, f[1] + f[3] / 2
+        return x - 100, y - 50
+
+    out = grounding.evaluate(good, png, meta)
+    assert out["targets"] == 5 and out["hit_rate"] == 1.0 and out["p50_s"] is not None
+    bad = grounding.evaluate(lambda img, ask: (0, 0), png, meta)
+    assert bad["hit_rate"] == 0.0
+    broken = grounding.evaluate(lambda img, ask: 1 / 0, png, meta)
+    assert broken["hit_rate"] == 0.0 and {r["error"] for r in broken["rows"]} == {"ZeroDivisionError"}
+    shot = tmp_path / "window-1.png"
+    shot.write_bytes(png)
+    shot.with_suffix(".json").write_text(json.dumps(meta))
+    assert grounding.latest_shot(tmp_path) == shot
+    with pytest.raises(ValueError):
+        grounding.load("no-function-here")
+
+
+# ---- the agent section and the A/B verdict -------------------------------------------------------------------
+
+
+def test_the_agent_section_never_presses_chords_the_whole_mac_acts_on():
+    from neo.selftest import agent
+
+    sent = []
+
+    async def real(a, c):
+        sent.append(a["keys"])
+        return "Pressed"
+
+    hk = agent._safe_hotkey(real)
+    for keys in ("cmd+tab", "cmd+space", "cmd+q", "cmd+h", "cmd+m", "ctrl+left", "cmd+alt+esc", "cmd+shift+3", "fn+f"):
+        assert asyncio.run(hk({"keys": keys}, None)).startswith("Error"), keys
+    assert asyncio.run(hk({"keys": "cmd+k", "app": "Safari"}, None)).startswith("Error")  # never another app
+    for keys in ("cmd+k", "return", "escape", "cmd+j", "tab"):
+        assert asyncio.run(hk({"keys": keys}, None)) == "Pressed", keys
+    assert sent == ["cmd+k", "return", "escape", "cmd+j", "tab"]
+
+
+def test_the_ab_verdict_needs_enough_runs_and_success_before_speed():
+    from neo.selftest import agent
+
+    def arm(runs, success, secs, calls=3):
+        return {"runs": runs, "success": success, "seconds_p50": secs, "model_calls_p50": calls}
+
+    s = {"low": arm(10, 0.9, 8.0, 3), "high": arm(10, 0.9, 30.0, 5)}
+    assert "low can be the default" in agent.verdict(s, "low", "high")
+    assert "keep high" in agent.verdict({**s, "low": arm(10, 0.7, 8.0)}, "low", "high")
+    assert "wasn't faster" in agent.verdict({**s, "low": arm(10, 0.9, 40.0)}, "low", "high")
+    assert "too few runs" in agent.verdict({**s, "low": arm(4, 0.9, 8.0)}, "low", "high")
+    assert "not measured" in agent.verdict(s, "batch on", "batch off")
+    rows = [{"arm": "low", "success": True, "model_calls": 2, "seconds": 5.0, "failover_calls": 1, "failover_s": 1.5},
+            {"arm": "low", "success": False, "model_calls": 4, "seconds": 9.0, "failover_calls": 0, "failover_s": 0.0}]  # fmt: skip
+    got = agent.summarize(rows)["low"]
+    assert got["runs"] == 2 and got["success"] == 0.5 and got["model_calls_p50"] == 3 and got["failover_share"] == pytest.approx(1 / 6, abs=1e-3)
+
+
+def test_an_arm_sets_only_switches_the_build_has_and_puts_them_back(monkeypatch):
+    from neo import config
+    from neo.selftest import agent
+
+    s = types.SimpleNamespace(screen_effort="medium")
+    monkeypatch.setattr(config, "settings", lambda: s)
+    with agent._settings_for(agent.Arm("low", effort="low", batch=True)) as have:
+        assert s.screen_effort == "low" and have == {"screen_effort": True, "batch_actions": False}
+        assert not hasattr(s, "batch_actions")
+    assert s.screen_effort == "medium"
+
+
+def test_the_cli_runs_grounding_only_with_a_grounder(monkeypatch, capsys):
+    from neo.selftest import __main__ as cli
+
+    monkeypatch.setattr(cli, "neo_app_ancestor", lambda *a, **k: "")
+    monkeypatch.setattr(cli, "_interactive", lambda: True)
+    assert cli.main(["grounding"]) == 2 and "--grounder" in capsys.readouterr().err
+    monkeypatch.setattr(cli, "neo_app_ancestor", lambda *a, **k: "/Applications/NEO.app/Contents/MacOS/neo")
+    for test in ("ab", "agent", "grounding"):
+        assert cli.main([test]) == 2  # inside NEO: never, whatever the test

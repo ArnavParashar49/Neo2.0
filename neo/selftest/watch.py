@@ -26,6 +26,12 @@ the test stops there.
 After the checks it keeps listening while NEO cleans up (`disarm`, then `stop_listening`): the user
 grabbing the mouse as the window closes is still seen, so the pointer and the front app are left to
 them (`took_over`, `active_after_run`).
+
+Accessibility actions (a press, a set value, focusing or raising) post no events, so the event hook
+never sees them: `ax_hook` is shown each one instead, before it is made, and refuses (raises `Stop`)
+any whose element isn't the test window's — or any once the user has taken over. It is installed at
+NEO's one AX-action choke point when the code has it (``AX_CHOKE``), and around each function that
+acts through Accessibility today (``AX_ACTIONS``), for as long as the watch is armed.
 """
 
 from __future__ import annotations
@@ -63,6 +69,21 @@ def _kinds() -> tuple[dict[int, str], dict[int, str]]:
     return mouse, keys
 
 
+# Where Accessibility actions are made. AX_CHOKE: the module attribute NEO's AX-action choke point
+# calls, when it has one, as hook(element, action, value). AX_ACTIONS: each function that acts
+# through Accessibility today, and how to find what it acts on (an element, or a hit's pid).
+AX_CHOKE = ("neo.tools.computer.ax", "_ax_watch")
+AX_ACTIONS: dict[str, dict[str, tuple[str, str]]] = {
+    "neo.tools.computer.ax": {
+        "press_el": ("element", "press"),
+        "press_element": ("element", "press"),
+        "set_el_value": ("element", "set value"),
+        "focus_el": ("ref", "focus"),
+        "raise_window": ("hit", "raise"),
+    },
+    "neo.decide.media": {"_perform": ("ref", "perform"), "_set": ("ref", "set")},
+}
+
 _DOWN_UP = {"down": "up", "rdown": "rup", "odown": "oup"}
 _GESTURE_REST = {"up", "rup", "oup", "dragged", "rdragged", "odragged"}
 _POINTER_SLACK = 3.0  # points: the pointer is "still where NEO put it"
@@ -92,6 +113,8 @@ class Watch:
         self._run_over: int | None = None  # len(self.foreign) when the checks ended (disarm)
         self._lock = threading.RLock()
         self._mouse, self._keyk = _kinds()
+        self.ax_seen: list[dict] = []  # every Accessibility action NEO made during the run
+        self._ax_undo: list[tuple[Any, str, Any, bool]] = []
 
     # ---- life ------------------------------------------------------------------------------
     def arm(self, start: tuple[float, float], *, calibrate_s: float = 0.6) -> str:
@@ -101,6 +124,7 @@ class Watch:
 
         self._last = self.mac.pointer()
         inp._watch = self
+        self._install_ax()
         self._tap = self.mac.tap(self._seen)
         self._calibrating = self._tap is not None
         inp.move(*start)  # checked like any other event: it must land in the test window
@@ -131,6 +155,7 @@ class Watch:
             self.release()
             if inp._watch is self:
                 inp._watch = None
+            self._uninstall_ax()
             self._run_over = len(self.foreign)
 
     def stop_listening(self) -> None:
@@ -157,6 +182,63 @@ class Watch:
         if self._tap is not None and self._run_over is not None:
             return len(self.foreign) > self._run_over
         return self.pointer_moved()
+
+    # ---- Accessibility actions ---------------------------------------------------------------
+    def ax_hook(self, target: Any, action: str = "", value: Any = None, *, pid: int | None = None) -> None:
+        """Shown every Accessibility action before it is made: only the test window's elements,
+        and nothing at all once the user has taken over. (Armed only: a watch left behind by a run
+        that ended is no one's.)"""
+        from neo.tools.computer import input as inp
+
+        if inp._watch is not self:
+            return
+        with self._lock:
+            if self.stopped or self.refused:
+                raise Stop(self.stopped or self.refused)
+            owner = int(pid) if pid is not None else int(self.mac.element_pid(target) or 0)
+            if owner != self.test_pid:
+                self._refuse(f"an Accessibility {action or 'action'} would have acted on another app (pid {owner or '?'})")
+            self.ax_seen.append({"action": action, "pid": owner})
+
+    def _install_ax(self) -> None:
+        import importlib
+
+        mod_name, attr = AX_CHOKE
+        try:
+            choke = importlib.import_module(mod_name)
+        except ImportError:
+            choke = None
+        if choke is not None and hasattr(choke, attr):
+            self._ax_undo.append((choke, attr, getattr(choke, attr), True))
+            setattr(choke, attr, self.ax_hook)
+        for mod_name, fns in AX_ACTIONS.items():
+            try:
+                mod = importlib.import_module(mod_name)
+            except ImportError:
+                continue
+            for name, (kind, what) in fns.items():
+                fn = getattr(mod, name, None)
+                if fn is None:
+                    continue
+                self._ax_undo.append((mod, name, fn, True))
+                setattr(mod, name, self._watched(fn, kind, what))
+
+    def _watched(self, fn: Any, kind: str, what: str) -> Any:
+        def watched(target: Any, *a: Any, **k: Any) -> Any:
+            if kind == "hit":
+                self.ax_hook(None, what, pid=int(getattr(target, "pid", 0) or 0))
+            else:
+                ref = getattr(target, "ref", None) if kind == "element" else target
+                self.ax_hook(ref, (a[0] if a and isinstance(a[0], str) and kind == "ref" else what))
+            return fn(target, *a, **k)
+
+        watched.__wrapped__ = fn  # type: ignore[attr-defined]
+        return watched
+
+    def _uninstall_ax(self) -> None:
+        while self._ax_undo:
+            obj, name, old, _present = self._ax_undo.pop()
+            setattr(obj, name, old)
 
     # ---- the hook: every event NEO is about to post --------------------------------------------
     def __call__(self, ev: Any) -> None:

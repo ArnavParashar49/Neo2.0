@@ -22,6 +22,7 @@ import Quartz as _RealQ
 from PIL import Image, ImageDraw
 
 from neo.selftest import controls, testwin
+from neo.selftest import geometry as G
 from neo.selftest import layout as L
 from neo.selftest import watch as watch_mod
 
@@ -63,7 +64,7 @@ def _nothing_real(monkeypatch):
 # ---- the pretend Mac --------------------------------------------------------------------------
 
 CONTENT = (40.0, 92.0)  # the test window's content, top-left on screen (a 28 pt title bar above)
-FRAME = [40.0, 64.0, 720.0, 358.0]
+FRAME = [40.0, 64.0, 1000.0, 408.0]
 
 
 def _t(x, y, w, h):
@@ -81,7 +82,12 @@ TARGETS = {  # where testwin puts them (its add() calls), on screen
     "marker": _t(280, 244, 36, 36),
     "tile": _t(340, 244, 80, 36),
     "well": _t(440, 244, 100, 36),
+    "hindi": _t(280, 300, 110, 30),
+    "tiny": _t(410, 309, 12, 12),
+    "tilt": _t(*L.TILT),
 }
+TILT_QUAD = [[TARGETS["tilt"][0] + qx, TARGETS["tilt"][1] + qy] for qx, qy in G.tilt_quad(L.TILT[2], L.TILT[3])]
+SHEET = _t(350, 0, 300, 120)  # the "Start a new round?" sheet, over the top of the window
 MOUSE = {
     _RealQ.kCGEventMouseMoved: "move",
     _RealQ.kCGEventLeftMouseDown: "down",
@@ -122,6 +128,8 @@ class Desk:
         self.area = ""
         self.list_off = 0.0
         self.piece = [1, 6]
+        self.sheet = False  # the "Start a new round?" sheet is open
+        self.round = 1
         self.pressing = ""
         self.grab = None
         self.drags = 0
@@ -157,7 +165,8 @@ class Desk:
         self.log.write(ev, **data)
 
     def state(self):
-        s = {"field": self.field, "area": self.area, "list": self.list_off, "piece": list(self.piece), "active": self.active, "key": self.active}
+        s = {"field": self.field, "area": self.area, "list": self.list_off, "piece": list(self.piece), "active": self.active,
+             "key": self.active, "round": self.round, "sheet": self.sheet}  # fmt: skip
         if s != self._last_state:
             self._last_state = dict(s)
             self.write("state", **s)
@@ -177,6 +186,8 @@ class Desk:
             "cell": L.CELL,
             "board_n": L.BOARD_N,
             "piece": list(self.piece),
+            "tilt_quad": TILT_QUAD,
+            "round": self.round,
             "screens": [[0, 0, *self.display]],
             "second": None,
             "active": False,
@@ -232,6 +243,9 @@ class Desk:
     def _down(self, ev, x, y, button="left"):
         clicks = ev["fields"].get(_RealQ.kCGMouseEventClickState, 1)
         self.write("raw_ldown" if button == "left" else "raw_rdown", at=[x, y], clicks=clicks, window=MAIN_WIN)
+        if self.sheet and not inside(SHEET, x, y):
+            self.pressing = ""
+            return  # a sheet is open: the window under it takes no clicks (macOS beeps)
         if not self.active:
             self.activate_test()
             if self.opts.get("swallow_first_click"):
@@ -244,8 +258,11 @@ class Desk:
             cell = testwin.cell_at(x - bx, y - by)
             self.grab = cell if (button == "left" and cell == self.piece) else None
             self.write("board_down", button=button, cell=cell, at=[x, y], clicks=clicks)
-        elif target in ("double", "marker"):
+        elif target in ("double", "marker", "tiny"):
             self.write(f"{target}_down", at=[x, y], clicks=clicks)
+        elif target == "tilt":
+            cell = G.cell_at([tuple(p) for p in TILT_QUAD], x, y)
+            self.write("tilt_down", cell=cell, square=G.square(*cell) if cell else None, at=[x, y])
         elif target == "tile":
             self.write("tile_down", at=[x, y])
         elif target in ("field", "area"):
@@ -277,8 +294,8 @@ class Desk:
                 self.write("piece_moved", start=self.grab, end=cell)
                 self.piece = cell
                 self.state()
-        elif self.pressing in ("button_a", "button_b") and target == self.pressing:
-            self.write("button", name=L.BUTTON_A if target == "button_a" else L.BUTTON_B)
+        elif self.pressing in ("button_a", "button_b", "hindi") and target == self.pressing:
+            self.write("button", name={"button_a": L.BUTTON_A, "button_b": L.BUTTON_B, "hindi": L.HINDI_BUTTON}[target])
         elif self.pressing == "tile" and self.dnd:
             if target == "well":
                 self.write("drop", payload=L.DRAG_PAYLOAD)
@@ -313,8 +330,25 @@ class Desk:
             self._insert("\n")
         elif code == 38 and flags & _RealQ.kCGEventFlagMaskCommand:
             self.write("menu", title=L.MENU_TITLE)
+        elif code == 40 and flags & _RealQ.kCGEventFlagMaskCommand and not self.sheet:  # Test › New Round… (⌘K)
+            self.sheet = True
+            self.write("sheet_open", title=L.SHEET_TITLE)
+            self.state()
+        elif code == 0 and flags & _RealQ.kCGEventFlagMaskCommand:  # ⌘A: what's typed next replaces it
+            self.selected = self.focus_el
+
+    def answer_sheet(self, button):
+        self.sheet = False
+        self.write("sheet_answer", button=button)
+        if button == L.SHEET_START:
+            self.round += 1
+            self.write("round", n=self.round)
+        self.state()
 
     def _insert(self, text):
+        if getattr(self, "selected", "") == self.focus_el and self.focus_el:
+            setattr(self, self.focus_el, "")
+            self.selected = ""
         if self.focus_el == "field":
             self.field += text
             self.write("text", target="field", value=self.field)
@@ -342,6 +376,8 @@ class Desk:
         d.rectangle([fx * k, fy * k, (fx + fw) * k - 1, (fy + fh) * k - 1], fill=(236, 236, 236))
         mx, my, mw, mh = TARGETS["marker"]
         d.rectangle([mx * k, my * k, (mx + mw) * k - 1, (my + mh) * k - 1], fill=L.MARKER_RGB)
+        tx, ty, tw, th = TARGETS["tiny"]
+        d.rectangle([tx * k, ty * k, (tx + tw) * k - 1, (ty + th) * k - 1], fill=L.TINY_RGB)
         if "-R" in cmd:
             rx, ry, rw, rh = (int(v) for v in cmd[cmd.index("-R") + 1].split(","))
             img = img.crop((rx * k, ry * k, (rx + rw) * k, (ry + rh) * k))
@@ -499,7 +535,12 @@ def ax_elements(desk):
         el("e4", "AXButton", L.BUTTON_B, "", "button_b", actions=("AXPress",)),
         el("e5", "AXTextField", L.FIELD_HINT, desk.field, "field"),
         el("e6", "AXTextArea", "", desk.area, "area", frame=[ax_x + 1, ax_y + 1, ax_w - 17, ax_h - 2]),
-    ]
+        el("e7", "AXButton", L.HINDI_BUTTON, "", "hindi", actions=("AXPress",)),
+    ] + ([
+        el("e8", "AXSheet", L.SHEET_TITLE, "", "sheet", frame=SHEET),
+        el("e9", "AXButton", L.SHEET_START, "", "sheet_start", frame=[SHEET[0] + 180, SHEET[1] + 80, 90, 26], actions=("AXPress",)),
+        el("e10", "AXButton", L.SHEET_CANCEL, "", "sheet_cancel", frame=[SHEET[0] + 80, SHEET[1] + 80, 90, 26], actions=("AXPress",)),
+    ] if desk.sheet else [])  # fmt: skip
 
 
 @pytest.fixture
@@ -535,6 +576,9 @@ def mac(monkeypatch, tmp_path):
         e = ax.get(eid)
         if e.ref[0] != TEST_PID:
             raise AssertionError("pressed something outside the test window")
+        if e.ref[1] in ("sheet_start", "sheet_cancel"):
+            desk.answer_sheet(e.title)
+            return f"Pressed {eid} (Button {e.title!r})"
         desk.write("button", name=e.title)
         return f"Pressed {eid} ({e.role.removeprefix('AX')} {e.title!r})"
 
@@ -573,9 +617,11 @@ def mac(monkeypatch, tmp_path):
             return ax.Hit()
         pid = top["pid"]
         own = pid == TEST_PID
+        blocked = own and desk.sheet and not inside(SHEET, x, y)
         return ax.Hit(
             pid=pid, app=top["name"], label=label_at(x, y) if own else "Reload",
             role=roles.get(desk.target_at(x, y), "AXGroup") if own else "AXButton", regular=True,
+            sheet=f"“{L.SHEET_TITLE}” (buttons: {L.SHEET_START}, {L.SHEET_CANCEL})" if blocked else "",
         )  # fmt: skip
 
     def owner_at(x, y):
@@ -607,6 +653,15 @@ def mac(monkeypatch, tmp_path):
     monkeypatch.setattr(ax, "regular", lambda pid: pid in (TEST_PID, USER_PID))
     monkeypatch.setattr(ax, "focus_el", focus_el)
     monkeypatch.setattr(ax, "press_el", lambda e: press(e.id))
+    monkeypatch.setattr(ax, "press_element", lambda e: press(e.id))
+
+    def window_elements(app=None):
+        els = ax_elements(desk) if desk.front[1] == TEST_PID else []
+        for e in els:
+            ax._issued[e.id] = e
+        return (desk.name if els else "Safari"), (tuple(FRAME) if els else None), els
+
+    monkeypatch.setattr(ax, "window_elements", window_elements)
     monkeypatch.setattr(ax, "set_el_value", lambda e, v: set_value(e.id, v))
     monkeypatch.setattr(apps, "bring_pid_front", bring_pid_front)
     monkeypatch.setattr(screen, "displays", lambda: [screen.Display(1, 0.0, 0.0, float(desk.display[0]), float(desk.display[1]))])
@@ -676,10 +731,19 @@ def test_everything_arrives_and_the_report_says_so(mac):
     assert passed >= {
         "first_click", "click_point", "right_click", "double_click", "ax_tree", "click_id", "ax_press", "ax_set_value",
         "type_field", "hotkey_return", "type_area", "hotkey_menu", "scroll", "drag_board", "drag_drop",
-        "screenshot_region", "screenshot_full", "activate", "feedback",
+        "screenshot_region", "screenshot_full", "activate", "feedback", "sheet_blocks", "click_meaning", "ax_watched",
     }  # fmt: skip
+    # what NEO doesn't offer yet skips, never fails: squares by name, zoom, marks, menus, Effect, the after-look
+    skipped = {n for n, c in checks.items() if c.status == "skip"}
+    assert skipped == {
+        "second_display", "menu_sheet", "type_named", "board_cells", "tilted_board", "zoom_tiny", "click_mark",
+        "after_look", "effect_fields",
+    }, report.text()  # fmt: skip
     assert report.ok
-    assert report.summary().startswith("Controls check: 19 of 19 passed")
+    assert report.summary().startswith("Controls check: 22 of 22 passed")
+    sc = report.scores
+    assert sc["success"] == 1.0 and sc["passed"] == 21 and sc["skipped"] == 9  # (the feedback check isn't scored)
+    assert set(report.timing) >= {"click", "drag", "scroll", "hotkey", "ax_press", "type_text", "screenshot", "ax_tree"}
     # nothing went anywhere but the test window
     assert desk.stray == []
     # every event NEO posted during the run carries this run's mark; the last one puts the pointer back
@@ -702,9 +766,9 @@ def test_the_exact_events_for_a_click_a_drag_and_typing(mac):
     marks: dict[str, int] = {}
     real = controls._one
 
-    async def spy(fn, r):
+    async def spy(fn, r, *a):
         marks[fn.__name__] = len(desk.posted)
-        return await real(fn, r)
+        return await real(fn, r, *a)
 
     controls._one = spy
     try:
@@ -825,9 +889,9 @@ def test_a_note_whose_numbers_miss_is_caught_without_clicking(mac, monkeypatch):
     marks = {}
     real = controls._one
 
-    async def spy(fn, r):
+    async def spy(fn, r, *a):
         marks[fn.__name__] = len(desk.posted)
-        out = await real(fn, r)
+        out = await real(fn, r, *a)
         marks[fn.__name__ + ":end"] = len(desk.posted)
         return out
 
@@ -947,15 +1011,15 @@ def test_the_report_is_saved_where_neo_keeps_its_data(mac):
     report = _run(mac)
     saved = controls.save(report)
     assert saved is not None and saved.parent == settings().data_dir / "selftest"
-    assert "Controls check: 19 of 19 passed" in saved.read_text()
+    assert "Controls check: 22 of 22 passed" in saved.read_text()
     assert saved.with_suffix(".json").exists()
     assert oct(saved.stat().st_mode & 0o777) == "0o600"
 
 
 def test_accessibility_positions_off_the_window_are_reported_and_never_clicked(mac):
-    """ax_tree says the buttons are 500 pt to the right — past the test window's edge, over Safari.
+    """ax_tree says the buttons are 800 pt to the right — past the test window's edge, over Safari.
     The report says so, and the click by id that would have landed on Safari is never sent."""
-    mac.set(ax_shift=(500, 0))
+    mac.set(ax_shift=(800, 0))
     report = _run(mac)
     checks = _by_name(report)
     assert checks["ax_tree"].status == "fail" and "is outside" in checks["ax_tree"].arrived
