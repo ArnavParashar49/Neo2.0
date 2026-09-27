@@ -1415,6 +1415,10 @@ async def drag_tool(a: dict, c: ToolContext):
         t = await probe(pts)
         if gate := await g._gate_drop(a, t):
             return gate
+        # A helper's mark's own words at either end are judged too (dragging "Delete" onto something).
+        marked = [(w, h.app) for e, h in zip(ends, t.hits, strict=True) for w in e.labels]
+        if marked and (gate := await g._gate_click(a, marked, "drag")):
+            return gate
         src, dst = t.hits
         between_apps = bool(src.pid and dst.pid and src.pid != dst.pid)
         if not between_apps:

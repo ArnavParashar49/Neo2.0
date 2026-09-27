@@ -433,3 +433,13 @@ def test_the_walk_hands_its_deadline_to_ax_cores_walk_when_there_is_one(monkeypa
     assert isinstance(got["w"], Walk) and 0.4 < made[0] <= 0.5
     monkeypatch.delattr(ax, "_Walk")
     assert marks._walk_limits(time.monotonic() + 0.5) == {}
+
+
+def test_a_drag_from_a_helpers_mark_is_judged_by_its_words_too(world, new_tools):
+    world.front = ("Chess", CHESS)
+    pointer.set_id_resolver("t", lambda eid: (612.0, 540.0), labels=lambda eid: ["Delete account"])
+    try:
+        out = run("drag", {"id1": "t3", "x2": 300, "y2": 300}, ToolContext(user_text="tidy up", extras={"blind": False}))
+        assert out.text.startswith("NEEDS_CONFIRM") and "Delete account" in out.text and world.events() == []
+    finally:
+        pointer.set_id_resolver("t", None)
