@@ -100,7 +100,7 @@ scripts/install-app.sh      # build NEO.app, install it to /Applications and sta
 
 - `GEMINI_API_KEY` — [aistudio.google.com/apikey](https://aistudio.google.com/apikey). Add more in `GEMINI_API_KEYS=key2,key3` for more free quota.
 - `GROQ_API_KEY` — [console.groq.com/keys](https://console.groq.com/keys) (optional; instant chat replies).
-- `CEREBRAS_API_KEY` — [cloud.cerebras.ai](https://cloud.cerebras.ai) (optional, **paid**: the fastest brain for steps that need no picture, and a seeing fallback when Gemini is overloaded). NEO spends at most `NEO_CEREBRAS_DAILY_BUDGET` a day on it.
+- `CEREBRAS_API_KEY` — [cloud.cerebras.ai](https://cloud.cerebras.ai) (optional, **paid**: a very fast brain for quick answers and text-only steps, tried ahead of Groq, and a seeing fallback when Gemini is overloaded). NEO spends at most `NEO_CEREBRAS_DAILY_BUDGET` a day on it.
 
 The browser tools need Chromium once: `.venv/bin/python -m playwright install chromium`.
 
@@ -173,7 +173,7 @@ Everything is an environment variable with the `NEO_` prefix (or a line in `.env
 |---|---|---|
 | `NEO_BRAIN` | `gemini` | primary agentic brain: `gemini` · `groq` · `local` · `claude` |
 | `NEO_FAST_BRAIN` | `groq` | brain for chat-only turns |
-| `CEREBRAS_API_KEY` | — | a paid [Cerebras](https://cloud.cerebras.ai) key: `gpt-oss-120b` answers text-only steps and chat ahead of Groq; `qwen-3.8-27b` sees the screen when Gemini is overloaded (ahead of Groq). No key: nothing changes |
+| `CEREBRAS_API_KEY` | — | a paid [Cerebras](https://cloud.cerebras.ai) key: `gpt-oss-120b` takes chat and text-only steps wherever Groq would (tried just ahead of it); `qwen-3.8-27b` sees the screen when Gemini is overloaded (ahead of Groq). No key: nothing changes |
 | `NEO_CEREBRAS_DAILY_BUDGET` | `0.50` | dollars a day NEO may spend on Cerebras (usage × price, counted per answer). At 80% it says so; once spent it skips Cerebras until midnight and says why. `0` never spends |
 | `NEO_CEREBRAS_MODEL` / `NEO_CEREBRAS_VISION_MODEL` | `gpt-oss-120b` / `qwen-3.8-27b` | the text and seeing models (one that `/v1/models` doesn't list for your key is skipped) |
 | `NEO_CEREBRAS_PRICES` | published prices | JSON, $ per million tokens: `{"gpt-oss-120b": [0.35, 0.75], "qwen-3.8-27b": [0.99, 1.49]}` (entries override or add models; an unknown model counts at the dearest price) |

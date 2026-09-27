@@ -93,8 +93,8 @@ GEMINI_API_KEY=
 # Optional: a free Groq key (https://console.groq.com/keys) makes quick answers faster.
 GROQ_API_KEY=
 
-# Optional, paid: a Cerebras key (https://cloud.cerebras.ai) makes screen steps and answers much
-# faster. NEO spends at most this many dollars a day on it (it tells you at 80%, then skips it).
+# Optional, paid: a Cerebras key (https://cloud.cerebras.ai) — a very fast brain, tried ahead of Groq.
+# NEO spends at most this many dollars a day on it (it tells you at 80%, then skips it).
 CEREBRAS_API_KEY=
 NEO_CEREBRAS_DAILY_BUDGET=0.50
 
