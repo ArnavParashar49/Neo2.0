@@ -145,6 +145,9 @@ def _sample(img: np.ndarray, xs: np.ndarray, ys: np.ndarray) -> np.ndarray:
     return (a * (1 - ax) + b * ax) * (1 - ay) + (c * (1 - ax) + d * ax) * ay
 
 
+_MAX_CELLS = 24  # the most squares on a side NEO looks for
+_MIN_SQUARE = 12  # pixels: a square smaller than this is no square anyone plays on
+
 # ---- flat grids -------------------------------------------------------------------------------
 
 
@@ -193,19 +196,30 @@ def _runs(edge: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
 def _close(edge: np.ndarray, gap: int = 3) -> np.ndarray:
     """Bridge gaps of up to ``gap`` pixels along axis 0 (where four squares meet, a resampled
     picture blends the corner and the flip vanishes for a pixel or two); the ends stay put."""
-    k = 2 * gap + 1
-    pad = np.pad(edge.astype(np.int32), ((gap, gap), (0, 0)))
-    c = np.cumsum(np.pad(pad, ((1, 0), (0, 0))), axis=0)
-    dil = (c[k:] - c[:-k]) > 0
-    pad2 = np.pad(dil.astype(np.int32), ((gap, gap), (0, 0)), constant_values=1)
-    c2 = np.cumsum(np.pad(pad2, ((1, 0), (0, 0))), axis=0)
-    return (c2[k:] - c2[:-k]) == k
+    h = edge.shape[0]
+    p = np.zeros((h + 2 * gap, edge.shape[1]), bool)
+    p[gap : gap + h] = edge
+    dil = p[gap : gap + h].copy()
+    for d in range(1, gap + 1):
+        dil |= p[gap - d : gap - d + h]
+        dil |= p[gap + d : gap + d + h]
+    q = np.ones((h + 2 * gap, edge.shape[1]), bool)
+    q[gap : gap + h] = dil
+    out = dil.copy()
+    for d in range(1, gap + 1):
+        out &= q[gap - d : gap - d + h]
+        out &= q[gap + d : gap + d + h]
+    return out
 
 
 def _candidates(edge: np.ndarray, min_run: int) -> list[tuple[float, float, float]]:
     """(position, run start, run end) of each straight line at least ``min_run`` long (lines in
     adjacent columns merged: the strongest stands for them)."""
-    length, end = _runs(_close(edge))
+    cols = np.nonzero(edge.sum(axis=0) >= min_run - 2 * 3)[0]  # (only columns with edge enough for a line)
+    length = np.zeros(edge.shape[1], np.int64)
+    end = np.zeros(edge.shape[1], np.int64)
+    if len(cols):
+        length[cols], end[cols] = _runs(_close(edge[:, cols]))
     idx = np.nonzero(length >= min_run)[0]
     out: list[tuple[float, float, float]] = []
     group: list[int] = []
@@ -293,8 +307,8 @@ def find_grid(gray: np.ndarray, *, min_cells: int = 3, flip: float = 18.0) -> Gr
     if cx is None or cy is None:
         return None
     (x0, cw, cols), (y0, ch, rows) = cx, cy
-    if cols < min_cells or rows < min_cells or not (0.5 < cw / ch < 2.0):
-        return None
+    if not (min_cells <= cols <= _MAX_CELLS and min_cells <= rows <= _MAX_CELLS) or min(cw, ch) < _MIN_SQUARE or not (0.5 < cw / ch < 2.0):
+        return None  # (a transparency checkerboard's tiny squares, a table's long rows: no board)
     return Grid(float(x0), float(y0), float(cw), float(ch), int(cols), int(rows), lines=_drawn_with_lines(g, x0, y0, cw, ch, cols, rows))
 
 
@@ -319,13 +333,15 @@ def _box(a: np.ndarray, r: int) -> np.ndarray:
     if r <= 0:
         return a
     k = 2 * r + 1
-    p = np.pad(a, r, mode="edge")
-    c = np.cumsum(p, axis=0, dtype=np.float64)
-    c = np.vstack([np.zeros((1, c.shape[1])), c])
-    v = (c[k:] - c[:-k]) / k
-    c = np.cumsum(v, axis=1)
-    c = np.hstack([np.zeros((c.shape[0], 1)), c])
-    return ((c[:, k:] - c[:, :-k]) / k).astype(np.float32)
+    h, w = a.shape
+    p = np.pad(a.astype(np.float32, copy=False), r, mode="edge")
+    v = p[0:h].copy()
+    for d in range(1, k):
+        v += p[d : d + h]
+    out = v[:, 0:w].copy()
+    for d in range(1, k):
+        out += v[:, d : d + w]
+    return out * np.float32(1.0 / (k * k))
 
 
 def _smooth(a: np.ndarray, r: int) -> np.ndarray:
@@ -393,9 +409,6 @@ def _subpixel(R: np.ndarray, pts: np.ndarray) -> np.ndarray:
 
 
 # ---- a lattice of X-corners -----------------------------------------------------------------------
-
-_MAX_CELLS = 24  # the most squares on a side NEO looks for
-
 
 def _spacing(H: np.ndarray, i: float, j: float) -> float:
     p = _apply(H, [(i, j), (i + 1, j), (i, j + 1)])
@@ -654,6 +667,7 @@ class Board:
     tones: Tones | None = None
     agree: float = 1.0  # share of squares whose colour alternates as a board's should
     state: np.ndarray | None = field(default=None, repr=False)  # how every square looked last time
+    rim: np.ndarray | None = field(default=None, repr=False)  # …and its rim (a move leaves rims alone)
     occupancy: list[str] | None = None  # per row, top first: '.' empty, 'L' light piece, 'D' dark piece
 
     # -- geometry --
@@ -683,7 +697,7 @@ class Board:
     # -- names --
     @property
     def chess(self) -> bool:
-        """Chess names (a1–h8) apply: 8×8 alternating squares whose orientation is known."""
+        """Names like a1–h8 apply: 8×8 alternating squares whose orientation is known."""
         return self.rows == 8 and self.cols == 8 and not self.lines and self.orientation in SIDES
 
     def name(self, col: int, row: int) -> str:
@@ -725,6 +739,9 @@ class Board:
 def _board(pic: Picture, H_img: np.ndarray, c0: int, r0: int, c1: int, r1: int, **kw) -> Board:
     """A Board from a lattice→image mapping and the block of squares that is the board."""
     shift = np.array([[1.0, 0, c0], [0, 1.0, r0], [0, 0, 1]])
+    t = kw.get("tones")
+    if t is not None and (c0 + r0) % 2:  # (the squares' parity counted from the board's own corner)
+        kw["tones"] = Tones(t.odd, t.even)
     return Board(pic.to_screen @ H_img @ shift, rows=r1 - r0 + 1, cols=c1 - c0 + 1, **kw)
 
 
@@ -771,6 +788,8 @@ def _settle(pic: Picture, H_img: np.ndarray, keys: np.ndarray, **kw) -> tuple[Bo
         return None, f"only {agree:.0%} of the squares alternate as a board's should"
     if min(c1 - c0, r1 - r0) + 1 < 3:
         return None, "too few squares"
+    if _spacing(Hu, c0, r0) < _MIN_SQUARE * 0.6:
+        return None, "the squares are too small to be a board's"
     b = _board(pic, Hu, c0, r0, c1, r1, tones=tones, agree=agree, **kw)
     b.flat = _perspective(b.H, b.cols, b.rows) < 1.03
     return b, ""
@@ -1019,6 +1038,28 @@ def state(pic: Picture, b: Board) -> np.ndarray:
     return _look(pic, b)[0]
 
 
+def _rims(pic: Picture, b: Board) -> np.ndarray:
+    Hi = np.linalg.inv(pic.to_screen) @ b.H
+    return _rim_colours(pic.rgb, Hi, _block(0, 0, b.cols - 1, b.rows - 1))
+
+
+def _covered(pic: Picture, b: Board) -> bool:
+    """Is the board no longer where it was — covered (a sheet, a menu), moved or gone? A move changes
+    squares' middles, and a highlight or a piece's shadow a few squares' rims; something over the
+    board changes many rims at once, and a board that moved no longer alternates where it was."""
+    sq = _block(0, 0, b.cols - 1, b.rows - 1)
+    Hi = np.linalg.inv(pic.to_screen) @ b.H
+    seen = _inside(pic.rgb.shape, Hi, sq)
+    if seen.mean() < 0.9:
+        return True
+    if b.rim is not None:
+        rim = _rims(pic, b)
+        changed = (np.abs(rim - b.rim).mean(axis=2) > 12).mean(axis=1) > 0.3
+        if changed.sum() > max(6, 0.12 * len(sq)):
+            return True
+    return bool(not b.lines and b.tones is not None and _agree(pic.rgb, Hi, sq[seen], b.tones).mean() < b.agree - 0.12)
+
+
 # ---- what NEO knows: the boards it found ---------------------------------------------------------
 
 FRESH_S = 60.0  # a board last seen longer ago than this is looked at again before a square is acted on
@@ -1074,7 +1115,7 @@ def _read(pic: Picture, b: Board, now: float, previous: Board | None) -> list[st
             b.orientation, b.oriented_by = o, "pieces"
         elif previous is not None and previous.orientation:
             b.orientation, b.oriented_by = previous.orientation, previous.oriented_by
-    b.state = state(pic, b)
+    b.state, b.rim = state(pic, b), _rims(pic, b)
     b.at = now
     if previous is not None and previous.state is not None and previous.state.shape == b.state.shape:
         since = [b.name(c, r) for c, r in changed_cells(b, previous.state, b.state)]
@@ -1197,8 +1238,8 @@ def note(b: Board, since: list[str] | None = None, *, blind: bool = False) -> st
     if blind and b.source != "neo":
         text += "A model that can't see can't act on this board's squares (its corners came from a model); take a new screenshot."
         return text
-    text += 'To act on a square, name it — click cell="' + b.name(min(4, b.cols - 1), b.rows - 1) + '"'
-    text += f' · drag from="{b.name(min(4, b.cols - 1), b.rows - 1)}" to="{b.name(min(4, b.cols - 1), max(0, b.rows - 3))}"'
+    c, r = min(4, b.cols - 1), max(0, b.rows - 2)
+    text += f'To act on a square, name it — click cell="{b.name(c, r)}" · drag from="{b.name(c, r)}" to="{b.name(c, max(0, r - 2))}"'
     text += " — and NEO works out the points."
     if b.occupancy is not None:
         text += f" Pieces now, top row first (L light, D dark, digits: empty squares): {_rows_text(b)}"
@@ -1298,15 +1339,11 @@ def after_move(b: Board, pic: Picture, frm: str = "", to: str = "", *, now: floa
     now = time.monotonic() if now is None else now
     if b.state is None:
         return Move("", None)
-    if not b.lines and b.tones is not None:
-        sq = _block(0, 0, b.cols - 1, b.rows - 1)
-        Hi = np.linalg.inv(pic.to_screen) @ b.H
-        seen = _inside(pic.rgb.shape, Hi, sq)
-        if seen.mean() < 0.9 or _agree(pic.rgb, Hi, sq[seen], b.tones).mean() < 0.6:
-            return Move("The board isn't where it was (covered, moved or gone) — take a screenshot before the next move.", None)
+    if _covered(pic, b):
+        return Move("The board isn't where it was (covered, moved or gone) — take a screenshot before the next move.", None)
     now_state = state(pic, b)
     cells = [b.name(c, r) for c, r in changed_cells(b, b.state, now_state)]
-    b.state, b.at = now_state, now
+    b.state, b.rim, b.at = now_state, _rims(pic, b), now
     if not b.lines:
         b.occupancy = occupancy(pic, b)
     if not cells:
