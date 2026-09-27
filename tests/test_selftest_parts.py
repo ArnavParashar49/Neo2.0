@@ -533,7 +533,8 @@ def test_neos_own_windows_stay_protected_during_a_self_test(front):
 
 
 def test_the_self_test_never_touches_the_real_mac_under_tests(tmp_path):
-    from neo.selftest.mac import Mac, NoEffects
+    from neo.effects import EffectRefused
+    from neo.selftest.mac import Mac
 
     m = Mac()
     for call in (
@@ -549,5 +550,5 @@ def test_the_self_test_never_touches_the_real_mac_under_tests(tmp_path):
         lambda: m.tap(lambda t, e: None),
         m.can_capture,
     ):
-        with pytest.raises(NoEffects):
+        with pytest.raises(EffectRefused):
             call()

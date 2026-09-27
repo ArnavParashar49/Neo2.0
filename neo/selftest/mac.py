@@ -3,8 +3,9 @@ drives like a model would.
 
 Starting and stopping the test window, reading the window list, asking which app is in front and
 what is under a point, bringing the user's app back, and a listen-only event tap that notices the
-user's own mouse and keys. One class, so a test swaps all of it for a fake; and under pytest (or
-NEO_NO_EFFECTS=1) every method that would touch the real Mac refuses.
+user's own mouse and keys. One class, so a test swaps all of it for a fake; and while real effects
+are off (neo.effects: under pytest, or NEO_NO_EFFECTS=1) every method that would touch the real Mac
+refuses — reading it included.
 """
 
 from __future__ import annotations
@@ -20,16 +21,13 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from neo import effects
+
 Rect = tuple[float, float, float, float]  # x, y, width, height: points, top-left origin (Quartz)
 
 
-class NoEffects(RuntimeError):
-    """The self-test tried to touch the real Mac where nothing real may happen (tests)."""
-
-
-def _no_effects_here() -> None:
-    if "pytest" in sys.modules or "PYTEST_CURRENT_TEST" in os.environ or os.environ.get("NEO_NO_EFFECTS") == "1":
-        raise NoEffects("the controls self-test never touches the real Mac here")
+def _no_effects_here(what: str = "look at or act on the real Mac") -> None:
+    effects.guard("selftest", f"{what} for the controls self-test")
 
 
 class Child:
@@ -147,7 +145,7 @@ class Tap:
 
 
 class Mac:
-    """The real Mac. Every method that touches it refuses under tests (see NoEffects)."""
+    """The real Mac. Every method that touches it refuses while real effects are off (neo.effects)."""
 
     def trusted(self) -> bool:
         from neo.tools.computer import ax
