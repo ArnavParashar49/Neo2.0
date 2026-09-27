@@ -76,6 +76,8 @@ async def _picture(frame: tuple[float, float, float, float] | None, what: str):
     area = _on_display(frame)
     if area is None:
         return None, None, "(No picture: its window is off every screen.)"
+    if await asyncio.to_thread(pointer.protected_in, area):
+        return None, None, "(No picture: a window of an app NEO never reads is over it.)"
     try:
         got = await asyncio.to_thread(screen.capture, area)
     except PermissionError as e:

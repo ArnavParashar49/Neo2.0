@@ -290,11 +290,17 @@ def _target(area: tuple[float, float, float, float] | None, pid: int) -> tuple[s
     if pid:
         app = ax._running(pid)
         return (str(app.localizedName() or "") if app is not None else ""), pid
-    if area is not None:
+    if area is not None and not _whole_display(area):
         got = ax.window_owner_at(area[0] + area[2] / 2, area[1] + area[3] / 2)
         if got and got[1] and not ax.is_neo(got[1], got[0]):
             return got
     return ax.working_app()
+
+
+def _whole_display(area: tuple[float, float, float, float]) -> bool:
+    from neo.tools.computer import screen
+
+    return any(abs(d.x - area[0]) < 1 and abs(d.y - area[1]) < 1 and abs(d.w - area[2]) < 2 for d in screen.displays())
 
 
 def _off_limits(name: str, pid: int) -> bool:

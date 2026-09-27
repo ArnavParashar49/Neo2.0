@@ -1,24 +1,30 @@
 """Coordinate input the model can trust: it lands where the model aimed, in the app it aimed at,
 never on NEO's own window — and the result says what it hit and whether anything changed.
 
-The Chess run that prompted this: every click and drag reported "ok" while the board never
+The run that prompted this (a board game): every click and drag reported "ok" while the board never
 moved. A click on a window whose app isn't frontmost may only activate it (a view that doesn't
 accept the first mouse), a screenshot's pixels are not always screen points, NEO's overlay is on
 top but invisible in screenshots, and a bare "ok" hid all of it. So, for each click, drag and
 scroll a model makes:
 
-1. the numbers: plain screen points, or pixels of a screenshot (``shot``) that NEO maps itself;
-   on some display; never picked by a brain that couldn't see the screen;
+1. the numbers: plain screen points, a screenshot's pixels (``shot``), 0–1000 of a screenshot
+   (nx,ny, or a box_2d [ymin, xmin, ymax, xmax] acted on at its middle: Gemini's own scale), an
+   element id or a board square — all through one checked function (:func:`numeric` / :func:`aim`),
+   which NEO does the arithmetic in; on some display; never numbers picked by a brain that couldn't
+   see the screen, in any form. A point a model picked that lies inside a control (a button, a
+   link, a tab) is moved to its middle, and that spot is looked at and gated again (:func:`snap`);
 2. the target: what's under each point (one AX lookup) — never NEO's own window, never a window
    a sheet is blocking; the owner brought to the front (and its window made key) first, and every
    point looked at again after that: an input whose target changed on the way isn't made (a drag
    between two apps brings neither forward: raising one could cover the other's drop spot);
 3. the outcome: the owner app and label at the point, and a before/after look (the picture
    around each point, taken with the pointer already resting where it will be — a hover highlight
-   is no change — plus the front app, a sheet or dialog, the focused window and element). A move on
-   a board or canvas after which nothing visibly changed is reported as a miss; a click on a control
-   whose effect may show elsewhere says it saw no change near the point, and to check before
-   repeating it.
+   is no change — plus the front app, a sheet or dialog, the focused window and element, watched
+   meanwhile: done at the first change). A move on a board or canvas after which nothing visibly
+   changed is reported as a miss; a click on a control whose effect may show elsewhere says it saw
+   no change near the point, and to check before repeating it. The result carries an Effect (what
+   changed) and, for a brain that can see that aimed at a picture, the picture after it — so no
+   separate "take a screenshot to check" turn is needed.
 """
 
 from __future__ import annotations
@@ -179,6 +185,36 @@ def _said(ctx: ToolContext, values: list[float]) -> bool:
 # numbers — and every form maps through NEO's own record of the screenshot (never the model's sums).
 
 NORM = 1000.0  # the 0–1000 scale of nx,ny and box_2d
+
+# The pointer tools' words for the model (the handlers' registrations use these; see the wiring
+# notes): every form named, no app named — when a picture is needed is told by evidence.
+CLICK_DESCRIPTION = (
+    "Click an element id (from a look, ax_tree or a screenshot's list — exact, best), or a place in a "
+    "screenshot with its shot id: its pixels x,y, or nx,ny on 0–1000 of it, or box_2d [ymin, xmin, ymax, xmax] "
+    "on 0–1000 (its middle is clicked); or screen points x,y. A point inside a button, link or tab is clicked "
+    "at its middle. Brings the app there to the front first, never clicks NEO's own window, and says what "
+    "changed (with the picture after it, when you can see). button: left|right|middle; count: 1-3; "
+    "modifiers: cmd, shift, alt, ctrl."
+)
+DRAG_DESCRIPTION = (
+    "Drag from one place to another: each end an element id (id1, id2), or a place in a screenshot with its "
+    "shot id — pixels x1,y1 / x2,y2, nx1,ny1 / nx2,ny2 on 0–1000, or box_2d1 / box_2d2 — or screen points. "
+    "Brings the app there to the front first (not when the ends are in two different apps) and says what "
+    "changed at both ends."
+)
+SCROLL_DESCRIPTION = (
+    "Scroll the content under the pointer, or at an element id (a list, a pane), or at a place in a "
+    "screenshot with its shot id (x,y pixels, nx,ny or box_2d on 0–1000), or screen points x,y. dy<0 scrolls "
+    "down, dy>0 up (lines)."
+)
+SCREENSHOT_DESCRIPTION = (
+    "Take a screenshot: a whole display (display: its number, 1 = main), or a region x,y,w,h in screen "
+    "points. Use it when a look or ax_tree shows too little to act on — a large area of a window with no "
+    "elements in it (a board, a map, a canvas, a picture) — or for a layout question. Its note gives the "
+    "image size, a shot id and the controls in it with element ids: click an id when the target is listed; "
+    "otherwise give its place in the image with the shot id (pixels x,y, nx,ny on 0–1000, or box_2d "
+    "[ymin, xmin, ymax, xmax] on 0–1000) and NEO maps it to the screen."
+)
 
 # The schema of each form, to merge into click / scroll (end "") and drag (ends "1", "2") parameters.
 FORM_ARGS = {
@@ -855,6 +891,37 @@ def look_area(
     return int(left), int(top), int(round(right - left)), int(round(bottom - top))
 
 
+def protected_in(area: tuple[float, float, float, float]) -> bool:
+    """Does any window on screen over ``area`` belong to an app NEO never touches (a protected app:
+    a host's approval dialog, a vault)? Then no picture of it is taken on NEO's own initiative. When
+    the window server can't say: yes (fail closed). NEO's own overlay never shows in a capture."""
+    try:
+        import Quartz as Q
+
+        wins = Q.CGWindowListCopyWindowInfo(
+            Q.kCGWindowListOptionOnScreenOnly | Q.kCGWindowListExcludeDesktopElements, Q.kCGNullWindowID
+        )
+    except Exception:  # noqa: BLE001
+        return True
+    if wins is None:
+        return True
+    g = _gates()
+    ax0, ay0, aw, ah = area
+    for w in wins:
+        b = w.get("kCGWindowBounds") or {}
+        wx, wy, ww, wh = (float(b.get(k, 0) or 0) for k in ("X", "Y", "Width", "Height"))
+        if ww <= 0 or wh <= 0 or float(w.get("kCGWindowAlpha", 1) or 0) <= 0.01:
+            continue
+        if wx >= ax0 + aw or wy >= ay0 + ah or wx + ww <= ax0 or wy + wh <= ay0:
+            continue
+        pid, name = int(w.get("kCGWindowOwnerPID", 0) or 0), str(w.get("kCGWindowOwnerName", "") or "")
+        if pid and ax.is_neo(pid, name):
+            continue
+        if g._protected(name, pid):
+            return True
+    return False
+
+
 async def after_look(ctx: ToolContext, where: list[Aim], pts: list[tuple[float, float]], hit: ax.Hit):
     """The picture after an input, for a brain that can see, when it aimed at a picture or a mark:
     (image, its Shot, NEO's note) — registered as a new shot the next input may use — or None (a
@@ -871,7 +938,7 @@ async def after_look(ctx: ToolContext, where: list[Aim], pts: list[tuple[float, 
     shot = next((w.shot for w in where if w.shot is not None), None)
     window = await asyncio.to_thread(_window_frame, hit)
     area = look_area(pts, shot, window)
-    if area is None:
+    if area is None or await asyncio.to_thread(protected_in, area):
         return None
     try:
         got = await asyncio.to_thread(screen.capture, area)

@@ -24,6 +24,7 @@ from neo.tools.computer import ax, marks, pointer, screen
 # The fake Mac of the pointer tests (its fixtures, by the same names).
 world = base.world
 shots = base.shots
+_REAL_PROTECTED_IN = pointer.protected_in  # (the suite fakes it: no protected window anywhere)
 
 
 @pytest.fixture(autouse=True)
@@ -32,6 +33,7 @@ def _no_picture(monkeypatch):
     the capture itself — ``shots``, ``captures``). The after-look never reaches the real screen, and
     never asks for Screen Recording."""
     monkeypatch.setattr(screen, "can_capture", lambda: False)
+    monkeypatch.setattr(pointer, "protected_in", lambda area: False)  # (the window server: no protected window)
 
 
 @pytest.fixture
@@ -569,3 +571,46 @@ def test_a_slow_app_cannot_stretch_the_wait(monkeypatch, clock):
     monkeypatch.setattr(ax, "scene", scene)
     _run_outcome(before)
     assert clock["now"] < 1.0 + 2 * 0.3 + 0.61  # the clock bounds the watching, not only the sleeps
+
+
+def test_no_picture_is_taken_over_a_protected_apps_window(world, new_tools, captures, monkeypatch):
+    world.front = ("Chess", CHESS)
+    seen = []
+
+    def protected_in(area):
+        seen.append(area)
+        return True
+
+    monkeypatch.setattr(pointer, "protected_in", protected_in)
+    out = run("click", {"x": 612, "y": 540, "shot": _shot().id})
+    assert out.ok and not out.images and not out.effect.looked and seen and captures == []
+
+
+def test_the_window_server_decides_what_is_protected_and_fails_closed(monkeypatch):
+    import Quartz as Q
+
+    from neo.config import settings
+
+    wins = [
+        {"kCGWindowBounds": {"X": 0, "Y": 0, "Width": 300, "Height": 300}, "kCGWindowOwnerPID": 900, "kCGWindowOwnerName": "NEO"},
+        {"kCGWindowBounds": {"X": 500, "Y": 500, "Width": 100, "Height": 100}, "kCGWindowOwnerPID": 66, "kCGWindowOwnerName": "Vault"},
+        {"kCGWindowBounds": {"X": 0, "Y": 0, "Width": 1512, "Height": 982}, "kCGWindowOwnerPID": CHESS, "kCGWindowOwnerName": "Chess"},
+    ]
+    monkeypatch.setattr(Q, "CGWindowListCopyWindowInfo", lambda opts, wid: wins)
+    monkeypatch.setattr(ax, "is_neo", lambda pid, name="": pid == 900)
+    monkeypatch.setattr(ax, "app_names", lambda pid: {"Vault", "com.example.vault"} if pid == 66 else {"Chess"})
+    monkeypatch.setattr(settings(), "protected_apps", ["com.example.vault"])
+    assert _REAL_PROTECTED_IN((0.0, 0.0, 400.0, 400.0)) is False  # NEO's overlay never shows in a picture
+    assert _REAL_PROTECTED_IN((450.0, 450.0, 100.0, 100.0)) is True
+    monkeypatch.setattr(Q, "CGWindowListCopyWindowInfo", lambda opts, wid: None)
+    assert _REAL_PROTECTED_IN((0.0, 0.0, 10.0, 10.0)) is True  # the window server can't say: no picture
+
+
+def test_the_tool_words_name_every_form_and_no_app():
+    import re
+
+    for text in (pointer.CLICK_DESCRIPTION, pointer.DRAG_DESCRIPTION, pointer.SCROLL_DESCRIPTION, pointer.SCREENSHOT_DESCRIPTION):
+        assert "0–1000" in text and "shot id" in text
+        assert not re.search(r"\b(Chess|Safari|Chrome|Finder|Mail|Notes)\b", text)
+    assert {"nx", "ny", "box_2d"} <= set(pointer.FORM_ARGS)
+    assert {"nx1", "ny1", "nx2", "ny2", "box_2d1", "box_2d2"} <= set(pointer.DRAG_FORM_ARGS)

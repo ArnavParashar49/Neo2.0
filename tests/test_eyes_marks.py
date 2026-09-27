@@ -231,6 +231,7 @@ def looking(fake_ax, monkeypatch):
         return ImagePart(buf.getvalue(), "image/png"), 0.5
 
     monkeypatch.setattr(screen, "capture", capture)
+    monkeypatch.setattr(pointer, "protected_in", lambda area: False)
     monkeypatch.setattr(ax, "scene", lambda pid: ax.Scene(front=APP, front_pid=PID, title="Chess", sheet="a sheet “Start a New Game?”", known=True))
     monkeypatch.setattr(ax, "pid_for_app", lambda name: PID if name == APP else None)
     return shots
@@ -294,3 +295,17 @@ def test_a_helpers_note_joins_a_look_with_a_picture(looking):
         assert "Board 8×8" not in _look().text  # no picture, no board note
     finally:
         observe._notes.remove(board)
+
+
+def test_a_look_takes_no_picture_over_a_protected_window(looking, monkeypatch):
+    monkeypatch.setattr(pointer, "protected_in", lambda area: True)
+    out = _look(image=True)
+    assert out.ok and not out.images and not looking and "never reads" in out.text
+    assert "Button “Start” [sheet]" in out.text  # the list still answers
+
+
+def test_a_whole_display_lists_the_app_being_worked_in(fake_ax, monkeypatch):
+    monkeypatch.setattr(screen, "displays", lambda: [screen.Display(1, 0.0, 0.0, 1512.0, 982.0)])
+    monkeypatch.setattr(ax, "window_owner_at", lambda x, y: ("Other", 55))  # whatever is under the middle
+    got = marks.collect_sync((0.0, 0.0, 1512.0, 982.0))
+    assert got.app == APP and got.pid == PID
