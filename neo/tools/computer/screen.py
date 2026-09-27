@@ -49,6 +49,7 @@ _ZOOM_MIN = 768  # …and a smaller one is scaled up to at least this long edge
 _AFTER_MAX = 1024  # a look after an action (medium detail): at most this long edge
 ZOOM_W, ZOOM_H = 320, 200  # a zoom's default area, in points
 JPEG_QUALITY = 85  # with 4:4:4 chroma: PSNR 38.5–41.5 dB against the lossless picture
+_MAX_BYTES = 400_000  # the upload budget for one picture
 # What each kind of picture asks the brain for (ImagePart.detail; a provider without such a knob ignores
 # it). A retry after a miss may ask for "ultra" itself.
 _DETAIL = {"full": "high", "region": "high", "zoom": "high", "window": "high", "after": "medium"}
@@ -366,12 +367,17 @@ def grab(region: tuple[int, int, int, int] | None = None, display: Display | Non
 
 
 def encode(img: Image.Image, fmt: str | None = None) -> tuple[bytes, str]:
-    """(bytes, mime): JPEG q85 4:4:4, or PNG at compress level 1 — never PNG's optimize (100–290 ms)."""
+    """(bytes, mime): JPEG q85 4:4:4, or PNG at compress level 1 — never PNG's optimize (100–290 ms).
+    A JPEG past the upload budget (a photo, noise) is made again at q75 4:2:0: about half the bytes."""
     buf = io.BytesIO()
     if (fmt or shot_format()) == "png":
         img.save(buf, format="PNG", compress_level=1)
         return buf.getvalue(), "image/png"
-    (img if img.mode == "RGB" else img.convert("RGB")).save(buf, format="JPEG", quality=JPEG_QUALITY, subsampling=0)
+    rgb = img if img.mode == "RGB" else img.convert("RGB")
+    rgb.save(buf, format="JPEG", quality=JPEG_QUALITY, subsampling=0)
+    if buf.tell() > _MAX_BYTES:
+        buf = io.BytesIO()
+        rgb.save(buf, format="JPEG", quality=75, subsampling=2)
     return buf.getvalue(), "image/jpeg"
 
 

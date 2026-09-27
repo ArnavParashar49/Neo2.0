@@ -231,8 +231,13 @@ def capture_rect(
 
     def run() -> Image.Image:
         content = _shareable(timeout)
+        try:
+            shown = _display(content, display)
+        except Failed:  # (a display newer than the cached list: look again once)
+            content = _shareable(timeout, fresh=True)
+            shown = _display(content, display)
         flt = sc.SCContentFilter.alloc().initWithDisplay_excludingApplications_exceptingWindows_(
-            _display(content, display), _neo_apps(content), []
+            shown, _neo_apps(content), []
         )
         k = scale or display.scale or _filter_scale(sc, flt) or 1.0
         cfg = _config(sc, round((right - left) * k), round((bottom - top) * k), (left - display.x, top - display.y, right - left, bottom - top))
@@ -324,4 +329,4 @@ def to_pil(cg: Any) -> Image.Image:
     if raw is None:
         cg, raw = _redraw(cg, w, h), "BGRX"
     data = bytes(Q.CGDataProviderCopyData(Q.CGImageGetDataProvider(cg)))
-    return Image.frombuffer("RGB", (w, h), data, "raw", raw, int(Q.CGImageGetBytesPerRow(cg)), 1)
+    return Image.frombytes("RGB", (w, h), data, "raw", raw, int(Q.CGImageGetBytesPerRow(cg)), 1)
