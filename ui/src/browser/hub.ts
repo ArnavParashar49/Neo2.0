@@ -226,9 +226,12 @@ export class BrowserHub {
           return true;
         }
         const isLive = this.snap.open && this.snap.open.sid === c.sid;
-        const open = isLive ? this.snap.open : this.snap.ended[c.sid]?.open ?? null;
-        const steps = isLive ? this.snap.steps : this.snap.ended[c.sid]?.steps ?? [];
-        const ended = { ...this.snap.ended, [c.sid]: { sid: c.sid, close: c, open, steps } };
+        const prior = isLive ? undefined : this.snap.ended[c.sid];
+        const open = isLive ? this.snap.open : prior?.open ?? null;
+        const steps = isLive ? this.snap.steps : prior?.steps ?? [];
+        // An update for an ended row (its page closed after the warm period) keeps what it doesn't say (the poster).
+        const close = prior ? { ...prior.close, ...c } : c;
+        const ended = { ...this.snap.ended, [c.sid]: { sid: c.sid, close, open, steps } };
         if (isLive) this.set({ ended, open: null, live: null, steps: [], action: null, dialog: null, select: null, hint: null });
         else this.set({ ended });
         return true;
@@ -261,6 +264,7 @@ export class BrowserHub {
         const w = this.waiters.get(r.req);
         if (w) { this.waiters.delete(r.req); w(r); }
         else if (r.req === "input" && !r.ok && r.code === "not_user") this.toast("NEO has control", 1800);
+        else if (r.req === "input" && !r.ok && r.code === "busy") this.toast("NEO is finishing a step — one moment", 1800);
         return true;
       }
       case "browser_frame": {
@@ -303,10 +307,20 @@ export class BrowserHub {
     });
   }
 
-  /** Controls that target an ended session (Reopen) carry its sid explicitly. */
-  controlSid(sid: string, action: ControlAction, extra: Record<string, unknown> = {}) {
+  /** Controls that target an ended session (Reopen) carry its sid explicitly; resolves with the result. */
+  controlSid(sid: string, action: ControlAction, extra: Record<string, unknown> = {}): Promise<BrowserResult> {
     const req = `c${++this.reqN}`;
-    this.sendFn({ cmd: "browser_control", sid, req, action, ...extra });
+    if (!this.sendFn({ cmd: "browser_control", sid, req, action, ...extra })) return Promise.resolve({ req, ok: false, code: "timeout" });
+    return new Promise((resolve) => {
+      const t = window.setTimeout(() => { this.waiters.delete(req); resolve({ req, ok: false, code: "timeout" }); }, 8000);
+      this.waiters.set(req, (r) => { clearTimeout(t); resolve(r); });
+    });
+  }
+
+  /** The ended row's page is gone (the core closed it): the row offers only its timeline. */
+  pageGone(sid: string) {
+    const e = this.snap.ended[sid];
+    if (e && e.close.alive) this.set({ ended: { ...this.snap.ended, [sid]: { ...e, close: { ...e.close, alive: false } } } });
   }
 
   input(type: string, fields: Record<string, unknown>) {

@@ -478,7 +478,21 @@ export default function App() {
   useEffect(() => {
     const el = logRef.current;
     if (el && stickToBottom.current) el.scrollTo({ top: el.scrollHeight, behavior: reduced ? "auto" : "smooth" });
-  }, [neo.items, neo.state, layout, bsnap.ended, reduced]);
+  }, [neo.items, neo.state, bsnap.ended, reduced]);
+
+  // A (re)connect replays the transcript, and the log mounts afresh each time the orb opens: land on
+  // the newest line at once. A layout change (the card docking, the strip appearing) jumps too — a
+  // smooth scroll there is cut off by the resize.
+  useLayoutEffect(() => {
+    const el = logRef.current;
+    if (!el) return;
+    stickToBottom.current = true;
+    el.scrollTop = el.scrollHeight;
+  }, [neo.helloAt, expanded]);
+  useLayoutEffect(() => {
+    const el = logRef.current;
+    if (el && stickToBottom.current) el.scrollTop = el.scrollHeight;
+  }, [layout, compact, neo.ask, erasing]); // what decides whether the log is the docked strip
 
   const onScroll = () => {
     const el = logRef.current;
@@ -575,7 +589,7 @@ export default function App() {
       if (strip) return null;
       const e = bsnap.ended[it.sid];
       if (!e) return null;
-      return <EndedRow key={it.id} e={e} landing={landingSid === it.sid} canReopen={it.sid === latestBrowserSid && !live} onReopen={() => hub.controlSid(it.sid, "reopen")} />;
+      return <EndedRow key={it.id} e={e} landing={landingSid === it.sid} canReopen={it.sid === latestBrowserSid && !live} onReopen={() => void hub.controlSid(it.sid, "reopen").then((r) => { if (!r.ok && r.code === "no_session") hub.pageGone(it.sid); })} />;
     }
     if (it.kind === "tools") {
       const tools = it.job && browserJobs.has(it.job) ? it.tools.filter((t) => !t.name.startsWith("browser")) : it.tools;

@@ -195,6 +195,10 @@ async def _run(goal: str, start: str, c: ToolContext) -> str | ToolOutput:
     system = browse_prompt(STEPS)
     chain = providers.brain("vision")  # a page that is mostly pixels comes with a screenshot
     job = f"browse{next(_ids)}"
+    from neo.events import current_job
+    from neo.tools.browser_live import live
+
+    live.job_for(job, current_job.get())  # the run is its request's: the user's, when they asked
     try:
         res = await run_agent(
             task,

@@ -367,7 +367,11 @@ export function BrowserView({ hub, snap, surface, connected, reduced, onTakeCont
     if (st.status === "waiting") return a && a.gated ? captionFor(a) : { text: "Waiting for your OK", orb: "shaping" };
     if (st.status === "thinking") return { text: "Thinking…", orb: "solving" };
     if (st.status !== "working") return null;
-    if (st.loading && (!a || a.kind === "navigate")) return { text: slowLoad ? `Still loading ${host}…` : `Opening ${host}`, orb: "connecting" };
+    if (st.loading && (!a || a.kind === "navigate")) {
+      // Where NEO is going, not the page it's leaving (the address bar still shows that one).
+      const to = a && a.kind === "navigate" && a.url ? displayHost(a.url) || host : host;
+      return { text: slowLoad ? `Still loading ${to}…` : `Opening ${to}`, orb: "connecting" };
+    }
     if (a) return captionFor(a);
     if (st.caption) return { text: st.caption, orb: "working" };
     return null;

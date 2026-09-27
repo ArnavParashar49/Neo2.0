@@ -59,6 +59,7 @@ export function useNeo(opts: { surface?: "overlay" | "window" } = {}) {
   const [ask, setAsk] = useState<ConfirmCard | null>(null);
   const [problems, setProblems] = useState<string[]>([]);
   const [erasedAt, setErasedAt] = useState(0); // bumps when the core confirms an erase
+  const [helloAt, setHelloAt] = useState(0); // bumps when a (re)connect's replay has landed
   const sock = useRef<WebSocket | null>(null);
   const noteTimer = useRef<number | undefined>(undefined);
 
@@ -86,6 +87,7 @@ export function useNeo(opts: { surface?: "overlay" | "window" } = {}) {
           setAsk(ev.data.confirm ?? null);
           setProblems(ev.data.problems ?? []);
           hub.endHello(ev.data.browser);
+          setHelloAt(Date.now());
           {
             // A live session whose browser_open fell out of the replay still needs its anchor.
             const sid = hub.sid;
@@ -242,5 +244,5 @@ export function useNeo(opts: { surface?: "overlay" | "window" } = {}) {
     hub.clearEnded();
   }, [hub]);
 
-  return { connected, state, items, error, note, ask, problems, erasedAt, send, clear, hub };
+  return { connected, state, items, error, note, ask, problems, erasedAt, helloAt, send, clear, hub };
 }

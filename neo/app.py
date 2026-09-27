@@ -119,6 +119,9 @@ class App:
                 await bus().say(text, role="user")
                 await self.answer(ans, said=text)  # typed straight to the question, in any voice mode
             elif self.voice and getattr(self.voice, "handles_text", False):
+                from neo.tools.browser_live import live
+
+                live.user_said()  # the user's own words (a typed request has its job only in Live's calls)
                 await self.voice.send_text(text)  # Live answers aloud + in the transcript
             else:
                 await self.handle_text(text)

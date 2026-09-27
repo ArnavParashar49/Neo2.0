@@ -271,6 +271,12 @@ def run(name: str, args: dict, ctx: ToolContext | None = None):
     return asyncio.run(registry().invoke(name, args, ctx or ToolContext()))
 
 
+def _user_says_continue() -> None:
+    """After a hand-off the page is the user's: in the chat's card only the user's own word (or the
+    card's hand-back) gives it back to NEO. (A separate window has no such turn.)"""
+    browser_live.live.user_said()
+
+
 # ---- the page as numbered elements ---------------------------------------------------------------
 
 
@@ -600,6 +606,7 @@ def test_a_human_check_page_hands_the_window_to_the_user(world):
     out = run("browser_open", {"url": "search.example/"})
     assert out.halt and out.text.startswith("NEEDS_USER")
     assert "search.example wants a human check" in out.text and (("front",) in page.log) != browser._in_chat()
+    _user_says_continue()
     # an image-text challenge page (what a package index showed a headless check)
     page.sites["https://index.example/"] = (
         '- button "Play audio CAPTCHA" [ref=e2]',
@@ -643,6 +650,7 @@ def test_handoff_speaks_neos_own_words_about_the_site(world):
     _, _, page = world
     out = run("browser_handoff", {"kind": "login"})
     assert out.halt and out.text == _LOGIN[settings().browser_view]
+    _user_says_continue()
     where = "in the chat on" if browser._in_chat() else "window on"
     assert f"Please take over in NEO's browser {where} shop.example" in run("browser_handoff", {"kind": "zzz"}).text
 
@@ -1155,6 +1163,7 @@ def test_picking_up_a_browse_keeps_the_earlier_runs_taint(world, inner):
     out = asyncio.run(registry().invoke("browse", {"goal": "check my orders on shop.example"}, ToolContext()))
     assert out.halt and out.text.startswith("NEEDS_USER")
     # "continue" is a new request (nothing read yet in it), but the task quotes the earlier page
+    _user_says_continue()
     inner([_call(1, "browser_open", url="https://shop.example/?" + "q=" + "x" * 80)])
     ctx = ToolContext()
     out = asyncio.run(registry().invoke("browse", {"goal": "continue"}, ctx))

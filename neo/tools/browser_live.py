@@ -32,10 +32,11 @@ import re
 import secrets
 import struct
 import time
+import weakref
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 
 from neo.agent import confirm
 from neo.agent.loop import add_pause_clock
@@ -83,6 +84,56 @@ def pack_frame(
         _MIME_CODE.get(mime, 1), b"\0" * 7,
     )  # fmt: skip
     return head + image
+
+
+class _Frame:
+    """One page frame on its way to the views: decoded, packed (or turned into JSON) only when a
+    view actually gets it, and then once for all of them."""
+
+    __slots__ = ("sid", "sid_bytes", "fid", "src", "kind", "ts_ms", "vw", "vh", "sx", "sy", "flags", "_img", "_bin", "_txt")  # fmt: skip
+
+    def __init__(self, sid: str, sid_bytes: bytes, fid: int, src: bytes | str, *, kind: int, ts_ms: float, vw: float,
+                 vh: float, sx: float, sy: float, flags: int) -> None:  # fmt: skip
+        self.sid, self.sid_bytes, self.fid, self.src = sid, sid_bytes, fid, src
+        self.kind, self.ts_ms, self.flags = kind, ts_ms, flags
+        self.vw, self.vh, self.sx, self.sy = vw, vh, sx, sy
+        self._img: bytes | None = None
+        self._bin: bytes | None = None
+        self._txt: str | None = None
+
+    def image(self) -> bytes | None:
+        if self._img is None:
+            src = self.src
+            if isinstance(src, str):
+                try:
+                    src = base64.b64decode(src)
+                except (ValueError, TypeError):
+                    src = b""
+            self._img = src if src and len(src) <= MAX_IMAGE else b""
+        return self._img or None
+
+    def payload(self, binary: bool) -> bytes | str | None:
+        img = self.image()
+        if img is None:
+            return None
+        iw, ih = jpeg_size(img) or (self.vw, self.vh)
+        dpr = float(DSF)  # the page's device scale factor (the image itself may be scaled to the view)
+        if binary:
+            if self._bin is None:
+                self._bin = pack_frame(
+                    self.sid_bytes, self.fid, img, kind=self.kind, ts_ms=self.ts_ms, vw=self.vw, vh=self.vh, iw=iw,
+                    ih=ih, dpr=dpr, sx=self.sx, sy=self.sy, flags=self.flags,
+                )  # fmt: skip
+            return self._bin
+        if self._txt is None:
+            b64 = self.src if isinstance(self.src, str) else base64.b64encode(img).decode()
+            frame = {
+                "sid": self.sid, "fid": self.fid, "kind": "still" if self.kind == KIND_STILL else "live",
+                "ts": self.ts_ms, "vw": round(self.vw), "vh": round(self.vh), "iw": iw, "ih": ih, "dpr": dpr,
+                "sx": self.sx, "sy": self.sy, "flags": self.flags, "mime": "image/jpeg", "b64": b64,
+            }  # fmt: skip
+            self._txt = json.dumps({"type": "browser_frame", "data": frame, "ts": time.time()})
+        return self._txt
 
 
 def unpack_frame(buf: bytes) -> tuple[dict, bytes] | None:
@@ -368,7 +419,10 @@ _CMD_MAX, _PASTE_CMD_MAX = 64 * 1024, 128 * 1024
 # ---- who watches (one per overlay / pop-out window connection) -------------------------------------------
 
 _RANK = {"window": 4, "focus": 3, "docked": 2, "mini": 1, "hidden": 0}
-_FPS = {"window": 30, "focus": 30, "docked": 24, "mini": 2}
+# Frames a second: while NEO drives the view is only watched, so 24 does; while the user drives,
+# every frame is their feedback.
+_FPS = {"window": 24, "focus": 24, "docked": 24, "mini": 2}
+_FPS_USER = {"window": 30, "focus": 30, "docked": 30, "mini": 2}
 _JSON_FPS = 10
 
 
@@ -403,9 +457,8 @@ class Viewer:
     def watching(self, sid: str) -> bool:
         return bool(sid) and self.hello and self.visible and self.view != "hidden" and self.sid == sid
 
-    @property
-    def fps(self) -> float:
-        cap = _FPS.get(self.view, 2)
+    def fps(self, user: bool = False) -> float:
+        cap = (_FPS_USER if user else _FPS).get(self.view, 2)
         return min(cap, _JSON_FPS) if not self.binary else cap
 
     def bucket(self, cls: str) -> _Bucket:
@@ -463,6 +516,7 @@ class Session:
     last_ok: str = ""
     need_reason: str = ""  # what a need_user asked for (login, 2fa, captcha, payment, other)
     meta: dict[int, dict] = field(default_factory=dict)  # per step: NEO's own bookkeeping, never sent
+    saw: set[str] = field(default_factory=set)  # jobs that had a browser step's result on this card
 
 
 # ---- the page's own view of itself (run in the page, never shown to a model) ------------------------------
@@ -516,11 +570,43 @@ _JS_FOCUS_FIELD = r"""(want) => {
   const r = pick.getBoundingClientRect();
   return {x: r.x, y: r.y, w: r.width, h: r.height, kind: pick.type === 'password' ? 'password' : 'text'};
 }"""
-# The field the user just typed into: its value is theirs (NEO's snapshots hide it afterwards).
+# What the user edits while they have the page is theirs: the field it lands in is marked, and NEO's
+# reads and pictures hide marked fields afterwards. The mark goes on the element the edit event
+# itself reports (an <input>, <textarea>, <select>, or an editor's contenteditable host), so moving
+# on at once (Tab, a click on the next field) or a page moving the focus by itself never marks the
+# wrong one. The listener is installed in every frame when the user gets the page and switched off
+# when NEO has it back (NEO's own typing is NEO's). A page script filling a field while the user
+# drives counts too: masking more than needed is the safe side.
+_JS_FILLABLE = (
+    "const own = t => { if (!t || t.nodeType !== 1) return null;"
+    " if (t.isContentEditable) { while (t.parentElement && t.parentElement.isContentEditable) t = t.parentElement; return t; }"
+    " if (t.tagName === 'TEXTAREA' || t.tagName === 'SELECT') return t;"
+    " if (t.tagName === 'INPUT' && !/^(?:checkbox|radio|button|submit|reset|image|file|hidden)$/i.test(t.type || '')) return t;"
+    " return null; };"
+)
+_JS_ARM_FILLED = (
+    "(on) => {"
+    + _JS_FILLABLE
+    + r""" const K = Symbol.for('neo.userFilled');
+  let st = window[K];
+  if (!st) {
+    st = {on: false};
+    Object.defineProperty(window, K, {value: st});
+    const mark = e => { if (!st.on) return; const t = own((e.composedPath && e.composedPath()[0]) || e.target);
+      if (t) t.setAttribute('data-neo-user-filled', ''); };
+    for (const type of ['beforeinput', 'input', 'change']) addEventListener(type, mark, true);
+  }
+  st.on = !!on;
+  return true;
+}"""
+)
+# The same mark on the focused field, as a second line: right before anything that can move the
+# focus (a press, Tab, Enter) after the user edited, and a moment after their last edit.
 _JS_MARK_FILLED = (
     "() => {"
     + _JS_DEEP
-    + " if (a && (a.tagName === 'INPUT' || a.tagName === 'TEXTAREA' || a.isContentEditable)) a.setAttribute('data-neo-user-filled', ''); }"
+    + _JS_FILLABLE
+    + " const t = own(a); if (t) t.setAttribute('data-neo-user-filled', ''); }"
 )
 _JS_SELECTION = (
     "(cut) => {"
@@ -556,6 +642,45 @@ _JS_FAVICON = r"""() => {
   const small = links.find(l => /\b(?:16|32)x/.test(l.sizes && l.sizes.value || ''));
   return (small || links[0] || {}).href || (location.origin && location.origin !== 'null' ? location.origin + '/favicon.ico' : '');
 }"""
+# Where the user's own values sit in a frame (viewport CSS px): a picture of the page for the card
+# (a step's thumbnail, the poster) paints over them once the user has had the page.
+_JS_FILLED_RECTS = r"""(said) => {
+  const out = [];
+  const add = r => { if (r.width > 0 && r.height > 0 && out.length < 200) out.push({x: r.x, y: r.y, w: r.width, h: r.height}); };
+  const walk = root => {
+    for (const e of root.querySelectorAll('[data-neo-user-filled], input[type=password]')) add(e.getBoundingClientRect());
+    for (const e of root.querySelectorAll('*')) if (e.shadowRoot) walk(e.shadowRoot);
+  };
+  walk(document);
+  // Where the page repeats what the user typed: a field that holds it (the results page's own search
+  // box), and its text (a suggestion list, a results heading).
+  const words = (said || []).filter(v => v && v.length >= 3).map(v => v.toLowerCase());
+  const holds = root => {
+    for (const e of root.querySelectorAll('input, textarea')) {
+      const v = String(e.value || '').toLowerCase();
+      if (v && words.some(w => v.includes(w))) add(e.getBoundingClientRect());
+    }
+    for (const e of root.querySelectorAll('*')) if (e.shadowRoot) holds(e.shadowRoot);
+  };
+  if (words.length) holds(document);
+  if (words.length && document.body) {
+    const tw = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+    for (let n = tw.nextNode(); n && out.length < 200; n = tw.nextNode()) {
+      const hay = n.data.toLowerCase();
+      if (hay.length !== n.data.length) continue;
+      for (const v of words) {
+        let i = hay.indexOf(v);
+        while (i >= 0 && out.length < 200) {
+          const r = document.createRange();
+          r.setStart(n, i); r.setEnd(n, i + v.length);
+          for (const b of r.getClientRects()) add(b);
+          i = hay.indexOf(v, i + v.length);
+        }
+      }
+    }
+  }
+  return out;
+}"""
 _CURSORS = {
     "default", "pointer", "text", "move", "not-allowed", "grab", "grabbing", "crosshair", "help", "wait", "progress",
     "col-resize", "row-resize", "ew-resize", "ns-resize", "nesw-resize", "nwse-resize", "n-resize", "s-resize",
@@ -576,6 +701,8 @@ _CLOSE_AFTER_S = 1.5  # a finished job's card folds away this long after it ends
 _PRESENT_S = 0.24  # NEO's cursor gets this long to reach a target before it acts
 _THUMB_AFTER_S = 0.35
 _TAKE_S = 8.0
+_USER_TURN_S = 60.0  # a word to NEO (voice) this recent is the user asking it to go on
+_DIALOG_WAIT_S = 0.5  # Chromium's own report of a dialog (which frame opened it) comes this soon
 
 
 def _rect(r: Any) -> dict | None:
@@ -650,6 +777,28 @@ class Live:
         self._bound_pages: set[int] = set()
         self._browser_up = False
         self.handed_back_at = 0.0  # when the user last handed the page back after a login, a code…
+        # Pages the user has driven: NEO's reads and pictures of them hide what the user filled,
+        # whichever card (episode) is open — the page outlives the card.
+        self._user_pages: weakref.WeakSet = weakref.WeakSet()
+        # What the user's marked fields held, per page, in memory only: a search they submit is
+        # echoed by the page it leads to (its title, its links), where no field holds it any more.
+        self._user_vals: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+        # When the user last spoke to NEO: per request (a typed request is a job), and without one
+        # (a voice session's words). Only the user's own turn takes the page back from them.
+        self._user_jobs: dict[str, float] = {}
+        self._user_turn = 0.0
+        self._bind_task: asyncio.Task | None = None
+        self._bind_page: Any = None
+        self._cast_on: Any = None  # the CDP session the screencast runs on
+        self._stale_cdps: weakref.WeakSet = weakref.WeakSet()
+        self._pinned = False  # NEO's action works at a point on the page: no resize until it's done
+        self._arm_task: asyncio.Task | None = None
+        self._arm_stale = False  # a frame navigated or appeared: its listener needs installing
+        self._mark_pending = False
+        self._dialog_seen: deque[tuple[float, str, str, str]] = deque(maxlen=8)  # (t, type, message, url)
+        self._dialog_wake: asyncio.Event | None = None
+        self._close_kept: dict | None = None  # the latest card's close, as the transcript replay keeps it
+        self._close_sent: dict | None = None
         self.lock = asyncio.Lock()
         self._cast_lock = asyncio.Lock()
         self._released = asyncio.Event()
@@ -678,25 +827,23 @@ class Live:
             self._timers = {}
             self._holders = 0
             self.want_take = False
+            self._bind_task = self._arm_task = None
+            self._dialog_wake = None
         return loop
 
     def _spawn(self, coro) -> asyncio.Task | None:
         if self._ensure_loop() is None:
             coro.close()
             return None
-        t = asyncio.get_running_loop().create_task(self._quiet(coro))
+        t = asyncio.get_running_loop().create_task(coro)
         self._tasks.add(t)
-        t.add_done_callback(self._tasks.discard)
+        t.add_done_callback(self._settled)
         return t
 
-    @staticmethod
-    async def _quiet(coro) -> None:
-        try:
-            await coro
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:  # noqa: BLE001 — never the page's words or the user's input in a log
-            print(f"[browser] card: {type(e).__name__}")
+    def _settled(self, t: asyncio.Task) -> None:
+        self._tasks.discard(t)
+        if not t.cancelled() and (e := t.exception()) is not None:
+            print(f"[browser] card: {type(e).__name__}")  # never the page's words or the user's input
 
     def _later(self, name: str, delay: float, fn) -> None:
         loop = self._ensure_loop()
@@ -720,19 +867,92 @@ class Live:
 
     def _user_has_it(self) -> None:
         """The page is the user's now: NEO's steps wait for the next hand-back. (The event is new;
-        whoever waited on the old one wakes and waits again.)"""
+        whoever waited on the old one wakes and waits again.) Every edit they make marks its field."""
         old, self._released = self._released, asyncio.Event()
         old.set()
+        self._set_armed(True)
+
+    def user_said(self, job: str = "") -> None:
+        """The user spoke or typed to NEO (their own words, not a model's)."""
+        now = time.time()
+        if job:
+            self._user_jobs[job] = now
+            while len(self._user_jobs) > 64:
+                self._user_jobs.pop(next(iter(self._user_jobs)))
+        else:
+            self._user_turn = now
+
+    def job_for(self, child: str, parent: str) -> None:
+        """`child` runs on behalf of `parent` (a browse run started by a request): the user's request
+        is the user's in its run too."""
+        if child and parent and (t := self._user_jobs.get(parent)) is not None:
+            self._user_jobs[child] = t
+
+    def _users_turn(self, job: str, s: Session) -> bool:
+        """Is `job` the user asking NEO to go on since the page became theirs? A request they made
+        after taking it (or a word to the voice session since), not a job that was already running,
+        a scheduled one or a model's own call."""
+        t = self._user_jobs.get(job)
+        if t is not None:
+            return t > s.user_since
+        return self._user_turn > s.user_since and time.time() - self._user_turn < _USER_TURN_S
+
+    def user_touched(self, page: Any = None) -> bool:
+        """Has the user had this page (so NEO's reads and pictures hide what they filled)? Without a
+        page: the page the card shows, or the card itself."""
+        if page is None:
+            s = self.s
+            page = self.page
+            if s is not None and s.touched:
+                return True
+        if page is None:
+            return False
+        try:
+            return page in self._user_pages
+        except TypeError:
+            return False
+
+    def remembered(self, page: Any) -> set[str]:
+        """What the user typed on this page (kept in memory only, to hide it from NEO's reads)."""
+        try:
+            return set(self._user_vals.get(page, ()))
+        except TypeError:
+            return set()
+
+    async def _keep_values(self, page: Any) -> None:
+        from neo.tools import browser
+
+        vals = await browser._user_values(page)
+        if not vals:
+            return
+        with contextlib.suppress(TypeError):
+            kept = self._user_vals.setdefault(page, set())
+            kept.update(v[:500] for v in vals)
+            while len(kept) > 64:
+                kept.pop()
+
+    def saw_page(self, job: str) -> bool:
+        s = self.s
+        return s is not None and job in s.saw
+
+    def ran(self, job: str) -> None:
+        """A browser step of `job` ran on this card (its model has seen the page)."""
+        s = self.s
+        if s is not None and job:
+            s.saw.add(job)
 
     def held_seconds(self) -> float:
         """How long NEO's browser tools have waited for the user (not the runs' time)."""
         return self._held_total + (time.monotonic() - self._hold_t0 if self._holders else 0.0)
 
-    def _broadcast(self, type_: str, data: dict, *, recent: bool = False) -> None:
+    def _broadcast(self, type_: str, data: dict, *, recent: bool = False, replay: dict | None = None) -> None:
         ch = self.channel
         if ch is not None:
             try:
-                ch.broadcast(type_, data, recent=recent)
+                if replay is not None:
+                    ch.broadcast(type_, data, recent=recent, replay=replay)
+                else:
+                    ch.broadcast(type_, data, recent=recent)
             except Exception as e:  # noqa: BLE001
                 print(f"[browser] card broadcast: {type(e).__name__}")
 
@@ -767,6 +987,7 @@ class Live:
             "loading": s.loading, "progress": None, "can_back": s.can_back, "can_forward": s.can_forward,
             "controller": s.controller, "status": s.status, "viewport": self._viewport(), "tabs": tabs,
             "popped": s.popped, "job": s.job, "need_user": s.need_user, "error": s.error, "caption": s.caption,
+            "held": self._holders > 0,  # a NEO step is waiting for the page to be handed back
         }  # fmt: skip
         if favicon if favicon is not None else not s.favicon_sent:
             msg["favicon"] = s.favicon
@@ -850,9 +1071,11 @@ class Live:
             if self.page is not None and not _closed(self.page):
                 self._spawn(self._refresh())
             return s
-        if s.status == "need_user" and s.controller == "user" and job not in s.asked and not self._holders:
-            # A new request while the card waits on the user's login (or code…): they said "continue"
-            # in the chat rather than handing back on the card.
+        if s.controller == "user" and job not in s.jobs and not s.ended and self._users_turn(job, s):
+            # The user asked NEO for something after taking the page (they said "continue" in the
+            # chat instead of handing back on the card, or asked for something new after a Stop):
+            # that's their hand-back. Any other job's step waits for the card's hand-back, and the
+            # card says NEO is waiting.
             self._handed_back(resume=False, fold=False)
         if job:
             s.jobs.add(job)
@@ -861,10 +1084,15 @@ class Live:
         return s
 
     def launched(self) -> None:
-        """NEO's browser is up (it was cold-starting)."""
+        """NEO's browser is up (it was cold-starting, or it went away and a step started it again)."""
         self._browser_up = True
         s = self.s
-        if s is not None and s.status == "starting":
+        if s is None:
+            return
+        if s.status == "error" and (s.error or {}).get("code") == "browser_closed":
+            s.error = None
+            s.status = "starting"
+        if s.status == "starting":
             s.status = "working" if s.controller == "neo" else "user"
             self._emit_state(now=True)
 
@@ -901,9 +1129,12 @@ class Live:
             return None
         if (
             s is None or s.ended or s.jobs or s.controller != "neo" or s.need_user is not None
-            or self._holders or s.status in ("error", "starting")
+            or self._holders or s.status == "starting"
         ):  # fmt: skip
             return None
+        if s.status == "error":
+            # The page (or the whole browser) is gone and no job will bring it back.
+            return self.end("error", alive=False)
         return self.end("done")
 
     async def end(self, reason: str, *, alive: bool = True, poster: bool = True) -> None:
@@ -914,11 +1145,25 @@ class Live:
         s.ended = True
         self._cancel("close")
         self.inflight = None
+        self._pinned = False
+        if s.user_step is not None:
+            self._finish_user_step(s)
         for d in list(self._dialogs.values()):
             with contextlib.suppress(Exception):
                 await d.dismiss()
         self._dialogs.clear()
-        pic = await self._capture(640, 60, 48 * 1024) if poster and alive and reason != "erased" else None
+        pic = None
+        if poster and alive and reason != "erased":
+            if s.controller == "user":
+                # Never a picture of the user's turn: NEO's own last look at the page instead.
+                pic = next(
+                    (st["thumb"] for st in reversed(s.steps) if st.get("thumb") and st.get("by") == "neo"),
+                    None,
+                )
+            else:
+                pic = await self._capture(640, 60, 48 * 1024)
+        if s.controller == "user":
+            self._set_armed(False)
         await self._stop_cast()
         s.alive, s.closed_at = alive, time.time()
         steps = sum(1 for st in s.steps if st.get("by") == "neo" or st.get("kind") == "user")
@@ -935,18 +1180,48 @@ class Live:
         self._hint = {}
         for v in self.viewers.values():
             v.slot = None
-        self._broadcast("browser_close", msg, recent=True)
+        # A card the user had: its poster may show what they filled, so the replay for late-joining
+        # overlays keeps the row without it (the live row has it, in memory).
+        kept = {**msg, "poster": None} if s.touched and msg.get("poster") else None
+        self._close_sent, self._close_kept = msg, kept if kept is not None else msg
+        self._broadcast("browser_close", msg, recent=True, replay=kept)
         if alive:
             self._later("warm", _WARM_S, self._cool)
         else:
             self._cancel("warm")
 
+    def _finish_user_step(self, s: Session) -> None:
+        """The user's turn on the page ends: its step says what they did and for how long."""
+        if s.user_step is None:
+            return
+        nu = s.need_user
+        reason = (s.need_reason or "other") if nu is not None and nu.get("reason") != "confirm" else ""
+        cur = next((x for x in s.steps if x["step_id"] == s.user_step), None)
+        if reason:
+            label = _USER_DONE.get(reason, "You took over")
+        elif cur is not None and not cur["label"].startswith("Your turn"):
+            label = cur["label"]  # "You took over", "You opened the page again", "You restarted the browser"
+        else:
+            label = "You took over"
+        secs = time.time() - s.user_since
+        self._step("user", f"{label} · {_mmss(secs)}", "ok", by="user", step_id=s.user_step,
+                   duration_ms=int(secs * 1000))  # fmt: skip
+        s.user_step = None
+
     async def _cool(self) -> None:
         """Ten minutes after a card closed with nothing reopening it: NEO's browser closes (the
-        profile, and the user's logins, stay)."""
+        profile, and the user's logins, stay) — and the ended row stops offering Reopen."""
         if self.s is not None:
             return
-        self.last = None
+        last, self.last = self.last, None
+        sent, kept = self._close_sent, self._close_kept
+        self._close_sent = self._close_kept = None
+        if last is not None and sent is not None and sent.get("sid") == last.sid:
+            if kept is not None:
+                kept["alive"] = False
+            self._broadcast(
+                "browser_close", {k: v for k, v in {**sent, "alive": False}.items() if k != "poster"}
+            )
         from neo.tools import browser
 
         await browser._b.close()
@@ -959,12 +1234,21 @@ class Live:
         self._spawn(self.bind(page))
 
     async def bind(self, page: Any) -> None:
-        """Watch `page`: its screencast, loading and navigation feed the card."""
+        """Watch `page`: its screencast, loading and navigation feed the card. One bind per page at
+        a time: a second caller (the tab switch and the step that follows it) waits for the first."""
         if not self.on() or page is None or _closed(page):
             return
         self._ensure_loop()
         if page is self.page and self.cdp is not None:
             return
+        t = self._bind_task
+        if t is None or t.done() or self._bind_page is not page:
+            self._bind_page = page
+            t = self._bind_task = self._spawn(self._bind(page))
+        if t is not None:
+            await asyncio.wait([t])
+
+    async def _bind(self, page: Any) -> None:
         old = self.cdp
         self.page, self.cdp, self.cast = page, None, None
         self._sync_url(page)
@@ -978,6 +1262,8 @@ class Live:
             with contextlib.suppress(Exception):
                 page.on("crash", lambda *_: self._crashed(page))
                 page.on("close", lambda *_: self._page_closed(page))
+                page.on("framenavigated", lambda *_: self._frames_changed(page))
+                page.on("frameattached", lambda *_: self._frames_changed(page))
         try:
             cdp = await page.context.new_cdp_session(page)
         except Exception:  # noqa: BLE001 — a page that is going away (or a fake one)
@@ -992,6 +1278,7 @@ class Live:
         cdp.on("Page.frameStoppedLoading", lambda p: self._loading(p, False))
         cdp.on("Page.frameNavigated", self._navigated)
         cdp.on("Page.navigatedWithinDocument", self._navigated)
+        cdp.on("Page.javascriptDialogOpening", self._dialog_opening)
         with contextlib.suppress(Exception):
             await cdp.send("Page.enable")
             tree = await cdp.send("Page.getFrameTree")
@@ -1000,8 +1287,15 @@ class Live:
             size = page.viewport_size or {}
             if (size.get("width"), size.get("height")) != self.vp:
                 await page.set_viewport_size({"width": self.vp[0], "height": self.vp[1]})
+        s = self.s
+        if s is not None and s.controller == "user" and not s.ended:
+            self._set_armed(True)  # a tab the user now has: their edits there are theirs too
         await self._retune(still=True)
         await self._refresh()
+
+    def _frames_changed(self, page: Any) -> None:
+        if page is self.page:
+            self._arm_stale = True
 
     def _crashed(self, page: Any) -> None:
         s = self.s
@@ -1108,16 +1402,42 @@ class Live:
             self._emit_state()
 
     async def _fetch_favicon(self, page: Any, origin: str) -> None:
-        """The site's icon, through the page's own context, as a small data URL (≤ 8 KB)."""
+        """The site's icon as a small data URL (≤ 8 KB). The page names it, so the request is plain:
+        no cookies or logins of NEO's profile go with it, and it never reaches this Mac or the local
+        network from a page that isn't there itself (every redirect is checked the same way)."""
+        from neo.tools import browser
+        from neo.tools.computer import policy
+
+        local_page = _local_host(_host(origin))
         try:
             href = str(await asyncio.wait_for(page.evaluate(_JS_FAVICON), 2) or "")
-            if not href.lower().startswith(("http://", "https://")):
+            client = None
+            for _ in range(4):
+                if not href.lower().startswith(("http://", "https://")):
+                    return
+                if not local_page and (
+                    _local_host(_host(href)) or await asyncio.to_thread(policy.private_host, href)
+                ):
+                    return
+                if client is None:
+                    client = await browser._b.icon_client()
+                    if client is None:
+                        return
+                resp = await client.get(href, timeout=3000, max_redirects=0, headers={"Accept": "image/*"})
+                if 300 <= resp.status < 400 and (loc := str(resp.headers.get("location") or "")):
+                    await _dispose(resp)
+                    href = urljoin(href, loc)
+                    continue
+                break
+            else:
                 return
-            resp = await page.request.get(href, timeout=3000, max_redirects=3)
-            if not resp.ok:
-                return
-            kind = str(resp.headers.get("content-type", "")).split(";")[0].strip().lower()
-            body = await resp.body()
+            try:
+                if not resp.ok:
+                    return
+                kind = str(resp.headers.get("content-type", "")).split(";")[0].strip().lower()
+                body = await resp.body()
+            finally:
+                await _dispose(resp)
         except Exception:  # noqa: BLE001 — no icon then
             return
         if len(body) > 64 * 1024 or not body:
@@ -1182,25 +1502,25 @@ class Live:
             cdp = self.cdp
             want = self._cast_params()
             if cdp is None:
-                self.cast = None
+                self.cast = self._cast_on = None
                 return
-            changed = want != self.cast
+            changed = want != self.cast or (want is not None and self._cast_on is not cdp)
             if changed:
-                if self.cast is not None:
+                if self.cast is not None and self._cast_on is cdp:
                     with contextlib.suppress(Exception):
                         await cdp.send("Page.stopScreencast")
-                self.cast = want
+                self.cast, self._cast_on = want, (cdp if want is not None else None)
                 if want is not None:
                     try:
                         await cdp.send("Page.startScreencast", want)
                     except Exception:  # noqa: BLE001
-                        self.cast = None
+                        self.cast = self._cast_on = None
                         return
             if want is not None and (changed or still):
                 await self._still()
 
     async def _stop_cast(self) -> None:
-        cdp, self.cast = self.cdp, None
+        cdp, self.cast, self._cast_on = self.cdp, None, None
         if cdp is not None:
             with contextlib.suppress(Exception):
                 await cdp.send("Page.stopScreencast")
@@ -1209,11 +1529,17 @@ class Live:
         # Acked to Chromium at once, so it keeps producing fresh frames; the newest one replaces
         # whatever a view hasn't been sent yet (never a queue).
         self._spawn(_send(cdp, "Page.screencastFrameAck", {"sessionId": p.get("sessionId")}))
-        if cdp is not self.cdp or self.cast is None:
+        if cdp is not self.cdp:
+            # A session the card no longer listens to (a tab it left): its screencast stops.
+            if cdp not in self._stale_cdps:
+                with contextlib.suppress(TypeError):
+                    self._stale_cdps.add(cdp)
+                self._spawn(_send(cdp, "Page.stopScreencast", {}))
             return
-        try:
-            data = base64.b64decode(p.get("data") or "")
-        except (ValueError, TypeError):
+        if self.cast is None:
+            return
+        data = p.get("data")
+        if not isinstance(data, str) or not data:
             return
         md = p.get("metadata") or {}
         size = (float(md.get("deviceWidth") or self.vp[0]), float(md.get("deviceHeight") or self.vp[1]))
@@ -1245,6 +1571,10 @@ class Live:
         if data:
             self._deliver(data, kind=KIND_STILL, vw=w, vh=h, sx=x, sy=y, ts_ms=time.time() * 1000)
 
+    def _fps(self, v: Viewer) -> float:
+        s = self.s
+        return v.fps(user=s is not None and s.controller == "user")
+
     async def _shot(self, *, quality: int) -> tuple[bytes, tuple[float, float, float, float]] | None:
         """The visible viewport as a JPEG, as the screen shows it (device pixels). Never with a
         scaled clip: Chromium renders one by resizing the page for a moment, and the screencast
@@ -1269,49 +1599,47 @@ class Live:
 
     async def _capture(self, width: int, quality: int, limit: int) -> str | None:
         """A small picture of the page (a step's thumbnail, the card's poster) as a data URL of at
-        most `limit` bytes."""
+        most `limit` bytes. On a page the user has had, what they filled is painted over (no picture
+        at all when the page can't say where that is)."""
+        page = self.page
+        rects: list[tuple[float, float, float, float]] = []
+        if page is not None and self.user_touched(page):
+            from neo.tools import browser
+
+            said = (await browser._user_values(page) or set()) | self.remembered(page)
+            got_rects = await _filled_rects(page, said)
+            if got_rects is None:
+                return None
+            rects = got_rects
         got = await self._shot(quality=85)
         if got is None or not got[0]:
             return None
-        data = await asyncio.to_thread(_small_jpeg, got[0], width, quality, limit * 3 // 4)
+        data = await asyncio.to_thread(_small_jpeg, got[0], width, quality, limit * 3 // 4, rects, got[1][2])
         return "data:image/jpeg;base64," + base64.b64encode(data).decode() if data else None
 
     def _deliver(
-        self, data: bytes, *, kind: int, vw: float, vh: float, sx: float, sy: float, ts_ms: float
+        self, data: bytes | str, *, kind: int, vw: float, vh: float, sx: float, sy: float, ts_ms: float
     ) -> None:
+        """A frame for everyone watching: it replaces whatever a view hasn't been sent yet. It is
+        decoded and packed only if it actually goes out (most frames of a busy page never do)."""
         s = self.s
-        if s is None or s.ended or not data or len(data) > MAX_IMAGE:
+        if s is None or s.ended or not data:
             return
-        iw, ih = jpeg_size(data) or (vw, vh)
+        if len(data) * (3 / 4 if isinstance(data, str) else 1) > MAX_IMAGE:
+            return
         s.fid += 1
         flags = (
             (FLAG_USER if s.controller == "user" else 0)
             | (FLAG_LOADING if s.loading else 0)
             | (FLAG_STILL if kind == KIND_STILL else 0)
         )
-        dpr = float(DSF)  # the page's device scale factor (the image itself may be scaled to the view)
-        binary: bytes | None = None
-        text: str | None = None
+        frame = _Frame(
+            s.sid, s.sid_bytes, s.fid, data, kind=kind, ts_ms=ts_ms, vw=vw, vh=vh, sx=sx, sy=sy, flags=flags
+        )
         for v in list(self.viewers.values()):
-            if not v.watching(s.sid):
-                continue
-            if v.binary:
-                if binary is None:
-                    binary = pack_frame(
-                        s.sid_bytes, s.fid, data, kind=kind, ts_ms=ts_ms, vw=vw, vh=vh, iw=iw, ih=ih, dpr=dpr,
-                        sx=sx, sy=sy, flags=flags,
-                    )  # fmt: skip
-                v.slot = (s.fid, binary)
-            else:
-                if text is None:
-                    frame = {
-                        "sid": s.sid, "fid": s.fid, "kind": "still" if kind == KIND_STILL else "live", "ts": ts_ms,
-                        "vw": round(vw), "vh": round(vh), "iw": iw, "ih": ih, "dpr": dpr, "sx": sx, "sy": sy,
-                        "flags": flags, "mime": "image/jpeg", "b64": base64.b64encode(data).decode(),
-                    }  # fmt: skip
-                    text = json.dumps({"type": "browser_frame", "data": frame, "ts": time.time()})
-                v.slot = (s.fid, text)
-            self._pump(v)
+            if v.watching(s.sid):
+                v.slot = (s.fid, frame)
+                self._pump(v)
 
     def _pump(self, v: Viewer) -> None:
         """Send `v` its latest frame if it has credit and its frame rate allows (§10.4.4)."""
@@ -1324,16 +1652,21 @@ class Live:
         now = time.monotonic()
         if v.credits <= 0:
             if now - v.last_ack >= 2.0:
-                v.credits, v.outstanding = 1, {}  # a lost ack or a reloaded view must not stall it
+                # A lost ack or a reloaded view must not stall it — but a view that stopped acking
+                # gets one frame per 2 s, not the full rate.
+                v.credits, v.outstanding, v.last_ack = 1, {}, now
             else:
                 self._pump_later(v, v.last_ack + 2.0 - now)
                 return
-        gap = 1.0 / max(1.0, v.fps) - (now - v.last_sent)
+        gap = 1.0 / max(1.0, self._fps(v)) - (now - v.last_sent)
         if gap > 0.001:
             self._pump_later(v, gap)
             return
-        fid, payload = v.slot
+        fid, frame = v.slot
         v.slot = None
+        payload = frame.payload(v.binary) if isinstance(frame, _Frame) else frame
+        if payload is None:
+            return
         replaced = False
         with contextlib.suppress(Exception):
             replaced = bool(v.conn.offer_frame(payload))
@@ -1384,6 +1717,7 @@ class Live:
         if self.s is not None:
             self._popped_now()
             self._spawn(self._retune())
+            self._want_viewport()  # the page follows the largest view that remains
 
     def _view(self, v: Viewer, m: dict) -> None:
         s = self.s
@@ -1456,7 +1790,9 @@ class Live:
         if s.status == "waiting":  # never under a pending approval: its target must stay put
             self._later("viewport", 0.25, self._apply_viewport)
             return
-        if self.lock.locked() and waited < 0.6:  # mid-action: after it, but never later than 600 ms
+        if self.lock.locked() and (self._pinned or waited < 0.6):
+            # Mid-action: after it, but never later than 600 ms — except under an action at a point
+            # (a click at x, y), which must land on the layout it was checked on.
             self._later("viewport", 0.1, self._apply_viewport)
             return
         if now - self._vp_last < 1.0:
@@ -1497,6 +1833,8 @@ class Live:
         waited = False
         while True:
             waited = await self.hold() or waited
+            if (t := self._arm_task) is not None and not t.done():
+                await asyncio.wait([t])  # the user's last marks are in, the listener is off
             await self.lock.acquire()
             s = self.s
             if s is not None and (self.want_take or s.controller == "user"):
@@ -1509,6 +1847,7 @@ class Live:
 
     def leave(self) -> None:
         s = self.s
+        self._pinned = False
         if self.inflight is not None:
             self.fail("interrupted")
         if s is not None and s.controller == "neo" and s.status == "working":
@@ -1524,6 +1863,7 @@ class Live:
         self._holders += 1
         if self._holders == 1:
             self._hold_t0 = time.monotonic()
+            self._emit_state()  # the card says NEO is waiting for the page
         try:
             while (s := self.s) is not None and (self.want_take or s.controller == "user"):
                 if self.want_take and s.controller != "user":
@@ -1534,12 +1874,42 @@ class Live:
             self._holders -= 1
             if self._holders == 0:
                 self._held_total += time.monotonic() - self._hold_t0
+                self._emit_state()
         return True
 
-    def user_touched(self) -> bool:
-        """Has the user had the page in this card (so NEO's reads hide what they filled)?"""
-        s = self.s
-        return bool(s is not None and s.touched) or bool(self.last is not None and self.last.touched)
+    def pin(self) -> None:
+        """NEO's action works at a point on the page (a click at x, y): the page keeps its size until
+        the action is done, so the point it checked is the point it clicks."""
+        self._pinned = True
+
+    # ---- the user's marks on what they fill ---------------------------------------------------------------
+    def _set_armed(self, on: bool) -> None:
+        """Mark every field the user edits from now on (on), or stop (off: first whatever they edited
+        last is marked). In order: each change waits for the one before it."""
+        page = self.page
+        if page is None or _closed(page):
+            return
+        if on:
+            with contextlib.suppress(TypeError):
+                self._user_pages.add(page)
+        elif not self.user_touched(page):
+            return
+        prev = self._arm_task
+        self._arm_task = self._spawn(self._arm(prev, page, on))
+
+    async def _arm(self, prev: asyncio.Task | None, page: Any, on: bool) -> None:
+        if prev is not None and not prev.done():
+            await asyncio.wait([prev])
+
+        async def go() -> None:
+            if not on:
+                await self._flush_mark()
+                await self._keep_values(page)
+            self._arm_stale = False
+            await _arm_frames(page, on)
+
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(go(), 4)  # a page that doesn't answer never holds NEO (or the user) up
 
     def _action(self, a: dict, phase: str, **extra: Any) -> None:
         s = self.s
@@ -1622,6 +1992,7 @@ class Live:
     def done(self, step: str | None = None, *, thumb: bool = True) -> None:
         a, s = self.inflight, self.s
         self.inflight = None
+        self._pinned = False
         if a is None or s is None:
             return
         label = step or a["step"]
@@ -1637,6 +2008,7 @@ class Live:
     def fail(self, reason: str, step: str | None = None) -> None:
         a, s = self.inflight, self.s
         self.inflight = None
+        self._pinned = False
         if a is None or s is None:
             return
         self._action(a, "fail", reason=reason[:120])
@@ -1850,18 +2222,7 @@ class Live:
             return
         nu = s.need_user
         reason = (s.need_reason or "other") if nu is not None and nu.get("reason") != "confirm" else ""
-        if s.user_step is not None:
-            secs = time.time() - s.user_since
-            done = _USER_DONE.get(reason, "You took over")
-            self._step(
-                "user",
-                f"{done} · {_mmss(secs)}",
-                "ok",
-                by="user",
-                step_id=s.user_step,
-                duration_ms=int(secs * 1000),
-            )
-            s.user_step = None
+        self._finish_user_step(s)
         for d in list(self._dialogs.values()):
             with contextlib.suppress(Exception):
                 self._spawn(d.dismiss())
@@ -1872,6 +2233,7 @@ class Live:
         s.controller, s.status = "neo", "thinking"
         self._hint = {}
         self._inputs.clear()
+        self._set_armed(False)  # NEO's own typing from here on is NEO's (marks made so far stay)
         self._released.set()
         self._emit_state(now=True)
         if resume and reason and not self._holders and self.hooks.resume is not None:
@@ -1909,7 +2271,9 @@ class Live:
         if s.controller != "user":
             s.user_since = time.time()
             s.user_step = self._step("user", "You took over", "running", by="user")
-        s.controller, s.status, s.touched = "user", "user", True
+        s.controller, s.touched = "user", True
+        if s.status != "error":  # a dead page keeps its panel (Restart / Reload)
+            s.status = "user"
         s.need_user, s.need_reason = None, ""
         self._user_has_it()
         self._cancel("close")
@@ -1931,8 +2295,6 @@ class Live:
         v.send("browser_result", {"req": req, "ok": ok, **({"code": code} if code else {})})
 
     async def _do_control(self, v: Viewer, action: str, m: dict, req: str) -> str:
-        from neo.tools import browser
-
         sid = m.get("sid")
         if action == "reopen":
             return await self._reopen(sid, str(m.get("url") or ""))
@@ -1971,6 +2333,7 @@ class Live:
             self._popped_now()
             self._emit_state()
             self._spawn(self._retune(still=True))
+            self._want_viewport()
             return ""
         if action in ("expand", "collapse"):
             return ""
@@ -1978,10 +2341,13 @@ class Live:
             if s.status != "error":
                 return "invalid"
             s.error = None
+            if not s.jobs and s.controller != "user":
+                # Nothing of NEO's is waiting for it: the user asked for the page back, so it's theirs.
+                s.controller, s.touched, s.user_since = "user", True, time.time()
+                s.user_step = self._step("user", "You restarted the browser", "running", by="user")
             s.status = "user" if s.controller == "user" else "working"
             self._emit_state(now=True)
-            url = s.url
-            self._spawn(browser.relaunch(url))
+            self._spawn(self._relaunch(s.url))
             return ""
         if action in ("back", "forward", "reload", "hard_reload", "stop_loading", "tab"):
             if s.controller != "user" and (code := await self.take()):
@@ -2014,6 +2380,17 @@ class Live:
                 self._mark_filled_soon()
             return ""
         return "unsupported"
+
+    async def _relaunch(self, url: str) -> None:
+        """Start NEO's browser again at the page it was on — under the page lock, so a NEO step
+        never has the browser closed under it."""
+        from neo.tools import browser
+
+        async with self.lock:
+            await browser.relaunch(url)
+        s = self.s
+        if s is not None and s.controller == "user" and not s.ended:
+            self._user_has_it()
 
     async def _navigate(self, action: str, m: dict) -> str:
         from neo.tools import browser
@@ -2102,7 +2479,7 @@ class Live:
         if s.controller != "user" or s.status not in ("user", "need_user"):
             return self._reject(v, "not_user")
         if self.lock.locked() or self.want_take:
-            return None  # a NEO action still holds the page (a take that timed out)
+            return self._reject(v, "busy")  # a NEO action still holds the page (a take that timed out)
         ev = _valid(typ, m, self.vp)
         if ev is None:
             return self._reject(v, "invalid")
@@ -2167,6 +2544,17 @@ class Live:
             return
         t = ev["type"]
         mods = ev.get("mods", 0)
+        if t not in ("mousemove", "wheel"):
+            with contextlib.suppress(TypeError):
+                self._user_pages.add(page)  # the user drives this page
+            if (a := self._arm_task) is not None and not a.done():
+                await asyncio.wait([a])
+            if self._arm_stale:  # a new document (or frame) since the listener went in
+                self._arm_stale = False
+                await _arm_frames(page, True)
+            printable = t == "keydown" and bool(ev.get("text")) and not mods & (2 | 4)
+            if self._mark_pending and t in ("mousedown", "click", "keydown") and not printable:
+                await self._flush_mark()  # the field they typed in, before this moves the focus on
         if t == "mousemove":
             await cdp.send("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": ev["x"], "y": ev["y"], "modifiers": mods,
                                                         "buttons": ev["buttons"], "button": _held(ev["buttons"])})  # fmt: skip
@@ -2205,7 +2593,9 @@ class Live:
             )
             await cdp.send("Input.dispatchKeyEvent", p)
             edits = any(re.match(r"delete|transpose|undo|redo|yank", c) for c in p.get("commands", ()))
-            if t == "keydown" and (p.get("text") or ev["key"] in ("Backspace", "Delete") or edits):
+            if t == "keydown" and (
+                (p.get("text") and ev["key"] != "Enter") or ev["key"] in ("Backspace", "Delete") or edits
+            ):
                 self._mark_filled_soon()
             if t == "keydown":
                 self._hint_soon(None)
@@ -2214,15 +2604,22 @@ class Live:
             self._mark_filled_soon()
 
     def _mark_filled_soon(self) -> None:
-        self._later("filled", 0.15, self._mark_filled)
+        self._mark_pending = True
+        self._later("filled", 0.15, self._flush_mark)
+
+    async def _flush_mark(self) -> None:
+        self._cancel("filled")
+        if self._mark_pending:
+            self._mark_pending = False
+            await self._mark_filled()
+            if (page := self.page) is not None and not _closed(page):
+                await self._keep_values(page)  # before a key or a press that can submit (and navigate)
 
     async def _mark_filled(self) -> None:
         page = self.page
         if page is None or _closed(page):
             return
-        from neo.tools import browser
-
-        for fr in browser._frames(page):
+        for fr in _all_frames(page):
             with contextlib.suppress(Exception):
                 await asyncio.wait_for(fr.evaluate(_JS_MARK_FILLED), 1)
 
@@ -2276,18 +2673,49 @@ class Live:
         self._mark_filled_soon()
         return ""
 
-    def user_dialog(self, dialog: Any) -> bool:
-        """A page's alert / confirm / prompt while the user has the page: the card asks them."""
+    def _dialog_opening(self, p: dict) -> None:
+        """Chromium's own report of a dialog: which frame (URL) opened it."""
+        self._dialog_seen.append(
+            (time.monotonic(), str(p.get("type") or ""), str(p.get("message") or ""), str(p.get("url") or ""))
+        )
+        if self._dialog_wake is not None:
+            self._dialog_wake.set()
+
+    async def _dialog_url(self, kind: str, message: str) -> str | None:
+        """The URL of the frame that opened this dialog (None: Chromium didn't say)."""
+        deadline = time.monotonic() + _DIALOG_WAIT_S
+        while True:
+            for i, (t, k, m, url) in enumerate(self._dialog_seen):
+                if k == kind and m == message and time.monotonic() - t < 5:
+                    del self._dialog_seen[i]
+                    return url
+            left = deadline - time.monotonic()
+            if left <= 0 or self.cdp is None:
+                return None
+            self._dialog_wake = asyncio.Event()
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(self._dialog_wake.wait(), left)
+
+    async def user_dialog(self, dialog: Any) -> bool:
+        """A page's alert / confirm / prompt while the user has the page: the card asks them, naming
+        the site that asked — an embedded page (an ad's frame) is named as one, never as the site."""
         s = self.s
         if not self.on() or s is None or s.ended or s.controller != "user":
             return False
         did = "d" + secrets.token_hex(4)
         kind = str(getattr(dialog, "type", "alert"))
+        message = str(getattr(dialog, "message", ""))
         page = self.page
+        top = str(page.url if page is not None else s.url)
+        opener = await self._dialog_url(kind, message)
+        if s is not self.s or s.ended:
+            return False
         msg = {
             "sid": s.sid, "dialog_id": did, "kind": kind if kind in ("alert", "confirm", "prompt", "beforeunload") else "alert",
-            "message": str(getattr(dialog, "message", ""))[:2000], "origin": _host(page.url if page is not None else s.url),
+            "message": message[:2000], "origin": _host(opener or top),
         }  # fmt: skip
+        if opener and _origin(opener) != _origin(top):
+            msg["embedded"] = True
         if kind == "prompt":
             msg["default"] = str(getattr(dialog, "default_value", ""))[:2000]
         self._dialogs[did] = dialog
@@ -2389,6 +2817,7 @@ class Live:
     async def shutdown(self, reason: str = "") -> None:
         if reason == "erased":
             self._favicons.clear()
+            self._user_vals.clear()
             if self.s is not None:
                 await self.end("erased", alive=False, poster=False)
             self.last = None
@@ -2402,6 +2831,52 @@ def _closed(page: Any) -> bool:
         return bool(page.is_closed())
     except Exception:  # noqa: BLE001
         return True
+
+
+def _all_frames(page: Any) -> list:
+    main = getattr(page, "main_frame", page)
+    rest = [f for f in (getattr(page, "frames", None) or []) if f is not main]
+    return [main, *rest[:31]]
+
+
+async def _filled_rects(
+    page: Any, said: set[str] | None = None
+) -> list[tuple[float, float, float, float]] | None:
+    """Where the user's values are on screen — their fields, every password box, and the page's
+    own text that repeats `said` — in viewport CSS px, frames included (None: the page couldn't say)."""
+    out: list[tuple[float, float, float, float]] = []
+    words = sorted(said or (), key=len, reverse=True)[:20]
+    for i, fr in enumerate(_all_frames(page)):
+        try:
+            got = await asyncio.wait_for(fr.evaluate(_JS_FILLED_RECTS, words), 1)
+            ox = oy = 0.0
+            clip = None
+            if i:
+                box = await asyncio.wait_for((await fr.frame_element()).bounding_box(), 1)
+                if not box:
+                    continue
+                ox, oy = float(box["x"]), float(box["y"])
+                clip = (ox, oy, ox + float(box["width"]), oy + float(box["height"]))
+        except Exception:  # noqa: BLE001
+            if i == 0:
+                return None
+            continue
+        for r in got or []:
+            rr = _rect(r)
+            if rr is None:
+                continue
+            x0, y0, x1, y1 = rr["x"] + ox, rr["y"] + oy, rr["x"] + ox + rr["w"], rr["y"] + oy + rr["h"]
+            if clip is not None:
+                x0, y0, x1, y1 = max(x0, clip[0]), max(y0, clip[1]), min(x1, clip[2]), min(y1, clip[3])
+            if x1 > x0 and y1 > y0:
+                out.append((x0, y0, x1 - x0, y1 - y0))
+    return out
+
+
+async def _arm_frames(page: Any, on: bool) -> None:
+    for fr in _all_frames(page):
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(fr.evaluate(_JS_ARM_FILLED, on), 1)
 
 
 def _origin(url: str) -> str:
@@ -2427,16 +2902,24 @@ def _resize_jpeg(data: bytes, max_w: float, max_h: float, quality: int) -> bytes
         return b""
 
 
-def _small_jpeg(data: bytes, width: int, quality: int, limit: int) -> bytes:
-    """`data` at `width` px wide, as good a JPEG as fits in `limit` bytes (b"" if none does)."""
+def _small_jpeg(
+    data: bytes, width: int, quality: int, limit: int, cover: list | tuple = (), css_w: float = 0
+) -> bytes:
+    """`data` at `width` px wide, as good a JPEG as fits in `limit` bytes (b"" if none does), with
+    the `cover` rects (viewport CSS px, the page `css_w` wide) painted over."""
     import io
 
-    from PIL import Image
+    from PIL import Image, ImageDraw
 
     try:
         src = Image.open(io.BytesIO(data)).convert("RGB")
     except Exception:  # noqa: BLE001
         return b""
+    if cover:
+        k = src.width / css_w if css_w else 1.0
+        draw = ImageDraw.Draw(src)
+        for x, y, w, h in cover:
+            draw.rectangle([x * k - 2, y * k - 2, (x + w) * k + 2, (y + h) * k + 2], fill=(42, 42, 48))
     for w, q in (
         (width, quality),
         (width, quality - 15),
@@ -2465,6 +2948,12 @@ def _shrink_icon(body: bytes) -> tuple[bytes, str]:
         return out.getvalue(), "image/png"
     except Exception:  # noqa: BLE001
         return b"", ""
+
+
+async def _dispose(resp: Any) -> None:
+    if (fn := getattr(resp, "dispose", None)) is not None:
+        with contextlib.suppress(Exception):
+            await fn()
 
 
 async def _send(cdp: Any, method: str, params: dict) -> None:
@@ -2533,6 +3022,8 @@ bus().on_job_end(live._job_ended)
 def _on_event(ev) -> None:
     if ev.type == "confirm_done":
         live._answered(str(ev.data.get("action_id") or ""), str(ev.data.get("outcome") or ""))
+    elif ev.type == "transcript" and ev.data.get("role") == "user" and ev.data.get("final", True):
+        live.user_said(str(ev.data.get("job") or ""))  # the user's own words (typed, or said)
 
 
 bus().subscribe(_on_event)

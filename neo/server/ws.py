@@ -23,6 +23,7 @@ overlay once stalled the Gemini Live receive loop long enough to kill the voice 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hmac
 import json
 import logging
@@ -116,8 +117,10 @@ class UIServer:
 
         live.channel = self
         self._token = ws_token()
+        # No per-message deflate: the socket is local, and page frames are JPEGs, which don't
+        # compress — zlib on every frame was most of the core's cost of the live view.
         self._server = await serve(
-            self._handle, s.ws_host, s.ws_port, max_size=2**22, process_request=self._admit
+            self._handle, s.ws_host, s.ws_port, max_size=2**22, process_request=self._admit, compression=None
         )
         print(f"[ui] websocket on ws://{s.ws_host}:{s.ws_port} (token required)")
 
@@ -165,17 +168,27 @@ class UIServer:
             from neo.tools.browser_live import live
 
             live.viewer_gone(cl)
+            # A client that stopped reading is cut off for good: close its socket, so the overlay
+            # notices, reconnects and gets a fresh hello (an open socket that hears nothing never does).
+            transport = getattr(c, "transport", None)
+            if transport is not None:
+                with contextlib.suppress(Exception):
+                    transport.abort()
 
-    def broadcast(self, type_: str, data: dict[str, Any], *, recent: bool = False) -> None:
+    def broadcast(
+        self, type_: str, data: dict[str, Any], *, recent: bool = False, replay: dict[str, Any] | None = None
+    ) -> None:
         """A browser card message (neo/tools/browser_live.py). The card's opening and closing are
-        part of the transcript (replayed); the rest goes only to clients that show the card."""
+        part of the transcript (replayed — as `replay` when given: what late-joining overlays may
+        see of it); the rest goes only to clients that show the card."""
         msg = {"type": type_, "data": data, "ts": time.time()}
         if recent:
-            self._recent.append(msg)
+            kept = replay if replay is not None else data
+            self._recent.append({**msg, "data": kept})
             self._recent = self._recent[-60:]
-            if data.get("poster"):
+            if kept.get("poster"):
                 # In memory only, and not for long: the poster leaves the replay after ten minutes.
-                asyncio.get_running_loop().call_later(_POSTER_KEEP_S, lambda: data.update(poster=None))
+                asyncio.get_running_loop().call_later(_POSTER_KEEP_S, lambda: kept.update(poster=None))
         if self._clients:
             self._send_all(json.dumps(msg, default=str), lambda cl: recent or cl.browser)
 

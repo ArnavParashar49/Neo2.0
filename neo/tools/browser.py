@@ -31,7 +31,7 @@ import time
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import quote_plus, urljoin, urlsplit
+from urllib.parse import quote, quote_plus, urljoin, urlsplit
 
 from neo.agent import confirm
 from neo.agent.registry import ToolContext, ToolOutput, tool
@@ -289,6 +289,7 @@ class _Browser:
         # model put together — it can't carry anything of the user's out.
         self.links: dict[str, None] = {}
         self.shown: dict[int, str] = {}  # id(tab) → the URL NEO last showed a model from it
+        self._icons = None  # a plain HTTP client for site icons (none of the profile's cookies)
 
     @property
     def current(self):
@@ -376,6 +377,16 @@ class _Browser:
         self._gone = True
         live.browser_down(unexpected=not self._closing)
 
+    async def icon_client(self):
+        """The client the card fetches a site's icon with: its own, with none of the profile's
+        cookies or logins (a page chooses the icon's address)."""
+        if self._icons is None and self._pw is not None:
+            kw: dict = {}
+            if ua := _chrome_ua(self._pw):
+                kw["user_agent"] = ua
+            self._icons = await self._pw.request.new_context(**kw)
+        return self._icons
+
     def _watch(self, page) -> None:
         page.on("dialog", self._dialog)
         page.on("close", lambda p: self.shown.pop(id(p), None))
@@ -386,7 +397,7 @@ class _Browser:
         asks them. Otherwise it's dismissed — "Cancel" is the choice that changes nothing — and
         told to the model with the next action's result. Leaving a page NEO was told to leave
         ("unsaved changes?") is accepted."""
-        if live.user_dialog(dialog):
+        if await live.user_dialog(dialog):
             return
         kind = str(getattr(dialog, "type", ""))
         with suppress(Exception):
@@ -404,6 +415,10 @@ class _Browser:
 
     async def _drop(self) -> None:
         self._closing = True
+        icons, self._icons = self._icons, None
+        if icons is not None:
+            with suppress(Exception):
+                await icons.dispose()
         if self._ctx is not None:
             with suppress(Exception):
                 await self._ctx.close()
@@ -567,9 +582,13 @@ _JS_PAGE = r"""() => {
   const inputs = [...document.querySelectorAll('input')].filter(vis);
   const CODE = /one[- ]?time|\botp\b|verification code|security code|\b2fa\b|two[- ]factor|passcode|auth(?:entication)? code/i;
   const words = i => [i.name, i.id, i.placeholder, i.getAttribute('aria-label')].join(' ');
+  // What the user wrote in an editor (a contenteditable they filled in the chat's card) is theirs.
+  const mine = [...document.querySelectorAll('[data-neo-user-filled]')].filter(e => e.isContentEditable)
+    .map(e => e.innerText).filter(t => t && t.trim());
+  const hide = s => { for (const t of mine) s = s.split(t).join('[filled by you]'); return s; };
   return {
-    body: (document.body ? document.body.innerText : '').slice(0, 60000),
-    main: [...document.querySelectorAll('main,[role=main]')].map(m => m.innerText).join('\n').slice(0, 60000),
+    body: hide(document.body ? document.body.innerText : '').slice(0, 60000),
+    main: hide([...document.querySelectorAll('main,[role=main]')].map(m => m.innerText).join('\n')).slice(0, 60000),
     canvas,
     password: inputs.some(i => i.type === 'password'),
     code: inputs.some(i => (i.getAttribute('autocomplete') || '') === 'one-time-code' || CODE.test(words(i))),
@@ -615,10 +634,11 @@ async def _secret_values(page) -> set[str] | None:
 def _mask(entries: list[_El | str], secrets: set[str] | None, label: str = "filled") -> None:
     """No secret's value in a snapshot: a field holding one shows as [filled]. When the page
     couldn't say what its secrets are, no field shows its value."""
+    low = {s.lower() for s in secrets} if secrets is not None else set()
     for e in entries:
         if not isinstance(e, _El) or not e.value or e.role not in _VALUED:
             continue
-        if secrets is None or " ".join(e.value.split()) in secrets:
+        if secrets is None or " ".join(e.value.split()).lower() in low:
             e.value = ""
             e.states = (*e.states, label)
 
@@ -629,13 +649,45 @@ _JS_USER_FILLED = r"""() => {
   const out = [];
   const walk = root => {
     for (const e of root.querySelectorAll('[data-neo-user-filled]')) {
-      const v = e.isContentEditable ? e.innerText : e.value;
+      const v = e.isContentEditable ? e.innerText
+        : e.tagName === 'SELECT' ? [...e.selectedOptions].map(o => (o.label || o.text || '').trim()).join(' ') : e.value;
       if (v && out.length < 50) out.push(String(v));
     }
     for (const e of root.querySelectorAll('*')) if (e.shadowRoot) walk(e.shadowRoot);
   };
   walk(document);
   return out;
+}"""
+
+
+_JOIN = r"(?:\s+|\+|%20|_|-)"  # how a page or an address joins the words of what was typed
+
+
+def _hide_values(text: str, values: set[str]) -> str:
+    """`text` (the page's text, a link, its title or address) without what the user typed into the
+    page — in any case, as typed, as a URL or a slug carries it — when it's long enough to be theirs."""
+    pats: list[str] = []
+    for v in sorted(values, key=len, reverse=True):
+        if len(v) >= 3:
+            pats.append(_JOIN.join(re.escape(w) for w in v.split()))
+            pats += [re.escape(f) for f in (quote(v, safe=""), quote_plus(v)) if f not in (v, v.replace(" ", "+"))]
+    return re.sub("|".join(dict.fromkeys(pats)), "[filled by you]", text, flags=re.I) if pats else text
+
+
+# A field that holds what the user typed without having been typed into (the search box of the
+# results page their search led to): marked as theirs too, so pictures of the page cover it.
+_JS_MARK_ECHOES = r"""(said) => {
+  const words = (said || []).filter(v => v && v.length >= 3).map(v => v.toLowerCase());
+  let n = 0;
+  const walk = root => {
+    for (const e of root.querySelectorAll('input, textarea')) {
+      const v = String(e.value || '').toLowerCase();
+      if (v && words.some(w => v.includes(w))) { e.setAttribute('data-neo-user-filled', ''); n++; }
+    }
+    for (const e of root.querySelectorAll('*')) if (e.shadowRoot) walk(e.shadowRoot);
+  };
+  if (words.length) walk(document);
+  return n;
 }"""
 
 
@@ -693,11 +745,20 @@ async def _aria(page) -> str:
 
 
 async def _shot(page) -> bytes:
-    if _in_chat() and live.user_touched():
-        # After the user had the page: what they filled (and every password box) is blacked out.
-        with suppress(Exception):
-            mask = [page.locator("[data-neo-user-filled], input[type=password]")]
-            return await page.screenshot(type="jpeg", quality=70, scale="css", mask=mask)
+    if _in_chat() and live.user_touched(page):
+        # A page the user has had (in this card or an earlier one): what they filled (and every
+        # password box) is blacked out — and without the mask, there's no picture.
+        sel = "[data-neo-user-filled], input[type=password]"
+        mask = [fr.locator(sel) for fr in _frames(page)]
+        # …and wherever the page repeats what they typed (a suggestion list, a results heading).
+        said = sorted((await _user_values(page) or set()) | live.remembered(page), key=len, reverse=True)
+        said = [v for v in said if len(v) >= 3][:20]
+        if said:
+            for fr in _frames(page):
+                with suppress(Exception):
+                    await fr.evaluate(_JS_MARK_ECHOES, said)
+        mask += [page.get_by_text(v) for v in said]
+        return await page.screenshot(type="jpeg", quality=70, scale="css", mask=mask)
     return await page.screenshot(type="jpeg", quality=70, scale="css")
 
 
@@ -744,6 +805,9 @@ async def _read(
 ) -> ToolOutput:
     """The snapshot of `page` (its numbers become the ones click/type take). A page that is only a
     human check hands the window to the user; one that is mostly graphics brings a screenshot."""
+    if _in_chat() and (s := live.s) is not None and s.controller == "user":
+        # The user took the page while this step still ran: nothing of their turn is read.
+        return ToolOutput("The user has the page now, so NEO didn't read it. Wait for them to hand it back.")
     notes = list(notes or [])
     if said := await _decline_consent(page):
         notes.append(said)
@@ -757,10 +821,28 @@ async def _read(
         return ToolOutput(await _hand_over("captcha", page))
     entries = _parse(await _aria(page))
     _mask(entries, await _secret_values(page))
-    if _in_chat() and live.user_touched():
-        _mask(entries, await _user_values(page), label="filled by you")
+    hide: set[str] = set()
+    if _in_chat():
+        # What the user filled in the chat's card (marked as they typed): in this card or an
+        # earlier one — the page outlives the card — and what they typed before a submit took
+        # the page on (the core kept it, in memory, to hide it here).
+        mine = await _user_values(page)
+        if mine is None and not live.user_touched(page):
+            mine = set()
+        if mine is None or mine:
+            _mask(entries, mine, label="filled by you")
+        hide = (mine or set()) | live.remembered(page)
+        if hide:
+            _mask(entries, hide, label="filled by you")
     _b.remember(page, entries)
     text = _page_text(probe, find)
+    if hide:
+        # A page echoes what was typed into it (a suggestion, a results heading, a link, its title).
+        text = _hide_values(text, hide)
+        entries = [_hide_values(e, hide) if isinstance(e, str) else e for e in entries]
+        for e in entries:
+            if isinstance(e, _El):
+                e.name, e.url = _hide_values(e.name, hide), _hide_values(e.url, hide)
     n_els = sum(isinstance(e, _El) for e in entries)
     if probe.get("widget"):
         notes.append(
@@ -792,7 +874,10 @@ async def _read(
     except Exception:  # noqa: BLE001
         title = ""
     _b.saw(page)
-    return ToolOutput(_render(page.url, title, notes, entries, text, max_chars, find), images=images)
+    url = str(page.url)
+    if hide:
+        url, title = _hide_values(url, hide), _hide_values(title, hide)
+    return ToolOutput(_render(url, title, notes, entries, text, max_chars, find), images=images)
 
 
 async def _open_risk(url: str, c: ToolContext) -> str:
@@ -1105,13 +1190,16 @@ def _card(kind: str):
             try:
                 if live.s is None:
                     live.claim(job, starting=_b.cold())  # the card closed while this step waited
-                if waited and kind in _ACTS:
-                    return await _timed(_reread(), name)
+                # A step that acts on what its model saw of the page re-reads it instead; opening a
+                # page for a job that never saw this one acts on nothing the user changed.
+                if waited and kind in _ACTS and (kind != "open" or not job or live.saw_page(job)):
+                    return await _timed(_reread(c), name)
                 out = await _timed(fn(a, c), name)
                 if waited and kind == "read" and isinstance(out, ToolOutput) and not _halted(out):
                     return ToolOutput(f"{_USER_READ}\n{out.text}", images=out.images)
                 return out
             finally:
+                live.ran(job)
                 live.leave()
 
         return run
@@ -1119,10 +1207,13 @@ def _card(kind: str):
     return deco
 
 
-async def _reread() -> ToolOutput:
+async def _reread(c: ToolContext) -> ToolOutput:
+    """The page after the user's turn, through the same guards as any read (a page on this Mac or
+    the local network after reading untrusted content is the user's call). The user's page stays
+    where they put it."""
     page = await _b.page()
     await live.intent("read", "Read the page again", present=False)
-    out = await _read(page)
+    out = await _show(page, c, _b.shown.get(id(page), ""), leave="none")
     live.done()
     if _halted(out):
         return out
@@ -1255,6 +1346,8 @@ async def browser_click(a: dict, c: ToolContext) -> str | ToolOutput:
             x, y = float(a["x"]), float(a["y"])
         except (TypeError, ValueError):
             return "Error: x and y must be numbers (pixels on the screenshot)."
+        if _in_chat():
+            live.pin()  # the page keeps its size until the click: it lands where it was checked
         try:
             got = await page.evaluate(_JS_POINT, [x, y])
         except Exception:  # noqa: BLE001
@@ -1629,11 +1722,18 @@ async def browser_handoff(a: dict, c: ToolContext) -> str:
     return await _hand_over(kind, page, detail=detail)
 
 
-@tool("browser_close", "Close NEO's browser.", _p({}), category="browser", quiet=True)
+@tool("browser_close", "Close NEO's browser.", _p({}), category="browser", quiet=True, timeout=_HELD_S)
 async def browser_close(a: dict, c: ToolContext) -> str:
-    if _in_chat():
+    if not _in_chat():
+        await _b.close()
+        return "Browser closed."
+    # Never while the user has the page (their login, their typing): after they hand it back.
+    await live.enter()
+    try:
         await live.end("done", alive=False)
-    await _b.close()
+        await _b.close()
+    finally:
+        live.leave()
     return "Browser closed."
 
 

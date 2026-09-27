@@ -269,6 +269,16 @@ export function BrowserCard({ hub, snap, connected, surface, reduced, onExpand, 
     suppressToast.current = false;
   }, [st.controller, st.status, st.sid, hub, nu]);
 
+  // A job that wasn't on the card (another request, a scheduled one) waits for the page the user
+  // has: say so once. (After their own Take control, "NEO is paused" already said it.)
+  const held = useRef({ on: !!st.held, job: st.job });
+  useEffect(() => {
+    const now = !!st.held && st.controller === "user";
+    const p = held.current;
+    if (now && !p.on && st.job && st.job !== p.job) hub.toast(nu ? "NEO is waiting for you to finish here" : "NEO wants to use the page — hand back when you're done", 3200);
+    held.current = { on: now, job: st.job };
+  }, [st.held, st.controller, st.job, hub, nu]);
+
   useEffect(() => { if (!neoDriving) setCloseAsk(false); }, [neoDriving]);
 
   const take = useCallback(() => {
@@ -362,7 +372,7 @@ export function BrowserCard({ hub, snap, connected, surface, reduced, onExpand, 
       case "acting": return <>{isWindow ? <ThinkingOrb state="working" size={20} theme="auto" /> : <span className="br-dot live" />}NEO is browsing</>;
       case "thinking": return <>{isWindow ? <ThinkingOrb state="solving" size={20} theme="auto" /> : <span className="br-dot live slow" />}NEO is thinking</>;
       case "waiting": return <><span className="br-status-glyph warn">{I.wait(14)}</span>{confirmElsewhere ? "Waiting for your OK in NEO's chat" : "Waiting for your OK below"}</>;
-      case "user": return <><span className="br-status-glyph">{I.hand(14)}</span><span className="br-fg">You're in control</span></>;
+      case "user": return <><span className="br-status-glyph">{I.hand(14)}</span><span className="br-fg">{st.held && job ? "NEO is waiting for the page" : "You're in control"}</span></>;
       case "error": return <><span className="br-status-glyph bad">{I.warn(14)}</span>{st.error?.code === "crashed" ? "This page crashed" : st.error?.code === "browser_closed" ? "Browser closed" : `Couldn't reach ${host}`}</>;
       default: return null;
     }
@@ -497,7 +507,7 @@ function DialogSheet({ hub, snap }: { hub: BrowserHub; snap: BrowserSnap }) {
   return (
     <div className="br-sheet-scrim" data-noinput onPointerDown={(e) => e.stopPropagation()}>
       <div className="br-sheet" role="alertdialog" aria-modal="true" aria-labelledby="br-dlg-origin" aria-describedby="br-dlg-msg" ref={ref} onKeyDown={onKey}>
-        <div className="br-sheet-origin" id="br-dlg-origin">{origin} says</div>
+        <div className="br-sheet-origin" id="br-dlg-origin">{d.embedded ? `An embedded page on ${origin} says` : `${origin} says`}</div>
         <div className="br-sheet-msg" id="br-dlg-msg" dir="auto">{d.message.slice(0, 2000) || (d.kind === "beforeunload" ? "Leave this page? Changes you made may not be saved." : "")}</div>
         {d.kind === "prompt" && <input className="br-sheet-input" value={text} onChange={(e) => setText(e.target.value)} aria-label="Answer" spellCheck={false} />}
         <div className="br-sheet-btns">

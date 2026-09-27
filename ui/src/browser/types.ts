@@ -41,6 +41,8 @@ export interface BrowserState {
   need_user: NeedUser | null;
   error: { code: string; message: string } | null;
   caption: string | null;
+  /** A NEO step is waiting for the user to hand the page back (a job asked for it meanwhile). */
+  held?: boolean;
 }
 
 export interface BrowserAction {
@@ -103,6 +105,8 @@ export interface BrowserDialog {
   sid: Sid; dialog_id: string; kind: "alert" | "confirm" | "prompt" | "beforeunload";
   message: string;
   default?: string; origin: string;
+  /** A frame from another site (an ad, an embed) opened it, not the page itself: `origin` is that frame's host. */
+  embedded?: boolean;
 }
 
 export type ErrCode = "bad_sid" | "not_user" | "no_session" | "busy" | "invalid" | "rate" | "blocked_url" | "unsupported" | "timeout";
