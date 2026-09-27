@@ -29,7 +29,7 @@ import re
 import secrets
 from dataclasses import dataclass
 
-from neo.agent.registry import ToolContext, fence
+from neo.agent.registry import USERS_WORDS, ToolContext, fence
 from neo.tools.computer import apps, ax, screen
 
 SETTLE_S = 0.12  # after bringing an app forward (or raising a window), before the input
@@ -146,8 +146,10 @@ def _numbers(a: dict, keys: tuple[str, ...]) -> list[float]:
 
 
 def _said(ctx: ToolContext, values: list[float]) -> bool:
-    """Did the user's own words give these numbers ("click at 300, 400")?"""
-    said = {float(n) for n in re.findall(r"-?\d+(?:\.\d+)?", ctx.user_text or "")}
+    """Did the user's own words give these numbers ("click at 300, 400")? Only what the Session
+    marked as theirs (USERS_WORDS) — never a model's goal, a Live relay's or an embedding host's
+    words, whatever ctx.user_text holds."""
+    said = {float(n) for n in re.findall(r"-?\d+(?:\.\d+)?", str(ctx.get(USERS_WORDS, "") or ""))}
     return bool(values) and all(v in said or round(v) in said for v in values)
 
 

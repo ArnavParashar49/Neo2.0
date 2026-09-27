@@ -144,6 +144,14 @@ def _cooling(p: Provider) -> float:
         return 0.0
 
 
+def _seen_by(turn: Turn, p: Provider) -> Turn:
+    """The reply as written by `p`: a brain that doesn't declare vision saw no picture, whatever its
+    reply says (a host's own provider, or any that never heard of Turn.sees, leaves it True)."""
+    if not getattr(p, "supports_vision", False):
+        turn.sees = False
+    return turn
+
+
 class Chain:
     """Ordered providers with automatic failover on RateLimited / ProviderError.
 
@@ -281,8 +289,8 @@ class Chain:
             providers = _eyes_first(providers)
         for p in providers:
             try:
-                turn = await p.complete(
-                    messages, system=system, tools=tools, effort=effort, max_tokens=max_tokens
+                turn = _seen_by(
+                    await p.complete(messages, system=system, tools=tools, effort=effort, max_tokens=max_tokens), p
                 )
                 self.last_used, self.last_model = p.name, getattr(p, "model", "")
                 return turn
@@ -299,8 +307,8 @@ class Chain:
             await bus().note(f"Waiting {secs:.0f}s for {spoken_name(name)}'s rate limit")
             await asyncio.sleep(secs + 0.5)
             try:
-                turn = await p.complete(
-                    messages, system=system, tools=tools, effort=effort, max_tokens=max_tokens
+                turn = _seen_by(
+                    await p.complete(messages, system=system, tools=tools, effort=effort, max_tokens=max_tokens), p
                 )
                 self.last_used, self.last_model = p.name, getattr(p, "model", "")
                 return turn

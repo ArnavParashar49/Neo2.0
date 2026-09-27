@@ -124,6 +124,11 @@ class ToolContext:
         return self.taint[0] if self.taint else ""
 
 
+# ToolContext.extras key: the user's own words for this request — typed or spoken to NEO.app, or
+# the user's sentence Live hands over — set by the Session alone (never a model's goal, a Live
+# relay's or anything an embedded agent is handed; a caller's extras never carry it through).
+USERS_WORDS = "users_words"
+
 Handler = Callable[[dict[str, Any], ToolContext], Awaitable[str | ToolOutput] | str | ToolOutput]
 # (regex, args) or (regex, args, check): `check(filled_args)` runs on cached data only and says
 # whether the pattern really claims the utterance; False hands it to the next pattern.

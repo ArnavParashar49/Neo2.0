@@ -23,7 +23,7 @@ from neo import runtime
 from neo.agent import confirm, fastpath, grants
 from neo.agent.loop import AgentResult, _supersede_observations, run_agent
 from neo.agent.prompt import build as build_prompt
-from neo.agent.registry import Origin, ToolContext, ToolOutput, fence, registry, voiced
+from neo.agent.registry import USERS_WORDS, Origin, ToolContext, ToolOutput, fence, registry, voiced
 from neo.config import settings
 from neo.events import NeoState, bus
 from neo.providers import brain
@@ -214,9 +214,14 @@ class Session:
         # caller's next call from the same task (approving another agent's card, say) never gets
         # them. An embedded agent's request carries only its own context too, for the same reason.
         own = runtime.library_bound()
+        # The user's own words, marked for the tools (a blind brain may click numbers only they
+        # gave): by NEO.app's Session alone, never on a caller's say-so.
+        request_extras = {k: v for k, v in (extras or {}).items() if k != USERS_WORDS}
+        if (from_user or origin == "user") and not (own or runtime.library_mode()):
+            request_extras[USERS_WORDS] = text
         reset: list[tuple[contextvars.ContextVar[Any], contextvars.Token[Any]]] = [
             (_request_taint, _request_taint.set(tuple(taint))),
-            (_request_extras, _request_extras.set(dict(extras or {}))),
+            (_request_extras, _request_extras.set(request_extras)),
         ]
         if conversation or own:
             token = _conversation.set(conversation)

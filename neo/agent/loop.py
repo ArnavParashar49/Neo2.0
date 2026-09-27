@@ -182,6 +182,14 @@ def _supersede_observations(messages: list[Message], *, start: int = 0) -> None:
                 pages.add(url)
 
 
+def _saw(turn: Turn, provider: Provider) -> bool:
+    """Could the brain that wrote this reply see? Not when it says it couldn't (Turn.sees), nor
+    when the provider declares no vision (a Chain already folds that into each reply)."""
+    from neo.providers import Chain
+
+    return getattr(turn, "sees", True) and (isinstance(provider, Chain) or bool(getattr(provider, "supports_vision", False)))
+
+
 async def _run_calls(
     calls: list[ToolCall],
     reg: Registry,
@@ -377,7 +385,7 @@ async def run_agent(
         results = meta_results + (
             await _run_calls(
                 real, reg, ctx, ev, s.max_tool_result_chars, job, set(enabled) if strict else None,
-                blind=not getattr(turn, "sees", True),
+                blind=not _saw(turn, provider),
             )
             if real
             else []

@@ -183,3 +183,74 @@ def test_a_blind_refusal_names_what_still_works():
         pointer.points({"x": 612, "y": 540}, ("x", "y"), ToolContext(user_text="play", extras={"blind": True}))
     assert "ax_tree" in str(r.value) and "click_text" in str(r.value)
     assert isinstance(ToolOutput("x").fence, bool)
+
+
+class HostTextOnly:
+    """A host's own text-only brain (neo2 providers): it declares no vision and has never heard of
+    Turn.sees, so every reply it writes says sees=True."""
+
+    name, model, supports_vision, supports_tools = "host", "m", False, True
+
+    def __init__(self):
+        self.turns = [Turn(tool_calls=[ToolCall("t1", "click", {"x": 612, "y": 540})]), Turn(text="Done.")]
+
+    def cooling_until(self):
+        return 0.0
+
+    async def complete(self, messages, **kw):
+        return self.turns.pop(0)
+
+    async def stream(self, messages, **kw):
+        yield ""
+
+
+@pytest.mark.parametrize("chained", [True, False])
+def test_a_brain_that_declares_no_vision_is_blind_whatever_its_turns_say(monkeypatch, chained):
+    from neo.providers import Chain
+
+    clicked = []
+    monkeypatch.setattr(inp, "click", lambda *a, **k: clicked.append(a) or "clicked")
+    monkeypatch.setattr(inp, "move", lambda x, y: None)
+    brain = Chain([HostTextOnly()]) if chained else HostTextOnly()
+    res = asyncio.run(run_agent("play e4", provider=brain, system="", ev=EventBus(), verify=False,
+                                tools=[registry().get("click").spec()]))  # fmt: skip
+    assert clicked == [] and "can't see the screen" in res.steps[0].result
+
+
+def test_only_the_users_own_words_give_a_blind_brain_its_numbers():
+    """"Click at 612, 540" from the user is theirs to give; the same numbers in a model's goal, a
+    Live relay's or an embedding host's words are not (whatever ctx.user_text holds)."""
+    from neo.agent.registry import USERS_WORDS
+
+    goal = ToolContext(user_text="(a host model's goal) click 612 540", extras={"blind": True}, origin="agent")
+    with pytest.raises(pointer.Refused):
+        pointer.points({"x": 612, "y": 540}, ("x", "y"), goal)
+    theirs = ToolContext(user_text="play", extras={"blind": True, USERS_WORDS: "click at 612, 540"}, origin="agent")
+    assert pointer.points({"x": 612, "y": 540}, ("x", "y"), theirs)[0] == [(612.0, 540.0)]
+
+
+def test_the_session_marks_the_users_own_words_and_nothing_else(monkeypatch):
+    from test_v2_session import FakeChain, FakeReflex
+
+    from neo import runtime
+    from neo.agent import session as sess_mod
+    from neo.agent.loop import AgentResult
+    from neo.agent.registry import USERS_WORDS
+
+    seen = []
+
+    async def fake_run_agent(goal, **kw):
+        seen.append(kw["ctx"].get(USERS_WORDS, ""))
+        return AgentResult("ok", "done", [], [])
+
+    monkeypatch.setattr(sess_mod, "run_agent", fake_run_agent)
+    monkeypatch.setattr(sess_mod, "brain", lambda purpose="agent": FakeChain())
+    s = sess_mod.Session(reflex=FakeReflex("agent_task"))
+    said = "click at 612, 540"
+    asyncio.run(s.handle(said, from_user=True))  # typed, or spoken to NEO.app
+    asyncio.run(s.handle(said, origin="user"))  # Live handing over the user's own sentence
+    asyncio.run(s.handle(said, origin="live"))  # Live's model's goal
+    asyncio.run(s.handle(said, origin="live", extras={USERS_WORDS: said}))  # nobody else can say so
+    monkeypatch.setattr(runtime, "library_bound", lambda: True)  # an embedded agent's request
+    asyncio.run(s.handle(said, origin="user"))
+    assert seen == [said, said, "", "", ""]

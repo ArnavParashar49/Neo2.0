@@ -15,7 +15,7 @@ import Quartz as RealQ
 from PIL import Image
 
 from neo.agent import confirm
-from neo.agent.registry import ToolContext, ToolOutput, registry
+from neo.agent.registry import USERS_WORDS, ToolContext, ToolOutput, registry
 from neo.tools.computer import apps, ax, focus, pointer, screen
 from neo.tools.computer import input as inp
 
@@ -399,7 +399,8 @@ def test_a_blind_brain_may_not_click_drag_or_scroll_at_coordinates(world):
         assert not out.ok and "can't see the screen" in out.text
     assert world.events() == []
     # coordinates the user said themselves are theirs, not made up
-    assert run("click", {"x": 612, "y": 540}, ToolContext(user_text="click at 612, 540", extras={"blind": True})).ok
+    said = {"blind": True, USERS_WORDS: "click at 612, 540"}  # the user's own words (the Session marks them)
+    assert run("click", {"x": 612, "y": 540}, ToolContext(user_text="click at 612, 540", extras=said)).ok
 
 
 # ---- screenshots: truthful geometry, and NEO maps pixels itself ------------------------------------------------
