@@ -63,9 +63,10 @@ class AgentConfig(BaseModel):
     protected_apps: tuple[str, ...] = ()  # NEO's input tools never click or type into these
     extra_secret_paths: tuple[Path, ...] = ()  # never read or written by NEO's tools (data_dir never is)
     models_dir: Path | None = None  # where a local embedding model is kept (default: the user cache dir)
-    max_steps: int = Field(24, ge=1)
-    max_seconds: float = Field(180.0, gt=0)
-    max_concurrent_tasks: int = Field(2, ge=1)
+    # (defaults as keywords: type checkers see only Field(default=...))
+    max_steps: int = Field(default=24, ge=1)
+    max_seconds: float = Field(default=180.0, gt=0)
+    max_concurrent_tasks: int = Field(default=2, ge=1)
     approval_timeout_s: float = 110.0  # an inline approver's time to answer; below the gate's 120 s
 
     @model_validator(mode="before")

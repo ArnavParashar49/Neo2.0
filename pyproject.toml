@@ -78,6 +78,7 @@ include = ["neo*"]
 
 [tool.setuptools.package-data]
 neo2 = ["py.typed"]
+neo = ["py.typed"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
