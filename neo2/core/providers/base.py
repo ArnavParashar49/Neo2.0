@@ -247,7 +247,8 @@ class AllBrainsFailed(ProviderError):
 
     def spoken(self) -> str:
         """Why the task stopped, for the user: which brain, and quota vs error."""
-        parts = [failure_words(n, e) for n, e in self.failures]
+        # (each reason once: two brains on one account refused for one reason say it once)
+        parts = list(dict.fromkeys(failure_words(n, e) for n, e in self.failures))
         if not parts:
             return "I couldn't reach any model, so I stopped."
         said = parts[0] if len(parts) == 1 else ", ".join(parts[:-1]) + " and " + parts[-1]

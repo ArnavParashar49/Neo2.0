@@ -68,6 +68,7 @@ from neo2.core import logger, runtime
 from neo2.core.providers import cerebras_hooks as hooks
 from neo2.core.providers import spend
 from neo2.core.providers.base import (
+    BadRequest,
     Message,
     Overloaded,
     ProviderError,
@@ -607,6 +608,7 @@ def account(c: Conf | None = None) -> Account:
 class CerebrasProvider(OpenAICompatProvider):
     raise_truncated = True
     stream_effort = "low"  # a chat answer: quick thinking
+    stream_usage = True  # (off for this brain once the server refuses the option: see stream)
 
     def __init__(self, acct: Account, *, model: str, name: str, vision: bool) -> None:
         super().__init__(
@@ -654,7 +656,12 @@ class CerebrasProvider(OpenAICompatProvider):
         if not isinstance(tin, int):
             tin = f.tokens  # the estimate of what was sent
         if not isinstance(tout, int):
-            tout = math.ceil(len(text.encode("utf-8", "ignore")) / 3) + _STREAM_REASONING
+            # a stream that said nothing spent its room thinking (Truncated); else its text plus some
+            tout = (
+                math.ceil(len(text.encode("utf-8", "ignore")) / 3) + _STREAM_REASONING
+                if text
+                else f.max_tokens
+            )
         try:
             self.account.spent(self.model, tin, tout)
         except Exception as e:  # noqa: BLE001 — counting must never lose the answer it counts
@@ -725,12 +732,27 @@ class CerebrasProvider(OpenAICompatProvider):
             await self.account.admit(
                 self.model, estimate(messages, system, None, vision=self.supports_vision), self.name
             )
+            room = max(max_tokens, ROOM["low"])
             produced = False
-            async for chunk in super().stream(
-                messages, system=system, max_tokens=max(max_tokens, ROOM["low"])
-            ):
-                produced = True
-                yield chunk
+            try:
+                async for chunk in super().stream(messages, system=system, max_tokens=room):
+                    produced = True
+                    yield chunk
+            except BadRequest as e:
+                # A server that won't take stream_options (its usage then comes unasked, or is
+                # estimated): asked once more without them, and they stay off when that goes
+                # through. A 400 that comes again is the request's own: raised, the option kept.
+                if produced or type(e) is not BadRequest or not self.stream_usage:
+                    raise
+                self.stream_usage = False
+                try:
+                    async for chunk in super().stream(messages, system=system, max_tokens=room):
+                        produced = True
+                        yield chunk
+                except BadRequest:
+                    self.stream_usage = not produced
+                    raise
+                log.info(f"[brain] {self.name}: the server refused stream_options; its usage is estimated")
             if not produced:  # its thinking used all the room: nothing was said, another brain may say it
                 raise Truncated(f"{self.name}: no room left for the answer")
         finally:

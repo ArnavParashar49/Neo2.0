@@ -200,7 +200,8 @@ def test_settings_read_forgivingly(cset):
     assert "csk" not in repr(s) and "csk" not in repr(c)  # a printed setting never shows the key
     s2 = cset(NEO_CEREBRAS_DAILY_BUDGET="lots", NEO_CEREBRAS_PRICES="{not json")
     c2 = cb.conf(s2)
-    assert c2.daily_budget == 0.5 and c2.prices == spend.PRICES  # a typo never stops NEO starting
+    # a typo never stops NEO starting; a budget it can't read spends nothing (the cap fails closed)
+    assert c2.daily_budget == 0.0 and c2.prices == spend.PRICES
 
 
 # ---- a step, as the agent loop asks for one ---------------------------------------------------
@@ -431,7 +432,8 @@ def test_prices_and_ledger_arithmetic(tmp_path):
     assert again.over() and math.isclose(again.today(), 0.5250035)  # kept across a restart
     now[0] += 2 * 3600  # past midnight: a new day
     assert not again.over() and again.today() == 0.0
-    assert spend.budget("-1") == 0.5 and spend.budget(0) == 0.0 and spend.budget("nan") == 0.5
+    assert spend.budget("-1") == 0.0 and spend.budget(0) == 0.0 and spend.budget("nan") == 0.0
+    assert spend.budget("") == 0.5 and spend.budget("$2") == 2.0
     assert oct((tmp_path / "s.json").stat().st_mode & 0o777) == "0o600"
 
 
@@ -499,6 +501,50 @@ async def test_a_streamed_answer_is_counted_even_without_usage(cset, fake):
     fake.reply(payload="data: [DONE]\n\n")  # thought, said nothing: another brain may say it
     with pytest.raises(Truncated):
         _ = [c async for c in cb.cerebras().stream(ASK)]
+    # ...and was paid for all the same: the prompt, and the room it spent thinking
+    tin2, tout2 = ledger_file(s)["tokens"]["gpt-oss-120b"]
+    assert tin2 >= 2 * tin and tout2 - tout >= cb.ROOM["low"]
+
+
+def _sse(*chunks: dict) -> str:
+    return "".join(f"data: {json.dumps(c)}\n\n" for c in chunks) + "data: [DONE]\n\n"
+
+
+def _chunk(text: str | None = None, usage: tuple[int, int] | None = None) -> dict:
+    out: dict[str, Any] = {"id": "c", "object": "chat.completion.chunk", "created": 0, "model": "gpt-oss-120b",
+                           "choices": [] if text is None else [{"index": 0, "delta": {"content": text}, "finish_reason": None}]}  # fmt: skip
+    if usage:
+        out["usage"] = {"prompt_tokens": usage[0], "completion_tokens": usage[1], "total_tokens": sum(usage)}
+    return out
+
+
+async def test_a_stream_asks_for_its_usage_and_counts_what_the_server_reports(cset, fake):
+    s = cset()
+    fake.reply(payload=_sse(_chunk("Hi"), _chunk(None, usage=(321, 45))))
+    assert [c async for c in cb.cerebras().stream(ASK)] == ["Hi"]
+    assert fake.bodies[0]["stream_options"] == {"include_usage": True}
+    assert ledger_file(s)["tokens"]["gpt-oss-120b"] == [321, 45]  # the server's count, not an estimate
+
+
+async def test_a_server_that_refuses_stream_options_is_asked_again_without_them(cset, fake):
+    cset()
+    fake.reply(
+        400, {"message": "Unrecognized request argument supplied: stream_options", "code": "wrong_api_format"}
+    )
+    fake.reply(payload=_sse(_chunk("Hi")))
+    p = cb.cerebras()
+    assert [c async for c in p.stream(ASK)] == ["Hi"]
+    assert "stream_options" in fake.bodies[0] and "stream_options" not in fake.bodies[1]
+    fake.reply(payload=_sse(_chunk("Again")))
+    assert [c async for c in p.stream(ASK)] == ["Again"]
+    assert "stream_options" not in fake.bodies[2]  # learnt: not sent again
+    # a 400 about something else is that request's own trouble: raised, and the option kept
+    fake.reply(400, {"message": "messages: too many"})
+    fake.reply(400, {"message": "messages: too many"})
+    q = cb.cerebras_vision()
+    with pytest.raises(BadRequest):
+        _ = [c async for c in q.stream(ASK)]
+    assert q.stream_usage is True
 
 
 # ---- pictures ---------------------------------------------------------------------------------

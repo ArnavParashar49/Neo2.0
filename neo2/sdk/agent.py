@@ -1251,7 +1251,7 @@ def _finalize(rt_ref: weakref.ReferenceType[runtime.Runtime], tmp: Path | None) 
 # would keep (an embedded agent never writes those; erased all the same if present).
 _OWN_FILES = (
     "memory.sqlite3", "memory.sqlite3-wal", "memory.sqlite3-shm", "memory.sqlite3-journal",
-    "audit.log", "audit.log.1", "audit.log.tmp", "brain_cooldowns.json",
+    "audit.log", "audit.log.1", "audit.log.tmp", "brain_cooldowns.json", "cerebras_spend.json",
     "decide.json", "decide_shadow.log", "media_uris.json", "reflex_extra.jsonl", "reflex_learn.json",
 )  # fmt: skip
 _OWN_DIRS = ("browser", "decide_learned", "tmp")

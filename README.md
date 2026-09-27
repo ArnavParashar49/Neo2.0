@@ -173,8 +173,8 @@ Everything is an environment variable with the `NEO_` prefix (or a line in `.env
 |---|---|---|
 | `NEO_BRAIN` | `gemini` | primary agentic brain: `gemini` · `groq` · `local` · `claude` |
 | `NEO_FAST_BRAIN` | `groq` | brain for chat-only turns |
-| `CEREBRAS_API_KEY` | — | a paid [Cerebras](https://cloud.cerebras.ai) key: `gpt-oss-120b` takes chat and text-only steps wherever Groq would (tried just ahead of it); `qwen-3.8-27b` sees the screen when Gemini is overloaded (ahead of Groq). No key: nothing changes |
-| `NEO_CEREBRAS_DAILY_BUDGET` | `0.50` | dollars a day NEO may spend on Cerebras (usage × price, counted per answer). At 80% it says so; once spent it skips Cerebras until midnight and says why. `0` turns Cerebras off (no chain names it) |
+| `CEREBRAS_API_KEY` | — | a paid [Cerebras](https://cloud.cerebras.ai) key: `gpt-oss-120b` takes chat and text-only steps wherever Groq would (tried just ahead of it); `qwen-3.8-27b` sees the screen when Gemini is overloaded (ahead of Groq). Never ahead of the local brain when you put it first; with only the local brain named (`NEO_BRAIN`/`NEO_FAST_BRAIN=local`) Cerebras isn't used, and your screenshots go to it only if you also named a cloud brain that sees. No key: nothing changes |
+| `NEO_CEREBRAS_DAILY_BUDGET` | `0.50` | dollars a day NEO may spend on Cerebras (usage × price, counted per answer). At 80% it says so; once spent it skips Cerebras until midnight and says why. `0` or `off` turns Cerebras off (no chain names it); so does a value that isn't a dollar amount (a negative number, a typo), with a warning in the log |
 | `NEO_CEREBRAS_MODEL` / `NEO_CEREBRAS_VISION_MODEL` | `gpt-oss-120b` / `qwen-3.8-27b` | the text and seeing models (one that `/v1/models` doesn't list for your key is skipped) |
 | `NEO_CEREBRAS_PRICES` | published prices | JSON, $ per million tokens: `{"gpt-oss-120b": [0.35, 0.75], "qwen-3.8-27b": [0.99, 1.49]}` (entries override or add models; an unknown model counts at the dearest price) |
 | `NEO_VOICE` | `auto` | `auto` (Live if the key allows it, else local) · `live` · `local` · `off` |

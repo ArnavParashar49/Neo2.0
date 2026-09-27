@@ -193,6 +193,50 @@ def test_without_a_key_or_with_a_zero_budget_every_chain_is_main_s(mac, off):
         assert (c.names, c.eyes) == (names, []), purpose
 
 
+@pytest.mark.parametrize(
+    ("env", "want"),
+    [
+        # only brains on this Mac named: nothing the user said ever left it, and a key doesn't change
+        # that (nor do main's own cloud brains in "light" and "vision": Cerebras isn't added to them)
+        (
+            {"NEO_BRAIN": "local", "NEO_FAST_BRAIN": "local"},
+            {"agent": ["local"], "fast": ["local"], "light": ["gemini_lite", "local"],
+             "vision": ["gemini", "claude", "local"]},
+        ),
+        # a cloud brain named after the local one: Cerebras joins behind it, never ahead of local
+        (
+            {"NEO_BRAIN": "local", "NEO_FAST_BRAIN": "gemini"},
+            {"agent": ["local", "gemini", "cerebras"], "fast": ["gemini", "cerebras", "local"],
+             "light": ["gemini_lite", "gemini", "cerebras", "local"],
+             "vision": ["gemini", "claude", "cerebras_vision", "cerebras", "local"]},
+        ),
+        (
+            {"NEO_BRAIN": "gemini", "NEO_FAST_BRAIN": "local"},
+            {"agent": ["gemini", "cerebras", "local"], "fast": ["local", "gemini", "cerebras"],
+             "light": ["gemini_lite", "local", "gemini", "cerebras"],
+             "vision": ["gemini", "claude", "cerebras_vision", "cerebras", "local"]},
+        ),
+        (
+            {"NEO_BRAIN": "claude", "NEO_FAST_BRAIN": "local"},
+            {"agent": ["claude", "cerebras", "local"], "fast": ["local", "claude", "cerebras"],
+             "light": ["gemini_lite", "local", "claude", "cerebras"],
+             "vision": ["claude", "gemini", "cerebras_vision", "cerebras", "local"]},
+        ),
+        # local first, Groq for chat: ahead of Groq (decision 49), and no seeing Cerebras (no picture
+        # of theirs left the Mac: see the next test)
+        (
+            {"NEO_BRAIN": "local"},
+            {"agent": ["local", "cerebras", "groq"], "fast": ["cerebras", "groq", "local"],
+             "light": ["gemini_lite", "cerebras", "groq", "local"],
+             "vision": ["gemini", "claude", "local", "cerebras", "groq"]},
+        ),
+    ],
+)  # fmt: skip
+def test_cerebras_never_goes_ahead_of_a_brain_on_this_mac_the_user_put_first(mac, env, want):
+    mac(**env)
+    assert {p: prov.brain(p).names for p in want} == want
+
+
 async def test_without_a_key_nothing_goes_to_cerebras_and_a_picture_step_is_main_s(mac, fake):
     brains = mac(key="", busy=("gemini",))
     assert (await prov.brain("agent").complete(ASK)).text == "from groq"
@@ -263,16 +307,42 @@ async def test_a_picture_step_goes_to_cerebras_vision_when_gemini_is_out(mac, fa
     assert chain.last_used == cb.TEXT_BRAIN and fake.models == [cb.VISION_MODEL, cb.TEXT_MODEL]
 
 
-async def test_the_seeing_fallback_never_goes_ahead_of_a_brain_on_this_mac_the_user_put_first(mac, fake):
+async def test_a_local_first_user_s_pictures_never_go_to_cerebras(mac, fake):
+    """NEO_BRAIN=local and no cloud brain that sees named: on main no picture ever left the Mac (a
+    pixel step with no seeing brain goes blind and says so, DECISIONS 39). A Cerebras key alone
+    doesn't change that: no seeing fallback, and its text brain gets the words, never the picture."""
     brains = mac(NEO_BRAIN="local")
     chain = prov.brain("agent")
-    assert chain.names == ["local", "cerebras", "groq"]
+    assert (chain.names, chain.eyes, chain.supports_vision) == (["local", "cerebras", "groq"], [], False)
     assert (await chain.complete(_screenshot_step())).text == "from local" and fake.bodies == []
     brains["local"].busy = True
-    fake.default = (200, completion("a board", model=cb.VISION_MODEL), {})
     chain = prov.brain("agent")
-    await chain.complete(_screenshot_step())
-    assert chain.last_used == cb.VISION_BRAIN  # the Mac's own brain couldn't: then the one that sees
+    turn = await chain.complete(_screenshot_step())
+    assert chain.last_used == cb.TEXT_BRAIN and turn.sees is False  # blind, as main's Groq would be
+    assert fake.models == [cb.TEXT_MODEL]
+    parts = [p for m in fake.bodies[0]["messages"] if isinstance(m["content"], list) for p in m["content"]]
+    assert not [p for p in parts if p.get("type") == "image_url"]  # the picture stayed on the Mac
+
+
+def test_a_local_first_user_who_names_a_brain_that_sees_gets_cerebras_eyes_too(mac):
+    mac(NEO_BRAIN="local", NEO_FAST_BRAIN="gemini")  # Gemini already sees their screenshots
+    assert prov.brain("agent").eyes == [cb.VISION_BRAIN]
+
+
+def test_cerebras_eyes_follow_the_seeing_fallbacks_rule():
+    """with_cerebras_eyes mirrors brain-effort's _fallback_eyes: cloud eyes for a local-first user
+    only with NEO_CLOUD_EYES=on or a cloud brain that sees among the ones they named."""
+    from types import SimpleNamespace as NS
+
+    key = {"cerebras_api_key": KEY, "cerebras_daily_budget": 0.5}
+    eyes = ("gemini", "gemini_lite", "claude", "groq_vision")
+    local = NS(**key, brain="local", fast_brain="groq", offline_brain="local")
+    assert hooks.with_cerebras_eyes((), local) == ()
+    opted_in = NS(**key, brain="local", fast_brain="groq", offline_brain="local", cloud_eyes="on")
+    assert hooks.with_cerebras_eyes((), opted_in) == (cb.VISION_BRAIN,)
+    cloud = NS(**key, brain="gemini", fast_brain="groq", offline_brain="local")
+    want = ("gemini", "gemini_lite", "claude", cb.VISION_BRAIN, "groq_vision")
+    assert hooks.with_cerebras_eyes(eyes, cloud) == want
 
 
 async def test_a_spent_seeing_brain_leaves_the_step_to_main_s_blind_fallbacks(mac, fake):
@@ -332,6 +402,39 @@ async def test_a_spent_budget_fails_over_without_a_round_trip_and_the_stop_says_
     assert fake.bodies == []
 
 
+async def test_a_stop_says_the_spent_budget_once_not_once_per_cerebras_brain(mac, fake):
+    from neo2.core.agent.loop import _model_trouble
+    from neo2.core.agent.session import Reply
+
+    mac(busy=("gemini", "groq", "local"), NEO_CEREBRAS_DAILY_BUDGET="0.001")
+    _spend_it(config.settings())
+    with pytest.raises(AllBrainsFailed) as e:
+        await prov.brain("agent").complete(_screenshot_step())  # both Cerebras brains asked: both out
+    assert {n for n, _ in e.value.failures} >= {cb.TEXT_BRAIN, cb.VISION_BRAIN}
+    budget = "Cerebras' daily budget of $0.0010 is used up"
+    assert e.value.spoken().count(budget) == 1
+    # the session's reply: the stop, and not the same news again as a note after it
+    heard = cb.add_spoken_notes(Reply(text=_model_trouble(e.value, []), route="agent")).text
+    assert heard.count(budget) == 1 and heard.startswith("I had to stop:")
+    assert cb.spoken_notes() == ""  # (and not saved up for the next reply either)
+
+
+def test_a_note_the_reply_doesn_t_already_say_is_still_heard(mac):
+    from neo2.core.agent.session import Reply
+
+    mac()
+    a = cb.account(cb.conf())
+    a._tell("Cerebras' daily budget of $0.50 is used up; I'll skip it until tomorrow")
+    a._tell("Cerebras refused the API key (CEREBRAS_API_KEY); skipping it for today")
+    r = cb.add_spoken_notes(
+        Reply(text="I had to stop: Cerebras refused the API key (CEREBRAS_API_KEY).", route="agent")
+    )
+    assert r.text == (
+        "I had to stop: Cerebras refused the API key (CEREBRAS_API_KEY). "
+        "Cerebras' daily budget of $0.50 is used up; I'll skip it until tomorrow."
+    )
+
+
 async def test_a_reply_that_thought_away_all_its_room_is_asked_again_then_left_to_groq(mac, fake):
     brains = mac(busy=("gemini",))
     fake.reply(payload=completion(None, finish="length", usage=(500, 1024)))
@@ -370,6 +473,30 @@ def test_the_default_budget_is_fifty_cents_a_day(mac):
     mac()
     assert config.settings().cerebras_daily_budget == 0.50 and cb.conf().daily_budget == 0.50
     assert "csk" not in repr(config.settings())
+
+
+@pytest.mark.parametrize(
+    "value", ["off", "OFF", "none", "false", "no", "-1", "$-2", "nan", "inf", "lots", "1,25"]
+)
+def test_a_budget_that_isn_t_a_dollar_amount_turns_cerebras_off_not_on(mac, value, caplog):
+    """The cap fails closed: "off" (the README's 0), a negative number or a typo spends nothing."""
+    with caplog.at_level(logging.INFO):
+        mac(NEO_CEREBRAS_DAILY_BUDGET=value)
+    assert config.settings().cerebras_daily_budget == 0.0 and cb.conf().daily_budget == 0.0
+    assert not hooks.enabled()
+    for purpose, names in MAINS.items():
+        assert prov.brain(purpose).names == names, purpose
+    assert "NEO_CEREBRAS_DAILY_BUDGET" in caplog.text  # said why in the log
+
+
+@pytest.mark.parametrize(
+    ("value", "want"), [("", 0.50), ("  ", 0.50), ("$1.25", 1.25), (" 0.2 ", 0.2), ("0", 0.0)]
+)
+def test_only_an_empty_budget_is_the_default(mac, value, want):
+    mac(NEO_CEREBRAS_DAILY_BUDGET=value)
+    assert config.settings().cerebras_daily_budget == want
+    assert spend.budget(value, 0.5) == want  # (a host's hosted(daily_budget=...) reads it the same way)
+    assert spend.budget(None, 0.5) == 0.5
 
 
 async def test_the_session_says_the_budget_note_with_its_reply(tmp_path, fake, monkeypatch):
@@ -411,3 +538,24 @@ async def test_the_key_is_never_logged_or_said(mac, fake, caplog):
             assert all(KEY not in str(x) for _, x in e.value.failures)
     assert len(fake.bodies) == 2
     assert not [r for r in caplog.records if KEY in r.getMessage()]
+
+
+# ---- the SDK (not wired to Cerebras on this branch) ---------------------------------------------
+
+
+@pytest.mark.parametrize("field", ["brain", "fast_brain"])
+@pytest.mark.parametrize("name", [cb.TEXT_BRAIN, cb.VISION_BRAIN])
+def test_an_embedded_agent_can_t_name_a_cerebras_brain_it_has_no_key_field_for(field, name):
+    from pydantic import ValidationError
+
+    from neo2.sdk.config import AgentConfig
+
+    with pytest.raises(ValidationError, match="cerebras_api_key"):
+        AgentConfig(**{field: name})
+    assert AgentConfig(brain="groq", fast_brain="gemini").brain == "groq"  # the others as before
+
+
+def test_erasing_an_embedded_agent_removes_its_cerebras_spend_ledger():
+    from neo2.sdk import agent
+
+    assert spend.FILE in agent._OWN_FILES

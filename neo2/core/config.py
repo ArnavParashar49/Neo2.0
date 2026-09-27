@@ -92,12 +92,11 @@ class Settings(BaseSettings):
     @field_validator("cerebras_daily_budget", mode="before")
     @classmethod
     def _cerebras_budget(cls, v):
-        """"$1.25", " 0.5 " or 2 — and a typo is the default, never a reason not to start."""
-        try:
-            f = float(str(v).strip().lstrip("$"))
-        except (TypeError, ValueError):
-            return 0.50
-        return f if f == f and 0 <= f < float("inf") else 0.50
+        """"$1.25", " 0.5 " or 2. A cap it can't read ("off", -1, a typo) is 0: Cerebras off, never
+        a reason not to start (neo2.core.providers.spend.budget)."""
+        from neo2.core.providers.spend import budget
+
+        return budget(v, 0.50)
 
     # ---- reflex ----------------------------------------------------------------------
     reflex: Literal["laya", "lite", "off"] = "laya"

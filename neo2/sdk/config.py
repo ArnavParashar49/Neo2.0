@@ -87,6 +87,18 @@ class AgentConfig(BaseModel):
             raise ValueError("name must be 1 to 100 characters")
         return v
 
+    @field_validator("brain", "fast_brain")
+    @classmethod
+    def _a_brain_it_has_a_key_for(cls, v: str) -> str:
+        # Cerebras' brains take a key this config has no field for yet (NEO.app reads
+        # CEREBRAS_API_KEY; the SDK's cerebras_api_key comes with the integration): until then an
+        # agent that names one could never reach it.
+        if v in ("cerebras", "cerebras_vision") and "cerebras_api_key" not in cls.model_fields:
+            raise ValueError(
+                f"brain {v!r} needs AgentConfig.cerebras_api_key, which this version doesn't have yet"
+            )
+        return v
+
     @field_validator("tools", mode="before")
     @classmethod
     def _tools(cls, v: Any) -> Any:
