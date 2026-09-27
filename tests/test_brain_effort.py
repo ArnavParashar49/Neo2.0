@@ -361,7 +361,23 @@ def test_every_brain_that_sees_busy_stops_the_step_and_says_what_still_works(mon
         asyncio.run(prov.brain("vision").complete(_picture_step()))
     said = stop.value.spoken()
     assert b["groq"].asked == [] and "can see the screen is busy" in said and "by their names" in said
-    assert "Groq can't see pictures" in said
+    assert "Gemini Lite is overloaded" in said and "Groq can't see" not in said  # why the seeing ones failed
+    assert any(e.kind == "blind" for _, e in stop.value.failures)  # (the log still has who was left out)
+
+
+def test_a_blind_brains_refused_coordinates_make_the_next_step_a_pixel_step(monkeypatch):
+    """Every brain that sees is down from the first step: the text-only brain may take the step with
+    no picture — but once it tried coordinates and was refused, the task needs eyes: it isn't asked
+    again to repeat that (the Chess run's three blind clicks), the run stops and says why."""
+    b = _brains(monkeypatch, gemini=Brain("gemini", error=Overloaded("busy")), groq=Brain("groq", False, answer="x"))
+    chain = prov.Chain(["gemini", "groq"], sticky=False)
+    msgs = [Message.user("move e2 to e4")]
+    asyncio.run(chain.complete(msgs))
+    assert len(b["groq"].asked) == 1  # no picture yet: an AX-only step is its to take
+    msgs += _step("click", {"x": 612, "y": 540}, "Error: you can't see the screen — this model has no vision", ok=False)
+    with pytest.raises(NoEyes):
+        asyncio.run(chain.complete(msgs))
+    assert len(b["groq"].asked) == 1
 
 
 def test_a_step_with_no_picture_still_goes_to_a_text_only_brain(monkeypatch):

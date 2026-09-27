@@ -114,6 +114,11 @@ BLIND_PICTURE = (
 )
 
 
+# The words the input tools refuse a blind brain's coordinates with (neo.tools.computer.pointer.blind):
+# a request that holds that refusal is a pixel task — the chain then asks only brains that see.
+BLIND_REFUSAL = "you can't see the screen"
+
+
 class Provider(Protocol):
     name: str
     supports_vision: bool
@@ -290,7 +295,9 @@ class NoEyes(AllBrainsFailed):
         self.kind = "no_eyes"
 
     def spoken(self) -> str:
-        said = self._said()
+        # Why the brains that see couldn't answer; that the others can't see goes without saying.
+        seeing = [(n, e) for n, e in self.failures if getattr(e, "kind", "") != "blind"]
+        said = AllBrainsFailed(seeing)._said() if seeing else self._said()
         why = f" ({said})" if said else ""
         return (
             f"The model that can see the screen is busy right now{why}, so I stopped rather than act "

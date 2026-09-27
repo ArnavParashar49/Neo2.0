@@ -29,6 +29,7 @@ from neo import runtime
 from neo.config import BrainName, settings
 from neo.providers import budget
 from neo.providers.base import (
+    BLIND_REFUSAL,
     AllBrainsFailed,
     Blind,
     Level,
@@ -451,7 +452,7 @@ class Chain:
         level = self.level(messages, effort)
         failures: list[tuple[str, ProviderError]] = []
         providers = self._providers()
-        pixels = _has_picture(messages)
+        pixels = _needs_eyes(messages)
         if pixels:
             providers = self._for_pixels(providers, failures)
         for p in providers:
@@ -535,6 +536,18 @@ def _has_picture(messages: list[Message]) -> bool:
 
     start = request_start(messages) if messages else 0
     return any(m.images or any(r.images for r in m.tool_results) for m in messages[start:])
+
+
+def _needs_eyes(messages: list[Message]) -> bool:
+    """Is the request being worked on a pixel task: it carries a picture, or a brain that can't see
+    already tried to act at screen coordinates in it and was refused (BLIND_REFUSAL) — the task
+    needs a brain that sees, and another turn of a blind one would only repeat that."""
+    from neo.providers.history import request_start
+
+    if _has_picture(messages):
+        return True
+    start = request_start(messages) if messages else 0
+    return any(not r.ok and BLIND_REFUSAL in r.content for m in messages[start:] for r in m.tool_results)
 
 
 # The brains that can see, in the order a step working from a picture asks them:
