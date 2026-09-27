@@ -51,6 +51,16 @@ class Settings(BaseSettings):
         hide_input_in_errors=True,  # a bad value's error never prints it (a key, say)
     )
 
+    @classmethod
+    def settings_customise_sources(
+        cls, settings_cls, init_settings, env_settings, dotenv_settings, file_secret_settings
+    ):  # pydantic-settings calls it with these, by name
+        """With effects off (a test, a scratch script run with NEO_NO_EFFECTS=1), never the .env
+        files: ~/.neo/.env holds the user's real API keys."""
+        if effects.why_off():
+            return init_settings, env_settings, file_secret_settings
+        return init_settings, env_settings, dotenv_settings, file_secret_settings
+
     # ---- keys (no prefix — read the conventional names) -------------------------------
     # repr=False: a logged or printed Settings never shows a key.
     gemini_api_key: str = Field(default="", validation_alias="GEMINI_API_KEY", repr=False)

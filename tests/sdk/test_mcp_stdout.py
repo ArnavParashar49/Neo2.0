@@ -15,6 +15,8 @@ from pathlib import Path
 
 import pytest
 
+from neo import effects
+
 pytest.importorskip("mcp")
 
 pytestmark = pytest.mark.portable  # no macOS or extra needed: CI's sdk-core job runs it on Linux too
@@ -54,9 +56,10 @@ class Server:
         env.update(HOME=str(self.home), TMPDIR=str(self.tmp), PYTHONPATH=str(ROOT))
         self.stderr_path = tmp_path / "stderr.txt"
         self._err = open(self.stderr_path, "wb")  # noqa: SIM115 — closed in close()
-        self.proc = subprocess.Popen(
-            argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self._err, cwd=str(tmp_path), env=env
-        )
+        with effects.allow("process"):  # a Python child: refused unless meant, as here
+            self.proc = subprocess.Popen(
+                argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self._err, cwd=str(tmp_path), env=env
+            )
         self.lines: list[str] = []
         self._q: queue.Queue[str | None] = queue.Queue()
         threading.Thread(target=self._read, daemon=True).start()
@@ -191,8 +194,9 @@ def test_the_entry_point_imports_only_the_standard_library(tmp_path):
     )
     env = {k: v for k, v in os.environ.items() if not k.startswith(("NEO_", "PYTEST"))}
     env.update(HOME=str(tmp_path), PYTHONPATH=str(ROOT))
-    out = subprocess.run(
-        [sys.executable, "-c", code], capture_output=True, text=True, cwd=str(tmp_path), env=env, timeout=120
-    )
+    with effects.allow("process"):  # a Python child: refused unless meant, as here
+        out = subprocess.run(
+            [sys.executable, "-c", code], capture_output=True, text=True, cwd=str(tmp_path), env=env, timeout=120
+        )
     assert out.returncode == 0, out.stderr[-2000:]
     assert json.loads(out.stdout.strip().splitlines()[-1]) == ["neo2"]

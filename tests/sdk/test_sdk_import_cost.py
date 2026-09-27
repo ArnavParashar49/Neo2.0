@@ -12,6 +12,8 @@ from pathlib import Path
 
 import pytest
 
+from neo import effects
+
 pytestmark = pytest.mark.portable  # no macOS or extra needed: CI's sdk-core job runs it on Linux too
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -44,9 +46,10 @@ def _run(code: str, tmp_path: Path) -> dict:
         if not k.startswith(("NEO_", "GEMINI", "GROQ", "ANTHROPIC", "OPENAI", "PYTEST"))
     }
     env.update(HOME=str(home), PYTHONPATH=str(ROOT), NEO_DATA_DIR=str(tmp_path / "app_data"))
-    out = subprocess.run(
-        [sys.executable, "-c", code], capture_output=True, text=True, cwd=str(tmp_path), env=env, timeout=120
-    )
+    with effects.allow("process"):  # a Python child: refused unless meant, as here
+        out = subprocess.run(
+            [sys.executable, "-c", code], capture_output=True, text=True, cwd=str(tmp_path), env=env, timeout=120
+        )
     assert out.returncode == 0, out.stderr[-3000:]
     assert not (home / ".neo").exists() and not (tmp_path / "app_data").exists()
     return json.loads(out.stdout.strip().splitlines()[-1])

@@ -121,13 +121,19 @@ class ToolSelector:
         needs_screen: bool = False,
         playbook_tools: list[str] | None = None,
         history_tools: list[str] | None = None,
+        required: tuple[str, ...] = (),
     ) -> Selection:
+        """`required`: tools the caller knows the run needs (a game's run opens the app)."""
         if runtime.library_bound():
             shown = [t.name for t in self.reg.all() if not t.hidden]
             if len(shown) <= _MAX_TOOLS:
                 # An embedded agent's few tools, its host's among them: all of them, every time
                 # (a keyword match would hide a host tool the request didn't happen to name).
-                return Selection(shown, dict.fromkeys(shown, "all"))
+                why = dict.fromkeys(shown, "all")
+                for n in required:
+                    if n in self.reg:
+                        why.setdefault(n, "required")
+                return Selection(list(why), why)
         scores = self._scores(text)
         ranked = sorted(scores.items(), key=lambda kv: -kv[1])
         chosen: dict[str, str] = {}
@@ -136,6 +142,9 @@ class ToolSelector:
         for n in ALWAYS:
             if n in self.reg:
                 chosen[n] = "always"
+        for n in required:
+            if n in self.reg:
+                chosen.setdefault(n, "required")
         if needs_screen:
             for n in SCREEN:
                 if n in self.reg:

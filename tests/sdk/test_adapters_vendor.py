@@ -21,6 +21,7 @@ from pydantic import BaseModel
 from vendor_shapes import assert_conforms, assert_rejected
 
 import neo2
+from neo import effects
 from neo.providers.base import ImagePart
 from neo2.adapters import anthropic as neo_anthropic
 from neo2.adapters import gemini as neo_gemini
@@ -533,9 +534,10 @@ def test_the_adapters_import_no_vendor_sdk_and_no_decide(tmp_path):
         f"after_use = [m for m in {heavy!r} if m in sys.modules]\n"
         "print(json.dumps({'import': at_import, 'use': after_use, 'text': text}))\n"
     )
-    out = subprocess.run(
-        [sys.executable, "-c", code], capture_output=True, text=True, cwd=str(tmp_path), env=env, timeout=120
-    )
+    with effects.allow("process"):  # a Python child: refused unless meant, as here
+        out = subprocess.run(
+            [sys.executable, "-c", code], capture_output=True, text=True, cwd=str(tmp_path), env=env, timeout=120
+        )
     assert out.returncode == 0, out.stderr[-3000:]
     got = json.loads(out.stdout.strip().splitlines()[-1])
     assert got == {"import": [], "use": [], "text": "hi"}

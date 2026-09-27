@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from neo import runtime
+from neo import effects, runtime
 from neo.tools import MACOS_ONLY, MODULES_FOR, PRESETS, REFUSED, load, modules_for, resolve
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -42,7 +42,8 @@ def _run(code: str, tmp_path: Path, *, macos: bool = False) -> dict:
     env = {**os.environ, "HOME": str(home), "NEO_DATA_DIR": str(tmp_path / "data"), "NEO_REFLEX": "off"}
     env.pop("PYTEST_CURRENT_TEST", None)
     src = textwrap.dedent(code) if macos else _NO_MACOS + textwrap.dedent(code)
-    out = subprocess.run([sys.executable, "-c", src], cwd=ROOT, env=env, capture_output=True, text=True, timeout=120)
+    with effects.allow("process"):  # a Python child: refused unless meant, as here
+        out = subprocess.run([sys.executable, "-c", src], cwd=ROOT, env=env, capture_output=True, text=True, timeout=120)
     assert out.returncode == 0, out.stderr[-3000:]
     return json.loads(out.stdout.strip().splitlines()[-1])
 

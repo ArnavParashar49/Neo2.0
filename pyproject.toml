@@ -45,6 +45,7 @@ mac = [  # the macOS tools: see, click, type, apps, files, shell, mail, calendar
   "tld",  # a site's registrable domain (neo.decide.sites)
   "lxml",  # a site's own search form / OpenSearch description
   "python-dateutil",  # recurring events (RRULE) when a calendar is read by script
+  "pypdf",  # read_file on a PDF
 ]
 embeddings = ["sentence-transformers"]  # memory + tool-selection embeddings
 reflex = ["laya>=0.3", "torch"]  # Laya, NEO.app's local decision model

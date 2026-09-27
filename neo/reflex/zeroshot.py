@@ -34,6 +34,7 @@ import threading
 import time
 from typing import Any
 
+from neo import effects
 from neo.config import settings
 
 SUBFOLDER = "typed-decisions"
@@ -97,6 +98,7 @@ def _open(path: str) -> Any:
     """Load the checkpoint onto NEO's Laya device (the caller holds the Laya lock)."""
     import laya
 
+    effects.guard("model", "load Laya's zero-shot checkpoint into memory (1.7 GB)", via=laya.load)
     return laya.load(path, device=settings().laya_device)
 
 
@@ -201,7 +203,7 @@ def _ready(wait_s: float) -> Any:
 def _load() -> None:
     global _agent, _loading, _failed_at, _used
     agent = None
-    failed = False
+    failed = True  # until the load is through: one refused (effects off: a BaseException) failed too
     try:
         path = _find()
         if path is None:
@@ -211,18 +213,20 @@ def _load() -> None:
                 agent = _open(path)
                 # a new model's first pass is slow (Metal kernels): take it now, not in a question
                 agent.system_one({"text": "warm up"}, _WARM)
+        failed = False
     except Exception as e:  # noqa: BLE001 - no torch, no model, out of memory: the prior decides
         print(f"[decide] zero-shot Laya unavailable ({str(e)[:80]})")
-        agent, failed = None, True
-    with _mu:
-        done, _loading = _loading, None
-        if failed:
-            _failed_at = time.monotonic()
-        elif agent is not None:
-            _agent, _used = agent, time.monotonic()
-            _schedule(IDLE_S)
-    if done is not None:
-        done.set()
+        agent = None
+    finally:
+        with _mu:
+            done, _loading = _loading, None
+            if failed:
+                _failed_at = time.monotonic()
+            elif agent is not None:
+                _agent, _used = agent, time.monotonic()
+                _schedule(IDLE_S)
+        if done is not None:
+            done.set()
 
 
 def _schedule(delay: float) -> None:

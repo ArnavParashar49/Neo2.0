@@ -3,8 +3,10 @@ refuses every one in NEO's own test runs: a test fakes the step it needs instead
 
 import os
 
-os.environ.setdefault("NEO_REFLEX", "off")  # never load Laya (1.7 GB) inside the test suite
-os.environ.setdefault("NEO_VOICE", "off")
+# Never Laya (1.7 GB) or the on-device voice inside the suite, whatever the environment says: a test
+# that wants one sets it for itself (monkeypatch.setenv) and fakes the load.
+os.environ["NEO_REFLEX"] = "off"
+os.environ["NEO_VOICE"] = "off"
 
 from pathlib import Path
 

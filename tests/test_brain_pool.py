@@ -10,8 +10,8 @@ from pathlib import Path
 import pytest
 from neo_lib import make_runtime
 
+from neo import effects, runtime
 from neo import providers as prov
-from neo import runtime
 from neo.providers.base import ProviderError, RateLimited, Turn
 
 
@@ -283,7 +283,8 @@ def test_a_hosts_provider_built_before_any_agent_reads_no_settings(tmp_path):
         """
     )
     root = Path(__file__).resolve().parents[1]
-    out = subprocess.run([sys.executable, "-c", code], cwd=root, env=env, capture_output=True, text=True, timeout=120)
+    with effects.allow("process"):  # a Python child: refused unless meant, as here
+        out = subprocess.run([sys.executable, "-c", code], cwd=root, env=env, capture_output=True, text=True, timeout=120)
     assert out.returncode == 0, out.stderr[-2000:]
     assert json.loads(out.stdout.strip().splitlines()[-1]) == [True, True, True, True, False]
     assert not (home / ".neo").exists()

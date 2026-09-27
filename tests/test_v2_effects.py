@@ -14,16 +14,22 @@ test_a_tests_own_fake_of_the_primitive_is_let_through.
 from __future__ import annotations
 
 import asyncio
+import functools
+import json
 import os
+import shutil
+import signal
 import socket
 import subprocess
 import sys
 import threading
 import time
+import weakref
 import webbrowser
 from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 import pytest
 
@@ -114,6 +120,27 @@ class Sentinels:
         self.mp.setattr(effects, "_outside", lambda sock, address: isinstance(address, tuple))
         self._after.append(lambda: time.sleep(0.1))  # a connection on its way lands first
 
+    def search(self) -> None:
+        """Every web search's HTTP client: primp, written in Rust (no Python socket under it, so the
+        audit hook never sees its connections)."""
+        import primp
+
+        hit = self.fn("primp.Client.request")
+
+        class Client:  # as ddgs makes and uses one
+            def __init__(self, *a, **k):
+                pass
+
+            def headers_update(self, headers):
+                pass
+
+            def request(self, *a, **k):
+                hit()
+
+            get = post = request
+
+        self.mp.setattr(primp, "Client", Client)
+
     def _accept(self, srv: socket.socket) -> None:
         while not self._stop.is_set():
             try:
@@ -141,7 +168,6 @@ class Sentinels:
 
 @pytest.fixture
 def s(monkeypatch, tmp_path):
-    monkeypatch.setattr(effects, "_allowed", set())  # NEO_TEST_RENDER=1 lets the browser through: not here
     sentinels = Sentinels(monkeypatch, tmp_path)
     yield sentinels
     sentinels.close()
@@ -149,10 +175,14 @@ def s(monkeypatch, tmp_path):
 
 @pytest.fixture
 def neo_app(monkeypatch):
-    """NEO.app's process: not under pytest, NEO_NO_EFFECTS unset."""
-    monkeypatch.setattr(effects, "_under_pytest", lambda: False)
+    """NEO.app's mode (NEO_NO_EFFECTS unset, effects on as if not under pytest) for this test's own
+    thread and what it starts from there (its asyncio tasks, asyncio.to_thread). Every other thread
+    (one an earlier test left running) keeps effects off."""
     monkeypatch.delenv("NEO_NO_EFFECTS", raising=False)
+    token = effects._as_app.set(True)
     assert effects.on()
+    yield
+    effects._as_app.reset(token)
 
 
 def _refusal(e: BaseException | None, depth: int = 0) -> effects.EffectRefused | None:
@@ -173,8 +203,9 @@ CASES: dict[str, tuple[str, Callable[[Sentinels], Callable[[], object]], bool]] 
 
 
 def case(kind: str, *, app: bool = True):
-    """A choke point refused as ``kind``. ``app``: also run in NEO.app's mode (a model provider's
-    client retries a dropped connection for seconds there, so those only run with effects off)."""
+    """A choke point refused as ``kind``. ``app``: also run in NEO.app's mode (not for a model
+    provider's client, which retries a dropped connection for seconds there, nor for a path that
+    reaches its primitive from a thread of its own, where NEO.app's mode doesn't reach)."""
 
     def register(arrange):
         CASES[arrange.__name__] = (kind, arrange, app)
@@ -398,6 +429,105 @@ def a_download(s):
 
     s.network()
     return lambda: urllib.request.urlopen(s.url4, timeout=5)
+
+
+# the network under every web search: ddgs's HTTP client, primp, has no Python socket. ddgs asks its
+# engines from its own worker threads, where NEO.app's mode (a test's own thread) doesn't reach:
+# test_neo_app_searches_the_web drives the same door in that mode.
+
+
+@case("network", app=False)
+def a_web_search(s):
+    from neo.tools import web
+
+    s.search()
+    return lambda: web._one("despacito", 3, "duckduckgo")
+
+
+@case("network", app=False)
+def a_news_search(s):
+    from neo.tools import web
+
+    s.search()
+    return lambda: web._news("despacito", 3)
+
+
+@case("network", app=False)
+def a_video_search(s):
+    from neo.decide import media
+
+    s.search()
+    return lambda: media._video_search("despacito", 3)
+
+
+@case("network", app=False)
+def a_text_search(s):
+    from neo.decide import media
+
+    s.search()
+    return lambda: media._text_search("despacito", 3)
+
+
+@case("network", app=False)
+def a_site_search(s):
+    from neo.decide import sites
+
+    s.search()
+    return lambda: sites._search("youtube", "us-en")
+
+
+# models: gigabytes read into memory, guard() before each load
+
+
+def _fake_laya(s):
+    s.mp.setitem(sys.modules, "laya", SimpleNamespace(load=s.fn("laya.load", poses_as="laya")))
+
+
+@case("model")
+def load_laya_for_a_question(s):
+    from neo.reflex import zeroshot
+
+    _fake_laya(s)
+    return lambda: zeroshot._open("/nowhere/typed-decisions")
+
+
+@case("model")
+def load_laya_for_the_reflex(s):
+    from neo import models
+    from neo.reflex import features
+
+    _fake_laya(s)
+    s.mp.setattr(models, "laya_dir", lambda encoder="english": "/nowhere/laya")  # never the real cache
+    return lambda: features.load_encoder("english", "cpu")
+
+
+@case("model")
+def load_the_on_device_voice(s):
+    from neo import models
+    from neo.voice import local
+
+    s.mp.setitem(sys.modules, "mlx_audio.stt.utils", SimpleNamespace(load=s.fn("stt_load", poses_as="mlx_audio")))
+    s.mp.setitem(
+        sys.modules, "mlx_audio.tts.utils", SimpleNamespace(load_model=s.fn("tts_load", poses_as="mlx_audio"))
+    )
+    s.mp.setattr(models, "local_path", lambda repo: repo)  # never the real cache
+    s.mp.setattr(local, "WakeSpotter", lambda rate: None)  # the wake word's own small model: not this case
+
+    async def heard(text):
+        pass
+
+    return local.LocalVoice(heard)._load_models
+
+
+@case("model")
+def load_the_memory_embedder(s):
+    from neo.memory import embed
+
+    model = s.cls("SentenceTransformer", poses_as="sentence_transformers")
+    s.mp.setitem(sys.modules, "sentence_transformers", SimpleNamespace(SentenceTransformer=model))
+    s.mp.setattr(embed, "_model", None)
+    s.mp.setattr(embed, "_failed", False)
+    return embed._get
 
 
 # macOS calls with no program or socket under them: guard() before each
@@ -638,6 +768,162 @@ def test_the_suite_runs_with_effects_off():
     assert effects._hooked  # installed when neo was first imported
 
 
+def test_the_suite_widens_nothing():
+    """Nothing is allowed outside a test's own opt-in, and neither Laya nor the voice is on, whatever
+    the environment says (test_the_environment_cannot_widen_the_suite runs this with it saying so)."""
+    from neo import config
+
+    assert not effects._allowed
+    assert (os.environ["NEO_REFLEX"], os.environ["NEO_VOICE"]) == ("off", "off")
+    assert (config.settings().reflex, config.settings().voice) == ("off", "off")
+
+
+def test_the_environment_cannot_widen_the_suite():
+    """NEO_TEST_RENDER=1 left exported in a shell once let every test reach the network and start
+    Chromium; NEO_REFLEX=laya would load the 1.7 GB model into any test that asked the reflex."""
+    root = Path(effects.__file__).resolve().parent.parent
+    env = {**os.environ, "NEO_TEST_RENDER": "1", "NEO_REFLEX": "laya", "NEO_VOICE": "local"}
+    here = "tests/test_v2_effects.py::test_the_suite_widens_nothing"
+    run = [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", here]
+    done = subprocess.run(run, cwd=root, env=env, capture_output=True, text=True, timeout=120)
+    assert done.returncode == 0, done.stdout[-2000:] + done.stderr[-2000:]
+
+
+def test_neo_apps_mode_is_this_tests_own_thread_only(neo_app, tmp_path):
+    """Any other thread (one an earlier test left running) keeps effects off; what this test hands
+    a worker itself (asyncio.to_thread) runs as NEO.app."""
+    marker, out = tmp_path / "ran", {}
+
+    def elsewhere():
+        try:
+            effects.guard("input", "post a keyboard event")
+            out["guard"] = "passed"
+        except effects.EffectRefused:
+            out["guard"] = "refused"
+        try:
+            os.system(f"touch '{marker}'")
+        except effects.EffectRefused:
+            out["os.system"] = "refused"
+
+    t = threading.Thread(target=elsewhere, daemon=True)
+    t.start()
+    t.join(10)
+    assert out == {"guard": "refused", "os.system": "refused"} and not marker.exists()
+    effects.guard("input", "post a keyboard event")  # this thread: NEO.app
+    assert asyncio.run(asyncio.to_thread(effects.on))
+
+
+def test_neo_app_searches_the_web(s, neo_app):
+    """The door every web search goes through (ddgs's HTTP client) opens in NEO.app: the Rust
+    client under it is reached."""
+    from ddgs.http_client import HttpClient
+
+    s.search()
+    with pytest.raises(Reached):
+        HttpClient().request("GET", "https://duckduckgo.com/")
+    assert s.reached() == ["primp.Client.request"]
+
+
+def test_allow_lasts_only_its_block():
+    with effects.allow("input"):
+        effects.guard("input", "post a keyboard event")
+        with effects.allow("audio"):
+            effects.guard("audio", "play a sound")
+        with pytest.raises(effects.EffectRefused):
+            effects.guard("audio", "play a sound")
+    with pytest.raises(effects.EffectRefused):
+        effects.guard("input", "post a keyboard event")
+    assert not effects._allowed
+
+
+# ---- signals and C functions that start programs ----------------------------------------------------
+
+
+def test_a_signal_only_reaches_this_processs_own_children():
+    """Called as the hook is (nothing is sent): the shell that started the suite, its process group
+    and every process at once are refused; a probe (signal 0) and this process itself are not."""
+    for event, args in (
+        ("os.kill", (os.getppid(), signal.SIGTERM)),
+        ("os.kill", (-1, signal.SIGKILL)),
+        ("os.kill", (0, signal.SIGTERM)),
+        ("os.killpg", (os.getpgid(0), signal.SIGTERM)),
+        ("os.kill", (1, signal.SIGTERM)),  # launchd, whose own parent is 0
+    ):
+        with pytest.raises(effects.EffectRefused, match="signal"):
+            effects._audit(event, args)
+    effects._audit("os.kill", (os.getppid(), 0))
+    effects._audit("os.kill", (os.getpid(), signal.SIGINT))
+
+
+def test_a_child_this_process_started_can_be_stopped():
+    with effects.allow("process"):
+        child = subprocess.Popen(["/bin/sleep", "30"])
+        done = subprocess.Popen(["/usr/bin/true"])
+    try:
+        child.terminate()  # Popen's own os.kill
+        assert child.wait(10) == -signal.SIGTERM
+        time.sleep(0.3)  # `true` has exited and waits to be reaped: a signal to it reaches nothing
+        effects._audit("os.kill", (done.pid, signal.SIGTERM))
+        done.wait(10)
+        effects._audit("os.kill", (done.pid, signal.SIGTERM))  # reaped: no such process any more
+    finally:
+        for p in (child, done):
+            if p.poll() is None:
+                p.kill()
+                p.wait(10)
+
+
+def test_a_c_function_that_starts_programs_is_refused_through_ctypes():
+    import ctypes
+
+    libc = ctypes.CDLL(None)
+    for name in ("system", "posix_spawn", "execv", "fork", "kill"):
+        with pytest.raises(effects.EffectRefused, match=name):
+            getattr(libc, name)  # looked up only: never called
+    assert libc.getpid() == os.getpid()
+
+
+def test_a_spawn_with_no_audit_event_is_checked_too(tmp_path):
+    """multiprocessing starts its children through _posixsubprocess.fork_exec, which raises no audit
+    event of its own."""
+    import multiprocessing.util
+
+    marker = tmp_path / "ran"
+    with pytest.raises(effects.EffectRefused, match="touch"):
+        multiprocessing.util.spawnv_passfds(b"/usr/bin/touch", [b"touch", os.fsencode(marker)], ())
+    assert not marker.exists()
+
+
+# ---- a test's fake of a real API, and a spy around the real one ------------------------------------
+
+
+def _spies(real):
+    return {
+        "a closure": lambda tap, ev: real(tap, ev),
+        "functools.wraps": functools.wraps(real)(lambda tap, ev: real(tap, ev)),
+        "a partial": functools.partial(real),
+        "a mock": mock.Mock(wraps=real),
+        "a helper": lambda tap, ev: _call(real, tap, ev),
+    }
+
+
+def _call(fn, *args):
+    return fn(*args)
+
+
+@pytest.mark.parametrize("shape", ["a closure", "functools.wraps", "a partial", "a mock", "a helper"])
+def test_a_spy_that_calls_the_real_api_is_no_fake(shape, s):
+    import Quartz
+
+    from neo.tools.computer import input as inp
+
+    real = s.fn("CGEventPost", poses_as="objc")  # stands for PyObjC's own CGEventPost
+    s.mp.setattr(Quartz, "CGEventPost", _spies(real)[shape])
+    with pytest.raises(effects.EffectRefused):
+        inp.click(5, 5)
+    assert s.reached() == []
+
+
 @pytest.mark.skipif(sys.platform != "darwin", reason="macOS")
 def test_a_clean_process_is_neo_app_and_the_switch_turns_it_off(tmp_path):
     """Detected for real, not patched: a process that isn't pytest and doesn't set NEO_NO_EFFECTS
@@ -657,9 +943,10 @@ def test_a_clean_process_is_neo_app_and_the_switch_turns_it_off(tmp_path):
         "        print('refused')\n"
     )
     run = [sys.executable, "-c", code, str(root), str(marker)]
-    app = subprocess.run(run, env=env, capture_output=True, text=True, timeout=60)
+    with effects.allow("process"):  # a Python child: refused unless meant, as here
+        app = subprocess.run(run, env=env, capture_output=True, text=True, timeout=60)
+        off = subprocess.run(run, env={**env, "NEO_NO_EFFECTS": "1"}, capture_output=True, text=True, timeout=60)
     assert app.stdout.split("\n")[0] == "'' False", app.stderr
-    off = subprocess.run(run, env={**env, "NEO_NO_EFFECTS": "1"}, capture_output=True, text=True, timeout=60)
     assert off.stdout.split("\n")[:2] == ["'NEO_NO_EFFECTS=1' True", "refused"], off.stderr
     assert not marker.exists()
 
@@ -736,28 +1023,48 @@ def test_allow_lets_one_kind_through(monkeypatch):
         effects.guard("audio", "play a sound")
 
 
-def test_allow_lasts_only_its_block():
-    with effects.allow("input"):
-        effects.guard("input", "post a keyboard event")
-        with effects.allow("audio"):
-            effects.guard("audio", "play a sound")
-        with pytest.raises(effects.EffectRefused):
-            effects.guard("audio", "play a sound")
-    with pytest.raises(effects.EffectRefused):
-        effects.guard("input", "post a keyboard event")
-    assert not effects._allowed
+_OSA_RUNS_AS_IT_COMPILES = (
+    'property p : (do shell script "touch ran")',  # a property's first value
+    "script S\nproperty p : 1\nend script",  # a script object's properties
+    'use framework "Foundation"',  # loads a framework's code
+    'use script "Helpers"',
+    'tell application "Finder" to activate',  # loads its dictionary: may launch it
+    'using terms from app id "com.apple.mail"\nend using terms from',
+    'tell «class capp» "Finder" to activate',
+)
 
 
 @pytest.mark.parametrize(
     "argv, refused",
     [
         (["lsappinfo", "front"], False),
+        (["lsappinfo", "info", "-only", "pid", "-app", "com.apple.Safari"], False),
+        (["lsappinfo", "list"], False),
+        (["lsappinfo", "visibleProcessList"], False),
+        (["lsappinfo", "launch", "execpath=/System/Applications/Calculator.app/Contents/MacOS/Calculator"], True),
+        (["lsappinfo", "kill", "-force", "0x0-0x1"], True),
+        (["lsappinfo", "setfront", "0x0-0x1"], True),
+        (["lsappinfo", "setinfo", "0x0-0x1", "LSUIElement=1"], True),
+        (["lsappinfo"], True),
         (["/usr/bin/mdfind", "kMDItemContentType == 'com.apple.application-bundle'"], False),
+        (["ioreg", "-r", "-d", "1", "-c", "IOAccelerator"], False),
         (["defaults", "read", "-g", "AppleInterfaceStyle"], False),
-        (["osacompile", "-o", "s.scpt", "-e", "return 1"], False),
-        ([sys.executable, "-m", "pytest"], False),
-        (["git", "status"], False),
-        (["uv", "pip", "list"], False),
+        (["defaults", "write", "com.apple.dock", "autohide", "-bool", "true"], True),
+        (["sysctl", "-n", "hw.memsize"], False),
+        (["sysctl", "-w", "kern.maxfiles=1"], True),
+        (["sysctl", "kern.maxfiles=1"], True),
+        (["sysctl", "-f", "settings.conf"], True),
+        (["osacompile", "-o", "s.scpt", "-e", "on run argv\nreturn item 1 of argv\nend run"], False),
+        (["osacompile", "-o", "s.scpt", "-e", "tell application id (item 1 of argv) to return name"], False),
+        *[(["osacompile", "-o", "s.scpt", "-e", script], True) for script in _OSA_RUNS_AS_IT_COMPILES],
+        (["osacompile", "-l", "JavaScript", "-o", "s.scpt", "-e", "1"], True),
+        (["osacompile", "-o", "s.scpt"], True),  # the script on stdin: unseen
+        ([sys.executable, "-m", "pytest"], False),  # a child test run: under this switch itself
+        ([sys.executable, "-c", "import os; os.system('open -a Safari')"], True),  # no switch of its own
+        (["python3", "-m", "webbrowser", "https://example.com"], True),
+        (["git", "status"], True),  # `-c alias.x=!cmd` runs anything, `web--browse` opens a browser
+        (["git", "-c", "alias.x=!touch ran", "x"], True),
+        (["uv", "run", "--", "touch", "ran"], True),
         (["open", "-a", "Safari"], True),
         (["/usr/bin/osascript", "-e", 'tell application "Finder" to activate'], True),
         (["shortcuts", "run", "Morning"], True),
@@ -766,7 +1073,6 @@ def test_allow_lasts_only_its_block():
         (["screencapture", "-x", "shot.png"], True),
         (["pmset", "displaysleepnow"], True),
         (["killall", "Dock"], True),
-        (["defaults", "write", "com.apple.dock", "autohide", "-bool", "true"], True),
         (["/bin/sh", "-c", "ls"], True),
     ],
 )
@@ -774,30 +1080,186 @@ def test_which_programs_still_run(argv, refused):
     assert (effects._program(argv[0], argv) is not None) is refused
 
 
+@pytest.mark.parametrize("script", ["on run argv\nreturn item 1 of argv\nend run", *_OSA_RUNS_AS_IT_COMPILES])
+def test_osacompile_reads_the_script_file_it_is_given(script, tmp_path):
+    src = tmp_path / "s.applescript"
+    src.write_text(script)
+    runs = script != "on run argv\nreturn item 1 of argv\nend run"
+    assert (effects._program("osacompile", ["osacompile", "-o", str(tmp_path / "s.scpt"), str(src)]) is not None) is runs
+    assert effects._program("osacompile", ["osacompile", str(tmp_path / "missing.applescript")]) is not None
+
+
+@pytest.mark.skipif(shutil.which("osacompile") is None, reason="macOS")
+def test_osacompile_never_runs_a_script_as_it_compiles(tmp_path):
+    marker = tmp_path / "ran"
+    script = f"property p : (do shell script \"touch '{marker}'\")"
+    with pytest.raises(effects.EffectRefused, match="osacompile"):
+        subprocess.run(["osacompile", "-o", str(tmp_path / "s.scpt"), "-e", script], capture_output=True, timeout=30)
+    assert not marker.exists()
+
+
 @pytest.mark.parametrize(
     "family, address, outside",
     [
-        (socket.AF_INET, ("127.0.0.1", 80), False),
-        (socket.AF_INET, ("localhost", 80), False),
-        (socket.AF_INET, ("0.0.0.0", 80), False),
-        (socket.AF_INET6, ("::1", 80, 0, 0), False),
-        (socket.AF_INET6, ("::ffff:127.0.0.1", 80, 0, 0), False),
-        (socket.AF_UNIX, "/tmp/neo.sock", False),
         (socket.AF_INET, ("142.250.74.10", 443), True),
         (socket.AF_INET, ("192.168.1.20", 8080), True),
         (socket.AF_INET, ("generativelanguage.googleapis.com", 443), True),
         (socket.AF_INET6, ("2001:db8::1", 443, 0, 0), True),
+        # loopback, where nothing of this process listens: NEO.app's local model server (8080) and ws
+        # port (8765), a local proxy app, AirPlay (5000, 7000)...
+        (socket.AF_INET, ("127.0.0.1", 8080), True),
+        (socket.AF_INET, ("localhost", 8765), True),
+        (socket.AF_INET, ("0.0.0.0", 7000), True),
+        (socket.AF_INET6, ("::1", 5000, 0, 0), True),
+        (socket.AF_INET6, ("::ffff:127.0.0.1", 8080, 0, 0), True),
+        (socket.AF_UNIX, "/tmp/neo.sock", False),
     ],
 )
 def test_where_a_connection_goes(family, address, outside):
     assert effects._outside(SimpleNamespace(family=family), address) is outside
 
 
+def test_loopback_reaches_only_this_processs_own_listeners():
+    v4, v6 = SimpleNamespace(family=socket.AF_INET), SimpleNamespace(family=socket.AF_INET6)
+    mine = socket.create_server(("127.0.0.1", 0))
+    port = mine.getsockname()[1]
+    try:
+        for sock, host in ((v4, "127.0.0.1"), (v4, "localhost"), (v6, "::1"), (v6, "::ffff:127.0.0.1")):
+            assert not effects._outside(sock, (host, port)), host
+        assert effects._outside(v4, ("142.250.74.10", port))
+    finally:
+        mine.close()
+    assert effects._outside(v4, ("127.0.0.1", port))  # closed: whatever listens there now isn't this process
+
+
 def test_a_refused_connection_says_where():
     v6 = SimpleNamespace(family=socket.AF_INET6)
     with pytest.raises(effects.EffectRefused, match=r"connect to \[2001:db8::1\]:443"):
         effects._audit("socket.connect", (v6, ("2001:db8::1", 443, 0, 0)))
-    effects._audit("socket.connect", (v6, ("::1", 443, 0, 0)))  # loopback: fine
+    with pytest.raises(effects.EffectRefused, match=r"connect to 127\.0\.0\.1:8080 .*not this process"):
+        effects._audit("socket.connect", (SimpleNamespace(family=socket.AF_INET), ("127.0.0.1", 8080)))
+    mine = socket.create_server(("::1", 0), family=socket.AF_INET6)
+    try:
+        effects._audit("socket.connect", (v6, ("::1", mine.getsockname()[1], 0, 0)))  # this process's own
+    finally:
+        mine.close()
+
+
+class Elsewhere:
+    """A server on this Mac's loopback that this process didn't start (NEO.app's local model server, a
+    local proxy app): it runs here, forgotten as this process's own. It answers any request as an
+    OpenAI-compatible model server would, and records each one."""
+
+    def __init__(self, monkeypatch) -> None:
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        self.seen: list[str] = []
+        seen = self.seen
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_POST(self):
+                seen.append(self.requestline)
+                self.rfile.read(int(self.headers.get("content-length", 0)))
+                body = json.dumps(
+                    {
+                        "id": "c", "object": "chat.completion", "created": 0, "model": "m",
+                        "choices": [{"index": 0, "finish_reason": "stop",
+                                     "message": {"role": "assistant", "content": "A REAL LOCAL MODEL"}}],
+                    }
+                ).encode()
+                self.send_response(200)
+                self.send_header("content-type", "application/json")
+                self.send_header("content-length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            do_GET = do_CONNECT = do_POST
+
+        self.srv = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.port = self.srv.server_address[1]
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+        monkeypatch.setattr(effects, "_listening", weakref.WeakSet(), raising=False)  # as if elsewhere
+
+    def close(self) -> None:
+        self.srv.shutdown()
+        self.srv.server_close()
+
+
+@pytest.fixture
+def elsewhere(monkeypatch):
+    server = Elsewhere(monkeypatch)
+    yield server
+    server.close()
+
+
+def test_the_offline_brain_is_refused_on_loopback(elsewhere, monkeypatch):
+    """No keys in the suite: the brain chain ends at the local model server NEO.app runs on
+    127.0.0.1:8080 - a real model."""
+    from neo import providers
+    from neo.providers import openai_compat
+    from neo.providers.base import Message
+
+    monkeypatch.setattr(openai_compat, "local", functools.partial(openai_compat.local, port=elsewhere.port))
+    monkeypatch.setattr(providers, "_cache", {})
+    monkeypatch.setattr(providers, "_demoted", {})
+    with pytest.raises(BaseException) as got:
+        asyncio.run(asyncio.wait_for(providers.brain("agent").complete([Message("user", "hi")]), 30))
+    assert _refusal(got.value) is not None, repr(got.value)
+    assert elsewhere.seen == []
+
+
+def test_no_proxy_carries_a_client_past_the_checks(elsewhere, monkeypatch):
+    """A proxy app (Clash, Surge, Proxyman, a corporate agent) listens on loopback and names itself
+    in the environment or macOS's settings: every HTTP client would reach the internet through it."""
+    import urllib.request
+
+    import httpx
+
+    assert os.environ.get("NO_PROXY") == "*"
+    assert not [k for k in os.environ if k.lower().endswith("_proxy") and k.lower() != "no_proxy"]
+    assert {k: v for k, v in urllib.request.getproxies().items() if k != "no"} == {}
+    assert httpx._utils.get_environment_proxies() == {}
+
+    monkeypatch.setenv("HTTPS_PROXY", f"http://127.0.0.1:{elsewhere.port}")  # set after neo was imported
+    monkeypatch.delenv("NO_PROXY", raising=False)
+    monkeypatch.delenv("no_proxy", raising=False)
+
+    async def get():
+        async with httpx.AsyncClient(timeout=5) as c:
+            return await c.get("https://generativelanguage.googleapis.com/v1beta/models")
+
+    with pytest.raises(BaseException) as got:
+        asyncio.run(get())
+    assert _refusal(got.value) is not None, repr(got.value)
+    assert elsewhere.seen == []
+
+
+# ---- the user's keys ------------------------------------------------------------------------------------
+
+
+def test_the_users_env_files_are_never_read_with_effects_off(monkeypatch, tmp_path):
+    """~/.neo/.env holds the user's real API keys: a scratch script (NEO_NO_EFFECTS=1) must not
+    pick them up, as the suite never does."""
+    from neo import config
+
+    env = tmp_path / ".env"
+    env.write_text("GEMINI_API_KEY=key-from-the-users-env-file\n")
+    monkeypatch.setitem(config.Settings.model_config, "env_file", (env,))  # the release setting's shape
+    monkeypatch.setattr(config, "_settings", None)
+    assert config.Settings().gemini_api_key == ""
+    assert config.settings().gemini_api_key == ""
+
+
+def test_neo_app_reads_its_env_file(monkeypatch, tmp_path, neo_app):
+    from neo import config
+
+    env = tmp_path / ".env"
+    env.write_text("GEMINI_API_KEY=key-from-the-users-env-file\n")
+    monkeypatch.setitem(config.Settings.model_config, "env_file", (env,))
+    assert config.Settings().gemini_api_key == "key-from-the-users-env-file"
 
 
 # ---- the incident -----------------------------------------------------------------------------------
@@ -828,6 +1290,7 @@ def test_play_through_the_session_with_its_fast_paths_acts_on_nothing(s, monkeyp
     monkeypatch.setattr(events, "_bus", events.EventBus())
     s.spawn(probes=True)
     s.network()
+    s.search()  # the web searches on the way (site resolution, the video search): Rust, no Python socket
     s.put(playwright.async_api, "async_playwright")
     s.skylight()
     for mod, name in (

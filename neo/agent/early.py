@@ -125,7 +125,9 @@ class EarlyActor:
             pending = text[start:]
             ran: list[Ran] = []
             if final:
-                steps = fastpath.plan(pending, first_index=len(self.executed))
+                # The rest of the utterance, read as part of the whole ("open chess and play as
+                # white": with chess opened early, "play as white" is still no song).
+                steps = fastpath.plan(pending, first_index=len(self.executed), whole=text)
                 if not steps:
                     return []
                 for tool, args in steps:

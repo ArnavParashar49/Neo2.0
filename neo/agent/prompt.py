@@ -47,6 +47,14 @@ _HOW_TO_WORK: tuple[tuple[str, frozenset[str] | None], ...] = (
         frozenset({"screenshot", "click"}),
     ),
     (
+        "- \"Play <game>\" (\"play chess as white\", \"a game of chess against you\") when that game is an app on\n"
+        "  this Mac means play it in that app, never music or a video: open it or bring it to the front,\n"
+        "  start a new game set up as asked (the side the user plays, the level, the opponent) from its own\n"
+        "  New Game menu item or dialog, then play on the board. If they want you to move, make your moves\n"
+        "  by clicking the board and tell them when it's their turn.\n",
+        frozenset({"open_app", "click"}),
+    ),
+    (
         "- If a tool fails, adapt — try another approach. Never repeat an identical failing call, and\n"
         "  never try the same failing approach more than twice: switch approach or tell the user what's\n"
         "  in the way.\n",

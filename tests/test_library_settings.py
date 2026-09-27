@@ -16,7 +16,7 @@ import pytest
 from neo_lib import make_runtime
 from pydantic import ValidationError
 
-from neo import runtime
+from neo import effects, runtime
 from neo.config import DECIDE_DEFAULTS, LibrarySettings, Settings
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -31,8 +31,9 @@ def test_the_environment_and_env_files_never_reach_an_embedded_agent(tmp_path):
     home = tmp_path / "home"
     (home / ".neo").mkdir(parents=True)
     (home / ".neo" / ".env").write_text("GEMINI_API_KEY=from-dotenv\nNEO_CONFIRM_DESTRUCTIVE=false\nNEO_BRAIN=claude\n")
+    # NEO.app's own process: effects on (off, its Settings would read no .env file at all)
     env = {
-        **os.environ,
+        **{k: v for k, v in os.environ.items() if k not in ("NEO_NO_EFFECTS", "PYTEST_CURRENT_TEST")},
         "HOME": str(home),
         "NEO_DATA_DIR": str(tmp_path / "app_data"),
         "GEMINI_API_KEY": "from-env",
@@ -54,18 +55,26 @@ def test_the_environment_and_env_files_never_reach_an_embedded_agent(tmp_path):
         }}))
         """
     )
-    out = subprocess.run([sys.executable, "-c", code], cwd=ROOT, env=env, capture_output=True, text=True, timeout=60)
+    with effects.allow("process"):  # a Python child: refused unless meant, as here
+        out = subprocess.run([sys.executable, "-c", code], cwd=ROOT, env=env, capture_output=True, text=True, timeout=60)
     assert out.returncode == 0, out.stderr
     got = json.loads(out.stdout.strip().splitlines()[-1])
     assert got["app"] == ["from-env", False, "claude", "on"]  # NEO.app reads them, as always
     assert got["lib"] == ["", "", True, "gemini", "legacy", False]
 
 
-def test_env_files_even_when_passed_are_ignored(tmp_path):
+def test_env_files_even_when_passed_are_ignored(tmp_path, monkeypatch):
     f = tmp_path / "x.env"
     f.write_text("GEMINI_API_KEY=from-file\nNEO_CONFIRM_DESTRUCTIVE=false\n")
-    assert Settings(_env_file=f).gemini_api_key == "from-file"
-    lib = LibrarySettings(data_dir=tmp_path / "a", _env_file=f)
+    assert Settings(_env_file=f).gemini_api_key == ""  # effects off (the suite): no .env file, ever
+    # NEO.app's mode (effects on, this thread only): NEO.app reads it, an embedded agent still doesn't
+    monkeypatch.delenv("NEO_NO_EFFECTS", raising=False)
+    token = effects._as_app.set(True)
+    try:
+        assert effects.on() and Settings(_env_file=f).gemini_api_key == "from-file"
+        lib = LibrarySettings(data_dir=tmp_path / "a", _env_file=f)
+    finally:
+        effects._as_app.reset(token)
     assert lib.gemini_api_key == "" and lib.confirm_destructive
 
 

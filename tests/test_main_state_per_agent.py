@@ -328,9 +328,10 @@ def _child(code: str, tmp_path: Path, *, pythonpath: Path, cwd: Path, **env: str
     home.mkdir(exist_ok=True)
     base = {k: v for k, v in os.environ.items() if k not in ("PYTEST_CURRENT_TEST", "NEO_NO_EFFECTS", "NEO_DATA_DIR")}
     base.update(HOME=str(home), PYTHONDONTWRITEBYTECODE="1", PYTHONPATH=str(pythonpath), **env)
-    out = subprocess.run(
-        [sys.executable, "-c", code, str(tmp_path / "agent")], cwd=cwd, env=base, capture_output=True, text=True, timeout=120
-    )
+    with effects.allow("process"):  # a Python child: refused unless meant, as here
+        out = subprocess.run(
+            [sys.executable, "-c", code, str(tmp_path / "agent")], cwd=cwd, env=base, capture_output=True, text=True, timeout=120
+        )
     assert out.returncode == 0, out.stderr[-3000:]
     assert not (home / ".neo").exists()
     return json.loads(out.stdout.strip().splitlines()[-1])
