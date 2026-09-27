@@ -246,6 +246,16 @@ class Mac:
         time.sleep(0.2)
         return front_app()[1] == pid
 
+    def buttons_down(self) -> bool:
+        """Is any mouse button down right now — the user's, or one NEO pressed (Quartz's combined
+        state of this login session)?"""
+        _no_effects_here()
+        import Quartz as Q
+
+        state = Q.kCGEventSourceStateCombinedSessionState
+        buttons = (Q.kCGMouseButtonLeft, Q.kCGMouseButtonRight, Q.kCGMouseButtonCenter)
+        return any(bool(Q.CGEventSourceButtonState(state, b)) for b in buttons)
+
     def post(self, ev: Any) -> None:
         """Post an event without the watcher (only to let go of what NEO itself pressed)."""
         _no_effects_here()

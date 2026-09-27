@@ -130,6 +130,7 @@ class Desk:
         self.on_post = None  # scenario hook: (desk, event) after each posted event
         self.activations: list[int] = []
         self.commands: list[str] = []
+        self.held: set[str] = set()  # mouse buttons down, whoever pressed them (Quartz's combined state)
         self._last_state = None
         self.cover = opts.get("cover")  # (name, pid, rect): a window on top of the test window
 
@@ -205,6 +206,10 @@ class Desk:
         for tap in list(self.taps):
             tap.see(ev)
         kind = MOUSE.get(ev["type"]) or KEYS.get(ev["type"])
+        if kind in ("down", "rdown"):
+            self.held.add(kind)
+        elif kind in ("up", "rup"):
+            self.held.discard("r" + "down" if kind == "rup" else "down")
         if kind in ("move", "down", "rdown", "dragged"):
             self.pointer = ev["pos"]
         if kind in ("down", "rdown", "up", "rup", "dragged", "scroll"):
@@ -419,6 +424,9 @@ class FakeMac:
     def post(self, ev):
         Q = watch_mod.Q
         Q.CGEventPost(Q.kCGHIDEventTap, ev)
+
+    def buttons_down(self):
+        return bool(self.desk.held)
 
     def tap(self, on_event):
         if self.desk.opts.get("no_tap"):
@@ -910,3 +918,179 @@ def test_a_broken_step_is_a_report_not_a_crash(mac, monkeypatch):
     report = _run(mac)
     assert report.refused.startswith("the test itself broke") and "window server went away" in report.refused
     assert mac.desk.posted == [] and mac.desk.alive is False and inp._watch is None
+
+
+# ---- clean-up: the user's Mac is theirs again ------------------------------------------------------
+
+
+def _pointer_pulled_back(desk):
+    return any(MOUSE.get(e["type"]) == "move" and e["pos"] == (900.0, 700.0) for e in desk.posted)
+
+
+def test_a_user_who_takes_over_as_it_ends_keeps_the_pointer_and_their_app(mac, monkeypatch):
+    """The window closes (the cue that it's over); the user grabs the mouse and clicks into Mail while
+    NEO is still cleaning up. The watch still listens: the pointer isn't pulled back to where it was
+    45 s ago, and Safari isn't brought back over Mail."""
+    desk = mac.desk
+    real_stop = FakeChild.stop
+
+    def stop(self):
+        real_stop(self)
+        desk.user_moves(1300.0, 500.0)
+        desk.front = ("Mail", 333)
+
+    monkeypatch.setattr(FakeChild, "stop", stop)
+    report = _run(mac)
+    assert report.ok, report.text()  # every check had run by then
+    assert desk.pointer == (1300.0, 500.0) and not _pointer_pulled_back(desk)
+    assert desk.activations == [] and desk.front == ("Mail", 333)
+    assert "left the pointer and the front app" in report.info["clean-up"]
+    assert desk.taps == []  # and it stops listening at the very end
+
+
+def test_without_a_tap_a_pointer_moved_after_neos_last_mouse_event_is_not_pulled_back(mac):
+    """No event tap: the user moves the mouse during the last check, which posts no mouse event. The
+    pointer isn't where NEO left it at the end, so it stays where the user put it."""
+    mac.set(no_tap=True)
+    desk = mac.desk
+    real = desk.command
+
+    def command(cmd):
+        real(cmd)
+        if cmd == "deactivate":  # the activate_app check
+            desk.pointer = (1300.0, 500.0)
+
+    desk.command = command
+    report = _run(mac)
+    assert desk.pointer == (1300.0, 500.0) and not _pointer_pulled_back(desk)
+    assert desk.activations == []
+
+
+def test_a_keyboard_app_switch_a_mouse_only_tap_cannot_hear_is_left_alone(mac):
+    """No Input Monitoring (the tap hears the mouse only): the user presses cmd+tab to Mail. NEO's next
+    key is refused, and the clean-up neither brings Safari back over Mail nor moves the pointer."""
+    mac.set(tap_mouse_only=True)
+    desk = mac.desk
+    state = {"done": False}
+
+    def hook(d, ev):
+        if ev["type"] == _RealQ.kCGEventLeftMouseUp and d.focus_el == "field" and not state["done"]:
+            state["done"] = True
+            d.front = ("Mail", 333)  # cmd+tab
+
+    desk.on_post = hook
+    report = _run(mac)
+    assert "keys would have gone to Mail" in report.stopped
+    assert desk.activations == [] and desk.front == ("Mail", 333)
+    assert not _pointer_pulled_back(desk)
+    assert "Mail came to the front" in report.info["clean-up"]
+
+
+# ---- other NEO jobs ------------------------------------------------------------------------------
+
+
+def test_a_target_another_job_sets_during_the_run_is_kept(mac, monkeypatch):
+    """Another job opens Pages while the test runs (set_target('Pages')): the clean-up puts back the
+    target it found only if nothing else changed it meanwhile."""
+    from neo.tools.computer import apps
+
+    real = controls._activate
+
+    async def _activate(r):
+        c = await real(r)
+        apps.set_target("Pages")
+        return c
+
+    monkeypatch.setattr(controls, "CHECKS", controls.CHECKS[:-1] + (_activate,))
+    _run(mac)
+    assert apps.target() == "Pages"
+
+
+def test_nothing_is_taken_while_another_job_is_busy_or_a_button_is_down(mac):
+    report = _run(mac, busy=lambda: "another NEO job is still running")
+    assert report.refused.startswith("another NEO job is still running")
+    assert mac.desk.posted == [] and mac.desk.alive is False
+    desk = mac.desk
+    desk.held.add("down")  # the user (or another job) is holding the mouse button
+    report = _run(mac)
+    assert "a mouse button is held down" in report.refused
+    assert desk.posted == []
+
+
+def test_another_jobs_gesture_that_began_before_the_test_is_let_go(mac, monkeypatch):
+    """A job that slipped in between the last look and the arming is mid-drag in Safari: its button
+    went down before the watch, so the rest of its gesture is let through (never a button left
+    stuck in that app), and the test stops there."""
+    from neo.tools.computer import input as inp
+
+    desk = mac.desk
+    real_arm = watch_mod.Watch.arm
+
+    def arm(self, start, **k):
+        inp._post(watch_mod.Q.CGEventCreateMouseEvent(None, _RealQ.kCGEventLeftMouseDown, (1000.0, 600.0), 0))
+        mode = real_arm(self, start, **k)
+        for x in (1010.0, 1020.0):
+            inp._post(watch_mod.Q.CGEventCreateMouseEvent(None, _RealQ.kCGEventLeftMouseDragged, (x, 600.0), 0))
+        inp._post(watch_mod.Q.CGEventCreateMouseEvent(None, _RealQ.kCGEventLeftMouseUp, (1020.0, 600.0), 0))
+        return mode
+
+    monkeypatch.setattr(watch_mod.Watch, "arm", arm)  # its press comes after the last look, before the watch
+    report = _run(mac)
+    assert [e["pos"] for e in desk.posted if e["type"] == _RealQ.kCGEventLeftMouseUp] == [(1020.0, 600.0)]
+    assert desk.held == set()
+    assert "another NEO job was using the mouse" in report.stopped
+    assert report.checks == []  # nothing of the test's own was sent after it
+    assert not _pointer_pulled_back(desk)  # the pointer is that job's
+
+
+# ---- a check never passes on what NEO didn't send --------------------------------------------------
+
+
+def test_a_drag_whose_mouse_up_neo_never_sent_is_stopped_not_passed(mac, monkeypatch):
+    """The user touches the mouse right after the drag's last step: NEO's drag tool never posts its
+    mouse-up (the watch refuses it) and says so; the watch lets go of the button at the drag's last
+    point, which moves the piece. That move is the watch's, not the tool's: the check is stopped."""
+    desk = mac.desk
+    seen = {"n": 0, "armed": False}
+
+    def hook(d, ev):
+        if ev["type"] == _RealQ.kCGEventLeftMouseDown and d.pressing == "board" and d.grab is not None:
+            seen["armed"] = True
+        if seen["armed"] and ev["type"] == _RealQ.kCGEventLeftMouseDragged:
+            seen["n"] += 1
+            if seen["n"] == 12:
+                d.user_moves(1300.0, 800.0)
+
+    desk.on_post = hook
+    report = _run(mac)
+    drag = _by_name(report)["drag_board"]
+    assert "you moved the mouse" in report.stopped
+    assert drag.said.startswith("Error: drag failed")
+    assert drag.status == "stopped", drag.line()
+    assert _by_name(report)["feedback"].status == "pass"
+
+
+def test_a_test_window_that_dies_mid_drag_gets_none_of_the_rest(mac):
+    """The test app dies after the 3rd drag step: the rest of the drag would land on Safari below.
+    Nothing more of it is posted; one mouse-up lets go of the button."""
+    desk = mac.desk
+    seen = {"n": 0, "armed": False, "at": None}
+
+    def hook(d, ev):
+        if ev["type"] == _RealQ.kCGEventLeftMouseDown and d.pressing == "board" and d.grab is not None:
+            seen["armed"] = True
+        if seen["armed"] and ev["type"] == _RealQ.kCGEventLeftMouseDragged:
+            seen["n"] += 1
+            if seen["n"] == 3:
+                d.alive = False
+                seen["at"] = len(d.posted)
+
+    desk.on_post = hook
+    report = _run(mac)
+    assert desk.stray == []
+    after = desk.posted[seen["at"] :]
+    # the button let go where the drag was, then (the user never touched anything) the pointer back
+    assert _kinds(after) == ["up", "move"] and after[0]["pos"] == desk.posted[seen["at"] - 1]["pos"]
+    assert after[1]["pos"] == (900.0, 700.0)
+    assert "the test window closed in the middle of a drag" in report.stopped
+    assert _by_name(report)["drag_board"].status == "stopped"

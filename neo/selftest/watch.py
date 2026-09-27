@@ -16,7 +16,16 @@ While a test runs, NEO's input module shows every event to the `Watch` just befo
   pointer is still where NEO last put it before each mouse event (keys can't be watched then).
 
 When it stops mid-gesture it lets go of whatever NEO pressed (a button still down, keys still
-down), so nothing stays stuck.
+down), so nothing stays stuck. The rest of a gesture also stops when the test window is gone (its
+app died mid-drag): nothing more of it lands on the app below.
+
+A gesture it never saw begin — another NEO job's, whose button went down just before the test took
+the mouse — is let through to its end (cutting it would leave that button stuck in that app), and
+the test stops there.
+
+After the checks it keeps listening while NEO cleans up (`disarm`, then `stop_listening`): the user
+grabbing the mouse as the window closes is still seen, so the pointer and the front app are left to
+them (`took_over`, `active_after_run`).
 """
 
 from __future__ import annotations
@@ -80,6 +89,7 @@ class Watch:
         self._tap: Any = None
         self._ours_seen = 0
         self._calibrating = False
+        self._run_over: int | None = None  # len(self.foreign) when the checks ended (disarm)
         self._lock = threading.RLock()
         self._mouse, self._keyk = _kinds()
 
@@ -113,39 +123,71 @@ class Watch:
         return self.mode
 
     def disarm(self) -> None:
-        """Let go of anything still pressed, stop listening and uninstall."""
+        """The checks are over: let go of anything still pressed and uninstall. The tap keeps
+        listening until `stop_listening`, so what the user does during the clean-up is seen."""
         from neo.tools.computer import input as inp
 
         with self._lock:
             self.release()
             if inp._watch is self:
                 inp._watch = None
+            self._run_over = len(self.foreign)
+
+    def stop_listening(self) -> None:
         if self._tap is not None:
             self._tap.stop()
             self._tap = None
 
+    # ---- after the run: is the Mac the user's now? -------------------------------------------
+    def pointer_moved(self) -> bool:
+        """Is the pointer somewhere other than where NEO last put it?"""
+        if self._last is None:
+            return False
+        x, y = self.mac.pointer()
+        return abs(x - self._last[0]) > _POINTER_SLACK or abs(y - self._last[1]) > _POINTER_SLACK
+
+    def took_over(self) -> bool:
+        """Did the user take the mouse or keyboard at any point (the clean-up included)?"""
+        return bool(self.stopped) or self.pointer_moved()
+
+    def active_after_run(self) -> bool:
+        """Is the user using the Mac as NEO cleans up — has the tap heard them since the checks
+        ended? (Without a tap nothing tells when a move happened: a pointer that isn't where NEO
+        left it counts.)"""
+        if self._tap is not None and self._run_over is not None:
+            return len(self.foreign) > self._run_over
+        return self.pointer_moved()
+
     # ---- the hook: every event NEO is about to post --------------------------------------------
     def __call__(self, ev: Any) -> None:
         with self._lock:
+            typ = int(Q.CGEventGetType(ev))
+            kind = self._mouse.get(typ) or self._keyk.get(typ)
+            if self._not_ours_to_cut(kind, ev):
+                # The rest of a gesture begun before the watch (another NEO job's): its button or
+                # key is already down in that app. It goes through, and the test stops here.
+                if not self.stopped:
+                    self.stopped = "another NEO job was using the mouse or keyboard"
+                x, y = self._where(kind, ev) if typ in self._mouse else (0.0, 0.0)
+                Q.CGEventSetIntegerValueField(ev, Q.kCGEventSourceUserData, self.tag)
+                self._record(kind or "?", typ, ev, x, y)
+                self.sent[-1]["theirs"] = True
+                return
             if self.stopped or self.refused:
                 self.release()  # (the tap saw the user between two of NEO's events)
                 raise Stop(self.stopped or self.refused)
-            typ = int(Q.CGEventGetType(ev))
-            kind = self._mouse.get(typ) or self._keyk.get(typ)
             x = y = 0.0
             if kind is None:
                 self._refuse(f"an event of a kind the test doesn't send ({typ})")
             elif typ in self._mouse:
-                if kind == "scroll":
-                    x, y = self.mac.pointer()  # a scroll goes where the pointer is
-                else:
-                    loc = Q.CGEventGetLocation(ev)
-                    x, y = float(loc.x), float(loc.y)
+                x, y = self._where(kind, ev)
                 if self.mode == "pointer":
                     self._pointer_still()
                 if self._down is not None and kind in _GESTURE_REST:
                     if not self._inside(x, y):  # a drag that would leave the test window
                         self._refuse(f"a drag to ({x:.0f}, {y:.0f}) would have left the test window")
+                    if not self._still_there(x, y):  # its app died mid-drag: the app below would get the rest
+                        self._refuse("the test window closed in the middle of a drag")
                 else:
                     where = self.elsewhere(x, y)
                     if where:
@@ -159,9 +201,32 @@ class Watch:
             Q.CGEventSetIntegerValueField(ev, Q.kCGEventSourceUserData, self.tag)
             self._record(kind or "?", typ, ev, x, y)
 
+    def _not_ours_to_cut(self, kind: str | None, ev: Any) -> bool:
+        """Is this the rest of a gesture the watch never saw begin: a drag step or a button let go
+        while a button is down that the test never pressed, or a key let go it never pressed?"""
+        if kind in _GESTURE_REST:
+            return self._down is None and bool(self.mac.buttons_down())
+        if kind == "key_up":
+            return int(Q.CGEventGetIntegerValueField(ev, Q.kCGKeyboardEventKeycode)) not in self._keys
+        return False
+
+    def _where(self, kind: str, ev: Any) -> tuple[float, float]:
+        if kind == "scroll":
+            return self.mac.pointer()  # a scroll goes where the pointer is
+        loc = Q.CGEventGetLocation(ev)
+        return float(loc.x), float(loc.y)
+
     # ---- where an event would go -----------------------------------------------------------
     def _inside(self, x: float, y: float) -> bool:
         return any(contains(b, x, y, 1.0) for b in self.windows.values())
+
+    def _still_there(self, x: float, y: float) -> bool:
+        """Is the test window under this point still on screen as the test app's own?"""
+        for n, b in self.windows.items():
+            if contains(b, x, y, 1.0):
+                w = self.mac.window(n)
+                return w is not None and int(w["pid"]) == self.test_pid
+        return False
 
     def elsewhere(self, x: float, y: float) -> str:
         """"" when the test window gets an event at this point, else where it would go instead."""

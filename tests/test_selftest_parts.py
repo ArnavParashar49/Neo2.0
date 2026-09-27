@@ -678,6 +678,9 @@ def test_a_drag_that_would_leave_the_test_window_is_cut_and_let_go(monkeypatch):
         def windows(self):
             return [{"pid": 4242, "name": "NEO Self-Test", "number": 777, "alpha": 1.0, "bounds": (0.0, 0.0, 100.0, 100.0)}]
 
+        def window(self, number):
+            return next((w for w in self.windows() if w["number"] == number), None)
+
         def hit_pid(self, x, y):
             return 4242
 
@@ -744,6 +747,7 @@ def test_the_self_test_never_touches_the_real_mac_under_tests(tmp_path):
         lambda: m.pids_named("x"),
         lambda: m.activate(1),
         lambda: m.post({}),
+        m.buttons_down,
         lambda: m.tap(lambda t, e: None),
         m.can_capture,
     ):

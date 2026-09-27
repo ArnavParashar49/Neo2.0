@@ -18,7 +18,12 @@ What happens, in under a minute:
    drop, activate_app, a click on a second display when there is one — and compares what the
    window received with what NEO sent and with what the tool said it did.
 4. It closes the window, lets go of anything still pressed, puts the pointer back and brings back
-   the app that was in front (not if the user took over and went to another one).
+   the app that was in front — unless the user took the mouse or keyboard (during the run or as
+   it ends: the watch listens until the clean-up is done) or another app came to the front: then
+   the pointer and the front app are left as they are.
+
+It doesn't start while another NEO job is at work or a mouse button is down: it needs the mouse
+and keyboard to itself.
 
 The report gives each check as passed or failed with what was sent, what NEO's tool answered and
 what actually arrived; it is saved in NEO's data folder (``selftest/``).
@@ -813,7 +818,9 @@ async def _one(fn: Callable[[_Run], Awaitable[Check]], r: _Run) -> Check:
         c = Check(name, name.replace("_", " ").capitalize()).fail(f"no answer within {_CHECK_S:.0f} s")
     except Exception as e:  # noqa: BLE001 - one broken check must not stop the clean-up
         c = Check(name, name.replace("_", " ").capitalize()).fail(f"the check broke: {e!r}"[:200])
-    if (r.watch.stopped or r.watch.refused) and c.status == "fail":
+    if (r.watch.stopped or r.watch.refused) and c.status in ("pass", "fail"):
+        # Cut short: what arrived may be the watch letting go of NEO's button (a drag's end the
+        # tool never sent), not the tool's own doing — neither a pass nor a failure of the tool.
         c.status, c.why = "stopped", ""
         c.arrived = f"stopped: {r.watch.stopped or r.watch.refused}"
     c.ms = int((time.monotonic() - t0) * 1000)
@@ -872,9 +879,16 @@ def _points(ready: dict) -> list[tuple[float, float]]:
     return pts
 
 
-async def run(*, mac: Any = None, budget_s: float = _BUDGET_S, notify: Callable[[str], Any] | None = None) -> Report:
+async def run(
+    *,
+    mac: Any = None,
+    budget_s: float = _BUDGET_S,
+    notify: Callable[[str], Any] | None = None,
+    busy: Callable[[], str] | None = None,
+) -> Report:
     """Run the controls self-test (see the module doc). Never raises for what happens on screen:
-    everything ends up in the report."""
+    everything ends up in the report. `busy`: why not now ("" = go), asked again right before the
+    test takes the mouse (other NEO jobs at work)."""
     from neo.tools import computer
     from neo.tools.computer import apps
     from neo.tools.computer import input as inp
@@ -895,7 +909,7 @@ async def run(*, mac: Any = None, budget_s: float = _BUDGET_S, notify: Callable[
     log.touch()
     child: Child | None = None
     watch: Watch | None = None
-    was_front = False
+    front_end: tuple[str, int] | None = None
     try:
         child = await asyncio.to_thread(mac.launch, log, secrets.token_hex(2).upper())
         reader = LogReader(log)
@@ -925,6 +939,12 @@ async def run(*, mac: Any = None, budget_s: float = _BUDGET_S, notify: Callable[
                     "click anything but the test window"
                 )
                 return report
+        if busy is not None and (why := busy()):
+            report.refused = f"{why}, and the check needs the mouse and keyboard to itself"
+            return report
+        if await asyncio.to_thread(mac.buttons_down):
+            report.refused = "a mouse button is held down (yours, or another NEO job's), and the check needs the mouse to itself"
+            return report
         if notify is not None:
             with contextlib.suppress(Exception):
                 await _maybe_await(notify("Checking my computer controls in a test window: please don't touch the mouse or keyboard."))
@@ -933,7 +953,7 @@ async def run(*, mac: Any = None, budget_s: float = _BUDGET_S, notify: Callable[
         try:
             mode = await asyncio.to_thread(watch.arm, r.cell(6, 1))
         except Stop as e:
-            report.stopped = str(e)
+            report.refused = str(e)
             return report
         report.info["watching"] = _WATCHING.get(mode, mode)
         if watch.stopped:
@@ -968,33 +988,63 @@ async def run(*, mac: Any = None, budget_s: float = _BUDGET_S, notify: Callable[
     finally:
         if child is not None and child.alive():
             with contextlib.suppress(Exception):
-                was_front = (await asyncio.to_thread(mac.front))[1] == child.pid
+                front_end = await asyncio.to_thread(mac.front)
+        try:
+            if watch is not None:
+                await asyncio.to_thread(watch.disarm)  # it still listens: the user may take over now
+            if apps._target is None:  # what the test set: another job's target (set meanwhile) stays
+                apps._target = saved_target
+            _forget_test_tree(started)
+            if child is not None:
+                await asyncio.to_thread(child.stop)
+            await _clean_up(mac, report, watch, (prev_name, prev_pid), child.pid if child else 0, front_end, pointer0)
+        finally:
+            if watch is not None:
+                await asyncio.to_thread(watch.stop_listening)
+            shutil.rmtree(tmp, ignore_errors=True)
+            report.seconds = time.monotonic() - t0
+
+
+async def _clean_up(
+    mac: Any,
+    report: Report,
+    watch: Watch | None,
+    prev: tuple[str, int],
+    test_pid: int,
+    front_end: tuple[str, int] | None,
+    pointer0: tuple[float, float] | None,
+) -> None:
+    """The Mac back as the user left it: the app that was in front, and the pointer — unless it is
+    theirs now. The user took over (the watch saw them, or the pointer isn't where NEO left it) or
+    another app came to the front during the run: nothing is moved or brought forward over them.
+    Only when the user took over while the test window was in front, and has let go since, does
+    their app come back (macOS picked some app when the test window closed)."""
+    from neo.tools.computer import input as inp
+
+    name, pid = prev
+    elsewhere = front_end is not None and int(front_end[1]) not in (test_pid, pid)
+    was_front = front_end is not None and int(front_end[1]) == test_pid
+    took_over = active = False
+    with contextlib.suppress(Exception):
         if watch is not None:
-            await asyncio.to_thread(watch.disarm)
-        apps._target = saved_target
-        _forget_test_tree(started)
-        if child is not None:
-            await asyncio.to_thread(child.stop)
-        took_over = bool(watch is not None and watch.stopped)
-        await _restore(mac, report, prev_name, prev_pid, child.pid if child else 0, was_front, took_over)
-        if watch is not None and watch.sent and not took_over and pointer0:
-            with contextlib.suppress(Exception):
-                await asyncio.to_thread(inp.move, *pointer0)  # the pointer back where the user left it
-        shutil.rmtree(tmp, ignore_errors=True)
-        report.seconds = time.monotonic() - t0
-
-
-async def _restore(mac: Any, report: Report, name: str, pid: int, test_pid: int, was_front: bool, took_over: bool) -> None:
-    """The app that was in front before, back in front — unless the user took over and went on
-    to another app (then it stays theirs)."""
-    if not pid or pid == test_pid or (took_over and not was_front):
+            took_over = await asyncio.to_thread(watch.took_over)
+            active = await asyncio.to_thread(watch.active_after_run)
+    if elsewhere:
+        report.info["clean-up"] = f"{front_end[0] or 'another app'} came to the front during the check, so I left it there"
+    elif active:
+        report.info["clean-up"] = "you were using the mouse or keyboard, so I left the pointer and the front app as they were"
+    if pid and pid != test_pid and not elsewhere and not (took_over and (active or not was_front)):
+        with contextlib.suppress(Exception):
+            if (await asyncio.to_thread(mac.front))[1] == pid:
+                report.info["in front after"] = name
+            else:
+                ok = await asyncio.to_thread(mac.activate, pid)
+                report.info["in front after"] = name if ok else f"couldn't bring {name} back"
+    if watch is None or not watch.sent or took_over or elsewhere or not pointer0:
         return
     with contextlib.suppress(Exception):
-        if (await asyncio.to_thread(mac.front))[1] == pid:
-            report.info["in front after"] = name
-            return
-        ok = await asyncio.to_thread(mac.activate, pid)
-        report.info["in front after"] = name if ok else f"couldn't bring {name} back"
+        if not await asyncio.to_thread(watch.took_over):  # a last look: still where NEO left it
+            await asyncio.to_thread(inp.move, *pointer0)  # the pointer back where the user left it
 
 
 _WATCHING = {
