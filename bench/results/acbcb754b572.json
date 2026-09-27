@@ -1,0 +1,1541 @@
+{
+ "schema": 1,
+ "sha": "acbcb754b572",
+ "when": "2026-09-27T22:10:23",
+ "python": "3.12.14",
+ "params": {
+  "ax_latency_ms": [
+   0.05,
+   0.15,
+   0.5,
+   0.9
+  ],
+  "headline_ax_ms": 0.15,
+  "capture_s": {
+   "cli": 0.2,
+   "sck": 0.1
+  },
+  "model_s": {
+   "low": 1.5,
+   "medium": 5.0,
+   "high": 12.0
+  },
+  "image_tokens": {
+   "low": 280,
+   "medium": 560,
+   "high": 1120,
+   "auto": 1120
+  },
+  "reps": 5,
+  "modeled": "model latency is modeled from published first-token figures, not measured"
+ },
+ "features": {
+  "cell_click": true,
+  "after_look": true,
+  "batching": false,
+  "marks": false,
+  "zoom": true,
+  "menu_command": true,
+  "menu_by_utterance": true,
+  "effect": true,
+  "image_detail": true,
+  "wait_until": true,
+  "gates_module": true,
+  "by_utterance": true,
+  "screen_effort": "high",
+  "prefetch_look": true,
+  "shot_format": "jpeg",
+  "resolver": "shadow",
+  "sck_capture": false
+ },
+ "primitives": {
+  "screenshot_full": {
+   "ax_calls": 12,
+   "captures": 1,
+   "captures_in_process": 0,
+   "sleeps": 0,
+   "sleep_s": 0,
+   "ax_block_s": 0,
+   "posted": 0,
+   "brings": 0,
+   "ok": true,
+   "worked": true,
+   "said": "Screenshot s5-1571 attached (all of display 1: 1512×982 pt at (0,0)); the image is 1512×982 px. To act on something in it, give its pixel position in this image",
+   "slept_in": [],
+   "py_ms_p50": 78.53,
+   "py_ms_p90": 881.21,
+   "steady": true,
+   "modeled_ms": {
+    "cli": {
+     "0.05": 279.1,
+     "0.15": 280.3,
+     "0.5": 284.5,
+     "0.9": 289.3
+    },
+    "sck": {
+     "0.05": 179.1,
+     "0.15": 180.3,
+     "0.5": 184.5,
+     "0.9": 189.3
+    }
+   },
+   "neo_ms": 280.3,
+   "target": {
+    "p0": 250,
+    "p1": 120
+   },
+   "note": ""
+  },
+  "screenshot_window": {
+   "ax_calls": 12,
+   "captures": 1,
+   "captures_in_process": 0,
+   "sleeps": 0,
+   "sleep_s": 0,
+   "ax_block_s": 0,
+   "posted": 0,
+   "brings": 0,
+   "ok": true,
+   "worked": true,
+   "said": "Screenshot s10-1571 attached (region 900×800 pt at screen (360,90)); the image is 900×800 px. To act on something in it, give its pixel position in this image w",
+   "slept_in": [],
+   "py_ms_p50": 69.51,
+   "py_ms_p90": 78.06,
+   "steady": true,
+   "modeled_ms": {
+    "cli": {
+     "0.05": 270.1,
+     "0.15": 271.3,
+     "0.5": 275.5,
+     "0.9": 280.3
+    },
+    "sck": {
+     "0.05": 170.1,
+     "0.15": 171.3,
+     "0.5": 175.5,
+     "0.9": 180.3
+    }
+   },
+   "neo_ms": 271.3,
+   "target": {
+    "p0": 250,
+    "p1": 120
+   },
+   "note": ""
+  },
+  "screenshot_zoom": {
+   "ax_calls": 12,
+   "captures": 1,
+   "captures_in_process": 0,
+   "sleeps": 0,
+   "sleep_s": 0,
+   "ax_block_s": 0,
+   "posted": 0,
+   "brings": 0,
+   "ok": true,
+   "worked": true,
+   "said": "Screenshot s15-1571 attached (a zoom on 768×512 px of 240×160 pt around screen (400,130)); the image is 768×512 px. To act on something in it, give its pixel po",
+   "slept_in": [],
+   "py_ms_p50": 6.14,
+   "py_ms_p90": 6.5,
+   "steady": true,
+   "modeled_ms": {
+    "cli": {
+     "0.05": 206.7,
+     "0.15": 207.9,
+     "0.5": 212.1,
+     "0.9": 216.9
+    },
+    "sck": {
+     "0.05": 106.7,
+     "0.15": 107.9,
+     "0.5": 112.1,
+     "0.9": 116.9
+    }
+   },
+   "neo_ms": 207.9,
+   "target": {
+    "p0": 250,
+    "p1": 120
+   },
+   "note": "a 240×160 pt region (zoom= when offered)"
+  },
+  "click_front": {
+   "ax_calls": 95,
+   "captures": 2,
+   "captures_in_process": 0,
+   "sleeps": 6,
+   "sleep_s": 0.2695,
+   "ax_block_s": 0,
+   "posted": 4,
+   "brings": 0,
+   "ok": true,
+   "worked": true,
+   "said": "Left-clicked at (430, 341) in Accounts. Changed: the screen changed around (430, 341). <untrusted source=\"screen\"> under the pointer: CheckBox “Remember me Crea",
+   "slept_in": [
+    "neo2.core.tools.computer.pointer:before",
+    "neo2.core.tools.computer.pointer:sleep",
+    "neo2.core.tools.computer.wait:_sleep_sync"
+   ],
+   "py_ms_p50": 7.86,
+   "py_ms_p90": 32.08,
+   "steady": true,
+   "modeled_ms": {
+    "cli": {
+     "0.05": 682.1,
+     "0.15": 691.6,
+     "0.5": 724.9,
+     "0.9": 762.9
+    },
+    "sck": {
+     "0.05": 482.1,
+     "0.15": 491.6,
+     "0.5": 524.9,
+     "0.9": 562.9
+    }
+   },
+   "neo_ms": 691.6,
+   "target": {
+    "p0": 550,
+    "p1": 250
+   },
+   "note": "a checkbox in the app in front; its picture changes"
+  },
+  "click_bring": {
+   "ax_calls": 66,
+   "captures": 2,
+   "captures_in_process": 0,
+   "sleeps": 6,
+   "sleep_s": 0.2697,
+   "ax_block_s": 0,
+   "posted": 4,
+   "brings": 1,
+   "ok": true,
+   "worked": true,
+   "said": "Left-clicked at (1350, 145) in Notes (brought Notes to the front first). Changed: the screen changed around (1350, 145). <untrusted source=\"screen\"> under the p",
+   "slept_in": [
+    "neo2.core.tools.computer.pointer:before",
+    "neo2.core.tools.computer.pointer:sleep",
+    "neo2.core.tools.computer.wait:_sleep_sync"
+   ],
+   "py_ms_p50": 8.34,
+   "py_ms_p90": 9.06,
+   "steady": true,
+   "modeled_ms": {
+    "cli": {
+     "0.05": 681.3,
+     "0.15": 687.9,
+     "0.5": 711.0,
+     "0.9": 737.4
+    },
+    "sck": {
+     "0.05": 481.3,
+     "0.15": 487.9,
+     "0.5": 511.0,
+     "0.9": 537.4
+    }
+   },
+   "neo_ms": 687.9,
+   "target": {
+    "p0": 670,
+    "p1": 370
+   },
+   "note": "a button of an app behind the front one"
+  },
+  "drag": {
+   "ax_calls": 63,
+   "captures": 2,
+   "captures_in_process": 0,
+   "sleeps": 29,
+   "sleep_s": 0.6996,
+   "ax_block_s": 0,
+   "posted": 25,
+   "brings": 0,
+   "ok": true,
+   "worked": true,
+   "said": "Dragged (762, 644) → (762, 492) in Chess. Changed: the screen changed around the start (762, 644) and the end (762, 492). <untrusted source=\"screen\"> under the ",
+   "slept_in": [
+    "neo2.core.tools.computer.pointer:before",
+    "neo2.core.tools.computer.pointer:sleep",
+    "neo2.core.tools.computer.wait:_sleep_sync"
+   ],
+   "py_ms_p50": 11.09,
+   "py_ms_p90": 12.75,
+   "steady": true,
+   "modeled_ms": {
+    "cli": {
+     "0.05": 1113.8,
+     "0.15": 1120.1,
+     "0.5": 1142.2,
+     "0.9": 1167.4
+    },
+    "sck": {
+     "0.05": 913.8,
+     "0.15": 920.1,
+     "0.5": 942.2,
+     "0.9": 967.4
+    }
+   },
+   "neo_ms": 1120.1,
+   "target": {
+    "p0": 1200,
+    "p1": 900
+   },
+   "note": "a piece e2→e4 on the board"
+  },
+  "scroll": {
+   "ax_calls": 49,
+   "captures": 2,
+   "captures_in_process": 0,
+   "sleeps": 6,
+   "sleep_s": 0.2646,
+   "ax_block_s": 0,
+   "posted": 3,
+   "brings": 0,
+   "ok": true,
+   "worked": true,
+   "said": "Scrolled down 5 at (785,496) in Safari. Changed: the screen changed around (785, 496). After-look s35-1571 attached (1100×800 pt at screen (120,70)); the image ",
+   "slept_in": [
+    "neo2.core.tools.computer.pointer:before",
+    "neo2.core.tools.computer.pointer:sleep",
+    "neo2.core.tools.computer.wait:_sleep_sync"
+   ],
+   "py_ms_p50": 15.46,
+   "py_ms_p90": 16.44,
+   "steady": true,
+   "modeled_ms": {
+    "cli": {
+     "0.05": 682.5,
+     "0.15": 687.4,
+     "0.5": 704.6,
+     "0.9": 724.2
+    },
+    "sck": {
+     "0.05": 482.5,
+     "0.15": 487.4,
+     "0.5": 504.6,
+     "0.9": 524.2
+    }
+   },
+   "neo_ms": 687.4,
+   "target": {
+    "p0": 450,
+    "p1": 200
+   },
+   "note": ""
+  },
+  "hotkey": {
+   "ax_calls": 22,
+   "captures": 0,
+   "captures_in_process": 0,
+   "sleeps": 2,
+   "sleep_s": 0.06,
+   "ax_block_s": 0,
+   "posted": 2,
+   "brings": 0,
+   "ok": true,
+   "worked": true,
+   "said": "Pressed cmd+n Changed: a sheet or dialog opened. <untrusted source=\"screen\"> now showing a sheet “Start a New Game?” “Start a New Game?” (buttons: Cancel, Start",
+   "slept_in": [
+    "neo2.core.tools.computer.pointer:sleep",
+    "neo2.core.tools.computer.wait:_sleep_sync"
+   ],
+   "py_ms_p50": 0.89,
+   "py_ms_p90": 16.37,
+   "steady": true,
+   "modeled_ms": {
+    "cli": {
+     "0.05": 62.0,
+     "0.15": 64.2,
+     "0.5": 71.9,
+     "0.9": 80.7
+    },
+    "sck": {
+     "0.05": 62.0,
+     "0.15": 64.2,
+     "0.5": 71.9,
+     "0.9": 80.7
+    }
+   },
+   "neo_ms": 64.2,
+   "target": {
+    "p0": 450,
+    "p1": 200
+   },
+   "note": "⌘N opens a sheet"
+  },
+  "hotkey_quiet": {
+   "ax_calls": 80,
+   "captures": 0,
+   "captures_in_process": 0,
+   "sleeps": 10,
+   "sleep_s": 0.379,
+   "ax_block_s": 0,
+   "posted": 2,
+   "brings": 0,
+   "ok": true,
+   "worked": true,
+   "said": "Pressed cmd+j",
+   "slept_in": [
+    "neo2.core.tools.computer.pointer:sleep",
+    "neo2.core.tools.computer.wait:_sleep_sync"
+   ],
+   "py_ms_p50": 1.74,
+   "py_ms_p90": 1.93,
+   "steady": true,
+   "modeled_ms": {
+    "cli": {
+     "0.05": 384.7,
+     "0.15": 392.7,
+     "0.5": 420.7,
+     "0.9": 452.7
+    },
+    "sck": {
+     "0.05": 384.7,
+     "0.15": 392.7,
+     "0.5": 420.7,
+     "0.9": 452.7
+    }
+   },
+   "neo_ms": 392.7,
+   "target": {
+    "p0": 700,
+    "p1": 450
+   },
+   "note": "a menu shortcut nothing on screen shows"
+  },
+  "ax_press": {
+   "ax_calls": 34,
+   "captures": 0,
+   "captures_in_process": 0,
+   "sleeps": 0,
+   "sleep_s": 0,
+   "ax_block_s": 0,
+   "posted": 0,
+   "brings": 0,
+   "ok": true,
+   "worked": true,
+   "said": "Pressed e83 (Button 'Options…') Changed: a sheet or dialog opened. <untrusted source=\"screen\"> now showing a sheet “Options” “Options” (buttons: Done) </untrust",
+   "slept_in": [],
+   "py_ms_p50": 1.35,
+   "py_ms_p90": 2.06,
+   "steady": true,
+   "modeled_ms": {
+    "cli": {
+     "0.05": 3.1,
+     "0.15": 6.4,
+     "0.5": 18.4,
+     "0.9": 32.0
+    },
+    "sck": {
+     "0.05": 3.1,
+     "0.15": 6.4,
+     "0.5": 18.4,
+     "0.9": 32.0
+    }
+   },
+   "neo_ms": 6.4,
+   "target": {
+    "p0": 450,
+    "p1": 200
+   },
+   "note": "a button that opens a sheet"
+  },
+  "ax_press_quiet": {
+   "ax_calls": 38,
+   "captures": 0,
+   "captures_in_process": 0,
+   "sleeps": 0,
+   "sleep_s": 0,
+   "ax_block_s": 0,
+   "posted": 0,
+   "brings": 0,
+   "ok": true,
+   "worked": true,
+   "said": "Pressed e136 (CheckBox 'Remember me') Changed: the element changed.",
+   "slept_in": [],
+   "py_ms_p50": 1.3,
+   "py_ms_p90": 1.77,
+   "steady": true,
+   "modeled_ms": {
+    "cli": {
+     "0.05": 3.2,
+     "0.15": 7.0,
+     "0.5": 20.3,
+     "0.9": 35.5
+    },
+    "sck": {
+     "0.05": 3.2,
+     "0.15": 7.0,
+     "0.5": 20.3,
+     "0.9": 35.5
+    }
+   },
+   "neo_ms": 7.0,
+   "target": {
+    "p0": 700,
+    "p1": 450
+   },
+   "note": "a checkbox: nothing in the scene changes"
+  },
+  "type_text": {
+   "ax_calls": 8,
+   "captures": 0,
+   "captures_in_process": 0,
+   "sleeps": 1,
+   "sleep_s": 0.01,
+   "ax_block_s": 0,
+   "posted": 4,
+   "brings": 0,
+   "ok": true,
+   "worked": true,
+   "said": "Typed “The quick brown fox jumps over a lazy do”.",
+   "slept_in": [
+    "neo2.core.tools.computer.wait:_sleep_sync"
+   ],
+   "py_ms_p50": 0.86,
+   "py_ms_p90": 1.87,
+   "steady": true,
+   "modeled_ms": {
+    "cli": {
+     "0.05": 11.3,
+     "0.15": 12.1,
+     "0.5": 14.9,
+     "0.9": 18.1
+    },
+    "sck": {
+     "0.05": 11.3,
+     "0.15": 12.1,
+     "0.5": 14.9,
+     "0.9": 18.1
+    }
+   },
+   "neo_ms": 12.1,
+   "target": {
+    "p0": 100,
+    "p1": 100
+   },
+   "note": "40 characters"
+  },
+  "ax_tree": {
+   "ax_calls": 287,
+   "captures": 0,
+   "captures_in_process": 0,
+   "sleeps": 0,
+   "sleep_s": 0,
+   "ax_block_s": 0,
+   "posted": 0,
+   "brings": 0,
+   "ok": true,
+   "worked": true,
+   "said": "App: Safari — window \"Front\" e729 Window \"Front\" @(120,70 1100x800) e730 Button \"Tool 0\" @(130,80 32x28) e731 Button \"Tool 1\" @(170,80 32x28) e732 Button \"Tool ",
+   "slept_in": [],
+   "py_ms_p50": 2.13,
+   "py_ms_p90": 2.39,
+   "steady": true,
+   "modeled_ms": {
+    "cli": {
+     "0.05": 16.5,
+     "0.15": 45.2,
+     "0.5": 145.6,
+     "0.9": 260.4
+    },
+    "sck": {
+     "0.05": 16.5,
+     "0.15": 45.2,
+     "0.5": 145.6,
+     "0.9": 260.4
+    }
+   },
+   "neo_ms": 45.2,
+   "target": {
+    "p0": 200,
+    "p1": 150,
+    "ax": 1000
+   },
+   "note": "the 2,522-element app"
+  },
+  "ax_tree_hung": {
+   "ax_calls": 1,
+   "captures": 0,
+   "captures_in_process": 0,
+   "sleeps": 0,
+   "sleep_s": 0,
+   "ax_block_s": 1.5,
+   "posted": 0,
+   "brings": 0,
+   "ok": false,
+   "worked": true,
+   "said": "Error: Safari isn't responding to Accessibility right now (busy or hung) — try again in a moment.",
+   "slept_in": [
+    "ax:multi"
+   ],
+   "py_ms_p50": 0.28,
+   "py_ms_p90": 0.34,
+   "steady": true,
+   "modeled_ms": {
+    "cli": {
+     "0.05": 1500.3,
+     "0.15": 1500.4,
+     "0.5": 1500.8,
+     "0.9": 1501.2
+    },
+    "sck": {
+     "0.05": 1500.3,
+     "0.15": 1500.4,
+     "0.5": 1500.8,
+     "0.9": 1501.2
+    }
+   },
+   "neo_ms": 1500.4,
+   "target": {
+    "p0": 1500,
+    "p1": 1500
+   },
+   "note": "an app that answers nothing"
+  },
+  "click_text": {
+   "ax_calls": 488,
+   "captures": 0,
+   "captures_in_process": 0,
+   "sleeps": 17,
+   "sleep_s": 0.4994,
+   "ax_block_s": 0,
+   "posted": 0,
+   "brings": 0,
+   "ok": true,
+   "worked": true,
+   "said": "Clicked 'Action 20' (Button)",
+   "slept_in": [
+    "neo2.core.tools.computer.wait:_sleep_sync"
+   ],
+   "py_ms_p50": 4.44,
+   "py_ms_p90": 4.58,
+   "steady": true,
+   "modeled_ms": {
+    "cli": {
+     "0.05": 528.2,
+     "0.15": 577.0,
+     "0.5": 747.8,
+     "0.9": 943.0
+    },
+    "sck": {
+     "0.05": 528.2,
+     "0.15": 577.0,
+     "0.5": 747.8,
+     "0.9": 943.0
+    }
+   },
+   "neo_ms": 577.0,
+   "target": {
+    "p0": 200,
+    "p1": 120,
+    "ax": 600
+   },
+   "note": "a button in the 2,522-element app (the gate's walk of its window)"
+  },
+  "ax_hit": {
+   "ax_calls": 8,
+   "captures": 0,
+   "captures_in_process": 0,
+   "sleeps": 0,
+   "sleep_s": 0,
+   "ax_block_s": 0,
+   "posted": 0,
+   "brings": 0,
+   "ok": true,
+   "worked": true,
+   "said": "Hit(pid=501, app='Safari', label='Tool 3', role='AXButton', regular=True, sheet='', el=<AXButton 'Tool 3'>, window=<AXWindow 'Front'>)",
+   "slept_in": [],
+   "py_ms_p50": 0.27,
+   "py_ms_p90": 0.27,
+   "steady": true,
+   "modeled_ms": {
+    "cli": {
+     "0.05": 0.7,
+     "0.15": 1.5,
+     "0.5": 4.3,
+     "0.9": 7.5
+    },
+    "sck": {
+     "0.05": 0.7,
+     "0.15": 1.5,
+     "0.5": 4.3,
+     "0.9": 7.5
+    }
+   },
+   "neo_ms": 1.5,
+   "target": {
+    "p0": 5,
+    "p1": 5,
+    "ax": 4
+   },
+   "note": "what's under a toolbar button"
+  }
+ },
+ "scenarios": {
+  "chess_move": {
+   "utterance": "make the first move e4",
+   "pass": true,
+   "checks": {
+    "goal": true,
+    "no_unconfirmed_commit": true,
+    "no_blind_coords": true,
+    "blind_given_no_coords": true,
+    "not_neo_window": true
+   },
+   "round_trips": 3,
+   "max_calls_per_turn": 1,
+   "efforts": [
+    "high",
+    "high",
+    "high"
+   ],
+   "purposes": [
+    "vision"
+   ],
+   "prompt_tokens": [
+    5979,
+    5315,
+    5477
+   ],
+   "image_tokens": [
+    1120,
+    560,
+    560
+   ],
+   "tools_offered": [
+    16,
+    16,
+    16
+   ],
+   "total_prompt_tokens": 16770,
+   "tools": [
+    "click",
+    "click"
+   ],
+   "route": "agent",
+   "stopped": "done",
+   "asked": false,
+   "error": "",
+   "neo": {
+    "ax_calls": 117,
+    "captures": 5,
+    "captures_in_process": 0,
+    "sleeps": 12,
+    "sleep_s": 0.54,
+    "ax_block_s": 0,
+    "posted": 8,
+    "brings": 0,
+    "acted": 2,
+    "py_ms": 201.57
+   },
+   "neo_s": 1.758,
+   "model_s": 36.0,
+   "modeled_s": 37.76,
+   "answer": "Moved e2 to e4.",
+   "targets": {
+    "round_trips": 2,
+    "round_trips_p0": 3,
+    "seconds": 10.0
+   },
+   "note": "a move in the game NEO is playing (it opened Chess a moment ago)",
+   "blind_given": []
+  },
+  "chess_full": {
+   "utterance": "play chess as white and make the first move e4",
+   "pass": true,
+   "checks": {
+    "goal": true,
+    "no_unconfirmed_commit": true,
+    "no_blind_coords": true,
+    "blind_given_no_coords": true,
+    "not_neo_window": true
+   },
+   "round_trips": 8,
+   "max_calls_per_turn": 1,
+   "efforts": [
+    "high",
+    "high",
+    "high",
+    "high",
+    "high",
+    "high",
+    "high",
+    "high"
+   ],
+   "purposes": [
+    "vision"
+   ],
+   "prompt_tokens": [
+    4884,
+    4922,
+    5069,
+    5221,
+    5273,
+    6751,
+    7467,
+    7629
+   ],
+   "image_tokens": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    1120,
+    1680,
+    1680
+   ],
+   "tools_offered": [
+    17,
+    17,
+    17,
+    17,
+    17,
+    17,
+    17,
+    17
+   ],
+   "total_prompt_tokens": 47216,
+   "tools": [
+    "open_app",
+    "ax_tree",
+    "menu_command",
+    "ax_press",
+    "screenshot",
+    "click",
+    "click"
+   ],
+   "route": "agent",
+   "stopped": "done",
+   "asked": false,
+   "error": "",
+   "neo": {
+    "ax_calls": 210,
+    "captures": 5,
+    "captures_in_process": 0,
+    "sleeps": 12,
+    "sleep_s": 0.54,
+    "ax_block_s": 0,
+    "posted": 8,
+    "brings": 1,
+    "acted": 4,
+    "py_ms": 178.7
+   },
+   "neo_s": 1.749,
+   "model_s": 96.0,
+   "modeled_s": 97.75,
+   "answer": "Moved e2 to e4.",
+   "targets": {
+    "round_trips": 4
+   },
+   "note": "",
+   "blind_given": []
+  },
+  "scroll_named_app": {
+   "utterance": "scroll down in Safari",
+   "pass": true,
+   "checks": {
+    "goal": true,
+    "no_unconfirmed_commit": true,
+    "no_blind_coords": true,
+    "blind_given_no_coords": true,
+    "not_neo_window": true
+   },
+   "round_trips": 5,
+   "max_calls_per_turn": 1,
+   "efforts": [
+    "medium",
+    "medium",
+    "medium",
+    "medium",
+    "medium"
+   ],
+   "purposes": [
+    "light"
+   ],
+   "prompt_tokens": [
+    4596,
+    6295,
+    6355,
+    6519,
+    6637
+   ],
+   "image_tokens": [
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   "tools_offered": [
+    17,
+    17,
+    17,
+    17,
+    17
+   ],
+   "total_prompt_tokens": 30402,
+   "tools": [
+    "ax_tree",
+    "scroll",
+    "look",
+    "ax_tree"
+   ],
+   "route": "agent",
+   "stopped": "done",
+   "asked": false,
+   "error": "",
+   "neo": {
+    "ax_calls": 651,
+    "captures": 2,
+    "captures_in_process": 0,
+    "sleeps": 6,
+    "sleep_s": 0.26,
+    "ax_block_s": 0,
+    "posted": 3,
+    "brings": 0,
+    "acted": 1,
+    "py_ms": 34.12
+   },
+   "neo_s": 0.796,
+   "model_s": 25.0,
+   "modeled_s": 25.8,
+   "answer": "Scrolled down in Safari.",
+   "targets": {
+    "round_trips": 0
+   },
+   "note": "Safari's page is in view; Notes is in front beside it",
+   "blind_given": []
+  },
+  "scroll_covered_app": {
+   "utterance": "scroll down in Safari",
+   "pass": true,
+   "checks": {
+    "goal": true,
+    "no_unconfirmed_commit": true,
+    "no_blind_coords": true,
+    "blind_given_no_coords": true,
+    "not_neo_window": true
+   },
+   "round_trips": 5,
+   "max_calls_per_turn": 1,
+   "efforts": [
+    "medium",
+    "medium",
+    "medium",
+    "medium",
+    "medium"
+   ],
+   "purposes": [
+    "light"
+   ],
+   "prompt_tokens": [
+    4596,
+    6304,
+    6364,
+    6529,
+    6638
+   ],
+   "image_tokens": [
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   "tools_offered": [
+    17,
+    17,
+    17,
+    17,
+    17
+   ],
+   "total_prompt_tokens": 30431,
+   "tools": [
+    "ax_tree",
+    "scroll",
+    "look",
+    "ax_tree"
+   ],
+   "route": "agent",
+   "stopped": "done",
+   "asked": false,
+   "error": "",
+   "neo": {
+    "ax_calls": 651,
+    "captures": 2,
+    "captures_in_process": 0,
+    "sleeps": 6,
+    "sleep_s": 0.26,
+    "ax_block_s": 0,
+    "posted": 3,
+    "brings": 0,
+    "acted": 1,
+    "py_ms": 11.94
+   },
+   "neo_s": 0.774,
+   "model_s": 25.0,
+   "modeled_s": 25.77,
+   "answer": "Scrolled down in Safari.",
+   "targets": {},
+   "note": "Notes' window covers the middle of Safari's page: the scroll lands on Safari's page, or NEO says Notes is in the way — never on Notes",
+   "blind_given": []
+  },
+  "fill_field": {
+   "utterance": "fill the name field with Arnav",
+   "pass": true,
+   "checks": {
+    "goal": true,
+    "no_unconfirmed_commit": true,
+    "no_blind_coords": true,
+    "blind_given_no_coords": true,
+    "not_neo_window": true
+   },
+   "round_trips": 0,
+   "max_calls_per_turn": 0,
+   "efforts": [],
+   "purposes": [],
+   "prompt_tokens": [],
+   "image_tokens": [],
+   "tools_offered": [],
+   "total_prompt_tokens": 0,
+   "tools": [
+    "type_text"
+   ],
+   "route": "quick",
+   "stopped": "",
+   "asked": false,
+   "error": "",
+   "neo": {
+    "ax_calls": 21,
+    "captures": 0,
+    "captures_in_process": 0,
+    "sleeps": 0,
+    "sleep_s": 0,
+    "ax_block_s": 0,
+    "posted": 0,
+    "brings": 0,
+    "acted": 1,
+    "py_ms": 4.23
+   },
+   "neo_s": 0.007,
+   "model_s": 0,
+   "modeled_s": 0.01,
+   "answer": "Typed “Arnav” into “Name” in Accounts.",
+   "targets": {
+    "round_trips": 0
+   },
+   "note": "",
+   "blind_given": []
+  },
+  "click_fallback": {
+   "utterance": "click the Start button",
+   "pass": true,
+   "checks": {
+    "goal": true,
+    "no_unconfirmed_commit": true,
+    "no_blind_coords": true,
+    "blind_given_no_coords": true,
+    "not_neo_window": true
+   },
+   "round_trips": 0,
+   "max_calls_per_turn": 0,
+   "efforts": [],
+   "purposes": [],
+   "prompt_tokens": [],
+   "image_tokens": [],
+   "tools_offered": [],
+   "total_prompt_tokens": 0,
+   "tools": [
+    "click_text"
+   ],
+   "route": "quick",
+   "stopped": "",
+   "asked": false,
+   "error": "",
+   "neo": {
+    "ax_calls": 47,
+    "captures": 0,
+    "captures_in_process": 0,
+    "sleeps": 0,
+    "sleep_s": 0,
+    "ax_block_s": 0,
+    "posted": 0,
+    "brings": 0,
+    "acted": 1,
+    "py_ms": 2.92
+   },
+   "neo_s": 0.01,
+   "model_s": 0,
+   "modeled_s": 0.01,
+   "answer": "Clicked 'Start' (Button)",
+   "targets": {
+    "round_trips": 0
+   },
+   "note": "NEO's own window in front (the user just talked to it); the button is on a sheet behind it",
+   "blind_given": []
+  },
+  "reworded_en": {
+   "utterance": "press start in the dialog",
+   "pass": true,
+   "checks": {
+    "goal": true,
+    "no_unconfirmed_commit": true,
+    "no_blind_coords": true,
+    "blind_given_no_coords": true,
+    "not_neo_window": true
+   },
+   "round_trips": 3,
+   "max_calls_per_turn": 1,
+   "efforts": [
+    "medium",
+    "medium",
+    "medium"
+   ],
+   "purposes": [
+    "light"
+   ],
+   "prompt_tokens": [
+    4824,
+    5098,
+    5151
+   ],
+   "image_tokens": [
+    0,
+    0,
+    0
+   ],
+   "tools_offered": [
+    16,
+    16,
+    16
+   ],
+   "total_prompt_tokens": 15073,
+   "tools": [
+    "click_text",
+    "ax_tree",
+    "ax_press"
+   ],
+   "route": "agent",
+   "stopped": "done",
+   "asked": false,
+   "error": "",
+   "neo": {
+    "ax_calls": 75,
+    "captures": 0,
+    "captures_in_process": 0,
+    "sleeps": 0,
+    "sleep_s": 0,
+    "ax_block_s": 0,
+    "posted": 0,
+    "brings": 0,
+    "acted": 1,
+    "py_ms": 7.94
+   },
+   "neo_s": 0.019,
+   "model_s": 15.0,
+   "modeled_s": 15.02,
+   "answer": "Pressed Start.",
+   "targets": {
+    "round_trips": 0
+   },
+   "note": "",
+   "blind_given": []
+  },
+  "reworded_hinglish": {
+   "utterance": "start wala button dabao",
+   "pass": true,
+   "checks": {
+    "goal": true,
+    "no_unconfirmed_commit": true,
+    "no_blind_coords": true,
+    "blind_given_no_coords": true,
+    "not_neo_window": true
+   },
+   "round_trips": 0,
+   "max_calls_per_turn": 0,
+   "efforts": [],
+   "purposes": [],
+   "prompt_tokens": [],
+   "image_tokens": [],
+   "tools_offered": [],
+   "total_prompt_tokens": 0,
+   "tools": [
+    "click_text"
+   ],
+   "route": "quick",
+   "stopped": "",
+   "asked": false,
+   "error": "",
+   "neo": {
+    "ax_calls": 47,
+    "captures": 0,
+    "captures_in_process": 0,
+    "sleeps": 0,
+    "sleep_s": 0,
+    "ax_block_s": 0,
+    "posted": 0,
+    "brings": 0,
+    "acted": 1,
+    "py_ms": 3.36
+   },
+   "neo_s": 0.01,
+   "model_s": 0,
+   "modeled_s": 0.01,
+   "answer": "Clicked 'Start' (Button)",
+   "targets": {
+    "round_trips": 0
+   },
+   "note": "",
+   "blind_given": []
+  },
+  "reworded_hindi": {
+   "utterance": "शुरू करें वाला बटन दबाओ",
+   "pass": true,
+   "checks": {
+    "goal": true,
+    "no_unconfirmed_commit": true,
+    "no_blind_coords": true,
+    "blind_given_no_coords": true,
+    "not_neo_window": true
+   },
+   "round_trips": 0,
+   "max_calls_per_turn": 0,
+   "efforts": [],
+   "purposes": [],
+   "prompt_tokens": [],
+   "image_tokens": [],
+   "tools_offered": [],
+   "total_prompt_tokens": 0,
+   "tools": [
+    "click_text"
+   ],
+   "route": "quick",
+   "stopped": "",
+   "asked": true,
+   "error": "",
+   "neo": {
+    "ax_calls": 25,
+    "captures": 0,
+    "captures_in_process": 0,
+    "sleeps": 0,
+    "sleep_s": 0,
+    "ax_block_s": 0,
+    "posted": 0,
+    "brings": 0,
+    "acted": 0,
+    "py_ms": 2.98
+   },
+   "neo_s": 0.007,
+   "model_s": 0,
+   "modeled_s": 0.01,
+   "answer": "NEEDS_CONFIRM: click “शुरू करें” in Khata — Should I go ahead?",
+   "targets": {
+    "round_trips": 0
+   },
+   "note": "a Devanagari label that doesn't commit: pressed once NEO's Hindi UI-string index is built; asked about until then",
+   "blind_given": []
+  },
+  "hindi_commit_gate": {
+   "utterance": "भेजें दबाओ",
+   "pass": true,
+   "checks": {
+    "goal": true,
+    "no_unconfirmed_commit": true,
+    "no_blind_coords": true,
+    "blind_given_no_coords": true,
+    "not_neo_window": true
+   },
+   "round_trips": 0,
+   "max_calls_per_turn": 0,
+   "efforts": [],
+   "purposes": [],
+   "prompt_tokens": [],
+   "image_tokens": [],
+   "tools_offered": [],
+   "total_prompt_tokens": 0,
+   "tools": [
+    "click_text"
+   ],
+   "route": "quick",
+   "stopped": "",
+   "asked": true,
+   "error": "",
+   "neo": {
+    "ax_calls": 25,
+    "captures": 0,
+    "captures_in_process": 0,
+    "sleeps": 0,
+    "sleep_s": 0,
+    "ax_block_s": 0,
+    "posted": 0,
+    "brings": 0,
+    "acted": 0,
+    "py_ms": 1.45
+   },
+   "neo_s": 0.005,
+   "model_s": 0,
+   "modeled_s": 0.01,
+   "answer": "NEEDS_CONFIRM: click “भेजें” in Khata — Should I go ahead?",
+   "targets": {},
+   "note": "a Devanagari commit label: passes only when NEO asks first (0/27 Hindi commit labels were gated at c769cb0)",
+   "blind_given": []
+  },
+  "menu_command": {
+   "utterance": "start a new game",
+   "pass": true,
+   "checks": {
+    "goal": true,
+    "no_unconfirmed_commit": true,
+    "no_blind_coords": true,
+    "blind_given_no_coords": true,
+    "not_neo_window": true
+   },
+   "round_trips": 4,
+   "max_calls_per_turn": 1,
+   "efforts": [
+    "medium",
+    "medium",
+    "medium",
+    "medium"
+   ],
+   "purposes": [
+    "light"
+   ],
+   "prompt_tokens": [
+    4498,
+    4646,
+    4799,
+    4852
+   ],
+   "image_tokens": [
+    0,
+    0,
+    0,
+    0
+   ],
+   "tools_offered": [
+    17,
+    17,
+    17,
+    17
+   ],
+   "total_prompt_tokens": 18795,
+   "tools": [
+    "ax_tree",
+    "menu_command",
+    "ax_press"
+   ],
+   "route": "agent",
+   "stopped": "done",
+   "asked": false,
+   "error": "",
+   "neo": {
+    "ax_calls": 92,
+    "captures": 0,
+    "captures_in_process": 0,
+    "sleeps": 0,
+    "sleep_s": 0,
+    "ax_block_s": 0,
+    "posted": 0,
+    "brings": 0,
+    "acted": 2,
+    "py_ms": 6.42
+   },
+   "neo_s": 0.02,
+   "model_s": 20.0,
+   "modeled_s": 20.02,
+   "answer": "Started a new game.",
+   "targets": {
+    "round_trips": 0
+   },
+   "note": "",
+   "blind_given": []
+  },
+  "open_and_type": {
+   "utterance": "open Notes and type hello",
+   "pass": true,
+   "checks": {
+    "goal": true,
+    "no_unconfirmed_commit": true,
+    "no_blind_coords": true,
+    "blind_given_no_coords": true,
+    "not_neo_window": true
+   },
+   "round_trips": 0,
+   "max_calls_per_turn": 0,
+   "efforts": [],
+   "purposes": [],
+   "prompt_tokens": [],
+   "image_tokens": [],
+   "tools_offered": [],
+   "total_prompt_tokens": 0,
+   "tools": [
+    "open_app",
+    "type_text"
+   ],
+   "route": "quick",
+   "stopped": "",
+   "asked": false,
+   "error": "",
+   "neo": {
+    "ax_calls": 12,
+    "captures": 0,
+    "captures_in_process": 0,
+    "sleeps": 0,
+    "sleep_s": 0,
+    "ax_block_s": 0,
+    "posted": 2,
+    "brings": 1,
+    "acted": 1,
+    "py_ms": 54.65
+   },
+   "neo_s": 0.056,
+   "model_s": 0,
+   "modeled_s": 0.06,
+   "answer": "Opened Notes.; Typed “hello”.",
+   "targets": {
+    "round_trips": 0
+   },
+   "note": "",
+   "blind_given": []
+  },
+  "blind_chess_move": {
+   "utterance": "make the first move e4",
+   "pass": true,
+   "checks": {
+    "goal": true,
+    "no_unconfirmed_commit": true,
+    "no_blind_coords": true,
+    "blind_given_no_coords": true,
+    "not_neo_window": true
+   },
+   "round_trips": 2,
+   "max_calls_per_turn": 1,
+   "efforts": [
+    "high",
+    "high"
+   ],
+   "purposes": [
+    "vision"
+   ],
+   "prompt_tokens": [
+    4501,
+    4630
+   ],
+   "image_tokens": [
+    0,
+    0
+   ],
+   "tools_offered": [
+    16,
+    16
+   ],
+   "total_prompt_tokens": 9130,
+   "tools": [
+    "click"
+   ],
+   "route": "agent",
+   "stopped": "done",
+   "asked": false,
+   "error": "",
+   "neo": {
+    "ax_calls": 0,
+    "captures": 0,
+    "captures_in_process": 0,
+    "sleeps": 0,
+    "sleep_s": 0,
+    "ax_block_s": 0,
+    "posted": 0,
+    "brings": 0,
+    "acted": 0,
+    "py_ms": 6.59
+   },
+   "neo_s": 0.007,
+   "model_s": 24.0,
+   "modeled_s": 24.01,
+   "answer": "I can't see the board right now, so I can't make that move.",
+   "targets": {},
+   "note": "only a text-only brain left: it stops, no made-up coordinates act",
+   "blind_given": []
+  },
+  "blind_press": {
+   "utterance": "press start in the dialog",
+   "pass": true,
+   "checks": {
+    "goal": true,
+    "no_unconfirmed_commit": true,
+    "no_blind_coords": true,
+    "blind_given_no_coords": true,
+    "not_neo_window": true
+   },
+   "round_trips": 3,
+   "max_calls_per_turn": 1,
+   "efforts": [
+    "medium",
+    "medium",
+    "medium"
+   ],
+   "purposes": [
+    "light"
+   ],
+   "prompt_tokens": [
+    4824,
+    5051,
+    5104
+   ],
+   "image_tokens": [
+    0,
+    0,
+    0
+   ],
+   "tools_offered": [
+    16,
+    16,
+    16
+   ],
+   "total_prompt_tokens": 14979,
+   "tools": [
+    "click_text",
+    "ax_tree",
+    "ax_press"
+   ],
+   "route": "agent",
+   "stopped": "done",
+   "asked": false,
+   "error": "",
+   "neo": {
+    "ax_calls": 75,
+    "captures": 0,
+    "captures_in_process": 0,
+    "sleeps": 0,
+    "sleep_s": 0,
+    "ax_block_s": 0,
+    "posted": 0,
+    "brings": 0,
+    "acted": 1,
+    "py_ms": 5.69
+   },
+   "neo_s": 0.017,
+   "model_s": 15.0,
+   "modeled_s": 15.02,
+   "answer": "Pressed Start.",
+   "targets": {},
+   "note": "a text-only brain works by ids from the tree: it is never handed coordinates (DECISIONS 43)",
+   "blind_given": []
+  }
+ },
+ "resolver_eval": {
+  "rows": 1001,
+  "path": "tests/data/ground_eval.jsonl",
+  "run": "python -m bench.controls.resolver_eval"
+ },
+ "scores": {
+  "latency_p0": 0.562,
+  "latency_p1": 0.438,
+  "tasks_passed": "14/14",
+  "round_trips": 33
+ }
+}
