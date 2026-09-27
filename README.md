@@ -136,6 +136,27 @@ NEO's state:
 
 The mapping lives in `ui/src/App.tsx` (`ORB`).
 
+### Checking NEO's computer controls
+
+If clicking, typing or dragging doesn't seem to work, say **"Neo, check your computer controls"** (or type it
+in the overlay; Hinglish works too: *"apne computer controls check karo"*). NEO then spends under a minute on
+its own **test window** — a small separate app it starts, top-left on your main display — and drives it only
+through its own tools, exactly as a model would: click at a point, right and double click, a screenshot turned
+into coordinates (a region and the whole screen), `ax_tree` → click by id, `ax_press`, `ax_set_value`,
+`type_text` with Hindi and emoji and with two lines, `hotkey` (Return and a menu shortcut), scrolling down and
+up, dragging a piece on a Chess-like board, drag and drop, bringing the window forward with `activate_app`, and
+a click on a second display if you have one. The window starts *behind* your app, so the first click shows
+whether a click on a window that isn't in front gets through (Chess's board ignores that click).
+
+While it runs, keep your hands off the mouse and keyboard: the first move, click or key press of yours stops it
+at once. It never clicks, scrolls or types anywhere but its test window — every event is checked before it is
+sent — and it won't start if something covers that window. Afterwards it closes the window, puts the pointer
+back and brings back the app you were in. The reply lists what worked and what didn't, with what NEO sent,
+what its tool answered and what actually arrived; the full report is saved in `~/.neo/selftest/`. Only your
+own request starts it — no model can. From a shell running inside NEO.app (for instance NEO's own shell tool),
+`python -m neo.selftest controls` runs the same test; anywhere else it only tells you to ask NEO, because it
+needs NEO.app's permissions.
+
 ## Configuration
 
 Everything is an environment variable with the `NEO_` prefix (or a line in `.env`). The useful ones:
@@ -235,6 +256,7 @@ neo/
   voice/      wake.py · local.py · live.py · audio.py · pipeline.py
   memory/     store.py (SQLite + FTS5 + vectors, playbooks, sessions) · embed.py · summarize.py
   server/     ws.py (websocket to the overlay)
+  selftest/   controls.py ("check your computer controls") · testwin.py (its test window) · watch.py (its safety)
 ui/           Tauri 2 + React overlay (src/App.tsx, src/ws.ts, src-tauri/src/lib.rs)
 tests/        72 tests, no network
 ```

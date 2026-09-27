@@ -587,7 +587,9 @@ def _run(args: argparse.Namespace) -> int:  # pragma: no cover - needs a real wi
     nc.addObserver_selector_name_object_(ctl, "appActive:", NSApplicationDidBecomeActiveNotification, None)
     nc.addObserver_selector_name_object_(ctl, "appInactive:", NSApplicationDidResignActiveNotification, None)
     nc.addObserver_selector_name_object_(ctl, "windowKey:", NSWindowDidBecomeKeyNotification, None)
-    nc.addObserver_selector_name_object_(ctl, "windowClosing:", NSWindowWillCloseNotification, None)
+    for w in (win, second_win):  # only the test's own windows (a drag image's closing is no reason to quit)
+        if w is not None:
+            nc.addObserver_selector_name_object_(ctl, "windowClosing:", NSWindowWillCloseNotification, w)
     nc.addObserver_selector_name_object_(ctl, "listScrolled:", NSViewBoundsDidChangeNotification, clip)
 
     def raw(event):

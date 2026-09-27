@@ -70,25 +70,27 @@ class Child:
 
 
 # The events the tap listens to: every way a person can use the mouse or the keyboard.
-def _tap_types() -> tuple[int, ...]:
+def _tap_types(keys: bool = True) -> tuple[int, ...]:
     import Quartz as Q
 
-    return (
+    mouse = (
         Q.kCGEventMouseMoved, Q.kCGEventLeftMouseDown, Q.kCGEventLeftMouseUp, Q.kCGEventRightMouseDown,
         Q.kCGEventRightMouseUp, Q.kCGEventLeftMouseDragged, Q.kCGEventRightMouseDragged,
         Q.kCGEventOtherMouseDown, Q.kCGEventOtherMouseUp, Q.kCGEventOtherMouseDragged, Q.kCGEventScrollWheel,
-        Q.kCGEventKeyDown, Q.kCGEventKeyUp, Q.kCGEventFlagsChanged,
     )  # fmt: skip
+    return (*mouse, Q.kCGEventKeyDown, Q.kCGEventKeyUp, Q.kCGEventFlagsChanged) if keys else mouse
 
 
 class Tap:
     """A listen-only event tap on a thread of its own: it sees every mouse and key event in this
     login session (NEO's own too) and hands each to `on_event(type, event)`. It can't change or
-    block anything."""
+    block anything. Listening to keys can take Input Monitoring on top of Accessibility: without
+    it the tap listens to the mouse alone (`keys` is False)."""
 
     def __init__(self, on_event: Callable[[int, Any], None]) -> None:
         self._on_event = on_event
         self._tap = None
+        self.keys = False
         self._stop = threading.Event()
         self._ready = threading.Event()
         self._thread: threading.Thread | None = None
@@ -102,10 +104,6 @@ class Tap:
     def _run(self) -> None:
         import Quartz as Q
 
-        mask = 0
-        for t in _tap_types():
-            mask |= Q.CGEventMaskBit(t)
-
         def callback(proxy, typ, event, refcon):
             if typ in (Q.kCGEventTapDisabledByTimeout, Q.kCGEventTapDisabledByUserInput):
                 if self._tap is not None:
@@ -118,9 +116,17 @@ class Tap:
             return event
 
         self._callback = callback  # kept alive as long as the tap
-        tap = Q.CGEventTapCreate(
-            Q.kCGSessionEventTap, Q.kCGHeadInsertEventTap, Q.kCGEventTapOptionListenOnly, mask, callback, None
-        )
+        tap = None
+        for keys in (True, False):
+            mask = 0
+            for t in _tap_types(keys):
+                mask |= Q.CGEventMaskBit(t)
+            tap = Q.CGEventTapCreate(
+                Q.kCGSessionEventTap, Q.kCGHeadInsertEventTap, Q.kCGEventTapOptionListenOnly, mask, callback, None
+            )
+            if tap is not None:
+                self.keys = keys
+                break
         if tap is None:
             self._ready.set()
             return

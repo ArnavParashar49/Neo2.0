@@ -425,14 +425,14 @@ async def _ax_tree(r: _Run) -> Check:
     if missing:
         return c.fail(f"no ids for {', '.join(missing)} (found {', '.join(ids) or 'nothing'})")
     off = []
-    for name in ("button_a", "button_b", "field"):
+    for name in ("button_a", "button_b", "field", "area"):
         e = ax.get(ids[name])
-        tx, ty, tw, th = r.targets[name]
-        if e is not None and (abs(e.x - tx) > 2 or abs(e.y - ty) > 2 or abs(e.w - tw) > 2 or abs(e.h - th) > 2):
-            off.append(f"{name} at ({e.x:.0f},{e.y:.0f} {e.w:.0f}×{e.h:.0f}), really ({tx:.0f},{ty:.0f} {tw:.0f}×{th:.0f})")
+        if e is not None and not contains(r.targets[name], *e.center, 1.0):  # where a click by id goes
+            tx, ty, tw, th = r.targets[name]
+            off.append(f"{name}'s center ({e.center[0]:.0f},{e.center[1]:.0f}) is outside ({tx:.0f},{ty:.0f} {tw:.0f}×{th:.0f})")
     if off:
         return c.fail("positions differ from the window's own: " + "; ".join(off), "clicks by id would land off target")
-    return c.ok("ids for Alpha, Bravo, the text field and the text area, at the window's own positions")
+    return c.ok("ids for Alpha, Bravo, the text field and the text area, each centered on the real control")
 
 
 async def _click_id(r: _Run) -> Check:
@@ -561,7 +561,9 @@ async def _scroll(r: _Run) -> Check:
     down = await r.wait_state(lambda s: float(s.get("list", 0)) > start + 1)
     if down is None:
         got = r.since(m, "raw_scroll")
-        return c.fail("the app got a scroll event, but the list didn't move" if got else "no scroll arrived")
+        if got:
+            return c.fail(f"the app got a scroll event (delta {got[-1].get('dy')}), but the list didn't move down")
+        return c.fail("no scroll arrived")
     lower = float(down["list"])
     back = await r.tool("scroll", x=x, y=y, dy=5)
     c.said += f" / {back.text}"
@@ -887,6 +889,7 @@ async def run(*, mac: Any = None, budget_s: float = _BUDGET_S, notify: Callable[
     pointer0 = await asyncio.to_thread(mac.pointer)
     saved_target = apps._target
     report.info["in front before"] = f"{prev_name or '?'} (pid {prev_pid})"
+    started = time.time()
     tmp = Path(tempfile.mkdtemp(prefix="neo-selftest-"))
     log = tmp / "events.jsonl"
     log.touch()
@@ -899,6 +902,9 @@ async def run(*, mac: Any = None, budget_s: float = _BUDGET_S, notify: Callable[
         ready, why = await _wait_ready(reader, child, _READY_S)
         if ready is None:
             report.refused = why
+            with contextlib.suppress(OSError):  # what the window said on its way out, for the report
+                if err := log.with_suffix(".stderr").read_text(errors="replace").strip():
+                    report.info["test window error"] = err[-400:]
             return report
         report.info["test window"] = f"{ready.get('name')} (pid {child.pid}), {ready.get('frame')}"
         report.info["displays"] = ready.get("screens")
@@ -925,12 +931,11 @@ async def run(*, mac: Any = None, budget_s: float = _BUDGET_S, notify: Callable[
         r = _Run(mac, child, reader, ready, watch, main)
         r.can_capture = bool(await asyncio.to_thread(_can_capture, mac))
         try:
-            report.info["watching"] = await asyncio.to_thread(watch.arm, r.cell(6, 1))
+            mode = await asyncio.to_thread(watch.arm, r.cell(6, 1))
         except Stop as e:
             report.stopped = str(e)
             return report
-        if report.info["watching"] == "pointer":
-            report.info["watching"] = "pointer only (no event tap: keys you press can't be noticed)"
+        report.info["watching"] = _WATCHING.get(mode, mode)
         if watch.stopped:
             report.stopped = f"{watch.stopped}, so I stopped before doing anything"
             return report
@@ -954,6 +959,12 @@ async def run(*, mac: Any = None, budget_s: float = _BUDGET_S, notify: Callable[
         if report.checks:
             report.checks.append(_feedback(report.checks))
         return report
+    except Exception as e:  # noqa: BLE001 - a broken test is a report too, never a crash of the request
+        if report.checks:
+            report.stopped = f"the test itself broke ({e!r:.160})"
+        else:
+            report.refused = f"the test itself broke ({e!r:.160})"
+        return report
     finally:
         if child is not None and child.alive():
             with contextlib.suppress(Exception):
@@ -961,6 +972,7 @@ async def run(*, mac: Any = None, budget_s: float = _BUDGET_S, notify: Callable[
         if watch is not None:
             await asyncio.to_thread(watch.disarm)
         apps._target = saved_target
+        _forget_test_tree(started)
         if child is not None:
             await asyncio.to_thread(child.stop)
         took_over = bool(watch is not None and watch.stopped)
@@ -983,6 +995,22 @@ async def _restore(mac: Any, report: Report, name: str, pid: int, test_pid: int,
             return
         ok = await asyncio.to_thread(mac.activate, pid)
         report.info["in front after"] = name if ok else f"couldn't bring {name} back"
+
+
+_WATCHING = {
+    "tap": "your mouse and keyboard (an event tap)",
+    "tap-mouse": "your mouse (an event tap; keys you press can't be noticed without Input Monitoring)",
+    "pointer": "pointer only (no event tap: keys you press can't be noticed)",
+}
+
+
+def _forget_test_tree(since: float) -> None:
+    """The ax_tree ids the test read point into its window, which is about to close: a model that
+    clicked one later would hit whatever is there then. Dropped, so it has to look again."""
+    from neo.tools.computer import ax
+
+    if ax._last_tree and ax._last_tree_ts >= since:
+        ax._last_tree, ax._last_tree_ts, ax._last_tree_app = {}, 0.0, ""
 
 
 def _can_capture(mac: Any) -> bool:

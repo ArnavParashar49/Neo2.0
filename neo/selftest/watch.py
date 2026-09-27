@@ -71,7 +71,7 @@ class Watch:
         self.tag = secrets.randbits(40) | 1  # this run's mark on NEO's own events
         self.stopped = ""  # what the user did: the run stops
         self.refused = ""  # an event that wouldn't have reached the test window: the run stops
-        self.mode = "off"  # "tap": the user's own events are seen; "pointer": only a moved pointer is
+        self.mode = "off"  # "tap": the user's events are seen ("tap-mouse": not keys); "pointer": a moved pointer
         self.sent: list[dict] = []  # every event NEO posted during the run
         self.foreign: list[str] = []
         self._down: dict | None = None  # a button NEO pressed and hasn't let go of yet
@@ -107,7 +107,7 @@ class Watch:
             self._tap = None
             self.mode = "pointer"
         else:
-            self.mode = "tap"
+            self.mode = "tap" if getattr(self._tap, "keys", True) else "tap-mouse"
             if self.foreign:  # the user was using the mouse or keyboard while the test began
                 self.stopped = self.foreign[0]
         return self.mode

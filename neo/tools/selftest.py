@@ -47,6 +47,9 @@ async def selftest_controls(a: dict, c: ToolContext):
         from neo.events import bus
         from neo.selftest import controls
 
-        report = await controls.run(notify=bus().note)
+        try:
+            report = await controls.run(notify=bus().note)
+        except Exception as e:  # noqa: BLE001 - said to the user, never handed to a model to "fix"
+            return ToolOutput(f"The controls check broke before it could finish: {e!r:.160}", say=True)
         saved = await asyncio.to_thread(controls.save, report)
     return ToolOutput(report.reply(saved), say=True)

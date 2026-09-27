@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import os
 import subprocess
+import time
 import types
 from pathlib import Path
 
@@ -342,8 +343,8 @@ class Desk:
 
 
 class FakeTap:
-    def __init__(self, desk, on_event, strip=False):
-        self.desk, self.on_event, self.strip = desk, on_event, strip
+    def __init__(self, desk, on_event, strip=False, keys=True):
+        self.desk, self.on_event, self.strip, self.keys = desk, on_event, strip, keys
         desk.taps.append(self)
 
     def see(self, ev):
@@ -422,7 +423,7 @@ class FakeMac:
     def tap(self, on_event):
         if self.desk.opts.get("no_tap"):
             return None
-        return FakeTap(self.desk, on_event, strip=bool(self.desk.opts.get("tap_blind")))
+        return FakeTap(self.desk, on_event, strip=bool(self.desk.opts.get("tap_blind")), keys=not self.desk.opts.get("tap_mouse_only"))
 
 
 def fake_quartz(desk):
@@ -473,8 +474,12 @@ def fake_quartz(desk):
 def ax_elements(desk):
     from neo.tools.computer.ax import Element
 
+    dx, dy = desk.opts.get("ax_shift", (0, 0))  # Accessibility reporting controls somewhere else
+
     def el(eid, role, title, value, name, frame=None, actions=()):
         x, y, w, h = frame or TARGETS[name]
+        if name in ("button_a", "button_b", "field", "area"):
+            x, y = x + dx, y + dy
         return Element(eid, role, title, value, x, y, w, h, actions=list(actions), ref=(TEST_PID, name))
 
     ax_x, ax_y, ax_w, ax_h = TARGETS["area"]
@@ -504,6 +509,8 @@ def mac(monkeypatch, tmp_path):
     monkeypatch.setattr(inp, "time", types.SimpleNamespace(sleep=lambda s: None))  # NEO's input pacing
     monkeypatch.setattr(inp, "_watch", None)
     monkeypatch.setattr(ax, "_last_tree", {})
+    monkeypatch.setattr(ax, "_last_tree_ts", 0.0)
+    monkeypatch.setattr(ax, "_last_tree_app", "")
     monkeypatch.setattr(apps, "_target", ("Notes", 1e18))  # an app NEO opened a moment ago
 
     def snapshot(app=None, *, max_lines=250):
@@ -512,6 +519,7 @@ def mac(monkeypatch, tmp_path):
 
         els = ax_elements(desk) if pid == TEST_PID else [Element("e1", "AXButton", "Reload", "", 5, 30, 20, 20, ref=(USER_PID, "x"))]
         ax._last_tree = {e.id: e for e in els}
+        ax._last_tree_ts, ax._last_tree_app = time.time(), name.lower()
         return "\n".join([f"App: {name}"] + ["  " + e.line() for e in els])
 
     def press(eid):
@@ -592,7 +600,7 @@ def _kinds(events):
 
 def test_everything_arrives_and_the_report_says_so(mac):
     from neo.tools import computer
-    from neo.tools.computer import apps
+    from neo.tools.computer import apps, ax
     from neo.tools.computer import input as inp
 
     desk = mac.desk
@@ -624,6 +632,7 @@ def test_everything_arrives_and_the_report_says_so(mac):
     assert desk.alive is False
     assert inp._watch is None and computer._test_window_pid == 0
     assert apps._target == target_before
+    assert ax._last_tree == {}  # no id from the test window outlives it
     assert report.seconds < 60
 
 
@@ -854,3 +863,50 @@ def test_the_report_is_saved_where_neo_keeps_its_data(mac):
     assert "Controls check: 19 of 19 passed" in saved.read_text()
     assert saved.with_suffix(".json").exists()
     assert oct(saved.stat().st_mode & 0o777) == "0o600"
+
+
+def test_accessibility_positions_off_the_window_are_reported_and_never_clicked(mac):
+    """ax_tree says the buttons are 500 pt to the right — past the test window's edge, over Safari.
+    The report says so, and the click by id that would have landed on Safari is never sent."""
+    mac.set(ax_shift=(500, 0))
+    report = _run(mac)
+    checks = _by_name(report)
+    assert checks["ax_tree"].status == "fail" and "is outside" in checks["ax_tree"].arrived
+    assert "would have gone to Safari" in report.stopped
+    assert checks["click_id"].status == "stopped"
+    assert mac.desk.stray == []
+    *during, last = mac.desk.posted
+    assert all(inside(FRAME, *e["pos"]) for e in during if "pos" in e)
+    assert MOUSE[last["type"]] == "move" and last["pos"] == (900.0, 700.0)  # only the pointer, put back
+
+
+def test_a_tap_without_keys_still_watches_the_mouse_and_says_so(mac):
+    mac.set(tap_mouse_only=True)
+    report = _run(mac)
+    assert report.info["watching"].startswith("your mouse (an event tap; keys")
+    assert report.ok, report.text()
+
+
+def test_a_window_that_never_starts_is_explained(mac, monkeypatch):
+    def launch(log, tag):
+        log.with_suffix(".stderr").write_text("Traceback ...\nImportError: no AppKit here\n")
+        mac.desk.alive = False  # it died at once
+        return FakeChild(mac.desk)
+
+    monkeypatch.setattr(mac, "launch", launch)
+    report = _run(mac)
+    assert report.refused == "the test window quit before it was ready"
+    assert "ImportError: no AppKit here" in report.info["test window error"]
+    assert mac.desk.posted == []
+
+
+def test_a_broken_step_is_a_report_not_a_crash(mac, monkeypatch):
+    from neo.tools.computer import input as inp
+
+    def broken(*a, **k):
+        raise RuntimeError("the window server went away")
+
+    monkeypatch.setattr(mac, "windows", broken)  # the preflight's own look at the screen fails
+    report = _run(mac)
+    assert report.refused.startswith("the test itself broke") and "window server went away" in report.refused
+    assert mac.desk.posted == [] and mac.desk.alive is False and inp._watch is None
