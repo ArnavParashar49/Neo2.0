@@ -801,12 +801,17 @@ def test_the_script_rule_comes_with_applescript_when_more_tools_brings_it_in(mon
 
 def test_click_text_pressed_and_watched_through_accessibility_is_verified():
     """click_text that pressed its control through Accessibility and saw it change checked its own
-    work, like ax_press: no check turn for it. Clicked with the mouse (no Effect), it didn't."""
+    work, like ax_press: no check turn for it (its Effect says so). Clicked with the mouse (no
+    Effect), or at words read off the screen (the pointer's outcome: a change at the point), it
+    didn't."""
     watched = ToolResult("c1", "click_text", "Clicked 'Start' (Button)")
-    watched.effect = _eff(True)
+    watched.effect = _eff(True, verified=True)
     assert batch.verified("click_text", watched)
     mouse = ToolResult("c2", "click_text", "Clicked 'Start' (Button) at (10, 20)")
     assert not batch.verified("click_text", mouse)
+    read = ToolResult("c4", "click_text", "Clicked the words 'Start' — found by reading the screen.")
+    read.effect = _eff(True)
+    assert not batch.verified("click_text", read) and not batch.seen("click_text", read)
     sheet = ToolResult("c3", "click_text", "Clicked 'New…' (Button)")
-    sheet.effect = _eff(True, sheet="“Save?”")
+    sheet.effect = _eff(True, sheet="“Save?”", verified=True)
     assert not batch.verified("click_text", sheet)  # (a sheet opened: the model answers it first)

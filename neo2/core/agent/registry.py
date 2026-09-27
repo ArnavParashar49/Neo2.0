@@ -45,12 +45,16 @@ class Effect:
     something changed where it acted (None: couldn't tell); ``scene_changed``: the front app, its
     window or a sheet changed — what follows was planned on a screen that is gone; ``sheet``: the
     sheet or dialog now open ("" = none), as NEO's own words; ``looked``: the result carries a look
-    at the screen after the action (its picture, or the words of it), so no separate look is needed."""
+    at the screen after the action (its picture, or the words of it), so no separate look is needed;
+    ``verified``: NEO checked through Accessibility that it worked (True: a press whose element or
+    window visibly changed), or that it couldn't (False: the mouse, pixels, nothing seen) — None: the
+    tool doesn't say (neo2.core.agent.batch judges it by the tool)."""
 
     changed: bool | None = None
     scene_changed: bool = False
     sheet: str = ""
     looked: bool = False
+    verified: bool | None = None
 
 
 @dataclass(frozen=True)

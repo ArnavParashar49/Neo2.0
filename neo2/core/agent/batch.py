@@ -4,12 +4,13 @@ A model may answer with several tool calls at once. The loop runs them in order 
 and this module says, from what each action did, when to stop and when the model has already seen
 enough:
 
-* **stop at the first action that went wrong** — it failed, it missed (a click, drag or scroll
-  that changed nothing where it acted), or it changed the screen under the rest of the batch (a
-  sheet or dialog opened or closed, another window or app came forward). The actions after it are
-  skipped with a note; looks still run (they change nothing). This is how batched computer actions
-  are run elsewhere too: in order, stopping at the first failure, so a batch never runs blind past
-  a miss. A command that rightly changes nothing anyone sees (a menu's Copy) is no miss;
+* **stop at the first action on the screen that went wrong** — it failed, it missed (a click,
+  drag or scroll that changed nothing where it acted), or it changed the screen under the rest of
+  the batch (a sheet or dialog opened or closed, another window or app came forward). The actions
+  after it are skipped with a note; looks still run (they change nothing). This is how batched
+  computer actions are run elsewhere too: in order, stopping at the first failure, so a batch never
+  runs blind past a miss. A command that rightly changes nothing anyone sees (a menu's Copy) is no
+  miss, and a failed call off the screen (a reminder, a mail) stops nothing;
 * **no separate check turn** when the model has already seen the state after every action since
   it last looked: each result carried a picture of it (an after-look), or NEO checked it through
   Accessibility (a value read back, a press whose element or window visibly changed). When a check
@@ -49,6 +50,7 @@ _MISS_WORDS = ("Nothing visibly changed",)
 # didn't land. Anything else may rightly change nothing anyone sees (a menu's Copy, a keystroke):
 # its changed=False is no miss unless its Effect says so (``missed``, if Step 0 settles on one).
 _POINTER = frozenset({"click", "drag", "scroll", "click_text"})
+_SCREEN_CATEGORY = "computer"  # the tools that work the screen (a registered tool's category)
 _SCENE_WORDS = (
     "a sheet or dialog opened",
     "the sheet or dialog closed",
@@ -56,11 +58,13 @@ _SCENE_WORDS = (
     "the window changed",
 )
 # NEO's actions that check their own work through Accessibility: a value read back after it was
-# set (the tool fails otherwise), a press or a menu item whose element, window or sheet changed —
-# click_text's too, when it pressed the control through Accessibility and watched it (its Effect
-# then says what changed; a click it had to make with the mouse carries none: not verified).
+# set (the tool fails otherwise), a press or a menu item whose element, window or sheet changed.
+# A tool that may act either way says which in its Effect (``verified``): click_text is verified
+# only when it pressed the control through Accessibility and saw it change — a click it made with
+# the mouse (at the element, or at words read off the screen) carries the pointer's outcome, and a
+# change at the point (a press highlight) is no check: not verified.
 _READ_BACK = frozenset({"ax_set_value"})
-_AX_PRESS = frozenset({"ax_press", "menu_command", "click_text"})
+_AX_PRESS = frozenset({"ax_press", "menu_command"})
 # What a skipped action's result says (history.halted() knows "skipped: " is no result).
 SKIPPED = "skipped: an earlier action in this turn {why} — look at its result first, then decide"
 _HALTS = ("NEEDS_CONFIRM", "NEEDS_USER", "skipped: ")
@@ -103,8 +107,13 @@ def moved_scene(r: Any) -> bool:
     return any(w in text for w in _SCENE_WORDS)
 
 
-def stop_reason(r: ToolResult) -> str:
-    """Why the actions after this one in the same turn must not run ("" = they may)."""
+def stop_reason(r: ToolResult, category: str = _SCREEN_CATEGORY) -> str:
+    """Why the actions after this one in the same turn must not run ("" = they may). Only an action
+    on the screen (`category`: its tool's) stops them: they were chosen for the screen it failed on,
+    missed or changed. Any other call (a reminder, a mail, a file) that failed says so in its own
+    result and the others run as asked, each passing its own gates."""
+    if category != _SCREEN_CATEGORY:
+        return ""
     if not r.ok:
         return "failed"
     if missed(r):
@@ -222,7 +231,6 @@ LOOK = "look"  # the eyes' look tool (neo2.core.tools.computer.observe), when th
 LOOK_TOOL_S = 2.5  # the look tool's whole call (its own walk is bounded at 1.5 s)
 _LOOK_TOOLS = frozenset({LOOK, "ax_tree", "screenshot"})  # a run given one of these may be shown a look
 _PICTURE_TOOLS = frozenset({LOOK, "screenshot"})  # …and a picture only with one of these
-_SCREEN_CATEGORY = "computer"
 
 
 def _observer() -> Any | None:

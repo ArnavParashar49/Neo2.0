@@ -247,8 +247,9 @@ async def _run_calls(
     # Keep the model's order: consecutive read-only (parallel_safe) calls run together, any
     # side-effect call runs at its own position. Once a call asks the human, nothing after it
     # runs — the rest get synthetic results so every tool_call still has a matching result.
-    # An action that failed, changed nothing or changed the screen under the rest stops the
-    # actions after it (neo2.core.agent.batch): they were chosen for a screen that isn't there any more.
+    # An action on the screen that failed, changed nothing or changed the screen under the rest stops
+    # the actions after it (neo2.core.agent.batch): they were chosen for a screen that isn't there any
+    # more. Any other failed call (a reminder, a mail) leaves the rest to run, each on its own.
     # Looks after it still run — they change nothing, and they are what the model needs next.
     results: list[ToolResult] = []
     halted = False
@@ -277,7 +278,7 @@ async def _run_calls(
             results.append(r)
             i += 1
             if i < len(calls) and not _halt_kind(r.content) and not stop:
-                stop = batch.stop_reason(r)
+                stop = batch.stop_reason(r, t.category if t else "")
                 if stop:
                     log.info(f"  ~ {c.name} {stop}: the {len(calls) - i} call(s) after it wait for the model")
         if any(_halt_kind(r.content) for r in results):
