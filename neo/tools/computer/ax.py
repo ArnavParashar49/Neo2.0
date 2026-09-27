@@ -200,11 +200,16 @@ def _same(a, b) -> bool:
 # the model never sees it in a screenshot, so a click aimed at what's under it would land on NEO.
 # No input tool ever acts on it.
 _OWN_NAMES = frozenset({"neo", "neo-ui"})  # the overlay, by the names it runs under
+# While the controls self-test runs, its test window's pid (neo.tools.computer.allow_test_window):
+# NEO started it, so macOS holds NEO responsible for it — but it is the one app the test acts in.
+_test_window_pid = 0
 
 
 def is_neo(pid: int, name: str = "") -> bool:
     """One of NEO's own processes (the app that launched this core, its overlay), by pid — or its
-    overlay by name (a development run starts it apart)."""
+    overlay by name (a development run starts it apart). Never the self-test's own test window."""
+    if pid and pid == _test_window_pid:
+        return False
     if " ".join(str(name or "").split()).casefold() in _OWN_NAMES:
         return True
     if not pid or pid <= 0:

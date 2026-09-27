@@ -7,6 +7,8 @@ from __future__ import annotations
 import math
 import re
 import time
+from collections.abc import Callable
+from typing import Any
 
 import Quartz as Q
 
@@ -114,7 +116,15 @@ _SHIFTED = {
 }  # fmt: skip
 
 
+# While the controls self-test runs (neo.selftest), every event is shown to its watcher before it
+# is posted: the watcher marks it as NEO's own and raises instead when it wouldn't reach the test
+# window, or when the user has taken over the mouse or keyboard. None the rest of the time.
+_watch: Callable[[Any], None] | None = None
+
+
 def _post(ev) -> None:
+    if _watch is not None:
+        _watch(ev)
     effects.guard("input", "post a keyboard or mouse event", via=Q.CGEventPost)
     Q.CGEventPost(Q.kCGHIDEventTap, ev)
 

@@ -33,6 +33,7 @@ def _env() -> dict[str, str]:
         env = {k: v for k, v in os.environ.items() if not _SECRET_ENV.search(k) and not k.startswith("GIT_CONFIG")}
     env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:" + os.environ.get("PATH", "/usr/bin:/bin")
     env.update(policy.GIT_SAFE_ENV)
+    env["NEO_SHELL"] = "1"  # a command NEO runs (a model may have chosen it): NEO's own self-tests refuse it
     return env
 
 

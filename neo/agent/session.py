@@ -235,6 +235,7 @@ class Session:
             return Reply("", "chat")
         job = f"j{next(_job_ids)}"
         if from_user:
+            bus().new_user_turn()
             await bus().say(text, role="user", job=job)
 
         if (p := confirm.peek()) is not None:

@@ -7,6 +7,8 @@ import functools
 import re
 import sys
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 from neo import runtime
@@ -899,6 +901,8 @@ def _protected(owner: str, pid: int = 0) -> bool:
     user's to press, never NEO's), and any app in the `protected_apps` setting — a host's own
     approval dialog, for one. Matched on the app's name, bundle id or executable's name (`pid`:
     the app's process, when that's what is known)."""
+    if pid and pid == ax._test_window_pid:
+        return False  # the controls self-test's own window, while it runs (allow_test_window)
     name = (owner or "").strip().lower()
     if name in _NEVER_TYPE_INTO:
         return True
@@ -952,6 +956,37 @@ async def _off_limits_el(e: ax.Element, pid: int, owner: str) -> bool:
         return _protected(owner, pid)
     return await _protected_at(owner, *e.center)
 
+# The controls self-test's own test window (neo.selftest.controls), by its pid, while that test
+# runs: a separate app NEO started — NEO's child, so macOS holds NEO responsible for it — never NEO's
+# overlay. It is the one exception to the rules above, should they ever see it as NEO's: by pid
+# (ax._test_window_pid, which ax.is_neo and _protected honour), so nothing else that shares a name or
+# a bundle gets through.
+
+
+@contextmanager
+def allow_test_window(pid: int) -> Iterator[None]:
+    """For the length of a controls self-test: its test window (this pid, and only it) may be typed
+    into even if a protection of NEO's own windows would take it for one of them."""
+    ax._test_window_pid = int(pid)
+    try:
+        yield
+    finally:
+        ax._test_window_pid = 0
+
+
+def _test_window_front() -> bool:
+    if not ax._test_window_pid:
+        return False
+    from neo.tools.computer.focus import front_app
+
+    return front_app()[1] == ax._test_window_pid
+
+
+def __getattr__(name: str):
+    if name == "_test_window_pid":  # (read where it lives: set and cleared by allow_test_window)
+        return ax._test_window_pid
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 async def _guard_front(want: str = "") -> str | None:
     """Keystrokes only ever go to the app NEO is working in.
@@ -971,7 +1006,7 @@ async def _guard_front(want: str = "") -> str | None:
                 f"so I didn't type or press anything — click {real} and say it again."
             )
         front = real
-    if _protected(front):
+    if _protected(front) and not _test_window_front():
         return confirm.ask_user("click where you want me to type first.")
     return None
 

@@ -24,7 +24,7 @@ _MODULES = [
     "neo.tools.browse",
 ]  # fmt: skip
 _MAC_ONLY = ["neo.tools.media"]
-_MAC_MODULES = ["neo.tools.computer"]
+_MAC_MODULES = ["neo.tools.computer", "neo.tools.selftest"]
 
 
 def load_all() -> list[str]:
@@ -93,6 +93,8 @@ REFUSED: dict[str, str] = {
     "process-wide (NEO.app's), not per agent",
     "browse": "browse isn't available to embedded agents yet: its jobs are NEO.app's (one browser, one "
     "card, one job to pick up again); give the agent the browser tools and it browses itself",
+    "selftest_controls": "selftest_controls is NEO.app's own check of its computer controls (its test "
+    "window, its user's words): never an embedded agent's",
 }
 
 

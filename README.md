@@ -138,6 +138,32 @@ NEO's state:
 
 The mapping lives in `ui/src/App.tsx` (`ORB`).
 
+### Checking NEO's computer controls
+
+If clicking, typing or dragging doesn't seem to work, say **"Neo, check your computer controls"** (or type it
+in the overlay; Hinglish works too: *"apne computer controls check karo"*). NEO then spends under a minute on
+its own **test window** — a small separate app it starts, top-left on your main display — and drives it only
+through its own tools, exactly as a model would: click at a point, right and double click, a screenshot turned
+into coordinates (a region and the whole screen), `ax_tree` → click by id, `ax_press`, `ax_set_value`,
+`type_text` with Hindi and emoji and with two lines, `hotkey` (Return and a menu shortcut), scrolling down and
+up, dragging a piece on a Chess-like board, drag and drop, bringing the window forward with `activate_app`, and
+a click on a second display if you have one. The window starts *behind* your app, so the first click shows
+whether a click on a window that isn't in front gets through (Chess's board ignores that click).
+
+While it runs, keep your hands off the mouse and keyboard: the first move, click or key press of yours stops it
+at once. It never clicks, scrolls or types anywhere but its test window — every event is checked before it is
+sent — and it won't start if something covers that window, while another NEO job is still at work, or while a
+mouse button is held down. Afterwards it closes the window, puts the pointer back and brings back the app you
+were in — unless you've taken over the mouse or keyboard (even as it finishes) or gone to another app: then
+it leaves both as they are. The reply lists what worked and what didn't, with what NEO sent, what its tool
+answered and what actually arrived; the full report is saved in `~/.neo/selftest/`.
+
+Only your own words start it ("your computer controls", "NEO's", *apne* — "test the input controls" could be
+about a game), once per request: no model can, and a model handing your earlier words back doesn't run it
+again. For developers, `python -m neo.selftest controls` runs the same test from your own Terminal window, with
+that terminal's permissions (Accessibility; Screen Recording for the screenshot checks); it refuses to run as a
+command NEO itself runs (its shell tool) or without an interactive terminal.
+
 ## Configuration
 
 Everything is an environment variable with the `NEO_` prefix (or a line in `.env`). The useful ones:
@@ -482,6 +508,7 @@ neo/
   voice/      wake.py · local.py · live.py · audio.py · pipeline.py
   memory/     store.py (SQLite + FTS5 + vectors, playbooks, sessions) · embed.py · summarize.py
   server/     ws.py (websocket to the overlay)
+  selftest/   controls.py ("check your computer controls") · testwin.py (its test window) · watch.py (its safety)
 neo2/         the library other apps embed: sdk/ (AsyncAgent, Agent, host tools) · adapters/ · mcp/ · providers.py
 ui/           Tauri 2 + React overlay (src/App.tsx, src/ws.ts, src-tauri/src/lib.rs)
 tests/        2,100+ tests, no network or real model (tests/sdk: the library)

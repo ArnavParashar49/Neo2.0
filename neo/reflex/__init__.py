@@ -14,6 +14,7 @@ import threading
 
 from neo.config import settings
 from neo.reflex.schema import Decision, Intent, wants_reply
+from neo.selftest.phrases import is_request as asks_for_selftest
 
 log = logging.getLogger(__name__)
 
@@ -60,6 +61,10 @@ def get_laya():
 def _rules(text: str) -> Decision | None:
     if is_bare_stop(text):
         return Decision("stop", 1.0, False, 0.0, False, 0.0, source="rules")
+    if asks_for_selftest(text):
+        # "check your computer controls": NEO's own self-test (neo.selftest), run by its fast path.
+        # Never conversation — a head that called it chat would answer instead of testing.
+        return Decision("quick_action", 1.0, False, 0.0, False, 0.0, source="rules")
     return None
 
 
