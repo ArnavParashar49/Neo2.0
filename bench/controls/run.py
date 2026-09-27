@@ -601,9 +601,17 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--out", type=Path, default=None, help="default: bench/results/<sha>.json")
     ap.add_argument("--diff", type=Path, default=None, help="a baseline report to compare with")
     ap.add_argument("--save-baseline", action="store_true", help="write bench/baselines/step0.json too")
+    ap.add_argument("--ax-ms", type=float, default=None,
+                    help="per-AX-call ms for the NEO ms column (calibrated: the live self-test's --ax-walk p50)")  # fmt: skip
     args = ap.parse_args(argv)
     prepare_process()
     sys.path.insert(0, str(ROOT))
+    if args.ax_ms:
+        from bench.controls import fakes
+
+        fakes.HEADLINE_AX_MS = args.ax_ms
+        if args.ax_ms not in fakes.AX_LATENCY_MS:
+            fakes.AX_LATENCY_MS = (*fakes.AX_LATENCY_MS, args.ax_ms)
     prims = None if args.only == "scenarios" else measure_primitives(args.reps, args.names)
     scens = None if args.only == "primitives" else run_scenarios(args.names)
     rep = build_report(prims, scens, reps=args.reps)

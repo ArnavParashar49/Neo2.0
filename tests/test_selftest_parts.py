@@ -1019,6 +1019,17 @@ def test_the_agent_section_never_presses_chords_the_whole_mac_acts_on():
     for keys in ("cmd+k", "return", "escape", "cmd+j", "tab"):
         assert asyncio.run(hk({"keys": keys}, None)) == "Pressed", keys
     assert sent == ["cmd+k", "return", "escape", "cmd+j", "tab"]
+    chosen = []
+
+    async def menu(a, c):
+        chosen.append(a)
+        return "Chose it."
+
+    mc = agent._safe_menu(menu)
+    for words in ("Restart…", "shut down the mac", "Log Out Arnav…", "Force Quit…", "System Settings…"):
+        assert asyncio.run(mc({"command": words}, None)).startswith("Error"), words
+    assert asyncio.run(mc({"command": "New Round", "app": "Finder"}, None)).startswith("Error")
+    assert asyncio.run(mc({"command": "start a new round"}, None)) == "Chose it." and chosen == [{"command": "start a new round"}]
 
 
 def test_the_ab_verdict_needs_enough_runs_and_success_before_speed():

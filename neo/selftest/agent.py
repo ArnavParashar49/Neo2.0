@@ -9,7 +9,8 @@ rules as ``python -m neo.selftest controls``). Each request runs in the controls
 every guard of the controls check: events only to the test window and Accessibility actions only on
 its elements (neo.selftest.watch), stop the moment the user touches the mouse or keyboard, NEO's own
 window never, and a question for the user (NEEDS_CONFIRM) ends that run unanswered. The model gets
-only the screen tools, and ``hotkey`` refuses chords the whole Mac acts on (⌘Tab, ⌘Space, ⌘Q…).
+only the screen tools; ``hotkey`` refuses chords the whole Mac acts on (⌘Tab, ⌘Space, ⌘Q…) and
+``menu_command`` (when the build has it) the system menu's commands (Restart…, Shut Down…, Log Out…).
 
 For each run: did the goal happen (from the test window's own log), model calls and their seconds,
 tool calls, total seconds, and which brain answered (a failover to another brain — an overloaded
@@ -51,8 +52,15 @@ EFFORT_SETTINGS = ("screen_effort",)
 @dataclass
 class Arm:
     name: str
-    effort: str = "high"
+    effort: str | None = None  # None: the build's own screen effort (settings.screen_effort, else high)
     batch: bool | None = None  # None: as the build has it
+
+    def thinking(self) -> str:
+        if self.effort:
+            return self.effort
+        from neo.config import settings
+
+        return str(next((getattr(settings(), n) for n in EFFORT_SETTINGS if getattr(settings(), n, None)), "high"))
 
 
 @dataclass
@@ -107,6 +115,21 @@ def _safe_hotkey(handler: Callable) -> Callable:
         return await handler(a, c)
 
     return hotkey
+
+
+# Menu commands the whole Mac acts on (the system menu's): never chosen in the agent section, whatever
+# menu_command itself would do with them.
+_SYSTEM_MENU = re.compile(r"restart|shut\s*down|log\s*out|force\s*quit|\bsleep\b|lock\s*screen|system\s*settings|"
+                          r"system\s*preferences|about\s+this\s+mac|app\s*store|recent\s+items", re.I)  # fmt: skip
+
+
+def _safe_menu(handler: Callable) -> Callable:
+    async def menu_command(a: dict, c: Any) -> Any:
+        if any(isinstance(v, str) and _SYSTEM_MENU.search(v) for v in a.values()) or a.get("app"):
+            return "Error: that menu isn't available in the self-test (only the test window's own menus are)."
+        return await handler(a, c)
+
+    return menu_command
 
 
 class _Counting:
@@ -175,6 +198,8 @@ def _check(req: Request, arm: Arm, results: list[dict]) -> Callable:
             reg = registry().subset([n for n in AGENT_TOOLS if registry().get(n) is not None])
             if (hk := reg.get("hotkey")) is not None:
                 reg._tools["hotkey"] = dataclasses.replace(hk, handler=_safe_hotkey(hk.handler))
+            if (mc := reg.get("menu_command")) is not None:
+                reg._tools["menu_command"] = dataclasses.replace(mc, handler=_safe_menu(mc.handler))
             if await asyncio.to_thread(r.front_pid) != r.pid and r.ready.get("name"):
                 await r.tool("activate_app", name=str(r.ready["name"]))  # (the scene: the test window in front)
             words = req.words(r)
@@ -183,7 +208,7 @@ def _check(req: Request, arm: Arm, results: list[dict]) -> Callable:
             t0 = time.monotonic()
             try:
                 res = await run_agent(
-                    words, provider=chain, system=build(""), tools=reg.specs(), reg=reg, strict=True, effort=arm.effort,
+                    words, provider=chain, system=build(""), tools=reg.specs(), reg=reg, strict=True, effort=arm.thinking(),  # type: ignore[arg-type]
                     max_seconds=RUN_S, ctx=ToolContext(user_text=words, taint=r.taint, origin="user"), verify=True,
                 )  # fmt: skip
                 stopped, steps = res.stopped, len(res.steps)
