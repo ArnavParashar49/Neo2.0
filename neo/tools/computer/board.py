@@ -243,7 +243,7 @@ def _candidates(edge: np.ndarray, min_run: int) -> list[tuple[float, float, floa
 _SAME_EXTENT = 4.0  # px: lines whose runs start and end this close share an extent (for the counts below)
 _LINES_AT_ONE_EXTENT = 2 * (_MAX_CELLS + 1) + 2  # the most one board has (a drawn line has two edges)
 _FEW_LINES = 60  # up to this many: every pair of lines is tried; more (a texture): only a run's first line
-_WALK_BUDGET = 20000  # lines looked up in all walks together: past it the picture is a texture, no board
+_WALK_BUDGET = 20000  # lines looked up in all walks together: past it the rest of the picture is a texture
 
 
 def _textures(pos: np.ndarray, st: np.ndarray, en: np.ndarray) -> np.ndarray:
@@ -311,7 +311,7 @@ def _progression(lines: list[tuple[float, float, float]], min_lines: int):
                     too_many = True  # more lines than any board has: stripes, not a board
                     break
             if work > _WALK_BUDGET:
-                return None
+                return best  # (a texture: what was found before it stands)
             k = len(picked)
             if too_many or k < min_lines or (best is not None and k <= best[2]):
                 continue
