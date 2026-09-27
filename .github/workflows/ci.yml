@@ -1,5 +1,6 @@
 # Every push and pull request: lint, the Python tests, and the overlay (TypeScript, Vite build,
-# Rust tests). macOS runners, because NEO drives macOS APIs (pyobjc, CoreGraphics).
+# Rust tests). macOS runners, because NEO drives macOS APIs (pyobjc, CoreGraphics). The sdk-core
+# job checks NEO as a library other apps install (neo2): the wheel with no extras, on Linux too.
 name: CI
 
 on:
@@ -38,6 +39,48 @@ jobs:
         run: .venv/bin/python -m compileall -q neo neo2
       - name: Tests
         run: .venv/bin/python -m pytest -q -p no:cacheprovider
+
+  sdk-core:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - name: Build the sdist and wheel
+        run: uv build --out-dir dist
+      - name: The wheel alone, no extras, in a clean venv
+        # from outside the checkout, so neo2 can only come from the wheel
+        working-directory: ${{ runner.temp }}
+        run: |
+          uv venv --python 3.12 wheel-core
+          uv pip install --python wheel-core/bin/python "$GITHUB_WORKSPACE"/dist/*.whl
+          wheel-core/bin/python -c "import neo2; from neo2 import AsyncAgent; print(neo2.__file__)"
+          wheel-core/bin/python "$GITHUB_WORKSPACE/scripts/wheel_smoke.py"
+      - name: The wheel with the web extra
+        working-directory: ${{ runner.temp }}
+        run: |
+          uv venv --python 3.12 wheel-web
+          whl=$(echo "$GITHUB_WORKSPACE"/dist/*.whl)
+          uv pip install --python wheel-web/bin/python "${whl}[web]"
+          wheel-web/bin/python "$GITHUB_WORKSPACE/scripts/wheel_smoke.py" --extra web
+      - name: Install the checkout, core only
+        run: |
+          uv venv --python 3.12
+          uv pip install -e . pytest pytest-asyncio
+      - name: Portable SDK tests, core only
+        run: .venv/bin/python -m pytest -q -p no:cacheprovider tests/sdk -m portable --ignore=tests/sdk/test_sdk_import_cost.py
+      - name: Import budget (import neo2 is the standard library; AsyncAgent loads no model, vendor SDK, pyobjc or browser)
+        run: .venv/bin/python -m pytest -q -p no:cacheprovider tests/sdk/test_sdk_import_cost.py
+      - name: Portable SDK tests with the SDK's extras (vendor SDK shapes, MCP server, LangChain)
+        run: |
+          uv pip install -e ".[brains,mcp,langchain]"
+          .venv/bin/python -m pytest -q -p no:cacheprovider tests/sdk -m portable
 
   overlay:
     runs-on: macos-14

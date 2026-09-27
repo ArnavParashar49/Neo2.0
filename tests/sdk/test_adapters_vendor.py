@@ -137,7 +137,9 @@ async def test_openai_specs_are_what_the_openai_sdk_takes(tmp_path):
         responses, _ = neo_openai.agent_tool(agent, api="responses")
         chats = [chat, *agent.export_tools("openai_chat")]
         flats = [responses, *agent.export_tools("openai_responses")]
-    assert len(chats) > 10
+        n = len(agent.tools)
+    # web (4), memory and 3 host tools anywhere; the Mac and browser tools where they load
+    assert len(chats) == len(flats) == 1 + n and n >= 8
     for spec in chats:
         assert_conforms(spec, chat_t.ChatCompletionFunctionToolParam)
         assert_conforms(spec, chat_t.ChatCompletionToolUnionParam)

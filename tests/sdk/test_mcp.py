@@ -8,6 +8,7 @@ Only fake brains and host tools run here: nothing reaches a real model, app, dia
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import sys
 
 import pytest
@@ -129,7 +130,10 @@ async def test_annotations_come_from_the_tools_own_fields(tmp_path):
     assert set(tools[TASK_TOOL].input_schema["properties"]) == {"goal", "context", "conversation"}
 
 
-@pytest.mark.skipif(sys.platform != "darwin", reason="NEO's shell tool is macOS-only")
+@pytest.mark.skipif(
+    sys.platform != "darwin" or importlib.util.find_spec("AppKit") is None,
+    reason="NEO's shell tool: macOS with the [mac] extra",
+)
 async def test_shell_is_listed_as_destructive():
     async with _neo([], tools=("shell", "read_file"), expose="tools") as neo, Client(neo.server) as c:
         tools = {t.name: t for t in (await c.list_tools()).tools}

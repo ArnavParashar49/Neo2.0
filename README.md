@@ -6,6 +6,8 @@ Say *"Neo"* (or press **⌥⌘**), ask for something, and NEO works your Mac the
 
 There is no subscription. The brains are Gemini and Groq free tiers, or Gemma 4 running on your own GPU; the decision layer, wake word, speech-to-text and text-to-speech all run on-device.
 
+NEO's agent is also a Python library, `neo2`: other apps and AI frameworks (OpenAI, Anthropic, Gemini, LangChain, any MCP client) can embed it, with its safety rules and its confirmation gate — see [Use NEO from your own app](#use-neo-from-your-own-app).
+
 ---
 
 ## Why it feels fast
@@ -15,7 +17,7 @@ Most assistants send every word to a large model and wait. NEO routes first.
 ```
  "turn the volume up"        → regex fast path            0 LLM calls,   ~0 ms
  "what's the capital of Peru" → Laya (local) → Groq stream               ~150 ms + first token
- "reply to Sam's email…"      → Laya (local) → agent loop with 37 tools  ~150 ms + Gemini
+ "reply to Sam's email…"      → Laya (local) → agent loop with 52 tools  ~150 ms + Gemini
 ```
 
 The router is **Laya**, a 421M-parameter local decision model. One encoder pass (~20 ms on an M3 Pro) feeds five small calibrated heads trained on ~16k utterances — NEO's own templates plus 12k real crowd-sourced phrasings from CLINC150 and MASSIVE mapped onto NEO's labels: *what kind of request is this* (0.90 held-out on real phrasings, where Laya's zero-shot alone scores 0.44), *which single tool does it* (0.85), *does it want an answer or just doing*, *is it destructive*, *does it need the screen*. When the intent head is unsure it falls back to Laya's zero-shot answers, locally. Only then does a language model get involved — and only the one the task needs.
@@ -58,7 +60,7 @@ Every tool is a plain Python function registered with a decorator; adding one is
                                               Overlay (Tauri 2 + React, thinking-orbs) ⇄ websocket ⇄ Python core
 ```
 
-**Every call is kept small.** A request only ships the tools it plausibly needs — picked by embedding the request against each tool's description, then expanding families (`browser_*`, `mail_*`) and adding the screen tools when the reflex says so — typically 3–7 of the 46 (9–19 % of the schema tokens) plus a `more_tools` escape hatch the model can call mid-run. Tool results older than two turns are stubbed out of the history. Simple one-tool actions that miss the regex fast path go to Gemini Flash-Lite instead of the full model. Net effect: a day of use fits the free tiers, and Groq's 8K-TPM tier can run a whole agent turn as the fallback.
+**Every call is kept small.** A request only ships the tools it plausibly needs — picked by embedding the request against each tool's description, then expanding families (`browser_*`, `mail_*`) and adding the screen tools when the reflex says so — typically 3–7 of its 52 plus a `more_tools` escape hatch the model can call mid-run. Tool results older than two turns are stubbed out of the history. Simple one-tool actions that miss the regex fast path go to Gemini Flash-Lite instead of the full model. Net effect: a day of use fits the free tiers, and Groq's 8K-TPM tier can run a whole agent turn as the fallback.
 
 **Brains are pluggable and fail over.** Gemini walks 3.8 → 3.7 → 3.5 Flash across every API key you give it (free-tier quota is per key *and* per model), backs off on overload, and hands text-only turns to Groq's `gpt-oss-120b` at ~700 tokens/s. `python -m neo --local` serves Gemma 4 12B on-device for offline use. An Anthropic key turns on Claude as an optional brain.
 
@@ -90,7 +92,7 @@ Requirements: macOS 13+ on Apple Silicon (built and tested on an M3 Pro, 18 GB),
 ```bash
 brew install uv rustup && rustup default stable
 git clone https://github.com/ArnavParashar49/Neo2.0 && cd Neo2.0
-uv venv --python 3.12 && uv pip install -r requirements.lock && uv pip install -e ".[dev]"
+uv venv --python 3.12 && uv pip install -r requirements.lock && uv pip install -e ".[app,dev]"
 cp .env.example .env        # paste your keys (both free, no card)
 .venv/bin/python -m neo --doctor
 scripts/install-app.sh      # build NEO.app, install it to /Applications and start it
@@ -223,6 +225,242 @@ async def wifi(a: dict, c: ToolContext) -> str:
 
 Register the module in `neo/tools/__init__.py` and it is available to every brain, to Gemini Live, and to the zero-LLM fast path. Return `confirm.gated(...)` from a handler to put it behind the confirmation gate.
 
+## Use NEO from your own app
+
+NEO's agent — its tools, its safety rules and its confirmation gate — is also a Python package, `neo2`, that other apps and AI frameworks embed. An embedded agent is not NEO.app: it never reads or writes `~/.neo` or NEO.app's settings, and each agent has its own folder (a private temp folder unless you give it one), brains, tools and memory, and a confirmation gate per conversation.
+
+### Install
+
+Python 3.12. The distribution is still named `neo` (the move to `neo2` on PyPI hasn't happened yet), so install it from GitHub or a checkout, with the extras you need:
+
+```bash
+pip install "neo[web,openai] @ git+https://github.com/ArnavParashar49/Neo2.0"
+uv pip install -e ".[web,openai]"      # or from a checkout
+```
+
+| Extra | What it adds |
+|---|---|
+| *(none)* | the core: `neo2.AsyncAgent` and `Agent`, NEO's agent loop, host tools, the framework adapters, and the `weather` and `clock` tools. No model, macOS framework or browser. |
+| `web` | `web_search` and `web_fetch` |
+| `browser` | NEO's own headless Chromium (`browser_*`). Then run `playwright install chromium`. |
+| `mac` | the macOS tools: Accessibility, click and type, apps, files, shell, mail and calendar |
+| `gemini`, `openai`, `claude` | NEO's provider classes for Gemini, any OpenAI-compatible server (OpenAI, Groq, Ollama, LM Studio, vLLM…) and Claude. `brains` is all three. |
+| `mcp` | the MCP server, `neo2-mcp` |
+| `langchain` | `neo2.adapters.langchain` |
+| `embeddings` | local embeddings for memory recall |
+| `app` | everything NEO.app runs. `all` is `app` plus `mcp` and `langchain`. |
+
+The package also installs the top-level `neo` package that NEO.app runs. Until the rename, don't install it next to NeuralEnsemble's `neo`, which uses the same folder name.
+
+The snippets below use top-level `await`: run them inside an `async def`, or in `python -m asyncio`.
+
+### An agent in your app
+
+<!-- snippet: quickstart -->
+```python
+import neo2
+from neo2.providers import OpenAICompatible
+
+brain = OpenAICompatible(model="gpt-5.1", api_key="sk-...")  # or Gemini(key), Claude(key), Groq(key), your own
+async with neo2.AsyncAgent(neo2.AgentConfig(tools="web"), provider=brain) as neo:
+    r = await neo.ask("What's the weather in Lisbon this afternoon?")
+    print(r.status, r.text)  # done, and the answer
+
+    async for e in neo.stream("And in Porto?"):  # the same, as events while it runs
+        if e.type == "text_delta":
+            print(e.text, end="")
+```
+
+`AgentConfig` takes the tools as presets, globs and names: `"web"`, `"browser"`, `"mac_read"`, `"mac"`, `"memory"`, `"all"`, `"none"`, `("web", "browser_*")`. It also takes `data_dir`, `memory=True` or `MemoryConfig(path=...)`, `persona`, `instructions`, `protected_apps`, `extra_secret_paths` and the step and time limits. `AgentConfig.from_env()` reads keys and settings from the environment, but only when you call it. Each `conversation=` is its own thread with its own gate. `pending()`, `cancel()`, `history()`, `reset()` and `forget_all()` work per agent; `forget_all()` deletes only files NEO made in the agent's folder.
+
+The sync twin needs no event loop:
+
+<!-- snippet: sync -->
+```python
+with neo2.Agent(neo2.AgentConfig(tools="web"), provider=brain) as neo:
+    r = neo.ask("What time is it in Tokyo?")
+    print(r.text)
+```
+
+### Approvals: only your code says yes
+
+Anything consequential is staged, not run, and `ask()` returns `status="needs_approval"`. That covers NEO's own tools that change something and your host tools marked `risk="destructive"` or given `confirm=`. `r.approval` is the card: show its `summary` and `detail` (exactly what will run) to your user as they are.
+
+<!-- snippet: approvals -->
+```python
+@neo.tool(risk="destructive", confirm=lambda a: f"Refund {a['amount']} on order {a['order_id']}")
+async def refund(order_id: str, amount: float, ctx: neo2.ToolContext) -> str:
+    """Refund an order, in part or in full."""
+    return await billing.refund(order_id, amount, tenant=ctx.extras["tenant"])
+
+r = await neo.ask("Refund order 812 in full", tool_context={"tenant": "acme"})
+if r.status == "needs_approval":
+    card = r.approval  # card.summary, card.detail (the exact arguments), card.expires_at
+    if await my_ui.confirm(card.summary, card.detail):  # your UI, your signed-in user
+        r = await neo.approve(card.action_id, via=neo2.Approval("web-ui", "user:42"))
+    else:
+        r = await neo.deny(card.action_id)
+print(r.status, r.text)
+```
+
+Or decide inline with an approver, which is asked before `ask()` returns:
+
+<!-- snippet: approver -->
+```python
+async def ask_my_user(req: neo2.ApprovalRequest) -> neo2.Approval | None:
+    if await my_ui.confirm(req.summary, req.detail):
+        return neo2.Approval("desktop-dialog", "user:42")
+    return None  # declines
+
+neo = neo2.AsyncAgent(neo2.AgentConfig(tools="web"), provider=brain, approver=ask_my_user)
+```
+
+The rules:
+
+- **Only host code approves.** Either `approve(action_id, via=neo2.Approval(channel, approver))` from your own route, or an `approver` that returns an `Approval`. Anything else declines: `None`, `True`, `"yes"`, an exception, or no answer within `approval_timeout_s` (110 s). `approver="deny"` declines everything at once; `"defer"`, the default, waits for `approve()` or `deny()`.
+- **Text never approves.** A "yes" passed to `ask()` is a new request, not an answer to the card. No tool, tool argument, exported spec, adapter or MCP tool can approve, and no action id ever appears in text a model reads.
+- **An approval runs exactly what the card showed, once.** It must come within 120 s, in the conversation that staged it. An unknown, superseded, expired or other agent's id gives `status="expired"` and runs nothing. A run that stages something new after an approval comes back as a new `needs_approval`.
+- **An approver is a person's answer.** Calling `ask()` or `stream()` from an approver raises `ApprovalReentryError`.
+- **Say where a request came from.** Pass `source="model"` when another model wrote the task; the adapters and the MCP server always do. Such a request, like one with `context=` or one that read a web page, asks first before saving to memory, opening links that could carry data out, or submitting in a chat app.
+- **Everything is audited.** Each staged, approved, denied or expired action is recorded with the agent's name and `via`, in `<data_dir>/audit.log` (mode 0600). An agent without a `data_dir` sends the records to `on_audit=` and the `neo.audit` logger.
+
+Host tools are plain functions. The schema comes from the typed signature (or `parameters=`, a JSON schema or a pydantic model). A parameter typed `neo2.ToolContext` gets the request's `tool_context` as `ctx.extras`. Output counts as third-party content unless you pass `untrusted=False`: the model sees it fenced, and the request then asks before memory writes and data-carrying links. Parameters named `confirm`, `cancel` or `_…` are refused, because NEO drops those from model calls.
+
+### Plug NEO into another AI framework
+
+The recommended way is the whole agent as one tool. NEO keeps its own prompt, safety rules and gate. The model passes `{"task": ..., "context": ...}` and gets text back:
+
+- the answer
+- `NEEDS_CONFIRM: <summary> — waiting for the user's decision in the app. Don't retry or work around it.`
+- `The user's OK is required and was not given: <summary>. Nothing was done; don't retry.`
+- `NEEDS_USER: <question>`
+
+Anything NEO wrote after reading third-party content comes back inside `<untrusted source="...">`.
+
+<!-- snippet: openai -->
+```python
+from openai import AsyncOpenAI
+
+import neo2.adapters.openai
+
+client = AsyncOpenAI()
+spec, run_neo = neo2.adapters.openai.agent_tool(neo)  # api="responses" for the Responses API
+messages = [{"role": "user", "content": "Refund order 812 in full"}]
+reply = (await client.chat.completions.create(model="gpt-5.1", messages=messages, tools=[spec])).choices[0].message
+messages.append(reply.model_dump(exclude_none=True))
+for call in reply.tool_calls or []:
+    if call.function.name == spec["function"]["name"]:
+        messages.append({"role": "tool", "tool_call_id": call.id, "content": await run_neo(call.function.arguments)})
+
+# NEEDS_CONFIRM: the card waits for your user, not for the model
+if (card := neo.pending()) and await my_ui.confirm(card.summary, card.detail):
+    r = await neo.approve(card.action_id, via=neo2.Approval("web-ui", "user:42"))
+    messages.append({"role": "user", "content": neo2.adapters.result_text(r)})  # how it went
+```
+
+<!-- snippet: anthropic -->
+```python
+from anthropic import AsyncAnthropic
+
+import neo2.adapters.anthropic
+
+client = AsyncAnthropic()
+spec, run_neo = neo2.adapters.anthropic.agent_tool(neo)
+msg = await client.messages.create(
+    model="claude-opus-5", max_tokens=1024, tools=[spec], messages=[{"role": "user", "content": "Refund order 812"}]
+)
+results = [
+    {"type": "tool_result", "tool_use_id": b.id, "content": await run_neo(b.input)}
+    for b in msg.content
+    if b.type == "tool_use" and b.name == spec["name"]
+]
+```
+
+<!-- snippet: gemini -->
+```python
+from google import genai
+from google.genai import types
+
+import neo2.adapters.gemini
+
+client = genai.Client()
+decl, run_neo = neo2.adapters.gemini.agent_tool(neo)
+config = types.GenerateContentConfig(tools=[types.Tool(function_declarations=[decl])])
+resp = await client.aio.models.generate_content(model="gemini-3.8-flash", contents="Refund order 812", config=config)
+parts = [
+    types.Part.from_function_response(name=fc.name, response={"output": await run_neo(fc.args)})
+    for fc in resp.function_calls or []
+    if fc.name == decl["name"]
+]
+```
+
+<!-- snippet: langchain -->
+```python
+import neo2.adapters.langchain
+
+neo_tool = neo2.adapters.langchain.agent_tool(neo)  # a StructuredTool: llm.bind_tools([neo_tool]), create_agent(…)
+msg = await neo_tool.ainvoke({"name": "neo", "args": {"task": "Refund order 812"}, "id": "call_1", "type": "tool_call"})
+print(msg.content)  # NEEDS_CONFIRM: Refund 49.5 on order 812 — waiting for the user's decision in the app. …
+```
+
+Any other framework (the OpenAI Agents SDK, LlamaIndex, CrewAI…) can wrap the same `(spec, handler)` pair, or use the MCP server. A framework's own approval step, such as `needs_approval` or a LangGraph interrupt, only approves handing the task to NEO. It never approves NEO's own staged action.
+
+For finer control, run NEO's tools one by one in your own model loop. Put `neo2.SAFETY_RULES` into your system prompt; untrusted output comes back already fenced:
+
+<!-- snippet: tools -->
+```python
+tools = neo.export_tools("openai_chat")  # or "openai_responses", "anthropic", "gemini", "mcp", "jsonschema"
+async with neo.turn() as t:  # one turn of your loop: what one call read counts for the next
+    out = await neo.call_tool("clock", {}, turn=t)  # a gated call returns status="needs_approval"
+    messages += neo2.adapters.openai.tool_message(out, "call_1")
+```
+
+The other helpers are `neo2.adapters.openai.function_call_output`, `neo2.adapters.anthropic.tool_result`, `neo2.adapters.gemini.function_response` and `neo2.adapters.langchain.tool_message`.
+
+### Use NEO from an MCP client
+
+<!-- snippet: mcp-command -->
+```bash
+neo2-mcp --tools web --expose task --approve deny --env      # or: python -m neo2.mcp …
+```
+
+For Claude Desktop (`claude_desktop_config.json`), Claude Code (`.mcp.json`) or Cursor (`.cursor/mcp.json`), with the full path to `neo2-mcp` if it isn't on the client's `PATH`:
+
+<!-- snippet: mcp-config -->
+```json
+{
+  "mcpServers": {
+    "neo": {
+      "command": "neo2-mcp",
+      "args": ["--tools", "web", "--approve", "deny", "--env"],
+      "env": { "GEMINI_API_KEY": "your-key" }
+    }
+  }
+}
+```
+
+- **`--tools`** takes comma-separated presets, globs and names, like `AgentConfig`.
+- **`--expose task`** gives one tool, `neo_task(goal, context?, conversation?)`, which hands the whole task to NEO. `tools` lists NEO's tools one by one, and `both` does both.
+- **`--approve deny`** is the default: nothing gated runs, and the model is told the user has to do it.
+- **`--approve dialog`** (macOS) shows a native dialog from the server process. Cancel is the default button, and the dialog gives up before the card expires. The server adds `osascript` to `protected_apps`.
+- **`--approve elicit --trust-client NAME`** lets the MCP client ask its user (MCP elicitation), only for the client names you list. It approves only when the user accepts with `approve: true`. This trusts the client: a client names itself, and it may answer elicitations on its own.
+- **`--env`** reads the API keys (`GEMINI_API_KEY`, `GEMINI_API_KEYS`, `GROQ_API_KEY`, `ANTHROPIC_API_KEY`) and `NEO_MCP_*` settings such as `NEO_MCP_DATA_DIR`. NEO.app's own `NEO_*` variables are never read. Without `--env`, `neo_task` has no model, though the individual tools still work.
+
+The server speaks stdio only and opens no network listener. stdout carries nothing but the protocol, and audit lines go to stderr.
+
+### What NEO never exposes to an embedding app or its model
+
+- **No way for a model to approve anything.** There is no approve, confirm, cancel or deny tool, tool argument, exported spec, adapter or MCP route, and no action id in text a model reads. Confirmation can't be switched off: there is no setting for it, and `NEO_CONFIRM_DESTRUCTIVE` isn't read.
+- **None of NEO.app's data.** Not `~/.neo`, NEO.app's `.env` and settings, its memory database, audit log or trained reflex, and not its `NEO_*` variables. A `data_dir`, memory file or `models_dir` inside `~/.neo` is refused, even through `from_env()`.
+- **No tools you didn't pick.** Not in a model's call, a fast path, `more_tools`, or the run that continues after an approval. `play_music` isn't available to embedded agents, and erasing everything is never a tool: `forget_all()` is host code and removes only the agent's own files.
+- **None of NEO.app's own machinery.** Laya (the local reflex model) and its learning, voice, the overlay and macOS permission prompts stay in NEO.app, and task kinds run their plain scripts.
+- **No secrets.** NEO's file and shell tools don't touch SSH and GPG keys, `.env` files, cloud credentials, keychains, browser profiles, any agent's folder or memory file, or `extra_secret_paths`. Commands don't inherit API keys.
+- **No private network.** NEO's browser and `web_fetch` never reach private, loopback or link-local addresses.
+
+### `protected_apps`
+
+An agent with the Mac tools (`tools="mac"`) clicks and types on the real desktop. NEO's input tools refuse any target owned by NEO's overlay or by an app in `AgentConfig(protected_apps=(...))`, matched by name, bundle id or executable. When they can't tell who owns a target, they refuse too. Keep your approval UI off that desktop or list your app there, or NEO could press your own "Approve" button. In NEO.app the setting is `NEO_PROTECTED_APPS='["Some App"]'`. The desktop is shared, so run one Mac-enabled agent per desktop.
+
 ## Project layout
 
 ```
@@ -234,8 +472,9 @@ neo/
   voice/      wake.py · local.py · live.py · audio.py · pipeline.py
   memory/     store.py (SQLite + FTS5 + vectors, playbooks, sessions) · embed.py · summarize.py
   server/     ws.py (websocket to the overlay)
+neo2/         the library other apps embed: sdk/ (AsyncAgent, Agent, host tools) · adapters/ · mcp/ · providers.py
 ui/           Tauri 2 + React overlay (src/App.tsx, src/ws.ts, src-tauri/src/lib.rs)
-tests/        72 tests, no network
+tests/        2,100+ tests, no network or real model (tests/sdk: the library)
 ```
 
 ## Development
