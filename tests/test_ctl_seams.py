@@ -144,8 +144,11 @@ def test_until_gives_up_at_its_timeout_and_takes_async_checks(fake_clock):
 def test_the_controls_settings_and_their_defaults(monkeypatch):
     from neo2.core import config
 
+    monkeypatch.delenv("NEO_PREFETCH_LOOK", raising=False)  # (the suite turns the first look off: tests/conftest.py)
+    monkeypatch.setattr(config, "_settings", None)
     s = config.settings()
     assert (s.screen_effort, s.prefetch_look, s.shot_format, s.resolver) == ("high", True, "jpeg", "shadow")
+    assert (s.prefetch_look_s, s.prewarm_resolver) == (0.5, True)
     assert (s.resolver_laya_p, s.local_grounder, s.ground_port, s.sck_capture, s.sck_stream) == (0.7, "", 8081, False, False)
     for key, typo, default in (("resolver", "livee", "shadow"), ("shot_format", "gif", "jpeg"), ("screen_effort", "max", "high")):
         monkeypatch.setenv(f"NEO_{key.upper()}", typo)

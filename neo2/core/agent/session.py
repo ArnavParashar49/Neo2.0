@@ -19,7 +19,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any, Literal
 
 from neo2.core import logger, runtime
-from neo2.core.agent import confirm, fastpath, grants
+from neo2.core.agent import confirm, fastpath, grants, prefetch
 from neo2.core.agent.loop import AgentResult, _supersede_observations, run_agent
 from neo2.core.agent.prompt import build as build_prompt
 from neo2.core.agent.registry import USERS_WORDS, Origin, ToolContext, ToolOutput, fence, registry, voiced
@@ -345,7 +345,7 @@ class Session:
 
         log.info(f"  ~ {game.name} is a game on this Mac: the agent plays it there")
         d = replace(d, intent="agent_task", needs_screen=True, tool="", tool_p=0.0)
-        return await self._agent(text, d, images, job, hint=games.hint(game), also=_GAME_TOOLS)
+        return await self._agent(text, d, images, job, hint=games.hint(game), also=_GAME_TOOLS, game=game)
 
     async def _chat(self, text: str, d: Decision, job: str) -> Reply:
         outcomes.route(job, "chat")
@@ -488,6 +488,7 @@ class Session:
         done_note: str = "",
         hint: str = "",
         also: tuple[str, ...] = (),
+        game: Any = None,
     ) -> Reply:
         """An agent run as one task (neo2.core.agent.grants): from here until the job is done, across
         every card the user answers on the way. It's what a yes "for this task" covers and what
@@ -498,7 +499,7 @@ class Session:
         try:
             with grants.task(task):
                 reply = await self._agent_task(
-                    text, d, images, job, only=only, done_note=done_note, hint=hint, also=also
+                    text, d, images, job, only=only, done_note=done_note, hint=hint, also=also, game=game
                 )
             return reply
         finally:
@@ -516,6 +517,7 @@ class Session:
         done_note: str = "",
         hint: str = "",
         also: tuple[str, ...] = (),
+        game: Any = None,
     ) -> Reply:
         # The single-tool lane ("dim my screen", "click Send") runs one tool, which looks for itself
         # if it must: the reflex's screen signal alone doesn't buy it the vision chain.
@@ -537,6 +539,10 @@ class Session:
         self.jobs[job] = asyncio.current_task()  # type: ignore[assignment]
         try:
             async with self._agent_slots:
+                # NEO's first look at the screen (neo2.core.agent.prefetch), read while this request is routed
+                first_look = prefetch.start(
+                    text, d, only=only, game=game, images=images, sees=prefetch.sees(chain)
+                )
                 playbook_ctx = await asyncio.to_thread(self._playbooks_for, text) if _playbooks_on() else ""
                 if only:  # the reflex chose: that tool's schema and nothing else to get lost in
                     from neo2.core.agent.toolselect import MORE_TOOLS
@@ -554,15 +560,18 @@ class Session:
                 chain.effort = Effort(start_level(d, screen=screen, light=purpose == "light"))
                 snapshot = self._trimmed()
                 ctx = ToolContext(user_text=text, taint=list(_request_taint.get()), extras=dict(_request_extras.get()))
+                goal, goal_images = _with_conversation(text), images
+                if (look := await prefetch.collect(first_look, tools)) is not None:
+                    goal, goal_images = look.attach(goal, goal_images, ctx)  # fenced, and tainting as ax_tree would
                 res = await run_agent(
-                    _with_conversation(text),
+                    goal,
                     provider=chain,
                     system=self._system(playbook_ctx + hint + _already_done_note() + done_note),
                     tools=tools,
                     history=snapshot,
                     ctx=ctx,
                     effort=chain.effort.start,
-                    images=images,
+                    images=goal_images,
                     job=job,
                 )
                 outcomes.brain(job, getattr(chain, "last_used", ""))
@@ -573,6 +582,7 @@ class Session:
             raise
         finally:
             self.jobs.pop(job, None)
+        prefetch.forget(res.messages[len(snapshot) :])  # the first look was for this run only
         await self._remember(*res.messages[len(snapshot) :])  # only this job's new turns
         _learn_from(job, res)
         if res.stopped == "needs_confirm" and self._stage_pending(res, ctx.taint, text):

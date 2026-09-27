@@ -330,6 +330,9 @@ async def run_agent(
             )
         await ev.set_state(NeoState.THINKING, job=job)
         _supersede_observations(messages, start=len(history or []))
+        from neo2.core.agent import prefetch
+
+        prefetch.supersede(messages, start=len(history or []))  # (the first look, once a newer look is in)
         try:
             # The run's clock, as the brains see it (neo2.core.providers.budget): the chain asks no
             # brain whose wait alone is past the time left, and gives up on a call still out then.

@@ -15,6 +15,11 @@ The voice layer feeds the running transcript of the current utterance in here as
 Everything that ran early leaves a one-shot *claim*: when the language model then asks for the
 same thing (Gemini Live hears the whole sentence too), the claim answers it instead of running
 it twice. A claim is consumed once, so a command the user repeats later still runs.
+
+Before any of that, the moment the user starts talking to NEO (`listening()` on the wake word,
+push-to-talk or the start of speech, and the first words of each utterance `feed()` sees), what the
+request will need is warmed (neo2.core.agent.prefetch.prewarm): the resolver's Laya is loaded while the
+user speaks, not when the words are already in.
 """
 
 from __future__ import annotations
@@ -84,6 +89,7 @@ class EarlyActor:
         self._ran_keys: set[str] = set()  # this utterance: never the same action twice
         self._claims: dict[str, tuple[float, Ran]] = {}  # early runs the model hasn't asked for yet
         self._lock = asyncio.Lock()
+        self._warmed = -1  # the utterance whose words already started a prewarm
         self.executed: list[Ran] = []  # this utterance, in order
 
     # ---- utterance lifecycle ----------------------------------------------------------------
@@ -96,9 +102,21 @@ class EarlyActor:
         self.executed = []
         return done
 
+    def listening(self, reason: str = "wake") -> bool:
+        """The user started talking to NEO (wake word, push-to-talk, speech starting): warm what
+        their request will need while they speak. Never waits; True when a prewarm started."""
+        self._warmed = self._utt
+        from neo2.core.agent import prefetch
+        from neo2.core.providers.cerebras_hooks import prewarm_soon
+
+        prewarm_soon()  # a paid Cerebras key's connection (~0.9 s cold), opened while they speak
+        return prefetch.prewarm(reason)
+
     def feed(self, text: str) -> None:
         """The full transcript of the current utterance so far (may be revised)."""
         text = text.strip()
+        if text and self._warmed != self._utt:
+            self.listening("speech")  # the first words of an utterance NEO wasn't told about
         if text != self._text:
             if not text.startswith(self._text[: self._consumed]):
                 self._consumed = 0  # the recogniser revised words we already acted on

@@ -186,6 +186,10 @@ class Settings(BaseSettings):
     # is already in front (or none is named and the front one is where NEO last worked), never a
     # protected app's, with a picture only when the screen is needed. Off: the model looks itself.
     prefetch_look: bool = True
+    prefetch_look_s: float = 0.5  # the most that first look may add before the first model call
+    # Laya's resolver is loaded at the wake word (the start of speech), not when the words are in:
+    # its first answer drops from ~0.5 s to ~45 ms once the user has spoken for about a second.
+    prewarm_resolver: bool = True
     shot_format: Literal["jpeg", "png"] = "jpeg"  # screenshots for a model: JPEG q85, or PNG
     # Laya's UI resolver ("click the start button", "start wala button dabao"): "shadow" logs
     # what it would press and acts only on an exact label; "live" lets every stage that passed
@@ -360,6 +364,8 @@ class LibrarySettings(Settings):
     browser_headless: bool = True
     browser_view: Literal["chat", "window"] = "window"  # no chat card: that's NEO.app's overlay
     include_username: bool = False
+    # No early first look at the host's screen unless the host asks for it (neo2.core.agent.prefetch).
+    prefetch_look: bool = False
 
     def __init__(self, **values: Any) -> None:
         try:
