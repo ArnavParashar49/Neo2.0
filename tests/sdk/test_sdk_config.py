@@ -109,6 +109,22 @@ def test_from_env_never_reads_neo_apps_settings_file(home):
         neo2.AgentConfig.from_env(env_files=[home / ".neo" / ".env"])
 
 
+def test_from_env_never_follows_a_link_into_neo_apps_settings(tmp_path, monkeypatch):
+    """~/project/linked.env -> ~/.neo/.env (a common dotfiles setup) is NEO.app's file all the same."""
+    fake_home = tmp_path / "linked-home"
+    (fake_home / ".neo").mkdir(parents=True)
+    (fake_home / ".neo" / ".env").write_text("GEMINI_API_KEY=neo-apps-own-key\n")
+    monkeypatch.setenv("HOME", str(fake_home))
+    link = tmp_path / "project" / "linked.env"
+    link.parent.mkdir()
+    link.symlink_to(fake_home / ".neo" / ".env")
+    opened: list = []
+    monkeypatch.setattr("neo2.sdk.config._read_env_file", lambda p: opened.append(p) or {})
+    with pytest.raises(ValueError, match="NEO.app's own data"):
+        neo2.AgentConfig.from_env(env_files=[link])
+    assert opened == []
+
+
 def test_an_agent_needs_a_brain():
     with pytest.raises(ValueError, match="no brain"):
         neo2.AsyncAgent(neo2.AgentConfig())

@@ -190,6 +190,7 @@ class AgentConfig(BaseModel):
         for f in env_files:
             p = Path(os.path.expanduser(str(f)))
             _refuse_neo_home(p, "env file")
+            _refuse_neo_home(p.resolve(), "env file")  # a link to NEO.app's .env is that file
             env.update(_read_env_file(p))
         env.update(os.environ)
         values: dict[str, Any] = {}
