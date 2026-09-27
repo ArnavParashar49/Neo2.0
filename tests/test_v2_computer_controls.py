@@ -20,6 +20,7 @@ from neo.tools.computer import apps, ax, focus, screen
 from neo.tools.computer import input as inp
 
 NEO, CHESS, DOCK, MAIL = 900, 4242, 77, 55
+_REAL_SAMPLE = screen.sample_points  # (the suite's conftest makes it "no picture" in every test)
 
 
 # ---- fakes -----------------------------------------------------------------------------------------
@@ -368,10 +369,19 @@ def test_a_hotkey_that_opened_a_sheet_says_so(world, monkeypatch):
     assert out.ok and "a sheet or dialog opened" in out.text and "Start, Cancel" in out.text
 
 
-def test_no_event_is_sent_when_macos_wont_take_them(world, monkeypatch):
+def test_when_macos_may_drop_neos_input_no_result_claims_it_arrived(world, monkeypatch):
     monkeypatch.setattr(inp, "can_post", lambda: False)
+    world.react = False  # the events went nowhere
     out = run("click", {"x": 612, "y": 540})
-    assert out.halt and out.text.startswith(confirm.NEEDS_USER) and world.events() == []
+    assert not out.ok and "Nothing visibly changed" in out.text and "may not send clicks" in out.text
+    world.front = ("Chess", CHESS)
+    monkeypatch.setattr(ax, "frontmost_app", lambda: ("Chess", CHESS))
+    monkeypatch.setattr(apps, "front_name", lambda: "Chess")
+    assert "may not send clicks" in run("hotkey", {"keys": "cmd+n"}).text
+    # A wrong "no" from macOS never locks NEO out: when the click did land, the result says so plainly.
+    world.react = True
+    out = run("click", {"x": 612, "y": 540})
+    assert out.ok and "Changed" in out.text and "may not send" not in out.text
 
 
 # ---- a brain that can't see -------------------------------------------------------------------------------
@@ -492,3 +502,25 @@ def test_the_self_checks_say_when_macos_drops_neos_clicks_and_keys(monkeypatch):
     assert any("clicks or keystrokes" in p for p in health.problems())
     monkeypatch.setattr(inp, "can_post", lambda: True)
     assert permissions.missing() == []
+
+
+def test_change_is_judged_on_a_small_picture_cut_to_the_screen(monkeypatch):
+    from PIL import ImageDraw
+
+    shots = []
+    board = Image.new("RGB", (140, 240), (230, 230, 230))
+    moved = board.copy()
+    ImageDraw.Draw(moved).rectangle((20, 100, 60, 140), fill=(20, 20, 20))  # a piece arrived
+
+    def grab(extra):
+        shots.append(extra)
+        return board if len(shots) == 1 else moved
+
+    monkeypatch.setattr(screen, "can_capture", lambda: True)
+    monkeypatch.setattr(screen, "_grab", grab)
+    before = _REAL_SAMPLE([(10.0, 500.0)])
+    after = _REAL_SAMPLE([(10.0, 500.0)])
+    assert shots[0] == ["-R", "0,440,70,120"]  # never past the screen's left edge
+    assert screen.differs(before[0], after[0]) and not screen.differs(before[0], before[0])
+    monkeypatch.setattr(screen, "can_capture", lambda: False)
+    assert _REAL_SAMPLE([(10.0, 500.0)]) is None  # no Screen Recording: unknown, never "unchanged"

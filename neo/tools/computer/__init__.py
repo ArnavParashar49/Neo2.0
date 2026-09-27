@@ -54,29 +54,27 @@ def _needs_ax() -> str | None:
     return None if _ax_trusted() else _ax_off_reply()
 
 
-# macOS checks separately whether a process may post input events, and drops them silently when
-# it may not: a click NEO "made" would never arrive. Asked before any click, key or typing.
-INPUT_OFF = (
-    "macOS isn't letting NEO send clicks or keystrokes — in System Settings › Privacy & Security › "
-    "Accessibility, turn NEO off and on again, then ask again"
-)
-_INPUT_STILL_OFF = (
-    "Error: macOS still isn't letting NEO send clicks or keystrokes, and the user has already been told. "
-    "Stop here and tell them."
+# macOS checks separately whether a process may post input events ("control this computer"), and
+# drops them silently when it may not. Its answer isn't taken as a hard stop — a wrong "no" would lock
+# NEO out of every click and key — but no result claims success past it: a click that changed nothing
+# says why, and every other input says macOS may have dropped it.
+INPUT_DOUBT = (
+    " (macOS reports NEO may not send clicks or keystrokes, so this may not have arrived — if nothing "
+    "happened, turn NEO off and on in System Settings › Privacy & Security › Accessibility.)"
 )
 
 
 def _needs_input() -> str | None:
-    """None when NEO may both read the UI and post input events; else what the tool answers."""
-    if err := _needs_ax():
-        return err
+    """None when NEO may read the UI (Accessibility); else what the tool answers."""
+    return _needs_ax()
+
+
+def _input_doubt() -> str:
+    """INPUT_DOUBT when macOS says this process may not post events, else ""."""
     try:
-        allowed = inp.can_post()
+        return "" if inp.can_post() else INPUT_DOUBT
     except Exception:  # noqa: BLE001
-        allowed = True
-    if allowed:
-        return None
-    return confirm.ask_user(INPUT_OFF) if grants.first("input-off") else _INPUT_STILL_OFF
+        return ""
 
 
 def _dialog_text(els=None, app: str = "") -> str:
@@ -418,10 +416,10 @@ async def click(a: dict, c: ToolContext) -> str | ToolOutput:
     before = await _watch(c, pid, pts)
     await asyncio.to_thread(inp.click, *pts[0], button=button, count=count, mods=mods)
     if before is None:
-        return head
+        return head + _input_doubt()
     out = await pointer.outcome(before, pid, pts, [_at(*pts[0])])
     under = [pointer.words(h)] if not a.get("id") else []
-    text, ok = pointer.report(head, out, under)
+    text, ok = pointer.report(head, out, under, _input_doubt())
     if any(under) or out.details:
         _taint(c, "screen")
     return ToolOutput(text, ok=ok)
@@ -474,10 +472,10 @@ async def drag(a: dict, c: ToolContext) -> str | ToolOutput:
         head += f" (brought {t.brought} to the front first)"
     head += "."
     if before is None:
-        return head
+        return head + _input_doubt()
     out = await pointer.outcome(before, pid, pts, [f"the start {_at(*pts[0])}", f"the end {_at(*pts[1])}"])
     under = [f"start {pointer.words(src)}" if pointer.words(src) else "", f"end {pointer.words(dst)}" if pointer.words(dst) else ""]
-    text, ok = pointer.report(head, out, under)
+    text, ok = pointer.report(head, out, under, _input_doubt())
     if any(under) or out.details:
         _taint(c, "screen")
     return ToolOutput(text, ok=ok)
@@ -529,9 +527,9 @@ async def scroll(a: dict, c: ToolContext) -> str | ToolOutput:
     before = await _watch(c, pid, pts)
     text = await asyncio.to_thread(inp.scroll, pts[0][0], pts[0][1], dy, dx)
     if before is None:
-        return text
+        return str(text) + _input_doubt()
     out = await pointer.outcome(before, pid, pts, [_at(*pts[0])])
-    text, ok = pointer.report(str(text) + (f" in {t.hits[0].app}." if t.hits[0].app else "."), out, [])
+    text, ok = pointer.report(str(text) + (f" in {t.hits[0].app}." if t.hits[0].app else "."), out, [], _input_doubt())
     return ToolOutput(text, ok=ok)
 
 
@@ -896,7 +894,7 @@ async def type_text(a: dict, c: ToolContext) -> str | ToolOutput:
                 "somewhere else. Look before typing again.",
                 ok=False,
             )
-    return f"Typed “{text[:80]}”{note}" + (" into a new note." if created else ".")
+    return f"Typed “{text[:80]}”{note}" + (" into a new note." if created else ".") + _input_doubt()
 
 
 @tool(
@@ -929,7 +927,11 @@ async def dictate(a: dict, c: ToolContext) -> str:
         text = "\n" + text  # the heading stays a heading; the points start on their own line
     note = await _type(text)
     first = text.strip().splitlines()[0][:80]
-    return f"Typed {len(text.strip().splitlines())} line(s), starting “{first}”{note}" + (" (new note)." if created else ".")
+    return (
+        f"Typed {len(text.strip().splitlines())} line(s), starting “{first}”{note}"
+        + (" (new note)." if created else ".")
+        + _input_doubt()
+    )
 
 
 @tool(
@@ -992,7 +994,7 @@ async def hotkey(a: dict, c: ToolContext) -> str:
     out = await asyncio.to_thread(inp.hotkey, keys)
     if before is not None and not out.startswith("Error"):
         out += await _changes(before, pid, c)  # ⌘N may open a window, or a sheet that waits for an answer
-    return out
+    return out + ("" if out.startswith("Error") else _input_doubt())
 
 
 async def _new_note(c: ToolContext) -> str:
@@ -1130,7 +1132,7 @@ async def click_text(a: dict, c: ToolContext) -> str:
     except pointer.Refused as r:
         return str(r)
     await asyncio.to_thread(inp.click, *spot)
-    return f"Clicked '{name}' ({e.role.removeprefix('AX')}) at {tuple(map(int, spot))}"
+    return f"Clicked '{name}' ({e.role.removeprefix('AX')}) at {tuple(map(int, spot))}" + _input_doubt()
 
 
 _AX_CODE = re.compile(r"\((-?\d+)\)")

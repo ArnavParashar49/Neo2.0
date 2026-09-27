@@ -130,6 +130,12 @@ def sample_points(points: list[tuple[float, float]], r: float = _SAMPLE_R) -> li
         top = min(p[1] for p in points) - r
         right = max(p[0] for p in points) + r
         bottom = max(p[1] for p in points) + r
+        home = display_at(*points[0])
+        if home is not None:  # only what's on that screen is in the picture
+            left, top = max(left, home.x), max(top, home.y)
+            right, bottom = min(right, home.x + home.w), min(bottom, home.y + home.h)
+        if right - left < 2 or bottom - top < 2:
+            return None
         img = _grab(["-R", f"{int(left)},{int(top)},{int(right - left)},{int(bottom - top)}"])
         k = img.width / max(1.0, right - left)  # pixels per point
         out = []

@@ -324,9 +324,10 @@ def words(h: ax.Hit) -> str:
     return f"{role} “{label}”" if label and role else (label or role)
 
 
-def report(head: str, out: Outcome, under: list[str]) -> tuple[str, bool]:
-    """(the tool's text, ok). Third-party words go inside an untrusted fence."""
-    text = f"{head} {out.said}"
+def report(head: str, out: Outcome, under: list[str], doubt: str = "") -> tuple[str, bool]:
+    """(the tool's text, ok). Third-party words go inside an untrusted fence. ``doubt``: macOS's own
+    warning that it may have dropped the events, said when nothing is known to have changed."""
+    text = f"{head} {out.said}" + (doubt if out.changed is not True else "")
     bits = [f"under the pointer: {u}" for u in under if u] + ([out.details] if out.details else [])
     if bits:
         text += "\n" + fence("screen", "; ".join(bits))
