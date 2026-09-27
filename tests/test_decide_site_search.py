@@ -549,6 +549,92 @@ def test_page_read_says_why_when_it_can_neither_read_nor_look(monkeypatch, eyes)
     assert "Surfer has no window on screen" in asyncio.run(web.page_read()).text
 
 
+@pytest.fixture
+def in_a_host(tmp_path, monkeypatch):
+    """page_read in an agent embedded in another app ("Acme Desk"): that app is the one macOS
+    asks about Accessibility and Screen Recording."""
+    import sys
+
+    from neo_lib import make_runtime
+
+    from neo import runtime
+
+    monkeypatch.setattr(sys, "executable", "/Applications/Acme Desk.app/Contents/MacOS/python3")
+    rt = make_runtime(tmp_path / "a", "a", ["page_read"])
+    with runtime.bind(rt.scope()):
+        yield rt
+
+
+def test_in_a_host_page_read_asks_for_the_hosts_accessibility(monkeypatch, eyes, in_a_host):
+    """Accessibility off and no picture either: a question for the host's user naming the host app
+    (as the ax tools ask), not an error that tells them to turn something on for NEO."""
+    from neo.agent import confirm
+    from neo.agent.registry import ToolContext, registry
+    from neo.tools.computer import screen
+
+    def no_screen(wid, region=None):
+        raise PermissionError("off")
+
+    monkeypatch.setattr(screen, "capture_window", no_screen)
+    Browser(monkeypatch, trusted=False)
+    monkeypatch.setattr(focus, "front_app", lambda: ("Surfer", 42))
+    monkeypatch.setattr(inventory, "app_for_pid", lambda pid: SURFER)
+    out = asyncio.run(registry().invoke("page_read", {}, ToolContext()))
+    assert out.halt and out.text.startswith(confirm.NEEDS_USER)
+    assert "Accessibility is off for Acme Desk, the app this agent runs in" in out.text and "NEO" not in out.text
+
+
+def test_in_a_host_page_read_asks_for_the_hosts_screen_recording(monkeypatch, eyes, in_a_host):
+    from neo.agent import confirm
+    from neo.tools.computer import screen
+
+    def no_screen(wid, region=None):
+        raise PermissionError("off")
+
+    monkeypatch.setattr(screen, "capture_window", no_screen)
+    b = Browser(monkeypatch)
+    b.url, b.text = "https://vids.example.org/watch?v=1", ""  # a video: nothing to read, so NEO looks
+    monkeypatch.setattr(focus, "front_app", lambda: ("Surfer", 42))
+    monkeypatch.setattr(inventory, "app_for_pid", lambda pid: SURFER)
+    r = asyncio.run(web.page_read())
+    assert isinstance(r.text, confirm.Halt) and r.text.startswith(confirm.NEEDS_USER)
+    assert "Screen Recording is off for Acme Desk, the app this agent runs in" in r.text and "NEO" not in r.text
+
+
+def test_in_a_host_a_screenshot_says_whose_accessibility_is_off(monkeypatch, eyes, in_a_host):
+    Browser(monkeypatch, trusted=False)
+    monkeypatch.setattr(focus, "front_app", lambda: ("Surfer", 42))
+    monkeypatch.setattr(inventory, "app_for_pid", lambda pid: SURFER)
+    r = asyncio.run(web.page_read())
+    assert r.ok and "(Accessibility is off for Acme Desk)" in r.text and "for NEO" not in r.text
+
+
+def test_the_screenshot_goes_to_the_hosts_own_vision_brain(monkeypatch, in_a_host):
+    """A host that brought its own brains (provider=): page_read's screenshot is looked at by the
+    one of them that can see, never by none."""
+    from neo_lib import ScriptedBrain
+
+    from neo import providers as prov
+    from neo.providers.base import ImagePart
+    from neo.tools.computer import screen
+
+    text_only = ScriptedBrain(["(can't see)"], name="host-text")
+    text_only.supports_vision = False
+    eye = ScriptedBrain(["A cooking video, 3 minutes long."], name="host-vision")
+    in_a_host.brains = prov.BrainPool(
+        overrides=dict.fromkeys(("agent", "fast", "vision", "light", "offline"), [text_only, eye])
+    )
+    chain = web._vision_chain()
+    assert chain.names == [eye]
+    Browser(monkeypatch, trusted=False)
+    monkeypatch.setattr(focus, "front_app", lambda: ("Surfer", 42))
+    monkeypatch.setattr(inventory, "app_for_pid", lambda pid: SURFER)
+    monkeypatch.setattr(focus, "front_window_id", lambda pid: 9)
+    monkeypatch.setattr(screen, "capture_window", lambda wid, region=None: ImagePart(b"png", "image/png"))
+    r = asyncio.run(web.page_read())
+    assert r.ok and r.text.endswith("A cooking video, 3 minutes long.") and eye.calls == 1 and text_only.calls == 0
+
+
 def test_page_read_answers_the_users_own_words_from_the_page(monkeypatch, eyes):
     """No model is waiting to read the page (a fast path ran it): NEO answers from it, the page
     handed to the model fenced as untrusted, in the user's language."""

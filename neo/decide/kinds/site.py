@@ -66,6 +66,7 @@ _METHOD = {
 _FIELD_ROLES = ("AXTextField", "AXComboBox", "AXSearchField")
 _NO_AX = "Accessibility access is off for NEO: System Settings › Privacy & Security › Accessibility"
 _NO_SCREEN = "Screen Recording is off for NEO: System Settings › Privacy & Security › Screen Recording"
+_SCREEN_OFF = "Screen Recording is off for "
 # how a flow ended -> (what to say, the outcome's reason); '' = the method's own failure (blamed)
 _VERDICTS = {
     "untrusted": ("Accessibility is off, so I couldn't check the page", "unconfirmed"),
@@ -558,7 +559,7 @@ def _vision_chain() -> Any:
     names = []
     for n in brain("vision").names:
         try:
-            if make(n).supports_vision:
+            if (make(n) if isinstance(n, str) else n).supports_vision:  # a name, or a host's own provider
                 names.append(n)
         except Exception:  # noqa: BLE001 - a brain that isn't set up (no key, no package) can't look
             continue
@@ -598,7 +599,7 @@ async def _look(pid: int, browser: App, ask: str, view: View | None = None) -> t
     try:
         img = await asyncio.to_thread(screen.capture_window, wid, view)
     except PermissionError:
-        return "", _NO_SCREEN
+        return "", _no_screen()
     except Exception as e:  # noqa: BLE001 - no picture: the reason is the answer
         return "", f"the screenshot failed ({str(e)[:80]})"
     task = _LOOK_ASK.format(ask=ask[:300], browser=browser.name) if ask else _LOOK_PAGE
@@ -648,6 +649,42 @@ def _page(url: str, title: str, how: str, text: str) -> str:
     return "\n".join([*head, f"Read from: {how}", "", text])
 
 
+def _host() -> str:
+    """Embedded in another app: that app's name, which macOS holds responsible for the agent's
+    permissions ("" = NEO.app, or not embedded)."""
+    from neo import runtime
+
+    if not runtime.library_bound():
+        return ""
+    from neo.tools import computer
+
+    return computer._host_app() or "the app this agent runs in"
+
+
+def _no_screen() -> str:
+    if not _host():
+        return _NO_SCREEN
+    from neo.tools import computer
+
+    return f"{_SCREEN_OFF}{computer._host_who()}"
+
+
+def _cant_read(browser: App, trusted: bool, err: str) -> Result:
+    """Neither the page's text nor a screenshot: why. Embedded, a permission that is off is a
+    question for the host app's user, naming that app (as the ax tools ask)."""
+    if _host():
+        from neo.agent.confirm import ask_user
+        from neo.tools import computer
+
+        if not trusted:
+            return Result(computer._ax_off_reply(), False)
+        if err.startswith(_SCREEN_OFF):
+            return Result(ask_user(computer._off_for_host("Screen Recording")), False)
+    if not trusted:
+        return Result(f"Error: {_NO_AX}. A screenshot didn't work either: {err}", False)
+    return Result(f"Error: {browser.name} shows no page I can read. A screenshot didn't work either: {err}", False)
+
+
 async def page_read(limit: int = PAGE_CHARS, ask: str = "") -> Result:
     """The page in the front tab of whichever browser the user is looking at: its address, title
     and text (the main content first) through Accessibility; when that is off or the page has
@@ -676,7 +713,7 @@ async def page_read(limit: int = PAGE_CHARS, ask: str = "") -> Result:
             return await _answer(ask, page) if ask else Result(page, True)
         why = "the page has little text to read" if text.strip() else f"{browser.name} showed no page text"
     else:
-        why = "Accessibility is off for NEO"
+        why = f"Accessibility is off for {_host() or 'NEO'}"
     seen, err = await _look(pid, browser, ask, view)
     if seen:
         how = f"a screenshot of the {browser.name} window, as the vision brain saw it ({why})"
@@ -685,9 +722,7 @@ async def page_read(limit: int = PAGE_CHARS, ask: str = "") -> Result:
         how = f"the page's text in {browser.name} (only this much; a screenshot didn't work: {err})"
         page = _page(url, title, how, text)
         return await _answer(ask, page) if ask else Result(page, True)
-    if not trusted:
-        return Result(f"Error: {_NO_AX}. A screenshot didn't work either: {err}", False)
-    return Result(f"Error: {browser.name} shows no page I can read. A screenshot didn't work either: {err}", False)
+    return _cant_read(browser, trusted, err)
 
 
 # ---- the tool's gates and fast-path checks -------------------------------------------------------------

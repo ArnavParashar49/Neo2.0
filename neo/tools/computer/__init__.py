@@ -61,21 +61,32 @@ def _host_app() -> str:
     return next((p.stem for p in (exe, *exe.parents) if p.suffix == ".app"), "")
 
 
+def _host_who() -> str:
+    """Embedded in another app: that app, the one macOS must trust for this agent's permissions,
+    named as its user knows it."""
+    app = _host_app()
+    return (
+        f"{app}, the app this agent runs in"
+        if app
+        else f"the app this agent runs in ({Path(sys.executable).name}: for a script, the terminal or app that started it)"
+    )
+
+
+def _off_for_host(permission: str) -> str:
+    """Embedded: the question when `permission` (a Privacy & Security pane) is off for the host app."""
+    return (
+        f"{permission} is off for {_host_who()} — turn it on in System Settings › Privacy & Security › "
+        f"{permission}, then ask again"
+    )
+
+
 def _ax_off_texts() -> tuple[str, str]:
     """(the question, the error after it) when Accessibility is off. Embedded in another app, it is
     that app's process macOS must trust, not NEO.app: the texts name it."""
     if not runtime.library_bound():
         return AX_OFF, _AX_STILL_OFF
     app = _host_app()
-    who = (
-        f"{app}, the app this agent runs in"
-        if app
-        else f"the app this agent runs in ({Path(sys.executable).name}: for a script, the terminal or app that started it)"
-    )
-    ask = (
-        f"Accessibility is off for {who} — turn it on in System Settings › Privacy & Security › "
-        "Accessibility, then ask again"
-    )
+    ask = _off_for_host("Accessibility")
     still = (
         f"Error: Accessibility is still off for {app or 'the app this agent runs in'}, and the user has already "
         "been told how to turn it on. Stop here and tell them; don't try AppleScript or any other way into the app."
