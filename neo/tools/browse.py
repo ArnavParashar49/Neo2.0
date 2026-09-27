@@ -41,6 +41,8 @@ TOOLS = (
 STEPS = 20
 SECONDS = 150.0
 _WRAP_UP_S = 20.0
+_BUDGET_S = SECONDS + _WRAP_UP_S + 30  # a whole job, not counting the time it waits for the user
+_HELD_S = 6 * 3600.0  # the registry's cap: while the user has NEO's browser, the job waits for them
 _RESUME_S = 600.0  # a job that stopped to ask the user is picked up again within this long
 _ids = itertools.count(1)
 _running = asyncio.Lock()  # one job at a time: two would fight over the same tab
@@ -69,9 +71,14 @@ def _pick_up(goal: str) -> tuple[str, str]:
     count as read already: its page and its question come along (words a site chose), so the new
     run starts as tainted as the old one ended — though "continue" is a new request."""
     last = _last
+    from neo.tools.browser_live import live
+
+    # The user just handed the browser back after doing their part (a login, a code): however long
+    # that took, this is the job it was for.
+    handed_back = time.time() - live.handed_back_at < 120
     if (
         not last
-        or time.time() - last["at"] > _RESUME_S
+        or (time.time() - last["at"] > _RESUME_S and not handed_back)
         or last["stopped"] not in ("needs_confirm", "needs_user", "max_steps")
     ):
         return "", ""
@@ -100,7 +107,7 @@ def asks(p: confirm.Pending | None) -> bool:
 
 @tool(
     "browse",
-    "Do a job on a website in NEO's own browser (a separate window the user can see): go to a site and "
+    "Do a job on a website in NEO's own browser (the user can watch it and take over): go to a site and "
     "find, compare, check, read or fill something — e.g. 'go to <site> and find the cheapest <thing>'. "
     "Takes several steps and returns a short result. Give a self-contained goal with the site and the "
     "details. For a quick fact use web_search instead.",
@@ -115,7 +122,7 @@ def asks(p: confirm.Pending | None) -> bool:
     category="web",
     slow=True,
     untrusted=True,
-    timeout=SECONDS + _WRAP_UP_S + 30,
+    timeout=_HELD_S,
 )
 async def browse(a: dict, c: ToolContext) -> str | ToolOutput:
     global _now
@@ -135,9 +142,36 @@ async def browse(a: dict, c: ToolContext) -> str | ToolOutput:
     async with _running:
         _now = goal
         try:
-            return await _run(goal, str(a.get("url") or "").strip(), c)
+            return await _within(_run(goal, str(a.get("url") or "").strip(), c), _BUDGET_S)
+        except TimeoutError:
+            return f"Error: browse took longer than {int(_BUDGET_S)}s and was stopped"
         finally:
             _now = ""
+
+
+async def _within(coro, budget: float):
+    """`coro` within `budget` seconds of its own: while NEO's browser waits for the user to hand it
+    back, the clock stops."""
+    from neo.agent.loop import paused
+
+    loop = asyncio.get_running_loop()
+    p0, t0 = paused(), loop.time()
+    handle: asyncio.TimerHandle | None = None
+    async with asyncio.timeout(None) as cm:
+
+        def check() -> None:  # only this ever ends it: when the job's own time is up
+            nonlocal handle
+            left = t0 + budget + (paused() - p0) - loop.time()
+            if left <= 0:
+                cm.reschedule(loop.time())
+            else:
+                handle = loop.call_later(min(left, 0.5), check)
+
+        handle = loop.call_later(min(budget, 0.5), check)
+        try:
+            return await coro
+        finally:
+            handle.cancel()
 
 
 async def _run(goal: str, start: str, c: ToolContext) -> str | ToolOutput:
@@ -161,6 +195,10 @@ async def _run(goal: str, start: str, c: ToolContext) -> str | ToolOutput:
     system = browse_prompt(STEPS)
     chain = providers.brain("vision")  # a page that is mostly pixels comes with a screenshot
     job = f"browse{next(_ids)}"
+    from neo.events import current_job
+    from neo.tools.browser_live import live
+
+    live.job_for(job, current_job.get())  # the run is its request's: the user's, when they asked
     try:
         res = await run_agent(
             task,

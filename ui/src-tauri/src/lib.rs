@@ -4,6 +4,10 @@
 
 mod chord;
 mod core;
+#[cfg(target_os = "macos")]
+mod frame;
+#[cfg(target_os = "macos")]
+mod native;
 mod perms;
 
 use tauri::image::Image;
@@ -68,7 +72,7 @@ pub fn run() {
                 })
                 .build(),
         )
-        .invoke_handler(tauri::generate_handler![hide_window, ws_token])
+        .invoke_handler(tauri::generate_handler![hide_window, ws_token, frame::set_frame, native::clipboard_write, native::show_quiet])
         .manage(core::Core::default())
         .setup(|app| {
             #[cfg(target_os = "macos")]

@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import Awaitable, Callable
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
@@ -54,6 +55,10 @@ class Event:
 
 Subscriber = Callable[[Event], Awaitable[None] | None]
 
+# The job whose tool is running now: set as each tool call is announced (tool_start is awaited in
+# the task that then runs the tool), so a tool can tell which job called it without a parameter.
+current_job: ContextVar[str] = ContextVar("neo_current_job", default="")
+
 
 class EventBus:
     """Tiny async pub/sub. Subscribers may be sync or async; errors never propagate."""
@@ -63,6 +68,8 @@ class EventBus:
         self._base = NeoState.IDLE  # the "global" state (voice session / nothing running)
         self._jobs: dict[str, NeoState] = {}  # per-job states
         self._state = NeoState.IDLE
+        self._tasks: dict[str, asyncio.Task] = {}  # the task each job runs in (for a scoped stop)
+        self._job_end: list[Callable[[str], None]] = []
 
     @property
     def state(self) -> NeoState:
@@ -75,6 +82,19 @@ class EventBus:
     def subscribe(self, fn: Subscriber) -> Callable[[], None]:
         self._subs.append(fn)
         return lambda: self._subs.remove(fn)
+
+    def on_job_end(self, fn: Callable[[str], None]) -> Callable[[], None]:
+        """Call `fn(job)` whenever a job ends (its state goes back to idle)."""
+        self._job_end.append(fn)
+        return lambda: self._job_end.remove(fn)
+
+    def cancel_job(self, job: str) -> bool:
+        """Stop one job — the task it runs in — and nothing else. False when it isn't running."""
+        t = self._tasks.get(job)
+        if t is None or t.done():
+            return False
+        t.cancel()
+        return True
 
     async def publish(self, type: str, **data: Any) -> None:
         ev = Event(type=type, data=data)
@@ -98,9 +118,18 @@ class EventBus:
         it's the base state. Publishes only when the aggregate actually changes."""
         if job:
             if state == NeoState.IDLE:
-                self._jobs.pop(job, None)
+                ended = self._jobs.pop(job, None) is not None
+                self._tasks.pop(job, None)
+                if ended:
+                    for fn in list(self._job_end):
+                        try:
+                            fn(job)
+                        except Exception as e:  # noqa: BLE001 — a bad listener must not stop the job ending
+                            print(f"[events] job-end listener error: {type(e).__name__}")
             else:
                 self._jobs[job] = state
+                if job not in self._tasks and (task := asyncio.current_task()) is not None:
+                    self._tasks[job] = task
         else:
             self._base = state
         agg = self._aggregate()
@@ -121,6 +150,7 @@ class EventBus:
         await self.publish("note", text=text)
 
     async def tool_start(self, name: str, args: dict[str, Any], *, job: str = "") -> None:
+        current_job.set(job)  # the caller's task runs the tool next: it can tell which job it is
         await self.publish("tool_start", name=name, args=args, job=job)
 
     async def tool_end(self, name: str, ok: bool, summary: str, *, job: str = "") -> None:

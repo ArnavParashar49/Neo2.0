@@ -281,6 +281,12 @@ def approval_active() -> bool:
     return _approved.get() is not None
 
 
+def approving() -> str:
+    """The action id the user said yes to, inside :func:`approved` ("" elsewhere)."""
+    a = _approved.get()
+    return a.action_id if a is not None else ""
+
+
 def gated(
     tool: str, params: dict[str, Any], summary: str, detail: str = "", *, always: bool = False
 ) -> dict[str, Any] | str:
