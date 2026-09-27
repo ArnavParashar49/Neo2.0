@@ -1378,7 +1378,9 @@ def _native(monkeypatch, names):
     monkeypatch.setattr(axkit, "runtime", lambda path: "native")
 
 
-def test_a_look_kept_before_an_app_was_let_go_is_never_served_after_it_is_watched_again(fake, notes, monkeypatch):
+def test_a_look_kept_before_an_app_was_let_go_is_never_served_after_it_is_watched_again(
+    fake, notes, monkeypatch
+):
     """A→B→A with room to watch one app only: what was kept from A goes when A is let go, and A's
     count moves on when it is watched again — the model and the gate read A as it is now."""
     from neo.tools.computer import gates
@@ -1411,7 +1413,9 @@ def test_a_new_watch_never_matches_a_count_from_an_earlier_one(notes):
     assert axwatch.watch(5) and axwatch.generation(5) not in (None, 0, 1)  # a fresh count
 
 
-def test_the_last_three_apps_stay_watched_and_the_one_looked_at_longest_ago_is_let_go(fake, notes, monkeypatch):
+def test_the_last_three_apps_stay_watched_and_the_one_looked_at_longest_ago_is_let_go(
+    fake, notes, monkeypatch
+):
     for i, n in enumerate(("One", "Two", "Three", "Four")):
         fake.add_app(n, 100 + i, app_root(window(n, button("x"))))
     _native(monkeypatch, fake.names)
@@ -1424,7 +1428,9 @@ def test_the_last_three_apps_stay_watched_and_the_one_looked_at_longest_ago_is_l
     assert notes.stopped == [101] and axwatch.generation(101) is None and axwatch.generation(100) is not None
 
 
-def test_alternating_between_two_apps_starts_each_observer_once_and_reuses_the_looks(fake, notes, monkeypatch):
+def test_alternating_between_two_apps_starts_each_observer_once_and_reuses_the_looks(
+    fake, notes, monkeypatch
+):
     fake.add_app("Alpha", 100, app_root(window("A", *[button(f"a{i}") for i in range(30)])))
     fake.add_app("Beta", 200, app_root(window("B", *[button(f"b{i}") for i in range(30)])))
     _native(monkeypatch, fake.names)
@@ -1541,7 +1547,9 @@ def test_an_app_with_no_focused_window_shows_its_main_window_or_its_only_one(fak
     tree = ax.snapshot()
     assert '"Open"' in tree and "another window" not in tree  # the one window on screen
     two = window("Two", button("Close"), frame=(40, 60, 800, 600))
-    fake.apps[9] = app_root(window("One", button("Open")), two, AXFocusedWindow=None, AXMainWindow=None).set_pid(9)
+    fake.apps[9] = app_root(
+        window("One", button("Open")), two, AXFocusedWindow=None, AXMainWindow=None
+    ).set_pid(9)
     tree = ax.snapshot()
     assert tree.count("another window") == 2 and '"Open"' not in tree  # which one is meant: can't tell
 
@@ -1563,7 +1571,12 @@ def test_a_file_opened_in_an_app_that_shows_another_name_is_settled_at_once(cloc
 
 
 def test_a_sheet_on_one_window_never_blocks_a_point_on_another_window_of_its_app(fake, monkeypatch):
-    sheet = El("AXSheet", "Save changes?", frame=(100, 100, 300, 120), children=[button("Save", frame=(110, 180, 60, 24))])
+    sheet = El(
+        "AXSheet",
+        "Save changes?",
+        frame=(100, 100, 300, 120),
+        children=[button("Save", frame=(110, 180, 60, 24))],
+    )
     doc = window("Doc", sheet, frame=(0, 25, 600, 500))
     board = window("Board", frame=(700, 25, 600, 500))
     root = app_root(doc, board)
@@ -1607,7 +1620,11 @@ def test_a_window_id_from_another_apps_look_is_not_this_apps_window(fake):
 
 def test_a_blind_look_carries_no_coordinates_and_asks_for_no_screenshot(fake, notes, monkeypatch):
     board = El("AXGroup", frame=(120, 70, 1200, 800))
-    fake.add_app("Game", 42, app_root(window("Board", button("New Game"), board), window("Other", frame=(40, 40, 300, 200))))
+    fake.add_app(
+        "Game",
+        42,
+        app_root(window("Board", button("New Game"), board), window("Other", frame=(40, 40, 300, 200))),
+    )
     _native(monkeypatch, fake.names)
     seeing = ax.snapshot("Game")
     assert "@(" in seeing and "screenshot" in seeing  # (a model that can see gets both)

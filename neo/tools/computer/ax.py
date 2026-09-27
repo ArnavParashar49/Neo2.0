@@ -1999,6 +1999,7 @@ def _blocked(pid: int, win, x: float, y: float, kids: list | None = None) -> str
     '' when nothing does. A point on the sheet or the modal window itself is never blocked by it."""
     fv = _attrs(_app_el(pid), ("AXFocusedWindow",)) if pid else {}
     focused = fv.get("AXFocusedWindow")
+    f = (0.0, 0.0, 0.0, 0.0)
     if focused is not None and (win is None or not _same(focused, win)):
         mv = _attrs(focused, ("AXModal", "AXPosition", "AXSize"))
         f = _frame_of(mv)
@@ -2007,8 +2008,8 @@ def _blocked(pid: int, win, x: float, y: float, kids: list | None = None) -> str
     target = win if win is not None else focused
     if target is None:
         return ""
-    if win is None and not _inside(x, y, _point_size(focused)):
-        return ""  # a point on another window of the app (a board beside the document): not this sheet's
+    if win is None and f[2] > 0 and f[3] > 0 and not _inside(x, y, f):
+        return ""  # a point on another window of the app (a board beside the document): not its sheet's
     sheet = _sheet_of(target, kids)
     if sheet is not None and not _inside(x, y, _point_size(sheet)):
         return summary(sheet)
