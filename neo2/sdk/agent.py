@@ -222,6 +222,7 @@ class AsyncAgent:
                 brains=BrainPool(overrides),
                 audit_sink=on_audit,
                 audit_file=not own_tmp,  # a temp dir's log would vanish with it: on_audit and the logger
+                temporary=own_tmp,
             )
             settings.ensure_dirs()
             if settings.memory_path is not None:

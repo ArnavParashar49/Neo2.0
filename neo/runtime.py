@@ -69,6 +69,8 @@ class Runtime:
     secret_paths: tuple[Path, ...] = ()  # never read or written by NEO's tools
     generation: int = 0  # bumped when this agent's memory is erased (neo.privacy)
     library: bool = True
+    temporary: bool = False  # its data dir is a temp dir its owner removes when it closes
+    closed: bool = False
     scopes: dict[str, Scope] = field(default_factory=dict, repr=False)
     lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
 
@@ -88,6 +90,8 @@ class Runtime:
             _live.add(self)
         if self.library:
             set_library_mode()  # from now on, code that lost its agent fails closed
+            # Dropped without close(): what it kept stays secret all the same.
+            self._retire = weakref.finalize(self, _retire, tuple(_kept(self)))
 
     def scope(self, conversation: str = "default") -> Scope:
         """The conversation's scope (its own gate, events and session), created on first use."""
@@ -109,9 +113,15 @@ class Runtime:
         return v
 
     def close(self) -> None:
-        """No longer live: its data dir stops counting as one of the process's secret roots."""
+        """No longer live: its data dir is free for another agent. What it kept (its data dir,
+        unless a temp dir its owner removes; its memory file; its secret paths) stays secret to
+        every other agent for the rest of the process."""
         with _live_lock:
             _live.discard(self)
+        if self.library and not self.closed:
+            self._retire.detach()
+            _retire(tuple(_kept(self)))
+        self.closed = True
 
 
 @dataclass(eq=False)
@@ -139,6 +149,9 @@ _scope: ContextVar[Scope | None] = ContextVar("neo_scope", default=None)
 _library = False  # set once an embedded agent exists; sticky for the process
 _live: weakref.WeakSet[Runtime] = weakref.WeakSet()
 _live_lock = threading.Lock()  # the policy reads it from worker threads
+# What closed (or dropped) agents kept, secret for the rest of the process. A dict as an ordered
+# set, lock-free: a finalizer adds to it whenever the GC runs, even inside _live_lock.
+_retired: dict[Path, None] = {}
 
 
 def current_scope() -> Scope | None:
@@ -225,7 +238,8 @@ def live_runtimes() -> list[Runtime]:
 
 def secret_roots() -> list[Path]:
     """Folders NEO's tools never read or write beyond the fixed list in the policy: every live
-    agent's data dir and extra secret paths, and the app's own data dir once its settings have
+    agent's data dir and extra secret paths (and what closed agents kept: Runtime.close), and the
+    app's own data dir once its settings have
     been built (read from the module global — this never builds settings). Embedded, also NEO.app's
     data wherever the environment's NEO_DATA_DIR / NEO_MEMORY_PATH moved it (its settings are
     never built in a host's process)."""
@@ -246,6 +260,7 @@ def secret_roots() -> list[Path]:
     if _library:
         for p in config.moved_app_data():  # a folder, or a memory file with its side files
             roots.extend([p, *(p.with_name(p.name + x) for x in _SIDE_FILES)])
+    roots.extend(list(_retired))
     out: list[Path] = []
     for p in roots:
         p = Path(str(p)).expanduser()
@@ -255,6 +270,22 @@ def secret_roots() -> list[Path]:
 
 
 _SIDE_FILES = ("-wal", "-shm", "-journal")  # what SQLite keeps next to a database
+
+
+def _kept(rt: Runtime) -> list[Path]:
+    """What a library agent keeps that no other agent may read: its data dir (unless a temp dir
+    that goes with it), its memory file, its secret paths."""
+    s = rt.settings
+    out = [] if rt.temporary else [Path(s.data_dir)]
+    out.extend(Path(p) for p in getattr(s, "extra_secret_paths", None) or ())
+    out.extend(_memory_files(s))
+    out.extend(Path(p) for p in rt.secret_paths)
+    return out
+
+
+def _retire(paths: tuple[Path, ...]) -> None:
+    for p in paths:
+        _retired[p] = None
 
 
 def _memory_files(s: Settings) -> list[Path]:

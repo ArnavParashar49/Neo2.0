@@ -59,8 +59,32 @@ def test_a_runtimes_own_secret_paths(tmp_path):
     rt = make_runtime(tmp_path / "d", "d")
     rt.secret_paths = (tmp_path / "tenant-keys",)
     assert policy.is_secret(tmp_path / "tenant-keys" / "a")
-    rt.close()  # gone: its folders are ordinary folders again
-    assert not policy.is_secret(tmp_path / "tenant-keys" / "a") and not policy.is_secret(tmp_path / "d")
+    rt.close()  # closed: what it kept is still no other agent's to read, for the whole process
+    assert policy.is_secret(tmp_path / "tenant-keys" / "a") and policy.is_secret(tmp_path / "d" / "audit.log")
+    assert policy.covers_secret(tmp_path) and rt not in runtime.live_runtimes()
+
+
+def test_a_dropped_runtimes_folders_stay_secret_too(tmp_path):
+    import gc
+
+    rt = make_runtime(tmp_path / "d", "d", extra_secret_paths=[tmp_path / "vault"])
+    del rt
+    gc.collect()
+    assert not runtime.live_runtimes()
+    assert policy.is_secret(tmp_path / "vault" / "k") and policy.covers_secret(tmp_path / "d")
+
+
+def test_an_agent_folder_from_any_process_is_secret_to_an_agent(tmp_path):
+    """Its marker says so: an agent that ran yesterday, in another process, kept its memory here."""
+    old = tmp_path / "old-agent"
+    (old / "browser").mkdir(parents=True)
+    (old / ".neo-agent").write_text("x")
+    for p in (old, old / "memory.sqlite3", old / "browser" / "Cookies", old / ".neo-agent"):
+        assert not policy.is_secret(p)  # NEO.app's own tools: as before
+    make_runtime(tmp_path / "live", "live")  # embedded from here on
+    for p in (old, old / "memory.sqlite3", old / "browser" / "Cookies", old / ".neo-agent"):
+        assert policy.is_secret(p), p
+    assert not policy.is_secret(tmp_path / "old-agent-notes.txt")
 
 
 def test_every_live_agent_counts_even_unbound(tmp_path):

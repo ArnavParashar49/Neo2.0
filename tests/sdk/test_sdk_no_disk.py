@@ -197,6 +197,32 @@ async def test_two_live_agents_never_share_a_folder(tmp_path):
         pass  # closed agents give their folder back
 
 
+async def test_a_closed_agents_data_stays_secret_to_the_others(tmp_path):
+    """One agent per tenant, idle ones closed: a live one's tools never read what a closed one
+    kept — its folder (memory, audit log, browser profile), its memory file, its secret paths."""
+    from neo import runtime
+    from neo.security import policy
+
+    a_dir, a_mem, vault = tmp_path / "tenants" / "a", tmp_path / "dbs" / "a.sqlite3", tmp_path / "vault"
+    cfg = neo2.AgentConfig(tools="none", data_dir=a_dir, memory=neo2.MemoryConfig(path=a_mem), extra_secret_paths=(vault,))
+    async with neo2.AsyncAgent(neo2.AgentConfig(tools="none", data_dir=tmp_path / "b"), provider=ScriptedBrain()):
+        a = neo2.AsyncAgent(cfg, provider=ScriptedBrain())
+        await a.ask("remember that my locker is 42")
+        (a_dir / "browser").mkdir()
+        (a_dir / "browser" / "Cookies").write_text("session=1")
+        await a.aclose()
+        for p in (a_dir / "audit.log", a_dir / "browser" / "Cookies", a_mem, Path(str(a_mem) + "-wal"), vault / "k"):
+            assert policy.is_secret(p), p
+        assert policy.covers_secret(tmp_path / "tenants") and policy.covers_secret(tmp_path / "dbs")
+        assert not policy.shell_is_read_only(f"cat {a_mem}") and not policy.shell_is_read_only(f"grep -r x {tmp_path / 'tenants'}")
+        t = neo2.AsyncAgent(neo2.AgentConfig(tools="none"), provider=ScriptedBrain())
+        td = t.data_dir
+        await t.aclose()  # a temp folder goes with its agent: nothing of it is kept
+        assert not td.exists() and td not in runtime.secret_roots()
+    async with neo2.AsyncAgent(cfg, provider=ScriptedBrain()):
+        pass  # and the tenant's agent opens again on its own folder and memory
+
+
 async def test_a_failed_construction_leaves_no_temp_dir(tmp_path, monkeypatch):
     import tempfile
 

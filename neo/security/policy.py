@@ -104,6 +104,18 @@ def _resolved(p: Path) -> Path:
         return p
 
 
+def _in_agent_folder(p: Path) -> bool:
+    """Embedded (neo.runtime): `p` lies in a folder NEO made an agent's own (its marker) — a live
+    agent's, a closed one's, or one from another process. NEO.app's own tools: unchanged."""
+    from neo import runtime
+
+    if not runtime.library_mode():
+        return False
+    from neo.config import AGENT_MARKER
+
+    return any(os.path.isfile(d / AGENT_MARKER) for d in (p, *p.parents))
+
+
 def is_secret(path: str | os.PathLike, base: str | os.PathLike | None = None) -> bool:
     """Keys, tokens, password stores, browser profiles, chat and mail stores, NEO's own data."""
     roots: list[Path] | None = None
@@ -116,6 +128,8 @@ def is_secret(path: str | os.PathLike, base: str | os.PathLike | None = None) ->
             return True
         roots = _extra_roots() if roots is None else roots
         if any(_under(p, r) for r in roots):
+            return True
+        if _in_agent_folder(p):
             return True
     return False
 

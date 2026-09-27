@@ -100,6 +100,7 @@ def _app_mode(monkeypatch):
 
     monkeypatch.setattr(runtime, "_library", False)
     monkeypatch.setattr(runtime, "_live", weakref.WeakSet())
+    monkeypatch.setattr(runtime, "_retired", {})
     yield
     monkeypatch.setattr(runtime, "_library", False)
 
