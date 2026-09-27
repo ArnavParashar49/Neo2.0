@@ -128,6 +128,7 @@ class Watch:
     def __call__(self, ev: Any) -> None:
         with self._lock:
             if self.stopped or self.refused:
+                self.release()  # (the tap saw the user between two of NEO's events)
                 raise Stop(self.stopped or self.refused)
             typ = int(Q.CGEventGetType(ev))
             kind = self._mouse.get(typ) or self._keyk.get(typ)
@@ -250,6 +251,8 @@ class Watch:
                 self._down = {"kind": kind, "at": entry["at"]}
             elif kind in ("up", "rup", "oup"):
                 self._down = None
+            elif self._down is not None and kind in _GESTURE_REST:
+                self._down["at"] = entry["at"]  # a release lets go where the drag is now
             if kind != "scroll":
                 self._last = (x, y)
         else:

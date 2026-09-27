@@ -50,6 +50,7 @@ _CHECK_S = 8.0
 _READY_S = 12.0  # a cold Python + AppKit start
 _WAIT_S = 1.0  # for a click to arrive
 _TEXT_WAIT_S = 2.5
+_DRAG_WAIT_S = 1.5  # a drag, and a drop (drag and drop runs its own loop in the app)
 _POINT_SLACK = 1.5  # points: a click "lands where it was sent"
 _SHOT_SLACK = 3.0  # points: screenshot → coordinates
 _ASKED = "check your computer controls"
@@ -267,8 +268,8 @@ class _Run:
     def state(self) -> dict:
         return self.reader.last("state") or {}
 
-    async def wait(self, mark: int, pred: Callable[[dict], bool], timeout: float = _WAIT_S) -> dict | None:
-        end = time.monotonic() + timeout
+    async def wait(self, mark: int, pred: Callable[[dict], bool], timeout: float | None = None) -> dict | None:
+        end = time.monotonic() + (_WAIT_S if timeout is None else timeout)
         while True:
             self.reader.poll()
             for e in self.reader.events[mark:]:
@@ -278,8 +279,8 @@ class _Run:
                 return None
             await asyncio.sleep(0.03)
 
-    async def wait_state(self, pred: Callable[[dict], bool], timeout: float = _TEXT_WAIT_S) -> dict | None:
-        end = time.monotonic() + timeout
+    async def wait_state(self, pred: Callable[[dict], bool], timeout: float | None = None) -> dict | None:
+        end = time.monotonic() + (_TEXT_WAIT_S if timeout is None else timeout)
         while True:
             s = self.state()
             if s and pred(s):
@@ -298,11 +299,11 @@ class _Run:
             await asyncio.sleep(0.05)
 
     # NEO's tools, the way the agent calls them
-    async def tool(self, name: str, **args: Any):
+    async def tool(self, tool_name: str, /, **args: Any):
         from neo.agent import confirm
         from neo.agent.registry import ToolContext, registry
 
-        out = await registry().invoke(name, args, ToolContext(user_text=_ASKED, taint=self.taint, origin="user"))
+        out = await registry().invoke(tool_name, args, ToolContext(user_text=_ASKED, taint=self.taint, origin="user"))
         if out.staged and (p := confirm.peek()) is not None and p.action_id == out.staged:
             confirm.cancel("the controls self-test never presses anything that needs a yes")
         return out
@@ -578,7 +579,7 @@ async def _drag_board(r: _Run) -> Check:
     m = r.mark()
     out = await r.tool("drag", x1=x1, y1=y1, x2=x2, y2=y2)
     c.sent, c.said = f"drag ({x1:.0f}, {y1:.0f}) → ({x2:.0f}, {y2:.0f}), cell {_cell_str(piece)} → {_cell_str(end)}", out.text
-    moved = await r.wait(m, lambda e: e.get("ev") == "piece_moved", 1.5)
+    moved = await r.wait(m, lambda e: e.get("ev") == "piece_moved", _DRAG_WAIT_S)
     if moved is not None and moved.get("end") == end:
         return c.ok(f"the piece moved from {_cell_str(piece)} to {_cell_str(end)}")
     if moved is not None:
@@ -597,7 +598,7 @@ async def _drag_drop(r: _Run) -> Check:
     m = r.mark()
     out = await r.tool("drag", x1=x1, y1=y1, x2=x2, y2=y2)
     c.sent, c.said = f"drag ({x1:.0f}, {y1:.0f}) → ({x2:.0f}, {y2:.0f}), tile → well", out.text
-    drop = await r.wait(m, lambda e: e.get("ev") == "drop", 2.0)
+    drop = await r.wait(m, lambda e: e.get("ev") == "drop", _DRAG_WAIT_S)
     if drop is not None and drop.get("payload") == L.DRAG_PAYLOAD:
         return c.ok("the well got the drop")
     if drop is not None:
