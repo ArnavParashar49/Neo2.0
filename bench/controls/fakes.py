@@ -1145,22 +1145,24 @@ def _draw(d: Any, el: FakeEl, world: World, font: Any, dy: float = 0.0, clip: tu
             _draw(d, c, world, font, dy, clip)
 
 
-_GLYPH = {"K": "♔", "Q": "♕", "R": "♖", "B": "♗", "N": "♘", "P": "♙"}
-
-
 def _draw_board(d: Any, b: Board) -> None:
+    """The squares, the selected piece's square lit (as a chess app shows a pick), and the pieces as
+    discs — white ones white with a dark rim, black ones near-black — so the picture doesn't depend
+    on a font having chess glyphs (without them a glyph draws as a striped box)."""
     k = SCALE
-    pf = _FONTS.setdefault(-int(b.sq), _font(int(b.sq * 0.75) * k))
     for r in range(8):
         for c in range(8):
             x0, y0 = (b.x + c * b.sq) * k, (b.y + r * b.sq) * k
             fill = (238, 238, 210) if (r + c) % 2 == 0 else (118, 150, 86)
+            if b.selected is not None and b.square_at(b.x + (c + 0.5) * b.sq, b.y + (r + 0.5) * b.sq) == b.selected:
+                fill = (186, 202, 68)  # (a pick is plain to see: a different shade, not just a hue)
             d.rectangle([x0, y0, x0 + b.sq * k - 1, y0 + b.sq * k - 1], fill=fill)
+    rad = b.sq * 0.34
     for sq, p in b.pieces.items():
         cx, cy = b.center(sq)
         white = p.isupper()
-        d.text(((cx - b.sq * 0.38) * k, (cy - b.sq * 0.48) * k), _GLYPH[p.upper()], font=pf,
-               fill=(255, 255, 255) if white else (10, 10, 10), stroke_width=k, stroke_fill=(0, 0, 0))  # fmt: skip
+        d.ellipse([(cx - rad) * k, (cy - rad) * k, (cx + rad) * k, (cy + rad) * k],
+                  fill=(255, 255, 255) if white else (24, 24, 24), outline=(30, 30, 30), width=k)  # fmt: skip
 
 
 # ---- AppKit's running applications ---------------------------------------------------------------
@@ -1334,9 +1336,10 @@ class Env:
 # pictures, no waiting), as the code has it: the bench measures the real thing. Taken when this module
 # is first imported — at collection time under pytest, before any fixture runs.
 _PRISTINE_NAMES = {
-    "neo2.core.tools.computer.ax": ("hit", "window_owner_at", "scene", "raise_window", "focused_element_text"),
+    "neo2.core.tools.computer.ax": ("hit", "window_owner_at", "scene", "raise_window", "focused_element_text", "working_app"),
     "neo2.core.tools.computer.screen": ("sample_points",),
-    "neo2.core.tools.computer.pointer": ("LOOK_S", "LOOK_AGAIN_S", "SETTLE_S", "HOVER_S", "POLL_S"),
+    "neo2.core.tools.computer.pointer": ("LOOK_S", "LOOK_AGAIN_S", "SETTLE_S", "HOVER_S", "POLL_S", "protected_in"),
+    "neo2.core.agent.settle": ("probe",),
 }
 
 

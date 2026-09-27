@@ -234,6 +234,17 @@ def test_the_brains_image_limit_sizes_the_picture(cli, monkeypatch):
     assert screen.shot().w == 1512
     monkeypatch.setattr(providers, "image_limit", lambda: "weird", raising=False)
     assert screen.shot().w == 1512  # an answer it can't read: NEO's own caps
+    # what providers.image_limit() returns in NEO: an ImageLimit (edge, pixels, bytes; None: no cap)
+    monkeypatch.setattr(providers, "image_limit", lambda: providers.ImageLimit(1024, None, None), raising=False)
+    assert (screen.shot().w, screen.shot().h) == (1024, 665)
+    monkeypatch.setattr(providers, "image_limit", lambda: providers.ImageLimit(None, 300_000, None), raising=False)
+    c = screen.shot()
+    assert c.w * c.h <= 300_000 and c.w < 1512  # the area alone binds (Groq: pixels, no edge)
+    monkeypatch.setattr(providers, "image_limit", lambda: providers.ImageLimit(None, None, 30_000), raising=False)
+    c = screen.shot()
+    assert c.w == 1512 or len(c.part.data) <= 30_000  # a brain's byte cap tightens the upload budget
+    assert screen._byte_budget(providers.ImageLimit(None, None, 30_000)) == 30_000
+    assert screen._byte_budget(providers.ImageLimit(None, None, 10 * 2**20)) == screen._MAX_BYTES
 
 
 # ---- regions and zooms keep Retina detail ------------------------------------------------------------

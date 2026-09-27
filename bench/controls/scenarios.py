@@ -214,7 +214,13 @@ def board_world(*, sheet: bool = False, front: str = "Chess") -> World:
 
 # ---- reading tool results ------------------------------------------------------------------------------
 
-_LINE = re.compile(r'^\s*(e\d+)\s+(\w+)(?:\s+"([^"]*)")?(?:\s+=\s+(.*?))?(?:\s+\((?:disabled|focused)\))*\s+@\((-?\d+),(-?\d+) (\d+)x(\d+)\)', re.M)
+# An element line: an id, a role, a label in straight or curly quotes, a value, and its frame — which
+# a brain that can't see is never given (DECISIONS 43): then the line ends without one.
+_LINE = re.compile(
+    r'^\s*(e\d+)\s+(\w+)(?:\s+["\u201c]([^"\u201d]*)["\u201d])?(?:\s+=\s+(.*?))?(?:\s+\((?:disabled|focused)\))*'
+    r'(?:\s+@\((-?\d+),(-?\d+) (\d+)x(\d+)\)|\s*$)',
+    re.M,
+)
 _SHOT = re.compile(r'shot="([^"\s]+)"')
 NEEDS = ("NEEDS_CONFIRM", "NEEDS_USER")
 
@@ -223,8 +229,8 @@ def elements(txt: str) -> list[dict]:
     out = []
     for m in _LINE.finditer(txt or ""):
         val = (m.group(4) or "").strip().strip("'\"")
-        out.append({"id": m.group(1), "role": m.group(2), "title": m.group(3) or "", "value": val,
-                    "frame": tuple(int(m.group(i)) for i in range(5, 9))})  # fmt: skip
+        frame = tuple(int(m.group(i)) for i in range(5, 9)) if m.group(5) is not None else None
+        out.append({"id": m.group(1), "role": m.group(2), "title": m.group(3) or "", "value": val, "frame": frame})
     return out
 
 
@@ -398,11 +404,16 @@ def _pixel(world: World, sid: str, square: str) -> tuple[float, float] | None:
     return round((x - s.x0) / s.ppp, 1), round((y - s.y0) / s.ppp, 1)
 
 
+# The screenshot note's words when NEO found a board's squares (neo2.core.tools.computer.board.note).
+_BOARD_FOUND = re.compile(r"\bboard of \d+\s*[×x]\s*\d+ squares", re.I)
+
+
 def move_policy(world: World, moves: list[tuple[str, str]], *, app_name: str = "Chess", then: Callable | None = None,
                 blind_guess: bool = False) -> Callable:  # fmt: skip
     """Make these moves on the board by clicks: look (a tree, then a picture), click the piece,
     look, click its square, look, answer — fewer looks when results carry a picture, both clicks
-    in one turn when the prompt allows it, squares by name when ``click`` takes a ``cell``."""
+    in one turn when the prompt allows it, squares by name when ``click`` takes a ``cell`` (after a
+    look whose note says NEO found the board: squares are named from it)."""
 
     def clicks_for(frm: str, to: str, sid: str | None, cells: bool) -> list:
         if cells:
@@ -440,6 +451,19 @@ def move_policy(world: World, moves: list[tuple[str, str]], *, app_name: str = "
             st["looked_tree"] = True
             return turn(call("ax_tree", app=app_name))
         last = mine[-1] if mine else None
+        if cells:
+            first = next((m for m in msgs if m.role == "user"), None)
+            seen = [r.content for r in mine if r.name in ("screenshot", "look", "observe")] + [first.text if first else ""]
+            if last is not None and last.name == "click" and last.content.startswith("Error"):
+                if "screenshot" not in last.content or st.get("relooked"):
+                    return say(last.content)
+                st["relooked"] = True  # (the board moved or wasn't known: look, then the same square again)
+                todo.insert(0, st.pop("sent", [""])[-1] or todo[0])
+                return turn(call("screenshot"))
+            if not any(_BOARD_FOUND.search(t or "") for t in seen):
+                if any(r.name == "screenshot" for r in mine):
+                    return say("I can't find the board's squares.")
+                return turn(call("screenshot"))
         if not todo:
             if last is not None and (last.images or last.name in ("screenshot", "look")) or verify_asked(msgs) and st.get("checked"):
                 return say("Moved " + ", ".join(f"{a} to {c}" for a, c in moves) + ".")
@@ -461,9 +485,11 @@ def move_policy(world: World, moves: list[tuple[str, str]], *, app_name: str = "
         if batch:
             frm, to = todo[0], todo[1]
             calls = clicks_for(frm, to, sid, cells)
+            st["sent"] = [frm, to]
             del todo[:2]
             return turn(*calls) if calls else say("I can't find the board.")
         sq = todo.pop(0)
+        st["sent"] = [sq]
         if cells:
             return turn(call("click", cell=sq))
         px = _pixel(world, sid or "", sq)

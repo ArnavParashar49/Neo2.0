@@ -30,6 +30,7 @@ scroll a model makes:
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import itertools
 import re
 import secrets
@@ -391,20 +392,42 @@ def set_grid_check(fn: GridCheck | None) -> None:
 # changed: None = couldn't tell).
 CellBefore = Callable[[list["Aim"]], Awaitable[Any]]
 CellAfter = Callable[[Any], Awaitable[tuple[str, "bool | None"]]]
+# ``region(aims)`` → the screen rectangle (x, y, w, h) the helper looks at before the input (the
+# board's): the look before the input (its change samples) is taken of it too — one capture for both.
+CellRegion = Callable[[list["Aim"]], "tuple[int, int, int, int] | None"]
 _cell_before: CellBefore | None = None
 _cell_after: CellAfter | None = None
+_cell_region: CellRegion | None = None
+# The area the look before an input also captures (a board's, for its check before a move): set around
+# the gate's _watch, which asks pointer.before for that look.
+_before_area: contextvars.ContextVar[tuple[int, int, int, int] | None] = contextvars.ContextVar("before_area", default=None)
 
 
-def set_cell_checks(before: CellBefore | None, after: CellAfter | None) -> None:
-    global _cell_before, _cell_after
-    _cell_before, _cell_after = before, after
+def set_cell_checks(before: CellBefore | None, after: CellAfter | None, region: CellRegion | None = None) -> None:
+    global _cell_before, _cell_after, _cell_region
+    _cell_before, _cell_after, _cell_region = before, after, region
 
 
-async def _cells_before(aims: list[Aim]) -> Any:
-    """The board helper's look right before an input on its squares (None: no square in it)."""
+def _cells_area(aims: list[Aim]) -> tuple[int, int, int, int] | None:
+    """The board's area the helper looks at before an input on its squares (None: no square in it,
+    or the helper doesn't say)."""
+    if _cell_region is None or _cell_before is None or not any(w.form == "cell" for w in aims):
+        return None
+    try:
+        return _cell_region(aims)
+    except Exception:  # noqa: BLE001 - the helper's own check before the input says what is wrong
+        return None
+
+
+async def _cells_before(aims: list[Aim], frame: Any = None) -> Any:
+    """The board helper's look right before an input on its squares (None: no square in it).
+    ``frame``: the pointer's look before the input (screen.Frame), taken of the board's area too —
+    the helper cuts its picture from it instead of taking another."""
     if _cell_before is None or not any(w.form == "cell" for w in aims):
         return None
     try:
+        if frame is not None and _hears(_cell_before, "frame"):
+            return await _cell_before(aims, frame=frame)  # type: ignore[call-arg]
         return await _cell_before(aims)
     except Refused:
         raise
@@ -412,13 +435,26 @@ async def _cells_before(aims: list[Aim]) -> Any:
         raise _helper_error(e) from None
 
 
-async def _cells_after(state: Any, text: str, ok: bool) -> tuple[str, bool]:
+async def _watched(g: Any, c: ToolContext, pid: int, pts: list[tuple[float, float]], hover: tuple[float, float], area):
+    """The gate's look before the input (g._watch), capturing ``area`` too (a board's) when given."""
+    tok = _before_area.set(area)
+    try:
+        return await g._watch(c, pid, pts, hover=hover)
+    finally:
+        _before_area.reset(tok)
+
+
+async def _cells_after(state: Any, text: str, ok: bool, frame: Any = None) -> tuple[str, bool]:
     """The board helper's words after the input (NEO's own: square names), and ok unless it saw the
-    board unchanged."""
+    board unchanged. ``frame``: the outcome's last look at the screen (screen.Frame), which the
+    helper may cut its look at the board from instead of taking another picture."""
     if state is None or _cell_after is None:
         return text, ok
     try:
-        said, changed = await _cell_after(state)
+        if frame is not None and _hears(_cell_after, "frame"):
+            said, changed = await _cell_after(state, frame=frame)  # type: ignore[call-arg]
+        else:
+            said, changed = await _cell_after(state)
     except Exception:  # noqa: BLE001 - the words are a help: the result stands without them
         return text, ok
     return (text + "\n" + said if said else text), ok and changed is not False
@@ -811,14 +847,27 @@ class Look:
     scene: ax.Scene
     pixels: list | None
     cost: float = 0.0  # how long the look at the scene took (a busy app answers slowly)
+    frame: Any = None  # the picture of the after-look's area the samples were cut from (screen.Frame)
 
 
-async def look(pid: int, pts: list[tuple[float, float]], like: list | None = None) -> Look:
+async def look(
+    pid: int, pts: list[tuple[float, float]], like: list | None = None, area: tuple[int, int, int, int] | None = None
+) -> Look:
     """The scene and the pixels around the points. ``like``: the samples of the look before, which
-    these are compared with — taken the same way (a pair never mixes two capture paths)."""
+    these are compared with — taken the same way (a pair never mixes two capture paths). ``area``:
+    the after-look's (screen points): one capture shows it and the samples' boxes — the samples are
+    cut from it, and it is the picture after the input when it is the last look (no second capture)."""
     t0 = time.monotonic()
     sc = await asyncio.to_thread(ax.scene, pid)
     cost = time.monotonic() - t0
+    if area is not None and pts and callable(getattr(screen, "shot", None)):  # (the capture pipeline's: capture_area)
+        try:
+            frame, _ = await asyncio.to_thread(screen.look_frame, area, pts, like=like, samples=False)
+        except Exception:  # noqa: BLE001 - no picture of the area: the samples alone, as without one
+            frame = None
+        if frame is not None:  # (the samples cut from it: no capture of their own)
+            px = await asyncio.to_thread(screen.sample_points, pts, frame=frame, like=like)
+            return Look(sc, px, cost, frame)
     px = await asyncio.to_thread(screen.sample_points, pts, like=like) if pts else None
     return Look(sc, px, cost)
 
@@ -826,13 +875,15 @@ async def look(pid: int, pts: list[tuple[float, float]], like: list | None = Non
 async def before(pid: int, pts: list[tuple[float, float]], hover: tuple[float, float] | None = None) -> Look:
     """The look before an input, with the pointer already resting at ``hover`` (where the input
     leaves it): a view that highlights under the pointer looks the same before and after, so only
-    what the input did counts as a change."""
+    what the input did counts as a change. A board move's look also shows the board (_before_area):
+    the board helper's check before the move is cut from it."""
     if hover is not None:
         from neo2.core.tools.computer import input as inp
 
         await asyncio.to_thread(inp.move, *hover)
         await asyncio.sleep(HOVER_S)
-    return await look(pid, pts)
+    area = _before_area.get()
+    return await (look(pid, pts) if area is None else look(pid, pts, area=area))
 
 
 class _Clock:
@@ -892,6 +943,7 @@ async def outcome(
     only_at_points: bool = False,
     *,
     settle: bool = False,
+    area: tuple[int, int, int, int] | None = None,
 ) -> Outcome:
     """What the input changed: the scene watched meanwhile (a sheet that opens, an app that comes
     forward, the focus that moves), the picture looked at LOOK_S after the input, and both again
@@ -899,25 +951,41 @@ async def outcome(
     redraw) — never later than that and one look, however slowly the app answers. A change seen in
     the scene ends the wait, confirmed by one look at the picture (the result names both) — taken
     LOOK_S after the change when ``settle`` (a picture of the result follows: the redraw, a sheet
-    sliding in, has had its moment)."""
+    sliding in, has had its moment). ``area``: the after-look's — each look at the picture is one
+    capture of it (and of the points), and the last one's frame is the outcome's (Outcome.frame):
+    the picture after the input, with no capture of its own."""
     if before.pixels is None and not before.scene.known:
         return compare(before, None, where)
     clock = _Clock()
     early, _cost = await _scene_meanwhile(before, pid, clock, LOOK_S, only_at_points, before.cost)
     if early is None:
-        first = await look(pid, pts, like=before.pixels)
+        first = await _look(pid, pts, before.pixels, area)
         out = compare(before, first, where, only_at_points)
         if out.changed is not False:
-            return await _words(out, before, first)
+            return _framed(await _words(out, before, first), first, area)
         early, _cost = await _scene_meanwhile(before, pid, clock, LOOK_S + LOOK_AGAIN_S, only_at_points, first.cost)
         if early is None:
-            last = await look(pid, pts, like=before.pixels)
-            return await _words(compare(before, last, where, only_at_points), before, last)
+            last = await _look(pid, pts, before.pixels, area)
+            return _framed(await _words(compare(before, last, where, only_at_points), before, last), last, area)
     if settle:
         await clock.sleep(LOOK_S)
-    now = await look(pid, pts, like=before.pixels)
+    now = await _look(pid, pts, before.pixels, area)
     seen = compare(before, now, where, only_at_points)
-    return await _words(seen, before, now) if seen.changed else early  # (a change that went back by now still happened)
+    # (a change that went back by now still happened)
+    return _framed(await _words(seen, before, now) if seen.changed else early, now, area)
+
+
+async def _look(pid: int, pts: list[tuple[float, float]], like: list | None, area: tuple[int, int, int, int] | None) -> Look:
+    """look(), with the after-look's area only when there is one."""
+    return await (look(pid, pts, like=like) if area is None else look(pid, pts, like=like, area=area))
+
+
+def _framed(out: Outcome, last: Look, area: tuple[int, int, int, int] | None) -> Outcome:
+    """The outcome with the after-look's area (worked out before the input) and the picture of it
+    its last look took (None: that look couldn't take one — the after-look captures it itself)."""
+    if area is not None:
+        out.area, out.frame = area, last.frame
+    return out
 
 
 async def _words(out: Outcome, before: Look, now: Look) -> Outcome:
@@ -965,6 +1033,10 @@ class Outcome:
     changed: bool | None  # None: couldn't tell
     scene_changed: bool = False  # the front app, the window, a sheet or the focus changed
     sheet: str = ""  # a sheet or dialog open after the input (its words: screen data)
+    # The last look's picture of the after-look's area (screen.Frame) and that area: the after-look
+    # is made from it (never sent before protected_in says the area is clear again).
+    frame: Any = None
+    area: tuple[int, int, int, int] | None = None
 
 
 def compare(before: Look, now: Look | None, where: list[str], only_at_points: bool = False) -> Outcome:
@@ -1213,24 +1285,51 @@ def wants_after_look(ctx: ToolContext, where: list[Aim]) -> bool:
     return any(w.pictured or w.numbers or (w.form == "id" and marks.is_mark(getattr(w.element, "id", ""))) for w in where)
 
 
-async def after_look(ctx: ToolContext, where: list[Aim], pts: list[tuple[float, float]], hit: ax.Hit):
-    """The picture after an input (see :func:`wants_after_look`): (image, its Shot, NEO's note) —
-    registered as a new shot the next input may use — or None (no Screen Recording, a protected
-    app's window over the area before or once it was taken). It replaces the separate "take a
-    screenshot to check" turn."""
+async def after_area(
+    ctx: ToolContext, where: list[Aim], pts: list[tuple[float, float]], hit: ax.Hit
+) -> tuple[int, int, int, int] | None:
+    """Where the picture after an input will be taken (see :func:`wants_after_look` and
+    :func:`look_area`), worked out before the input so the outcome's looks capture it: None when no
+    after-look is wanted, Screen Recording is off (never asked for here: that question is the
+    screenshot tool's) or a protected app's window is over it."""
     if not pts or not wants_after_look(ctx, where):
         return None
     if not await asyncio.to_thread(screen.can_capture):
-        return None  # (never asks for Screen Recording: that question is the screenshot tool's)
+        return None
     shot = next((w.shot for w in where if w.shot is not None), None)
     window = await asyncio.to_thread(_window_frame, hit)
     area = look_area(pts, shot, window)
     if area is None or await asyncio.to_thread(protected_in, area):
         return None
-    try:
-        img, x0, y0, scale, w, h = await asyncio.to_thread(capture_area, area, "after")
-    except Exception:  # noqa: BLE001 - no Screen Recording, a failed capture: the text outcome stands
+    return area
+
+
+async def after_look(
+    ctx: ToolContext, where: list[Aim], pts: list[tuple[float, float]], hit: ax.Hit, out: Outcome | None = None
+):
+    """The picture after an input (see :func:`wants_after_look`): (image, its Shot, NEO's note) —
+    registered as a new shot the next input may use — or None (no Screen Recording, a protected
+    app's window over the area before or once it was taken). It replaces the separate "take a
+    screenshot to check" turn. ``out``: the outcome, whose last look captured the area already
+    (Outcome.frame) — the picture is made from that capture, not a new one."""
+    if not pts or not wants_after_look(ctx, where):
         return None
+    if out is not None and out.frame is not None and out.area is not None:
+        area = out.area
+        try:
+            cap = await asyncio.to_thread(screen.render, out.frame, "after", rect=area)
+        except Exception:  # noqa: BLE001 - that frame can't make it: the text outcome stands
+            return None
+        img, x0, y0, scale, w, h = cap.part, cap.x0, cap.y0, cap.ppp, cap.w, cap.h
+    else:
+        # (the area as worked out before the input, when the outcome had one: not looked up twice)
+        area = out.area if out is not None and out.area is not None else await after_area(ctx, where, pts, hit)
+        if area is None:
+            return None
+        try:
+            img, x0, y0, scale, w, h = await asyncio.to_thread(capture_area, area, "after")
+        except Exception:  # noqa: BLE001 - no Screen Recording, a failed capture: the text outcome stands
+            return None
     if await asyncio.to_thread(protected_in, area):
         return None  # (a protected app's window came up over it while it was taken: dropped unseen)
     s = remember(x0, y0, scale, w, h)
@@ -1438,7 +1537,6 @@ async def click_tool(a: dict, c: ToolContext):
         # A point nothing could be told about before now shows something: judged like the rest.
         if t.relabeled and (gate := await g._gate_click(a, [(t.hits[0].label, t.hits[0].app)])):
             return gate
-        cells = await _cells_before([where])  # (a board's square: the board still where NEO found it)
     except Refused as r:
         return g._refused(c, r)
     h = t.hits[0]
@@ -1448,20 +1546,26 @@ async def click_tool(a: dict, c: ToolContext):
     if t.brought:
         head += f" (brought {t.brought} to the front first)"
     head += "."
-    before = await g._watch(c, pid, pts, hover=pts[0])
+    before = await _watched(g, c, pid, pts, pts[0], _cells_area([where]))
+    try:
+        # (a board's square: the board still where NEO found it — looked at in the look just taken)
+        cells = await _cells_before([where], before.frame if before is not None else None)
+    except Refused as r:
+        return g._refused(c, r)
+    area = await after_area(c, [where], pts, h) if before is not None else None
     await asyncio.to_thread(inp.click, *pts[0], button=button, count=count, mods=mods)
     if before is None:
         text, ok = await _cells_after(cells, head + g._input_doubt(), True)
         return with_effect(ToolOutput(text, ok=ok), effect_of(None))
     spot = _spot(where, pts[0], blind_ctx)
-    out = await outcome(before, pid, pts, [spot], settle=wants_after_look(c, [where]))
+    out = await outcome(before, pid, pts, [spot], settle=wants_after_look(c, [where]), area=area)
     if not at_the_point(h, where.pictured):
         out = maybe_elsewhere(out, spot)
     under = [words(h)] if where.form != "id" else []
     if snapped is not None:
         under.append(snapped.words())
     text, ok = report(head, out, under, g._input_doubt())
-    text, ok = await _cells_after(cells, text, ok)
+    text, ok = await _cells_after(cells, text, ok, out.frame)
     if any(under) or out.details:
         g._taint(c, "screen")
     return await _finish(c, ToolOutput(text, ok=ok), out, [where], pts, h)
@@ -1498,12 +1602,17 @@ async def drag_tool(a: dict, c: ToolContext):
             await bring(t, pts, blind=blind_ctx)
             if t.relabeled and (gate := await g._gate_drop(a, t)):
                 return gate
-        cells = await _cells_before(ends)  # (a board's squares: the board still where NEO found it)
     except Refused as r:
         return g._refused(c, r)
     src, dst = t.hits
     pid = src.pid
-    before = await g._watch(c, pid, pts, hover=pts[1])  # the drop leaves the pointer at the end
+    before = await _watched(g, c, pid, pts, pts[1], _cells_area(ends))  # the drop leaves the pointer at the end
+    try:
+        # (a board's squares: the board still where NEO found it — looked at in the look just taken)
+        cells = await _cells_before(ends, before.frame if before is not None else None)
+    except Refused as r:
+        return g._refused(c, r)
+    area = await after_area(c, ends, pts, src) if before is not None else None
     await asyncio.to_thread(inp.drag, *pts[0], *pts[1])
     starts, stops = _spot(ends[0], pts[0], blind_ctx), _spot(ends[1], pts[1], blind_ctx)
     head = f"Dragged {starts} → {stops}"
@@ -1519,7 +1628,7 @@ async def drag_tool(a: dict, c: ToolContext):
         text, ok = await _cells_after(cells, head + g._input_doubt(), True)
         return with_effect(ToolOutput(text, ok=ok), effect_of(None))
     out = await outcome(
-        before, pid, pts, [f"the start {starts}", f"the end {stops}"], between_apps, settle=wants_after_look(c, ends)
+        before, pid, pts, [f"the start {starts}", f"the end {stops}"], between_apps, settle=wants_after_look(c, ends), area=area
     )
     if between_apps and out.changed is False:
         out.said += (
@@ -1528,7 +1637,7 @@ async def drag_tool(a: dict, c: ToolContext):
         )
     under = [f"start {words(src)}" if words(src) else "", f"end {words(dst)}" if words(dst) else ""]
     text, ok = report(head, out, under, g._input_doubt())
-    text, ok = await _cells_after(cells, text, ok)
+    text, ok = await _cells_after(cells, text, ok, out.frame)
     if any(under) or out.details:
         g._taint(c, "screen")
     return await _finish(c, ToolOutput(text, ok=ok), out, ends, pts, src)
@@ -1570,6 +1679,7 @@ async def scroll_tool(a: dict, c: ToolContext):
     pid = t.hits[0].pid
     blind_ctx = bool(c.get("blind"))
     before = await g._watch(c, pid, pts, hover=pts[0])
+    area = await after_area(c, where, pts, t.hits[0]) if before is not None else None
     text = str(await asyncio.to_thread(inp.scroll, pts[0][0], pts[0][1], dy, dx))
     spot = _spot(where[0] if where else None, pts[0], blind_ctx)
     if blind_ctx:  # (its words name the point: a brain that can't see gets the square, mark or id)
@@ -1578,14 +1688,17 @@ async def scroll_tool(a: dict, c: ToolContext):
             text += f" at {where[0].said}"
     if before is None:
         return with_effect(ToolOutput(text + g._input_doubt()), effect_of(None))
-    out = await outcome(before, pid, pts, [spot if where or not blind_ctx else "the pointer"], settle=wants_after_look(c, where))
+    out = await outcome(
+        before, pid, pts, [spot if where or not blind_ctx else "the pointer"], settle=wants_after_look(c, where), area=area
+    )
     text, ok = report(text + (f" in {t.hits[0].app}." if t.hits[0].app else "."), out, [], g._input_doubt())
     return await _finish(c, ToolOutput(text, ok=ok), out, where, pts, t.hits[0])
 
 
 async def _finish(c: ToolContext, res, out: Outcome, where: list[Aim], pts: list[tuple[float, float]], hit: ax.Hit):
-    """The result with its Effect, and the after-look when the brain can see and aimed at a picture."""
-    looked = await after_look(c, where, pts, hit)
+    """The result with its Effect, and the after-look when the brain can see and aimed at a picture
+    (made from the outcome's last capture when it took the after-look's area)."""
+    looked = await after_look(c, where, pts, hit, out)
     if looked is not None:
         img, _s, said = looked
         res.images = [*res.images, img]

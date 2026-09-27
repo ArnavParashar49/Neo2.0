@@ -271,12 +271,16 @@ def _answers(root) -> bool:
     return err != ax._CANNOT_COMPLETE
 
 
-def walk_window(pid: int, deadline: float) -> tuple[str, tuple | None, list[ax.Element], dict[str, str]]:
+def walk_window(
+    pid: int, deadline: float, canvas: list | None = None
+) -> tuple[str, tuple | None, list[ax.Element], dict[str, str]]:
     """(window title, window frame, elements, blocked ids) of an app's focused window: an open
     sheet walked first (its elements are "sheet"), a dialog window's all "dialog". The deadline is
     looked at before every question about the window, and per element in the walk: a hung app
-    costs at most the one answer being waited on (ax-core's walk, once merged, also stops at an app
-    that stopped answering)."""
+    costs at most the one answer being waited on (ax-core's walk also stops at an app that stopped
+    answering). ``canvas``: filled with the frames (x, y, w, h, role) of the window's large
+    childless leaves that list no element of their own — a board or a canvas drawn in one piece
+    (ax-core's walk finds them): the evidence the board helper reads, from this same walk."""
     from neo2.core import runtime
 
     title, frame = "", None
@@ -326,7 +330,14 @@ def walk_window(pid: int, deadline: float) -> tuple[str, tuple | None, list[ax.E
         ax._walk(sheet, 1, first, ax._new_id, budget=budget, **walk_kw)
         blocked = {e.id: "sheet" for e in first}
     rest: list[ax.Element] = []
+    wk = walk_kw.get("w")
+    if canvas is not None and wk is not None and hasattr(wk, "canvas_min"):
+        wk.canvas_min = -1.0  # (set from the window's frame as the walk reads it: ax-core's canvas leaves)
     ax._walk(win, 1, rest, ax._new_id, budget=budget, skip=sheet, **walk_kw)
+    if canvas is not None and wk is not None:
+        for _el, role, seen, e in getattr(wk, "canvas", ()) or ():
+            if e is None and seen is not None:  # (one listed as an element is in the frames already)
+                canvas.append((*(float(v) for v in seen[:4]), str(role)))
     els = first + rest
     if dialog:
         blocked = {e.id: "dialog" for e in els}
@@ -387,13 +398,14 @@ def collect_sync(
             name = _target(None, pid)[0]
         if _off_limits(name, pid):  # NEO's own window, a protected app: never read, never listed
             return Collected(app=name, pid=pid, refused="protected")
-        title, window, els, blocked = walk_window(pid, deadline)
+        leaves: list[tuple[float, float, float, float, str]] = []
+        title, window, els, blocked = walk_window(pid, deadline, leaves)
         if not els and time.monotonic() > deadline:
             return Collected(name, pid, title, window, refused="slow")  # (it didn't get to the elements in time)
         chosen, more = pick(els, area, window=window, blocked=blocked, limit=limit)
         _remember([m.id for m in chosen])  # (an input by one of these gets the picture after it)
         kind = next(iter(set(blocked.values())), "")
-        frames = [(e.x, e.y, e.w, e.h, e.role) for e in els]
+        frames = [(e.x, e.y, e.w, e.h, e.role) for e in els] + leaves
         return Collected(name, pid, title, window, kind, chosen, more, frames=frames)
     except Exception:  # noqa: BLE001 - marks are a help, never a failure of the look
         return Collected()

@@ -514,14 +514,18 @@ def _ground(ask: _Ask, items: list) -> _Pick:
 # ---- acting ------------------------------------------------------------------------------------------
 
 
-def _with_effect(out: ToolOutput, *, changed: bool | None, scene_changed: bool = False, sheet: str = "") -> ToolOutput:
-    """Attach what the command changed (ToolOutput.effect, where this build has it)."""
+def _with_effect(
+    out: ToolOutput, *, changed: bool | None, scene_changed: bool = False, sheet: str = "", looked: bool = False
+) -> ToolOutput:
+    """Attach what the command changed (ToolOutput.effect, where this build has it). ``looked``: the
+    result lists what is on screen after it (the controls of the sheet it opened, by id), so the
+    model needs no separate look before it answers the sheet."""
     try:
         from neo2.core.agent import registry as reg
 
         cls = getattr(reg, "Effect", None)
         if cls is not None and hasattr(out, "effect"):
-            out.effect = cls(changed=changed, scene_changed=scene_changed, sheet=sheet, looked=False)
+            out.effect = cls(changed=changed, scene_changed=scene_changed, sheet=sheet, looked=looked)
     except Exception:  # noqa: BLE001 - an Effect this build can't make: the text still says it
         pass
     return out
@@ -871,7 +875,7 @@ async def _answer_sheet(
     )
     out = ToolOutput(f"{said}. It opened a {kind} in {name} that waits for an answer: {how}.\n" + fence("screen", "\n".join(lines) or after.sheet))
     out = _with_handoff(out, [f"{getattr(b, 'id', '')} “{_button_label(b)}”" for b in buttons])
-    return _with_effect(out, changed=True, scene_changed=True, sheet=after.sheet)
+    return _with_effect(out, changed=True, scene_changed=True, sheet=after.sheet, looked=bool(buttons))
 
 
 # ---- the tool ----------------------------------------------------------------------------------------

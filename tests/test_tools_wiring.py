@@ -316,15 +316,26 @@ def test_squares_go_through_the_board_helper_and_its_checks(monkeypatch):
     b = _Board()
     monkeypatch.setattr(pointer, "_cell_resolver", tools_pointer._cell_point)
     monkeypatch.setattr(board, "points_for", lambda a, keys, **k: ([(100.0, 200.0)], b, [a["cell"]]))
-    monkeypatch.setattr(tools_pointer, "_board_picture", lambda bb: "pic")
+    grabbed = []
+
+    def picture(bb, frame=None, backend=""):
+        grabbed.append((frame, backend))
+        return ("pic" if frame is None else "cut"), "cli"
+
+    monkeypatch.setattr(tools_pointer, "_board_picture", picture)
     seen = []
     monkeypatch.setattr(board, "before_move", lambda bb, pic, **k: seen.append(("before", pic)))
     monkeypatch.setattr(board, "after_move", lambda bb, pic, frm="", to="", **k: board.Move(f"On the board: {frm}→{to}.", True))
     aims = [pointer.Aim((1.0, 2.0), "cell", None, "square e2", cell="e2"), pointer.Aim((3.0, 4.0), "cell", None, "square e4", cell="e4")]
     state = asyncio.run(pointer._cells_before(aims))
-    assert seen == [("before", "pic")] and state == (b, "e2", "e4")
+    assert seen == [("before", "pic")] and state == (b, "e2", "e4", "cli")
     text, ok = asyncio.run(pointer._cells_after(state, "Dragged e2 → e4.", True))
     assert ok and text.endswith("On the board: e2→e4.")
+    # the pointer's last look after the input (its frame) is handed on: the board is looked at in it,
+    # taken the same way as the look before (no picture of its own)
+    grabbed.clear()
+    asyncio.run(pointer._cells_after(state, "Dragged e2 → e4.", True, frame="the last look"))
+    assert grabbed == [("the last look", "cli")]
 
     def stale(bb, pic, **k):
         raise board.BoardError("Error: the board isn't where NEO last saw it — take a new screenshot first; nothing was done.")
@@ -333,7 +344,7 @@ def test_squares_go_through_the_board_helper_and_its_checks(monkeypatch):
     with pytest.raises(pointer.Refused, match="isn't where NEO last saw it"):
         asyncio.run(pointer._cells_before(aims[:1]))  # (nothing is posted)
     monkeypatch.setattr(board, "after_move", lambda bb, pic, frm="", to="", **k: board.Move("Nothing changed on the board.", False))
-    assert asyncio.run(pointer._cells_after((b, "", "e4"), "Clicked.", True)) == ("Clicked.\nNothing changed on the board.", False)
+    assert asyncio.run(pointer._cells_after((b, "", "e4", "cli"), "Clicked.", True)) == ("Clicked.\nNothing changed on the board.", False)
 
 
 def test_a_board_that_cannot_be_looked_at_is_never_acted_on(monkeypatch):
@@ -342,7 +353,7 @@ def test_a_board_that_cannot_be_looked_at_is_never_acted_on(monkeypatch):
     monkeypatch.setattr(pointer, "_cell_resolver", tools_pointer._cell_point)
     monkeypatch.setattr(board, "points_for", lambda a, keys, **k: ([(100.0, 200.0)], _Board(), [a["cell"]]))
 
-    def no_picture(b):
+    def no_picture(b, frame=None, backend=""):
         raise PermissionError("no Screen Recording")
 
     monkeypatch.setattr(tools_pointer, "_board_picture", no_picture)
@@ -358,7 +369,7 @@ def test_the_screenshot_note_names_a_boards_squares(shots, monkeypatch):
 
     looked = []
     monkeypatch.setattr(marks, "collect", collect)
-    monkeypatch.setattr(tools_pointer, "_board_note", lambda cap, shot, col, blind: looked.append((col.frames, blind)) or "Board: squares a1–h8.")
+    monkeypatch.setattr(tools_pointer, "_board_note", lambda cap, shot, col, blind, region=None: looked.append((col.frames, blind)) or "Board: squares a1–h8.")
     monkeypatch.setattr(apps, "target", lambda: "Pages")
     out = _run({})
     assert out.text.endswith("Board: squares a1–h8.") and looked == [([(10.0, 60.0, 800.0, 560.0, "AXGroup")], False)]
@@ -402,5 +413,64 @@ def test_a_real_flat_board_in_the_picture_the_model_gets_is_named_without_coordi
         (x, y) = tools_pointer._cell_point("e2", shot, blind=True)
         bx, by, bw, bh = truth["board"]
         assert bx <= x <= bx + bw and by <= y <= by + bh  # the square's point, computed by NEO
+    finally:
+        board.forget()
+
+
+def test_the_board_after_a_move_is_cut_from_the_pointers_last_look(monkeypatch):
+    """The look at the board after a move comes from the frame the pointer's last look took (the
+    after-look's capture) when it shows the whole board, as the screen showed it, the same way as
+    the look before — else NEO takes its own picture of the board."""
+    from PIL import Image
+
+    from neo2.core.tools.computer import board
+
+    grabs = []
+
+    def grab(region=None, display=None):
+        grabs.append(region)
+        return screen.Frame(Image.new("RGB", (int(region[2]), int(region[3]))), float(region[0]), float(region[1]), 1.0)
+
+    monkeypatch.setattr(screen, "grab", grab)
+    monkeypatch.setattr(board, "region", lambda b, margin=0.03: (100, 100, 200, 200))
+    big = screen.Frame(Image.new("RGB", (800, 800)), 0.0, 0.0, 1.0)
+    pic, how = tools_pointer._board_picture(_Board(), big, "cli")
+    assert grabs == [] and how == "cli" and pic.rgb.shape[:2] == (200, 200) and (pic.x0, pic.y0) == (100.0, 100.0)
+    tools_pointer._board_picture(_Board(), big, "sck")  # (taken another way: colours don't compare)
+    tools_pointer._board_picture(_Board(), screen.Frame(Image.new("RGB", (150, 150)), 0.0, 0.0, 1.0), "cli")  # (too small)
+    tools_pointer._board_picture(_Board(), screen.Frame(Image.new("RGB", (800, 800)), 0.0, 0.0, 1.0, window_id=7), "cli")
+    assert grabs == [(100, 100, 200, 200)] * 3
+
+
+def test_a_region_screenshot_is_its_own_evidence_for_a_board(monkeypatch):
+    """A close picture of a board (a region screenshot) is judged by itself: a board that is a small
+    share of a busy window — the self-test's tilted one — is looked for there, at an angle too. The
+    window around it, full of controls, would say there is no large area drawn in one piece."""
+    import io
+
+    import numpy as np
+    from eyes_board_synth import board_to_image, tilted_screen
+
+    from neo2.core.tools.computer import board, marks
+
+    board.forget()
+    img, truth = tilted_screen(focal=600.0)  # (a board a small share of the window, as the self-test's)
+    corners = board_to_image(truth["H"], [(0, 0), (8, 0), (8, 8), (0, 8)])
+    x0, y0 = (int(v) - 20 for v in np.min(corners, axis=0))
+    x1, y1 = (int(v) + 20 for v in np.max(corners, axis=0))
+    region = (x0, y0, x1 - x0, y1 - y0)
+    crop = img.crop((x0, y0, x1, y1))
+    buf = io.BytesIO()
+    crop.save(buf, format="JPEG", quality=85)
+    cap = SimpleNamespace(part=ImagePart(buf.getvalue(), "image/jpeg"))
+    shot = pointer.remember(float(x0), float(y0), 1.0, crop.width, crop.height)
+    window = (0.0, 0.0, 1512.0, 982.0)
+    busy = [(x, y, 40.0, 20.0, "AXButton") for x in range(0, 1512, 60) for y in range(0, 982, 40)
+            if not (x0 - 40 <= x <= x1 and y0 - 20 <= y <= y1)]  # fmt: skip
+    col = marks.Collected(app="Game", pid=4242, window=window, frames=busy)
+    try:
+        assert board.canvas_area(window, busy) is None  # (the window as a whole: no evidence)
+        note = tools_pointer._board_note(cap, shot, col, False, region)
+        assert "8×8" in note, note
     finally:
         board.forget()

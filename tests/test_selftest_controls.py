@@ -25,6 +25,9 @@ from neo2.core.selftest import controls, testwin
 from neo2.core.selftest import geometry as G
 from neo2.core.selftest import layout as L
 from neo2.core.selftest import watch as watch_mod
+from neo2.core.tools.computer import screen as _screen
+
+_REAL_SAMPLE = _screen.sample_points  # (the suite's conftest makes it "no picture" in every test)
 
 TEST_PID = 4242
 USER_PID = 111
@@ -135,6 +138,7 @@ class Desk:
         self.grab = None
         self.drags = 0
         self.dnd = False
+        self.dropped = False  # the well got a drop (it shows it)
         self.entered = False
         self.on_post = None  # scenario hook: (desk, event) after each posted event
         self.activations: list[int] = []
@@ -302,6 +306,7 @@ class Desk:
             self.write("button", name={"button_a": L.BUTTON_A, "button_b": L.BUTTON_B, "hindi": L.HINDI_BUTTON}[target])
         elif self.pressing == "tile" and self.dnd:
             if target == "well":
+                self.dropped = True
                 self.write("drop", payload=L.DRAG_PAYLOAD)
             self.write("dnd_end", operation=1 if target == "well" else 0, at=[x, y])
         self.pressing, self.grab = "", None
@@ -382,10 +387,49 @@ class Desk:
         d.rectangle([mx * k, my * k, (mx + mw) * k - 1, (my + mh) * k - 1], fill=L.MARKER_RGB)
         tx, ty, tw, th = TARGETS["tiny"]
         d.rectangle([tx * k, ty * k, (tx + tw) * k - 1, (ty + th) * k - 1], fill=L.TINY_RGB)
+        self._draw_boards(d, k)
+        lx, ly, lw, lh = TARGETS["list"]  # its rows, as far down as it is scrolled
+        for i in range(int(lh // L.ROW_H) + 2):
+            top = ly + i * L.ROW_H - self.list_off % (2 * L.ROW_H)
+            if (i % 2 == 0) and ly <= top and top + L.ROW_H <= ly + lh:
+                d.rectangle([lx * k, top * k, (lx + lw) * k - 1, (top + L.ROW_H) * k - 1], fill=(200, 210, 240))
+        wx, wy, ww, wh = TARGETS["well"]
+        d.rectangle([wx * k, wy * k, (wx + ww) * k - 1, (wy + wh) * k - 1], fill=(60, 180, 90) if self.dropped else (215, 215, 215))
         if "-R" in cmd:
             rx, ry, rw, rh = (int(v) for v in cmd[cmd.index("-R") + 1].split(","))
             img = img.crop((rx * k, ry * k, (rx + rw) * k, (ry + rh) * k))
         img.save(path)
+
+
+    def _draw_boards(self, d, k):
+        """The flat board and the tilted one, drawn as the test window draws them (testwin)."""
+        bx, by, _, _ = TARGETS["board"]
+        c_ = L.CELL
+        for c in range(L.BOARD_N):
+            for r in range(L.BOARD_N):
+                fill = (237, 237, 209) if (c + r) % 2 == 0 else (117, 150, 87)
+                d.rectangle([(bx + c * c_) * k, (by + r * c_) * k, (bx + (c + 1) * c_) * k - 1, (by + (r + 1) * c_) * k - 1], fill=fill)
+        for (c, r), p in self.pieces.items():
+            black = [c, r] == self.piece or p.islower()
+            box = [(bx + c * c_ + 6) * k, (by + r * c_ + 6) * k, (bx + (c + 1) * c_ - 6) * k, (by + (r + 1) * c_ - 6) * k]
+            d.ellipse(box, fill=(0, 0, 0) if black else (255, 255, 255), outline=(85, 85, 85))
+        tx, ty, tw, th = TARGETS["tilt"]
+        for i in range(0, int(th), 3):  # wood: bands of browns
+            shade = 0.35 + 0.08 * ((i * 7919) % 13) / 13
+            rgb = tuple(int(255 * v) for v in (shade + 0.18, shade + 0.05, shade * 0.5))
+            d.rectangle([tx * k, (ty + i) * k, (tx + tw) * k - 1, (ty + i + 3) * k - 1], fill=rgb)
+        quad = [tuple(p) for p in TILT_QUAD]
+        for c in range(L.BOARD_N):
+            for r in range(L.BOARD_N):
+                grain = 0.04 * ((c * 31 + r * 17) % 5) / 5
+                col = (0.86 - grain, 0.74 - grain, 0.55 - grain) if (c + r) % 2 == 0 else (0.45 - grain, 0.27 - grain, 0.14)
+                d.polygon([(x * k, y * k) for x, y in G.cell_polygon(quad, c, r)], fill=tuple(int(255 * v) for v in col))
+        for (c, r), p in testwin.start_pieces().items():
+            cx, cy = G.cell_center(quad, c, r)
+            poly = G.cell_polygon(quad, c, r)
+            rad = max(3.0, abs(poly[2][1] - poly[0][1]) * 0.34)
+            d.ellipse([(cx - rad) * k, (cy - rad * 1.6) * k, (cx + rad) * k, (cy + rad * 0.4) * k],
+                      fill=(255, 255, 255) if p.isupper() else (0, 0, 0))  # fmt: skip
 
 
 class FakeTap:
@@ -587,13 +631,15 @@ def mac(monkeypatch, tmp_path):
         return f"Pressed {eid} ({e.role.removeprefix('AX')} {e.title!r})"
 
     def set_value(eid, value):
-        e = ax.get(eid)
-        if e.ref != (TEST_PID, "area"):
-            raise AssertionError("set a value outside the test window's text area")
-        desk.area = value
-        desk.write("text", target="area", value=value)
+        return set_ref(ax.get(eid), value)
+
+    def set_ref(e, value):
+        if e.ref not in ((TEST_PID, "area"), (TEST_PID, "field")):
+            raise AssertionError("set a value outside the test window's text field and area")
+        setattr(desk, e.ref[1], value)
+        desk.write("text", target=e.ref[1], value=value)
         desk.state()
-        return f"Set {eid} value."
+        return f"Set {e.id} value."
 
     def label_at(x, y):
         t = desk.target_at(x, y)
@@ -656,8 +702,16 @@ def mac(monkeypatch, tmp_path):
     monkeypatch.setattr(ax, "visible_frame", frame_of)
     monkeypatch.setattr(ax, "regular", lambda pid: pid in (TEST_PID, USER_PID))
     monkeypatch.setattr(ax, "focus_el", focus_el)
-    monkeypatch.setattr(ax, "press_el", lambda e: press(e.id))
-    monkeypatch.setattr(ax, "press_element", lambda e: press(e.id))
+    def press_ref(e):
+        if e.ref[0] != TEST_PID:
+            raise AssertionError("pressed something outside the test window")
+        if e.ref[1] in ("sheet_start", "sheet_cancel"):
+            desk.answer_sheet(e.title)
+            return f"Pressed {e.id} (Button {e.title!r})"
+        return press(e.id)
+
+    monkeypatch.setattr(ax, "press_el", press_ref)
+    monkeypatch.setattr(ax, "press_element", press_ref)
 
     def window_elements(app=None):
         els = ax_elements(desk) if desk.front[1] == TEST_PID else []
@@ -666,7 +720,49 @@ def mac(monkeypatch, tmp_path):
         return (desk.name if els else "Safari"), (tuple(FRAME) if els else None), els
 
     monkeypatch.setattr(ax, "window_elements", window_elements)
-    monkeypatch.setattr(ax, "set_el_value", lambda e, v: set_value(e.id, v))
+    monkeypatch.setattr(ax, "set_el_value", set_ref)
+    monkeypatch.setattr(ax, "secure", lambda ref: False)
+    # the window's controls, as the AX core lists them (a field found by its label, the sheet's buttons)
+    monkeypatch.setattr(ax, "visible_elements", lambda pid, *a, **k: ax_elements(desk) if pid == TEST_PID else [])
+    # the app NEO works in, and what a user would notice changing there (the front app, a sheet, the focus)
+    monkeypatch.setattr(ax, "working_app", lambda: desk.front if desk.front[1] == TEST_PID else ("Safari", USER_PID))
+
+    def scene(pid, front=None):
+        own = pid == TEST_PID and desk.alive
+        sheet = f"“{L.SHEET_TITLE}” (buttons: {L.SHEET_START}, {L.SHEET_CANCEL})" if own and desk.sheet else ""
+        return ax.Scene(desk.front[0], desk.front[1], desk.name if own else "", sheet, desk.focus_el if own else "", True)
+
+    monkeypatch.setattr(ax, "scene", scene)
+    # the Test menu (Test Action ⌘J, New Round… ⌘K) and the sheet New Round… opens, through the AX core
+    menu = [ax.MenuItem(L.MENU_TITLE, ("Test", L.MENU_TITLE), True, "J", 0, ref=(TEST_PID, "menu_action"), pid=TEST_PID),
+            ax.MenuItem(L.ROUND_MENU, ("Test", L.ROUND_MENU), True, "K", 0, ref=(TEST_PID, "menu_round"), pid=TEST_PID)]  # fmt: skip
+    monkeypatch.setattr(ax, "menu_items", lambda pid: list(menu) if pid == TEST_PID and desk.alive else [])
+    monkeypatch.setattr(ax, "in_system_menu", lambda ref: False)
+
+    def press_menu_item(item):
+        if item.ref[0] != TEST_PID:
+            raise AssertionError("chose a menu item outside the test window's app")
+        if item.ref[1] == "menu_action":
+            desk.write("menu", title=L.MENU_TITLE)
+        elif not desk.sheet:
+            desk.sheet = True
+            desk.write("sheet_open", title=L.SHEET_TITLE)
+            desk.state()
+        return f"Chose Test › {item.title}"
+
+    monkeypatch.setattr(ax, "press_menu_item", press_menu_item)
+
+    def blockers(pid):
+        if pid != TEST_PID or not desk.sheet:
+            return []
+        buttons = [e for e in ax_elements(desk) if e.ref[1] in ("sheet_start", "sheet_cancel")]
+        for e in buttons:
+            ax._issued[e.id] = e
+        return [ax.Blocker("sheet", L.SHEET_TITLE, buttons, TEST_PID, L.SHEET_TITLE, tuple(SHEET), (TEST_PID, "sheet"))]
+
+    monkeypatch.setattr(ax, "blockers", blockers)
+    # a model's click, drag and scroll are looked at before and after: the pictures come from the desk
+    monkeypatch.setattr(screen, "sample_points", _REAL_SAMPLE)
     monkeypatch.setattr(apps, "bring_pid_front", bring_pid_front)
     monkeypatch.setattr(screen, "displays", lambda: [screen.Display(1, 0.0, 0.0, float(desk.display[0]), float(desk.display[1]))])
     # macOS holds NEO responsible for the test window it started: NEO's own family, by pid — the
@@ -735,18 +831,19 @@ def test_everything_arrives_and_the_report_says_so(mac):
     assert passed >= {
         "first_click", "click_point", "right_click", "double_click", "ax_tree", "click_id", "ax_press", "ax_set_value",
         "type_field", "hotkey_return", "type_area", "hotkey_menu", "scroll", "drag_board", "drag_drop",
-        "screenshot_region", "screenshot_full", "activate", "feedback", "sheet_blocks", "click_meaning", "ax_watched",
+        "screenshot_region", "screenshot_full", "activate", "feedback", "sheet_blocks", "ax_watched",
+        # the speed work's features, through NEO's real tools on the pretend Mac
+        "menu_sheet", "type_named", "board_cells", "tilted_board", "zoom_tiny", "after_look", "effect_fields",
     }  # fmt: skip
-    # what NEO doesn't offer yet skips, never fails: squares by name, zoom, marks, menus, Effect, the after-look
+    # what can't be shown here skips, never fails: one display; screenshots list no ids (no real
+    # Accessibility tree); a Hindi title is asked about until NEO's Hindi UI-string index is built
     skipped = {n for n, c in checks.items() if c.status == "skip"}
-    assert skipped == {
-        "second_display", "menu_sheet", "type_named", "board_cells", "tilted_board", "zoom_tiny", "click_mark",
-        "after_look", "effect_fields",
-    }, report.text()  # fmt: skip
+    assert skipped == {"second_display", "click_mark", "click_meaning"}, report.text()
+    assert "NEO asked before pressing" in checks["click_meaning"].arrived
     assert report.ok
-    assert report.summary().startswith("Controls check: 22 of 22 passed")
+    assert report.summary().startswith("Controls check: 28 of 28 passed")
     sc = report.scores
-    assert sc["success"] == 1.0 and sc["passed"] == 21 and sc["skipped"] == 9  # (the feedback check isn't scored)
+    assert sc["success"] == 1.0 and sc["passed"] == 27 and sc["skipped"] == 3  # (the feedback check isn't scored)
     assert set(report.timing) >= {"click", "drag", "scroll", "hotkey", "ax_press", "type_text", "screenshot", "ax_tree"}
     # nothing went anywhere but the test window
     assert desk.stray == []
@@ -1015,7 +1112,7 @@ def test_the_report_is_saved_where_neo_keeps_its_data(mac):
     report = _run(mac)
     saved = controls.save(report)
     assert saved is not None and saved.parent == settings().data_dir / "selftest"
-    assert "Controls check: 22 of 22 passed" in saved.read_text()
+    assert "Controls check: 28 of 28 passed" in saved.read_text()
     assert saved.with_suffix(".json").exists()
     assert oct(saved.stat().st_mode & 0o777) == "0o600"
 
@@ -1350,14 +1447,14 @@ def test_a_drag_by_squares_that_doesnt_name_them_fails(mac, monkeypatch):
     assert c.status == "fail" and "doesn't say which squares changed" in c.arrived
 
 
-def test_zoom_then_a_12pt_button(mac, monkeypatch):
-    async def shot(real, a, c):
-        return await real({k: v for k, v in a.items() if k != "zoom"}, c)
-
-    _offer(monkeypatch, "screenshot", {"zoom": {"type": "boolean"}}, shot)
+def test_zoom_then_a_12pt_button(mac):
+    """The screenshot tool's zoom is a close look around x,y: the check asks around the button's
+    middle, finds it in the picture and clicks it by the zoom's pixels."""
     c = _by_name(_run(mac))["zoom_tiny"]
     assert c.status == "pass", c.line()
     assert "pt from the 12-pt button's centre" in c.arrived
+    tx, ty, tw, th = TARGETS["tiny"]
+    assert f"'x': {round(tx + tw / 2)}, 'y': {round(ty + th / 2)}" in c.sent  # (centred, not a region's corner)
 
 
 def test_a_click_by_the_id_a_screenshot_lists(mac, monkeypatch):
@@ -1382,12 +1479,10 @@ def test_a_menu_command_and_its_sheet(mac, monkeypatch):
         await asyncio.to_thread(inp.hotkey, "cmd+k")  # Test › New Round…, as found by meaning
         return f"Chose Test › {L.ROUND_MENU}; a sheet is open: “{L.SHEET_TITLE}” (Start, Cancel)."
 
-    registry().register(RegisteredTool("menu_command", "Choose a menu item by meaning.",
-                                       {"type": "object", "properties": {"command": {"type": "string"}}}, menu_command))  # fmt: skip
-    try:
-        c = _by_name(_run(mac))["menu_sheet"]
-    finally:
-        registry().remove("menu_command")
+    # (a stand-in in NEO's own menu_command's place, put back where it was after: other tests use it)
+    monkeypatch.setitem(registry()._tools, "menu_command", RegisteredTool("menu_command", "Choose a menu item by meaning.",
+                        {"type": "object", "properties": {"command": {"type": "string"}}}, menu_command))  # fmt: skip
+    c = _by_name(_run(mac))["menu_sheet"]
     assert c.status == "pass", c.line()
     assert "answered by its id" in c.arrived and mac.desk.round == 2
     assert said == [({"command": "start a new round"}, "start a new round")]
@@ -1412,21 +1507,37 @@ def test_the_after_look_and_effect_fields_once_results_carry_them(mac, monkeypat
 
 
 def test_an_effect_that_says_nothing_fails(mac, monkeypatch):
-    async def pressed_with_effect(real, a, c):
+    async def says_nothing(real, a, c):
         out = _as_output(await real(a, c))
-        out.effect = types.SimpleNamespace(changed=True, looked=False)
+        out.effect = types.SimpleNamespace(changed=None, looked=False)  # (a click that can't tell what it did)
         return out
 
-    _offer(monkeypatch, "ax_press", {}, pressed_with_effect)  # (one tool fills in its Effect: the seam is used)
-    monkeypatch.setattr(controls, "_has_effect", lambda: True)
+    _offer(monkeypatch, "click", {}, says_nothing)
     c = _by_name(_run(mac))["effect_fields"]
-    assert c.status == "fail" and "no Effect.changed on click, drag, scroll" in c.arrived
+    assert c.status == "fail" and "no Effect.changed on click" in c.arrived, c.line()
+    assert "drag" not in c.arrived.split("on ", 1)[1]  # (a model's drag and scroll said what they changed)
 
 
 def test_effect_fields_skip_while_no_tool_fills_the_seam(mac, monkeypatch):
-    monkeypatch.setattr(controls, "_has_effect", lambda: True)
+    real = controls._Run.tool_as
+
+    async def no_effect(self, tool_name, args, **kw):
+        out = await real(self, tool_name, args, **kw)
+        out.effect = None
+        return out
+
+    monkeypatch.setattr(controls._Run, "tool_as", no_effect)
     c = _by_name(_run(mac))["effect_fields"]
     assert c.status == "skip" and "no tool fills" in c.arrived, c.line()
+
+
+def test_effect_fields_come_from_a_models_own_actions(mac):
+    """The user's own click isn't looked at (they watch it): what an action changed is said for a
+    model's — the check makes its own, as a model's, where none ran before it."""
+    report = _run(mac)
+    c = _by_name(report)["effect_fields"]
+    assert c.status == "pass" and "as a model's" in c.sent, c.line()
+    assert mac.desk.stray == []
 
 
 def test_typing_into_a_field_named_by_its_label(mac, monkeypatch):
@@ -1442,15 +1553,18 @@ def test_typing_into_a_field_named_by_its_label(mac, monkeypatch):
 
 
 def test_click_by_meaning_once_the_resolver_acts(mac, monkeypatch):
+    from neo2.core.agent.registry import ToolOutput
+
     asked = []
 
-    async def by_meaning(real, a, c):
+    async def by_meaning(real, a, c):  # (the resolver's stages, live, and the Hindi strings index built)
         asked.append(a["label"])
-        label = L.HINDI_BUTTON if a["label"] in L.HINDI_PHRASES.values() else a["label"]
-        return await real({"label": label}, c)
+        mac.desk.write("button", name=L.HINDI_BUTTON)
+        return ToolOutput(f"Pressed “{L.HINDI_BUTTON}”.")
 
     _offer(monkeypatch, "click_text", {}, by_meaning)
     monkeypatch.setattr(controls, "_resolver_live", lambda: True)
+    monkeypatch.setattr(controls, "_hindi_index_ready", lambda: True)
     c = _by_name(_run(mac))["click_meaning"]
     assert c.status == "pass" and "skipped" not in c.arrived, c.line()
     assert asked == [L.HINDI_BUTTON, *L.HINDI_PHRASES.values()]
@@ -1461,7 +1575,8 @@ def test_a_sheet_blocks_the_board_and_the_click_says_so(mac):
     report = _run(mac)
     c = _by_name(report)["sheet_blocks"]
     assert c.status == "pass", c.line()
-    assert "sheet" in c.said and desk.sheet is False and desk.round == 1  # answered Cancel
+    assert "sheet" in c.said and desk.sheet is False and "Cancel closed it" in c.arrived
+    assert desk.round == 2  # (it answered Cancel; the menu check after it started round 2 with Start)
     opened = [e for e in desk.posted if e.get("code") == 40]
     assert opened and desk.stray == []
 
@@ -1477,7 +1592,7 @@ def test_bench_mode_repeats_the_primitives_for_timings(mac):
     assert mac.desk.field == L.TYPE_TEXT  # typed over, not appended to
     assert mac.desk.stray == []
     sc = report.scores
-    assert sc["passed"] == 21 + len(report.repeats) and sc["success"] == 1.0
+    assert sc["passed"] == 27 + len(report.repeats) and sc["success"] == 1.0
 
 
 def test_accessibility_actions_went_through_the_watch_and_it_let_go(mac):

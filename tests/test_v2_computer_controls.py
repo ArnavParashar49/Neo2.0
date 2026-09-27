@@ -413,6 +413,9 @@ def shots(monkeypatch):
 
     def grab(extra):
         grabbed.append(extra)
+        if "-R" in extra:  # a region: its own size at 2 px per point, as screencapture gives it
+            _x, _y, w, h = (float(v) for v in extra[extra.index("-R") + 1].split(","))
+            return Image.new("RGB", (round(2 * w), round(2 * h)), (200, 200, 200))
         return Image.new("RGB", size["px"], (200, 200, 200))
 
     monkeypatch.setattr(screen, "can_capture", lambda: True)

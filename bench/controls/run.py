@@ -303,7 +303,7 @@ _COORDS = frozenset({"x", "y", "x1", "y1", "x2", "y2", "box_2d", "nx", "ny", "po
 # "at 506, 770".
 _GEOMETRY = re.compile(
     r"@\(\s*-?\d"
-    r"|\bbox_2d\b"
+    r"|\bbox_2d\w*\s*[=:]?\s*\[\s*-?\d"  # (a box's numbers — not the word, as in a refusal naming the forms)
     r"|\b(?:x|y|x1|y1|x2|y2|nx|ny|cx|cy)\s*[=:]\s*-?\d"
     r"|\(\s*-?\d+(?:\.\d+)?\s*,\s*-?\d+(?:\.\d+)?\s*[,)]"
     r"|\bat\s+-?\d+(?:\.\d+)?\s*,\s*-?\d+(?:\.\d+)?",

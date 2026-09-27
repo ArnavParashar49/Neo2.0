@@ -45,6 +45,12 @@ def _nothing_real(monkeypatch):
         monkeypatch.setattr(Quartz, n, refuse)
     for n in ("AXUIElementPerformAction", "AXUIElementSetAttributeValue", "AXUIElementCopyElementAtPosition"):
         monkeypatch.setattr(AS, n, refuse)
+    # The bench measures NEO.app's defaults, as `python -m bench.controls.run` does: the suite's
+    # conftest turns the early first look off (it would read this Mac's screen); here the Mac is fake.
+    from neo2.core import config
+
+    monkeypatch.delenv("NEO_PREFETCH_LOOK", raising=False)
+    monkeypatch.setattr(config, "_settings", None)
     yield
 
 

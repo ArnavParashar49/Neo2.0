@@ -288,6 +288,7 @@ class _Run:
         self.can_capture = False
         self.timings: list[tuple[str, float, dict]] = []  # (tool, ms inside it, args) of every call
         self.outputs: dict[str, list[Any]] = {}  # each tool's answers, in order
+        self.agent_outputs: dict[str, list[Any]] = {}  # …and those of the calls made as a model's (origin agent)
         self.rep = 0  # the repetition running (--bench)
         self.last_shot: tuple[bytes, str, tuple] | None = None  # (png, note, region) of the window's picture
 
@@ -373,6 +374,8 @@ class _Run:
         if out.ok:  # (a refusal's time says nothing about how fast the tool acts)
             self.timings.append((tool_name, (time.monotonic() - t0) * 1000, dict(args)))
         self.outputs.setdefault(tool_name, []).append(out)
+        if origin == "agent":
+            self.agent_outputs.setdefault(tool_name, []).append(out)
         if out.staged and (p := confirm.peek()) is not None and p.action_id == out.staged:
             confirm.cancel("the controls self-test never presses anything that needs a yes")
         return out
@@ -877,6 +880,12 @@ async def _activate(r: _Run) -> Check:
 # ---- what NEO is still gaining: each skips until its tool offers it ------------------------------
 
 
+def _registered() -> set[str]:
+    from neo2.core.agent.registry import registry
+
+    return {t.name for t in registry().all()}
+
+
 def _params(tool_name: str) -> set[str]:
     from neo2.core.agent.registry import registry
 
@@ -898,6 +907,16 @@ def _resolver_live() -> bool:
 
         return str(getattr(settings(), "resolver", "") or "").lower() in ("live", "on", "all")
     except Exception:  # noqa: BLE001
+        return False
+
+
+def _hindi_index_ready() -> bool:
+    """NEO's index of the Mac's own English↔Hindi UI strings is built (neo2.core.decide.uistrings)."""
+    try:
+        from neo2.core.decide import uistrings
+
+        return bool(uistrings.ready())
+    except Exception:  # noqa: BLE001 - no index here: not ready
         return False
 
 
@@ -984,6 +1003,10 @@ async def _click_meaning(r: _Run) -> Check:
         (done if hit is not None else bad).append(what)
     c.sent = "click_text " + "; ".join(repr(p) for _, p in asks)
     c.said = " / ".join(said)
+    if bad and not _hindi_index_ready() and all(t.startswith("NEEDS_CONFIRM") for t in said):
+        # DECISIONS 40: until NEO has built its index of the Mac's own Hindi UI strings (at idle),
+        # a Devanagari label can't be told from one that sends or deletes — NEO asks first.
+        return c.skip("NEO asked before pressing a Hindi-titled button, as it should until its Hindi UI-string index is built")
     if bad:
         return c.fail(f"the button wasn't pressed for {', '.join(bad)}")
     rest = "" if live else "; by meaning (English, Hinglish, Hindi phrases) skipped: the resolver's later stages run in shadow"
@@ -996,8 +1019,11 @@ async def _type_named(r: _Run) -> Check:
     if key is None:
         return c.skip("type_text can't be pointed at a field by its name yet")
     words = " named ✓"
-    out = await r.tool("type_text", text=words, **{key: L.FIELD_HINT})
-    c.sent, c.said = f"type_text {words!r} {key}={L.FIELD_HINT!r}", out.text
+    # (the field holds the earlier check's text: typing into a field by its name never types over
+    # what it holds unless told to replace it)
+    extra = {"replace": True} if "replace" in _params("type_text") else {}
+    out = await r.tool("type_text", text=words, **{key: L.FIELD_HINT}, **extra)
+    c.sent, c.said = f"type_text {words!r} {key}={L.FIELD_HINT!r}" + (" replace=true" if extra else ""), out.text
     if await r.wait_state(lambda s: str(s.get("field", "")).endswith(words)):
         return c.ok(f"the field named {L.FIELD_HINT!r} got the text")
     return c.fail(f"the field reads {r.state().get('field', '')!r}")
@@ -1005,9 +1031,14 @@ async def _type_named(r: _Run) -> Check:
 
 async def _picture_of(r: _Run, frame: list | tuple) -> str | None:
     """A screenshot of one part of the window (a board): its shot id, for clicks by square."""
+    return (await _picture_and_note(r, frame))[0]
+
+
+async def _picture_and_note(r: _Run, frame: list | tuple) -> tuple[str | None, str]:
+    """A screenshot of one part of the window (a board): (its shot id, NEO's note on it)."""
     x, y, w, h = (int(round(v)) for v in frame)
     out = await r.tool("screenshot", x=x - 4, y=y - 4, w=w + 8, h=h + 8)
-    return note_shot(out.text) if out.ok else None
+    return (note_shot(out.text) if out.ok else None), out.text
 
 
 def _changed_squares(out: Any, *squares: str) -> bool:
@@ -1055,10 +1086,16 @@ async def _tilted_board(r: _Run) -> Check:
         return c.skip("click takes no square names yet (cell=)")
     if not r.can_capture:
         return c.skip("Screen Recording is off for NEO")
-    shot = await _picture_of(r, r.targets["tilt"])
+    shot, note = await _picture_and_note(r, r.targets["tilt"])
+    told = ""
+    if shot and "map_board orientation=" in note and "map_board" in _registered():
+        # NEO found the squares but couldn't tell from the pieces which side is White's: a model that
+        # sees says it, as the note asks (the test window draws White at the bottom)
+        said = await r.tool("map_board", shot=shot, orientation="bottom")
+        told = f", map_board orientation=bottom ({'taken' if said.ok else 'refused: ' + _one_line(said.text)})"
     m = r.mark()
     out = await r.tool("click", cell="e2", **({"shot": shot} if shot else {}))
-    c.sent, c.said = f"screenshot of the tilted board, then click cell=e2 shot={shot}", out.text
+    c.sent, c.said = f"screenshot of the tilted board{told}, then click cell=e2 shot={shot}", out.text
     hit = await r.wait(m, lambda e: e.get("ev") == "tilt_down")
     if hit is None:
         return c.fail("nothing arrived on the tilted board")
@@ -1066,7 +1103,8 @@ async def _tilted_board(r: _Run) -> Check:
     off = ((hit["at"][0] - cx) ** 2 + (hit["at"][1] - cy) ** 2) ** 0.5 if hit.get("at") else float("nan")
     if hit.get("square") != "e2":
         return c.fail(f"it landed on {hit.get('square') or 'the edge'} instead of e2", "the board's perspective is read wrong")
-    return c.ok(f"e2 on the tilted board, {off:.1f} pt from the square's centre")
+    how = " (which side is White's was told with map_board, as NEO's note asked)" if told else ""
+    return c.ok(f"e2 on the tilted board, {off:.1f} pt from the square's centre{how}")
 
 
 async def _zoom_tiny(r: _Run) -> Check:
@@ -1078,7 +1116,8 @@ async def _zoom_tiny(r: _Run) -> Check:
     if not r.can_capture:
         return c.skip("Screen Recording is off for NEO")
     x, y, w, h = r.targets["tiny"]
-    region = {"x": int(x - 30), "y": int(y - 20), "w": 72, "h": 52}
+    # a close look around the button's middle (the screenshot tool's zoom is centred on x,y)
+    region = {"x": int(round(x + w / 2)), "y": int(round(y + h / 2)), "w": 72, "h": 52}
     zoom = True if _param_type("screenshot", "zoom") == "boolean" else 4
     out = await r.tool("screenshot", zoom=zoom, **region)
     sid = note_shot(out.text)
@@ -1122,15 +1161,23 @@ async def _click_mark(r: _Run) -> Check:
 
 
 async def _after_look(r: _Run) -> Check:
+    from neo2.core.tools.computer import pointer
+
     c = Check("after_look", "A seeing model's click comes back with the picture after it")
-    eid = r.ids.get("button_a")
-    if not eid:
-        return c.skip("ax_tree gave no id for the Alpha button")
     if not r.can_capture:
         return c.skip("Screen Recording is off for NEO")
+    # As a model that can see clicks: at a pixel of a screenshot it took (a click by an ax_tree id
+    # needs no picture after it: its words say what changed).
+    x, y, w, h = r.bounds
+    shot = await r.tool("screenshot", x=int(x), y=int(y), w=int(w), h=int(h))
+    s = pointer.get_shot(note_shot(shot.text) or "") if shot.ok else None
+    if s is None:
+        return c.fail(f"no screenshot to click in: {_one_line(shot.text)}")
+    ax_, ay_ = r.center("button_a")
+    px, py = round((ax_ - s.x0) / s.ppp, 1), round((ay_ - s.y0) / s.ppp, 1)
     m = r.mark()
-    out = await r.tool_as("click", {"id": eid}, origin="agent")
-    c.sent, c.said = f"click id={eid} (Alpha) as a model that can see", out.text
+    out = await r.tool_as("click", {"x": px, "y": py, "shot": s.id}, origin="agent")
+    c.sent, c.said = f"click x={px} y={py} shot={s.id} (Alpha) as a model that can see", out.text
     await r.wait(m, lambda e: e.get("ev") == "button" and e.get("name") == L.BUTTON_A)
     eff = getattr(out, "effect", None)
     if out.images:
@@ -1156,13 +1203,28 @@ async def _effect_fields(r: _Run) -> Check:
     if not any(getattr(o, "effect", None) is not None for outs in r.outputs.values() for o in outs):
         # Step 0 gave ToolOutput the field; until a tool fills it, nothing here can say what changed
         return c.skip("no tool fills in its Effect yet")
+    if not r.can_capture:
+        return c.skip("Screen Recording is off for NEO: nothing can say what a click changed")
+    # What a model's own actions changed (the user's own commands aren't looked at: they watch):
+    # a click on Alpha, a drag of the tile onto the well, a scroll of the list — each as a model's.
+    lx, ly = r.center("list")
+    (tx, ty), (wx, wy) = r.center("tile"), r.center("well")
+    calls = {
+        "click": {"x": r.center("button_a")[0], "y": r.center("button_a")[1]},
+        "drag": {"x1": tx, "y1": ty, "x2": wx, "y2": wy},
+        "scroll": {"x": lx, "y": ly, "dy": -3},
+    }
     missing = []
-    for tool_name in ("click", "drag", "scroll"):
-        outs = [o for o in r.outputs.get(tool_name, []) if o.ok]
+    for tool_name, args in calls.items():
+        if not r.agent_outputs.get(tool_name):
+            await r.tool_as(tool_name, args, origin="agent")
+        outs = r.agent_outputs.get(tool_name) or []
         if not outs:
             missing.append(f"{tool_name} (didn't run)")
         elif getattr(getattr(outs[-1], "effect", None), "changed", None) is None:
             missing.append(tool_name)
+    await r.tool("scroll", x=lx, y=ly, dy=3)  # (the list back where it was)
+    c.sent = "click (Alpha), drag (tile → well) and scroll (the list) as a model's"
     if missing:
         return c.fail(f"no Effect.changed on {', '.join(missing)}", "a batch can't stop at a step that changed nothing")
     return c.ok("click, drag and scroll each set Effect.changed")

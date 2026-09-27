@@ -144,6 +144,7 @@ async def _type(text: str) -> str:
             "text": {"type": "string"},
             "field": {"type": "string", "description": "the label of the field to type into (optional)"},
             "app": {"type": "string", "description": "the app whose field it is (optional; the front app)"},
+            "replace": {"type": "boolean", "description": "with field: replace what the field already holds"},
         },
         ["text"],
     ),

@@ -168,24 +168,47 @@ def _sck_on() -> bool:
     return sck.enabled()
 
 
-def _image_limit() -> tuple[int, int] | None:
-    """The largest picture the brain about to see it takes as sent: (longest edge in pixels, total
-    pixels — 0: no cap on the area), from neo2.core.providers.image_limit() (a pair in that order;
-    an int: the longest edge only; None: NEO's own caps)."""
+def _brains_limit() -> object:
+    """neo2.core.providers.image_limit() — the strictest limit of the brains that may see the picture
+    (an ImageLimit, or a pair / an int where a host or a test declares one that way) — or None."""
     try:
         from neo2.core import providers
 
         fn = getattr(providers, "image_limit", None)
-        lim = fn() if callable(fn) else None
+        return fn() if callable(fn) else None
     except Exception:  # noqa: BLE001 - unknown: NEO's own caps
         return None
+
+
+def _image_limit(lim: object = ...) -> tuple[int, int] | None:
+    """The largest picture the brain about to see it takes as sent: (longest edge in pixels — 0: no
+    cap on the edge, total pixels — 0: no cap on the area), from neo2.core.providers.image_limit()
+    (an ImageLimit; a pair in that order; an int: the longest edge only; None: NEO's own caps)."""
+    if lim is ...:
+        lim = _brains_limit()
     if isinstance(lim, bool) or lim is None:
         return None
+    edge = getattr(lim, "long_edge", ...)
+    if edge is not ...:  # (an ImageLimit: its edge and pixel caps; its bytes are _byte_budget's)
+        e, px = edge or 0, getattr(lim, "pixels", None) or 0
+        ok = all(isinstance(v, int | float) and not isinstance(v, bool) and v >= 0 for v in (e, px))
+        return (int(e), int(px)) if ok and (e or px) else None
     if isinstance(lim, int | float) and lim > 0:
         return int(lim), 0
     if isinstance(lim, tuple | list) and len(lim) == 2 and all(isinstance(v, int | float) and v > 0 for v in lim):
         return int(lim[0]), int(lim[1])
     return None
+
+
+def _byte_budget(lim: object = ...) -> int:
+    """The upload budget for one picture: NEO's own (_MAX_BYTES), or less when a brain that may see
+    it takes less (ImageLimit.bytes)."""
+    if lim is ...:
+        lim = _brains_limit()
+    b = getattr(lim, "bytes", None)
+    if isinstance(b, int) and not isinstance(b, bool) and b > 0:
+        return max(16_000, min(_MAX_BYTES, b))
+    return _MAX_BYTES
 
 
 # ---- the pixels ----------------------------------------------------------------------------------
@@ -477,16 +500,16 @@ def encode(img: Image.Image, fmt: str | None = None) -> tuple[bytes, str]:
     return buf.getvalue(), "image/jpeg"
 
 
-def _fit(img: Image.Image, fmt: str | None) -> tuple[Image.Image, bytes, str]:
+def _fit(img: Image.Image, fmt: str | None, budget: int = _MAX_BYTES) -> tuple[Image.Image, bytes, str]:
     """(the picture sent, its bytes, mime). A JPEG past the upload budget (a photo, noise) is made
     smaller until it fits, at the same q85 4:4:4 (the quality the A/B test fixes): the caller maps
     from the picture that is sent. A PNG (the lossless arm of the A/B test) is sent as it is."""
     src, k = img, 1.0
     data, mime = encode(img, fmt)
     for _ in range(6):
-        if mime != "image/jpeg" or len(data) <= _MAX_BYTES or min(img.size) <= 16:
+        if mime != "image/jpeg" or len(data) <= budget or min(img.size) <= 16:
             break
-        k *= math.sqrt(_MAX_BYTES / len(data)) * 0.95  # (bytes go about with the area)
+        k *= math.sqrt(budget / len(data)) * 0.95  # (bytes go about with the area)
         # (always from the first picture: no blur on blur; BOX, an area average, is the quickest
         # clean way down by a little — 4 ms for 1.5 MP, against BILINEAR's 7)
         img = src.resize((max(1, round(src.width * k)), max(1, round(src.height * k))), Image.BOX)
@@ -530,7 +553,8 @@ def _size(frame: Frame, kind: str, limit: tuple[int, int] | None) -> tuple[int, 
         if kind in ("region", "zoom") and long * s < _ZOOM_MIN:
             s = _ZOOM_MIN / long
     if limit:  # (longest edge, total pixels): the brain's own limit, so it never shrinks the picture itself
-        s = min(s, limit[0] / max(iw, ih))
+        if limit[0] > 0:
+            s = min(s, limit[0] / max(iw, ih))
         if limit[1] > 0:
             s = min(s, math.sqrt(limit[1] / (iw * ih)))
     return max(1, round(iw * s)), max(1, round(ih * s))
@@ -564,7 +588,8 @@ def render(
     encoded per the shot format, with the mapping of its pixels to the screen."""
     t = time.perf_counter()
     src = frame.cut(*rect) if rect is not None else frame
-    img, data, mime = _fit(_resize(src.image, _size(src, kind, _image_limit())), fmt)
+    lim = _brains_limit()
+    img, data, mime = _fit(_resize(src.image, _size(src, kind, _image_limit(lim))), fmt, _byte_budget(lim))
     ppp = src.image.width * src.ppp / img.width
     part = _part(data, mime, detail or _DETAIL.get(kind, "high"))
     return Capture(
@@ -628,6 +653,23 @@ def after_look(
     cuts them (a sample of an unchanged screen is the same either way). ``like``: the samples taken
     before — no samples come back when this frame was taken another way (can't compare). A ``rect``
     off the points' display: ValueError."""
+    frame, samples = look_frame(rect, points, r, like=like)
+    return render(frame, "after", rect=rect, fmt=fmt), samples
+
+
+def look_frame(
+    rect: tuple[float, float, float, float],
+    points: list[tuple[float, float]] | None = None,
+    r: float | None = None,
+    *,
+    like: list[Image.Image] | None = None,
+    samples: bool = True,
+) -> tuple[Frame, list[Image.Image] | None]:
+    """after_look's capture without the picture for a model: (the frame showing ``rect`` and every
+    sample's box, the change samples cut from it — None when ``like`` came another way, or
+    ``samples`` is False: the caller cuts them, sample_points(points, frame=…)). The frame is kept
+    (last_frame); render(frame, "after", rect=rect) makes the after-look from it when one is sent —
+    one capture for the change check, the after-look and the board's look after a move."""
     _need_permission()
     x, y, w, h = rect
     pts = list(points or [])
@@ -645,10 +687,9 @@ def after_look(
         right, bottom = min(right, home.x + home.w), min(bottom, home.y + home.h)
     frame = grab(_whole(left, top, right, bottom))
     _keep(frame)
-    cap = render(frame, "after", rect=rect, fmt=fmt)
-    if not pts or _via(like) not in ("", frame.backend):
-        return cap, None
-    return cap, samples_from(frame, pts, rr)
+    if not pts or not samples or _via(like) not in ("", frame.backend):
+        return frame, None
+    return frame, samples_from(frame, pts, rr)
 
 
 # ---- windows -------------------------------------------------------------------------------------

@@ -154,7 +154,7 @@ async def screenshot(a: dict, c: ToolContext) -> ToolOutput:
     if cap.clickable:
         shot = pointer.remember(cap.x0, cap.y0, cap.ppp, cap.w, cap.h, covered=getattr(cap, "covered", ()))
         if not zoom:
-            board_note = await asyncio.to_thread(_board_note, cap, shot, collected, blind)
+            board_note = await asyncio.to_thread(_board_note, cap, shot, collected, blind, region)
     if blind:
         # A brain that can't see gets no picture's numbers in any form (no mapping, no sizes, no
         # places): what the picture holds, by element id only.
@@ -179,10 +179,12 @@ async def screenshot(a: dict, c: ToolContext) -> ToolOutput:
     return ToolOutput(text + (f"\n{board_note}" if board_note else ""), images=[cap.part], fence=False)
 
 
-def _board_note(cap, shot: pointer.Shot, collected: marks.Collected, blind: bool) -> str:
+def _board_note(cap, shot: pointer.Shot, collected: marks.Collected, blind: bool, region=None) -> str:
     """The screenshot note's board part (board.look): on the picture the model gets, with the
     window's part drawn in one piece as the evidence (from the marks' walk: no second walk), and no
-    board read under an open sheet or dialog. "" when there is nothing to say or it can't be told."""
+    board read under an open sheet or dialog. A region screenshot is judged by itself: the part of
+    it drawn in one piece (a board a model took a close picture of, however small a share of its
+    window it is). "" when there is nothing to say or it can't be told."""
     try:
         from PIL import Image
 
@@ -190,9 +192,10 @@ def _board_note(cap, shot: pointer.Shot, collected: marks.Collected, blind: bool
         img.load()
         pic = board.Picture.from_shot(img.convert("RGB"), shot)
         win = collected.window if collected.pid else None
-        canvas = board.canvas_area(win, collected.frames) if win is not None else None
+        view = tuple(float(v) for v in region) if region else win
+        canvas = board.canvas_area(view, collected.frames) if view is not None else None
         return board.look(
-            pic, shot=shot.id, blind=blind, sheet=bool(collected.blocker), area=canvas or win,
+            pic, shot=shot.id, blind=blind, sheet=bool(collected.blocker), area=canvas or view,
             canvas=canvas is not None, window=win,
         )  # fmt: skip
     except Exception:  # noqa: BLE001 - the board's words are a help, never the screenshot's failure
@@ -315,26 +318,53 @@ def _on_a_board(x: float, y: float) -> bool:
     return rx <= x < rx + rw and ry <= y < ry + rh
 
 
-def _board_picture(b: board.Board) -> board.Picture:
-    """The board's area now, captured the same way before and after an input (halved on Retina: a
-    board's look is the same at any scale)."""
-    frame = screen.grab(board.region(b))
+def _board_picture(b: board.Board, frame: screen.Frame | None = None, backend: str = "") -> tuple[board.Picture, str]:
+    """(the board's area now, the capture path it came from), captured the same way before and after
+    an input (halved on Retina: a board's look is the same at any scale). ``frame``: a picture just
+    taken after the input (the pointer's last look) — cut from it when it shows the whole board as
+    the screen showed it, the same way as ``backend`` (the look before): no capture of its own."""
+    region = board.region(b)
+    if not (
+        frame is not None
+        and frame.screen_like
+        and frame.covers(*region)
+        and (not backend or frame.backend == backend)
+    ):
+        frame = screen.grab(region)
+    else:
+        frame = frame.cut(*region)
     img, ppp = frame.image, frame.ppp
     if ppp < 0.99:
         k = max(1, round(1 / ppp))
         img, ppp = img.reduce(k), ppp * k
-    return board.Picture.of(img.convert("RGB"), frame.x0, frame.y0, ppp)
+    return board.Picture.of(img.convert("RGB"), frame.x0, frame.y0, ppp), frame.backend
 
 
-async def _board_before(aims: list[pointer.Aim]) -> tuple[board.Board, str, str] | None:
-    if pointer._cell_resolver is not _cell_point:
-        return None  # (the squares came from another resolver — a test's — not this board helper)
+def _aimed_board(aims: list[pointer.Aim]) -> tuple[board.Board, list[pointer.Aim]]:
+    """The board the squares aimed at are on, and those aims."""
     cells = [w for w in aims if w.form == "cell"]
     a = {"cell": cells[0].cell, **({"shot": cells[0].shot.id} if cells[0].shot is not None else {})}
     _pts, b, _names = board.points_for(a, ("cell",))
+    return b, cells
+
+
+def _board_area(aims: list[pointer.Aim]) -> tuple[int, int, int, int] | None:
+    """The area the check before a move looks at (the board's): the pointer's look before the
+    input captures it too."""
+    if pointer._cell_resolver is not _cell_point:
+        return None
+    return board.region(_aimed_board(aims)[0])
+
+
+async def _board_before(aims: list[pointer.Aim], frame: screen.Frame | None = None) -> tuple[board.Board, str, str, str] | None:
+    """The board still where NEO found it, right before the move (else BoardError: nothing is done)
+    — looked at in ``frame`` (the pointer's look before the input) when it shows the board."""
+    if pointer._cell_resolver is not _cell_point:
+        return None  # (the squares came from another resolver — a test's — not this board helper)
+    b, cells = _aimed_board(aims)
     names = [b.name(*b.parse(w.cell)) for w in cells]
     try:
-        pic = await asyncio.to_thread(_board_picture, b)
+        pic, backend = await asyncio.to_thread(_board_picture, b, frame)
     except Exception:  # noqa: BLE001 - no picture now: a board NEO can't check is never acted on
         raise board.BoardError(
             "Error: NEO couldn't look at the board just now, so it can't check it's still where it was — nothing "
@@ -342,16 +372,18 @@ async def _board_before(aims: list[pointer.Aim]) -> tuple[board.Board, str, str]
         ) from None
     board.before_move(b, pic)  # (the board still where NEO found it, else BoardError: nothing is done)
     frm = names[0] if len(names) > 1 else ""
-    return b, frm, names[-1]
+    return b, frm, names[-1], backend
 
 
-async def _board_after(state: tuple[board.Board, str, str]) -> tuple[str, bool | None]:
-    b, frm, to = state
-    pic = await asyncio.to_thread(_board_picture, b)
+async def _board_after(state: tuple[board.Board, str, str, str], frame: screen.Frame | None = None) -> tuple[str, bool | None]:
+    """What changed on the board, in square names — looked at in ``frame`` (the pointer's last look
+    after the input) when it shows the board, else in a picture of its own."""
+    b, frm, to, backend = state
+    pic, _how = await asyncio.to_thread(_board_picture, b, frame, backend)
     m = board.after_move(b, pic, frm, to)
     return m.said, m.changed
 
 
 pointer.set_cell_resolver(_cell_point)
 pointer.set_grid_check(_on_a_board)
-pointer.set_cell_checks(_board_before, _board_after)
+pointer.set_cell_checks(_board_before, _board_after, _board_area)
