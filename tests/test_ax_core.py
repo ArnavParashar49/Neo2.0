@@ -711,7 +711,7 @@ def test_until_answers_at_the_first_change_and_honestly_at_the_deadline(clock):
     assert got == "yes" and 0.1 <= clock.now() - t0 < 0.13
     t0 = clock.now()
     asked = []
-    assert asyncio.run(wait.until(lambda: asked.append(clock.now()) or False, 0.1, every=0.03)) is False
+    assert asyncio.run(wait.until(lambda: asked.append(clock.now()) or False, 0.1, every=0.03)) is None
     assert abs(clock.now() - t0 - 0.1) < 1e-9 and asked[-1] - t0 == pytest.approx(
         0.1
     )  # asked at the deadline too
@@ -982,7 +982,7 @@ def test_menu_items_are_read_without_opening_a_menu_and_never_the_system_menu(fa
 def test_a_menu_command_is_pressed_through_the_one_door_and_never_a_system_one(fake, monkeypatch):
     _root, apple, _new_game = _menu_app(fake)
     seen = []
-    monkeypatch.setattr(ax, "_ax_watch", lambda kind, el, what, value: seen.append((kind, what)))
+    monkeypatch.setattr(ax, "_watch", lambda kind, el, what, value: seen.append((kind, what)))
     items = {i.title: i for i in ax.menu_items(60)}
     assert ax.press_menu_item(items["New Game"]) == "Chose Game › New Game" and seen == [
         ("perform", "AXPress")
@@ -1068,7 +1068,7 @@ def test_every_ax_action_and_write_is_shown_to_the_watcher_first(fake, monkeypat
     b, f = button("OK"), El("AXTextField", "Name", value="", frame=(10, 100, 200, 24))
     ids = _ids((fake.add_app("Form", 3, app_root(window("Form", b, f))), ax.snapshot())[1])
     seen = []
-    monkeypatch.setattr(ax, "_ax_watch", lambda kind, el, what, value: seen.append((kind, what)))
+    monkeypatch.setattr(ax, "_watch", lambda kind, el, what, value: seen.append((kind, what)))
     ax.press(ids["OK"])
     ax.focus_el(f)
     other = window("Other", frame=(0, 0, 10, 10))
@@ -1080,7 +1080,7 @@ def test_every_ax_action_and_write_is_shown_to_the_watcher_first(fake, monkeypat
     def refuse(kind, el, what, value):
         raise RuntimeError("outside the test window")
 
-    monkeypatch.setattr(ax, "_ax_watch", refuse)
+    monkeypatch.setattr(ax, "_watch", refuse)
     n = len(fake.performed)
     with pytest.raises(RuntimeError):
         ax.press(ids["OK"])
@@ -1327,9 +1327,9 @@ def test_the_choke_points_are_refused_while_effects_are_off(monkeypatch):
 
     monkeypatch.setattr(ax, "AS", ApplicationServices)
     with pytest.raises(effects.EffectRefused):
-        ax._perform(object(), "AXPress", "press something")
+        ax.perform_action(object(), "AXPress", what="press something")
     with pytest.raises(effects.EffectRefused):
-        ax._set(object(), "AXValue", "x", "write something")
+        ax.set_attribute(object(), "AXValue", "x", what="write something")
 
 
 def test_a_labelled_look_ends_at_the_first_exact_match(fake, demo):

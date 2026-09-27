@@ -17,6 +17,10 @@ Role = Literal["user", "assistant", "tool"]
 class ImagePart:
     data: bytes
     mime: str = "image/png"
+    # How much of it the model should look at: "auto" (the provider's own choice), or "low" /
+    # "medium" / "high" / "ultra" — mapped by each provider to its own sizing (Gemini's
+    # media_resolution, …). A zoom or a board wants "high"; an after-look "medium".
+    detail: Literal["auto", "low", "medium", "high", "ultra"] = "auto"
 
 
 @dataclass

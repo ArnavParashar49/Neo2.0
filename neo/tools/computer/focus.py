@@ -88,7 +88,7 @@ def force_front(pid: int) -> bool:
 
         win = ax._attr(ax._app_el(pid), "AXFocusedWindow")
         if win is not None:
-            ax._perform(win, "AXRaise", f"raise process {pid}'s window", kind="focus", timeout=None)
+            ax.perform_action(win, "AXRaise", kind="focus", what=f"raise process {pid}'s window")
     except Exception:  # noqa: BLE001
         pass
     return True

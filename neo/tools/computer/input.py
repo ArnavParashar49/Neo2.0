@@ -166,6 +166,26 @@ def _post(ev) -> None:
     Q.CGEventPost(Q.kCGHIDEventTap, ev)
 
 
+def _post_to_pid(pid: int, ev) -> None:
+    """An event for one app only (CGEventPostToPid: it reaches that app in front or not), through
+    the same watcher and effects switch as _post — the watcher reads where it goes off the event
+    (kCGEventTargetUnixProcessID) — and never into NEO's own processes or a protected app. Counted
+    like _post's (a look kept from before it is out of date)."""
+    global _sent
+    _sent += 1
+    try:
+        Q.CGEventSetIntegerValueField(ev, Q.kCGEventTargetUnixProcessID, int(pid))
+    except Exception:  # noqa: BLE001 - (a test's stand-in event)
+        pass
+    if _watch is not None:
+        _watch(ev)
+    from neo.tools.computer import ax
+
+    ax.refuse_off_limits(int(pid))
+    effects.guard("input", "post a keyboard event to one app", via=Q.CGEventPostToPid)
+    Q.CGEventPostToPid(pid, ev)
+
+
 def can_post() -> bool:
     """May this process post input events? macOS checks that on its own (the "control your
     computer" part of Accessibility) and drops events silently when it's missing — so NEO asks

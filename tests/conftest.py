@@ -165,6 +165,36 @@ def _no_task_grants():
     grants.reset()
 
 
+class FakeClock:
+    """Time that passes only when something waits: ``now`` for the clock, ``sleep`` for the wait
+    (every one recorded in ``sleeps``), ``advance`` for time that passes meanwhile."""
+
+    def __init__(self, start: float = 1000.0) -> None:
+        self.t = start
+        self.sleeps: list[float] = []
+
+    def now(self) -> float:
+        return self.t
+
+    async def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.t += max(0.0, seconds)
+
+    def advance(self, seconds: float) -> None:
+        self.t += seconds
+
+
+@pytest.fixture
+def fake_clock(monkeypatch):
+    """neo.tools.computer.wait on a fake clock: ``until`` polls and waits in fake time (counted in
+    ``fake_clock.sleeps``), and a test says when things happen with ``fake_clock.advance``."""
+    wait = pytest.importorskip("neo.tools.computer.wait")  # (the computer package needs macOS)
+    clock = FakeClock()
+    monkeypatch.setattr(wait, "_now", clock.now)
+    monkeypatch.setattr(wait, "_sleep", clock.sleep)
+    return clock
+
+
 @pytest.fixture
 def real_browser():
     """The one real check (NEO_TEST_RENDER=1, which skips the tests asking for this otherwise): a

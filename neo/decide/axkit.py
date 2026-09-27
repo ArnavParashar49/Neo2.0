@@ -347,22 +347,23 @@ def _type(pid: int, text: str, newline: str) -> None:
     ``newline`` chord: a plain Return would send the message in a chat app."""
     import Quartz as Q
 
-    from neo.tools.computer.input import chunks
+    from neo.tools.computer import input as inp  # (its door: the watcher, NEO's own and protected apps)
 
     effects.guard("input", "type into another app", via=Q.CGEventPostToPid)
     key, flags = _NEWLINE_KEYS.get(newline, _NEWLINE_KEYS["return"])
+    text = text.replace("\r\n", "\n").replace("\r", "\n")  # a typed CR would be a Return
     for n, line in enumerate(text.split("\n")):
         if n:
             for down in (True, False):
                 ev = Q.CGEventCreateKeyboardEvent(None, key, down)
                 Q.CGEventSetFlags(ev, flags)
-                Q.CGEventPostToPid(pid, ev)
-        for piece in chunks(line):  # at most 20 UTF-16 units, never half a character
+                inp._post_to_pid(pid, ev)
+        for piece in inp.chunks(line):  # at most 20 UTF-16 units, never half a character
             n16 = len(piece.encode("utf-16-le")) // 2
             for down in (True, False):
                 ev = Q.CGEventCreateKeyboardEvent(None, 0, down)
                 Q.CGEventKeyboardSetUnicodeString(ev, n16, piece)
-                Q.CGEventPostToPid(pid, ev)
+                inp._post_to_pid(pid, ev)
 
 
 def set_text(el: Any, text: str, *, newline: str = "return") -> bool:
@@ -394,6 +395,11 @@ def _reads(el: Any, text: str) -> bool:
     return bool(wait.until_sync(lambda: _norm(_s(attr(el, "AXValue"))) == want, _READBACK_S, every=_READBACK_EVERY_S))
 
 
+# What is never typed without a chord for it: line breaks and other control characters (a typed
+# CR or ^C acts like the key in many inputs, a terminal's above all).
+_CONTROL = re.compile(r"[\x00-\x08\x0a-\x1f\x7f]")
+
+
 def _put(el: Any, text: str, newline: str) -> bool:
     set_attr(el, "AXFocused", True)
     if set_attr(el, "AXValue", text) and _reads(el, text):
@@ -401,6 +407,8 @@ def _put(el: Any, text: str, newline: str) -> bool:
     pid = _pid_of(el)
     if pid is None or _norm(_s(attr(el, "AXValue"))):
         return False  # can't type into it, or a half-set value is there: don't type on top of it
+    if not newline and _CONTROL.search(text):
+        return False  # no chord for a line break here (ax_set_value): typing it would press Return
     _type(pid, text, newline)
     return _reads(el, text)
 

@@ -132,3 +132,25 @@ async def test_a_fast_path_runs_only_the_agents_own_tool():
     async with neo2.AsyncAgent(neo2.AgentConfig(tools="web", fast_paths=False), provider=ScriptedBrain(["noon"])) as agent:
         r = await agent.ask("what time is it")
         assert r.route == "agent" and r.text == "noon"
+
+
+async def test_an_embedded_agents_request_never_takes_the_utterance_lane(monkeypatch):
+    """neo2 hands Session.handle origin "user" for source="user" (never from_user): a host's text all
+    the same, whoever typed it. Neither source may pick and press on its own (by_utterance) — both
+    keep the exact fast paths, like Live's relays."""
+    from neo.agent import session as sess
+    from neo.agent.registry import RegisteredTool, utterance_lane
+
+    lane_tool = RegisteredTool("t_utt", "", {}, lambda a, c: "", by_utterance=True)
+    seen = []
+    real = sess.Session._handle
+
+    async def spy(self, text, *, images, from_user, origin):
+        seen.append((origin, from_user, utterance_lane(lane_tool, origin)))  # decided inside the request
+        return await real(self, text, images=images, from_user=from_user, origin=origin)
+
+    monkeypatch.setattr(sess.Session, "_handle", spy)
+    async with neo2.AsyncAgent(neo2.AgentConfig(tools="none", fast_paths=False), provider=ScriptedBrain(["ok", "ok"])) as agent:
+        await agent.ask("click the start button")
+        await agent.ask("click the start button", source="model")
+    assert seen == [("user", False, False), ("live", False, False)]

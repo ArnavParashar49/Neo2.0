@@ -37,6 +37,77 @@ from neo import effects
 from neo.decide._objc import pooled
 from neo.tools.computer import wait
 
+# ---- the one door for Accessibility actions -------------------------------------------------------
+# Every AX action NEO takes in another app — a press, a value or the focus set, a window raised —
+# goes through perform_action / set_attribute, as every event goes through input._post (or, for one
+# app only, input._post_to_pid). While the controls self-test runs, its watcher (_watch) sees each
+# first and raises instead when the action wouldn't stay in its test window; then the target must be
+# neither one of NEO's own processes nor a protected app (OffLimits); then the effects switch
+# (neo/effects.py) has its say. An app that fails, or an element that can't be asked, is an error
+# code: the door itself raises only to refuse, and no caller takes a refusal for a plain failure
+# that another way around (typing where a value set failed) could make up for.
+_watch: Callable[[str, Any, str, Any], None] | None = None
+# What makes an app's web content readable (neo.decide.axkit.enable_web_reading), switched on and
+# back on its application element: nothing anyone sees changes, so it is no action in its UI.
+_READING_SWITCHES = frozenset({"AXManualAccessibility", "AXEnhancedUserInterface"})
+_ILLEGAL = -25201  # kAXErrorIllegalArgument: the answer for an element that can't be asked
+
+
+class OffLimits(Exception):
+    """The door won't act there: one of NEO's own processes, or an app NEO never touches."""
+
+
+def refuse_off_limits(pid: int) -> None:
+    """Raise OffLimits for NEO's own processes and protected apps. The tools and task kinds check
+    first, with better answers; this is the last word for any path that didn't."""
+    if not pid:
+        return
+    from neo.tools.computer import gates  # (the frozen gates, looked up at call time)
+
+    if is_neo(pid) or gates._protected("", pid):
+        raise OffLimits("that's NEO's own window or an app NEO never touches — nothing was done there")
+
+
+def _through(kind: str, el: Any, name: str, value: Any) -> None:
+    if _watch is not None:
+        _watch(kind, el, name, value)
+    if not (kind == "set" and name in _READING_SWITCHES):
+        refuse_off_limits(pid_of(el))
+
+
+def perform_action(
+    el: Any, action: str, *, kind: str = "accessibility", what: str = "", timeout: float | None = None
+) -> int:
+    """AXUIElementPerformAction through the one door: the AX error code (0 = done). The element
+    answers within _PRESS_TIMEOUT_S (a press may take a moment); the app's kept looks go."""
+    _through("perform", el, action, None)
+    effects.guard(kind, what or f"press {action} in another app's UI", via=AS.AXUIElementPerformAction)
+    _own_timeout(el, _PRESS_TIMEOUT_S if timeout is None else timeout)
+    _forget_el(el)
+    try:
+        return AS.AXUIElementPerformAction(el, action)
+    except Exception:  # noqa: BLE001 - an element that can't be asked: a failure, not a refusal
+        return _ILLEGAL
+
+
+def set_attribute(el: Any, name: str, value: Any, *, kind: str = "accessibility", what: str = "") -> int:
+    """AXUIElementSetAttributeValue through the one door: the AX error code (0 = done)."""
+    _through("set", el, name, value)
+    effects.guard(kind, what or f"set {name} in another app's UI", via=AS.AXUIElementSetAttributeValue)
+    _forget_el(el)
+    try:
+        return AS.AXUIElementSetAttributeValue(el, name, value)
+    except Exception:  # noqa: BLE001
+        return _ILLEGAL
+
+
+def _forget_el(el: Any) -> None:
+    try:
+        forget(pid_of(el) or None)  # (an app that can't be told: every kept look goes)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 # Roles worth showing to the model. Containers are walked but not listed unless titled.
 _INTERACTIVE = {
     "AXButton",
@@ -233,10 +304,12 @@ _timeout_for: Any = None  # the ApplicationServices the default was set through 
 
 
 def _library() -> bool:
+    """Embedded in another app's process (or an embedded agent's request is running): nothing
+    process-wide is changed here (runtime.process_wide_ok)."""
     try:
         from neo import runtime
 
-        return bool(runtime.library_mode() or runtime.library_bound())
+        return not runtime.process_wide_ok()
     except Exception:  # noqa: BLE001 - can't tell: act as a guest, never change process-wide state
         return True
 
@@ -282,6 +355,19 @@ def _app_el(pid: int):
     if not _ensure_timeout():
         _own_timeout(el)
     return el
+
+
+def _bounded(el):
+    """The element, answering each AX call within _AX_TIMEOUT_S even when its app hangs (a timeout
+    of its own: in a host's process there is no process-wide one of NEO's)."""
+    _own_timeout(el)
+    return el
+
+
+def _focused():
+    """The element with the keyboard focus (None), answering within _AX_TIMEOUT_S."""
+    el = _attr(_system_wide(), AS.kAXFocusedUIElementAttribute)
+    return None if el is None else _bounded(el)
 
 
 # ---- reading ------------------------------------------------------------------------------------------
@@ -829,7 +915,13 @@ def _release_web(pid: int) -> None:
 
 def _expose_web(pid: int, root) -> bool:
     """Switch the app's web tree on if it is a Chromium or Electron app (by what its bundle holds,
-    not its name). True when it was just switched on (it needs a moment to fill in)."""
+    not its name). True when it was just switched on (it needs a moment to fill in). Only as
+    NEO.app: embedded in another app's process, NEO switches no app's accessibility mode and
+    leaves no timer thread behind (runtime.process_wide_ok)."""
+    from neo import runtime
+
+    if not runtime.process_wide_ok():
+        return False
     with _web_lock:
         held = _web_held.get(pid)
         if held is not None:
@@ -1278,34 +1370,7 @@ def get(eid: str) -> Element | None:
     return _last_tree.get(eid) or _issued.get(eid)
 
 
-# ---- acting: the one door every Accessibility action and write goes through ------------------------------
-# While the controls self-test runs, every AX action and write is shown to its watcher before it is
-# made (like input._post's events): it may raise to stop one that wouldn't stay inside the test.
-# None the rest of the time.
-_ax_watch: Callable[[str, Any, str, Any], None] | None = None
-
-
-def _perform(el, action: str, what: str, *, kind: str = "accessibility", timeout: float | None = _PRESS_TIMEOUT_S) -> int:
-    """AXUIElementPerformAction through the watcher and the effects switch. The element pressed
-    gets a longer timeout of its own: a press may rightly take a moment to answer."""
-    if _ax_watch is not None:
-        _ax_watch("perform", el, action, None)
-    effects.guard(kind, what, via=AS.AXUIElementPerformAction)
-    if timeout:
-        _own_timeout(el, timeout)
-    forget(pid_of(el))
-    return AS.AXUIElementPerformAction(el, action)
-
-
-def _set(el, name: str, value, what: str, *, kind: str = "accessibility") -> int:
-    """AXUIElementSetAttributeValue through the watcher and the effects switch."""
-    if _ax_watch is not None:
-        _ax_watch("set", el, name, value)
-    effects.guard(kind, what, via=AS.AXUIElementSetAttributeValue)
-    forget(pid_of(el))
-    return AS.AXUIElementSetAttributeValue(el, name, value)
-
-
+# ---- acting ----------------------------------------------------------------------------------------------
 # AXPress and its plain equivalents. Anything else an element offers (AXConfirm — a Return that
 # sends —, AXIncrement, AXShowMenu, AXCancel…) is not a "press".
 _PRESS_ACTIONS = ("AXPress", "AXPick", "AXOpen")
@@ -1348,7 +1413,7 @@ def press_el(e: Element) -> str:
         return f"Error: {e.id} can't be pressed (its actions: {offers}) — click it by id instead."
     if _menu_role(e) and e.ref is not None and in_system_menu(e.ref):
         return _SYSTEM_MENU
-    err = _perform(e.ref, action, f"press {action} in another app's UI")
+    err = perform_action(e.ref, action)
     if err == 0:
         return f"Pressed {what}"
     if err == _CANNOT_COMPLETE:
@@ -1378,8 +1443,9 @@ def secure(el) -> bool:
 @pooled
 def set_el_value(e: Element, value: str) -> str:
     """Put text into a text field / area and read it back: AXValue first; a field that ignores it
-    (many web and framework inputs) is focused and typed into. Never a password field, never a
-    checkbox, slider or popup (those are pressed, through the click gate)."""
+    (many web and framework inputs) is focused and typed into — never a line break (a Return there
+    could send or run it: type_text knows how to type one where the cursor is). Never a password
+    field, never a checkbox, slider or popup (those are pressed, through the click gate)."""
     if e.role == "AXSecureTextField" or secure(e.ref):
         return "Error: that's a password field — NEO never fills those."
     web = _attr(e.ref, "AXEditableAncestor") is not None
@@ -1387,10 +1453,21 @@ def set_el_value(e: Element, value: str) -> str:
         return f"Error: {e.id} is a {e.role.removeprefix('AX')}, not a text field — press or click it instead."
     from neo.decide import axkit
 
-    if axkit._put(e.ref, value, "shift+return"):
+    value = value.replace("\r\n", "\n").replace("\r", "\n")
+    if axkit._put(e.ref, value, ""):  # "": no chord for a line break — those are never typed here
         return f"Set {e.id} to “{value[:60]}”."
     now = _str(_attr(e.ref, AS.kAXValueAttribute))
+    if not _norm_text(now) and axkit._CONTROL.search(value):
+        return (
+            f"Error: {e.id} didn't take the text, and typing it in would press Return at each line break "
+            "(which could send or run it) — click into it and use type_text, which types line breaks "
+            "the safe way for where the cursor is."
+        )
     return f"Error: {e.id} didn't take the text (it reads “{now[:60]}”) — click into it and use type_text."
+
+
+def _norm_text(s: str) -> str:
+    return " ".join(s.split())
 
 
 def set_value(eid: str, value: str) -> str:
@@ -1402,7 +1479,7 @@ def set_value(eid: str, value: str) -> str:
 
 def focused_role() -> tuple[str, str]:
     """(role, subrole) of whatever has the keyboard focus, or ("", "")."""
-    el = _attr(_system_wide(), AS.kAXFocusedUIElementAttribute)
+    el = _focused()
     if el is None:
         return "", ""
     v = _attrs(el, ("AXRole", "AXSubrole"))
@@ -1417,7 +1494,7 @@ def focused_is_secure() -> bool:
 
 def focused_editable() -> bool:
     """Is the keyboard focus in something you can type into (never a password field)?"""
-    el = _attr(_system_wide(), AS.kAXFocusedUIElementAttribute)
+    el = _focused()
     if el is None:
         return False
     v = _attrs(el, ("AXRole", "AXSubrole"))
@@ -1580,11 +1657,9 @@ def visible_frame(el) -> tuple[float, float, float, float] | None:
 
 
 def focus_el(el) -> bool:
-    """Give the element the keyboard focus through AX (no click), and say whether it took it."""
-    try:
-        if _set(el, AS.kAXFocusedAttribute, True, "focus a text area in another app's UI") != 0:
-            return False
-    except Exception:  # noqa: BLE001
+    """Give the element the keyboard focus through AX (no click), and say whether it took it. (A
+    refusal at the door goes on up: nothing may type in its place.)"""
+    if set_attribute(el, AS.kAXFocusedAttribute, True, what="focus a text area in another app's UI") != 0:
         return False
     return bool(_attr(el, AS.kAXFocusedAttribute, False))
 
@@ -1597,12 +1672,12 @@ def press_element(e: Element) -> str:
         return "Error: no press action"
     if _menu_role(e) and e.ref is not None and in_system_menu(e.ref):
         return _SYSTEM_MENU
-    err = _perform(e.ref, action, f"press {action} in another app's UI")
+    err = perform_action(e.ref, action)
     return "Pressed" if err == 0 else f"Error: AX action failed ({err})"
 
 
 def focused_element_text() -> str:
-    el = _attr(_system_wide(), AS.kAXFocusedUIElementAttribute)
+    el = _focused()
     if el is None:
         return ""
     v = _attrs(el, ("AXValue", "AXSelectedText"))
@@ -1625,7 +1700,11 @@ def focused_terminal(pid: int = 0) -> bool:
         root = _app_el(pid)
         if _expose_web(pid, root):
             _web_settle(_attr(root, AS.kAXFocusedWindowAttribute) or root)
-    el = _attr(_system_wide(), AS.kAXFocusedUIElementAttribute)
+    return is_terminal(_focused())
+
+
+def is_terminal(el) -> bool:
+    """Does this element, or the pane around it, say it is a terminal view?"""
     for _ in range(2):
         if el is None:
             return False
@@ -1634,6 +1713,7 @@ def focused_terminal(pid: int = 0) -> bool:
         if _TERMINAL.search(said):
             return True
         el = v.get("AXParent")
+        el = None if el is None else _bounded(el)
     return False
 
 
@@ -1911,11 +1991,9 @@ def raise_window(h: Hit) -> bool:
     focused = _attr(_app_el(h.pid), AS.kAXFocusedWindowAttribute)
     if focused is None or _same(focused, h.window) or _attr(focused, "AXModal") is True:
         return False  # (a modal window stays on top: never raise another over it)
-    try:
-        _perform(h.window, "AXRaise", f"raise {h.app or 'an app'}'s window under the pointer", kind="focus", timeout=None)
-        _set(h.window, "AXMain", True, f"raise {h.app or 'an app'}'s window under the pointer", kind="focus")
-    except Exception:  # noqa: BLE001
-        return False
+    what = f"raise {h.app or 'an app'}'s window under the pointer"
+    perform_action(h.window, "AXRaise", kind="focus", what=what)  # (a refusal at the door goes on up)
+    set_attribute(h.window, "AXMain", True, kind="focus", what=what)
     return True
 
 
@@ -2243,7 +2321,7 @@ def press_menu_item(item: MenuItem) -> str:
         return _SYSTEM_MENU
     if not item.enabled:
         return f"Error: “{where}” can't be chosen right now (it's greyed out)."
-    err = _perform(item.ref, "AXPress", f"choose the menu command {where}")
+    err = perform_action(item.ref, "AXPress", what=f"choose the menu command {where}")
     if err == 0:
         return f"Chose {where}"
     if err == _CANNOT_COMPLETE:

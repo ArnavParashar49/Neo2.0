@@ -8,7 +8,8 @@ While a test runs, NEO's input module shows every event to the `Watch` just befo
   where a gesture starts (a move, a button going down, a scroll), the point must be inside the test
   window, the window on top there must be it, and Accessibility's own hit test must name its app;
   the rest of a gesture that began there (drags, the button going up) must stay inside it;
-* refuses a key event unless the test window's app is the one in front (the keys go there);
+* refuses a key event unless the test window's app is the one in front (the keys go there) — or,
+  for keys posted to one app (input._post_to_pid), unless that app is the test window's;
 * marks each event it lets through as NEO's own (kCGEventSourceUserData), so that
 * a listen-only event tap (neo.selftest.mac.Tap) can tell the user's own events from NEO's: the
   first mouse move, click, scroll or key of theirs stops the run. Without a tap — or if the tap
@@ -195,9 +196,14 @@ class Watch:
             else:
                 code = int(Q.CGEventGetIntegerValueField(ev, Q.kCGKeyboardEventKeycode))
                 if not (kind == "key_up" and code in self._keys):  # letting go of NEO's own key is fine
-                    name, pid = self.mac.front()
-                    if pid != self.test_pid:
-                        self._refuse(f"keys would have gone to {name or 'another app'}, which is in front")
+                    to = int(Q.CGEventGetIntegerValueField(ev, Q.kCGEventTargetUnixProcessID))
+                    if to:  # posted to one app (input._post_to_pid): it goes there, whatever is in front
+                        if to != self.test_pid:
+                            self._refuse(f"keys would have gone to another app (pid {to})")
+                    else:
+                        name, pid = self.mac.front()
+                        if pid != self.test_pid:
+                            self._refuse(f"keys would have gone to {name or 'another app'}, which is in front")
             Q.CGEventSetIntegerValueField(ev, Q.kCGEventSourceUserData, self.tag)
             self._record(kind or "?", typ, ev, x, y)
 

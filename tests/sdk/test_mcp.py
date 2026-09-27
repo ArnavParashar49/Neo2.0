@@ -503,7 +503,7 @@ MAC = pytest.mark.skipif(
 
 
 @MAC
-@pytest.mark.parametrize("tools", ["mac", ("hotkey",), ("click", "clock"), ("type_text",)])
+@pytest.mark.parametrize("tools", ["mac", ("hotkey",), ("click", "clock"), ("type_text",), ("search_site",), ("notes_create",)])
 def test_elicit_with_input_tools_needs_the_clients_app_protected(tools):
     """In elicit mode the approval form is the client's own window, on this desktop: NEO's clicks
     and keys (a parallel hotkey "space", "return") must never be able to answer it."""

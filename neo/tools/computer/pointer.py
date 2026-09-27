@@ -216,15 +216,15 @@ def _off_limits() -> Refused:
 
 
 async def _protected(h: ax.Hit, x: float, y: float) -> bool:
-    from neo.tools import computer as _c  # (the gate helpers, looked up at call time)
+    from neo.tools.computer import gates  # (the frozen gate helpers, looked up at call time)
 
-    return await _c._protected_hit(h, x, y)
+    return await gates._protected_hit(h, x, y)
 
 
 async def _protected_pid(pid: int, name: str = "") -> bool:
-    from neo.tools import computer as _c
+    from neo.tools.computer import gates
 
-    return bool(pid) and (ax.is_neo(pid, name) or _c._protected(name, pid))
+    return bool(pid) and (ax.is_neo(pid, name) or gates._protected(name, pid))
 
 
 def _sheet_refusal(h: ax.Hit) -> Refused:

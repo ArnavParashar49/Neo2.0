@@ -75,10 +75,14 @@ MAX_CONVERSATIONS = 16  # neo_task threads kept; the least recently used idle on
 MAX_PENDING_INPUTS = 32  # 2026-07-28 elicitations awaiting the client's retry
 # Never listed, whatever a host registers: they read as approvals, or are NEO's own machinery.
 NEVER_LISTED = frozenset({"approve", "confirm", "cancel", "deny", "more_tools", TASK_TOOL})
-# NEO's tools that click, type or press keys on this desktop (neo.tools.computer). With
-# --approve elicit they could answer the client's own approval form unless its app is protected.
+# NEO's tools that click, type, press keys or perform Accessibility actions on this desktop
+# (neo.tools.computer, and the task tools whose kinds act in an app's own window: a site's search
+# box, a new note). With --approve elicit they could answer the client's own approval form unless
+# its app is protected. Every tool that acts goes here, including ones on their way (menu_command
+# presses menu items): tests/test_ctl_seams.py checks the catalog against it.
 INPUT_TOOLS = frozenset(
-    {"click", "click_text", "ax_press", "ax_set_value", "drag", "scroll", "type_text", "dictate", "hotkey"}
+    {"click", "click_text", "ax_press", "ax_set_value", "drag", "scroll", "type_text", "dictate", "hotkey", "menu_command"}
+    | {"search_site", "notes_create"}
 )
 _CONVERSATION = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 _MAX_GOAL = 20_000

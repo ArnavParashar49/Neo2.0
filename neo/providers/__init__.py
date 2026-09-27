@@ -30,7 +30,9 @@ from neo.providers.base import (
     spoken_name,
 )
 
-__all__ = ["AllBrainsFailed", "BrainPool", "Chain", "ProviderError", "RateLimited", "brain", "make", "pool"]
+__all__ = [
+    "AllBrainsFailed", "BrainPool", "Chain", "ProviderError", "RateLimited", "brain", "image_limit", "make", "pool",
+]  # fmt: skip
 
 log = logging.getLogger(__name__)
 
@@ -215,6 +217,20 @@ class Chain:
     def supports_vision(self) -> bool:
         return any(p.supports_vision for p in self._providers())
 
+    @property
+    def image_limit(self) -> tuple[int, int] | None:
+        """The largest picture every brain here that can see takes as sent: (longest edge in
+        pixels, total pixels), the strictest of those they declare (their own ``image_limit``; a
+        chain inside a chain counts too). None: none declares one."""
+        limits = [
+            lim
+            for p in self._providers()
+            if getattr(p, "supports_vision", False) and (lim := getattr(p, "image_limit", None))
+        ]
+        if not limits:
+            return None
+        return min(int(edge) for edge, _ in limits), min(int(px) for _, px in limits)
+
     supports_tools = True
 
     def _no_brain(self, failures: list[tuple[str, ProviderError]]) -> ProviderError:
@@ -356,6 +372,14 @@ def brain(purpose: Purpose = "agent") -> Chain:
     else:
         order = [s.brain, s.fast_brain, s.offline_brain]
     return Chain(_dedupe(order))
+
+
+def image_limit(purpose: Purpose = "vision") -> tuple[int, int] | None:
+    """The largest screenshot the brains for this purpose take without shrinking it themselves:
+    (longest edge in pixels, total pixels), the strictest of the chain — a host's own providers
+    included — so NEO can size a picture itself and map clicks on the image the model really saw.
+    None: no brain declares a limit (the picture goes as NEO made it)."""
+    return brain(purpose).image_limit
 
 
 def _hosts(purpose: Purpose) -> list[Provider]:

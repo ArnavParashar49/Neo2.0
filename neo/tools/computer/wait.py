@@ -1,9 +1,15 @@
 """Deadline waits instead of fixed sleeps: ask whether something happened until it has, or until
 time runs out — done at the first change, never sooner than the evidence, never later than a cap.
+A fixed ``sleep(0.7)`` after ⌘N waits 0.7 s whether the window took 40 ms or never came.
 
-:func:`until` is the async form (the event loop runs between looks); :func:`until_sync` the one
-for code already on a worker thread. Both read time from one replaceable clock, so a test runs them
-on a :class:`FakeClock` (``with wait.use_clock(FakeClock()):``) and never really sleeps.
+:func:`until` is the async form (the event loop runs between looks; None at the timeout);
+:func:`until_sync` the one for code already on a worker thread. Both read time from one replaceable
+clock, so a test runs them on a :class:`FakeClock` (``with wait.use_clock(FakeClock()):``) and never
+really sleeps. The real clock reads this module's ``_now`` and ``_sleep`` at call time, which the
+``fake_clock`` fixture in tests/conftest.py replaces instead: either way every wait is counted.
+
+Portable code (the agent loop, the session) imports this lazily, where it is about the screen: the
+package it lives in needs macOS.
 
 :func:`in_thread` runs a blocking walk on a worker thread and tells it to stop (a
 ``threading.Event``) when the task awaiting it is cancelled — a tool timeout, the user stopping —
@@ -35,18 +41,26 @@ __all__ = [
 ]
 
 
+# The real clock's parts, looked up at call time (a test's fake_clock swaps _now and _sleep).
+_now: Callable[[], float] = time.monotonic
+_sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
+_sleep_sync: Callable[[float], None] = time.sleep
+
+EVERY_S = 0.015  # a poll this often: well under a frame's worth of a person's patience
+
+
 class Clock:
-    """Real time: the monotonic clock and real sleeps."""
+    """Real time: the monotonic clock and real sleeps (this module's _now, _sleep, _sleep_sync)."""
 
     def now(self) -> float:
-        return time.monotonic()
+        return _now()
 
     def sleep(self, s: float) -> None:
         if s > 0:
-            time.sleep(s)
+            _sleep_sync(s)
 
     async def asleep(self, s: float) -> None:
-        await asyncio.sleep(max(0.0, s))
+        await _sleep(max(0.0, s))
 
 
 class FakeClock(Clock):
@@ -111,7 +125,7 @@ def precise_sleep(s: float) -> None:
     the last couple of milliseconds yielding until the deadline (an input's timing: a drag's steps)."""
     if s <= 0:
         return
-    if type(clock) is Clock:  # real time (a fake clock just moves on)
+    if type(clock) is Clock and _sleep_sync is time.sleep:  # real time (a fake clock just moves on)
         end = time.perf_counter() + s
         if s > _SPIN_S:
             time.sleep(s - _SPIN_S)
@@ -134,14 +148,14 @@ async def _ask(pred: Callable[[], Any], thread: bool) -> Any:
 async def until(
     pred: Callable[[], Any] | Callable[[], Awaitable[Any]],
     timeout: float,
-    every: float = 0.02,
+    every: float = EVERY_S,
     *,
     thread: bool = False,
 ) -> Any:
     """Ask ``pred()`` until it answers something truthy — returned at once — or ``timeout`` seconds
-    pass: then its last (falsy) answer. It is asked once even with no time at all, and once more at
-    the deadline, so a change at the last moment still counts. ``pred`` may be async; ``thread``:
-    it blocks (an Accessibility or window-server call), so it is asked on a worker thread."""
+    pass: then None. It is asked once even with no time at all, and once more at the deadline, so a
+    change at the last moment still counts. ``pred`` may be async; ``thread``: it blocks (an
+    Accessibility or window-server call), so it is asked on a worker thread."""
     deadline = now() + max(0.0, float(timeout))
     step = max(0.001, float(every))
     while True:
@@ -150,12 +164,12 @@ async def until(
             return v
         left = deadline - now()
         if left <= 0:
-            return v
+            return None
         await asleep(min(step, left))
 
 
 def until_sync[T](
-    pred: Callable[[], T], timeout: float, every: float = 0.02, *, stop: threading.Event | None = None
+    pred: Callable[[], T], timeout: float, every: float = EVERY_S, *, stop: threading.Event | None = None
 ) -> T:
     """:func:`until` for code on a worker thread. ``stop`` set: the wait ends now (its last answer)."""
     deadline = now() + max(0.0, float(timeout))

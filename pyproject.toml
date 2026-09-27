@@ -41,6 +41,9 @@ mac = [  # the macOS tools: see, click, type, apps, files, shell, mail, calendar
     # calendars, reminders and contacts through the system stores (the same pyobjc release)
     "pyobjc-framework-EventKit>=12.2,<13; sys_platform == 'darwin'",
     "pyobjc-framework-Contacts>=12.2,<13; sys_platform == 'darwin'",
+    # capturing the screen in NEO's own process, and reading text off it (the same pyobjc release)
+    "pyobjc-framework-ScreenCaptureKit>=12.2,<13; sys_platform == 'darwin'",
+    "pyobjc-framework-Vision>=12.2,<13; sys_platform == 'darwin'",
     "pillow",
     "tld",  # a site's registrable domain (neo.decide.sites)
     "lxml",  # a site's own search form / OpenSearch description
