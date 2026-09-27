@@ -6,7 +6,8 @@
 
 - The schema comes from the typed signature (or `parameters`: a JSON schema or a pydantic model);
   a parameter annotated ToolContext is handed NEO's context (`ctx.extras` = the request's
-  `tool_context`). A NEO-style handler ``(args: dict, ctx: ToolContext)`` works as is.
+  `tool_context`). A NEO-style handler ``(args: dict, ctx: ToolContext)`` — both annotated — works
+  as is, with its schema given as `parameters`.
 - A gated tool (risk="destructive", or `confirm`) asks before its function runs: NEO stages the
   exact validated arguments, and the function runs only after the host approves that card, with
   those arguments. `detail` (default: the arguments as JSON) is what the approval UI shows.
@@ -306,12 +307,17 @@ def _schema_and_binding(
     ctx = next((p.name for p in params if _is_ctx(ann[p.name])), None)
     is_model = isinstance(parameters, type) and issubclass(parameters, pydantic.BaseModel)
 
-    # NEO's own handler style: (args: dict, ctx: ToolContext)
-    if len(params) == 2 and _is_args(params[0], ann) and (ctx == params[1].name or params[1].name in ("ctx", "c")):
+    # NEO's own handler style: (args: dict, ctx: ToolContext), both annotated. Its arguments come
+    # as one dict, so its schema can only come from `parameters` (never guessed as "no arguments").
+    if len(params) == 2 and _is_args(params[0], ann) and ctx == params[1].name:
         if is_model:
             return _model_schema(parameters), _Binding("native", model=parameters)  # type: ignore[arg-type]
-        schema = dict(parameters) if isinstance(parameters, Mapping) else {"type": "object", "properties": {}}
-        return schema, _Binding("native")
+        if not isinstance(parameters, Mapping):
+            raise ValueError(
+                f"{name} takes (args: dict, ctx: ToolContext), NEO's own handler style: pass "
+                "parameters= (a JSON schema or a pydantic model) to say what the arguments are"
+            )
+        return dict(parameters), _Binding("native")
 
     rest = [p for p in params if p.name != ctx and p.kind is not inspect.Parameter.VAR_KEYWORD]
     if is_model:
@@ -373,9 +379,10 @@ def _is_ctx(a: Any) -> bool:
 
 
 def _is_args(p: inspect.Parameter, ann: Mapping[str, Any]) -> bool:
+    """Annotated as a dict or a Mapping (a plain parameter merely named "args" is an argument)."""
     a = ann[p.name]
     if a is inspect.Parameter.empty:
-        return p.name in ("args", "a", "arguments")
+        return False
     if a in (dict, Mapping, collections.abc.Mapping):
         return True
     if isinstance(a, str):

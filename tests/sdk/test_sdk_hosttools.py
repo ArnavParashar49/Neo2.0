@@ -133,6 +133,37 @@ async def test_a_neo_style_handler_works_as_is():
     assert seen == [({"q": "ada"}, "t1")]
 
 
+async def test_only_an_annotated_args_and_context_pair_is_neo_style():
+    """(args: dict, ctx: ToolContext) is NEO's handler style; two plain parameters that merely
+    have those names are two arguments."""
+
+    def add(a, c):
+        """Add two numbers."""
+        return a + c
+
+    t = neo2.host_tool(add)
+    assert set(t.parameters["properties"]) == {"a", "c"}  # never NEO's (args, ctx) with no schema
+    brain = ScriptedBrain([_call("add", {"a": 2, "c": 3}), "5"])
+    async with neo2.AsyncAgent(neo2.AgentConfig(tools="none"), provider=brain, host_tools=[t]) as agent:
+        r = await agent.ask("add 2 and 3")
+    assert r.steps[0].ok and r.steps[0].summary == "5"
+
+    def with_ctx(args: dict, ctx) -> str:
+        """Unannotated context."""
+        return "x"
+
+    assert set(neo2.host_tool(with_ctx).parameters["properties"]) == {"args", "ctx"}
+
+    def create_ticket(fields: dict, ctx: neo2.ToolContext) -> str:
+        """Open a ticket."""
+        return "T-1"
+
+    with pytest.raises(ValueError, match="parameters="):
+        neo2.host_tool(create_ticket)  # NEO's style takes its schema from parameters=, never {}
+    schema = {"type": "object", "properties": {"title": {"type": "string"}}}
+    assert neo2.host_tool(create_ticket, parameters=schema).parameters == schema
+
+
 async def test_a_model_can_pass_neither_confirm_cancel_nor_neo_args():
     seen: list = []
 
