@@ -21,6 +21,7 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
 W_PT, H_PT = 1512, 982
+_BAND = 96  # rows of a tilted board rendered at a time (whole, one render held over 600 MB of temporaries)
 _SF = "/System/Library/Fonts/SFNS.ttf"
 _UNI = "/System/Library/Fonts/Supplemental/Arial Unicode.ttf"
 
@@ -246,25 +247,27 @@ def tilted_screen(
     x1, y1 = np.ceil(pc.max(0)).astype(int)
     x0, y0, x1, y1 = max(0, x0), max(0, y0), min(Wp, x1), min(Hp, y1)
     Hi = np.linalg.inv(Hs)
-    X, Y = np.meshgrid(np.arange(x0, x1, dtype=np.float32) + 0.5, np.arange(y0, y1, dtype=np.float32) + 0.5)
-    q = np.stack([X, Y, np.ones_like(X)], -1) @ Hi.T
-    u, v = q[..., 0] / q[..., 2], q[..., 1] / q[..., 2]
-    inside = (u >= 0) & (u < n) & (v >= 0) & (v < n)
-    in_frame = (u >= -rim) & (u < n + rim) & (v >= -rim) & (v < n + rim) & ~inside
-    col, row = np.floor(u).astype(int), np.floor(v).astype(int)
-    par = (np.clip(col, 0, n - 1) + np.clip(row, 0, n - 1)) % 2
     sq_rng = rng.uniform(0, 2 * math.pi, (n, n))
     along = ((np.arange(n)[:, None] + np.arange(n)[None, :]) % 2 == 0)
-    phase = sq_rng[np.clip(row, 0, n - 1), np.clip(col, 0, n - 1)]
-    au = along[np.clip(row, 0, n - 1), np.clip(col, 0, n - 1)]
-    g = _wood(u, v, rng, au, phase, grain)
-    base = np.where(par[..., None] == 0, np.array(light, np.float32), np.array(dark, np.float32))
-    shade = 1.0 + lighting * (0.6 - (u / n) * 0.7 - (v / n) * 0.5)  # light from the far left
-    board_px = base * shade[..., None] + g[..., None] * np.array([1.0, 0.8, 0.6])
-    fr = np.array(frame, np.float32) * shade[..., None] + _wood(u, v, rng, np.ones_like(au), np.zeros_like(phase), grain * 0.8)[..., None]
-    region = img[y0:y1, x0:x1]
-    region[inside] = board_px[inside]
-    region[in_frame] = fr[in_frame]
+    for by0 in range(y0, y1, _BAND):  # (a band of rows at a time: a render's working memory stays small)
+        by1 = min(y1, by0 + _BAND)
+        X, Y = np.meshgrid(np.arange(x0, x1, dtype=np.float32) + 0.5, np.arange(by0, by1, dtype=np.float32) + 0.5)
+        q = np.stack([X, Y, np.ones_like(X)], -1) @ Hi.T
+        u, v = q[..., 0] / q[..., 2], q[..., 1] / q[..., 2]
+        inside = (u >= 0) & (u < n) & (v >= 0) & (v < n)
+        in_frame = (u >= -rim) & (u < n + rim) & (v >= -rim) & (v < n + rim) & ~inside
+        col, row = np.floor(u).astype(int), np.floor(v).astype(int)
+        par = (np.clip(col, 0, n - 1) + np.clip(row, 0, n - 1)) % 2
+        phase = sq_rng[np.clip(row, 0, n - 1), np.clip(col, 0, n - 1)]
+        au = along[np.clip(row, 0, n - 1), np.clip(col, 0, n - 1)]
+        g = _wood(u, v, rng, au, phase, grain)
+        base = np.where(par[..., None] == 0, np.array(light, np.float32), np.array(dark, np.float32))
+        shade = 1.0 + lighting * (0.6 - (u / n) * 0.7 - (v / n) * 0.5)  # light from the far left
+        board_px = base * shade[..., None] + g[..., None] * np.array([1.0, 0.8, 0.6])
+        fr = np.array(frame, np.float32) * shade[..., None] + _wood(u, v, rng, np.ones_like(au), np.zeros_like(phase), grain * 0.8)[..., None]
+        region = img[by0:by1, x0:x1]
+        region[inside] = board_px[inside]
+        region[in_frame] = fr[in_frame]
     arr = img
     # pieces, far to near; each with a soft shadow on the board first
     pieces = []
@@ -324,7 +327,7 @@ def tilted_screen(
     if sheet:
         sx, sy = 560 * ss, 90 * ss
         arr[sy : sy + 300 * ss, sx : sx + 500 * ss] = (236, 236, 236)
-    out = Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8))
+    out = Image.fromarray(np.clip(arr, 0, 255, out=arr).astype(np.uint8))
     small = out.reduce(ss) if ss > 1 else out
     if noise:
         a = np.asarray(small).astype(np.float32) + rng.normal(0, noise, (small.height, small.width, 3))

@@ -249,12 +249,9 @@ class _Budget(list):
 
 
 def _register(els: list[ax.Element]) -> None:
-    """Make the walk's ids clickable (ax.get resolves them), as ax_tree's are."""
-    with ax._lock:
-        for e in els:
-            ax._issued[e.id] = e
-        while len(ax._issued) > ax._ISSUED_MAX:
-            ax._issued.pop(next(iter(ax._issued)))
+    """Make the walk's ids clickable (ax.get resolves them), as ax_tree's are — in the registry's
+    own bounds (a count, and a size)."""
+    ax._issue(els)
 
 
 class _Late(Exception):
@@ -311,7 +308,7 @@ def walk_window(
         on_time()
         title = ax._str(ax._attr(win, "AXTitle"))
         on_time()
-        sheet = ax._sheet_of(win)
+        sheet = ax._sheet_of(win, w=_walk_limits(deadline).get("w"))  # (the look's deadline: a busy app ends it)
         dialog = False
         if sheet is None:
             on_time()

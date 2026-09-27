@@ -93,6 +93,14 @@ _PAD_PX = 24  # the second framing: this much border
 _MIN_CONF = 0.4  # Vision's confidences are coarse (fast 0.5, accurate 1.0; noise 0.3): below this, noise
 _RUN_WAIT_S = 5.0  # one recognition at a time (Vision queues concurrent ones anyway)
 _LABEL_MAX = 60  # words quoted in a result, at most this long
+# Hard bounds on the work done with what was read (a spreadsheet drawn on a canvas reads thousands of
+# lines): everything below is linear in the lines read, and these cap what is kept of them.
+_MAX_LINES = 5000  # lines one read keeps (reading order): more than any real screen shows
+_MARK_LINES = 600  # lines a read for text marks keeps (an open sheet's first): at most MAX_MARKS are listed
+_MAX_PLACES = 30  # places a find lists when the words are shown in more than one (the first in reading order)
+_CELL_PT = 64.0  # the side of a cell of the grid lines are looked up by
+_WIDE_CELLS = 4096  # a box over more cells than this is compared with everything (no line of words is)
+_FUZZY_TRIES = 64  # lines a moved line's words are compared with loosely (difflib), at most
 
 
 class Failed(Exception):
@@ -654,6 +662,7 @@ def read(
                 parts = tuple((s_, e_, to_screen(b_)) for s_, e_, b_ in r.parts)
                 lines.append(Line(text, float(r.conf), to_screen(r.box), parts))
     lines.sort(key=lambda ln: (round(ln.box[1] / 6), ln.box[0]))
+    del lines[_MAX_LINES:]  # (a hard bound on all that follows)
     ms = (time.perf_counter() - t0) * 1000
     return Reading(tuple(lines), (x0, y0, w_pt, h_pt), FAST if plan.fast else ACCURATE, ms, px.t, per_pt)
 
@@ -753,14 +762,16 @@ def merge(*readings: Reading, keep_all_words: bool = False) -> Reading:
     listing never shows the same place twice); ``keep_all_words`` adds every line whose words aren't
     already kept there (a find: the garbled "StartR" can't hide the "Start" another read got right)."""
     kept: list[Line] = []
+    grid = _Grid()  # (the kept lines by where they are: each line is compared with its neighbours only)
     for r in readings:
         for ln in r.lines:
-            k = key(ln.text)
+            k = key(ln.text) if keep_all_words else ""
             if not any(
-                (_inside(ln.center, o.box) or _inside(o.center, ln.box)) and (not keep_all_words or key(o.text) == k)
-                for o in kept
+                (_inside(ln.center, o.box) or _inside(o.center, ln.box)) and (not keep_all_words or ok == k)
+                for o, ok in grid.near(ln.box, ln.center)
             ):
                 kept.append(ln)
+                grid.add((ln, k), ln.box, ln.center)
     kept.sort(key=lambda ln: (round(ln.box[1] / 6), ln.box[0]))
     return replace(readings[0], lines=tuple(kept), ms=sum(r.ms for r in readings))
 
@@ -866,6 +877,79 @@ def _overlap(a: Box, b: Box) -> bool:
     return a[0] < b[0] + b[2] and b[0] < a[0] + a[2] and a[1] < b[1] + b[3] and b[1] < a[1] + a[3]
 
 
+class _Grid:
+    """Things with a box (lines, places), filed under every cell of a coarse grid their box touches
+    and the cell their middle is in: the neighbours of a place without a look at everything read —
+    what keeps merging, matching and checking reads linear in the lines read. Lookups give a superset
+    of the true neighbours (the caller's own test decides), in the order things were added."""
+
+    def __init__(self) -> None:
+        self.boxes: dict[tuple[int, int], list[int]] = {}
+        self.middles: dict[tuple[int, int], list[int]] = {}
+        self.wide: list[int] = []  # (a box over too many cells, or no box at all: always a neighbour)
+        self.items: list[Any] = []
+
+    @staticmethod
+    def _cells(b: Box) -> list[tuple[int, int]] | None:
+        try:
+            x0, y0 = math.floor(b[0] / _CELL_PT), math.floor(b[1] / _CELL_PT)
+            x1, y1 = math.floor((b[0] + b[2]) / _CELL_PT), math.floor((b[1] + b[3]) / _CELL_PT)
+        except (OverflowError, ValueError):  # (an infinite or undefined box)
+            return None
+        if x1 < x0 or y1 < y0 or (x1 - x0 + 1) * (y1 - y0 + 1) > _WIDE_CELLS:
+            return None
+        return [(i, j) for i in range(x0, x1 + 1) for j in range(y0, y1 + 1)]
+
+    @staticmethod
+    def _cell(p: tuple[float, float]) -> tuple[int, int] | None:
+        try:
+            return math.floor(p[0] / _CELL_PT), math.floor(p[1] / _CELL_PT)
+        except (OverflowError, ValueError):
+            return None
+
+    def add(self, item: Any, box: Box, middle: tuple[float, float]) -> None:
+        n = len(self.items)
+        self.items.append(item)
+        cells, mc = self._cells(box), self._cell(middle)
+        if cells is None or mc is None:
+            self.wide.append(n)
+            return
+        for c in cells:
+            self.boxes.setdefault(c, []).append(n)
+        self.middles.setdefault(mc, []).append(n)
+
+    def _out(self, found: set[int]) -> list[Any]:
+        found.update(self.wide)
+        return [self.items[i] for i in sorted(found)]
+
+    def near(self, box: Box, middle: tuple[float, float]) -> list[Any]:
+        """What may hold ``middle`` in its box, or have its middle in ``box``."""
+        cells, mc = self._cells(box), self._cell(middle)
+        if cells is None or mc is None:
+            return list(self.items)
+        found = set(self.boxes.get(mc, ()))
+        for c in cells:
+            found.update(self.middles.get(c, ()))
+        return self._out(found)
+
+    def overlapping(self, box: Box) -> list[Any]:
+        """What may overlap ``box``."""
+        cells = self._cells(box)
+        if cells is None:
+            return list(self.items)
+        found: set[int] = set()
+        for c in cells:
+            found.update(self.boxes.get(c, ()))
+        return self._out(found)
+
+
+def _lines_grid(reading: Reading) -> _Grid:
+    g = _Grid()
+    for ln in reading.lines:
+        g.add(ln, ln.box, ln.center)
+    return g
+
+
 def _context(reading: Reading, sheet: Box | None, where: str) -> str:
     """The words around a find, for the gate (what a dialog's "OK" does): the sheet's when the words
     are in it, else all that was read."""
@@ -902,13 +986,18 @@ def match(reading: Reading, label: str, *, sheet: Box | None = None) -> Result:
         return Missing(label, "no such words on the screen")
     best = min(r for r, _ in cands)
     places: list[Found] = []
+    grid = _Grid()
+    said: dict[str, str] = {}  # where → the words around (the same for every place there)
     for f in (f for r, f in cands if r == best):
-        if not any(_overlap(f.box, p.box) for p in places):
-            places.append(replace(f, context=_context(reading, sheet, f.where)))
+        if not any(_overlap(f.box, p.box) for p in grid.overlapping(f.box)):
+            if f.where not in said:
+                said[f.where] = _context(reading, sheet, f.where)
+            places.append(replace(f, context=said[f.where]))
+            grid.add(places[-1], f.box, f.point)
     if len(places) == 1:
         return places[0]
     places.sort(key=lambda f: (round(f.box[1] / 6), f.box[0]))
-    return Ambiguous(label, tuple(places))
+    return Ambiguous(label, tuple(places[:_MAX_PLACES]))  # (the first in reading order: "use more of its words")
 
 
 def _lookalikes(reading: Reading, label: str, found: Found) -> bool:
@@ -916,13 +1005,18 @@ def _lookalikes(reading: Reading, label: str, found: Found) -> bool:
     ("Stsrt" for "Start": a fast read garbling a second copy)? Then a closer read decides."""
     want = key(label)
     n = max(1, len(want.split()))
+    sm = difflib.SequenceMatcher(None)
+    sm.set_seq2(want)  # (the label's side is prepared once; the quick upper bounds skip most lines)
     for ln in reading.lines:
         if _overlap(ln.box, found.box):
             continue
         words = key(ln.text).split()
         for i in range(max(1, len(words) - n + 1)):
             chunk = " ".join(words[i : i + n])
-            if chunk and chunk != want and difflib.SequenceMatcher(None, chunk, want).ratio() >= 0.75:
+            if not chunk or chunk == want:
+                continue
+            sm.set_seq1(chunk)
+            if sm.real_quick_ratio() >= 0.75 and sm.quick_ratio() >= 0.75 and sm.ratio() >= 0.75:
                 return True
     return False
 
@@ -947,15 +1041,20 @@ def _says(text: str, label: str) -> bool:
     return _same_words(text, label) or bool(_spans(text, label))
 
 
-def _read_there(box: Box, readings: Sequence[Reading]) -> list[list[Line]]:
-    """For each reading, its lines at the place ``box`` is."""
-    return [[ln for ln in r.lines if ln.conf >= _MIN_CONF and _at_place(ln, box)] for r in readings]
+def _read_there(box: Box, readings: Sequence[Reading], grids: Sequence[_Grid] | None = None) -> list[list[Line]]:
+    """For each reading, its lines at the place ``box`` is (``grids``: each reading's lines by where
+    they are, :func:`_lines_grid` — only the lines near the place are looked at)."""
+    mid = (box[0] + box[2] / 2, box[1] + box[3] / 2)
+    return [
+        [ln for ln in (grids[i].near(box, mid) if grids is not None else r.lines) if ln.conf >= _MIN_CONF and _at_place(ln, box)]
+        for i, r in enumerate(readings)
+    ]
 
 
-def _variants(words: str, box: Box, readings: Sequence[Reading]) -> tuple[str, ...]:
+def _variants(words: str, box: Box, readings: Sequence[Reading], grids: Sequence[_Grid] | None = None) -> tuple[str, ...]:
     """Every other version of the words any read saw at ``box``'s place (the screen's words)."""
     out: list[str] = []
-    for there in _read_there(box, readings):
+    for there in _read_there(box, readings, grids):
         for ln in there:
             k = key(ln.text)
             if k and k != key(words) and all(k != key(v) for v in out):
@@ -963,12 +1062,12 @@ def _variants(words: str, box: Box, readings: Sequence[Reading]) -> tuple[str, .
     return tuple(out)
 
 
-def _checked(f: Found, readings: Sequence[Reading]) -> Found | None:
+def _checked(f: Found, readings: Sequence[Reading], grids: Sequence[_Grid] | None = None) -> Found | None:
     """``f`` with every other version of the words the reads saw at its place (``variants``: the gate
     judges each) — or None when more reads saw other words there than saw the words asked for: one
     read's misread that happens to be those words ("Details" where the others read "Delete")."""
     agree = disagree = 0
-    for there in _read_there(f.box, readings):
+    for there in _read_there(f.box, readings, grids):
         if there:
             if any(_says(ln.text, f.label) for ln in there):
                 agree += 1
@@ -976,7 +1075,7 @@ def _checked(f: Found, readings: Sequence[Reading]) -> Found | None:
                 disagree += 1
     if disagree > agree:
         return None
-    return replace(f, variants=_variants(f.line, f.box, readings))
+    return replace(f, variants=_variants(f.line, f.box, readings, grids))
 
 
 def find_in(
@@ -1007,6 +1106,14 @@ def find_in(
     rng = _ranges_for(label)
     hide = list(hide)
     seen: list[Reading] = []
+    filed: dict[int, _Grid] = {}
+
+    def grids() -> list[_Grid]:
+        """Each read so far, its lines by where they are (built once each)."""
+        for r in seen:
+            if id(r) not in filed:
+                filed[id(r)] = _lines_grid(r)
+        return [filed[id(r)] for r in seen]
 
     def look(plan: Plan, pad: int = 0) -> Reading:
         r = without(read(frame, area, plan=plan, ranges=rng, pad=pad), hide)
@@ -1022,16 +1129,16 @@ def find_in(
             if (
                 _sure(again, seen[-1], label, sheet)
                 and _overlap(first.box, again.box)  # type: ignore[union-attr]
-                and (took := _checked(first, seen)) is not None  # type: ignore[arg-type]
+                and (took := _checked(first, seen, grids())) is not None  # type: ignore[arg-type]
             ):
                 return took
     closer = look(plan_for(label, want_fast=False) or fast_plan)
     got = match(merge(closer, *seen[:-1], keep_all_words=True), label, sheet=sheet)
     disputed = Missing(label, "the reads of the screen disagree about the words there")
     if isinstance(got, Found):
-        return _checked(got, seen) or disputed
+        return _checked(got, seen, grids()) or disputed
     if isinstance(got, Ambiguous):
-        options = [f for f in (_checked(o, seen) for o in got.options) if f is not None]
+        options = [f for f in (_checked(o, seen, grids()) for o in got.options) if f is not None]
         if not options:
             return disputed
         return options[0] if len(options) == 1 else Ambiguous(label, tuple(options))
@@ -1315,10 +1422,10 @@ def text_marks(
     if wins is None or plan is None:
         return []
     try:
-        reads = [owned(read(px, area, plan=plan), wins, pid)]
+        reads = [_trimmed(owned(read(px, area, plan=plan), wins, pid), sheet)]
         quick = plan_for("", want_fast=True)
         if quick is not None and quick.fast:  # (a second read catches most of the words one drops: +6–25 ms)
-            reads.append(owned(read(px, area, plan=quick), wins, pid))
+            reads.append(_trimmed(owned(read(px, area, plan=quick), wins, pid), sheet))
     except (Failed, ValueError, effects.EffectRefused) as ex:
         log.info("no text marks: %s", ex)
         return []
@@ -1329,8 +1436,19 @@ def text_marks(
         w = wins.at((box[0] + box[2] / 2, box[1] + box[3] / 2))
         whose = w.pid if w is not None else pid
         owners.append((app if app and pid and whose == pid else (w.app if w is not None else app), whose))
-    also = [_variants(text, box, reads) for text, box, _ in chosen]
+    grids = [_lines_grid(r) for r in reads]
+    also = [_variants(text, box, reads, grids) for text, box, _ in chosen]
     return remember_marks(chosen, context=reading.text(), owners=owners, also=also)
+
+
+def _trimmed(reading: Reading, sheet: Box | None = None, n: int = _MARK_LINES) -> Reading:
+    """The reading with at most ``n`` of its lines — an open sheet's first, then in reading order —
+    kept in reading order: text marks list MAX_MARKS of them at most."""
+    if len(reading.lines) <= n:
+        return reading
+    lines = reading.lines
+    first = sorted(range(len(lines)), key=lambda i: (0 if sheet is not None and _inside(lines[i].center, sheet) else 1, i))[:n]
+    return replace(reading, lines=tuple(lines[i] for i in sorted(first)))
 
 
 async def look_marks(
@@ -1350,7 +1468,22 @@ async def look_marks(
     named = list(named)
     if not available() or not worth_reading(window or area, named, blind=blind):
         return []
-    return await asyncio.to_thread(text_marks, frame, area, covered=named, sheet=sheet, app=app, pid=pid)
+    task = asyncio.ensure_future(asyncio.to_thread(text_marks, frame, area, covered=named, sheet=sheet, app=app, pid=pid))
+    task.add_done_callback(_quiet)
+    done, _ = await asyncio.wait({task}, timeout=LOOK_BUDGET_S)
+    if task in done and not task.cancelled() and task.exception() is None:
+        return task.result()
+    log.info("no text marks: not read within %.1f s", LOOK_BUDGET_S)
+    return []  # (the read is left to finish on its own: the look goes on without its words)
+
+
+LOOK_BUDGET_S = 3.0  # a look waits this long at most for its text marks
+
+
+def _quiet(task: Any) -> None:
+    """(A read left to finish on its own: its end, or its error, is nobody's to hear.)"""
+    if not task.cancelled():
+        task.exception()
 
 
 def _takes(fn: Any, name: str) -> bool:
@@ -1473,22 +1606,61 @@ def diff(before: Reading, after: Reading) -> Change:
     a_lines = [ln for ln in after.lines if ln.conf >= _MIN_CONF]
     used: set[int] = set()
     gone, changed = [], []
+    grid = _Grid()  # (the after lines by where they are: a before line is compared with those over it)
+    same: dict[str, list[int]] = {}  # the after lines by their words, and by the numbers in them
+    digits: dict[tuple[str, ...], list[int]] = {}
+    keys = [key(a.text) for a in a_lines]
+    for j, a in enumerate(a_lines):
+        grid.add(j, a.box, a.center)
+        same.setdefault(keys[j], []).append(j)
+        digits.setdefault(tuple(re.findall(r"\d+", keys[j])), []).append(j)
     for b in b_lines:
-        j = next((j for j, a in enumerate(a_lines) if j not in used and _similar(a.text, b.text) and _overlap(a.box, b.box)), None)
+        over = [j for j in grid.overlapping(b.box) if j not in used and _overlap(a_lines[j].box, b.box)]
+        j = next((j for j in over if _similar(a_lines[j].text, b.text)), None)
         if j is None:
-            j = next((j for j, a in enumerate(a_lines) if j not in used and _overlap(a.box, b.box) and (_inside(a.center, b.box) or _inside(b.center, a.box))), None)
+            j = next((j for j in over if _inside(a_lines[j].center, b.box) or _inside(b.center, a_lines[j].box)), None)
             if j is not None and not _similar(a_lines[j].text, b.text):
                 changed.append((b.text, a_lines[j].text))
         if j is not None:
             used.add(j)
             continue
-        j = next((j for j, a in enumerate(a_lines) if j not in used and _similar(a.text, b.text)), None)
+        j = _elsewhere(key(b.text), keys, used, same, digits)
         if j is not None:  # the same words elsewhere: moved, not gone
             used.add(j)
             continue
         gone.append(b.text)
     new = [a.text for j, a in enumerate(a_lines) if j not in used]
     return Change(tuple(gone), tuple(new), tuple(changed))
+
+
+def _elsewhere(kb: str, keys: list[str], used: set[int], same: dict[str, list[int]], digits: dict[tuple[str, ...], list[int]]) -> int | None:
+    """The first after line anywhere with the words ``kb`` (a key: :func:`_similar`) — looked for only
+    among those with the same numbers (no other can be similar), at most _FUZZY_TRIES of them
+    compared loosely; past those, the first with exactly the same words."""
+    pool = digits.get(tuple(re.findall(r"\d+", kb)), [])
+    while pool and pool[0] in used:
+        pool.pop(0)  # (used ones never come back: dropped from the front as they are met)
+    sm = difflib.SequenceMatcher(None)
+    sm.set_seq2(kb)  # (as _similar compares them: the after line's words first; the quick bounds skip most)
+    tries = 0
+    for j in pool:
+        if j in used:
+            continue
+        ka = keys[j]
+        if ka == kb:
+            return j
+        sm.set_seq1(ka)
+        if sm.real_quick_ratio() >= 0.85 and sm.quick_ratio() >= 0.85 and sm.ratio() >= 0.85:
+            return j
+        tries += 1
+        if tries >= _FUZZY_TRIES:
+            break
+    else:
+        return None
+    exact = same.get(kb, [])
+    while exact and exact[0] in used:
+        exact.pop(0)
+    return exact[0] if exact else None
 
 
 def _q(s: str) -> str:

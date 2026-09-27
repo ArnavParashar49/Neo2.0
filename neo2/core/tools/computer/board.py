@@ -1227,17 +1227,45 @@ def changed_cells(b: Board, before: np.ndarray, after: np.ndarray, *, pool: int 
     return [(int(c), int(r)) for r, c in zip(rows, cols, strict=True)]
 
 
+def _sums_down(crop: np.ndarray, rows: np.ndarray):
+    """For each row boundary (``rows``: indices 0 … height, any order), in increasing order: (its
+    positions in ``rows``, the sums of every pixel above it left of each column boundary 0 … width —
+    (width + 1, colour), exact integers). One pass down the picture holding one row of sums: never
+    a copy of the picture (a board over a 6K display is read in a few MB, not hundreds)."""
+    h, w = crop.shape[:2]
+    acc = np.zeros((w,) + crop.shape[2:], np.int64)  # every pixel row above the boundary, summed per column
+    left = np.zeros((w + 1,) + crop.shape[2:], np.int64)
+    done = 0
+    uniq, where = np.unique(np.clip(np.asarray(rows, np.int64), 0, h), return_inverse=True)
+    order = np.argsort(where, kind="stable")
+    starts = np.searchsorted(where[order], np.arange(len(uniq) + 1))
+    for k, r in enumerate(uniq):
+        if r > done:
+            acc += crop[done:r].sum(axis=0, dtype=np.int64)
+            np.cumsum(acc, axis=0, out=left[1:])
+            done = int(r)
+        yield order[starts[k] : starts[k + 1]], left
+
+
 def _integral(crop: np.ndarray, rows: np.ndarray, cols: np.ndarray) -> np.ndarray:
-    """The integral image of ``crop`` at these row and column boundaries only (sorted indices, 0 …
-    size): (rows, cols, colour), the sum of every pixel above and left of each. Sums down each
-    column first — a matrix product, exact in float32 while a column sums below 2**24 — then
-    along the rows in float64."""
-    h = crop.shape[0]
-    up = (np.arange(h)[None, :] < rows[:, None]).astype(np.float32)  # (rows, h): the pixel rows above each
-    cf = np.ascontiguousarray(np.moveaxis(crop, 2, 0), dtype=np.float32)  # (colour, h, w)
-    down = (up @ cf).astype(np.float64)  # (colour, rows, w)
-    left = np.concatenate([np.zeros(down.shape[:2] + (1,)), np.cumsum(down, axis=2)], axis=2)
-    return np.moveaxis(left[:, :, cols], 0, 2)
+    """The integral image of ``crop`` at these row and column boundaries only (indices, 0 … size):
+    (rows, cols, colour), the sum of every pixel above and left of each — exact (integer sums), in
+    memory the size of one row of the picture plus the answer."""
+    cols = np.clip(np.asarray(cols, np.int64), 0, crop.shape[1])
+    out = np.empty((len(rows), len(cols)) + crop.shape[2:], np.float64)
+    for at, left in _sums_down(crop, rows):
+        out[at] = left[cols]
+    return out
+
+
+def _integral_pts(crop: np.ndarray, rows: np.ndarray, cols: np.ndarray) -> np.ndarray:
+    """The integral image at the points (rows[k], cols[k]) only: (len(rows), colour) — the same one
+    pass down the picture, whatever the points' spread (never a table of every row by every column)."""
+    cols = np.clip(np.asarray(cols, np.int64), 0, crop.shape[1])
+    out = np.empty((len(rows),) + crop.shape[2:], np.float64)
+    for at, left in _sums_down(crop, rows):
+        out[at] = left[cols[at]]
+    return out
 
 
 def _integral_at(crop: np.ndarray, Y: np.ndarray, X: np.ndarray, *, grid: bool = True) -> np.ndarray:
@@ -1246,13 +1274,14 @@ def _integral_at(crop: np.ndarray, Y: np.ndarray, X: np.ndarray, *, grid: bool =
     with ``grid`` False, at each point (Y[k], X[k]) — (len(Y), colour)."""
     iy = np.clip(np.floor(Y).astype(np.int64), 0, crop.shape[0] - 1)
     ix = np.clip(np.floor(X).astype(np.int64), 0, crop.shape[1] - 1)
+    if not grid:
+        S = _integral_pts(crop, np.r_[iy, iy, iy + 1, iy + 1], np.r_[ix, ix + 1, ix, ix + 1]).reshape((4, len(Y)) + crop.shape[2:])
+        fy, fx = (Y - iy)[:, None], (X - ix)[:, None]
+        return (S[0] * (1 - fx) + S[1] * fx) * (1 - fy) + (S[2] * (1 - fx) + S[3] * fx) * fy
     R, ry = np.unique(np.r_[iy, iy + 1], return_inverse=True)
     C, cx = np.unique(np.r_[ix, ix + 1], return_inverse=True)
     S = _integral(crop, R, C)
     r0, r1, c0, c1 = ry[: len(Y)], ry[len(Y) :], cx[: len(X)], cx[len(X) :]
-    if not grid:
-        fy, fx = (Y - iy)[:, None], (X - ix)[:, None]
-        return (S[r0, c0] * (1 - fx) + S[r0, c1] * fx) * (1 - fy) + (S[r1, c0] * (1 - fx) + S[r1, c1] * fx) * fy
     fy, fx = (Y - iy)[:, None, None], (X - ix)[None, :, None]
     Sy = S[r0] * (1 - fy) + S[r1] * fy
     return Sy[:, c0] * (1 - fx) + Sy[:, c1] * fx
