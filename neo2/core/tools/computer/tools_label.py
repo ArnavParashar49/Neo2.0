@@ -9,7 +9,7 @@ import re
 from neo2.core.agent import confirm
 from neo2.core.agent.registry import Choice, Effect, Handoff, ToolContext, ToolOutput, fence
 from neo2.core.reflex import outcomes
-from neo2.core.tools.computer import ax, gates, menus, ocr, phrases, pointer, resolve, wait
+from neo2.core.tools.computer import apps, ax, gates, menus, ocr, phrases, pointer, resolve, wait
 from neo2.core.tools.computer import input as inp
 from neo2.core.tools.computer._catalog import _p, tool
 
@@ -54,9 +54,17 @@ async def click_text(a: dict, c: ToolContext) -> str | ToolOutput:
         return f"Error: click what? '{a.get('label')}' isn't a label I can find."
     if err := gates._needs_input():
         return err
-    if err := await gates._guard_front():
+    # The app NEO works in must be in front — except while NEO's own window is (the user just talked
+    # to it) and NEO hasn't worked in an app lately: then the app whose window is in front behind it
+    # (ax.working_app) is the one meant. A click sends no keystroke; its target is still checked
+    # below (protected apps, NEO's own window at the spot, the gate) like any other.
+    behind = ""
+    if not apps.target() and await asyncio.to_thread(_neo_in_front):
+        name, pid = await asyncio.to_thread(ax.working_app)
+        behind = name if pid and not ax.is_neo(pid, name) else ""
+    if not behind and (err := await gates._guard_front()):
         return err
-    app, frame, els = await asyncio.to_thread(ax.window_elements)
+    app, frame, els = await asyncio.to_thread(ax.window_elements, behind or None)
     if gates._protected(app):
         return gates._refuse_protected()
     if frame is None:
@@ -143,6 +151,14 @@ async def click_text(a: dict, c: ToolContext) -> str | ToolOutput:
     outcomes.signature("", resolve.after_press(res, verified=None, bundle=bundle, ctx=c))
     at = "" if c.get("blind") else f" at {tuple(map(int, spot))}"  # (no coordinates for a brain that can't see)
     return f"Clicked '{name}' ({e.role.removeprefix('AX')}){at}" + gates._input_doubt()
+
+
+def _neo_in_front() -> bool:
+    """Is NEO's own window the front app's (the user just talked to it)?"""
+    from neo2.core.tools.computer.focus import front_app
+
+    name, pid = front_app()
+    return bool(pid) and ax.is_neo(pid, name)
 
 
 def _owner(els: list) -> tuple[int, str]:

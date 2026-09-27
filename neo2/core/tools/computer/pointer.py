@@ -1663,6 +1663,10 @@ async def scroll_tool(a: dict, c: ToolContext):
         if got is not None:
             where = [got]
             pts = [got.point]
+            if got.form == "id" and got.pid:
+                # (a scroll goes to the window under the pointer: another app's window over the element's
+                # middle would take it — a part of the element that shows, else nothing is scrolled)
+                pts = [await asyncio.to_thread(_clear_point, got)]
         else:
             pts = [await asyncio.to_thread(inp.mouse_position)]  # "scroll down": wherever the pointer is
             h = await asyncio.to_thread(ax.hit, *pts[0])
@@ -1693,6 +1697,44 @@ async def scroll_tool(a: dict, c: ToolContext):
     )
     text, ok = report(text + (f" in {t.hits[0].app}." if t.hits[0].app else "."), out, [], g._input_doubt())
     return await _finish(c, ToolOutput(text, ok=ok), out, where, pts, t.hits[0])
+
+
+_CLEAR_GRID = 5  # a covered element is looked at on this many × this many points for a part that shows
+
+
+@pooled  # (the window server's answers are Objective-C objects made on this thread)
+def _clear_point(where: Aim) -> tuple[float, float]:
+    """Where an input aimed at an element (form "id") reaches that element's app: its point when no
+    other app's window is on top there (the window server says), else the part of the element that
+    shows nearest its middle. Refused when other windows cover every part looked at, or the window
+    server can't say which window is there (never a point another app's window would take). The
+    refusal names the apps, never a place."""
+    x0, y0 = where.point
+    over = ax.window_owner_at(x0, y0)
+    if over is not None and (not over[1] or over[1] == where.pid):
+        return x0, y0  # (no window there, or the element's own app's: as aimed)
+    e = where.element
+    frame = getattr(e, "visible", None) or (getattr(e, "x", x0), getattr(e, "y", y0), getattr(e, "w", 0.0), getattr(e, "h", 0.0))
+    fx, fy, fw, fh = (float(v) for v in frame)
+    if over is not None and fw > 0 and fh > 0:
+        n = _CLEAR_GRID
+        spots = [(fx + fw * (i + 0.5) / n, fy + fh * (j + 0.5) / n) for i in range(n) for j in range(n)]
+        spots.sort(key=lambda p: (p[0] - x0) ** 2 + (p[1] - y0) ** 2)
+        shown = screen.displays()
+        for sx, sy in spots:
+            if not any(d.contains(sx, sy) for d in shown):
+                continue
+            there = ax.window_owner_at(sx, sy)
+            if there is not None and there[1] == where.pid:
+                return sx, sy
+    if over is None:
+        raise Refused("Error: the window server couldn't say which window is over that element — nothing was done; try again.")
+    name = over[0] or "another window"
+    what = f"{getattr(e, 'role', '').removeprefix('AX') or 'element'} {getattr(e, 'id', '')}".strip()
+    raise Refused(
+        f"Error: {name} covers {where.owner or 'that app'}'s {what} — nothing was done there. Bring "
+        f"{where.owner or 'that app'} to the front, or move {name}."
+    )
 
 
 async def _finish(c: ToolContext, res, out: Outcome, where: list[Aim], pts: list[tuple[float, float]], hit: ax.Hit):

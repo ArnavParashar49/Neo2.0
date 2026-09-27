@@ -506,3 +506,62 @@ def test_a_look_names_a_boards_squares_and_never_hints():
         assert tools_pointer._look_note(shot, None, ctx, collected=col) == ""  # (no picture: a blind brain's look)
     finally:
         board.forget()
+
+
+# ---- the baseline's gaps: a scroll under another window, a click_text with NEO's window in front ----------
+
+
+_REAL_OWNER_AT = ax.window_owner_at  # (the suite's conftest makes it "no window there" in every test)
+
+
+def _win(pid, name, x, y, w, h):
+    return {"kCGWindowOwnerPID": pid, "kCGWindowOwnerName": name, "kCGWindowAlpha": 1.0,
+            "kCGWindowBounds": {"X": x, "Y": y, "Width": w, "Height": h}}  # fmt: skip
+
+
+def test_a_scroll_at_an_element_goes_where_its_app_shows(monkeypatch):
+    """A scroll goes to the window under the pointer: aimed at an element (by id) whose middle
+    another app's window covers, it goes to a part of the element that shows — or, when none does,
+    nothing is done and the answer names the window in the way (never a place)."""
+    import Quartz
+
+    el = ax.Element("e8", "AXScrollArea", "", "", 350.0, 122.0, 870.0, 748.0)
+    where = pointer.Aim((785.0, 496.0), "id", element=el, pid=501, owner="Safari")
+    wins = [_win(505, "Notes", 700, 110, 700, 700), _win(501, "Safari", 120, 70, 1100, 800)]
+    monkeypatch.setattr(Quartz, "CGWindowListCopyWindowInfo", lambda opts, n: list(wins))
+    monkeypatch.setattr(ax, "window_owner_at", _REAL_OWNER_AT)  # (the window server: the list above)
+    x, y = pointer._clear_point(where)
+    assert 350 <= x < 700 and 122 <= y < 870  # Safari's own part of its page, not Notes
+    wins.insert(0, _win(505, "Notes", 0, 0, 1512, 982))  # (Notes over all of it)
+    with pytest.raises(pointer.Refused) as got:
+        pointer._clear_point(where)
+    assert "Notes covers Safari's ScrollArea e8" in str(got.value) and "(" not in str(got.value)
+    wins[:] = [_win(501, "Safari", 120, 70, 1100, 800)]
+    assert pointer._clear_point(where) == (785.0, 496.0)  # (nothing over it: its own middle)
+
+
+def test_click_text_with_neos_own_window_in_front_uses_the_app_behind_it(monkeypatch):
+    """The user just talked to NEO (its window in front) and NEO hasn't worked in an app lately:
+    "click Start" means the app whose window is in front behind NEO's — not a question back."""
+    from neo2.core.agent.registry import registry
+    from neo2.core.tools import load_all
+    from neo2.core.tools.computer import tools_label
+
+    load_all()
+    asked = []
+    monkeypatch.setattr(apps, "_target", None)
+    monkeypatch.setattr(tools_label, "_neo_in_front", lambda: True)
+    monkeypatch.setattr(apps, "front_name", lambda: "NEO")
+    monkeypatch.setattr(ax, "working_app", lambda: ("Chess", 502))
+
+    def elements(app=None, **k):
+        asked.append(app)
+        return app or "NEO", None, []
+
+    monkeypatch.setattr(ax, "window_elements", elements)
+    out = asyncio.run(registry().invoke("click_text", {"label": "Start"}, ToolContext(origin="user")))
+    assert asked == ["Chess"] and "Chess has no window in front" in out.text  # (the app behind it was looked at)
+    monkeypatch.setattr(ax, "working_app", lambda: ("NEO", 900))  # (nothing behind NEO's own window)
+    monkeypatch.setattr(ax, "is_neo", lambda pid, name="": pid == 900)
+    out = asyncio.run(registry().invoke("click_text", {"label": "Start"}, ToolContext(origin="user")))
+    assert out.text.startswith("NEEDS_USER: click where") and asked == ["Chess"]  # (as before: the user is asked)
