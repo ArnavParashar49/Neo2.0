@@ -34,14 +34,15 @@ _NO_MACOS = textwrap.dedent(
 )
 
 
-def _run(code: str, tmp_path: Path) -> dict:
+def _run(code: str, tmp_path: Path, *, macos: bool = False) -> dict:
+    """`code` in a fresh interpreter (its own HOME and data dir), without macOS frameworks unless
+    `macos`."""
     home = tmp_path / "home"
     home.mkdir(exist_ok=True)
     env = {**os.environ, "HOME": str(home), "NEO_DATA_DIR": str(tmp_path / "data"), "NEO_REFLEX": "off"}
     env.pop("PYTEST_CURRENT_TEST", None)
-    out = subprocess.run(
-        [sys.executable, "-c", _NO_MACOS + textwrap.dedent(code)], cwd=ROOT, env=env, capture_output=True, text=True, timeout=120
-    )
+    src = textwrap.dedent(code) if macos else _NO_MACOS + textwrap.dedent(code)
+    out = subprocess.run([sys.executable, "-c", src], cwd=ROOT, env=env, capture_output=True, text=True, timeout=120)
     assert out.returncode == 0, out.stderr[-3000:]
     return json.loads(out.stdout.strip().splitlines()[-1])
 
@@ -182,13 +183,21 @@ def test_requires_tags_match_the_presets():
     assert catalog().get("search_site").requires == {"macos"}  # it opens the Mac's own browser
 
 
-def test_neo_apps_catalog_order_is_unchanged():
-    from neo.agent.registry import catalog
-    from neo.tools import load_all
-
-    load_all()
-    order = [t.name for t in catalog().all() if t.name in APP_ORDER]
-    assert order == APP_ORDER
+def test_neo_apps_catalog_order_is_unchanged(tmp_path):
+    """As NEO.app loads it, in a fresh process: in this one, whichever test first imported a tool
+    module has already decided the catalog's order."""
+    names = _run(
+        """
+        import json
+        from neo.agent.registry import catalog
+        from neo.tools import load_all
+        load_all()
+        print(json.dumps([t.name for t in catalog().all()]))
+        """,
+        tmp_path,
+        macos=True,
+    )
+    assert [n for n in names if n in APP_ORDER] == APP_ORDER
 
 
 def test_modules_for_load_the_task_tools_with_the_computer_tools():
