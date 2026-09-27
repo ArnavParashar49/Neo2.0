@@ -51,7 +51,7 @@ import itertools
 import math
 import re
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import numpy as np
@@ -1361,6 +1361,7 @@ _KEEP = 8
 _boards: dict[str, Board] = {}  # by screenshot id
 _latest: Board | None = None
 _pictures: dict[str, Picture] = {}  # screenshots NEO saw a board-like area in but no grid: for map_board
+_picture_windows: dict[str, tuple[float, float, float, float] | None] = {}  # …and their windows
 _KEEP_PICTURES = 2
 
 
@@ -1374,6 +1375,7 @@ def forget() -> None:
     global _latest
     _boards.clear()
     _pictures.clear()
+    _picture_windows.clear()
     _empty.clear()
     _hinted.clear()
     _latest = None
@@ -1542,11 +1544,18 @@ def survey(
             _empty.pop(where, None)
             _hinted.difference_update({k for k in _hinted if k[0] == where})
     if b is None:
+        kept = _still_there(pic, window)
+        if kept is not None:  # (a board NEO knew in this window, still where it was: seen again)
+            since = _read(pic, kept, now, replace(kept))
+            kept.shot = shot or kept.shot
+            _remember(kept)
+            return Survey(board=kept, since=since)
         if window is not None:
             forget_window(window)  # the boards that were in this window aren't there any more
         if canvas and shot:
-            _pictures[shot] = pic
+            _pictures[shot], _picture_windows[shot] = pic, window
             while len(_pictures) > _KEEP_PICTURES:
+                _picture_windows.pop(next(iter(_pictures)), None)
                 _pictures.pop(next(iter(_pictures)))
             return Survey(hint=shot)
         return Survey()
@@ -1555,6 +1564,20 @@ def survey(
     since = _read(pic, b, now, previous)
     _remember(b)
     return Survey(board=b, since=since)
+
+
+def _still_there(pic: Picture, window: tuple[float, float, float, float] | None) -> Board | None:
+    """A board NEO knows in this window that NEO's own search didn't find in this picture (one
+    mapped from a model's corners, or one whose corners something hides now) but that is still
+    where it was: its squares' rims as they were and its colours alternating there."""
+    if window is None:
+        return None
+    for b in {id(v): v for v in [*([_latest] if _latest else []), *_boards.values()]}.values():
+        if not _same_window(b.window, window) or b.state is None or b.rim is None or _off_picture(pic, b):
+            continue
+        if not _covered(pic, b, _seen(pic, b)[1]):
+            return b
+    return None
 
 
 def _flat(pic: Picture, region, canvas: bool) -> Board | None:
@@ -1957,6 +1980,7 @@ def map_board(a: dict, *, blind: bool = False, picture: Picture | None = None, n
     if b is None:
         return f"Error: {why}.", False
     b.shot = shot
+    b.window = b.window or _picture_windows.get(shot)  # (its window moved: a new look before a square is acted on)
     previous = _latest if _latest is not None and _same_place(_latest, b) else None
     since = _read(pic, b, now, previous)
     if side and (b.rows, b.cols) == (8, 8) and not b.lines:

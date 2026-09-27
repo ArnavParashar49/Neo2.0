@@ -834,3 +834,29 @@ def test_the_note_shows_how_to_name_squares_without_suggesting_a_move():
     assert 'cell="<square>"' in text and 'from="<square>" to="<square>"' in text
     assert not re.search(r'(cell|from|to)="[a-h][1-8]"', text)
     assert not re.search(r'(cell|from|to)="[a-h][1-8]"', B.SCREENSHOT_WORDS)
+
+
+def test_a_board_mapped_from_corners_stays_while_it_is_there_and_goes_when_it_isnt():
+    img, tr = _tilted(elev=55, yaw=0)
+    win = (0.0, 0.0, 1512.0, 982.0)
+    blank = np.asarray(img).copy()
+    blank[:] = 60
+    B.survey(B.Picture.of(blank), canvas=True, shot="s1", window=win, now=1.0)  # (kept for its corners)
+    B._pictures["s1"] = B.Picture.of(img)  # as if NEO had found no grid in this one
+    true = board_to_image(tr["H"], [(0, 0), (8, 0), (8, 8), (0, 8)])
+    text, ok = B.map_board({"shot": "s1", "corners": true.tolist()}, now=2.0)
+    b = B.latest()
+    assert ok and b.source == "vision" and b.window == win  # (its window: a moved window means a new look)
+    B._empty.clear()
+    orig = B.find_tilted
+    try:
+        B.find_tilted = lambda *a, **k: None  # NEO can't find this board by itself
+        s = B.survey(B.Picture.of(img), canvas=True, shot="s2", window=win, now=3.0)
+        assert s.board is b and B.for_shot("s2") is b  # still where it was: kept, its squares named
+        after, _ = _tilted(elev=55, yaw=0, position=moved(START, "e2", "e4"), seed=8)
+        s = B.survey(B.Picture.of(after), canvas=True, shot="s3", window=win, now=4.0)
+        assert s.board is b and sorted(s.since) == ["e2", "e4"]
+        B.survey(B.Picture.of(blank), canvas=True, shot="s4", window=win, now=5.0)  # gone from its window
+        assert B.latest() is None and B.for_shot("s2") is None
+    finally:
+        B.find_tilted = orig
