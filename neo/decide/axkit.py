@@ -347,6 +347,8 @@ def _type(pid: int, text: str, newline: str) -> None:
     ``newline`` chord: a plain Return would send the message in a chat app."""
     import Quartz as Q
 
+    from neo.tools.computer.input import chunks
+
     effects.guard("input", "type into another app", via=Q.CGEventPostToPid)
     key, flags = _NEWLINE_KEYS.get(newline, _NEWLINE_KEYS["return"])
     for n, line in enumerate(text.split("\n")):
@@ -355,8 +357,7 @@ def _type(pid: int, text: str, newline: str) -> None:
                 ev = Q.CGEventCreateKeyboardEvent(None, key, down)
                 Q.CGEventSetFlags(ev, flags)
                 Q.CGEventPostToPid(pid, ev)
-        for i in range(0, len(line), 20):
-            piece = line[i : i + 20]
+        for piece in chunks(line):  # at most 20 UTF-16 units, never half a character
             n16 = len(piece.encode("utf-16-le")) // 2
             for down in (True, False):
                 ev = Q.CGEventCreateKeyboardEvent(None, 0, down)
@@ -378,15 +379,30 @@ def set_search(el: Any, text: str) -> bool:
     return _s(attr(el, "AXRole")) in (*_EDIT_ROLES, "AXComboBox", "AXSearchField") and _put(el, text, "return")
 
 
+# A field may show what was set, or typed, a moment later (an app that applies it asynchronously,
+# keystrokes still on their way): its value is read back every 20 ms for up to 400 ms before NEO
+# decides it didn't take — never a false "didn't take the text", never the text typed a second time.
+_READBACK_S = 0.4
+_READBACK_EVERY_S = 0.02
+
+
+def _reads(el: Any, text: str) -> bool:
+    """The input now reads ``text``, looked at until it does (at most _READBACK_S)."""
+    from neo.tools.computer import wait
+
+    want = _norm(text)
+    return bool(wait.until_sync(lambda: _norm(_s(attr(el, "AXValue"))) == want, _READBACK_S, every=_READBACK_EVERY_S))
+
+
 def _put(el: Any, text: str, newline: str) -> bool:
     set_attr(el, "AXFocused", True)
-    if set_attr(el, "AXValue", text) and _norm(_s(attr(el, "AXValue"))) == _norm(text):
+    if set_attr(el, "AXValue", text) and _reads(el, text):
         return True
     pid = _pid_of(el)
     if pid is None or _norm(_s(attr(el, "AXValue"))):
         return False  # can't type into it, or a half-set value is there: don't type on top of it
     _type(pid, text, newline)
-    return _norm(_s(attr(el, "AXValue"))) == _norm(text)
+    return _reads(el, text)
 
 
 def clear_text(el: Any, expected: str) -> bool:

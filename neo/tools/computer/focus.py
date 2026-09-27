@@ -13,6 +13,7 @@ from __future__ import annotations
 import ctypes
 import ctypes.util
 import subprocess
+import time
 
 from neo import effects
 
@@ -69,6 +70,7 @@ def force_front(pid: int) -> bool:
         return False
     wid = front_window_id(pid)
     effects.guard("focus", f"bring process {pid} to the front", via=sl._SLPSSetFrontProcessWithOptions)
+    note_bring()
     if sl._SLPSSetFrontProcessWithOptions(ctypes.byref(psn), wid, _USER_GENERATED) != 0:
         return False
     if wid:
@@ -81,25 +83,83 @@ def force_front(pid: int) -> bool:
         for kind in (0x01, 0x02):
             rec[0x08] = kind
             sl.SLPSPostEventRecordTo(ctypes.byref(psn), bytes(rec))
-    try:  # and raise it above the app's other windows
-        import ApplicationServices as AS
+    try:  # and raise it above the app's other windows (through the one door AX actions take)
+        from neo.tools.computer import ax
 
-        app = AS.AXUIElementCreateApplication(pid)
-        err, win = AS.AXUIElementCopyAttributeValue(app, "AXFocusedWindow", None)
-        if err == 0 and win is not None:
-            effects.guard("focus", f"raise process {pid}'s window", via=AS.AXUIElementPerformAction)
-            AS.AXUIElementPerformAction(win, "AXRaise")
+        win = ax._attr(ax._app_el(pid), "AXFocusedWindow")
+        if win is not None:
+            ax._perform(win, "AXRaise", f"raise process {pid}'s window", kind="focus", timeout=None)
     except Exception:  # noqa: BLE001
         pass
     return True
 
 
-def front_app() -> tuple[str, int]:
-    """(name, pid) of the app that is really in front right now.
+# Right after NEO brings an app forward, LaunchServices is the one to ask: the in-process answers
+# (Accessibility's focused app, the window server's front window) can lag a SkyLight switch.
+_ARBITER_AFTER_BRING_S = 0.5
+_brought_at = -1e9
 
-    Asks LaunchServices (`lsappinfo`, ~9 ms), which is always current — unlike NSWorkspace's
-    `frontmostApplication`, which lags until a Cocoa run loop delivers the change. Falls back to
-    the owner of the frontmost on-screen window."""
+
+def note_bring() -> None:
+    """NEO just asked for another app to come forward: lsappinfo decides who is in front for a moment."""
+    global _brought_at
+    _brought_at = time.monotonic()
+
+
+def _ax_front_pid() -> int:
+    """The app Accessibility says has the focus (the system-wide AXFocusedApplication): one round
+    trip; 0 when it can't say (a locked screen, no permission)."""
+    try:
+        import ApplicationServices as AS
+
+        from neo.tools.computer import ax
+
+        err, app = AS.AXUIElementCopyAttributeValue(ax._system_wide(), "AXFocusedApplication", None)
+        if err != 0 or app is None:
+            return 0
+        err, pid = AS.AXUIElementGetPid(app, None)
+        return int(pid) if err == 0 and pid else 0
+    except Exception:  # noqa: BLE001
+        return 0
+
+
+def _cg_front() -> tuple[str, int] | None:
+    """(owner name, pid) of the frontmost normal (layer-0) window on screen."""
+    try:
+        import Quartz as Q
+
+        wins = Q.CGWindowListCopyWindowInfo(Q.kCGWindowListOptionOnScreenOnly | Q.kCGWindowListExcludeDesktopElements, Q.kCGNullWindowID) or []
+    except Exception:  # noqa: BLE001
+        return None
+    for w in wins:  # front to back
+        if int(w.get("kCGWindowLayer", 1)) == 0:
+            return str(w.get("kCGWindowOwnerName", "")), int(w.get("kCGWindowOwnerPID", 0))
+    return None
+
+
+def _app_name(pid: int) -> str:
+    try:
+        from AppKit import NSRunningApplication
+
+        a = NSRunningApplication.runningApplicationWithProcessIdentifier_(int(pid))
+        return str(a.localizedName() or "") if a is not None else ""
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _fast_front() -> tuple[str, int] | None:
+    """The front app when Accessibility and the window server agree on it (about a millisecond);
+    None when they don't, or can't say."""
+    pid = _ax_front_pid()
+    if not pid:
+        return None
+    cg = _cg_front()
+    if cg is None or cg[1] != pid:
+        return None
+    return (_app_name(pid) or cg[0]), pid
+
+
+def _lsappinfo_front() -> tuple[str, int] | None:
     try:
         asn = subprocess.run(["lsappinfo", "front"], capture_output=True, text=True, timeout=1).stdout.strip()
         if asn:
@@ -118,13 +178,26 @@ def front_app() -> tuple[str, int]:
                 return name or "", pid
     except (OSError, subprocess.SubprocessError):
         pass
-    import Quartz as Q
+    return None
 
-    wins = Q.CGWindowListCopyWindowInfo(Q.kCGWindowListOptionOnScreenOnly | Q.kCGWindowListExcludeDesktopElements, Q.kCGNullWindowID) or []
-    for w in wins:
-        if int(w.get("kCGWindowLayer", 1)) == 0:
-            return str(w.get("kCGWindowOwnerName", "")), int(w.get("kCGWindowOwnerPID", 0))
-    return "", 0
+
+def front_app() -> tuple[str, int]:
+    """(name, pid) of the app that is really in front right now.
+
+    In process first: Accessibility's focused app (one round trip) cross-checked with the owner of
+    the frontmost window (the window server) — both current, unlike NSWorkspace's
+    `frontmostApplication`, which lags until a Cocoa run loop delivers the change. When they
+    disagree (an app in front with no window, a switch under way), or right after NEO brought an
+    app forward, LaunchServices decides (`lsappinfo`, two programs, ~12 ms); failing that, the
+    owner of the frontmost on-screen window."""
+    if time.monotonic() - _brought_at > _ARBITER_AFTER_BRING_S:
+        fast = _fast_front()
+        if fast is not None:
+            return fast
+    got = _lsappinfo_front()
+    if got is not None:
+        return got
+    return _cg_front() or ("", 0)
 
 
 def running() -> list[tuple[str, int, str]]:
