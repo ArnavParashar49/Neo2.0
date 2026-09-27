@@ -138,3 +138,46 @@ def test_the_training_commands_still_print_neos_lines(module):
     assert mains, module
     first = next(st for st in mains[0].body if not isinstance(st, ast.Import | ast.ImportFrom))
     assert isinstance(first, ast.Expr) and ast.unparse(first.value).endswith("log_to_stdout()"), ast.unparse(first)
+
+
+@pytest.fixture
+def silent_safari(monkeypatch):
+    """`close` with Safari running and its tab script failing: every Mac call faked."""
+    pytest.importorskip("AppKit")
+    from types import SimpleNamespace
+
+    from neo.decide import close, inventory, media
+
+    safari = SimpleNamespace(name="Safari", bundle_id="com.apple.Safari", handles=("https",), running=True)
+    monkeypatch.setattr(close, "_running_apps", lambda: [safari])
+    monkeypatch.setattr(close, "_is_browser", lambda app: True)
+    monkeypatch.setattr(close, "_tab_codes", lambda app: close._TabCodes("cwin", "bTab", "pURL", "pnam", "coreclos"))
+    monkeypatch.setattr(inventory, "named_in", lambda what, apps: None)
+
+    async def gate(app):
+        return None
+
+    async def osa(script, args, timeout):
+        return 1, "", "execution error: Safari got an error (-1712)"
+
+    monkeypatch.setattr(media, "_control_gate", gate)
+    monkeypatch.setattr(media, "_osascript", osa)
+
+
+def test_an_agents_close_prints_nothing(tmp_path, capsys, caplog, silent_safari):
+    from neo.agent.registry import ToolContext, registry
+
+    rt = make_runtime(tmp_path / "c", "c", ["close"])
+    with caplog.at_level(logging.INFO, logger="neo"), runtime.bind(rt.scope()):
+        out = asyncio.run(registry().invoke("close", {"target": "youtube"}, ToolContext()))
+    assert out.text == "Error: nothing called 'youtube' is open"
+    assert capsys.readouterr().out == ""
+    assert any(r.getMessage().startswith("[close] Safari didn't answer (execution error") for r in caplog.records)
+
+
+def test_neo_apps_close_line_still_reaches_stdout(neo_stdout, capsys, silent_safari):
+    from neo.decide import close
+
+    neo_stdout()
+    asyncio.run(close.close_target("youtube"))
+    assert capsys.readouterr().out == "[close] Safari didn't answer (execution error: Safari got an error (-1712))\n"

@@ -13,6 +13,7 @@ asked.
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -21,6 +22,8 @@ from neo.decide._objc import pooled
 
 if TYPE_CHECKING:
     from neo.decide.inventory import App
+
+log = logging.getLogger(__name__)
 
 # Words that say what kind of thing it is, not which: "close the youtube tab" closes "youtube".
 _FILLER = re.compile(r"\b(?:the|a|an|my|this|that|all|every|of|tabs?|windows?|apps?|application|page|site|website)\b", re.I)
@@ -114,7 +117,7 @@ async def close_target(target: str) -> str:
         code, out, err = await media._osascript(_close_tabs_script(codes), [b.bundle_id, what], _SCRIPT_S)
         n = int(out) if code == 0 and out.strip().isdigit() else 0
         if code != 0:
-            print(f"[close] {b.name} didn't answer ({err[-80:]})")
+            log.warning(f"[close] {b.name} didn't answer ({err[-80:]})")  # NEO.app's core.log; a host's logger
         if n:
             closed.append(f"{n} {what} tab{'s' if n != 1 else ''} in {b.name}")
     if closed:
