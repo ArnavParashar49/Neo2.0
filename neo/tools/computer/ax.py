@@ -689,6 +689,8 @@ def _walk(
         x, y, fw, fh = frame = _frame_of(v)
         if _outside(frame, box):
             return
+        if w is not None and w.canvas_min < 0 and role == "AXWindow":
+            w.canvas_min = _CANVAS_SHARE * fw * fh if fw > 0 and fh > 0 else 0.0
         seen = _clip(box, frame) if fw > 0 and fh > 0 else None
         if clip and role in _CLIPS and fw > 0 and fh > 0:
             box = _clip(box, frame)
@@ -738,7 +740,7 @@ def _walk(
             if w is not None and w.early is not None and w.early(e):
                 w.stopped = "found"
                 return
-        big = w is not None and w.canvas_min and seen is not None and seen[2] * seen[3] >= w.canvas_min
+        big = w is not None and w.canvas_min > 0 and seen is not None and seen[2] * seen[3] >= w.canvas_min
         if big and not kids and role not in _EDITABLE and role not in ("AXWebArea", "AXScrollArea", "AXWindow", "AXSheet"):
             w.canvas.append((el, role, seen, e))  # type: ignore[union-attr]
         kids = _in_view(el, role, kids, box, w)
@@ -1057,9 +1059,10 @@ def snapshot(
     budget = [_MAX_NODES]
     wframe: tuple[float, float, float, float] | None = None
     if win is not None:  # the window the user works in first: a big sidebar can't crowd it out
-        wframe = _point_size(win)
-        w.canvas_min = _CANVAS_SHARE * wframe[2] * wframe[3] if wframe[2] > 0 and wframe[3] > 0 else 0.0
+        w.canvas_min = -1.0  # (set from the window's own frame as the walk reads it)
         _walk(win, 1, els, _new_id, budget=budget, w=w)
+        first = els[0] if els and els[0].role == "AXWindow" and els[0].ref is win else None
+        wframe = (first.x, first.y, first.w, first.h) if first is not None else _point_size(win)
         if len(els) <= 1 and not w.stopped:
             # Nothing but the window itself in view: an app whose frames don't add up (some Java or
             # Qt builds) — look again without cutting anything to the window.
@@ -1099,7 +1102,7 @@ def snapshot(
     covering = _covering(int(pid or 0), wframe) if wframe is not None else []
     allx = els + open_menus + bar_items + background
     _register(allx, walk, name, int(pid or 0))
-    wtitle = _str(_attr(win, AS.kAXTitleAttribute)) if win is not None else ""
+    wtitle = els[0].title if els and els[0].ref is win else _str(_attr(win, AS.kAXTitleAttribute)) if win is not None else ""
     head = f"App: {name}" + (f' — window "{wtitle}"' if wtitle else "")
     fixed = _blocker_lines(w.blockers, covering)
     tail: list[str] = []
