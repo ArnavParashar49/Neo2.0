@@ -14,10 +14,10 @@ import pytest
 import Quartz as RealQ
 from PIL import Image
 
-from neo.agent import confirm
-from neo.agent.registry import USERS_WORDS, ToolContext, ToolOutput, registry
-from neo.tools.computer import apps, ax, focus, pointer, screen
-from neo.tools.computer import input as inp
+from neo2.core.agent import confirm
+from neo2.core.agent.registry import USERS_WORDS, ToolContext, ToolOutput, registry
+from neo2.core.tools.computer import apps, ax, focus, pointer, screen
+from neo2.core.tools.computer import input as inp
 
 NEO, CHESS, DOCK, MAIL = 900, 4242, 77, 55
 _REAL_SAMPLE = screen.sample_points  # (the suite's conftest makes it "no picture" in every test)
@@ -27,7 +27,7 @@ _REAL_SAMPLE = screen.sample_points  # (the suite's conftest makes it "no pictur
 
 
 class FakeQ:
-    """Quartz for neo.tools.computer.input: records every event posted (and every sleep), in order."""
+    """Quartz for neo2.core.tools.computer.input: records every event posted (and every sleep), in order."""
 
     kCGHIDEventTap = "hid"
     kCGMouseEventClickState = "clickState"
@@ -499,7 +499,7 @@ def test_an_unknown_modifier_or_key_presses_nothing(world, monkeypatch):
 def test_the_self_checks_say_when_macos_drops_neos_clicks_and_keys(monkeypatch):
     import ApplicationServices
 
-    from neo import health, permissions
+    from neo2.core import health, permissions
 
     monkeypatch.setattr(ApplicationServices, "AXIsProcessTrusted", lambda: True)
     monkeypatch.setattr(RealQ, "CGPreflightScreenCaptureAccess", lambda: True)
@@ -698,7 +698,7 @@ def test_a_click_whose_effect_may_be_elsewhere_is_not_called_a_miss(world):
     out = run("click", {"x": 612, "y": 540})
     assert out.ok and "Nothing visibly changed" not in out.text
     assert "near" in out.text and "screenshot" in out.text and "before" in out.text  # check before repeating it
-    from neo.agent import prompt
+    from neo2.core.agent import prompt
 
     assert "means\n  the move didn't happen" not in prompt.PERSONA
 
@@ -728,7 +728,7 @@ def test_a_blind_brain_scrolls_and_drags_by_element_id(world, monkeypatch):
 
 
 def test_a_refusal_that_quotes_a_sheet_counts_as_reading_the_screen(world, monkeypatch):
-    from neo.agent import grants
+    from neo2.core.agent import grants
 
     read: list = []
     monkeypatch.setattr(grants, "read_untrusted", read.append)
@@ -763,7 +763,7 @@ def test_waiting_after_each_input_is_only_as_long_as_it_needs(world, monkeypatch
 
 
 def test_typed_text_that_shows_a_moment_late_is_not_called_lost(monkeypatch):
-    import neo.tools.computer as comp
+    import neo2.core.tools.computer as comp
 
     typed, reads = [], {"n": 0}
 

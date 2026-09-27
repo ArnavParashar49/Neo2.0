@@ -1,4 +1,4 @@
-"""neo.decide.kinds.schedule: events and reminders added, the calendar read - through the Mac's
+"""neo2.core.decide.kinds.schedule: events and reminders added, the calendar read - through the Mac's
 store (a fake EventKit installed as sys.modules["EventKit"]), through an app's dictionary
 (osascript answered by a fake app that reads only the generated scripts' property codes), or as
 a calendar file (never opened). macOS is never asked anything: the fake store's access requests
@@ -21,12 +21,23 @@ from types import SimpleNamespace
 import pytest
 from Foundation import NSDate
 
-from neo import privacy
-from neo.agent.confirm import Halt
-from neo.config import settings
-from neo.decide import aescript, engine, eventkit, evidence, inventory, learned, media, run, sdef, workspace
-from neo.decide.inventory import App
-from neo.decide.kinds import schedule
+from neo2.core import privacy
+from neo2.core.agent.confirm import Halt
+from neo2.core.config import settings
+from neo2.core.decide import (
+    aescript,
+    engine,
+    eventkit,
+    evidence,
+    inventory,
+    learned,
+    media,
+    run,
+    sdef,
+    workspace,
+)
+from neo2.core.decide.inventory import App
+from neo2.core.decide.kinds import schedule
 
 FULL, NOT_ASKED, RESTRICTED, DENIED, WRITE_ONLY = 3, 0, 1, 2, 4
 FIX = Path(__file__).parent / "fixtures" / "decide" / "sdef"
@@ -348,7 +359,7 @@ def world(monkeypatch):
     monkeypatch.setattr(eventkit, "_store_obj", None)
     for kind, task in TASKS.items():
         monkeypatch.setitem(engine.TASKS, kind, task)
-        monkeypatch.setitem(engine.DRIVERS, kind, "neo.decide.kinds.schedule")
+        monkeypatch.setitem(engine.DRIVERS, kind, "neo2.core.decide.kinds.schedule")
     w = SimpleNamespace(ek=ek, apps=[DATEBOOK, TASKLIST], opened=[], osa=FakeApp())
     monkeypatch.setattr(engine, "_inventory", lambda: list(w.apps))
     monkeypatch.setattr(inventory, "inventory", lambda refresh=False: list(w.apps))
@@ -501,12 +512,12 @@ async def test_a_read_back_that_breaks_after_the_save_is_unconfirmed_and_never_s
 def _heard(text: str, monkeypatch) -> tuple:
     """(the session's reply to the user's ``text``, the session): with the kind on, a fast path
     runs the tool; no model may be asked anything."""
-    import neo.agent.session as sess_mod
-    from neo import events
-    from neo.agent import early
-    from neo.agent.session import Session
-    from neo.events import EventBus
-    from neo.reflex.schema import Decision
+    import neo2.core.agent.session as sess_mod
+    from neo2.core import events
+    from neo2.core.agent import early
+    from neo2.core.agent.session import Session
+    from neo2.core.events import EventBus
+    from neo2.core.reflex.schema import Decision
 
     class Reflex:
         async def decide(self, t):
@@ -527,7 +538,7 @@ def test_an_add_that_may_have_happened_is_said_and_never_handed_to_a_model(world
     assert reply.route == "quick" and not reply.silent and "may have" in reply.text
     assert len(world.ek.saved) == 1
     # a model's own retry of it (its casing, an ISO time) adds nothing either
-    from neo.agent.registry import ToolContext, registry
+    from neo2.core.agent.registry import ToolContext, registry
 
     start = at(1, 13).isoformat(timespec="minutes")
     out = asyncio.run(registry().invoke("calendar_add", {"title": "Lunch with Sam", "start": start}, ToolContext()))

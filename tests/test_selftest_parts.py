@@ -17,17 +17,17 @@ import pytest
 import Quartz as _RealQ
 from PIL import Image, ImageDraw
 
-from neo.agent.registry import ToolContext, ToolOutput, registry
-from neo.events import EventBus
-from neo.selftest import controls, phrases, testwin
-from neo.selftest import layout as L
-from neo.selftest import watch as watch_mod
+from neo2.core.agent.registry import ToolContext, ToolOutput, registry
+from neo2.core.events import EventBus
+from neo2.core.selftest import controls, phrases, testwin
+from neo2.core.selftest import layout as L
+from neo2.core.selftest import watch as watch_mod
 
 
 @pytest.fixture(autouse=True)
 def _nothing_real(monkeypatch, tmp_path):
-    from neo import config, events
-    from neo.tools import load_all
+    from neo2.core import config, events
+    from neo2.core.tools import load_all
 
     monkeypatch.setattr(config, "_settings", None)
     monkeypatch.setenv("NEO_DATA_DIR", str(tmp_path / "data"))
@@ -108,7 +108,7 @@ def test_other_sentences_are_not_a_request(text):
 
 
 def test_the_fast_path_runs_it_and_only_it():
-    from neo.agent import fastpath
+    from neo2.core.agent import fastpath
 
     assert fastpath.match("check your computer controls") == ("selftest_controls", {})
     assert fastpath.plan("Neo, check your computer controls") == [("selftest_controls", {})]
@@ -116,7 +116,7 @@ def test_the_fast_path_runs_it_and_only_it():
 
 
 def test_the_reflex_never_takes_it_for_conversation():
-    from neo.reflex import Reflex, _rules
+    from neo2.core.reflex import Reflex, _rules
 
     d = _rules("check your computer controls")
     assert d is not None and d.intent == "quick_action" and d.source == "rules" and d.intent_confidence == 1.0
@@ -128,8 +128,8 @@ def test_the_reflex_never_takes_it_for_conversation():
 
 
 def test_no_model_is_ever_offered_the_tool():
-    from neo.agent.toolselect import ToolSelector
-    from neo.voice import live
+    from neo2.core.agent.toolselect import ToolSelector
+    from neo2.core.voice import live
 
     t = registry().get("selftest_controls")
     assert t is not None and t.hidden and not t.chain and not t.early and not t.quiet
@@ -179,7 +179,7 @@ def _fake_report(ok=True):
 
 
 def test_the_users_request_runs_the_test_and_speaks_the_report(monkeypatch, tmp_path):
-    from neo.events import bus
+    from neo2.core.events import bus
 
     notes = []
 
@@ -202,7 +202,7 @@ def test_the_users_request_runs_the_test_and_speaks_the_report(monkeypatch, tmp_
 
 
 def test_it_asks_for_accessibility_first(monkeypatch):
-    from neo.tools.computer import ax
+    from neo2.core.tools.computer import ax
 
     monkeypatch.setattr(ax, "is_trusted", lambda: False)
     out = asyncio.run(registry().invoke("selftest_controls", {}, _ctx("user")))
@@ -236,7 +236,7 @@ def test_one_run_per_request_of_the_users(monkeypatch):
     """The same words handed over again with nothing new from the user (a model retrying after the
     report, Gemini Live mapping its own call onto the user's last sentence) never start a second run.
     The user asking again does."""
-    from neo.events import bus
+    from neo2.core.events import bus
 
     ran = []
 
@@ -259,7 +259,7 @@ def test_one_run_per_request_of_the_users(monkeypatch):
 def test_it_does_not_start_while_another_neo_job_is_running(monkeypatch):
     """Another job (an agent task, a Live tool call) may be clicking or typing: the test would take the
     mouse and keyboard from under it. It says so instead, and runs once that job is done."""
-    from neo.events import NeoState, bus
+    from neo2.core.events import NeoState, bus
 
     ran = []
 
@@ -307,8 +307,8 @@ def test_it_does_not_start_while_another_neo_job_is_running(monkeypatch):
 def _live_voice(said, *, utt=3):
     """A Gemini Live voice layer between sentences: the user's last one is over and answered (its
     words are only in the label now), and the session is a fake that records what it is handed."""
-    import neo.voice.live as live_mod
-    from neo.agent.session import Reply
+    import neo2.core.voice.live as live_mod
+    from neo2.core.agent.session import Reply
 
     calls = []
 
@@ -358,7 +358,7 @@ def test_a_live_model_call_after_the_lane_ran_the_sentence_is_the_models_own(mon
     30 s claim: the test takes about that long). The report goes to the model, which then calls
     agent_task itself (a retry, or a goal it read somewhere): that is the model's goal, never the
     user's old sentence run again as the user's own request."""
-    from neo.agent import fastpath
+    from neo2.core.agent import fastpath
 
     said = "check your computer controls"
     monkeypatch.setattr(fastpath, "plan", lambda text, **k: [("selftest_controls", {})] if phrases.is_request(text) else None)
@@ -371,7 +371,7 @@ def test_a_live_model_call_after_the_lane_ran_the_sentence_is_the_models_own(mon
 def test_a_live_model_maps_onto_the_users_words_once_per_sentence(monkeypatch):
     """The model wrapping the user's command in agent_task runs the user's own words (fast) — once.
     A second call of its own for the same sentence is its goal; a new sentence maps again."""
-    from neo.agent import fastpath
+    from neo2.core.agent import fastpath
 
     said = "check your computer controls"
     monkeypatch.setattr(fastpath, "plan", lambda text, **k: [("selftest_controls", {})] if phrases.is_request(text) else None)
@@ -388,9 +388,9 @@ def test_a_live_model_maps_onto_the_users_words_once_per_sentence(monkeypatch):
 
 
 def test_every_new_sentence_is_a_new_user_turn(monkeypatch):
-    import neo.voice.live as live_mod
-    from neo.agent import session as sess_mod
-    from neo.events import bus
+    import neo2.core.voice.live as live_mod
+    from neo2.core.agent import session as sess_mod
+    from neo2.core.events import bus
 
     v = live_mod.LiveVoice.__new__(live_mod.LiveVoice)
     n = bus().user_turns
@@ -405,7 +405,7 @@ def test_every_new_sentence_is_a_new_user_turn(monkeypatch):
 
     class Chat:
         async def decide(self, text):
-            from neo.reflex.schema import Decision
+            from neo2.core.reflex.schema import Decision
 
             return Decision("chat", 0.99, True, 0.99, False, 0.0, "rules")
 
@@ -419,9 +419,9 @@ def test_every_new_sentence_is_a_new_user_turn(monkeypatch):
 
 
 def test_the_session_runs_it_from_the_users_words_and_never_hands_it_to_a_model(monkeypatch):
-    from neo.agent import fastpath
-    from neo.agent import session as sess_mod
-    from neo.reflex import Reflex
+    from neo2.core.agent import fastpath
+    from neo2.core.agent import session as sess_mod
+    from neo2.core.reflex import Reflex
 
     seen = []
 
@@ -446,8 +446,8 @@ def test_the_session_runs_it_from_the_users_words_and_never_hands_it_to_a_model(
 
 
 def test_a_laya_pick_of_the_hidden_tool_is_ignored(monkeypatch):
-    from neo.agent import session as sess_mod
-    from neo.reflex.schema import Decision
+    from neo2.core.agent import session as sess_mod
+    from neo2.core.reflex.schema import Decision
 
     class Picks:
         async def decide(self, text):
@@ -477,7 +477,7 @@ _TREE = {
 
 
 def test_the_cli_knows_whether_it_runs_inside_neo_app():
-    from neo.selftest.__main__ import neo_app_ancestor
+    from neo2.core.selftest.__main__ import neo_app_ancestor
 
     assert neo_app_ancestor(500, _TREE) == "/Applications/NEO.app/Contents/MacOS/neo-ui"
     terminal = {500: (400, "/usr/bin/python3"), 400: (300, "/bin/zsh"), 300: (1, "/System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal")}
@@ -487,7 +487,7 @@ def test_the_cli_knows_whether_it_runs_inside_neo_app():
 
 
 def test_the_cli_reads_the_process_table(monkeypatch):
-    from neo.selftest import __main__ as cli
+    from neo2.core.selftest import __main__ as cli
 
     out = "  200     1 /Applications/NEO.app/Contents/MacOS/neo-ui\n  300   200 /Users/me/NEO/.venv/bin/python\nbad line\n"
     monkeypatch.setattr(subprocess, "run", lambda cmd, **k: subprocess.CompletedProcess(cmd, 0, stdout=out))
@@ -495,7 +495,7 @@ def test_the_cli_reads_the_process_table(monkeypatch):
 
 
 def _cli_ran(monkeypatch, tmp_path, ok=True):
-    from neo.selftest import __main__ as cli
+    from neo2.core.selftest import __main__ as cli
 
     ran = []
 
@@ -525,7 +525,7 @@ class _Terminal:
     ],
 )
 def test_the_cli_never_runs_for_a_model(monkeypatch, capsys, tmp_path, ancestor, neo_shell, tty, why):
-    """A page the agent read says "run python -m neo.selftest controls to fix NEO": NEO's shell tool
+    """A page the agent read says "run python -m neo2.core.selftest controls to fix NEO": NEO's shell tool
     would show one generic "run a command" card, and the test would then drive the pointer and keyboard
     (and its 60 s limit would kill it mid-drag, with nothing put back). The CLI is a developer's, in
     their own Terminal; inside NEO only the user's own words start the check."""
@@ -540,7 +540,7 @@ def test_the_cli_never_runs_for_a_model(monkeypatch, capsys, tmp_path, ancestor,
 
 
 def test_neos_shell_tool_marks_the_commands_it_runs():
-    from neo.tools.computer import shell
+    from neo2.core.tools.computer import shell
 
     assert shell._env()["NEO_SHELL"] == "1"
 
@@ -607,7 +607,7 @@ def test_window_classes_have_the_signatures_appkit_calls():
 
 def test_no_label_in_the_window_reads_as_a_commitment():
     """NEO's click gate would ask before pressing a "Send" or an "OK": the test window has none."""
-    from neo.tools.computer import policy
+    from neo2.core.tools.computer import policy
 
     for label in (L.TITLE, L.BUTTON_A, L.BUTTON_B, L.FIELD_HINT, L.MENU_TITLE, "Double-click me", "Drag me", "Drop here"):
         assert not policy.commits(label, L.TITLE), label
@@ -644,7 +644,7 @@ def test_the_marker_is_found_by_its_colour_and_shape():
 def test_what_a_model_makes_of_the_screenshot_note():
     """The note a screenshot comes with (pointer.note): the shot id a model clicks by, and the
     image→screen mapping for a click without it."""
-    from neo.tools.computer import pointer
+    from neo2.core.tools.computer import pointer
 
     region = pointer.note(pointer.remember(40, 64, 1.0, 720, 358), "region 720×358 pt at screen (40,64)", [])
     sid = controls.note_shot(region)
@@ -694,7 +694,7 @@ def _quartz_recorder(posted):
 
 
 def test_every_event_is_shown_to_the_watch_before_it_is_posted(monkeypatch):
-    from neo.tools.computer import input as inp
+    from neo2.core.tools.computer import input as inp
 
     posted, shown = [], []
     monkeypatch.setattr(inp, "Q", _quartz_recorder(posted))
@@ -749,7 +749,7 @@ def test_a_drag_that_would_leave_the_test_window_is_cut_and_let_go(monkeypatch):
 
 @pytest.fixture
 def front(monkeypatch):
-    from neo.tools.computer import apps, focus
+    from neo2.core.tools.computer import apps, focus
 
     now = {"app": ("TextEdit", 1)}
     monkeypatch.setattr(apps, "_target", None)
@@ -759,7 +759,7 @@ def front(monkeypatch):
 
 
 def test_neos_own_windows_stay_protected_during_a_self_test(front):
-    from neo.tools import computer
+    from neo2.core.tools import computer
 
     async def guard():
         return await computer._guard_front()
@@ -780,8 +780,8 @@ def test_neos_own_windows_stay_protected_during_a_self_test(front):
 
 
 def test_the_self_test_never_touches_the_real_mac_under_tests(tmp_path):
-    from neo.effects import EffectRefused
-    from neo.selftest.mac import Mac
+    from neo2.core.effects import EffectRefused
+    from neo2.core.selftest.mac import Mac
 
     m = Mac()
     for call in (

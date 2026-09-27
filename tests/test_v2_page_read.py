@@ -9,16 +9,16 @@ import asyncio
 
 import pytest
 
-from neo.agent import fastpath
-from neo.agent.registry import RegisteredTool, registry
-from neo.events import EventBus
-from neo.reflex.schema import Decision
+from neo2.core.agent import fastpath
+from neo2.core.agent.registry import RegisteredTool, registry
+from neo2.core.events import EventBus
+from neo2.core.reflex.schema import Decision
 
 
 @pytest.fixture(autouse=True)
 def _isolate(tmp_path, monkeypatch):
-    from neo import config, events
-    from neo.tools import load_all
+    from neo2.core import config, events
+    from neo2.core.tools import load_all
 
     monkeypatch.setattr(config, "_settings", None)
     monkeypatch.setenv("NEO_DATA_DIR", str(tmp_path))
@@ -121,7 +121,7 @@ class _Reflex:
 def test_page_read_is_slow_so_live_keeps_talking_while_it_reads():
     """A read can wait for the page's tree, walk thousands of nodes and ask the vision brain: Live
     declares it non-blocking (a slow tool), like screenshot and web_fetch."""
-    from neo.voice import live
+    from neo2.core.voice import live
 
     assert registry().get("page_read").slow
     (decl,) = [d for d in live._declarations() if d.name == "page_read"]
@@ -131,10 +131,10 @@ def test_page_read_is_slow_so_live_keeps_talking_while_it_reads():
 def test_the_users_own_words_are_answered_from_the_page(monkeypatch):
     """Typed or spoken "summarize this page": the fast path reads the page and NEO answers from it,
     aloud; no model call picks the tool."""
-    from neo.agent.session import Session
-    from neo.decide import run
-    from neo.decide.kinds import site
-    from neo.tools import computer
+    from neo2.core.agent.session import Session
+    from neo2.core.decide import run
+    from neo2.core.decide.kinds import site
+    from neo2.core.tools import computer
 
     asked: list[str] = []
 
@@ -151,13 +151,13 @@ def test_the_users_own_words_are_answered_from_the_page(monkeypatch):
 
 
 def _declared() -> set[str]:
-    from neo.voice import live
+    from neo2.core.voice import live
 
     return {d.name for d in live._declarations()}
 
 
 def test_live_calls_page_read_itself_and_is_told_when(monkeypatch):
-    from neo.voice import live
+    from neo2.core.voice import live
 
     assert "page_read" in live._DIRECT_TOOLS and "page_read" in _declared()
     assert "safari_read" not in _declared()
@@ -166,7 +166,7 @@ def test_live_calls_page_read_itself_and_is_told_when(monkeypatch):
 
 
 def test_browse_is_offered_to_live_only_while_it_is_there(monkeypatch):
-    from neo.voice import live
+    from neo2.core.voice import live
 
     assert "browse" in live._DIRECT_TOOLS
     if registry().get("browse") is None:  # until NEO's own browser registers it
@@ -190,7 +190,7 @@ def test_a_window_is_captured_by_its_id_and_scaled_down(monkeypatch):
 
     from PIL import Image
 
-    from neo.tools.computer import screen
+    from neo2.core.tools.computer import screen
 
     ran: list[list[str]] = []
 
@@ -219,7 +219,7 @@ def test_a_window_capture_is_cut_to_the_page(monkeypatch):
 
     from PIL import Image
 
-    from neo.tools.computer import screen
+    from neo2.core.tools.computer import screen
 
     def run(cmd, check, timeout):
         img = Image.new("RGB", (3200, 2000), "white")
@@ -248,9 +248,9 @@ INJECTED = (
 
 def _page_tool(monkeypatch, page=INJECTED):
     """page_read over a fake page: the page itself for a model, NEO's answer for the user's words."""
-    from neo.decide import run
-    from neo.decide.kinds import site
-    from neo.tools import computer
+    from neo2.core.decide import run
+    from neo2.core.decide.kinds import site
+    from neo2.core.tools import computer
 
     asked: list[str] = []
 
@@ -267,7 +267,7 @@ def test_a_page_a_model_asked_for_comes_back_fenced_and_counted(monkeypatch):
     """Live's model wrote "summarize this page" (an agent_task goal): the fast path hands it the
     page itself, which must reach it fenced as untrusted, be kept in the history fenced (never as
     NEO's own words), and be reported so the caller counts it as read."""
-    from neo.agent.session import Session
+    from neo2.core.agent.session import Session
 
     asked = _page_tool(monkeypatch)
     s = Session(reflex=_Reflex())
@@ -279,7 +279,7 @@ def test_a_page_a_model_asked_for_comes_back_fenced_and_counted(monkeypatch):
 
 
 def test_the_users_own_words_get_neos_answer_and_the_history_keeps_it_fenced(monkeypatch):
-    from neo.agent.session import Session
+    from neo2.core.agent.session import Session
 
     _page_tool(monkeypatch)
     s = Session(reflex=_Reflex())
@@ -293,7 +293,7 @@ def _live_voice(session):
     import threading
     from types import SimpleNamespace
 
-    import neo.voice.live as live_mod
+    import neo2.core.voice.live as live_mod
 
     sent: list = []
 
@@ -324,7 +324,7 @@ def test_live_counts_the_page_its_agent_task_read_and_gets_it_fenced(monkeypatch
     it fenced, once."""
     from types import SimpleNamespace
 
-    from neo.agent.session import Session
+    from neo2.core.agent.session import Session
 
     _page_tool(monkeypatch)
     v, sent = _live_voice(Session(reflex=_Reflex()))
@@ -339,7 +339,7 @@ def test_live_counts_what_its_agent_task_read_on_the_agents_route(monkeypatch):
     """The agent read mail to do the job: that counts for Live too. Its own answer isn't fenced."""
     from types import SimpleNamespace
 
-    from neo.agent.session import Reply
+    from neo2.core.agent.session import Reply
 
     class S:
         async def handle(self, text, **kw):
@@ -354,10 +354,10 @@ def test_live_counts_what_its_agent_task_read_on_the_agents_route(monkeypatch):
 def test_the_replies_in_another_app_go_to_the_agent(monkeypatch):
     """"read me the replies" with a mail app in front: page_read reads no browser behind it, and the
     whole request goes to NEO's agent, which can look at that app."""
-    from neo.agent.session import Reply, Session
-    from neo.decide import run
-    from neo.decide.kinds import site
-    from neo.tools import computer
+    from neo2.core.agent.session import Reply, Session
+    from neo2.core.decide import run
+    from neo2.core.decide.kinds import site
+    from neo2.core.tools import computer
 
     async def page_read(limit=site.PAGE_CHARS, ask=""):
         return run.Result("Error: Postbox is in front, not a web browser: what the user is looking at is in Postbox", False)

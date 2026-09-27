@@ -1,4 +1,4 @@
-"""neo.decide.aescript: the shared pieces of dictionary routes - slots found by code or name,
+"""neo2.core.decide.aescript: the shared pieces of dictionary routes - slots found by code or name,
 read-only properties never written, HTML bodies detected from the dictionary's own words, the
 answer protocol, the error map with its commit semantics, and the facade over media's runner and
 Automation gate (so media's own tests keep patching the same functions). osascript is faked."""
@@ -13,9 +13,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from neo.decide import aescript, media, sdef
-from neo.decide.inventory import App
-from neo.decide.run import Effect
+from neo2.core.decide import aescript, media, sdef
+from neo2.core.decide.inventory import App
+from neo2.core.decide.run import Effect
 
 
 def parse(body: str) -> sdef.Dictionary:

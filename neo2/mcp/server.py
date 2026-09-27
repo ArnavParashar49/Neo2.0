@@ -48,9 +48,9 @@ from mcp.shared.exceptions import MCPError
 from mcp_types import INVALID_PARAMS
 from mcp_types.version import MODERN_PROTOCOL_VERSIONS
 
-from neo.providers.base import ProviderError
-from neo.runtime import UnsupportedPlatform
 from neo2.adapters import _common as shared
+from neo2.core.providers.base import ProviderError
+from neo2.core.runtime import UnsupportedPlatform
 from neo2.mcp import approvers
 from neo2.sdk.agent import AsyncAgent, _usable
 from neo2.sdk.approval import Approval, ApprovalRequest
@@ -76,7 +76,7 @@ MAX_PENDING_INPUTS = 32  # 2026-07-28 elicitations awaiting the client's retry
 # Never listed, whatever a host registers: they read as approvals, or are NEO's own machinery.
 NEVER_LISTED = frozenset({"approve", "confirm", "cancel", "deny", "more_tools", TASK_TOOL})
 # NEO's tools that click, type, press keys or perform Accessibility actions on this desktop
-# (neo.tools.computer, and the task tools whose kinds act in an app's own window: a site's search
+# (neo2.core.tools.computer, and the task tools whose kinds act in an app's own window: a site's search
 # box, a new note). With --approve elicit they could answer the client's own approval form unless
 # its app is protected. Every tool that acts goes here, including ones on their way (menu_command
 # presses menu items): tests/test_ctl_seams.py checks the catalog against it.
@@ -191,7 +191,7 @@ def _rebuilt(cfg: AgentConfig, **changes: Any) -> AgentConfig:
 def _input_tools(cfg: AgentConfig, *, platform: str | None = None) -> list[str]:
     """NEO's input tools (INPUT_TOOLS) the config gives the agent, by name: nothing is loaded. A
     selection the agent would refuse, or tools it would leave out here, count as none."""
-    from neo.tools import resolve
+    from neo2.core.tools import resolve
 
     plat = platform or sys.platform
     if plat != "darwin" or importlib.util.find_spec("AppKit") is None:  # not here: [mac] needs macOS

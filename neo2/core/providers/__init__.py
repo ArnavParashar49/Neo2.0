@@ -1,0 +1,411 @@
+"""Brain factory + failover chain.
+
+``brain("agent")`` returns the provider chain for agentic turns, ``brain("fast")`` for
+chat-only turns. A chain tries providers in order and moves on when one is rate-limited or
+unreachable, so a free-tier 429 degrades gracefully instead of failing the turn.
+
+The brains made so far, and which of them failed lately, live in a :class:`BrainPool`: NEO.app's
+(the module's `_cache` and `_demoted`), or an embedded agent's own (neo2.core.runtime) — built from
+that agent's keys, and with the host's own providers for any purpose it supplied them for.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import time as _time
+from collections.abc import AsyncIterator, Mapping, Sequence
+from typing import Literal
+
+from neo2.core import logger, runtime
+from neo2.core.config import BrainName, settings
+from neo2.core.providers.base import (
+    AllBrainsFailed,
+    Message,
+    Provider,
+    ProviderError,
+    RateLimited,
+    ToolSpec,
+    Turn,
+    spoken_name,
+)
+
+__all__ = [
+    "AllBrainsFailed", "BrainPool", "Chain", "ProviderError", "RateLimited", "brain", "image_limit", "make", "pool",
+]  # fmt: skip
+
+log = logger(__name__)
+
+Purpose = Literal["agent", "fast", "vision", "offline", "light"]
+
+_cache: dict[str, Provider] = {}
+
+
+class BrainPool:
+    """One agent's brains: those made from its settings (by name), how recently each failed, and
+    the host's own providers per purpose (`overrides`), used instead of the named brains.
+
+    What a brain learns on the way (a Gemini key's quota window or refusal, a model's overload, a
+    server's real request size) is kept by the provider object itself, so the brains made here —
+    and their file in the agent's data dir (brain_cooldowns.json) — are this agent's alone. A
+    host's own provider object keeps what it learns in itself: one object handed to two agents is
+    shared by both."""
+
+    def __init__(self, overrides: Mapping[Purpose, Sequence[Provider]] | None = None) -> None:
+        self._made: dict[str, Provider] = {}
+        self._failed: dict[str, float] = {}
+        self.overrides: dict[str, list[Provider]] = {k: list(v) for k, v in (overrides or {}).items() if v}
+
+    def cache(self) -> dict[str, Provider]:
+        return self._made
+
+    def demoted(self) -> dict[str, float]:
+        return self._failed
+
+    def make(self, name: BrainName) -> Provider:
+        c = self.cache()
+        if name not in c:
+            c[name] = _build(name)
+        return c[name]
+
+
+class _AppPool(BrainPool):
+    """NEO.app's pool: the module's `_cache` and `_demoted`, looked up at call time."""
+
+    def cache(self) -> dict[str, Provider]:
+        return _cache
+
+    def demoted(self) -> dict[str, float]:
+        return _demoted
+
+
+_app_pool = _AppPool()
+
+
+def pool() -> BrainPool:
+    """The bound agent's brains (neo2.core.runtime), else NEO.app's."""
+    rt = runtime.current_runtime()
+    if rt is not None:
+        return rt.get_or_create("brains", BrainPool)
+    runtime.check_unbound("the brains")
+    return _app_pool
+
+
+def make(name: BrainName) -> Provider:
+    return pool().make(name)
+
+
+def _build(name: BrainName) -> Provider:
+    if name == "gemini":
+        from neo2.core.providers.gemini import GeminiProvider
+
+        p: Provider = GeminiProvider()
+    elif name == "groq":
+        from neo2.core.providers.openai_compat import groq
+
+        p = groq()
+    elif name == "gemini_lite":
+        from neo2.core.providers.gemini import GeminiProvider
+
+        p = GeminiProvider(model=settings().gemini_lite_model, name="gemini_lite")  # its own brain
+    elif name == "local":
+        from neo2.core.providers.openai_compat import local
+
+        p = local()
+    elif name == "claude":
+        from neo2.core.providers.claude import ClaudeProvider
+
+        p = ClaudeProvider()
+    else:
+        raise ProviderError(f"unknown brain {name}")
+    return p
+
+
+_DEMOTE_S = 300.0  # a brain that just failed goes to the back of the line for this long
+# Every brain failed but one only asked for a short wait: wait, then ask it again. A per-minute
+# limit is always clear within the minute, and on Groq's 8K a step of 4–6K tokens is ~30–45s of it:
+# the one brain left carries a long task through that wait rather than ending it.
+_WAIT_MAX_S = 65.0
+
+# Shared across chains: once Gemini has fallen over in one request, the next request (a fresh
+# Chain each time) should not pay the same failed round trips before reaching Groq. NEO.app's;
+# an embedded agent's pool keeps its own.
+_demoted: dict[str, float] = {}
+
+# A request-shaped failure says nothing about the brain's health: the next request may be fine.
+_NO_DEMOTE = ("bad_request", "too_large")
+
+
+def _cooling(p: Provider) -> float:
+    """When a brain that knows it's spent (every Gemini key out of quota) can be asked again."""
+    try:
+        return float(getattr(p, "cooling_until", lambda: 0.0)() or 0.0)
+    except Exception:  # noqa: BLE001
+        return 0.0
+
+
+def _seen_by(turn: Turn, p: Provider) -> Turn:
+    """The reply as written by `p`: a brain that doesn't declare vision saw no picture, whatever its
+    reply says (a host's own provider, or any that never heard of Turn.sees, leaves it True)."""
+    if not getattr(p, "supports_vision", False):
+        turn.sees = False
+    return turn
+
+
+class Chain:
+    """Ordered providers with automatic failover on RateLimited / ProviderError.
+
+    A provider that fails is *demoted* for a few minutes (a spent quota: until it resets): still
+    available, but tried after the ones that work. `sticky=False` keeps the given order regardless
+    (the vision chain must not let a text-only brain answer first and silently drop the screenshot).
+    When every brain fails, the error is an AllBrainsFailed that says, per brain, why — quota,
+    too large, not running — so the task can end with that reason spoken. Demotions are the
+    agent's own (its BrainPool), NEO.app's module `_demoted` when nothing is bound — except in a
+    chain of a host's own providers that the host calls itself (neo2.providers.Failover, no agent
+    bound): that one keeps them itself and touches nothing of NEO.app's."""
+
+    def __init__(self, names: Sequence[BrainName | Provider], *, sticky: bool = True) -> None:
+        self.names = list(names)  # brain names, or provider instances (a host's own), in order
+        self.sticky = sticky
+        self.last_used: str = ""
+        self.last_model: str = ""
+        self._missing: list[tuple[str, ProviderError]] = []
+        self._own_demoted: dict[str, float] = {}
+
+    def _hosts_only(self) -> bool:
+        """Only a host's own provider objects: no brain here is made from anyone's settings."""
+        return all(not isinstance(n, str) for n in self.names)
+
+    def _alone(self) -> bool:
+        """A host's own chain, called by the host itself with no agent bound (not NEO.app's)."""
+        return self._hosts_only() and runtime.current_scope() is None
+
+    def _demotions(self) -> dict[str, float]:
+        return self._own_demoted if self._alone() else pool().demoted()
+
+    def _providers(self) -> list[Provider]:
+        out: list[Provider] = []
+        self._missing = []
+        for n in self._order():
+            if not isinstance(n, str):
+                out.append(n)
+                continue
+            try:
+                out.append(make(n))
+            except ProviderError as e:  # missing key → skip silently
+                log.info(f"[brain] {n} unavailable: {e}")
+                self._missing.append((n, e))
+        if self.sticky:
+            # A brain that knows it's spent (all its quota) goes last: the next one is asked at once.
+            now = _time.time()
+            out.sort(key=lambda p: _cooling(p) > now)
+        return out
+
+    def _order(self) -> list[BrainName | Provider]:
+        if not self.sticky:
+            return list(self.names)
+        now = _time.time()
+        demoted = self._demotions()
+        healthy = [n for n in self.names if demoted.get(_key(n), 0.0) <= now]
+        return healthy + [n for n in self.names if n not in healthy]
+
+    def _demote(self, name: str, e: ProviderError | None = None) -> None:
+        if e is not None and getattr(e, "kind", "") in _NO_DEMOTE:
+            return
+        until = _time.time() + _DEMOTE_S
+        if e is not None and getattr(e, "kind", "") == "quota":
+            until = max(until, float(getattr(e, "until", 0.0) or 0.0))
+        self._demotions()[name] = until
+
+    @property
+    def name(self) -> str:
+        return "+".join(_key(n) for n in self.names)
+
+    @property
+    def supports_vision(self) -> bool:
+        return any(p.supports_vision for p in self._providers())
+
+    @property
+    def image_limit(self) -> tuple[int, int] | None:
+        """The largest picture every brain here that can see takes as sent: (longest edge in
+        pixels, total pixels), the strictest of those they declare (their own ``image_limit``; a
+        chain inside a chain counts too). None: none declares one."""
+        limits = [
+            lim
+            for p in self._providers()
+            if getattr(p, "supports_vision", False) and (lim := getattr(p, "image_limit", None))
+        ]
+        if not limits:
+            return None
+        return min(int(edge) for edge, _ in limits), min(int(px) for _, px in limits)
+
+    supports_tools = True
+
+    def _no_brain(self, failures: list[tuple[str, ProviderError]]) -> ProviderError:
+        if self._hosts_only():  # no key of NEO's could have been missing
+            return AllBrainsFailed(failures + self._missing)
+        s = settings()
+        if not pool().overrides and not (s.gemini_api_key or s.groq_api_key or s.anthropic_api_key):
+            return ProviderError(
+                "no API key set — add GEMINI_API_KEY to .env (free at aistudio.google.com/apikey)"
+            )
+        return AllBrainsFailed(failures + self._missing)
+
+    async def _failed(self, p: Provider, e: ProviderError, failures: list[tuple[str, ProviderError]]) -> None:
+        log.warning(f"[brain] {p.name} failed ({type(e).__name__}: {str(e)[:80]}); trying next")
+        failures.append((p.name, e))
+        if self.sticky:
+            self._demote(p.name, e)
+        if self._alone():
+            return  # no conversation to tell (and never NEO.app's)
+        from neo2.core.events import bus
+
+        who = spoken_name(p.name)  # "Gemini Lite", "the local model"
+        await bus().note(f"{who[:1].upper()}{who[1:]} unavailable, switching brain")
+
+    @staticmethod
+    def _short_wait(failures: list[tuple[str, ProviderError]]) -> tuple[float, str] | None:
+        """(seconds, brain) when some brain failed only for a moment (a per-minute limit, a busy
+        spell) and asked us to wait no longer than _WAIT_MAX_S."""
+        waits = [
+            (float(w), n)
+            for n, e in failures
+            if (w := getattr(e, "retry_after", None)) is not None and 0 <= float(w) <= _WAIT_MAX_S
+        ]
+        return min(waits) if waits else None
+
+    async def complete(
+        self,
+        messages: list[Message],
+        *,
+        system: str = "",
+        tools: list[ToolSpec] | None = None,
+        effort="medium",
+        max_tokens: int = 4096,
+    ) -> Turn:
+        failures: list[tuple[str, ProviderError]] = []
+        providers = self._providers()
+        if _has_picture(messages):
+            providers = _eyes_first(providers)
+        for p in providers:
+            try:
+                turn = _seen_by(
+                    await p.complete(messages, system=system, tools=tools, effort=effort, max_tokens=max_tokens), p
+                )
+                self.last_used, self.last_model = p.name, getattr(p, "model", "")
+                return turn
+            except ProviderError as e:
+                await self._failed(p, e, failures)
+        if (wait := self._short_wait(failures)) is not None:
+            # Every brain is out, but one only for seconds (Groq's per-minute budget): a long
+            # task is worth that pause rather than ending here.
+            secs, name = wait
+            p = next(p for p in providers if p.name == name)
+            log.warning(f"[brain] every brain failed; waiting {secs:.0f}s for {name}")
+            from neo2.core.events import bus
+
+            await bus().note(f"Waiting {secs:.0f}s for {spoken_name(name)}'s rate limit")
+            await asyncio.sleep(secs + 0.5)
+            try:
+                turn = _seen_by(
+                    await p.complete(messages, system=system, tools=tools, effort=effort, max_tokens=max_tokens), p
+                )
+                self.last_used, self.last_model = p.name, getattr(p, "model", "")
+                return turn
+            except ProviderError as e:
+                failures = [(n, x) for n, x in failures if n != name]
+                await self._failed(p, e, failures)
+        raise self._no_brain(failures)
+
+    async def stream(
+        self, messages: list[Message], *, system: str = "", max_tokens: int = 2048
+    ) -> AsyncIterator[str]:
+        failures: list[tuple[str, ProviderError]] = []
+        for p in self._providers():
+            produced = False
+            try:
+                async for chunk in p.stream(messages, system=system, max_tokens=max_tokens):
+                    produced = True
+                    yield chunk
+                self.last_used, self.last_model = p.name, getattr(p, "model", "")
+                return
+            except ProviderError as e:
+                if produced:  # can't restart a half-streamed answer
+                    raise
+                failures.append((p.name, e))
+                if self.sticky:
+                    self._demote(p.name, e)
+        raise self._no_brain(failures)
+
+
+def _eyes_first(providers: list[Provider]) -> list[Provider]:
+    """For a request working from a picture (a screenshot of a board): a brain that can see it goes
+    first, however recently it failed — a text-only one would act blind. But never ahead of a brain
+    on this Mac that came before it: the user who put a local brain first keeps their screen on the
+    Mac, and a cloud brain gets the picture only when the local one can't answer."""
+    now = _time.time()
+    local_before = 0
+    order: list[tuple[int, bool, bool, int]] = []
+    for i, p in enumerate(providers):
+        order.append((local_before, _cooling(p) > now, not getattr(p, "supports_vision", False), i))
+        if getattr(p, "on_device", False):
+            local_before += 1
+    return [providers[k[-1]] for k in sorted(order)]
+
+
+def _has_picture(messages: list[Message]) -> bool:
+    """Does the request being worked on carry a picture (a screenshot it took, a photo sent)?"""
+    from neo2.core.providers.history import request_start
+
+    start = request_start(messages) if messages else 0
+    return any(m.images or any(r.images for r in m.tool_results) for m in messages[start:])
+
+
+def brain(purpose: Purpose = "agent") -> Chain:
+    if own := _hosts(purpose):
+        return Chain(own, sticky=purpose != "vision")
+    s = settings()
+    if purpose == "fast":
+        order: list[BrainName | None] = [s.fast_brain, s.brain, s.offline_brain]
+    elif purpose == "vision":
+        # Only brains that can see the screenshot come first; text-only ones would drop it silently.
+        vision: list[BrainName | None] = [n for n in (s.brain, "gemini", "claude") if n not in ("groq", "local")]
+        order = vision + [n for n in (s.brain, s.fast_brain, s.offline_brain) if n not in vision]
+        return Chain(_dedupe(order), sticky=False)
+    elif purpose == "offline":
+        order = [s.offline_brain]
+    elif purpose == "light":
+        # One-tool actions that missed the regex fast path: cheapest capable brain first.
+        order = ["gemini_lite", s.fast_brain, s.brain, s.offline_brain]
+    else:
+        order = [s.brain, s.fast_brain, s.offline_brain]
+    return Chain(_dedupe(order))
+
+
+def image_limit(purpose: Purpose = "vision") -> tuple[int, int] | None:
+    """The largest screenshot the brains for this purpose take without shrinking it themselves:
+    (longest edge in pixels, total pixels), the strictest of the chain — a host's own providers
+    included — so NEO can size a picture itself and map clicks on the image the model really saw.
+    None: no brain declares a limit (the picture goes as NEO made it)."""
+    return brain(purpose).image_limit
+
+
+def _hosts(purpose: Purpose) -> list[Provider]:
+    """The host's own providers for this purpose — or, for a purpose it gave none for, the ones
+    it gave for its agent (or any): a host that brought its brains gets no others."""
+    ov = pool().overrides
+    for p in (purpose, "agent", "fast", "light", "vision", "offline"):
+        if ov.get(p):
+            return ov[p]
+    return []
+
+
+def _key(n: BrainName | Provider) -> str:
+    return n if isinstance(n, str) else str(getattr(n, "name", "") or type(n).__name__)
+
+
+def _dedupe(order: Sequence[BrainName | None]) -> list[BrainName]:
+    seen: list[BrainName] = []
+    for n in order:
+        if n is not None and n not in seen:  # None: no such brain (an embedded agent's offline one)
+            seen.append(n)
+    return seen

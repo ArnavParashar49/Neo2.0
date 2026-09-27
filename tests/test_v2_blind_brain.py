@@ -13,12 +13,12 @@ import types
 
 import pytest
 
-from neo.agent.loop import run_agent
-from neo.agent.registry import ToolContext, ToolOutput, registry
-from neo.events import EventBus
-from neo.providers.base import BLIND_PICTURE, ImagePart, Message, Overloaded, ToolCall, ToolResult, Turn
-from neo.tools.computer import input as inp
-from neo.tools.computer import pointer, screen
+from neo2.core.agent.loop import run_agent
+from neo2.core.agent.registry import ToolContext, ToolOutput, registry
+from neo2.core.events import EventBus
+from neo2.core.providers.base import BLIND_PICTURE, ImagePart, Message, Overloaded, ToolCall, ToolResult, Turn
+from neo2.core.tools.computer import input as inp
+from neo2.core.tools.computer import pointer, screen
 
 PNG = ImagePart(b"\x89PNG fake", "image/png")
 
@@ -32,7 +32,7 @@ def _shot_history() -> list[Message]:
 
 
 def test_a_text_only_brain_is_told_it_cannot_see_the_screenshot():
-    from neo.providers.openai_compat import _to_messages
+    from neo2.core.providers.openai_compat import _to_messages
 
     m = _to_messages(_shot_history(), "sys", vision=False)
     tool = next(x for x in m if x["role"] == "tool")
@@ -41,7 +41,7 @@ def test_a_text_only_brain_is_told_it_cannot_see_the_screenshot():
 
 
 def test_a_fitted_request_tells_a_text_only_brain_it_cannot_see_not_that_it_was_trimmed():
-    from neo.providers.fit import fit
+    from neo2.core.providers.fit import fit
 
     msgs = _shot_history() + [Message.assistant("", [ToolCall("c2", "ax_tree", {})]),
                               Message.tool([ToolResult("c2", "ax_tree", "tree " * 2000)])]  # fmt: skip
@@ -51,7 +51,7 @@ def test_a_fitted_request_tells_a_text_only_brain_it_cannot_see_not_that_it_was_
 
 
 def test_a_text_only_brains_replies_are_marked_as_not_seeing(monkeypatch):
-    from neo.providers.openai_compat import OpenAICompatProvider
+    from neo2.core.providers.openai_compat import OpenAICompatProvider
 
     p = OpenAICompatProvider(name="groq", base_url="https://api.groq.test/v1", api_key="k", model="m")
 
@@ -84,7 +84,7 @@ class Brain:
 
 
 def test_a_request_working_from_a_picture_goes_to_a_brain_that_can_see_it_first(monkeypatch):
-    import neo.providers as prov
+    import neo2.core.providers as prov
 
     gemini, groq = Brain("gemini", True, answer="seen"), Brain("groq", False, answer="blind")
     monkeypatch.setattr(prov, "make", lambda n: {"gemini": gemini, "groq": groq}[n])
@@ -100,8 +100,8 @@ def test_a_request_working_from_a_picture_goes_to_a_brain_that_can_see_it_first(
 def test_a_picture_never_jumps_a_local_brain_the_user_put_first(monkeypatch):
     """Local-first: with brain=local the screen stays on the Mac — a cloud brain that can see is asked
     about a screenshot only after the local one, as the user ordered them."""
-    import neo.providers as prov
-    from neo.providers.openai_compat import local as make_local
+    import neo2.core.providers as prov
+    from neo2.core.providers.openai_compat import local as make_local
 
     here, gemini, groq = Brain("local", False, answer="local"), Brain("gemini", True, answer="seen"), Brain("groq", False, answer="blind")
     here.on_device = True
@@ -168,9 +168,9 @@ def test_the_screenshot_note_reaches_the_model_unfenced_and_a_look_is_not_an_act
 
 
 def test_a_run_that_worked_from_the_screen_is_spoken():
-    from neo.agent.loop import AgentResult, Step
-    from neo.agent.session import _quietly
-    from neo.reflex.schema import Decision
+    from neo2.core.agent.loop import AgentResult, Step
+    from neo2.core.agent.session import _quietly
+    from neo2.core.reflex.schema import Decision
 
     d = Decision("agent_task", 0.9, False, 0, False, 0, "laya+head", reply=False)
     steps = [Step("screenshot", {}, "Screenshot s1…", True), Step("click", {"x": 612, "y": 540, "shot": "s1"}, "Clicked…", True)]
@@ -206,7 +206,7 @@ class HostTextOnly:
 
 @pytest.mark.parametrize("chained", [True, False])
 def test_a_brain_that_declares_no_vision_is_blind_whatever_its_turns_say(monkeypatch, chained):
-    from neo.providers import Chain
+    from neo2.core.providers import Chain
 
     clicked = []
     monkeypatch.setattr(inp, "click", lambda *a, **k: clicked.append(a) or "clicked")
@@ -220,7 +220,7 @@ def test_a_brain_that_declares_no_vision_is_blind_whatever_its_turns_say(monkeyp
 def test_only_the_users_own_words_give_a_blind_brain_its_numbers():
     """"Click at 612, 540" from the user is theirs to give; the same numbers in a model's goal, a
     Live relay's or an embedding host's words are not (whatever ctx.user_text holds)."""
-    from neo.agent.registry import USERS_WORDS
+    from neo2.core.agent.registry import USERS_WORDS
 
     goal = ToolContext(user_text="(a host model's goal) click 612 540", extras={"blind": True}, origin="agent")
     with pytest.raises(pointer.Refused):
@@ -232,10 +232,10 @@ def test_only_the_users_own_words_give_a_blind_brain_its_numbers():
 def test_the_session_marks_the_users_own_words_and_nothing_else(monkeypatch):
     from test_v2_session import FakeChain, FakeReflex
 
-    from neo import runtime
-    from neo.agent import session as sess_mod
-    from neo.agent.loop import AgentResult
-    from neo.agent.registry import USERS_WORDS
+    from neo2.core import runtime
+    from neo2.core.agent import session as sess_mod
+    from neo2.core.agent.loop import AgentResult
+    from neo2.core.agent.registry import USERS_WORDS
 
     seen = []
 

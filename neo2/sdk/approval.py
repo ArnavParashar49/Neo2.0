@@ -14,7 +14,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any
 
-from neo.agent.session import answer_of as parse_yes_no
+from neo2.core.agent.session import answer_of as parse_yes_no
 
 __all__ = [
     "Approval",

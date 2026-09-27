@@ -1,4 +1,4 @@
-"""neo.decide.shadow: the log of what a kind's new path would have done while legacy ran. Plain
+"""neo2.core.decide.shadow: the log of what a kind's new path would have done while legacy ran. Plain
 facts only, the user's own file, 30 days at most, gone with the privacy erase, and nothing from a
 dry run that outlived an erase."""
 
@@ -11,12 +11,12 @@ import time
 
 import pytest
 
-from neo.decide import shadow
+from neo2.core.decide import shadow
 
 
 @pytest.fixture
 def calls_legacy(monkeypatch, real_handlers):
-    from neo.tools.computer import legacy
+    from neo2.core.tools.computer import legacy
 
     async def notes_create(*a):
         return "notes_create done"
@@ -89,7 +89,7 @@ def test_a_slow_dry_run_is_logged_as_timed_out(shadow_runs, monkeypatch):
 
 
 def test_nothing_is_logged_from_a_dry_run_that_outlived_an_erase_and_the_erase_deletes_the_log(shadow_runs):
-    from neo import privacy
+    from neo2.core import privacy
 
     shadow.record("open_app", {"how": "app"})
 
@@ -106,8 +106,8 @@ def test_nothing_is_logged_from_a_dry_run_that_outlived_an_erase_and_the_erase_d
 def test_a_dry_run_asks_laya_only_while_its_model_is_loaded(shadow_runs, monkeypatch):
     """Nobody waits for a dry run: it never loads the zero-shot model (1.7 GB, under the Laya lock
     the next utterance's reflex waits on)."""
-    from neo.decide import engine
-    from neo.reflex import zeroshot
+    from neo2.core.decide import engine
+    from neo2.core.reflex import zeroshot
 
     asked = []
     monkeypatch.setattr(zeroshot, "ask", lambda state, q, wait_s, stale=None: asked.append(state))
@@ -138,7 +138,7 @@ def test_in_tests_a_dry_run_never_starts_unless_asked_for():
 
 
 def test_a_dry_run_that_cant_start_never_touches_legacys_answer(calls_legacy, monkeypatch):
-    from neo.agent.registry import ToolContext, registry
+    from neo2.core.agent.registry import ToolContext, registry
 
     def broken(kind, facts, **extra):
         facts.close()

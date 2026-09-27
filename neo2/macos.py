@@ -25,7 +25,7 @@ def permission_status() -> dict[str, bool]:
     """{"accessibility": …, "screen_recording": …} for this process. Never prompts."""
     if sys.platform != "darwin":
         return {"accessibility": False, "screen_recording": False}
-    from neo import permissions
+    from neo2.core import permissions
 
     gaps = permissions.missing()
     return {"accessibility": "Accessibility" not in gaps, "screen_recording": "Screen Recording" not in gaps}
@@ -36,7 +36,7 @@ def request_permissions() -> list[str]:
     from a settings screen. Returns what was missing ([] = nothing to ask)."""
     if sys.platform != "darwin":
         return []
-    from neo import permissions
+    from neo2.core import permissions
 
     gaps = permissions.missing()
     try:

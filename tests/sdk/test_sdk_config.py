@@ -10,7 +10,7 @@ import pytest
 from pydantic import ValidationError
 
 import neo2
-from neo import runtime
+from neo2.core import runtime
 from neo2.sdk import agent as agent_mod
 from neo2.testing import ScriptedBrain
 
@@ -144,7 +144,7 @@ def test_an_agent_needs_a_brain():
 
 async def test_named_brains_come_from_the_configs_keys_only(monkeypatch):
     pytest.importorskip("google.genai")  # the [gemini] extra
-    from neo.providers import gemini
+    from neo2.core.providers import gemini
 
     keys: list[str] = []
 
@@ -156,7 +156,7 @@ async def test_named_brains_come_from_the_configs_keys_only(monkeypatch):
     monkeypatch.setenv("GEMINI_API_KEY", "host-env-key")
     async with neo2.AsyncAgent(neo2.AgentConfig(gemini_api_keys=("cfg-key", "cfg-key-2"))) as agent:
         with runtime.bind(agent._rt.scope()):
-            from neo.providers import brain, make
+            from neo2.core.providers import brain, make
 
             p = make("gemini")
             assert isinstance(p, gemini.GeminiProvider) and keys == ["cfg-key", "cfg-key-2"]
@@ -167,13 +167,13 @@ async def test_host_providers_serve_every_purpose():
     main, fast = ScriptedBrain(name="main"), ScriptedBrain(name="fast")
     async with neo2.AsyncAgent(neo2.AgentConfig(), provider=[main], fast_provider=fast) as agent:
         with runtime.bind(agent._rt.scope()):
-            from neo.providers import brain
+            from neo2.core.providers import brain
 
             assert brain("agent").names == [main] and brain("vision").names == [main]
             assert brain("light").names == [main] and brain("fast").names == [fast]
     async with neo2.AsyncAgent(neo2.AgentConfig(), provider=main) as agent:
         with runtime.bind(agent._rt.scope()):
-            from neo.providers import brain
+            from neo2.core.providers import brain
 
             assert brain("fast").names == [main]  # fast defaults to the agent's provider
 
@@ -219,7 +219,7 @@ async def test_the_mac_tools_need_the_mac_extra(monkeypatch):
     the extra, and "all" leaves the Mac tools out instead of failing to import them."""
     import importlib.util
 
-    from neo.tools import MACOS_ONLY
+    from neo2.core.tools import MACOS_ONLY
 
     real = importlib.util.find_spec
     monkeypatch.setattr(agent_mod, "_platform", lambda: "darwin")
@@ -259,7 +259,7 @@ async def test_the_web_tools_need_the_web_extra(monkeypatch, caplog):
 def test_without_ddgs_web_search_says_so_instead_of_no_results(monkeypatch):
     import importlib.util
 
-    from neo.tools import web
+    from neo2.core.tools import web
 
     real = importlib.util.find_spec
     monkeypatch.setattr(importlib.util, "find_spec", lambda n, *a: None if n == "ddgs" else real(n, *a))
@@ -280,8 +280,8 @@ async def test_without_trafilatura_web_fetch_downloads_nothing(monkeypatch):
 
     import httpx
 
-    from neo.agent.registry import ToolContext, catalog
-    from neo.tools import load
+    from neo2.core.agent.registry import ToolContext, catalog
+    from neo2.core.tools import load
 
     load(["web_fetch"])
     real = importlib.util.find_spec
@@ -326,7 +326,7 @@ def test_a_missing_vendor_sdk_names_the_extra(monkeypatch):
     real = providers.importlib.import_module
 
     def no_openai(name, *a):
-        if name in ("openai", "neo.providers.openai_compat"):
+        if name in ("openai", "neo2.core.providers.openai_compat"):
             raise ImportError("No module named 'openai'")
         return real(name, *a)
 
@@ -353,7 +353,7 @@ def test_small_helpers():
     assert neo2.parse_yes_no("yes please") is True and neo2.parse_yes_no("no, wait") is False
     assert neo2.parse_yes_no("what's the weather") is None
     assert "Only the\n  user can approve" in neo2.SAFETY_RULES
-    assert neo2.ToolContext is __import__("neo.agent.registry", fromlist=["x"]).ToolContext
+    assert neo2.ToolContext is __import__("neo2.core.agent.registry", fromlist=["x"]).ToolContext
     assert set(neo2.__all__) >= {"AsyncAgent", "Agent", "Approval", "host_tool", "events", "providers"}
     with pytest.raises(AttributeError):
         neo2.nope  # noqa: B018
@@ -379,8 +379,8 @@ def test_macos_helpers_never_prompt(monkeypatch):
 
 
 def test_request_permissions_asks_only_for_whats_missing(monkeypatch):
-    from neo import permissions
     from neo2 import macos
+    from neo2.core import permissions
 
     monkeypatch.setattr(permissions, "missing", lambda: [])
     assert macos.request_permissions() == []

@@ -12,7 +12,7 @@ import httpx
 import pytest
 
 import neo2
-from neo.agent import confirm
+from neo2.core.agent import confirm
 from neo2.testing import ScriptedBrain
 
 pytestmark = pytest.mark.portable  # Linux or macOS, any install (what needs an extra skips): CI's sdk-core job
@@ -30,7 +30,7 @@ PAGE = (
 def fake_web(monkeypatch):
     """web_fetch without a network: every host is public, every page is PAGE."""
     pytest.importorskip("trafilatura")  # web_fetch reads pages with it: the [web] extra
-    from neo.security import policy
+    from neo2.core.security import policy
 
     monkeypatch.setattr(policy, "private_host", lambda url: "")
     real = httpx.AsyncClient

@@ -5,7 +5,7 @@ from __future__ import annotations
 import base64
 import json
 
-from neo.providers.base import ImagePart, Message, ToolCall, ToolResult, ToolSpec
+from neo2.core.providers.base import ImagePart, Message, ToolCall, ToolResult, ToolSpec
 
 
 def _history(sig: bytes | None = None) -> list[Message]:
@@ -17,7 +17,7 @@ def _history(sig: bytes | None = None) -> list[Message]:
 
 
 def test_gemini_contents_echo_signature_or_bypass():
-    from neo.providers.gemini import _SKIP_SIGNATURE, _to_contents
+    from neo2.core.providers.gemini import _SKIP_SIGNATURE, _to_contents
 
     c = _to_contents(_history(sig=b"real-sig"))
     assert [x.role for x in c] == ["user", "model", "user"]
@@ -32,14 +32,14 @@ def test_gemini_contents_echo_signature_or_bypass():
 
 
 def test_gemini_skips_empty_model_turn():
-    from neo.providers.gemini import _to_contents
+    from neo2.core.providers.gemini import _to_contents
 
     c = _to_contents([Message.user("hi"), Message.assistant("")])
     assert len(c) == 1  # an empty model turn would 400
 
 
 def test_gemini_tool_declarations_use_json_schema():
-    from neo.providers.gemini import _tools
+    from neo2.core.providers.gemini import _tools
 
     t = _tools(
         [ToolSpec("x", "d", {"type": "object", "properties": {"a": {"type": "string"}}, "required": ["a"]})]
@@ -49,7 +49,7 @@ def test_gemini_tool_declarations_use_json_schema():
 
 
 def test_openai_messages_round_trip_tool_ids_and_vision_flag():
-    from neo.providers.openai_compat import _to_messages
+    from neo2.core.providers.openai_compat import _to_messages
 
     m = _to_messages(_history(), "sys", vision=False)
     assert m[0] == {"role": "system", "content": "sys"}
@@ -64,7 +64,7 @@ def test_openai_messages_round_trip_tool_ids_and_vision_flag():
 
 
 def test_claude_messages_shape():
-    from neo.providers.claude import _to_messages
+    from neo2.core.providers.claude import _to_messages
 
     m = _to_messages(_history())
     assert m[1]["content"][0] == {"type": "tool_use", "id": "call_1", "name": "clock", "input": {}}
@@ -74,7 +74,7 @@ def test_claude_messages_shape():
 
 
 def test_gemini_keys_are_deduped_and_ordered(monkeypatch):
-    from neo import config
+    from neo2.core import config
 
     monkeypatch.setattr(config, "_settings", None)
     monkeypatch.setenv("GEMINI_API_KEY", "k1")

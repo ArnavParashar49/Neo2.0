@@ -20,7 +20,8 @@ to MCP clients.
 
 Everything here is loaded on first use (PEP 562): ``import neo2`` loads only the standard
 library, and ``from neo2 import AsyncAgent`` loads NEO's core without any model, vendor SDK,
-macOS framework or browser.
+macOS framework or browser. NEO's core is :mod:`neo2.core`, the package NEO.app runs
+(``python -m neo2``).
 """
 
 from __future__ import annotations
@@ -29,12 +30,12 @@ import importlib
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:  # the names below, for type checkers and IDEs (nothing is imported at runtime)
-    from neo.agent.prompt import SAFETY_RULES as SAFETY_RULES
-    from neo.agent.registry import ToolContext as ToolContext
-    from neo.agent.registry import ToolOutput as ToolOutput
-    from neo.agent.session import answer_of as parse_yes_no  # noqa: F401
-    from neo.runtime import NoRuntimeError as NoRuntimeError
-    from neo.runtime import UnsupportedPlatform as UnsupportedPlatform
+    from neo2.core.agent.prompt import SAFETY_RULES as SAFETY_RULES
+    from neo2.core.agent.registry import ToolContext as ToolContext
+    from neo2.core.agent.registry import ToolOutput as ToolOutput
+    from neo2.core.agent.session import answer_of as parse_yes_no  # noqa: F401
+    from neo2.core.runtime import NoRuntimeError as NoRuntimeError
+    from neo2.core.runtime import UnsupportedPlatform as UnsupportedPlatform
     from neo2.sdk.agent import AsyncAgent as AsyncAgent
     from neo2.sdk.approval import Approval as Approval
     from neo2.sdk.approval import ApprovalReentryError as ApprovalReentryError
@@ -68,14 +69,14 @@ _EXPORTS: dict[str, tuple[str, str]] = {
     "Approver": ("neo2.sdk.approval", "Approver"),
     "ApprovalReentryError": ("neo2.sdk.approval", "ApprovalReentryError"),
     "ToolTurn": ("neo2.sdk.tools_api", "ToolTurn"),
-    "ToolContext": ("neo.agent.registry", "ToolContext"),
-    "ToolOutput": ("neo.agent.registry", "ToolOutput"),
+    "ToolContext": ("neo2.core.agent.registry", "ToolContext"),
+    "ToolOutput": ("neo2.core.agent.registry", "ToolOutput"),
     "host_tool": ("neo2.sdk.hosttools", "host_tool"),
     "HostTool": ("neo2.sdk.hosttools", "HostTool"),
-    "SAFETY_RULES": ("neo.agent.prompt", "SAFETY_RULES"),
-    "parse_yes_no": ("neo.agent.session", "answer_of"),
-    "NoRuntimeError": ("neo.runtime", "NoRuntimeError"),
-    "UnsupportedPlatform": ("neo.runtime", "UnsupportedPlatform"),
+    "SAFETY_RULES": ("neo2.core.agent.prompt", "SAFETY_RULES"),
+    "parse_yes_no": ("neo2.core.agent.session", "answer_of"),
+    "NoRuntimeError": ("neo2.core.runtime", "NoRuntimeError"),
+    "UnsupportedPlatform": ("neo2.core.runtime", "UnsupportedPlatform"),
 }
 _SUBMODULES = ("events", "providers", "testing", "macos", "sdk", "adapters", "mcp")
 

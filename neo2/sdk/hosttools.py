@@ -36,9 +36,9 @@ from typing import Any, Literal, get_origin, get_type_hints
 
 import pydantic
 
-from neo.agent import confirm as _confirm
-from neo.agent.confirm import Halt
-from neo.agent.registry import RegisteredTool, ToolContext, ToolOutput, fence
+from neo2.core.agent import confirm as _confirm
+from neo2.core.agent.confirm import Halt
+from neo2.core.agent.registry import RegisteredTool, ToolContext, ToolOutput, fence
 
 __all__ = ["HostTool", "host_tool", "RESERVED_NAMES"]
 
@@ -49,16 +49,16 @@ _NAME = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")  # what every model API accepts as 
 # labels a request's taint gives the outer model's own words ("caller": a model wrote the task;
 # "context": the context passed with it), which sit beside the names of the untrusted tools it read.
 RESERVED_NAMES = frozenset({"approve", "confirm", "cancel", "deny", "more_tools", "caller", "context"})
-_DROPPED_ARGS = ("confirm", "cancel")  # neo.agent.registry.Registry.invoke drops these (and "_…")
+_DROPPED_ARGS = ("confirm", "cancel")  # neo2.core.agent.registry.Registry.invoke drops these (and "_…")
 # What a failing untrusted tool said, at most: its fenced error stays whole where NEO cuts a result
-# short (800 characters after an approval, neo.agent.session).
+# short (800 characters after an approval, neo2.core.agent.session).
 _ERROR_CHARS = 600
 
 
 def builtin_names() -> frozenset[str]:
     """Every name NEO's own tools use — also those not loaded in this process or given to no agent."""
-    from neo.agent.registry import catalog
-    from neo.tools import PRESETS, REFUSED
+    from neo2.core.agent.registry import catalog
+    from neo2.core.tools import PRESETS, REFUSED
 
     return frozenset({*PRESETS["all"], *REFUSED, *(t.name for t in catalog().all())})
 

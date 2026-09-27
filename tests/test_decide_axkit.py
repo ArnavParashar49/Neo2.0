@@ -1,4 +1,4 @@
-"""neo.decide.axkit: the AX facade over media's primitives, and the new finders and writers, on a
+"""neo2.core.decide.axkit: the AX facade over media's primitives, and the new finders and writers, on a
 fake element tree patched into media (the same targets media's own tests patch). No real UI is
 read, no key is pressed and the pasteboard is never touched."""
 
@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import pytest
 
-from neo.decide import axkit, media
+from neo2.core.decide import axkit, media
 
 
 class El:

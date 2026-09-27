@@ -1,0 +1,78 @@
+"""Local text embeddings for memory and playbook recall.
+
+Uses all-MiniLM-L6-v2 (22M params, 384-d) via sentence-transformers on the CPU: ~5 ms per
+query, well-calibrated cosine similarities (related ≈ 0.5-0.9, unrelated ≈ 0-0.3). Laya's
+encoder was tried first and rejected — its mean-pooled vectors are anisotropic (everything scores
+~0.85), which made semantic recall useless. Returns None if the model can't be loaded, and
+callers fall back to keyword search.
+"""
+
+from __future__ import annotations
+
+import threading
+
+import numpy as np
+
+from neo2.core import logger
+from neo2.core.config import settings
+
+log = logger(__name__)
+
+MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+DIM = 384
+
+_lock = threading.Lock()
+_model = None
+_failed = False
+
+
+def _get():
+    global _model, _failed
+    if settings().embeddings == "off":
+        return None
+    with _lock:
+        if _model is None and not _failed:
+            try:
+                from sentence_transformers import SentenceTransformer
+
+                from neo2.core import effects, models
+
+                effects.guard("model", "load the memory's embedding model", via=SentenceTransformer)
+                _model = SentenceTransformer(
+                    MODEL, device="cpu", cache_folder=str(settings().models_dir), revision=models.EMBEDDER_REVISION
+                )
+            except Exception as e:  # noqa: BLE001 — embeddings are an optimisation, never a failure
+                log.warning(f"[memory] embedding model unavailable: {str(e)[:100]}")
+                _failed = True
+        return _model
+
+
+def ready() -> bool:
+    """Whether the model is loaded: a caller that must never wait for (or start) the load asks this."""
+    return _model is not None
+
+
+def embed_texts(texts: list[str]) -> np.ndarray | None:
+    if not texts:
+        return np.zeros((0, DIM), dtype=np.float32)
+    if settings().embeddings == "off":  # keyword recall only: the model is never loaded
+        return None
+    m = _get()
+    if m is None:
+        return None
+    with _lock:
+        v = m.encode(texts, normalize_embeddings=True, convert_to_numpy=True, show_progress_bar=False)
+    return np.asarray(v, dtype=np.float32)
+
+
+def warmup() -> None:
+    threading.Thread(target=_get, daemon=True).start()
+
+
+def cosine_top(query: np.ndarray, matrix: np.ndarray, k: int) -> list[tuple[int, float]]:
+    """Indices + similarities of the k most similar rows (rows are unit vectors)."""
+    if matrix.shape[0] == 0:
+        return []
+    sims = matrix @ query
+    idx = np.argsort(-sims)[:k]
+    return [(int(i), float(sims[i])) for i in idx]

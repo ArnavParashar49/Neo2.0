@@ -9,13 +9,13 @@ import asyncio
 
 import pytest
 
-from neo.tools import computer
-from neo.tools.computer import ax, pointer
+from neo2.core.tools import computer
+from neo2.core.tools.computer import ax, pointer
 
 
 @pytest.fixture
 def neo_family(monkeypatch):
-    from neo.decide import media
+    from neo2.core.decide import media
 
     monkeypatch.setattr(media, "_self_family", lambda: frozenset({10}))
     monkeypatch.setattr(media, "responsible_pid", lambda pid: 10 if pid in (10, 4242) else pid)
@@ -32,7 +32,7 @@ def test_the_test_window_is_neos_own_only_outside_a_self_test(neo_family):
 
 
 def test_a_probe_refuses_neo_and_protected_apps_but_not_the_test_window(neo_family, monkeypatch):
-    from neo import config
+    from neo2.core import config
 
     monkeypatch.setenv("NEO_PROTECTED_APPS", '["HostApprover"]')
     monkeypatch.setattr(config, "_settings", None)
@@ -59,8 +59,8 @@ def test_a_probe_refuses_neo_and_protected_apps_but_not_the_test_window(neo_fami
 
 def test_a_protected_app_is_never_brought_forward_by_the_pointer(monkeypatch):
     """bring() checks the app it would activate — an element's own app too — before activating it."""
-    from neo import config
-    from neo.tools.computer import apps, focus
+    from neo2.core import config
+    from neo2.core.tools.computer import apps, focus
 
     monkeypatch.setenv("NEO_PROTECTED_APPS", '["HostApprover"]')
     monkeypatch.setattr(config, "_settings", None)

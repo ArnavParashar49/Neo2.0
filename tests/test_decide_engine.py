@@ -18,13 +18,13 @@ import types
 import numpy as np
 import pytest
 
-from neo.decide import engine, routes
-from neo.reflex import zeroshot
+from neo2.core.decide import engine, routes
+from neo2.core.reflex import zeroshot
 
 _DRIVERS = dict(engine.DRIVERS)  # as shipped (the fixture below swaps them for generic methods)
 
 try:
-    from neo.decide.inventory import App
+    from neo2.core.decide.inventory import App
 
     _STUB_INVENTORY = None
 except ImportError:  # the inventory module lands separately: a minimal stand-in until it does
@@ -135,14 +135,14 @@ def prefer(label: str | None, p: float = 0.85):
 
 @pytest.fixture(autouse=True)
 def _hermetic(monkeypatch):
-    import neo.reflex
+    import neo2.core.reflex
 
     if _STUB_INVENTORY is not None:
-        monkeypatch.setitem(sys.modules, "neo.decide.inventory", _STUB_INVENTORY)
+        monkeypatch.setitem(sys.modules, "neo2.core.decide.inventory", _STUB_INVENTORY)
     monkeypatch.setattr(engine, "DRIVERS", {})  # generic methods: script / url / ax
     monkeypatch.setattr(engine, "_app_caps", lambda app: CAPS.get(app.bundle_id, frozenset()))
     monkeypatch.setattr(routes, "route_app", lambda kind, route: None)  # no store is asked about
-    monkeypatch.setattr(neo.reflex, "get_laya", lambda: None)
+    monkeypatch.setattr(neo2.core.reflex, "get_laya", lambda: None)
     monkeypatch.setattr(zeroshot, "_agent", None)  # Laya is off in tests: nothing ever loads
     engine._cache.clear()
     yield
@@ -172,10 +172,10 @@ class FakeReflex:
 
 
 def use_reflex(monkeypatch, kind: str | None, p: float = 0.0, kind_head: bool = True) -> FakeReflex:
-    import neo.reflex
+    import neo2.core.reflex
 
     fake = FakeReflex(kind, p, kind_head)
-    monkeypatch.setattr(neo.reflex, "get_laya", lambda: fake)
+    monkeypatch.setattr(neo2.core.reflex, "get_laya", lambda: fake)
     return fake
 
 
@@ -251,7 +251,7 @@ def test_prior_orders_when_laya_is_unsure(monkeypatch):
 
 
 def test_prior_orders_when_laya_is_unavailable_broken_or_busy(monkeypatch):
-    import neo.reflex
+    import neo2.core.reflex
 
     assert order(choose("play_media", "play something", APPS))[:3] == ["Tunewave", "web", "Cliptide"]
 
@@ -264,7 +264,7 @@ def test_prior_orders_when_laya_is_unavailable_broken_or_busy(monkeypatch):
 
     use_laya(monkeypatch, prefer("Cliptide", 0.99))
     monkeypatch.setattr(engine, "LAYA_LOCK_S", 0.05)
-    lock = neo.reflex.laya_lock()
+    lock = neo2.core.reflex.laya_lock()
     with lock:  # the reflex (or a retrain) holds Laya: don't wait, decide by the prior
         t = time.perf_counter()
         c = choose("play_media", "play something", APPS)
@@ -275,22 +275,22 @@ def test_prior_orders_when_laya_is_unavailable_broken_or_busy(monkeypatch):
 
 def test_a_busy_laya_costs_the_lock_wait_not_the_whole_timeout(monkeypatch):
     # the real get_laya() takes the shared lock itself (no timeout): the engine must not block in it
-    import neo.reflex
+    import neo2.core.reflex
 
     fake = use_laya(monkeypatch, prefer("Cliptide", 0.99))
     reflex = FakeReflex("play_media", 0.9)
 
     def get_laya_taking_the_lock():
-        with neo.reflex.laya_lock():
+        with neo2.core.reflex.laya_lock():
             return reflex
 
-    monkeypatch.setattr(neo.reflex, "get_laya", get_laya_taking_the_lock)
+    monkeypatch.setattr(neo2.core.reflex, "get_laya", get_laya_taking_the_lock)
     monkeypatch.setattr(engine, "LAYA_LOCK_S", 0.05)
     monkeypatch.setattr(engine, "LAYA_TIMEOUT_S", 2.0)
     held, done = threading.Event(), threading.Event()
 
     def reflex_busy():  # another thread holds Laya (a retrain chunk, a load); lets go within 3 s
-        with neo.reflex.laya_lock():
+        with neo2.core.reflex.laya_lock():
             held.set()
             done.wait(3)
 
@@ -313,7 +313,7 @@ def test_a_busy_laya_costs_the_lock_wait_not_the_whole_timeout(monkeypatch):
 
 
 def test_an_answer_that_came_too_late_is_never_computed(monkeypatch):
-    import neo.reflex
+    import neo2.core.reflex
 
     fake = FakeReflex("play_media", 0.9)
     gate = threading.Event()
@@ -322,7 +322,7 @@ def test_an_answer_that_came_too_late_is_never_computed(monkeypatch):
         gate.wait(5)
         return fake
 
-    monkeypatch.setattr(neo.reflex, "get_laya", slow_load)
+    monkeypatch.setattr(neo2.core.reflex, "get_laya", slow_load)
     monkeypatch.setattr(engine, "LAYA_TIMEOUT_S", 0.1)
 
     async def run():
@@ -419,7 +419,7 @@ def test_the_kinds_with_drivers_are_wired_as_planned():
     import importlib
     import inspect
 
-    from neo.decide.kinds import note
+    from neo2.core.decide.kinds import note
 
     t = engine.TASKS
     assert (t["add_event"].routes, t["add_event"].fallback, t["add_event"].signals) == (("eventkit.events",), "ics", ())
@@ -439,7 +439,7 @@ def test_many_used_apps_go_through_laya_shortlist(monkeypatch):
     film = mk("Reelio", "test.reelio", category="public.app-category.video", media_evidence=MEDIA, **LIGHT)
     apps.insert(17, film)
 
-    from neo.memory import embed
+    from neo2.core.memory import embed
 
     seen = []
 
@@ -459,7 +459,7 @@ def test_many_used_apps_go_through_laya_shortlist(monkeypatch):
 
 
 def test_without_the_embedder_the_most_used_apps_go_to_laya(monkeypatch):
-    from neo.memory import embed
+    from neo2.core.memory import embed
 
     music = {"category": "public.app-category.music", "media_evidence": MEDIA}
     apps = [mk(f"Player{i:02d}", f"test.p{i}", **music, **LIGHT) for i in range(24)]
@@ -472,7 +472,7 @@ def test_without_the_embedder_the_most_used_apps_go_to_laya(monkeypatch):
 
 
 def test_the_shortlist_never_waits_for_the_embedder_and_skips_when_laya_cannot_answer(monkeypatch):
-    from neo.memory import embed
+    from neo2.core.memory import embed
 
     music = {"category": "public.app-category.music", "media_evidence": MEDIA}
     apps = [mk(f"Player{i:02d}", f"test.p{i}", **music, **LIGHT) for i in range(24)]
@@ -555,7 +555,7 @@ def test_an_untried_method_does_not_hide_the_ones_that_keep_failing(monkeypatch)
     assert c.index("Tunewave") > c.index("web")
     # permission denials don't count as tries: they never demote the app
     engine._cache.clear()
-    from neo.config import settings
+    from neo2.core.config import settings
 
     (settings().data_dir / "decide.json").unlink()
     for _ in range(5):
@@ -609,7 +609,7 @@ def test_an_app_with_a_track_record_counts_as_used_even_without_spotlight_data()
 
 
 def test_decide_json_is_written_atomically(monkeypatch):
-    from neo.config import settings
+    from neo2.core.config import settings
 
     engine.record("play_media", "test.tunewave", "ax", True)
     p = settings().data_dir / "decide.json"
@@ -631,7 +631,7 @@ def test_decide_json_is_written_atomically(monkeypatch):
 
 
 def test_decide_json_survives_corruption():
-    from neo.config import settings
+    from neo2.core.config import settings
 
     p = settings().data_dir / "decide.json"
     p.parent.mkdir(parents=True, exist_ok=True)
@@ -660,7 +660,7 @@ def test_concurrent_records_are_not_lost():
         t.start()
     for t in threads:
         t.join()
-    from neo.config import settings
+    from neo2.core.config import settings
 
     data = json.loads((settings().data_dir / "decide.json").read_text())
     assert sum(data["arms"]["play_media"][k]["ax"]["ok"] for k in ("test.t0", "test.t1")) == 40
@@ -690,13 +690,13 @@ def zs_asked(monkeypatch):
 
 
 def test_a_kind_head_that_is_busy_or_abstains_is_never_second_guessed_by_zero_shot(monkeypatch, zs_asked):
-    import neo.reflex
+    import neo2.core.reflex
 
     # a retrain holds Laya past LAYA_LOCK_S: the head may well know, so don't guess - and don't
     # start loading 1.7 GB of zero-shot model while memory is tightest
     reflex = use_reflex(monkeypatch, "play_media", 0.9)
     monkeypatch.setattr(engine, "LAYA_LOCK_S", 0.05)
-    with neo.reflex.laya_lock():
+    with neo2.core.reflex.laya_lock():
         assert asyncio.run(engine.decide_kind("play jazz")) == ("other", 0.0, False)
     assert not zs_asked and not reflex.texts
     # the head abstains (not an action): that is its answer
@@ -714,7 +714,7 @@ def test_a_kind_head_that_is_busy_or_abstains_is_never_second_guessed_by_zero_sh
 
 
 def test_a_reflex_that_only_has_its_head_file_is_read_for_a_kind_head(monkeypatch, zs_asked):
-    import neo.reflex
+    import neo2.core.reflex
 
     class Reflex:  # no has_kind_head flag: its loaded head file says
         has_head = True
@@ -725,16 +725,16 @@ def test_a_reflex_that_only_has_its_head_file_is_read_for_a_kind_head(monkeypatc
         def decide(self, text):
             return types.SimpleNamespace(kind="play_media", kind_p=0.8)
 
-    monkeypatch.setattr(neo.reflex, "get_laya", lambda: Reflex({"intent": {}, "kind": {"classes": []}}))
+    monkeypatch.setattr(neo2.core.reflex, "get_laya", lambda: Reflex({"intent": {}, "kind": {"classes": []}}))
     assert asyncio.run(engine.decide_kind("play jazz")) == ("play_media", pytest.approx(0.8), False)
     assert not zs_asked
-    monkeypatch.setattr(neo.reflex, "get_laya", lambda: Reflex({"intent": {}, "kind": None}))
+    monkeypatch.setattr(neo2.core.reflex, "get_laya", lambda: Reflex({"intent": {}, "kind": None}))
     asyncio.run(engine.decide_kind("play jazz"))
     assert zs_asked == [{"text": "play jazz"}]
 
 
 def test_decide_kind_takes_at_most_the_laya_timeout_in_all(monkeypatch):
-    import neo.reflex
+    import neo2.core.reflex
 
     gate = threading.Event()
 
@@ -742,7 +742,7 @@ def test_decide_kind_takes_at_most_the_laya_timeout_in_all(monkeypatch):
         time.sleep(0.3)
         return FakeReflex(None, kind_head=False)
 
-    monkeypatch.setattr(neo.reflex, "get_laya", slow_reflex)
+    monkeypatch.setattr(neo2.core.reflex, "get_laya", slow_reflex)
     monkeypatch.setattr(zeroshot, "ask", lambda *a, **kw: gate.wait(3))  # the zero-shot model hangs
     monkeypatch.setattr(engine, "LAYA_TIMEOUT_S", 0.5)
 
@@ -786,7 +786,7 @@ def test_decide_kind_without_laya_is_other():
 
 
 def test_decide_kind_gives_up_quickly_when_laya_hangs(monkeypatch):
-    import neo.reflex
+    import neo2.core.reflex
 
     gate = threading.Event()
 
@@ -794,7 +794,7 @@ def test_decide_kind_gives_up_quickly_when_laya_hangs(monkeypatch):
         gate.wait(5)
         return None
 
-    monkeypatch.setattr(neo.reflex, "get_laya", slow)
+    monkeypatch.setattr(neo2.core.reflex, "get_laya", slow)
     monkeypatch.setattr(engine, "LAYA_TIMEOUT_S", 0.1)
 
     async def timed():
@@ -822,7 +822,7 @@ def test_no_app_names_in_the_engine():
 @pytest.fixture
 def dictionary(monkeypatch):
     """A tiny system word list: ordinary words vs. made-up site names."""
-    import neo.decide.inventory as inv
+    import neo2.core.decide.inventory as inv
 
     common = {"repeat", "loop", "speaker", "background", "shuffle"}
     monkeypatch.setattr(inv, "_common_words", lambda words: {w: w in common for w in words})
@@ -889,7 +889,7 @@ def test_neo_start_scans_the_apps_then_makes_sure_the_zero_shot_checkpoint_is_he
 
 
 def test_the_privacy_erase_forgets_what_was_learned_about_apps():
-    from neo.config import settings
+    from neo2.core.config import settings
 
     engine.record("play_media", "test.tunewave", "ax", True)
     (settings().data_dir / "decide.json.corrupt").write_text("{}")
@@ -903,13 +903,13 @@ def test_the_privacy_erase_forgets_what_was_learned_about_apps():
 
 @pytest.fixture
 def ledger(monkeypatch):
-    """A stand-in for neo.reflex.outcomes: what the engine reports."""
-    import neo.reflex
+    """A stand-in for neo2.core.reflex.outcomes: what the engine reports."""
+    import neo2.core.reflex
 
     got = []
     mod = types.SimpleNamespace(decided=lambda text, kind, key, ok: got.append((text, kind, key, ok)))
-    monkeypatch.setitem(sys.modules, "neo.reflex.outcomes", mod)
-    monkeypatch.setattr(neo.reflex, "outcomes", mod, raising=False)
+    monkeypatch.setitem(sys.modules, "neo2.core.reflex.outcomes", mod)
+    monkeypatch.setattr(neo2.core.reflex, "outcomes", mod, raising=False)
     return got
 
 
@@ -975,10 +975,10 @@ def test_attempts_outside_a_decision_are_not_reported(ledger):
 
 
 def test_no_ledger_or_a_broken_one_never_breaks_learning(monkeypatch):
-    import neo.reflex
+    import neo2.core.reflex
 
-    monkeypatch.setitem(sys.modules, "neo.reflex.outcomes", None)  # not there: ImportError
-    monkeypatch.delattr(neo.reflex, "outcomes", raising=False)
+    monkeypatch.setitem(sys.modules, "neo2.core.reflex.outcomes", None)  # not there: ImportError
+    monkeypatch.delattr(neo2.core.reflex, "outcomes", raising=False)
 
     async def request():
         await engine.choose("play_media", "play a song", APPS, said="play a song")
@@ -986,10 +986,10 @@ def test_no_ledger_or_a_broken_one_never_breaks_learning(monkeypatch):
 
     asyncio.run(request())
     broken = types.SimpleNamespace(decided=lambda *a: 1 / 0)
-    monkeypatch.setitem(sys.modules, "neo.reflex.outcomes", broken)
-    monkeypatch.setattr(neo.reflex, "outcomes", broken, raising=False)
+    monkeypatch.setitem(sys.modules, "neo2.core.reflex.outcomes", broken)
+    monkeypatch.setattr(neo2.core.reflex, "outcomes", broken, raising=False)
     asyncio.run(request())
-    monkeypatch.setattr(neo.reflex, "outcomes", types.SimpleNamespace(), raising=False)  # no decided()
+    monkeypatch.setattr(neo2.core.reflex, "outcomes", types.SimpleNamespace(), raising=False)  # no decided()
     asyncio.run(request())
     assert engine.prior("play_media", "test.tunewave", "ax") > 0.5
 
@@ -1042,7 +1042,7 @@ def test_a_notes_library_is_a_weak_note_candidate_and_a_document_editor_is_not()
 
 
 def test_the_web_search_tag_counts_only_for_a_browser():
-    from neo.decide.sdef import Command, Dictionary
+    from neo2.core.decide.sdef import Command, Dictionary
 
     d = Dictionary(commands={"search the web": Command("search the web", "sfrisrch", "", (("for", "qury", "text"),))},
                    classes={}, properties={}, enums={})
@@ -1070,7 +1070,7 @@ EVENTS = engine.Task("put a meeting on my calendar", wants=("event.make",), rout
 
 
 def store(**kw):
-    from neo.decide.inventory import App
+    from neo2.core.decide.inventory import App
 
     return App(bundle_id="route:eventkit.events", name="your Mac's calendar store", path="", kind="route",
                note="your Mac's calendar store (every calendar app here shows it): 2 writable calendars", **kw)
@@ -1102,7 +1102,7 @@ def test_a_store_with_access_counts_the_users_own_use(events):
 
 
 def test_apps_that_write_into_the_store_step_aside_unless_named(events):
-    from neo.decide import learned
+    from neo2.core.decide import learned
 
     events.append((store(), True))
     learned.put("store_views", "add_event:test.datebook", {"seen": True})
@@ -1119,7 +1119,7 @@ def test_excluded_candidates_stay_out(events):
 
 
 def test_routes_are_asked_off_the_loop_and_a_broken_one_is_no_candidate(monkeypatch):
-    from neo.decide import routes
+    from neo2.core.decide import routes
 
     seen = []
 
@@ -1196,7 +1196,7 @@ def test_a_per_person_choice_reorders_for_that_person_only():
 
 
 def test_version_1_files_load_and_are_saved_as_version_2():
-    from neo.config import settings
+    from neo2.core.config import settings
 
     p = settings().data_dir / "decide.json"
     p.parent.mkdir(parents=True, exist_ok=True)
@@ -1225,7 +1225,7 @@ def test_habitual_is_where_this_kind_last_went(monkeypatch):
 
 
 def test_a_wrong_route_is_demoted_at_once():
-    from neo.config import settings
+    from neo2.core.config import settings
 
     engine.record("write_note", "test.a", "script_make", False, "route_bad")
     arm = json.loads((settings().data_dir / "decide.json").read_text())["arms"]["write_note"]["test.a"]["script_make"]

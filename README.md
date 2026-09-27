@@ -62,7 +62,7 @@ Every tool is a plain Python function registered with a decorator; adding one is
 
 **Every call is kept small.** A request only ships the tools it plausibly needs — picked by embedding the request against each tool's description, then expanding families (`browser_*`, `mail_*`) and adding the screen tools when the reflex says so — typically 3–7 of its 52 plus a `more_tools` escape hatch the model can call mid-run. Tool results older than two turns are stubbed out of the history. Simple one-tool actions that miss the regex fast path go to Gemini Flash-Lite instead of the full model. Net effect: a day of use fits the free tiers, and Groq's 8K-TPM tier can run a whole agent turn as the fallback.
 
-**Brains are pluggable and fail over.** Gemini walks 3.8 → 3.7 → 3.5 Flash across every API key you give it (free-tier quota is per key *and* per model), backs off on overload, and hands text-only turns to Groq's `gpt-oss-120b` at ~700 tokens/s. `python -m neo --local` serves Gemma 4 12B on-device for offline use. An Anthropic key turns on Claude as an optional brain.
+**Brains are pluggable and fail over.** Gemini walks 3.8 → 3.7 → 3.5 Flash across every API key you give it (free-tier quota is per key *and* per model), backs off on overload, and hands text-only turns to Groq's `gpt-oss-120b` at ~700 tokens/s. `python -m neo2 --local` serves Gemma 4 12B on-device for offline use. An Anthropic key turns on Claude as an optional brain.
 
 **It acts while you're still talking.** The voice layer feeds the live transcript — words as you say them — through Laya and the fast-path matcher every few hundred milliseconds. A quick command that has clearly finished ("open YouTube and…") runs *before the sentence ends*; what already ran is remembered so the model's own later call for it is a no-op. Slow tools and agent tasks are non-blocking in the Live session: NEO acknowledges, keeps listening, and reports when the result is in and you're not mid-sentence. Several requests can run at once — ask for the time while it's still reading your mail — and the orb shows the most important thing going on.
 
@@ -94,7 +94,7 @@ brew install uv rustup && rustup default stable
 git clone https://github.com/ArnavParashar49/Neo2.0 && cd Neo2.0
 uv venv --python 3.12 && uv pip install -r requirements.lock && uv pip install -e ".[app,dev]"
 cp .env.example .env        # paste your keys (both free, no card)
-.venv/bin/python -m neo --doctor
+.venv/bin/python -m neo2 --doctor
 scripts/install-app.sh      # build NEO.app, install it to /Applications and start it
 ```
 
@@ -107,13 +107,13 @@ The browser tools need Chromium once: `.venv/bin/python -m playwright install ch
 
 It lives in the menu bar (the dotted orb), with no Dock icon: it runs the core, restarts it if it crashes or hangs, stops it on quit, and opens at login (menu → *Open at Login*). **⌥⌘** — press Option and Command together and let go — shows NEO; ⌘⇧Space works too. The first launch asks for **Accessibility** and **Screen Recording** (and the microphone when you first talk to it); the menu shows what's still missing, with shortcuts to the right settings pane. The app is signed by its bundle id, so what you grant once stays granted across updates. The menu also has *Settings & API Keys…* (opens `~/.neo/.env`), *Open Logs*, *Restart NEO* and *Erase NEO's Memory…*.
 
-Without the app: grant **Accessibility** and **Screen Recording** to the terminal you run `python -m neo` from, in *System Settings → Privacy & Security*. macOS asks for the **Microphone** on the first voice run. Models (Laya, Parakeet, Kokoro, Vosk) download on first run; the wake-word model is checked against a pinned checksum.
+Without the app: grant **Accessibility** and **Screen Recording** to the terminal you run `python -m neo2` from, in *System Settings → Privacy & Security*. macOS asks for the **Microphone** on the first voice run. Models (Laya, Parakeet, Kokoro, Vosk) download on first run; the wake-word model is checked against a pinned checksum.
 
 ## Run
 
 ```bash
-.venv/bin/python -m neo                 # voice + core; the overlay connects to it
-.venv/bin/python -m neo --text -v       # terminal REPL that shows routing and every tool call
+.venv/bin/python -m neo2                 # voice + core; the overlay connects to it
+.venv/bin/python -m neo2 --text -v       # terminal REPL that shows routing and every tool call
 cd ui && npm install && npm run tauri dev   # the overlay (npm run tauri build → NEO.app)
 ```
 
@@ -160,7 +160,7 @@ answered and what actually arrived; the full report is saved in `~/.neo/selftest
 
 Only your own words start it ("your computer controls", "NEO's", *apne* — "test the input controls" could be
 about a game), once per request: no model can, and a model handing your earlier words back doesn't run it
-again. For developers, `python -m neo.selftest controls` runs the same test from your own Terminal window, with
+again. For developers, `python -m neo2.core.selftest controls` runs the same test from your own Terminal window, with
 that terminal's permissions (Accessibility; Screen Recording for the screenshot checks); it refuses to run as a
 command NEO itself runs (its shell tool) or without an interactive terminal.
 
@@ -206,21 +206,21 @@ What NEO keeps, and for how long:
 - **Logs** (`~/.neo/logs`) record which tools ran and whether they worked — never what you typed, said, sent or read. The **audit log** records confirmed actions (not the words of messages).
 - The overlay is hidden from screen sharing, recordings and screenshots.
 
-**Erase everything:** menu → *Erase NEO's Memory…* (or `python -m neo --forget-all`) deletes memories, playbooks, session summaries, learned requests and their cached features, logs, the audit log and the logins in NEO's own browser. Your settings and keys stay. No model or web page can trigger it.
+**Erase everything:** menu → *Erase NEO's Memory…* (or `python -m neo2 --forget-all`) deletes memories, playbooks, session summaries, learned requests and their cached features, logs, the audit log and the logins in NEO's own browser. Your settings and keys stay. No model or web page can trigger it.
 
 ## Training the reflex
 
 The heads are trained locally in a few minutes (plus feature extraction the first time):
 
 ```bash
-.venv/bin/python -m neo.reflex.hf_data    # optional: ~45k public phrasings (English, Hindi, Hinglish) + a benchmark
-.venv/bin/python -m neo.reflex.generate   # optional: grow the dataset with Gemini + Groq, cross-labelled
-.venv/bin/python -m neo.reflex.generate --focus chat:quick_action   # or --from-confusion FILE, --lang hinglish: ≤300 rows at one weak boundary
-.venv/bin/python -m neo.reflex.finetune   # embed (cached per text), fit the heads, gate, save
-.venv/bin/python -m neo.reflex.evaluate   # the head on the benchmark: by language and source, recalls, tool/kind, ECE, latency
+.venv/bin/python -m neo2.core.reflex.hf_data    # optional: ~45k public phrasings (English, Hindi, Hinglish) + a benchmark
+.venv/bin/python -m neo2.core.reflex.generate   # optional: grow the dataset with Gemini + Groq, cross-labelled
+.venv/bin/python -m neo2.core.reflex.generate --focus chat:quick_action   # or --from-confusion FILE, --lang hinglish: ≤300 rows at one weak boundary
+.venv/bin/python -m neo2.core.reflex.finetune   # embed (cached per text), fit the heads, gate, save
+.venv/bin/python -m neo2.core.reflex.evaluate   # the head on the benchmark: by language and source, recalls, tool/kind, ECE, latency
 ```
 
-`hf_data` maps open intent, dialogue, function-calling and computer-use sets (CLINC150, MASSIVE en/hi, Hinglish-TOP, TOPv2, MTOP en/hi, Schema-Guided Dialogue, glaive, AgentNet, OmniACT, …) onto NEO's labels — route, tool, task kind, destructive, needs the screen, wants a reply — and writes `~/.neo/reflex_hf.jsonl`. Every source is pinned to a revision and only the columns or byte ranges it needs are downloaded; `neo/reflex/sources.py` lists each one's licence. Some are CC-BY-SA (Hinglish-TOP too: it translates TOPv2), so the rows are built on your Mac and never committed. The Hinglish-TOP, MTOP, CLINC and MASSIVE test splits go to `reflex_eval.jsonl`, a benchmark whose sentences — and their translations and re-punctuated copies, from any source — are never trained on, whichever sources a build uses. NEO's own templates share a few short sentences with it ("next song", "ruk jao"): evaluate on `dataset.benchmark(rows)`, which drops what the head trained on. Leyzer is opt-in (`--with leyzer`): the repository hosting its data is licensed non-commercial, no-derivatives. So is `sentence_types` (no licence stated). Romanised-Hindi templates for every class, including destructive requests and stop phrases ("bas karo", "ruk jao"), are part of NEO's own data (`neo/reflex/templates_hi.py`).
+`hf_data` maps open intent, dialogue, function-calling and computer-use sets (CLINC150, MASSIVE en/hi, Hinglish-TOP, TOPv2, MTOP en/hi, Schema-Guided Dialogue, glaive, AgentNet, OmniACT, …) onto NEO's labels — route, tool, task kind, destructive, needs the screen, wants a reply — and writes `~/.neo/reflex_hf.jsonl`. Every source is pinned to a revision and only the columns or byte ranges it needs are downloaded; `neo2/core/reflex/sources.py` lists each one's licence. Some are CC-BY-SA (Hinglish-TOP too: it translates TOPv2), so the rows are built on your Mac and never committed. The Hinglish-TOP, MTOP, CLINC and MASSIVE test splits go to `reflex_eval.jsonl`, a benchmark whose sentences — and their translations and re-punctuated copies, from any source — are never trained on, whichever sources a build uses. NEO's own templates share a few short sentences with it ("next song", "ruk jao"): evaluate on `dataset.benchmark(rows)`, which drops what the head trained on. Leyzer is opt-in (`--with leyzer`): the repository hosting its data is licensed non-commercial, no-derivatives. So is `sentence_types` (no licence stated). Romanised-Hindi templates for every class, including destructive requests and stop phrases ("bas karo", "ruk jao"), are part of NEO's own data (`neo2/core/reflex/templates_hi.py`).
 
 `finetune` embeds every sentence once with Laya's multilingual checkpoint (`NEO_REFLEX_ENCODER=english` keeps the older English one; a head only ever runs on the encoder it was trained for) and fits six small MLP heads on it — intent, destructive, needs the screen, wants a reply, tool and task kind — each a 3-seed ensemble with its loss and temperature chosen on held-out rows. Rows are split by hashes, so every run agrees: a fixed base slice of the public and NEO rows (the anchors), 20% of your verified requests (the user slice), and a calibration slice (10% of your requests plus 1 in 20 public groups). A new head replaces the current one only if it clears absolute floors and ceilings — every time, not just the first: how many destructive, stop and screen requests it catches (judged only on rows whose label a rule didn't write), and how often it goes off by mistake (a short command it would cancel every job on, conversation it would send to the vision agent) — and, against the current head, nothing gets worse by more than a row or two (or a couple of points) or significantly (paired McNemar): your requests, Hinglish and Devanagari, and each of those signals; nor may any of them drift from the first head's numbers (the anchors), so losses too small to reject one at a time can't pile up. Calibration (measured on rows that chose no temperature) alone never keeps NEO without a head. Every run also fits the head a run without your requests would fit — on none of your rows or labels — and "forget everything" puts that one back. With the public data (~50k rows), the multilingual head scores 0.86 on the benchmark (English 0.87, Hinglish 0.89, Devanagari 0.81) at ~12 ms a decision; the English checkpoint's 0.84 (Devanagari 0.70) at ~22 ms.
 
@@ -235,8 +235,8 @@ and retrain. Intents are `chat`, `quick_action`, `agent_task`, `stop`.
 ## Adding a tool
 
 ```python
-# neo/tools/mine.py
-from neo.agent.registry import ToolContext, tool
+# neo2/core/tools/mine.py
+from neo2.core.agent.registry import ToolContext, tool
 
 @tool(
     "wifi",
@@ -250,7 +250,7 @@ async def wifi(a: dict, c: ToolContext) -> str:
     return "Wi-Fi off."
 ```
 
-Register the module in `neo/tools/__init__.py` and it is available to every brain, to Gemini Live, and to the zero-LLM fast path. Return `confirm.gated(...)` from a handler to put it behind the confirmation gate.
+Register the module in `neo2/core/tools/__init__.py` and it is available to every brain, to Gemini Live, and to the zero-LLM fast path. Return `confirm.gated(...)` from a handler to put it behind the confirmation gate.
 
 ## Use NEO from your own app
 
@@ -258,10 +258,11 @@ NEO's agent — its tools, its safety rules and its confirmation gate — is als
 
 ### Install
 
-Python 3.12. The distribution is still named `neo` (the move to `neo2` on PyPI hasn't happened yet), so install it from GitHub or a checkout, with the extras you need:
+Python 3.12. The distribution is `neo2`; install it with the extras you need:
 
 ```bash
-pip install "neo[web,openai] @ git+https://github.com/ArnavParashar49/Neo2.0"
+pip install "neo2[web,openai]"
+pip install "neo2[web,openai] @ git+https://github.com/ArnavParashar49/Neo2.0"   # or the latest from GitHub
 uv pip install -e ".[web,openai]"      # or from a checkout
 ```
 
@@ -272,12 +273,16 @@ uv pip install -e ".[web,openai]"      # or from a checkout
 | `browser` | NEO's own headless Chromium (`browser_*`). Then run `playwright install chromium`. |
 | `mac` | the macOS tools: Accessibility, click and type, apps, files, shell, mail and calendar |
 | `gemini`, `openai`, `claude` | NEO's provider classes for Gemini, any OpenAI-compatible server (OpenAI, Groq, Ollama, LM Studio, vLLM…) and Claude. `brains` is all three. |
-| `mcp` | the MCP server, `neo2-mcp`. Add `web` for its default `--tools web`: `neo[mcp,web]`. |
+| `mcp` | the MCP server, `neo2-mcp`. Add `web` for its default `--tools web`: `neo2[mcp,web]`. |
 | `langchain` | `neo2.adapters.langchain` |
 | `embeddings` | local embeddings for memory recall |
 | `app` | everything NEO.app runs. `all` is `app` plus `mcp` and `langchain`. |
 
-It also installs `neo`, the package NEO.app runs, as a top-level package. Until the rename, don't install it next to NeuralEnsemble's `neo`, which uses the same folder name.
+NEO.app's own package comes inside it, as `neo2.core`: nothing but `neo2` is installed at the top level. (Before 2.1 it was a top-level `neo`, the folder NeuralEnsemble's `neo` uses too.)
+
+Installed NEO from GitHub before 2.1, when its distribution was called `neo`? Run `pip uninstall neo` first, then install `neo2`. Both own the files in `neo2/`, so removing `neo` afterwards takes `neo2`'s files with it: if that happened, install `neo2` again. (NeuralEnsemble's `neo` is another project: this is only about NEO's.)
+
+NEO logs to the `neo` logger, the name it always had: a module logs as `neo.<module>`, and the audit lines go to `neo.audit`. The library's own lines go to `neo2` (the MCP server's to `neo2.mcp`). Nothing is printed unless your app configures logging.
 
 The snippets below use top-level `await`: run them inside an `async def`, or in `python -m asyncio`.
 
@@ -452,7 +457,7 @@ The other helpers are `neo2.adapters.openai.tool_messages` (a whole turn of Chat
 
 ### Use NEO from an MCP client
 
-Install NEO with its `mcp` extra, and `web` for the web tools: `pip install "neo[mcp,web] @ git+https://github.com/ArnavParashar49/Neo2.0"`. Without `web`, `--tools web` gives only `weather` and `clock`.
+Install NEO with its `mcp` extra, and `web` for the web tools: `pip install "neo2[mcp,web] @ git+https://github.com/ArnavParashar49/Neo2.0"`. Without `web`, `--tools web` gives only `weather` and `clock`.
 
 <!-- snippet: mcp-command -->
 ```bash
@@ -500,18 +505,20 @@ An agent with the Mac tools (`tools="mac"`) clicks and types on the real desktop
 ## Project layout
 
 ```
-neo/
-  agent/      loop.py (the one agent loop) · session.py (routing) · confirm.py · registry.py · prompt.py
-  providers/  gemini.py · openai_compat.py (Groq, local) · claude.py · base.py (neutral message format)
-  reflex/     laya_reflex.py · features.py · finetune.py · generate.py · dataset.py · schema.py · templates_hi.py · hf_data.py + sources.py (public data)
-  tools/      computer/ (gates: every check, frozen · tools_ax/pointer/keys/label/apps · ax, input, pointer, screen, apps, shell) · browser.py · browser_live.py (the chat's live card) · system.py · web.py · memory_tool.py
-  voice/      wake.py · local.py · live.py · audio.py · pipeline.py
-  memory/     store.py (SQLite + FTS5 + vectors, playbooks, sessions) · embed.py · summarize.py
-  server/     ws.py (websocket to the overlay)
-  selftest/   controls.py ("check your computer controls") · testwin.py (its test window) · watch.py (its safety)
-neo2/         the library other apps embed: sdk/ (AsyncAgent, Agent, host tools) · adapters/ · mcp/ · providers.py
-ui/           Tauri 2 + React overlay (src/App.tsx, src/ws.ts, src-tauri/src/lib.rs)
-tests/        2,100+ tests, no network or real model (tests/sdk: the library)
+neo2/           the package: `python -m neo2` is NEO.app's core
+  core/         NEO itself (the top-level `neo` before 2.1)
+    agent/      loop.py (the one agent loop) · session.py (routing) · confirm.py · registry.py · prompt.py
+    providers/  gemini.py · openai_compat.py (Groq, local) · claude.py · base.py (neutral message format)
+    reflex/     laya_reflex.py · features.py · finetune.py · generate.py · dataset.py · schema.py · templates_hi.py · hf_data.py + sources.py (public data)
+    tools/      computer/ (gates: every check, frozen · tools_ax/pointer/keys/label/apps · ax, input, pointer, screen, apps, shell) · browser.py · browser_live.py (the chat's live card) · system.py · web.py · memory_tool.py
+    voice/      wake.py · local.py · live.py · audio.py · pipeline.py
+    memory/     store.py (SQLite + FTS5 + vectors, playbooks, sessions) · embed.py · summarize.py
+    server/     ws.py (websocket to the overlay)
+    selftest/   controls.py ("check your computer controls") · testwin.py (its test window) · watch.py (its safety)
+  sdk/ · adapters/ · mcp/ · providers.py    the library other apps embed (AsyncAgent, Agent, host tools)
+neo             a checkout's compatibility shim for the old name (not in the wheel)
+ui/             Tauri 2 + React overlay (src/App.tsx, src/ws.ts, src-tauri/src/lib.rs)
+tests/          2,100+ tests, no network or real model (tests/sdk: the library)
 ```
 
 ## Development
@@ -522,9 +529,11 @@ ruff check . && ruff format .
 cd ui && npx tsc --noEmit && (cd src-tauri && cargo check)
 ```
 
-The suite can't act on your Mac: in NEO's own test runs (`tests/conftest.py` turns the switch on first thing, and so does any pytest run of NEO from its source tree), `neo/effects.py` refuses every real effect (opening apps or pages, AppleScript, keystrokes and clicks, Accessibility actions, sound, permission prompts, model and web requests including web searches and loopback servers the suite didn't start, loading Laya or the on-device voice…) with `EffectRefused`, so a test fakes the step it needs; a test that means the real thing opts in for itself with `with neo.effects.allow(kind):`. A scratch script gets the same with `NEO_NO_EFFECTS=1` in its environment (plus `NEO_DATA_DIR` pointing somewhere temporary), and never reads `~/.neo/.env` or the checkout's `.env`; NEO.app never sets it.
+The suite can't act on your Mac: in NEO's own test runs (`tests/conftest.py` turns the switch on first thing, and so does any pytest run of NEO from its source tree), `neo2/core/effects.py` refuses every real effect (opening apps or pages, AppleScript, keystrokes and clicks, Accessibility actions, sound, permission prompts, model and web requests including web searches and loopback servers the suite didn't start, loading Laya or the on-device voice…) with `EffectRefused`, so a test fakes the step it needs; a test that means the real thing opts in for itself with `with neo2.core.effects.allow(kind):`. A scratch script gets the same with `NEO_NO_EFFECTS=1` in its environment (plus `NEO_DATA_DIR` pointing somewhere temporary), and never reads `~/.neo/.env` or the checkout's `.env`; NEO.app never sets it.
 
-An app with NEO installed isn't one of NEO's test runs, even under its own pytest: its programs and connections, and the actions its users approve for its agents, happen for real. To refuse them in its tests, it starts the test process with `NEO_NO_EFFECTS=1`. That covers the whole process, the app's own programs and connections too, and it takes effect when NEO is first imported. Wrap each step a test really means to make in `with neo.effects.allow("network"):` (or another kind). The allowance is process-wide while the block runs and ends with it.
+NEO's package moved from `neo/` to `neo2/core/` in 2.1 (the distribution from `neo` to `neo2`). A checkout keeps a small `neo` shim, so an old import or `python -m neo` still works, with a DeprecationWarning, as the very same modules; the wheel has no `neo`. A branch from before the move: if it is older than `c475799` (main just before the move), merge that into it first, then main, so git follows the move and leaves only ordinary conflicts (merged straight in, files the branch changed a lot come back whole under `neo/`). Then run `python scripts/codemod_neo2.py`, `git add` what it moved and any "file location" conflict, run `ruff check --fix neo neo2 tests scripts` (a rewritten import can sort differently) and review the diff. The codemod rewrites imports, module paths in strings and docs, `neo/…` paths and, in NEO's package, `logging.getLogger(__name__)` (to `logger(__name__)`, so the module still logs as `neo.<module>`), and lists anything it can't decide (`--check` changes nothing). A checkout's venv from before 2.1: `uv pip uninstall neo`, then install again; `scripts/install-app.sh` does the same for NEO.app's runtime. After pulling 2.1, run it before `npm run tauri dev` too: a dev build uses that runtime when there is one (or set `NEO_HOME` to a checkout with `neo2` installed), and one from before 2.1 can't start `-m neo2`. <!-- neo2-codemod: keep (names the old paths on purpose) -->
+
+An app with NEO installed isn't one of NEO's test runs, even under its own pytest: its programs and connections, and the actions its users approve for its agents, happen for real. To refuse them in its tests, it starts the test process with `NEO_NO_EFFECTS=1`. That covers the whole process, the app's own programs and connections too, and it takes effect when NEO is first imported. Wrap each step a test really means to make in `with neo2.core.effects.allow("network"):` (or another kind). The allowance is process-wide while the block runs and ends with it.
 
 ## Status and roadmap
 
@@ -540,4 +549,4 @@ Built by **Arnav Parashar** — [GitHub](https://github.com/ArnavParashar49) · 
 
 [MIT](LICENSE). The models and datasets NEO downloads keep their own licences: training
 rows derived from public datasets are generated on your Mac and never committed (see
-`neo/reflex/sources.py` for each source's licence).
+`neo2/core/reflex/sources.py` for each source's licence).

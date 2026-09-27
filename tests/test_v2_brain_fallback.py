@@ -17,12 +17,12 @@ from types import SimpleNamespace
 
 import pytest
 
-import neo.agent.session as sess_mod
-from neo.agent import confirm
-from neo.agent.registry import RegisteredTool, registry
-from neo.agent.session import Session
-from neo.events import EventBus
-from neo.providers.base import (
+import neo2.core.agent.session as sess_mod
+from neo2.core.agent import confirm
+from neo2.core.agent.registry import RegisteredTool, registry
+from neo2.core.agent.session import Session
+from neo2.core.events import EventBus
+from neo2.core.providers.base import (
     AllBrainsFailed,
     ImagePart,
     Message,
@@ -36,16 +36,16 @@ from neo.providers.base import (
     Turn,
     Unavailable,
 )
-from neo.providers.history import NO_RESULT, flatten, normalize
-from neo.reflex.schema import Decision
+from neo2.core.providers.history import NO_RESULT, flatten, normalize
+from neo2.core.reflex.schema import Decision
 
 _OBJ = {"type": "object", "properties": {}}
 
 
 @pytest.fixture(autouse=True)
 def _env(tmp_path, monkeypatch):
-    from neo import config, events
-    from neo.tools import load_all
+    from neo2.core import config, events
+    from neo2.core.tools import load_all
 
     monkeypatch.setattr(config, "_settings", None)
     monkeypatch.setenv("NEO_DATA_DIR", str(tmp_path))
@@ -139,9 +139,9 @@ def claude_violations(msgs: list[dict]) -> list[str]:
 
 
 def wire_violations(messages: list[Message]) -> dict[str, list[str]]:
-    from neo.providers.claude import _to_messages as claude_msgs
-    from neo.providers.gemini import _to_contents
-    from neo.providers.openai_compat import _to_messages as openai_msgs
+    from neo2.core.providers.claude import _to_messages as claude_msgs
+    from neo2.core.providers.gemini import _to_contents
+    from neo2.core.providers.openai_compat import _to_messages as openai_msgs
 
     return {
         k: v
@@ -284,7 +284,7 @@ def test_the_follow_up_after_a_yes_pairs_every_call_including_a_halted_parallel_
         Message.user("[User confirmed. zz_script result: window 1] Continue and finish the task."),
     ]
     assert not wire_violations(hist)
-    c = __import__("neo.providers.gemini", fromlist=["_to_contents"])._to_contents(hist, "gemini-3.8-flash")
+    c = __import__("neo2.core.providers.gemini", fromlist=["_to_contents"])._to_contents(hist, "gemini-3.8-flash")
     assert [x.role for x in c] == ["user", "model", "user", "user"]
 
 
@@ -395,8 +395,8 @@ def _per_minute(delay="20s"):
 @pytest.fixture
 def gem(monkeypatch):
     """A Gemini provider with two keys and fake clients: `script(model, key) -> response | error`."""
-    g = pytest.importorskip("neo.providers.gemini")
-    from neo import config
+    g = pytest.importorskip("neo2.core.providers.gemini")
+    from neo2.core import config
 
     monkeypatch.setattr(config, "_settings", None)
     monkeypatch.setenv("GEMINI_API_KEY", "k1")
@@ -493,7 +493,7 @@ def test_every_key_spent_fails_at_once_without_a_round_trip(gem):
     with pytest.raises(QuotaExhausted):
         asyncio.run(p.complete([Message.user("the next step")]))
     assert gem.sent == []  # …and not asked again on every step
-    assert "429" in str(e1.value)  # (neo.reflex.generate rotates on that)
+    assert "429" in str(e1.value)  # (neo2.core.reflex.generate rotates on that)
 
 
 def test_a_history_gemini_still_rejects_is_retried_once_as_text(gem):
@@ -552,7 +552,7 @@ def _long_run(steps: int = 10, approvals: int = 6) -> list[Message]:
 
 
 def test_the_follow_up_request_fits_groqs_budget_keeping_the_latest_steps(monkeypatch):
-    from neo.providers.fit import estimate, fit
+    from neo2.core.providers.fit import estimate, fit
 
     msgs = _long_run()
     tools = registry().specs()  # the approval follow-up offers every tool
@@ -577,7 +577,7 @@ def test_the_follow_up_request_fits_groqs_budget_keeping_the_latest_steps(monkey
 
 
 def test_a_request_that_cannot_fit_fails_as_too_large():
-    from neo.providers.fit import fit
+    from neo2.core.providers.fit import fit
 
     with pytest.raises(RequestTooLarge):
         fit(
@@ -594,7 +594,7 @@ def test_groqs_413_teaches_the_real_size_and_the_request_is_fitted_again(monkeyp
     import httpx
     import openai
 
-    from neo.providers.openai_compat import OpenAICompatProvider
+    from neo2.core.providers.openai_compat import OpenAICompatProvider
 
     p = OpenAICompatProvider(name="groq", base_url="https://api.groq.test/v1", api_key="k", model="m",
                              reasoning_effort=True, token_budget=8000)  # fmt: skip
@@ -647,7 +647,7 @@ class FakeBrain:
 
 @pytest.fixture
 def chain(monkeypatch):
-    import neo.providers as prov
+    import neo2.core.providers as prov
 
     monkeypatch.setattr(prov, "_demoted", {})
 
@@ -668,7 +668,7 @@ def test_a_spent_brain_is_asked_last_and_the_next_one_at_once(chain):
 
 
 def test_a_too_large_request_does_not_bench_the_brain(chain):
-    import neo.providers as prov
+    import neo2.core.providers as prov
 
     groq = FakeBrain("groq", RequestTooLarge("413"))
     local = FakeBrain("local", answer="local")
@@ -693,7 +693,7 @@ def test_a_short_wait_is_waited_out_when_every_brain_failed(chain):
 
 
 def test_when_every_brain_fails_the_task_ends_saying_which_and_why(chain):
-    from neo.agent.loop import run_agent
+    from neo2.core.agent.loop import run_agent
 
     until = time.time() + 3 * 3600
     c = chain(
@@ -703,7 +703,7 @@ def test_when_every_brain_fails_the_task_ends_saying_which_and_why(chain):
     )
 
     async def go():
-        from neo import config
+        from neo2.core import config
 
         config.settings().groq_api_key = "k"  # a brain was set up: this isn't the no-key message
         return await run_agent("play chess as white", provider=c, system="", tools=[], max_steps=2)
@@ -721,8 +721,8 @@ def test_when_every_brain_fails_the_task_ends_saying_which_and_why(chain):
 
 
 def test_all_brains_failed_names_brains_that_are_not_set_up(chain, monkeypatch):
-    import neo.providers as prov
-    from neo import config
+    import neo2.core.providers as prov
+    from neo2.core import config
 
     def make(n):
         if n == "claude":
@@ -738,7 +738,7 @@ def test_all_brains_failed_names_brains_that_are_not_set_up(chain, monkeypatch):
 
 
 def test_tool_specs_given_to_fit_survive_when_nothing_was_used_yet():
-    from neo.providers.fit import fit
+    from neo2.core.providers.fit import fit
 
     params = {
         "type": "object",
@@ -762,11 +762,11 @@ def test_the_chess_run_survives_on_groq_when_gemini_is_spent(monkeypatch):
     import httpx
     import openai
 
-    import neo.providers as prov
-    from neo import config
-    from neo.providers import local_server
+    import neo2.core.providers as prov
+    from neo2.core import config
+    from neo2.core.providers import local_server
 
-    g = pytest.importorskip("neo.providers.gemini")
+    g = pytest.importorskip("neo2.core.providers.gemini")
     monkeypatch.setattr(config, "_settings", None)
     for k, v in (("GEMINI_API_KEY", "k1"), ("GEMINI_API_KEYS", "k2"), ("GROQ_API_KEY", "g1")):
         monkeypatch.setenv(k, v)
@@ -882,9 +882,9 @@ def _chess_follow_up(tree_chars: int = 6000, approvals: int = 1) -> list[Message
 
 
 def test_a_fitted_request_keeps_more_tools_and_fills_its_room_with_the_tools_it_dropped():
-    from neo.agent.prompt import build
-    from neo.agent.toolselect import MORE_TOOLS
-    from neo.providers.fit import estimate, fit
+    from neo2.core.agent.prompt import build
+    from neo2.core.agent.toolselect import MORE_TOOLS
+    from neo2.core.providers.fit import estimate, fit
 
     msgs = _chess_follow_up()
     tools = [*registry().specs(), MORE_TOOLS]  # the approval follow-up: every tool, and more_tools
@@ -906,7 +906,7 @@ def test_a_fitted_request_keeps_more_tools_and_fills_its_room_with_the_tools_it_
 
 
 def test_older_conversation_goes_before_the_tools_the_run_has_not_used():
-    from neo.providers.fit import fit
+    from neo2.core.providers.fit import fit
 
     earlier = []
     for j in range(3):
@@ -920,7 +920,7 @@ def test_older_conversation_goes_before_the_tools_the_run_has_not_used():
 
 
 def test_essential_tools_are_never_dropped():
-    from neo.providers.fit import fit
+    from neo2.core.providers.fit import fit
 
     fence = [ToolSpec(f"b{i}", "A browser tool. " * 20, _OBJ, essential=True) for i in range(12)]
     f = fit(_chess_follow_up(), system="sys", tools=fence, budget=4000, max_tokens=512, vision=False)
@@ -950,7 +950,7 @@ class ShownBrain:
 
 
 def test_more_tools_is_offered_in_a_follow_up_and_gives_back_what_fitting_dropped():
-    from neo.agent.loop import run_agent
+    from neo2.core.agent.loop import run_agent
 
     b = ShownBrain(
         [Turn(tool_calls=[ToolCall("m1", "more_tools", {"query": "click"})]), Turn(text="Your move.")],
@@ -973,7 +973,7 @@ def test_more_tools_is_offered_in_a_follow_up_and_gives_back_what_fitting_droppe
 
 
 def test_a_strict_run_marks_its_whole_fence_essential():
-    from neo.agent.loop import run_agent
+    from neo2.core.agent.loop import run_agent
 
     fence = [ToolSpec("browser_read", "Read.", _OBJ), ToolSpec("browser_click", "Click.", _OBJ)]
     got = {}
@@ -994,10 +994,10 @@ def test_a_strict_run_marks_its_whole_fence_essential():
 
 
 def test_the_lite_brain_is_demoted_under_its_own_name(monkeypatch):
-    import neo.providers as prov
-    from neo import config
+    import neo2.core.providers as prov
+    from neo2.core import config
 
-    g = pytest.importorskip("neo.providers.gemini")
+    g = pytest.importorskip("neo2.core.providers.gemini")
     monkeypatch.setattr(config, "_settings", None)
     monkeypatch.setenv("GEMINI_API_KEY", "k1")
     monkeypatch.setattr(prov, "_cache", {})
@@ -1018,7 +1018,7 @@ def test_the_lite_brain_is_demoted_under_its_own_name(monkeypatch):
     assert asyncio.run(prov.Chain(["gemini_lite", "groq"]).complete([Message.user("hi")])).text == "from groq"
     assert lite.name == "gemini_lite" and set(prov._demoted) == {"gemini_lite"}
     assert prov.brain("agent")._order()[0] == "gemini"  # the main brain still goes first
-    from neo.providers.base import failure_words
+    from neo2.core.providers.base import failure_words
 
     assert failure_words(lite.name, QuotaExhausted("x")).startswith("Gemini Lite ")
 
@@ -1027,7 +1027,7 @@ def test_the_lite_brain_is_demoted_under_its_own_name(monkeypatch):
 
 
 def test_quota_follows_the_key_not_its_place_in_the_list(gem, monkeypatch):
-    from neo import config
+    from neo2.core import config
 
     g = gem.g
     gem.rules["*"] = _err(429, "quota", _per_day())
@@ -1062,7 +1062,7 @@ def test_quota_follows_the_key_not_its_place_in_the_list(gem, monkeypatch):
 
 
 def test_a_key_gemini_calls_invalid_is_skipped_for_the_next(gem):
-    from neo.providers.base import failure_words
+    from neo2.core.providers.base import failure_words
 
     bad = _err(
         400,
@@ -1189,7 +1189,7 @@ def test_the_only_observation_of_a_run_is_kept_whole_through_approvals():
 
 
 def test_fit_spares_the_newest_observation_behind_the_halted_steps():
-    from neo.providers.fit import fit
+    from neo2.core.providers.fit import fit
 
     msgs = _chess_follow_up(tree_chars=6000, approvals=3)
     msgs = [Message.user("before " * 10), *_pair("z", "ax_tree", "stale tree " * 500)] + msgs
@@ -1206,7 +1206,7 @@ def test_a_learned_size_is_capped_and_comes_back_down(monkeypatch):
     import httpx
     import openai
 
-    from neo.providers import openai_compat as oc
+    from neo2.core.providers import openai_compat as oc
 
     p = oc.OpenAICompatProvider(name="local", base_url="https://api.local.test/v1", api_key="k", model="m",
                                 token_budget=8000)  # fmt: skip
@@ -1233,7 +1233,7 @@ def test_a_learned_size_is_capped_and_comes_back_down(monkeypatch):
     assert 1.0 < p._scale <= oc._MAX_SCALE  # not 1.4^12
 
     # Requests that go through say how big they really were: the estimate walks back to that.
-    from neo.providers.fit import estimate
+    from neo2.core.providers.fit import estimate
 
     state["prompt"] = int(estimate(msgs, "", None, vision=False))
     for _ in range(8):
@@ -1245,8 +1245,8 @@ def test_a_learned_size_is_capped_and_comes_back_down(monkeypatch):
 
 
 def test_a_small_brain_keeps_the_board_whole_before_stale_results_of_other_tools():
-    from neo.agent.toolselect import MORE_TOOLS
-    from neo.providers.fit import fit
+    from neo2.core.agent.toolselect import MORE_TOOLS
+    from neo2.core.providers.fit import fit
 
     board = ("AXButton “Board” " * 400)[:6000]
     msgs = [
@@ -1277,8 +1277,8 @@ def test_a_small_brain_keeps_the_board_whole_before_stale_results_of_other_tools
 
 
 def test_cutting_what_was_kept_whole_frees_room_for_it_not_for_tools():
-    from neo.agent.toolselect import MORE_TOOLS
-    from neo.providers.fit import estimate, fit
+    from neo2.core.agent.toolselect import MORE_TOOLS
+    from neo2.core.providers.fit import estimate, fit
 
     board = "AXButton “Board” " * 1500  # far more than Groq's 8K takes whole
     msgs = [Message.user("play chess as white"), *_pair("a", "open_app", "Opened Chess."),
@@ -1294,9 +1294,9 @@ def test_cutting_what_was_kept_whole_frees_room_for_it_not_for_tools():
 
 
 def test_a_per_minute_brain_gets_back_the_first_tools_but_not_a_prompt_of_its_whole_budget():
-    from neo.agent.loop import all_tools
-    from neo.agent.toolselect import MORE_TOOLS, SCREEN
-    from neo.providers.fit import estimate, fit
+    from neo2.core.agent.loop import all_tools
+    from neo2.core.agent.toolselect import MORE_TOOLS, SCREEN
+    from neo2.core.providers.fit import estimate, fit
 
     msgs = _chess_follow_up()
     tools = [*all_tools(registry()), MORE_TOOLS]  # the follow-up after a yes: every tool
@@ -1333,7 +1333,7 @@ def test_the_one_brain_left_is_waited_on_through_a_per_minute_limit(chain, monke
 
 
 def test_the_chain_names_brains_the_way_the_user_hears_them(chain, monkeypatch):
-    from neo.events import bus
+    from neo2.core.events import bus
 
     notes: list[str] = []
 
@@ -1371,7 +1371,7 @@ def _fake_every_tool(monkeypatch):
 
 
 def test_a_yes_after_another_request_continues_the_request_it_was_asked_for(monkeypatch):
-    from neo.providers.fit import fit
+    from neo2.core.providers.fit import fit
 
     _fake_every_tool(monkeypatch)
     ran: list[str] = []
@@ -1418,10 +1418,10 @@ def test_a_yes_after_another_request_continues_the_request_it_was_asked_for(monk
     assert asks[-1].startswith("[User confirmed (request: “play chess as white”).")
     # The other request came before the one being continued, not between its steps.
     assert asks.index("what's the weather like") < asks.index("play chess as white")
-    from neo.providers.history import request_start
+    from neo2.core.providers.history import request_start
 
     assert msgs[request_start(msgs)].text == "play chess as white"
-    from neo.agent.toolselect import MORE_TOOLS
+    from neo2.core.agent.toolselect import MORE_TOOLS
 
     tools = [*registry().specs(), MORE_TOOLS]  # (what the follow-up after a yes offers)
     f = fit(msgs, system="You are NEO. " * 200, tools=tools, budget=8000, max_tokens=4096, vision=False,
@@ -1474,7 +1474,7 @@ def _approvals(board: str, n: int) -> list[Message]:
 
 
 def test_the_only_look_at_the_board_stays_in_view_when_the_window_opens_on_a_note():
-    from neo.providers.fit import fit
+    from neo2.core.providers.fit import fit
 
     board = "AXButton “e2” " * 300
     s = Session(reflex=_agent_reflex())

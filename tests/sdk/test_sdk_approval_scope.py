@@ -14,7 +14,7 @@ import asyncio
 import pytest
 
 import neo2
-from neo.agent import confirm
+from neo2.core.agent import confirm
 from neo2.testing import ScriptedBrain, ToolCall, Turn
 
 pytestmark = pytest.mark.portable
@@ -194,7 +194,7 @@ async def test_work_the_approved_call_leaves_running_gets_no_approval():
 async def test_an_approval_ends_with_its_block_for_every_task_that_holds_it(tmp_path):
     """NEO's own gate: a task started inside approved() keeps the approval in its context, but once
     the block is over it approves nothing there (consume, approval_active, approving)."""
-    from neo import runtime
+    from neo2.core import runtime
 
     agent = neo2.AsyncAgent(neo2.AgentConfig(tools="none"), provider=ScriptedBrain([]))
     async with agent:

@@ -7,10 +7,10 @@ from __future__ import annotations
 
 import pytest
 
-from neo.agent.session import _match_fast_path
-from neo.decide import eventkit, inventory, sites
-from neo.decide.inventory import App
-from neo.events import EventBus
+from neo2.core.agent.session import _match_fast_path
+from neo2.core.decide import eventkit, inventory, sites
+from neo2.core.decide.inventory import App
+from neo2.core.events import EventBus
 
 NOTES = App(bundle_id="test.notes", name="Notes", path="/Applications/Notes.app")
 WEBBY = App(bundle_id="test.webby", name="Webby", path="/Applications/Webby.app", handles=("https", "http"))
@@ -19,8 +19,8 @@ KINDS = ("write_note", "add_reminder", "add_event", "read_calendar", "read_mail"
 
 @pytest.fixture(autouse=True)
 def _env(monkeypatch, tmp_path):
-    from neo import events
-    from neo.tools import load_all
+    from neo2.core import events
+    from neo2.core.tools import load_all
 
     monkeypatch.setattr(events, "_bus", EventBus())
     load_all()

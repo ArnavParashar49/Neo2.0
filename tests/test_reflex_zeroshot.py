@@ -10,8 +10,8 @@ import types
 
 import pytest
 
-import neo.reflex
-from neo.reflex import zeroshot
+import neo2.core.reflex
+from neo2.core.reflex import zeroshot
 
 Q = {"app": {"type": "choice", "instructions": "Which?", "criteria": {"A": "a", "B": "b"}}}
 
@@ -23,7 +23,7 @@ class FakeAgent:
         self.closed = False
 
     def system_one(self, state, questions):
-        self.locked.append(neo.reflex.laya_lock().locked())
+        self.locked.append(neo2.core.reflex.laya_lock().locked())
         self.calls.append(state)
         answer = {"type": "choice", "choice": "A", "probabilities": {"A": 0.9, "B": 0.1}}
         return {"answers": {q: answer for q in questions}}
@@ -35,7 +35,7 @@ class FakeAgent:
 @pytest.fixture
 def loader(monkeypatch):
     """Laya on, the checkpoint faked: ``loader.gate`` holds the load until set."""
-    from neo import config
+    from neo2.core import config
 
     monkeypatch.setenv("NEO_REFLEX", "laya")
     monkeypatch.setattr(config, "_settings", None)
@@ -46,7 +46,7 @@ def loader(monkeypatch):
         return "/nowhere/typed-decisions"
 
     def open_(path):
-        state.locked_while_opening.append(neo.reflex.laya_lock().locked())
+        state.locked_while_opening.append(neo2.core.reflex.laya_lock().locked())
         state.gate.wait(5)
         if state.fail:
             raise RuntimeError("no torch here")
@@ -118,7 +118,7 @@ def test_a_slow_load_answers_none_within_the_wait_and_drops_the_question(loader)
 def test_a_question_that_went_stale_waiting_for_the_lock_is_skipped(loader):
     zeroshot.ask("s", Q, wait_s=2.0)
     stale = threading.Event()
-    with neo.reflex.laya_lock():
+    with neo2.core.reflex.laya_lock():
         out = []
         t = threading.Thread(target=lambda: out.append(zeroshot.ask("late", Q, wait_s=2.0, stale=stale)))
         t.start()
@@ -133,7 +133,7 @@ def test_a_busy_laya_costs_the_wait_not_more(loader):
     held, done = threading.Event(), threading.Event()
 
     def reflex_busy():
-        with neo.reflex.laya_lock():
+        with neo2.core.reflex.laya_lock():
             held.set()
             done.wait(3)
 
@@ -168,14 +168,14 @@ def test_unload_waits_for_a_busy_laya(loader, monkeypatch):
     monkeypatch.setattr(zeroshot, "BUSY_RETRY_S", 0.05)
     zeroshot.ask("s", Q, wait_s=2.0)
     agent = loader.opened[0]
-    with neo.reflex.laya_lock():
+    with neo2.core.reflex.laya_lock():
         time.sleep(0.3)  # idle, but Laya is busy: it must not free the model mid-pass
         assert not agent.closed and zeroshot._agent is agent
     assert wait_until(lambda: agent.closed)
 
 
 def test_laya_off_or_a_failed_load_answers_none_without_retrying_at_once(loader, monkeypatch):
-    from neo import config
+    from neo2.core import config
 
     monkeypatch.setenv("NEO_REFLEX", "off")
     monkeypatch.setattr(config, "_settings", None)
@@ -186,7 +186,7 @@ def test_laya_off_or_a_failed_load_answers_none_without_retrying_at_once(loader,
     assert zeroshot.ask("s", Q, wait_s=1.0) is None
     assert zeroshot.ask("s", Q, wait_s=1.0) is None
     assert len(loader.locked_while_opening) == 1  # tried once; not again within RETRY_S
-    assert not neo.reflex.laya_lock().locked()
+    assert not neo2.core.reflex.laya_lock().locked()
 
 
 def test_a_checkpoint_not_on_this_mac_downloads_in_the_background_and_nobody_waits_for_it(loader, monkeypatch):
@@ -207,7 +207,7 @@ def test_a_checkpoint_not_on_this_mac_downloads_in_the_background_and_nobody_wai
         assert zeroshot.ask("s", Q, wait_s=1.0) is None
         assert time.perf_counter() - t < 0.5
     assert downloads == [True] and not loader.opened
-    assert not zeroshot.available()  # neo/decide doesn't even shortlist for it meanwhile
+    assert not zeroshot.available()  # neo2/core/decide doesn't even shortlist for it meanwhile
     gate.set()
     assert wait_until(lambda: zeroshot._fetching is None)
     assert zeroshot.available()
@@ -235,7 +235,7 @@ def test_only_a_complete_checkpoint_on_this_mac_is_found_and_looking_never_downl
 
 
 def test_prefetch_downloads_without_loading_and_a_failed_download_waits_before_retrying(loader, monkeypatch):
-    from neo import config
+    from neo2.core import config
 
     got, offline = [], []
 
@@ -270,7 +270,7 @@ def test_prefetch_of_a_checkpoint_already_here_never_waits_for_the_reflex(loader
     got = []
     monkeypatch.setattr(zeroshot, "_local", lambda: "/nowhere/typed-decisions")
     monkeypatch.setattr(zeroshot, "checkpoint_dir", lambda download=True: got.append(download))
-    with neo.reflex.laya_lock():  # the reflex is still loading at NEO's start
+    with neo2.core.reflex.laya_lock():  # the reflex is still loading at NEO's start
         zeroshot.prefetch()
         assert wait_until(lambda: zeroshot._fetching is None) and not got
         assert zeroshot.available()
@@ -279,7 +279,7 @@ def test_prefetch_of_a_checkpoint_already_here_never_waits_for_the_reflex(loader
 def test_the_checkpoint_is_fetched_at_the_pinned_revision_with_only_its_own_files(monkeypatch):
     import huggingface_hub
 
-    from neo import models
+    from neo2.core import models
 
     asked = {}
 

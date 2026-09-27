@@ -1,4 +1,4 @@
-"""neo/tools/computer split into files (gates, tools_ax, tools_pointer, tools_keys, tools_label,
+"""neo2/core/tools/computer split into files (gates, tools_ax, tools_pointer, tools_keys, tools_label,
 tools_apps, phrases) with no change in behaviour: the catalog keeps its order, every gate lives once
 in the frozen gates module and is looked up there at call time, and a patch through the package
 reaches what the tools really call."""
@@ -16,9 +16,9 @@ from pathlib import Path
 
 import pytest
 
-from neo import effects
-from neo.tools import computer
-from neo.tools.computer import gates
+from neo2.core import effects
+from neo2.core.tools import computer
+from neo2.core.tools.computer import gates
 
 ROOT = Path(__file__).resolve().parents[1]
 COMPUTER = Path(computer.__file__).resolve().parent
@@ -54,7 +54,7 @@ def test_neo_apps_catalog_order_is_the_one_before_the_split(tmp_path):
     env = {**os.environ, "HOME": str(home), "NEO_DATA_DIR": str(tmp_path / "data"), "NEO_REFLEX": "off"}
     env.pop("PYTEST_CURRENT_TEST", None)
     code = (
-        "import json\nfrom neo.agent.registry import catalog\nfrom neo.tools import load_all\nload_all()\n"
+        "import json\nfrom neo2.core.agent.registry import catalog\nfrom neo2.core.tools import load_all\nload_all()\n"
         "print(json.dumps([t.name for t in catalog().all()]))"
     )
     with effects.allow("process"):
@@ -65,11 +65,11 @@ def test_neo_apps_catalog_order_is_the_one_before_the_split(tmp_path):
 
 
 def test_every_computer_tool_has_its_place_in_the_order():
-    from neo.agent.registry import catalog
-    from neo.tools.computer import _catalog
+    from neo2.core.agent.registry import catalog
+    from neo2.core.tools.computer import _catalog
 
     assert _catalog.pending() == []  # all registered
-    mine = [t.name for t in catalog().all() if t.handler.__module__.startswith("neo.tools.computer.")]
+    mine = [t.name for t in catalog().all() if t.handler.__module__.startswith("neo2.core.tools.computer.")]
     assert mine and all(n in computer.ORDER for n in mine), [n for n in mine if n not in computer.ORDER]
     assert mine == [n for n in computer.ORDER if n in mine]
 
@@ -111,15 +111,15 @@ def test_a_patch_through_the_package_reaches_the_file_that_defines_it(monkeypatc
     assert computer._test_window_pid == 0
     with computer.allow_test_window(77):
         assert computer._test_window_pid == 77
-    assert isinstance(computer.ax, types.ModuleType) and computer.inp.__name__ == "neo.tools.computer.input"
+    assert isinstance(computer.ax, types.ModuleType) and computer.inp.__name__ == "neo2.core.tools.computer.input"
 
 
 def test_the_tools_call_the_gates_at_call_time(monkeypatch):
     """A gate patched through the package is the one ax_press, click_text, type_text and hotkey
     call — no tool kept a copy of it."""
-    from neo.agent.registry import ToolContext, registry
-    from neo.tools import load_all
-    from neo.tools.computer import ax
+    from neo2.core.agent.registry import ToolContext, registry
+    from neo2.core.tools import load_all
+    from neo2.core.tools.computer import ax
 
     load_all()
     asked: list[str] = []

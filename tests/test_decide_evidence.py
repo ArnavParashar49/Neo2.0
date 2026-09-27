@@ -1,4 +1,4 @@
-"""neo.decide.evidence + the inventory's new fields and helpers: what bundles declare beyond their
+"""neo2.core.decide.evidence + the inventory's new fields and helpers: what bundles declare beyond their
 scripting dictionary (SiriKit intents, App Intents, share extensions, services, usage keys, the
 document class), read from fixture bundles in a temp dir. Nothing real is scanned or launched."""
 
@@ -11,8 +11,8 @@ from pathlib import Path
 
 import pytest
 
-from neo.decide import evidence
-from neo.decide import inventory as inv
+from neo2.core.decide import evidence
+from neo2.core.decide import inventory as inv
 
 FIX = Path(__file__).parent / "fixtures" / "decide"
 
@@ -155,7 +155,7 @@ def test_a_file_the_parsers_choke_on_is_skipped_too(tmp_path):
 
 
 def test_the_responsible_apps_usage_keys(tmp_path, monkeypatch):
-    from neo.decide import media
+    from neo2.core.decide import media
 
     app = make_bundle(tmp_path, "Host", {"NSCalendarsFullAccessUsageDescription": "x", "NSContactsUsageDescription": "y"})
     exe = app / "Contents" / "MacOS" / "Host"
@@ -226,7 +226,7 @@ def test_evidence_that_cant_be_read_never_drops_the_app(mac, monkeypatch):
 
 
 def test_snapshot_and_lookups_never_start_a_scan(mac, monkeypatch):
-    from neo.decide import media
+    from neo2.core.decide import media
 
     make_bundle(mac, "Chatter", {"CFBundleName": "Chatter"})
     assert inv.snapshot() is None and inv.app_for_bundle("test.chatter") is None

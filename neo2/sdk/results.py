@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from neo.providers.base import ImagePart
+from neo2.core.providers.base import ImagePart
 from neo2.sdk.approval import ApprovalRequest, _plain
 
 Status = Literal[

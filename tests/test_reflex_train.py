@@ -10,8 +10,8 @@ import json
 import numpy as np
 import pytest
 
-from neo.reflex import finetune
-from neo.reflex import laya_reflex as lr
+from neo2.core.reflex import finetune
+from neo2.core.reflex import laya_reflex as lr
 
 _DIM = 12
 # word -> (intent, tool, kind-ish): the fake encoder puts each word's sentences in its own cluster
@@ -74,7 +74,7 @@ def _args(**kw) -> argparse.Namespace:
 
 
 def test_training_saves_an_ensemble_head_for_this_encoder_and_a_base_head(monkeypatch):
-    from neo.config import settings
+    from neo2.core.config import settings
 
     _setup(monkeypatch, _rows(own=60))
     report = finetune.train(_args(), agent=_Agent())
@@ -99,7 +99,7 @@ def test_training_saves_an_ensemble_head_for_this_encoder_and_a_base_head(monkey
 
 
 def test_the_base_head_is_the_head_you_would_have_without_your_requests(monkeypatch):
-    from neo.config import settings
+    from neo2.core.config import settings
 
     _setup(monkeypatch, _rows(own=60))
     finetune.train(_args(), agent=_Agent())
@@ -114,7 +114,7 @@ def test_the_base_head_is_the_head_you_would_have_without_your_requests(monkeypa
 
 
 def test_a_head_for_another_encoder_or_size_is_ignored(tmp_path):
-    from neo import models
+    from neo2.core import models
 
     def head(**kw):
         return {"version": 2, "mu": [0.0] * (_DIM + 1), "sd": [1.0] * (_DIM + 1),
@@ -291,7 +291,7 @@ def test_the_first_head_with_your_requests_is_calibrated_on_public_validation_ro
 
 
 def test_a_first_head_under_the_floors_is_not_kept(monkeypatch):
-    from neo.config import settings
+    from neo2.core.config import settings
 
     _setup(monkeypatch, _rows(own=60))
     monkeypatch.setattr(finetune, "_FLOORS", {**finetune._FLOORS, "base": 1.01})  # nothing passes
@@ -302,7 +302,7 @@ def test_a_first_head_under_the_floors_is_not_kept(monkeypatch):
 
 
 def test_a_head_from_the_old_split_is_not_judged_on_rows_it_trained_on(monkeypatch):
-    from neo.config import settings
+    from neo2.core.config import settings
 
     _setup(monkeypatch, _rows(own=60))
     finetune.train(_args(), agent=_Agent())
@@ -331,7 +331,7 @@ def test_a_rejected_head_still_leaves_the_erase_a_base_head_for_this_encoder(mon
 
 
 def test_reset_to_base_swaps_in_the_head_without_your_rows():
-    from neo.config import settings
+    from neo2.core.config import settings
 
     head = settings().data_dir / "reflex_head.json"
     head.write_text('{"mine": 1}')
@@ -352,7 +352,7 @@ def test_reset_to_base_swaps_in_the_head_without_your_rows():
 def test_an_erase_racing_the_save_never_leaves_a_head_fit_on_your_rows(monkeypatch):
     import threading
 
-    from neo.config import settings
+    from neo2.core.config import settings
 
     _setup(monkeypatch, _rows(own=60))
     finetune.train(_args(), agent=_Agent())  # a head and its base head
@@ -379,7 +379,7 @@ def test_an_erase_racing_the_save_never_leaves_a_head_fit_on_your_rows(monkeypat
 
 
 def test_a_head_saved_before_the_erase_noticed_is_undone(monkeypatch):
-    from neo.config import settings
+    from neo2.core.config import settings
 
     _setup(monkeypatch, _rows(own=60))
     finetune.train(_args(), agent=_Agent())
@@ -398,7 +398,7 @@ def test_head_writers_never_share_a_temporary_file(monkeypatch):
     import threading
     from pathlib import Path
 
-    from neo.config import settings
+    from neo2.core.config import settings
 
     temps = []
     real = Path.write_bytes
@@ -419,8 +419,8 @@ def test_head_writers_never_share_a_temporary_file(monkeypatch):
 
 
 def test_a_reflex_still_loading_when_the_erase_ran_switches_to_the_base_head(monkeypatch):
-    from neo import models
-    from neo.config import settings
+    from neo2.core import models
+    from neo2.core.config import settings
 
     def head(intent: int) -> dict:  # every embedding -> this intent
         W = np.zeros((4, 5))
@@ -475,7 +475,7 @@ def test_decide_averages_members_and_names_the_kind_of_an_action(monkeypatch):
 
 
 def test_rules_back_up_the_destructive_and_screen_heads(monkeypatch):
-    from neo.reflex.schema import refers_to_screen, sounds_destructive
+    from neo2.core.reflex.schema import refers_to_screen, sounds_destructive
 
     for t in ("Priya ko email bhejo", "send it to mom", "delete the report", "file hata do", "ye jacket kharido",
               "khareed lo", "uninstall zoom", "email Sam the notes", "pay the electricity bill",
@@ -523,7 +523,7 @@ def _snapshot(monkeypatch, root, checkpoints) -> list:
 
 
 def test_laya_dir_fetches_only_the_chosen_checkpoint(monkeypatch, tmp_path):
-    from neo import models
+    from neo2.core import models
 
     seen = _snapshot(monkeypatch, tmp_path, ("", "multilingual"))
     assert models.laya_dir("multilingual") == str(tmp_path / "multilingual")
@@ -532,8 +532,8 @@ def test_laya_dir_fetches_only_the_chosen_checkpoint(monkeypatch, tmp_path):
 
 
 def test_a_checkpoint_that_never_came_down_is_a_clear_error_and_the_reflex_uses_the_english_one(monkeypatch, tmp_path):
-    from neo import models
-    from neo.config import settings
+    from neo2.core import models
+    from neo2.core.config import settings
 
     _snapshot(monkeypatch, tmp_path, ("",))  # offline: only the English files were ever fetched
     with pytest.raises(FileNotFoundError, match="multilingual checkpoint isn't on this Mac"):
@@ -563,7 +563,7 @@ def test_a_checkpoint_that_never_came_down_is_a_clear_error_and_the_reflex_uses_
 
 
 def test_the_encoder_setting_is_forgiving(monkeypatch):
-    from neo.config import Settings
+    from neo2.core.config import Settings
 
     assert Settings().reflex_encoder == "multilingual"
     monkeypatch.setenv("NEO_REFLEX_ENCODER", " English ")
@@ -575,8 +575,8 @@ def test_the_encoder_setting_is_forgiving(monkeypatch):
 def test_evaluate_reports_a_head_on_the_benchmark_and_held_out_rows(monkeypatch, capsys):
     import sys
 
-    from neo.config import settings
-    from neo.reflex import evaluate
+    from neo2.core.config import settings
+    from neo2.core.reflex import evaluate
 
     _setup(monkeypatch, _rows())
     finetune.train(_args(), agent=_Agent())
@@ -608,8 +608,8 @@ def test_evaluate_reports_a_head_on_the_benchmark_and_held_out_rows(monkeypatch,
 def test_the_erase_puts_back_the_head_trained_without_your_requests():
     import asyncio
 
-    from neo import privacy
-    from neo.config import settings
+    from neo2.core import privacy
+    from neo2.core.config import settings
 
     head = settings().data_dir / "reflex_head.json"
     head.write_text('{"fit on": "your requests"}')
@@ -658,7 +658,7 @@ def test_the_head_without_your_requests_never_sees_your_labels_through_the_datas
     builds without that, so the base head's rows and the anchors' fingerprint don't move."""
     import time
 
-    from neo.config import settings
+    from neo2.core.config import settings
 
     def public(rows):
         sl = finetune.slices(rows)
@@ -682,9 +682,9 @@ def test_the_head_without_your_requests_never_sees_your_labels_through_the_datas
 
 
 def test_a_reflex_without_a_head_is_retrained_once(monkeypatch):
-    import neo.reflex as reflex_mod
-    from neo.reflex import finetune as ft
-    from neo.reflex import learn
+    import neo2.core.reflex as reflex_mod
+    from neo2.core.reflex import finetune as ft
+    from neo2.core.reflex import learn
 
     class Laya:  # a new encoder, a first run, or an erase with no base head to go back to
         has_head = False
@@ -723,8 +723,8 @@ def test_a_reflex_without_a_head_is_retrained_once(monkeypatch):
 def test_the_erase_goes_on_when_the_base_head_cannot_be_put_back():
     import asyncio
 
-    from neo import privacy
-    from neo.config import settings
+    from neo2.core import privacy
+    from neo2.core.config import settings
 
     s = settings()
     head = s.data_dir / "reflex_head.json"
@@ -771,7 +771,7 @@ def test_a_head_that_goes_off_more_often_is_not_an_improvement():
 def test_scores_count_what_a_head_sets_off_by_mistake_and_ece_on_rows_that_fit_nothing(monkeypatch):
     import copy
 
-    from neo.config import settings
+    from neo2.core.config import settings
 
     _setup(monkeypatch, _rows())
     finetune.train(_args(), agent=_Agent())
@@ -858,7 +858,7 @@ def test_screen_and_destructive_recall_count_only_labels_the_rules_did_not_write
     report = finetune.train(_args(), agent=_Agent())
     sl = finetune.slices(got)
     held = (sl["base"] | sl["cal"]) & ~sl["shadowed"]
-    from neo.config import settings
+    from neo2.core.config import settings
 
     h = json.loads((settings().data_dir / "reflex_head.json").read_text())
     assert h["held_out"]["needs_screen"] is not None and report["saved"]
@@ -885,7 +885,7 @@ def test_row_labels_say_which_labels_are_the_rows_own(monkeypatch):
 
 
 def test_the_destructive_rule_reads_hinglish_nouns_with_kar_and_orders_and_recharges():
-    from neo.reflex.schema import sounds_destructive
+    from neo2.core.reflex.schema import sounds_destructive
 
     for t in ("payment kar do", "payment karo", "mail kar do", "whatsapp kar do", "order kar do", "recharge kar do",
               "transfer kar dijiye", "msg kar dena", "pizza order karo", "ऑर्डर कर दो", "ऑर्डर करो", "रिचार्ज कर दो",
@@ -899,7 +899,7 @@ def test_the_destructive_rule_reads_hinglish_nouns_with_kar_and_orders_and_recha
 
 
 def test_the_screen_rule_leaves_device_commands_and_this_one_alone():
-    from neo.reflex.schema import refers_to_screen
+    from neo2.core.reflex.schema import refers_to_screen
 
     for t in ("lock my screen", "dim my screen", "make my screen brighter", "turn off the screen", "record my screen",
               "close this tab", "refresh the page", "zoom in on the page", "I like this one", "who wrote the article",
@@ -913,7 +913,7 @@ def test_the_screen_rule_leaves_device_commands_and_this_one_alone():
         assert refers_to_screen(t), t
     # A row with no screen label of its own takes a broader one (one noisy row among thousands, not a
     # certain yes at run time) — but never a command that only works the screen.
-    from neo.reflex.schema import screen_label
+    from neo2.core.reflex.schema import screen_label
 
     assert screen_label("fill in the form with my details") and not refers_to_screen("fill in the form with my details")
     assert screen_label("copy the tables into a sheet") and screen_label("what does this error mean")
@@ -921,7 +921,7 @@ def test_the_screen_rule_leaves_device_commands_and_this_one_alone():
 
 
 def test_short_close_and_skip_commands_are_taught_and_a_fixed_set_of_them_judged(monkeypatch):
-    from neo.reflex import dataset
+    from neo2.core.reflex import dataset
 
     rows = dataset.build(640)
     by = {r["text"]: r for r in rows}
@@ -930,7 +930,7 @@ def test_short_close_and_skip_commands_are_taught_and_a_fixed_set_of_them_judged
     assert any("isse band karo" in r["text"] and r["intent"] == "quick_action" for r in rows)
     probes = [r for r in rows if r["source"] == "template" and r.get("split") == "validation"]
     assert len(probes) >= 10 and {r["text"] for r in probes}.isdisjoint(r["text"] for r in rows if r.get("split") is None)
-    from neo.reflex import is_bare_stop
+    from neo2.core.reflex import is_bare_stop
 
     assert all(r["intent"] == "quick_action" and len(r["text"].split()) <= 2 and not is_bare_stop(r["text"]) for r in probes)
     got = finetune.training_rows(40)
@@ -942,8 +942,8 @@ def test_short_close_and_skip_commands_are_taught_and_a_fixed_set_of_them_judged
 def test_an_erase_removes_head_and_feature_files_a_cut_off_write_left():
     import asyncio
 
-    from neo import privacy
-    from neo.config import settings
+    from neo2.core import privacy
+    from neo2.core.config import settings
 
     d = settings().data_dir
     d.mkdir(parents=True, exist_ok=True)
@@ -963,7 +963,7 @@ def test_the_core_sweeps_head_files_a_quit_cut_off_but_not_a_write_in_progress()
     import os
     import time
 
-    from neo.config import settings
+    from neo2.core.config import settings
 
     d = settings().data_dir
     d.mkdir(parents=True, exist_ok=True)
@@ -976,9 +976,9 @@ def test_the_core_sweeps_head_files_a_quit_cut_off_but_not_a_write_in_progress()
 
 
 def test_with_learning_off_a_reflex_without_a_head_still_gets_one_from_public_rows_only(monkeypatch):
-    import neo.reflex as reflex_mod
-    from neo.config import settings
-    from neo.reflex import learn
+    import neo2.core.reflex as reflex_mod
+    from neo2.core.config import settings
+    from neo2.core.reflex import learn
 
     class Laya:
         has_head = False
@@ -995,7 +995,7 @@ def test_with_learning_off_a_reflex_without_a_head_still_gets_one_from_public_ro
         json.dumps({"text": "open my notes", "intent": "quick_action", "source": "live", "ts": 1e12, "verified": True}) + "\n"
     )
     monkeypatch.setenv("NEO_LEARN", "off")
-    from neo import config
+    from neo2.core import config
 
     monkeypatch.setattr(config, "_settings", None)
     assert not learn.enabled() and learn.due()
@@ -1003,7 +1003,7 @@ def test_with_learning_off_a_reflex_without_a_head_still_gets_one_from_public_ro
     monkeypatch.setattr(finetune, "train", lambda args, **kw: calls.append(kw) or {"saved": True, "intent": 0.9, "previous": None})
     assert learn.retrain() is not None and calls and calls[0]["own"] is False
     # and none of your rows reach the data it trains on
-    from neo.reflex import dataset
+    from neo2.core.reflex import dataset
 
     assert "open my notes" in {r["text"] for r in dataset.build(20)}
     assert "open my notes" not in {r["text"] for r in dataset.build(20, own=False)}  # not even read
@@ -1013,7 +1013,7 @@ def test_with_learning_off_a_reflex_without_a_head_still_gets_one_from_public_ro
 def test_the_learn_loop_retrains_a_headless_reflex_with_learning_off(monkeypatch):
     import asyncio
 
-    from neo.reflex import learn
+    from neo2.core.reflex import learn
 
     runs = []
     monkeypatch.setattr(learn, "enabled", lambda: False)
@@ -1034,8 +1034,8 @@ def test_the_learn_loop_retrains_a_headless_reflex_with_learning_off(monkeypatch
 
 
 def test_a_head_lost_again_after_a_successful_headless_retrain_gets_another(monkeypatch):
-    import neo.reflex as reflex_mod
-    from neo.reflex import learn
+    import neo2.core.reflex as reflex_mod
+    from neo2.core.reflex import learn
 
     class Laya:
         has_head = False
@@ -1056,10 +1056,10 @@ def test_a_head_lost_again_after_a_successful_headless_retrain_gets_another(monk
 
 
 def test_a_fallback_reflex_never_overwrites_the_head_of_the_encoder_it_stands_in_for(monkeypatch):
-    import neo.reflex as reflex_mod
-    from neo import models
-    from neo.config import settings
-    from neo.reflex import learn
+    import neo2.core.reflex as reflex_mod
+    from neo2.core import models
+    from neo2.core.config import settings
+    from neo2.core.reflex import learn
 
     class Laya:  # the multilingual files are missing offline: this run is on the English checkpoint
         has_head = False

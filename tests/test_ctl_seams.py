@@ -13,8 +13,8 @@ from pathlib import Path
 
 import pytest
 
-from neo import effects, runtime
-from neo.agent.registry import (
+from neo2.core import effects, runtime
+from neo2.core.agent.registry import (
     Choice,
     Effect,
     Handoff,
@@ -23,7 +23,7 @@ from neo.agent.registry import (
     ToolOutput,
     utterance_lane,
 )
-from neo.providers.base import ImagePart
+from neo2.core.providers.base import ImagePart
 
 # ---- ToolOutput.effect and .handoff ------------------------------------------------------------------
 
@@ -39,7 +39,7 @@ def test_new_tool_output_fields_come_last_with_defaults():
 
 
 def test_an_effect_and_a_handoff_reach_the_caller_through_the_registry(monkeypatch):
-    from neo.agent import registry as reg
+    from neo2.core.agent import registry as reg
 
     r = reg.Registry()
     got = ToolOutput("Clicked.", effect=Effect(changed=False), handoff=Handoff("which one?", [Choice("e1", "OK")]))
@@ -74,7 +74,7 @@ def test_the_utterance_lane_is_closed_to_an_embedded_agent(monkeypatch):
 def test_the_tool_decorator_takes_by_utterance():
     import inspect
 
-    from neo.agent import registry as reg
+    from neo2.core.agent import registry as reg
 
     assert inspect.signature(reg.tool).parameters["by_utterance"].default is False
     assert RegisteredTool("x", "", {}, lambda a, c: "").by_utterance is False
@@ -96,7 +96,7 @@ class _Brain:
 
 
 def test_image_limit_is_the_strictest_of_the_seeing_brains():
-    from neo.providers import Chain
+    from neo2.core.providers import Chain
 
     assert Chain([_Brain("a"), _Brain("b")]).image_limit is None  # none declares one
     chain = Chain([_Brain("a", limit=(2576, 3_750_000)), _Brain("b", limit=(1568, 1_150_000)), _Brain("t", vision=False, limit=(10, 10))])
@@ -106,7 +106,7 @@ def test_image_limit_is_the_strictest_of_the_seeing_brains():
 
 
 def test_image_limit_covers_a_hosts_own_brains(monkeypatch):
-    from neo import providers
+    from neo2.core import providers
 
     assert providers.image_limit("vision") is None  # NEO.app with no keys: nothing declared
     monkeypatch.setattr(providers, "_hosts", lambda purpose: [_Brain("host", limit=(1024, 800_000))])
@@ -117,7 +117,7 @@ def test_image_limit_covers_a_hosts_own_brains(monkeypatch):
 
 
 def test_until_returns_at_the_first_poll_that_sees_it(fake_clock):
-    from neo.tools.computer import wait
+    from neo2.core.tools.computer import wait
 
     ready_at = fake_clock.t + 0.06
     got = asyncio.run(wait.until(lambda: fake_clock.t >= ready_at and "in front", timeout=2.0, every=0.015))
@@ -125,7 +125,7 @@ def test_until_returns_at_the_first_poll_that_sees_it(fake_clock):
 
 
 def test_until_gives_up_at_its_timeout_and_takes_async_checks(fake_clock):
-    from neo.tools.computer import wait
+    from neo2.core.tools.computer import wait
 
     async def never():
         return None
@@ -141,7 +141,7 @@ def test_until_gives_up_at_its_timeout_and_takes_async_checks(fake_clock):
 
 
 def test_the_controls_settings_and_their_defaults(monkeypatch):
-    from neo import config
+    from neo2.core import config
 
     s = config.settings()
     assert (s.screen_effort, s.prefetch_look, s.shot_format, s.resolver) == ("high", True, "jpeg", "shadow")
@@ -161,7 +161,7 @@ def test_the_controls_settings_and_their_defaults(monkeypatch):
 def test_every_ax_action_goes_through_the_one_door_and_its_watcher_first(monkeypatch):
     import ApplicationServices as AS
 
-    from neo.tools.computer import ax
+    from neo2.core.tools.computer import ax
 
     done: list[tuple] = []
     seen: list[tuple] = []
@@ -193,7 +193,7 @@ def test_every_ax_action_goes_through_the_one_door_and_its_watcher_first(monkeyp
 
 
 def test_the_door_is_refused_with_effects_off():
-    from neo.tools.computer import ax
+    from neo2.core.tools.computer import ax
 
     with pytest.raises(effects.EffectRefused):
         ax.perform_action(object(), "AXPress")
@@ -202,8 +202,8 @@ def test_the_door_is_refused_with_effects_off():
 
 
 def test_presses_focus_raises_and_the_task_kinds_all_use_the_door(monkeypatch):
-    from neo.decide import media
-    from neo.tools.computer import ax
+    from neo2.core.decide import media
+    from neo2.core.tools.computer import ax
 
     calls: list[tuple] = []
     monkeypatch.setattr(ax, "perform_action", lambda el, action, **k: calls.append(("perform", action, k.get("kind"))) or 0)
@@ -258,17 +258,18 @@ def test_an_in_process_capture_is_an_effect_of_its_own():
 # ---- every tool that acts is one of neo2's INPUT_TOOLS ---------------------------------------------------
 
 _NEO = Path(runtime.__file__).resolve().parent
+_PKG = runtime.__name__.rpartition(".")[0]  # NEO's package (neo2.core), as its modules are named
 # Where a tool's handler can lead: the tools, the computer package, and the task kinds with the
-# Accessibility kit they share (neo.decide: axkit, media, the kinds).
+# Accessibility kit they share (neo2.core.decide: axkit, media, the kinds).
 _SCANNED_DIRS = ("tools", "tools/computer", "decide", "decide/kinds")
 # What makes a tool one that acts: an input event (to the front app or to one app), or an
 # Accessibility press, value, focus or text. (Bringing an app forward — its window raised through
 # the AX door — and switching a browser's web tree on for reading are not input.)
 _ACTUATORS = (
-    {("neo.tools.computer.input", n) for n in ("click", "drag", "scroll", "type_text", "hotkey", "_post", "_post_to_pid")}
-    | {("neo.tools.computer.ax", n) for n in ("press", "press_el", "press_element", "set_value", "set_el_value", "focus_el")}
-    | {("neo.decide.axkit", n) for n in ("perform", "set_text", "set_search", "clear_text", "post_return", "_put", "_type")}
-    | {("neo.decide.media", n) for n in ("_perform", "_post_return", "_set_query")}
+    {("neo2.core.tools.computer.input", n) for n in ("click", "drag", "scroll", "type_text", "hotkey", "_post", "_post_to_pid")}
+    | {("neo2.core.tools.computer.ax", n) for n in ("press", "press_el", "press_element", "set_value", "set_el_value", "focus_el")}
+    | {("neo2.core.decide.axkit", n) for n in ("perform", "set_text", "set_search", "clear_text", "post_return", "_put", "_type")}
+    | {("neo2.core.decide.media", n) for n in ("_perform", "_post_return", "_set_query")}
 )  # fmt: skip
 # A task kind's driver is its own module (run.run_best(sys.modules[__name__], …)): these are called.
 _DRIVER_HOOKS = ("attempt", "fallback", "accepts")
@@ -279,15 +280,15 @@ def _modules() -> dict[str, Path]:
     for d in _SCANNED_DIRS:
         for path in sorted((_NEO / d).glob("*.py")):
             rel = path.relative_to(_NEO).with_suffix("")
-            parts = ["neo", *rel.parts] if rel.name != "__init__" else ["neo", *rel.parts[:-1]]
+            parts = [_PKG, *rel.parts] if rel.name != "__init__" else [_PKG, *rel.parts[:-1]]
             out[".".join(parts)] = path
     return out
 
 
 def _call_graph() -> dict[tuple[str, str], set[tuple[str, str]]]:
     """(module, top-level function) -> what it names: its module's functions, and the functions
-    of the scanned modules it imports (``from neo.decide.kinds import site as sk`` … ``sk.search``,
-    ``from neo.decide.media import play_best``), called or handed on (a worker, a driver)."""
+    of the scanned modules it imports (``from neo2.core.decide.kinds import site as sk`` … ``sk.search``,
+    ``from neo2.core.decide.media import play_best``), called or handed on (a worker, a driver)."""
     mods = _modules()
     graph: dict[tuple[str, str], set[tuple[str, str]]] = {}
     for mod, path in mods.items():
@@ -342,8 +343,8 @@ def test_every_tool_that_acts_is_an_input_tool():
     tools, and the task tools whose kinds act in an app's own UI (a site's search box, a new note)
     — is one of neo2's INPUT_TOOLS, so an MCP server asking its client for approvals (--approve
     elicit) can't hand them out without the client's app protected."""
-    from neo.agent.registry import catalog
-    from neo.tools import PRESETS, load_all
+    from neo2.core.agent.registry import catalog
+    from neo2.core.tools import PRESETS, load_all
     from neo2.mcp.server import INPUT_TOOLS
 
     load_all()
@@ -356,25 +357,25 @@ def test_every_tool_that_acts_is_an_input_tool():
     embeddable = acting & set(PRESETS["all"])
     assert embeddable <= INPUT_TOOLS, embeddable - INPUT_TOOLS
     # and by what a tool says of itself: a computer tool that isn't read-only acts
-    mine = [t for t in tools if t.handler.__module__.startswith("neo.tools.computer.")]
+    mine = [t for t in tools if t.handler.__module__.startswith("neo2.core.tools.computer.")]
     declared = {t.name for t in mine if t.category == "computer" and not t.read_only}
     assert declared <= INPUT_TOOLS, declared - INPUT_TOOLS
     assert not acting & {t.name for t in tools if t.read_only}  # (a look never acts)
 
 
 def test_input_tools_and_the_planned_tools_are_known_names():
-    from neo.agent.registry import catalog
-    from neo.tools import MODULES_FOR, PLANNED, PRESETS, load_all
+    from neo2.core.agent.registry import catalog
+    from neo2.core.tools import MODULES_FOR, PLANNED, PRESETS, load_all
     from neo2.mcp.server import INPUT_TOOLS
 
     load_all()
     assert set(PRESETS["all"]) | set(PLANNED) >= INPUT_TOOLS
     assert "menu_command" in INPUT_TOOLS and PLANNED == {"menu_command": "mac", "look": "mac_read"}
     for name, preset in PLANNED.items():
-        assert MODULES_FOR[name] == "neo.tools.computer"
+        assert MODULES_FOR[name] == "neo2.core.tools.computer"
         # once it is registered it must be in its preset (else no embedded agent can have it)
         assert catalog().get(name) is None or name in PRESETS[preset], name
-    from neo.tools.computer import ORDER
+    from neo2.core.tools.computer import ORDER
 
     assert "menu_command" in ORDER and "look" in ORDER  # their places in the catalog are kept
 
@@ -394,7 +395,7 @@ def test_process_wide_work_only_as_neo_app(monkeypatch):
 def test_no_web_tree_switch_or_timer_thread_in_library_mode(monkeypatch):
     """ax_tree on a Chromium app switches its web tree on and holds it with a timer thread: as
     NEO.app only — never inside a host's process."""
-    from neo.tools.computer import ax
+    from neo2.core.tools.computer import ax
 
     asked: list[int] = []
     monkeypatch.setattr(ax, "_running", lambda pid: asked.append(pid))
@@ -405,7 +406,7 @@ def test_no_web_tree_switch_or_timer_thread_in_library_mode(monkeypatch):
 
 
 try:  # (the suite fakes it: nothing has the keyboard focus)
-    from neo.tools.computer.ax import focused_element_text as _REAL_FOCUSED_TEXT
+    from neo2.core.tools.computer.ax import focused_element_text as _REAL_FOCUSED_TEXT
 except ImportError:  # no macOS frameworks
     _REAL_FOCUSED_TEXT = None
 
@@ -433,7 +434,7 @@ def _ax_timeouts(monkeypatch):
 def test_no_process_wide_ax_timeout_in_library_mode(monkeypatch):
     """A timeout on the system-wide element is the whole process's default: as NEO.app only. In a
     host's process the elements NEO reads through it get their own timeout instead."""
-    from neo.tools.computer import ax
+    from neo2.core.tools.computer import ax
 
     system, focused, at_point, set_on = _ax_timeouts(monkeypatch)
     monkeypatch.setattr(runtime, "_library", True)
@@ -456,8 +457,8 @@ def test_no_process_wide_ax_timeout_in_library_mode(monkeypatch):
 def test_the_self_tests_hit_test_never_leaves_its_own_process_wide_timeout(monkeypatch):
     """The controls self-test's watcher asks Accessibility what is under each point: through NEO's
     one system-wide helper, so NEO.app's default stays 2 s after a test (never 0.5 s)."""
-    from neo.selftest import mac as smac
-    from neo.tools.computer import ax
+    from neo2.core.selftest import mac as smac
+    from neo2.core.tools.computer import ax
 
     system, _focused, _at, set_on = _ax_timeouts(monkeypatch)
     m = smac.Mac.__new__(smac.Mac)
@@ -469,7 +470,7 @@ def test_the_self_tests_hit_test_never_leaves_its_own_process_wide_timeout(monke
 # ---- the doors: every event and AX action, the typed fallbacks too; a refusal is never swallowed --------
 
 
-class _Stop(Exception):  # like neo.selftest.watch.Stop: a watcher's refusal is a plain Exception
+class _Stop(Exception):  # like neo2.core.selftest.watch.Stop: a watcher's refusal is a plain Exception
     pass
 
 
@@ -477,8 +478,8 @@ def _text_field(monkeypatch, pid: int = 4242):
     """A text field of app `pid` that ignores AXValue and reads back empty: NEO types into it."""
     import ApplicationServices as AS
 
-    from neo.decide import media
-    from neo.tools.computer import ax
+    from neo2.core.decide import media
+    from neo2.core.tools.computer import ax
 
     e = ax.Element("e3", "AXTextField", "", "", 10, 10, 100, 20, ref=object())
     monkeypatch.setattr(ax, "_attr", lambda el, name, default=None: default)  # not secure, no ancestor
@@ -492,8 +493,8 @@ def _text_field(monkeypatch, pid: int = 4242):
 def test_typing_into_one_app_goes_through_the_input_door_and_its_watcher(monkeypatch):
     import Quartz
 
-    from neo.tools.computer import ax
-    from neo.tools.computer import input as inp
+    from neo2.core.tools.computer import ax
+    from neo2.core.tools.computer import input as inp
 
     e = _text_field(monkeypatch)
     posted, seen = [], []
@@ -517,8 +518,8 @@ def test_a_refusing_ax_watcher_reaches_the_caller_and_nothing_is_typed(monkeypat
     import ApplicationServices as AS
     import Quartz
 
-    from neo.decide import media
-    from neo.tools.computer import ax
+    from neo2.core.decide import media
+    from neo2.core.tools.computer import ax
 
     e = _text_field(monkeypatch)
     posted = []
@@ -569,10 +570,10 @@ def test_the_doors_never_act_in_neos_own_process_or_a_protected_app(monkeypatch)
     import ApplicationServices as AS
     import Quartz
 
-    from neo import config
-    from neo.decide import media
-    from neo.tools.computer import ax
-    from neo.tools.computer import input as inp
+    from neo2.core import config
+    from neo2.core.decide import media
+    from neo2.core.tools.computer import ax
+    from neo2.core.tools.computer import input as inp
 
     done, posted = [], []
     monkeypatch.setattr(AS, "AXUIElementPerformAction", lambda el, a: done.append(a) or 0)
@@ -606,7 +607,7 @@ def test_the_self_tests_watch_judges_keys_for_one_app_by_where_they_go():
     them through only when that app is the test window's, and refuses them for any other."""
     import Quartz as Q
 
-    from neo.selftest.watch import Stop, Watch
+    from neo2.core.selftest.watch import Stop, Watch
 
     class Mac:
         front_app = ("Safari", 77)
@@ -638,8 +639,8 @@ def test_the_self_tests_watch_judges_keys_for_one_app_by_where_they_go():
 
 
 def _set_value_world(monkeypatch, *, hosts_shell, terminal: bool):
-    from neo.decide import axkit, media
-    from neo.tools.computer import ax, focus, tools_ax
+    from neo2.core.decide import axkit, media
+    from neo2.core.tools.computer import ax, focus, tools_ax
 
     typed, values = [], []
     monkeypatch.setattr(axkit, "_type", lambda pid, text, newline: typed.append((pid, text, newline)))
@@ -662,16 +663,16 @@ def _set_value_world(monkeypatch, *, hosts_shell, terminal: bool):
 
 @pytest.mark.parametrize("value", ["cd /tmp\nrm -rf build", "cd /tmp\rrm -rf build", "cd /tmp\r\nrm -rf build"])
 def test_ax_set_value_joins_the_lines_on_a_command_line(monkeypatch, value):
-    from neo.agent import confirm
-    from neo.agent.registry import ToolContext
-    from neo.tools.computer import tools_ax
+    from neo2.core.agent import confirm
+    from neo2.core.agent.registry import ToolContext
+    from neo2.core.tools.computer import tools_ax
 
     typed, values = _set_value_world(monkeypatch, hosts_shell="pane", terminal=True)
     monkeypatch.setattr(confirm, "gated", lambda *a, **k: pytest.fail("nothing here needs asking: nothing runs"))
     asyncio.run(tools_ax.ax_set_value({"id": "e7", "value": value}, ToolContext(origin="agent")))
     assert values and all("\n" not in v and "\r" not in v for n, v in values if n == "AXValue")
     assert typed and all("\n" not in t and "\r" not in t for _, t, _ in typed)  # no Return, ever
-    from neo.decide import media  # a field that takes the value: the result says it went in as one line
+    from neo2.core.decide import media  # a field that takes the value: the result says it went in as one line
 
     monkeypatch.setattr(media, "_attr", lambda el, name, default=None: values[-1][1] if name == "AXValue" else default)
     out = asyncio.run(tools_ax.ax_set_value({"id": "e7", "value": value}, ToolContext(origin="agent")))
@@ -679,8 +680,8 @@ def test_ax_set_value_joins_the_lines_on_a_command_line(monkeypatch, value):
 
 
 def test_ax_set_value_types_no_line_break_where_the_value_did_not_take(monkeypatch):
-    from neo.agent.registry import ToolContext
-    from neo.tools.computer import tools_ax
+    from neo2.core.agent.registry import ToolContext
+    from neo2.core.tools.computer import tools_ax
 
     typed, values = _set_value_world(monkeypatch, hosts_shell=False, terminal=False)
     out = asyncio.run(tools_ax.ax_set_value({"id": "e7", "value": "Dear team,\nthanks!"}, ToolContext(origin="agent")))
@@ -703,7 +704,7 @@ class _MenuEl:
 
 def _menu_bar(monkeypatch):
     """A menu bar as every app's AX tree has it: the system's menu first, then the app's own."""
-    from neo.tools.computer import ax
+    from neo2.core.tools.computer import ax
 
     bar = _MenuEl("AXMenuBar")
     apple, app_menu = _MenuEl("AXMenuBarItem", "Apple", bar), _MenuEl("AXMenuBarItem", "TextEdit", bar)
@@ -724,7 +725,7 @@ def _menu_bar(monkeypatch):
 
 
 def test_the_system_menu_is_told_by_its_place_in_the_menu_bar(monkeypatch):
-    from neo.tools.computer import gates
+    from neo2.core.tools.computer import gates
 
     apple, items, new, context = _menu_bar(monkeypatch)
     assert gates._in_system_menu(apple) and all(gates._in_system_menu(el) for el in items.values())
@@ -733,8 +734,8 @@ def test_the_system_menu_is_told_by_its_place_in_the_menu_bar(monkeypatch):
 
 
 def _menu_world(monkeypatch):
-    from neo.agent import confirm
-    from neo.tools.computer import ax, tools_ax
+    from neo2.core.agent import confirm
+    from neo2.core.tools.computer import ax, tools_ax
 
     apple, items, new, context = _menu_bar(monkeypatch)
     els = {f"e{n}": ax.Element(f"e{n}", "AXMenuItem", el.title, "", 20, 40 + 22 * n, 220, 22, actions=["AXPress", "AXCancel"], ref=el)
@@ -754,9 +755,9 @@ def _menu_world(monkeypatch):
 
 @pytest.mark.parametrize("eid", ["e1", "e2", "e3", "e4"])
 def test_ax_press_and_click_by_id_never_touch_the_system_menu(monkeypatch, eid):
-    from neo.agent.registry import ToolContext
-    from neo.tools.computer import input as inp
-    from neo.tools.computer import tools_ax, tools_pointer
+    from neo2.core.agent.registry import ToolContext
+    from neo2.core.tools.computer import input as inp
+    from neo2.core.tools.computer import tools_ax, tools_pointer
 
     els, pressed = _menu_world(monkeypatch)
     clicked = []
@@ -770,9 +771,9 @@ def test_ax_press_and_click_by_id_never_touch_the_system_menu(monkeypatch, eid):
 
 
 def test_a_click_at_a_system_menu_item_is_refused(monkeypatch):
-    from neo.agent.registry import ToolContext
-    from neo.tools.computer import ax, tools_pointer
-    from neo.tools.computer import input as inp
+    from neo2.core.agent.registry import ToolContext
+    from neo2.core.tools.computer import ax, tools_pointer
+    from neo2.core.tools.computer import input as inp
 
     _apple, items, _new, _context = _menu_bar(monkeypatch)
     monkeypatch.setattr(ax, "hit", lambda x, y: ax.Hit(pid=555, app="TextEdit", label="Restart…", role="AXMenuItem", regular=True, el=items["Restart…"]))
@@ -785,8 +786,8 @@ def test_a_click_at_a_system_menu_item_is_refused(monkeypatch):
 
 
 def test_click_text_never_picks_a_system_menu_item(monkeypatch):
-    from neo.agent.registry import ToolContext
-    from neo.tools.computer import ax, gates, tools_label
+    from neo2.core.agent.registry import ToolContext
+    from neo2.core.tools.computer import ax, gates, tools_label
 
     els, pressed = _menu_world(monkeypatch)
 
@@ -808,9 +809,9 @@ def test_click_text_never_picks_a_system_menu_item(monkeypatch):
 
 
 def _fallback_world(monkeypatch, hit):
-    from neo.agent import confirm
-    from neo.tools.computer import ax, gates, pointer
-    from neo.tools.computer import input as inp
+    from neo2.core.agent import confirm
+    from neo2.core.tools.computer import ax, gates, pointer
+    from neo2.core.tools.computer import input as inp
 
     async def none(*a, **k):
         return None
@@ -829,8 +830,8 @@ def _fallback_world(monkeypatch, hit):
 
 
 def test_click_texts_fallback_never_clicks_another_apps_window_over_the_element(monkeypatch):
-    from neo.agent.registry import ToolContext
-    from neo.tools.computer import ax, tools_label
+    from neo2.core.agent.registry import ToolContext
+    from neo2.core.tools.computer import ax, tools_label
 
     # another app's floating panel covers the spot: its "Send" button is what the click would hit
     staged, clicked = _fallback_world(monkeypatch, ax.Hit(pid=77, app="Mail", label="Send", role="AXButton", regular=True))
@@ -839,8 +840,8 @@ def test_click_texts_fallback_never_clicks_another_apps_window_over_the_element(
 
 
 def test_click_texts_fallback_asks_first_when_the_spot_is_a_committing_control(monkeypatch):
-    from neo.agent.registry import ToolContext
-    from neo.tools.computer import ax, tools_label
+    from neo2.core.agent.registry import ToolContext
+    from neo2.core.tools.computer import ax, tools_label
 
     # the same app, but what lies under the spot is its "Send" button, not the text meant
     staged, clicked = _fallback_world(monkeypatch, ax.Hit(pid=0, app="Notes", label="Send", role="AXButton", regular=True))
@@ -861,7 +862,7 @@ def test_one_window_server_lookup_names_a_point_accessibility_cannot(monkeypatch
     import ApplicationServices as AS
     import Quartz
 
-    from neo.tools.computer import ax, pointer
+    from neo2.core.tools.computer import ax, pointer
 
     real = {name: old for obj, name, old in monkeypatch._setattr if obj is ax and name in ("hit", "window_owner_at")}
     for name, fn in real.items():  # (the suite fakes both: the real ones here)
@@ -888,9 +889,9 @@ def test_one_window_server_lookup_names_a_point_accessibility_cannot(monkeypatch
 def test_a_menu_item_whose_place_cant_be_told_is_not_pressed(monkeypatch):
     """A menu item whose way up to its menu bar can't be read might be the system's: refused (fail
     closed), like a target whose owner can't be told."""
-    from neo.agent import confirm
-    from neo.agent.registry import ToolContext
-    from neo.tools.computer import ax, tools_ax
+    from neo2.core.agent import confirm
+    from neo2.core.agent.registry import ToolContext
+    from neo2.core.tools.computer import ax, tools_ax
 
     item = ax.Element("e88", "AXMenuItem", "Restart…", "", 20, 120, 220, 22, actions=["AXPress", "AXCancel"], ref="REF")
     monkeypatch.setattr(ax, "_attr", lambda el, name, default=None: default)  # nothing can be read

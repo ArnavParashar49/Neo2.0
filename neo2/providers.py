@@ -17,7 +17,7 @@ import importlib
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
-from neo.providers.base import (
+from neo2.core.providers.base import (
     ImagePart,
     Message,
     Provider,
@@ -80,7 +80,7 @@ def OpenAICompatible(
     OPENAI_API_KEY — and, for a `base_url` server that takes no key, none). `token_budget`: the
     most one request may carry, prompt and answer together (the model's context window): longer
     requests are trimmed to fit before they are sent."""
-    mod = _need("neo.providers.openai_compat", "openai")
+    mod = _need("neo2.core.providers.openai_compat", "openai")
     if client is None:
         openai_mod = _need("openai", "openai")
         try:
@@ -110,7 +110,7 @@ def Gemini(
     keys = [api_key] if isinstance(api_key, str) else list(api_key)
     if not any(k and k.strip() for k in keys):
         raise ProviderError("Gemini needs an API key")
-    mod = _need("neo.providers.gemini", "gemini")
+    mod = _need("neo2.core.providers.gemini", "gemini")
     return mod.GeminiProvider(model, keys=keys, fallback_models=list(fallback_models))
 
 
@@ -118,7 +118,7 @@ def Groq(api_key: str, *, model: str = "openai/gpt-oss-120b") -> Provider:
     """Groq's free tier (fast, text only)."""
     if not api_key:
         raise ProviderError("Groq needs an API key")
-    mod = _need("neo.providers.openai_compat", "openai")
+    mod = _need("neo2.core.providers.openai_compat", "openai")
     return mod.OpenAICompatProvider(
         name="groq",
         base_url="https://api.groq.com/openai/v1",
@@ -136,7 +136,7 @@ def Claude(
 ) -> Provider:
     """Anthropic's Claude. Pass `api_key` or your own `client` (unset: the anthropic SDK's own
     default, ANTHROPIC_API_KEY)."""
-    mod = _need("neo.providers.claude", "claude")
+    mod = _need("neo2.core.providers.claude", "claude")
     if client is None:
         client = _need("anthropic", "claude").AsyncAnthropic(api_key=api_key)
     return mod.ClaudeProvider(model, client=client)
@@ -147,6 +147,6 @@ def Failover(*providers: Provider, sticky: bool = True) -> Provider:
     that just failed goes to the back of the line for a few minutes (per agent)."""
     if not providers:
         raise ValueError("Failover needs at least one provider")
-    from neo.providers import Chain
+    from neo2.core.providers import Chain
 
     return Chain(list(providers), sticky=sticky)

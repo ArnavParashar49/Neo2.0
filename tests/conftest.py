@@ -1,4 +1,4 @@
-"""Test-wide defaults: no model downloads, no GPU, no network, no real effects on the Mac (neo/effects.py
+"""Test-wide defaults: no model downloads, no GPU, no network, no real effects on the Mac (neo2/core/effects.py
 refuses every one in NEO's own test runs: a test fakes the step it needs instead)."""
 
 import os
@@ -12,11 +12,11 @@ from pathlib import Path
 
 import pytest
 
-from neo import effects
+from neo2.core import effects
 
 effects.for_neo_tests()  # first: nothing real happens in this process, whatever a test sets or embeds
 
-from neo.config import Settings  # noqa: E402
+from neo2.core.config import Settings  # noqa: E402
 
 # A scratch conftest doing `from tests.conftest import *` must get the underscore fixtures too —
 # without them a test runs against the user's real ~/.neo.
@@ -37,7 +37,7 @@ Settings.model_config["env_file"] = None
 for _k in ("GEMINI_API_KEY", "GEMINI_API_KEYS", "GROQ_API_KEY", "ANTHROPIC_API_KEY", "NEO_DECIDE_MODES"):
     os.environ.pop(_k, None)
 
-from neo.decide import shadow as _shadow  # noqa: E402
+from neo2.core.decide import shadow as _shadow  # noqa: E402
 
 _REAL_LATER = _shadow.later
 
@@ -46,7 +46,7 @@ _REAL_LATER = _shadow.later
 def _isolated_data_dir(tmp_path, monkeypatch):
     """Every test gets its own ~/.neo (and notes folder): nothing a test does may touch the user's real
     data (memory, audit log, Laya's training examples, cooldowns, notes)."""
-    from neo import config
+    from neo2.core import config
 
     monkeypatch.setenv("NEO_DATA_DIR", str(tmp_path / "neo_data"))
     monkeypatch.setenv("NEO_NOTES_DIR", str(tmp_path / "notes"))  # never the user's ~/Documents
@@ -68,7 +68,7 @@ def _never_the_real_data_dir(_isolated_data_dir):
 @pytest.fixture(autouse=True)
 def _no_real_embeddings(monkeypatch):
     """Keyword-only memory by default; tests that need vectors install their own fake embedder."""
-    from neo.memory import embed
+    from neo2.core.memory import embed
 
     monkeypatch.setattr(embed, "embed_texts", lambda texts: None)
 
@@ -77,7 +77,7 @@ def _no_real_embeddings(monkeypatch):
 def _fresh_learning_state():
     """Requests still settling in RAM, the correction memory and unsaved counters are
     process-wide: none of them may carry from one test into the next."""
-    from neo.reflex import learn, memory, outcomes
+    from neo2.core.reflex import learn, memory, outcomes
 
     outcomes.forget()
     memory.forget()
@@ -107,7 +107,7 @@ def _app_mode(monkeypatch):
     that embeds agents (library mode) never leaves that on for the next one."""
     import weakref
 
-    from neo import runtime
+    from neo2.core import runtime
 
     monkeypatch.setattr(runtime, "_library", False)
     monkeypatch.setattr(runtime, "_live", weakref.WeakSet())
@@ -121,7 +121,7 @@ def _accessibility_on(monkeypatch):
     """The suite never depends on whether this Mac granted the test runner Accessibility: it is
     on, and a test that needs it off says so (monkeypatching ax.is_trusted)."""
     try:
-        from neo.tools.computer import ax
+        from neo2.core.tools.computer import ax
     except ImportError:  # no macOS frameworks (the core install's portable run): nothing to fake
         return
     monkeypatch.setattr(ax, "is_trusted", lambda: True)
@@ -133,8 +133,8 @@ def _no_real_screen(monkeypatch):
     picture before and after) and ask macOS whether events may be posted: in the suite nothing is
     under any point, no picture can be taken, one 1512×982 display, and posting is allowed. A test
     that needs a world fakes these itself."""
-    from neo.tools.computer import ax, pointer, screen
-    from neo.tools.computer import input as inp
+    from neo2.core.tools.computer import ax, pointer, screen
+    from neo2.core.tools.computer import input as inp
 
     monkeypatch.setattr(inp, "can_post", lambda: True)
     monkeypatch.setattr(ax, "hit", lambda x, y: ax.Hit())
@@ -147,9 +147,9 @@ def _no_real_screen(monkeypatch):
     monkeypatch.setattr(pointer, "LOOK_S", 0.0)
     monkeypatch.setattr(pointer, "LOOK_AGAIN_S", 0.0)
     monkeypatch.setattr(pointer, "SETTLE_S", 0.0)
-    # The app NEO works in is per test (bringing a real one forward is refused: neo/effects.py), and
+    # The app NEO works in is per test (bringing a real one forward is refused: neo2/core/effects.py), and
     # no app runs a shell unless a test says so.
-    from neo.tools.computer import apps, focus
+    from neo2.core.tools.computer import apps, focus
 
     monkeypatch.setattr(apps, "_target", None)
     monkeypatch.setattr(focus, "hosts_shell", lambda pid, depth=3: False)
@@ -158,7 +158,7 @@ def _no_real_screen(monkeypatch):
 @pytest.fixture(autouse=True)
 def _no_task_grants():
     """A "yes for this task" never outlives the test that gave it."""
-    from neo.agent import grants
+    from neo2.core.agent import grants
 
     grants.reset()
     yield
@@ -186,9 +186,9 @@ class FakeClock:
 
 @pytest.fixture
 def fake_clock(monkeypatch):
-    """neo.tools.computer.wait on a fake clock: ``until`` polls and waits in fake time (counted in
+    """neo2.core.tools.computer.wait on a fake clock: ``until`` polls and waits in fake time (counted in
     ``fake_clock.sleeps``), and a test says when things happen with ``fake_clock.advance``."""
-    wait = pytest.importorskip("neo.tools.computer.wait")  # (the computer package needs macOS)
+    wait = pytest.importorskip("neo2.core.tools.computer.wait")  # (the computer package needs macOS)
     clock = FakeClock()
     monkeypatch.setattr(wait, "_now", clock.now)
     monkeypatch.setattr(wait, "_sleep", clock.sleep)
@@ -212,11 +212,11 @@ def shadow_runs(monkeypatch):
 @pytest.fixture
 def real_handlers(monkeypatch):
     """The task kinds' tools with their own handlers (another test may have swapped one)."""
-    from neo.agent.registry import registry
-    from neo.tools import load_all
+    from neo2.core.agent.registry import registry
+    from neo2.core.tools import load_all
 
     load_all()
-    from neo.tools import computer, tasks, web
+    from neo2.core.tools import computer, tasks, web
 
     for mod, names in (
         (tasks, ("notes_create", "reminder_add", "calendar_add", "calendar_today", "mail_unread")),
@@ -231,8 +231,8 @@ def real_handlers(monkeypatch):
 def decide_modes(monkeypatch):
     """Set the task kinds' modes for one test (`decide_modes(add_event="on")`), with the tools shown
     as those modes want; the release defaults come back afterwards."""
-    from neo import config
-    from neo.tools import load_all
+    from neo2.core import config
+    from neo2.core.tools import load_all
 
     def use(**modes: str) -> None:
         monkeypatch.setenv("NEO_DECIDE_MODES", ",".join(f"{k}={m}" for k, m in modes.items()))

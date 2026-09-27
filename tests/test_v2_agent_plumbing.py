@@ -7,16 +7,16 @@ import asyncio
 
 import pytest
 
-from neo.agent import confirm, fastpath
-from neo.agent.registry import RegisteredTool, Registry, ToolContext, registry
-from neo.events import EventBus
+from neo2.core.agent import confirm, fastpath
+from neo2.core.agent.registry import RegisteredTool, Registry, ToolContext, registry
+from neo2.core.events import EventBus
 
 _OBJ = {"type": "object", "properties": {}}
 
 
 @pytest.fixture(autouse=True)
 def _env(tmp_path, monkeypatch):
-    from neo import config, events
+    from neo2.core import config, events
 
     monkeypatch.setattr(config, "_settings", None)
     monkeypatch.setenv("NEO_DATA_DIR", str(tmp_path))
@@ -52,7 +52,7 @@ def test_approval_is_active_only_inside_approved():
 
 
 def test_a_send_asks_even_with_confirmation_turned_off(monkeypatch):
-    from neo import config
+    from neo2.core import config
 
     monkeypatch.setenv("NEO_CONFIRM_DESTRUCTIVE", "false")
     monkeypatch.setattr(config, "_settings", None)

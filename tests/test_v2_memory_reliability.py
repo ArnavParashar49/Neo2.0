@@ -8,12 +8,12 @@ import hashlib
 import numpy as np
 import pytest
 
-from neo.agent.loop import run_agent
-from neo.agent.registry import RegisteredTool, Registry
-from neo.events import EventBus
-from neo.memory import embed as emb
-from neo.memory.store import Store
-from neo.providers.base import ToolCall, Turn
+from neo2.core.agent.loop import run_agent
+from neo2.core.agent.registry import RegisteredTool, Registry
+from neo2.core.events import EventBus
+from neo2.core.memory import embed as emb
+from neo2.core.memory.store import Store
+from neo2.core.providers.base import ToolCall, Turn
 
 
 def _fake_embed(texts):
@@ -137,12 +137,12 @@ def test_verify_can_be_disabled():
 
 
 def test_playbook_saved_after_successful_multistep_run(tmp_path, monkeypatch):
-    from neo import config
-    from neo.agent import session as sess_mod
-    from neo.agent.session import Session
-    from neo.memory import store as store_mod
-    from neo.reflex.schema import Decision
-    from neo.tools import load_all
+    from neo2.core import config
+    from neo2.core.agent import session as sess_mod
+    from neo2.core.agent.session import Session
+    from neo2.core.memory import store as store_mod
+    from neo2.core.reflex.schema import Decision
+    from neo2.core.tools import load_all
 
     monkeypatch.setattr(config, "_settings", None)
     monkeypatch.setenv("NEO_DATA_DIR", str(tmp_path))
@@ -163,12 +163,12 @@ def test_playbook_saved_after_successful_multistep_run(tmp_path, monkeypatch):
             Turn(text="Created the note."),
         ]
     )
-    import neo.tools.computer as comp
+    import neo2.core.tools.computer as comp
 
     async def ok(a, c):
         return "ok"
 
-    from neo.agent.registry import registry
+    from neo2.core.agent.registry import registry
 
     for name in ("open_app", "notes_create", "apps_running"):
         monkeypatch.setattr(registry().get(name), "handler", ok)  # restored after the test
@@ -181,7 +181,7 @@ def test_playbook_saved_after_successful_multistep_run(tmp_path, monkeypatch):
 
 
 def test_browser_url_and_selector_heuristics():
-    from neo.tools.browser import _norm_url
+    from neo2.core.tools.browser import _norm_url
 
     assert _norm_url("github.com") == "https://github.com"
     assert _norm_url("http://x.y") == "http://x.y"

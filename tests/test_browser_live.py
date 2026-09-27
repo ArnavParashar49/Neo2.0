@@ -1,4 +1,4 @@
-"""NEO's browser live in the chat (neo/tools/browser_live.py): the card's protocol, frames and
+"""NEO's browser live in the chat (neo2/core/tools/browser_live.py): the card's protocol, frames and
 credits, the screencast's life, the user's input (and every gate on it), take / hand back / stop,
 hand-offs and approvals, and the websocket lane — on fake Playwright pages and a fake CDP session:
 no Chromium starts, nothing reaches the network."""
@@ -15,11 +15,11 @@ import time
 
 import pytest
 
-from neo.agent import confirm
-from neo.agent.registry import ToolContext, registry
-from neo.events import bus, current_job
-from neo.tools import browser, browser_live
-from neo.tools.browser_live import key_event, pack_frame, page_viewport, tidy_label, unpack_frame
+from neo2.core.agent import confirm
+from neo2.core.agent.registry import ToolContext, registry
+from neo2.core.events import bus, current_job
+from neo2.core.tools import browser, browser_live
+from neo2.core.tools.browser_live import key_event, pack_frame, page_viewport, tidy_label, unpack_frame
 
 
 def _jpeg(w: int = 64, h: int = 40) -> bytes:
@@ -201,7 +201,7 @@ class Channel:
 @pytest.fixture
 async def card(monkeypatch):
     """The chat's browser card, a channel that records what it broadcasts, and a fake page."""
-    from neo import config
+    from neo2.core import config
 
     monkeypatch.setenv("NEO_BROWSER_VIEW", "chat")
     monkeypatch.setattr(config, "_settings", None)
@@ -544,7 +544,7 @@ def _chat_world(monkeypatch, page_url="https://shop.example/mug"):
     """test_browser's fake shop page, as a chat card sees it."""
     from test_browser import SHOP, TEXT, Ctx, Page
 
-    from neo.tools import load_all
+    from neo2.core.tools import load_all
 
     load_all()
     ctx = Ctx()
@@ -831,7 +831,7 @@ async def test_saying_continue_in_the_chat_is_a_hand_back_too(card):
 async def test_a_finished_job_folds_its_card_but_not_while_the_user_has_the_page(card, monkeypatch):
     live, ch = card
     monkeypatch.setattr(browser_live, "_CLOSE_AFTER_S", 0.05)
-    await bus().set_state(__import__("neo.events", fromlist=["NeoState"]).NeoState.THINKING, job="j1")
+    await bus().set_state(__import__("neo2.core.events", fromlist=["NeoState"]).NeoState.THINKING, job="j1")
     await _open(live, ch, job="j1")
     await live.intent("read", "Read the page", present=False)
     live.done(thumb=False)
@@ -843,14 +843,14 @@ async def test_a_finished_job_folds_its_card_but_not_while_the_user_has_the_page
     assert [r for t, _, r in ch.sent if t == "browser_close"] == [True] and live.s is None
     live.claim("j2")
     await live.take()
-    await bus().set_state(__import__("neo.events", fromlist=["NeoState"]).NeoState.THINKING, job="j2")
+    await bus().set_state(__import__("neo2.core.events", fromlist=["NeoState"]).NeoState.THINKING, job="j2")
     await bus().end_job("j2")
     await asyncio.sleep(0.2)
     assert len(ch.of("browser_close")) == 1 and live.s is not None  # the user is still on it
 
 
 async def test_stop_cancels_only_the_job_that_owns_the_card(card):
-    from neo.events import NeoState
+    from neo2.core.events import NeoState
 
     live, ch = card
     await _open(live, ch, job="")
@@ -936,7 +936,7 @@ async def test_after_the_user_had_the_page_neos_read_hides_what_they_filled(card
 
 
 async def test_window_mode_has_no_card(card, monkeypatch):
-    from neo import config
+    from neo2.core import config
 
     live, ch = card
     monkeypatch.setenv("NEO_BROWSER_VIEW", "window")
@@ -979,8 +979,8 @@ def _free_port() -> int:
 async def test_the_websocket_sends_frames_as_binary_after_json_and_keeps_browser_commands_off_the_bus(card, monkeypatch):
     import websockets
 
-    from neo import config
-    from neo.server import ws as ws_mod
+    from neo2.core import config
+    from neo2.core.server import ws as ws_mod
 
     live, _ = card
     port = _free_port()
@@ -1045,7 +1045,7 @@ async def test_a_step_waiting_for_the_page_is_never_stranded_by_a_second_hand_ov
 
 
 async def test_the_bus_knows_each_jobs_task_ends_it_alone_and_says_when_a_job_ends():
-    from neo.events import EventBus, NeoState
+    from neo2.core.events import EventBus, NeoState
 
     ev = EventBus()
     ended = []
@@ -1071,9 +1071,9 @@ async def test_the_bus_knows_each_jobs_task_ends_it_alone_and_says_when_a_job_en
 
 
 async def test_a_runs_clock_stops_while_the_browser_waits_for_the_user(monkeypatch):
-    from neo.agent import loop
-    from neo.agent.loop import run_agent
-    from neo.providers.base import Turn
+    from neo2.core.agent import loop
+    from neo2.core.agent.loop import run_agent
+    from neo2.core.providers.base import Turn
 
     held = {"s": 0.0}
     loop.add_pause_clock(lambda: held["s"])
@@ -1090,8 +1090,8 @@ async def test_a_runs_clock_stops_while_the_browser_waits_for_the_user(monkeypat
 
 
 async def test_browse_budget_does_not_count_the_users_time(monkeypatch):
-    from neo.agent import loop
-    from neo.tools import browse
+    from neo2.core.agent import loop
+    from neo2.core.tools import browse
 
     held = {"s": 0.0}
     loop.add_pause_clock(lambda: held["s"])
@@ -1290,7 +1290,7 @@ async def test_an_unapproved_click_at_a_point_is_checked_and_made_on_one_layout(
 async def test_a_held_click_rereads_through_the_stray_page_guard(card, monkeypatch):
     from urllib.parse import urlsplit
 
-    from neo.tools.computer import policy
+    from neo2.core.tools.computer import policy
 
     live, ch = card
 
@@ -1610,7 +1610,7 @@ async def test_a_dialog_from_an_embedded_page_names_that_page(card):
 
 
 async def test_a_favicon_is_fetched_without_the_profiles_cookies_and_never_from_the_local_network(card, monkeypatch):
-    from neo.tools.computer import policy
+    from neo2.core.tools.computer import policy
 
     live, ch = card
     page, conn = await _open(live, ch)
@@ -1664,7 +1664,7 @@ async def test_a_favicon_is_fetched_without_the_profiles_cookies_and_never_from_
 
 
 async def test_a_client_that_stopped_reading_is_disconnected_so_it_reconnects():
-    from neo.server import ws as ws_mod
+    from neo2.core.server import ws as ws_mod
 
     async def on_command(cmd):
         pass
@@ -1816,8 +1816,8 @@ async def test_a_field_that_repeats_the_users_words_is_covered_in_pictures_too(c
 async def test_the_socket_never_deflates_page_frames(card, monkeypatch):
     import websockets
 
-    from neo import config
-    from neo.server import ws as ws_mod
+    from neo2.core import config
+    from neo2.core.server import ws as ws_mod
 
     port = _free_port()
     monkeypatch.setenv("NEO_WS_PORT", str(port))

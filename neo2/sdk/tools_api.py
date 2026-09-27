@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Literal
 
-from neo.agent.registry import RegisteredTool, ToolContext
+from neo2.core.agent.registry import RegisteredTool, ToolContext
 
 if TYPE_CHECKING:
     from neo2.sdk.agent import AsyncAgent

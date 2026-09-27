@@ -1,4 +1,4 @@
-"""neo.decide.kinds.mail, the read half: the unread inbox through a mail app's own dictionary
+"""neo2.core.decide.kinds.mail, the read half: the unread inbox through a mail app's own dictionary
 (newest messages by index, never `whose`, never a property set), once more over fewer messages
 after a dropped connection, the Dock badge as a hint, and a shadow preview that reads only an app
 NEO may already script and that is running. osascript and the Dock are faked; every generated
@@ -18,10 +18,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from neo.decide import aescript, axkit, engine, media, run, sdef
-from neo.decide.engine import Candidate
-from neo.decide.inventory import App
-from neo.decide.kinds import mail
+from neo2.core.decide import aescript, axkit, engine, media, run, sdef
+from neo2.core.decide.engine import Candidate
+from neo2.core.decide.inventory import App
+from neo2.core.decide.kinds import mail
 
 US, RS = aescript.US, aescript.RS
 
@@ -230,7 +230,7 @@ def test_methods_come_from_evidence(monkeypatch):
 
 def test_the_real_engine_asks_the_mail_apps_and_drops_a_browser(monkeypatch):
     browser = dataclasses.replace(PIGEON, bundle_id="test.browser", handles=("mailto", "https"), days_used_30=9)
-    monkeypatch.setitem(engine.DRIVERS, "read_mail", "neo.decide.kinds.mail")
+    monkeypatch.setitem(engine.DRIVERS, "read_mail", "neo2.core.decide.kinds.mail")
     monkeypatch.setattr(engine, "_zero_shot_can_answer", lambda: False)
     monkeypatch.setattr(engine, "_inventory", lambda: [POSTBOX, browser])
     cands = asyncio.run(engine.choose("read_mail", "check my email"))
@@ -270,7 +270,7 @@ def test_preview_reads_only_an_app_neo_may_already_script(world, monkeypatch):
 def test_the_read_takes_every_field_the_old_script_read(monkeypatch):
     """Equivalence with the legacy tool: each inbox, mailbox and message property its script read
     (by the dictionary's own names) is read here too, by code."""
-    from neo.tools.computer import legacy
+    from neo2.core.tools.computer import legacy
 
     seen = []
 
@@ -288,7 +288,7 @@ def test_the_read_takes_every_field_the_old_script_read(monkeypatch):
 
 
 def test_through_the_real_engine(monkeypatch):
-    monkeypatch.setitem(engine.DRIVERS, "read_mail", "neo.decide.kinds.mail")
+    monkeypatch.setitem(engine.DRIVERS, "read_mail", "neo2.core.decide.kinds.mail")
     monkeypatch.setattr(engine, "_zero_shot_can_answer", lambda: False)
     monkeypatch.setattr(engine, "_inventory", lambda: [POSTBOX])
 

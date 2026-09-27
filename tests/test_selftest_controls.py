@@ -3,8 +3,8 @@
 Nothing here posts a real event, performs a real AX action, activates or launches an app, captures
 the screen or opens a window. Quartz's event calls, the AX functions NEO's tools use, the window
 list, the front app, the event tap and `screencapture` are all fakes that feed a simulated test
-window (`Desk`), which writes the same JSON log the real one (neo.selftest.testwin) does. The
-runner (neo.selftest.controls.run) drives it through NEO's real tool handlers, so these tests
+window (`Desk`), which writes the same JSON log the real one (neo2.core.selftest.testwin) does. The
+runner (neo2.core.selftest.controls.run) drives it through NEO's real tool handlers, so these tests
 assert the exact events NEO would send and what the report makes of what arrived.
 """
 
@@ -21,9 +21,9 @@ import pytest
 import Quartz as _RealQ
 from PIL import Image, ImageDraw
 
-from neo.selftest import controls, testwin
-from neo.selftest import layout as L
-from neo.selftest import watch as watch_mod
+from neo2.core.selftest import controls, testwin
+from neo2.core.selftest import layout as L
+from neo2.core.selftest import watch as watch_mod
 
 TEST_PID = 4242
 USER_PID = 111
@@ -35,7 +35,7 @@ MAIN_WIN, SECOND_WIN = 777, 778
 
 @pytest.fixture(autouse=True)
 def _nothing_real(monkeypatch):
-    from neo.tools import load_all
+    from neo2.core.tools import load_all
 
     load_all()
 
@@ -50,7 +50,7 @@ def _nothing_real(monkeypatch):
     monkeypatch.setattr(AS, "AXUIElementPerformAction", refuse)
     monkeypatch.setattr(AS, "AXUIElementSetAttributeValue", refuse)
     monkeypatch.setattr(AS, "AXUIElementCopyElementAtPosition", refuse)
-    from neo.tools.computer import apps, focus
+    from neo2.core.tools.computer import apps, focus
 
     monkeypatch.setattr(focus, "force_front", refuse)
     monkeypatch.setattr(focus, "front_app", refuse)
@@ -481,7 +481,7 @@ def fake_quartz(desk):
 
 
 def ax_elements(desk):
-    from neo.tools.computer.ax import Element
+    from neo2.core.tools.computer.ax import Element
 
     dx, dy = desk.opts.get("ax_shift", (0, 0))  # Accessibility reporting controls somewhere else
 
@@ -505,8 +505,8 @@ def ax_elements(desk):
 @pytest.fixture
 def mac(monkeypatch, tmp_path):
     """A pretend Mac wired into NEO's own tools. Options go through `mac.set(...)` before the run."""
-    from neo.tools.computer import apps, ax, focus, screen
-    from neo.tools.computer import input as inp
+    from neo2.core.tools.computer import apps, ax, focus, screen
+    from neo2.core.tools.computer import input as inp
 
     desk = Desk(tmp_path)
     fake = FakeMac(desk)
@@ -524,7 +524,7 @@ def mac(monkeypatch, tmp_path):
 
     def snapshot(app=None, *, max_lines=250):
         name, pid = desk.front
-        from neo.tools.computer.ax import Element
+        from neo2.core.tools.computer.ax import Element
 
         els = ax_elements(desk) if pid == TEST_PID else [Element("e1", "AXButton", "Reload", "", 5, 30, 20, 20, ref=(USER_PID, "x"))]
         ax._last_tree = {e.id: e for e in els}
@@ -612,7 +612,7 @@ def mac(monkeypatch, tmp_path):
     monkeypatch.setattr(screen, "displays", lambda: [screen.Display(1, 0.0, 0.0, float(desk.display[0]), float(desk.display[1]))])
     # macOS holds NEO responsible for the test window it started: NEO's own family, by pid — the
     # self-test's exception (allow_test_window) is what lets its tools act there
-    from neo.decide import media
+    from neo2.core.decide import media
 
     monkeypatch.setattr(media, "_self_family", lambda: frozenset({NEO_PID}))
     monkeypatch.setattr(media, "responsible_pid", lambda pid: NEO_PID if pid in (NEO_PID, TEST_PID) else pid)
@@ -660,9 +660,9 @@ def _kinds(events):
 
 
 def test_everything_arrives_and_the_report_says_so(mac):
-    from neo.tools import computer
-    from neo.tools.computer import apps, ax
-    from neo.tools.computer import input as inp
+    from neo2.core.tools import computer
+    from neo2.core.tools.computer import apps, ax
+    from neo2.core.tools.computer import input as inp
 
     desk = mac.desk
     target_before = apps._target
@@ -730,7 +730,7 @@ def test_the_exact_events_for_a_click_a_drag_and_typing(mac):
     assert [e["fields"][_RealQ.kCGMouseEventClickState] for e in dbl[1:]] == [1, 1, 2, 2]
     # a drag: move to the start, press, a small first step past the drag threshold, then the steps
     # (inp._DRAG_STEPS), let go at the end
-    from neo.tools.computer import input as inp
+    from neo2.core.tools.computer import input as inp
 
     drag = during("_drag_board")
     assert _kinds(drag) == ["move", "down", *["dragged"] * (1 + inp._DRAG_STEPS), "up"]
@@ -815,7 +815,7 @@ def test_screenshot_pixels_on_a_downscaled_screen_are_clicked_by_shot_id(mac):
 def test_a_note_whose_numbers_miss_is_caught_without_clicking(mac, monkeypatch):
     """A note whose numbers put image pixels 100 pt off where NEO maps them: the check reports it
     and clicks nothing."""
-    from neo.tools.computer import pointer
+    from neo2.core.tools.computer import pointer
 
     mac.set()
     mac.desk.display, mac.desk.px = (3200, 1800), 1
@@ -942,7 +942,7 @@ def test_a_window_that_is_not_neos_own_child_is_not_driven(mac):
 
 
 def test_the_report_is_saved_where_neo_keeps_its_data(mac):
-    from neo.config import settings
+    from neo2.core.config import settings
 
     report = _run(mac)
     saved = controls.save(report)
@@ -988,7 +988,7 @@ def test_a_window_that_never_starts_is_explained(mac, monkeypatch):
 
 
 def test_a_broken_step_is_a_report_not_a_crash(mac, monkeypatch):
-    from neo.tools.computer import input as inp
+    from neo2.core.tools.computer import input as inp
 
     def broken(*a, **k):
         raise RuntimeError("the window server went away")
@@ -1072,7 +1072,7 @@ def test_a_keyboard_app_switch_a_mouse_only_tap_cannot_hear_is_left_alone(mac):
 def test_a_target_another_job_sets_during_the_run_is_kept(mac, monkeypatch):
     """Another job opens Pages while the test runs (set_target('Pages')): the clean-up puts back the
     target it found only if nothing else changed it meanwhile."""
-    from neo.tools.computer import apps
+    from neo2.core.tools.computer import apps
 
     real = controls._activate
 
@@ -1101,7 +1101,7 @@ def test_another_jobs_gesture_that_began_before_the_test_is_let_go(mac, monkeypa
     """A job that slipped in between the last look and the arming is mid-drag in Safari: its button
     went down before the watch, so the rest of its gesture is let through (never a button left
     stuck in that app), and the test stops there."""
-    from neo.tools.computer import input as inp
+    from neo2.core.tools.computer import input as inp
 
     desk = mac.desk
     real_arm = watch_mod.Watch.arm

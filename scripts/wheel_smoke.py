@@ -3,8 +3,9 @@
     <venv>/bin/python scripts/wheel_smoke.py [--extra web]
 
 Run it with the python of a clean venv the wheel was installed into. It checks that neo2 comes
-from that venv (not a checkout); that `import neo2` loads only the standard library and
-`from neo2 import AsyncAgent` nothing heavy; that none of torch, pyobjc, playwright,
+from that venv (not a checkout), with NEO's own package inside it (neo2.core) and no top-level
+`neo` (a checkout's compatibility shim, never in the wheel); that `import neo2` loads only the
+standard library and `from neo2 import AsyncAgent` nothing heavy; that none of torch, pyobjc, playwright,
 sentence-transformers, laya, mlx, a vendor SDK, mcp or langchain-core is installed (with
 `--extra web`: that ddgs, trafilatura and pypdf are); that an agent with a scripted brain
 answers, with and without NEO's web tools; and that web_search and web_fetch are given only with
@@ -60,6 +61,11 @@ def main() -> int:
         problems.append(f"import neo2 loaded more than the standard library: {outside}")
     if not Path(neo2.__file__).resolve().is_relative_to(Path(sys.prefix).resolve()):
         problems.append(f"neo2 came from {neo2.__file__}, not this venv ({sys.prefix})")
+    core = importlib.util.find_spec("neo2.core")
+    if core is None or not Path(core.origin or "").resolve().is_relative_to(Path(sys.prefix).resolve()):
+        problems.append(f"neo2.core isn't in this venv's neo2: {core and core.origin}")
+    if installed("neo"):
+        problems.append("a top-level `neo` is installed: the wheel must not ship the checkout's shim")
 
     t = time.perf_counter()
     from neo2 import AsyncAgent

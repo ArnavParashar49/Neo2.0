@@ -17,7 +17,7 @@ from collections.abc import Awaitable, Callable, Iterable, Mapping
 from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
-    from neo.providers.base import ImagePart
+    from neo2.core.providers.base import ImagePart
     from neo2.sdk.agent import AsyncAgent
     from neo2.sdk.approval import ApprovalRequest
     from neo2.sdk.results import Result, ToolOutcome
@@ -427,7 +427,7 @@ def _fenced(text: str) -> bool:
 
 
 def _fence(name: str, text: str) -> str:
-    from neo.agent.registry import fence
+    from neo2.core.agent.registry import fence
 
     return fence(name, text)
 

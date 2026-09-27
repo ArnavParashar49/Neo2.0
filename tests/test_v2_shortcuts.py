@@ -27,8 +27,8 @@ import pytest
     ],
 )
 def test_shortcut_commands(text, keys):
-    from neo.agent import fastpath
-    from neo.tools import load_all
+    from neo2.core.agent import fastpath
+    from neo2.core.tools import load_all
 
     load_all()
     (tool, args), = fastpath.plan(text)
@@ -36,8 +36,8 @@ def test_shortcut_commands(text, keys):
 
 
 def test_the_hotkey_tool_teaches_the_standard_shortcuts():
-    from neo.agent.registry import registry
-    from neo.tools import load_all
+    from neo2.core.agent.registry import registry
+    from neo2.core.tools import load_all
 
     load_all()
     d = registry().get("hotkey").description

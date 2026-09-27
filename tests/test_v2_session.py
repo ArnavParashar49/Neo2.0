@@ -6,11 +6,11 @@ import asyncio
 
 import pytest
 
-from neo.agent import session as sess_mod
-from neo.agent.registry import registry
-from neo.agent.session import Session, _match_fast_path
-from neo.events import EventBus
-from neo.reflex.schema import Decision
+from neo2.core.agent import session as sess_mod
+from neo2.core.agent.registry import registry
+from neo2.core.agent.session import Session, _match_fast_path
+from neo2.core.events import EventBus
+from neo2.core.reflex.schema import Decision
 
 
 class FakeReflex:
@@ -38,7 +38,7 @@ class FakeChain:
         yield "there"
 
     async def complete(self, messages, *, system="", tools=None, effort="medium", max_tokens=4096):
-        from neo.providers.base import Turn
+        from neo2.core.providers.base import Turn
 
         self.completed += 1
         return Turn(text="agent did it")
@@ -46,12 +46,12 @@ class FakeChain:
 
 @pytest.fixture(autouse=True)
 def _isolate(tmp_path, monkeypatch):
-    from neo import config, events
+    from neo2.core import config, events
 
     monkeypatch.setattr(config, "_settings", None)
     monkeypatch.setenv("NEO_DATA_DIR", str(tmp_path))
     monkeypatch.setattr(events, "_bus", EventBus())
-    from neo.tools import load_all
+    from neo2.core.tools import load_all
 
     load_all()
 

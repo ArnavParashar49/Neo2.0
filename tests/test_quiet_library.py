@@ -8,12 +8,12 @@ import logging
 import pytest
 from neo_lib import make_runtime, scripted
 
-from neo import runtime
-from neo.agent import confirm
-from neo.agent.registry import RegisteredTool
-from neo.agent.session import Session
-from neo.providers import BrainPool, Chain
-from neo.providers.base import ProviderError, ToolCall, Turn
+from neo2.core import runtime
+from neo2.core.agent import confirm
+from neo2.core.agent.registry import RegisteredTool
+from neo2.core.agent.session import Session
+from neo2.core.providers import BrainPool, Chain
+from neo2.core.providers.base import ProviderError, ToolCall, Turn
 
 _OBJ = {"type": "object", "properties": {}}
 
@@ -33,11 +33,11 @@ class _Down:
 def neo_stdout():
     """NEO.app's logging setup, removed again afterwards (it's process-wide). Installed by the
     test itself: capsys swaps its stream between the setup and call phases."""
-    import neo
+    import neo2.core
 
     lg = logging.getLogger("neo")
     before, level = list(lg.handlers), lg.level
-    yield neo.log_to_stdout
+    yield neo2.core.log_to_stdout
     lg.handlers[:] = before
     lg.setLevel(level)
 
@@ -83,14 +83,14 @@ def test_an_agent_turn_and_its_approval_print_nothing(tmp_path, capsys, caplog):
     out = capsys.readouterr()
     assert out.out == "" and out.err == ""
     names = {rec.name for rec in caplog.records}
-    assert {"neo.providers", "neo.agent.session"} <= names
+    assert {"neo.providers", "neo.agent.session"} <= names  # logger names: NEO's kept theirs  neo2-codemod: keep
     texts = [rec.getMessage() for rec in caplog.records]
     assert any(t.startswith("[brain] down failed (ProviderError: down for maintenance)") for t in texts)
     assert "  ~ zz_broken failed; handing to the agent" in texts
 
 
 def test_neo_apps_lines_still_reach_stdout_with_the_same_text(neo_stdout, capsys, monkeypatch):
-    from neo import providers as prov
+    from neo2.core import providers as prov
 
     ok = type("Ok", (), {"name": "ok", "model": "", "supports_vision": False, "supports_tools": True})()
 
@@ -115,25 +115,25 @@ def test_neo_apps_setup_leaves_other_libraries_alone(neo_stdout, capsys):
 
 
 def test_importing_neo_configures_nothing_but_a_null_handler():
-    import neo
+    import neo2.core
 
     lg = logging.getLogger("neo")
     assert any(isinstance(h, logging.NullHandler) for h in lg.handlers)
     assert not logging.getLogger().handlers or all(
         type(h).__module__.startswith("_pytest") for h in logging.getLogger().handlers
     )
-    assert callable(neo.log_to_stdout)
+    assert callable(neo2.core.log_to_stdout)
 
 
 @pytest.mark.parametrize("module", ["generate", "finetune", "hf_data", "dataset"])
 def test_the_training_commands_still_print_neos_lines(module):
-    """`python -m neo.reflex.<module>` used to print the providers' status lines ("[gemini] …
+    """`python -m neo2.core.reflex.<module>` used to print the providers' status lines ("[gemini] …
     quota exhausted; trying next key"); now they are log records, which a command line shows
     only with NEO's stdout logging set up — first thing in its __main__ block."""
     import ast
     from pathlib import Path
 
-    tree = ast.parse((Path(__file__).resolve().parents[1] / "neo" / "reflex" / f"{module}.py").read_text())
+    tree = ast.parse((Path(__file__).resolve().parents[1] / "neo2" / "core" / "reflex" / f"{module}.py").read_text())
     mains = [n for n in tree.body if isinstance(n, ast.If) and "__main__" in ast.unparse(n.test)]
     assert mains, module
     first = next(st for st in mains[0].body if not isinstance(st, ast.Import | ast.ImportFrom))
@@ -146,7 +146,7 @@ def silent_safari(monkeypatch):
     pytest.importorskip("AppKit")
     from types import SimpleNamespace
 
-    from neo.decide import close, inventory, media
+    from neo2.core.decide import close, inventory, media
 
     safari = SimpleNamespace(name="Safari", bundle_id="com.apple.Safari", handles=("https",), running=True)
     monkeypatch.setattr(close, "_running_apps", lambda: [safari])
@@ -165,7 +165,7 @@ def silent_safari(monkeypatch):
 
 
 def test_an_agents_close_prints_nothing(tmp_path, capsys, caplog, silent_safari):
-    from neo.agent.registry import ToolContext, registry
+    from neo2.core.agent.registry import ToolContext, registry
 
     rt = make_runtime(tmp_path / "c", "c", ["close"])
     with caplog.at_level(logging.INFO, logger="neo"), runtime.bind(rt.scope()):
@@ -176,8 +176,33 @@ def test_an_agents_close_prints_nothing(tmp_path, capsys, caplog, silent_safari)
 
 
 def test_neo_apps_close_line_still_reaches_stdout(neo_stdout, capsys, silent_safari):
-    from neo.decide import close
+    from neo2.core.decide import close
 
     neo_stdout()
     asyncio.run(close.close_target("youtube"))
     assert capsys.readouterr().out == "[close] Safari didn't answer (execution error: Safari got an error (-1712))\n"
+
+
+def test_neos_modules_log_under_the_neo_logger_they_always_had():
+    """NEO's package moved to neo2.core, its log lines didn't: NEO.app (log_to_stdout) and hosts
+    configure the `neo` logger and `neo.audit`, so a module there logs as neo.<module>."""
+    import ast
+    from pathlib import Path
+
+    import neo2.core
+    from neo2.core import providers
+    from neo2.core.agent import session
+
+    assert neo2.core.logger("neo2.core.agent.session").name == "neo.agent.session"  # neo2-codemod: keep
+    assert neo2.core.logger("neo2.core").name == "neo"
+    assert neo2.core.logger("neo2.sdk.agent").name == "neo2.sdk.agent"  # not NEO's own package: as it is
+    assert neo2.core.logger("__main__").name == "__main__"  # python -m neo2.core.reflex.finetune
+    assert (session.log.name, providers.log.name) == ("neo.agent.session", "neo.providers")  # neo2-codemod: keep
+    root = Path(neo2.core.__file__).parent
+    by_module_name = [
+        f"{f.relative_to(root)}:{n.lineno}"
+        for f in sorted(root.rglob("*.py"))
+        for n in ast.walk(ast.parse(f.read_text()))
+        if isinstance(n, ast.Call) and ast.unparse(n.func).endswith("getLogger") and n.args and ast.unparse(n.args[0]) == "__name__"
+    ]
+    assert by_module_name == []  # logger(__name__) instead: logging.getLogger(__name__) would say neo2.core.…

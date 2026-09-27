@@ -27,14 +27,14 @@ from types import SimpleNamespace
 import pytest
 from neo_lib import ScriptedBrain, make_runtime
 
-from neo import effects, runtime
-from neo import providers as prov
-from neo.agent import confirm, grants
-from neo.agent import session as sess_mod
-from neo.agent.registry import RegisteredTool, ToolContext, catalog, registry
-from neo.events import EventBus, bus
-from neo.providers.base import QuotaExhausted, ToolCall, Turn
-from neo.reflex.schema import Decision
+from neo2.core import effects, runtime
+from neo2.core import providers as prov
+from neo2.core.agent import confirm, grants
+from neo2.core.agent import session as sess_mod
+from neo2.core.agent.registry import RegisteredTool, ToolContext, catalog, registry
+from neo2.core.events import EventBus, bus
+from neo2.core.providers.base import QuotaExhausted, ToolCall, Turn
+from neo2.core.reflex.schema import Decision
 
 ROOT = Path(__file__).resolve().parents[1]
 CHESS = grants.Target("Chess", "", ("ax_tree",))
@@ -107,7 +107,7 @@ def test_an_agents_yes_for_this_task_stays_one_off_and_neo_app_keeps_its_grants(
 
     # NEO.app, same process: the grant covers the rest of the task.
     runtime.set_library_mode(False)
-    from neo import events
+    from neo2.core import events
 
     monkeypatch.setattr(events, "_bus", EventBus())
     ran.clear()
@@ -223,7 +223,7 @@ def test_what_a_brain_learns_stays_in_the_agent_that_built_it(tmp_path, monkeypa
     """Groq's learned request size (its budget and estimate scale) and the Gemini quota file: each
     agent's own brain object and data dir, nothing in NEO.app's pool, data dir or ~/.neo."""
     pytest.importorskip("openai")
-    gem = pytest.importorskip("neo.providers.gemini")
+    gem = pytest.importorskip("neo2.core.providers.gemini")
 
     class Client:
         def __init__(self, api_key, http_options=None):
@@ -276,12 +276,11 @@ def test_the_suite_itself_runs_embedded_agents_with_effects_off(tmp_path):
 
 
 def _installed(tmp_path: Path) -> Path:
-    """NEO as another app has it: installed into that app's environment (here its two packages,
-    linked into a folder of their own), not run from NEO's source tree."""
+    """NEO as another app has it: installed into that app's environment (here its package, neo2,
+    linked into a folder of its own), not run from NEO's source tree."""
     site = tmp_path / "site"
     site.mkdir()
-    for pkg in ("neo", "neo2"):
-        (site / pkg).symlink_to(ROOT / pkg, target_is_directory=True)
+    (site / "neo2").symlink_to(ROOT / "neo2", target_is_directory=True)
     return site
 
 
@@ -290,10 +289,10 @@ _HOST = textwrap.dedent(
     import asyncio, json, socket, sys
     import pytest  # the host's own test run (or a notebook that has it loaded)
     import neo2
-    from neo import effects
+    from neo2.core import effects
     from neo2.testing import ScriptedBrain, ToolCall, Turn
 
-    assert "/site/neo/" in effects.__file__, effects.__file__  # the installed copy, not the source tree
+    assert "/site/neo2/core/" in effects.__file__, effects.__file__  # the installed copy, not the source tree
     before = [effects.why_off(), effects._hooked]
     # The host's own program and its own service (a CI database): nothing of NEO's refuses them.
     # (Asked of the check itself: nothing is started or connected.)
@@ -354,7 +353,7 @@ def test_a_host_that_sets_neo_no_effects_gets_the_switch(tmp_path):
         """
         import json
         import neo2
-        from neo import effects
+        from neo2.core import effects
         try:
             effects._audit("subprocess.Popen", ("/usr/bin/true", ["/usr/bin/true"], None, None))
             refused = False
@@ -375,7 +374,7 @@ def test_neo_from_its_source_tree_under_pytest_is_neos_own_test_run(tmp_path):
         import asyncio, json, sys
         import pytest
         import neo2
-        from neo import effects
+        from neo2.core import effects
         from neo2.testing import ScriptedBrain
 
         async def main():
@@ -400,7 +399,7 @@ _MAC = pytest.mark.skipif(
 @_MAC
 def test_accessibility_off_names_the_host_not_neo_app(tmp_path, monkeypatch):
     import neo2
-    from neo.tools.computer import ax
+    from neo2.core.tools.computer import ax
 
     monkeypatch.setattr(ax, "is_trusted", lambda: False)
     monkeypatch.setattr(sys, "executable", "/Applications/Acme Desk.app/Contents/MacOS/python3")
@@ -423,7 +422,7 @@ def test_accessibility_off_names_the_host_not_neo_app(tmp_path, monkeypatch):
 
 @_MAC
 def test_accessibility_off_for_a_script_names_its_interpreter(tmp_path, monkeypatch):
-    from neo.tools import computer
+    from neo2.core.tools import computer
 
     monkeypatch.setattr(sys, "executable", "/opt/homebrew/bin/python3.12")
     rt = make_runtime(tmp_path / "a", "a")
@@ -435,8 +434,8 @@ def test_accessibility_off_for_a_script_names_its_interpreter(tmp_path, monkeypa
 
 @_MAC
 def test_neo_apps_accessibility_question_is_unchanged(monkeypatch):
-    from neo.tools import computer, load_all
-    from neo.tools.computer import ax
+    from neo2.core.tools import computer, load_all
+    from neo2.core.tools.computer import ax
 
     load_all()
     monkeypatch.setattr(ax, "is_trusted", lambda: False)

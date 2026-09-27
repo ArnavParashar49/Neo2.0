@@ -9,14 +9,14 @@ import asyncio
 
 import pytest
 
-import neo.agent.session as sess_mod
-from neo.agent import confirm
-from neo.agent.session import Session
-from neo.decide import run
-from neo.decide.inventory import App
-from neo.events import EventBus
-from neo.providers.base import ToolCall, Turn
-from neo.reflex.schema import Decision
+import neo2.core.agent.session as sess_mod
+from neo2.core.agent import confirm
+from neo2.core.agent.session import Session
+from neo2.core.decide import run
+from neo2.core.decide.inventory import App
+from neo2.core.events import EventBus
+from neo2.core.providers.base import ToolCall, Turn
+from neo2.core.reflex.schema import Decision
 
 KINDS = ("write_note", "add_reminder", "add_event", "read_calendar", "read_mail", "open_app", "web_search")
 NOTES = App(bundle_id="test.notes", name="Notes", path="/Applications/Notes.app")
@@ -24,9 +24,9 @@ NOTES = App(bundle_id="test.notes", name="Notes", path="/Applications/Notes.app"
 
 @pytest.fixture(autouse=True)
 def _env(monkeypatch):
-    from neo import events
-    from neo.decide import inventory, sites
-    from neo.tools import load_all
+    from neo2.core import events
+    from neo2.core.decide import inventory, sites
+    from neo2.core.tools import load_all
 
     monkeypatch.setattr(events, "_bus", EventBus())
     # what the fast-path checks read: the apps on this "Mac", its country, which words are everyday
@@ -67,11 +67,11 @@ class Reflex:
 def world(monkeypatch, real_handlers):
     """Who answered each tool call: ("legacy", what) for today's code, ("driver", kind) for the
     kind's driver, ("web", query) for the web search both share."""
-    from neo.decide import axkit
-    from neo.decide.kinds import launch, mail, note, schedule, site
-    from neo.tools import computer, web
-    from neo.tools.computer import apps, ax, legacy
-    from neo.tools.computer import input as inp
+    from neo2.core.decide import axkit
+    from neo2.core.decide.kinds import launch, mail, note, schedule, site
+    from neo2.core.tools import computer, web
+    from neo2.core.tools.computer import apps, ax, legacy
+    from neo2.core.tools.computer import input as inp
 
     log: list = []
 
@@ -245,7 +245,7 @@ ROUTES = [
 
 
 def _fast_tool(text: str) -> str | None:
-    from neo.agent.fastpath import match
+    from neo2.core.agent.fastpath import match
 
     hit = match(text)
     return hit[0] if hit else None

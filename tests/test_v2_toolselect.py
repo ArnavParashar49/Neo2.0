@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import asyncio
 
-from neo.agent.loop import run_agent
-from neo.agent.registry import RegisteredTool, Registry
-from neo.agent.session import Session, _stub
-from neo.agent.toolselect import MORE_TOOLS, ToolSelector
-from neo.events import EventBus
-from neo.providers.base import Message, ToolCall, ToolResult, Turn
+from neo2.core.agent.loop import run_agent
+from neo2.core.agent.registry import RegisteredTool, Registry
+from neo2.core.agent.session import Session, _stub
+from neo2.core.agent.toolselect import MORE_TOOLS, ToolSelector
+from neo2.core.events import EventBus
+from neo2.core.providers.base import Message, ToolCall, ToolResult, Turn
 
 
 def _reg() -> Registry:
@@ -86,7 +86,7 @@ class Brain:
 def test_more_tools_grows_the_run_tool_list():
     reg = _reg()
     sel = ToolSelector(reg)
-    import neo.agent.toolselect as ts
+    import neo2.core.agent.toolselect as ts
 
     ts._selector = sel
     initial = sel.select("what's the volume").specs(reg)
@@ -134,9 +134,9 @@ def test_history_stubs_old_tool_results():
 
 
 def test_quick_action_uses_light_lane(monkeypatch):
-    import neo.agent.session as sess_mod
-    from neo.reflex.schema import Decision
-    from neo.tools import load_all
+    import neo2.core.agent.session as sess_mod
+    from neo2.core.reflex.schema import Decision
+    from neo2.core.tools import load_all
 
     load_all()
     purposes = []

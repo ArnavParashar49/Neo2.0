@@ -11,7 +11,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Sequence
 from typing import Any
 
-from neo.providers.base import Message, ToolCall, ToolSpec, Turn
+from neo2.core.providers.base import Message, ToolCall, ToolSpec, Turn
 
 __all__ = ["ScriptedBrain", "ToolCall", "Turn"]
 

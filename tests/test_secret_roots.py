@@ -8,8 +8,8 @@ from pathlib import Path
 import pytest
 from neo_lib import make_runtime
 
-from neo import runtime
-from neo.tools.computer import policy, shell
+from neo2.core import runtime
+from neo2.core.tools.computer import policy, shell
 
 
 @pytest.fixture
@@ -95,7 +95,7 @@ def test_every_live_agent_counts_even_unbound(tmp_path):
 
 
 def test_neo_apps_custom_data_dir_is_secret_once_its_settings_exist(tmp_path, monkeypatch):
-    from neo import config
+    from neo2.core import config
 
     custom = tmp_path / "custom-neo"
     monkeypatch.setenv("NEO_DATA_DIR", str(custom))
@@ -158,8 +158,8 @@ def test_a_data_dir_named_through_the_data_volume(tmp_path):
 async def test_applescript_never_sees_the_hosts_environment(monkeypatch, tmp_path):
     """`system attribute "X"` reads osascript's environment: it asks first, and an agent's
     osascript gets the shell tool's basic environment, never the host process's."""
-    from neo.agent.registry import ToolContext, registry
-    from neo.tools.computer import apps
+    from neo2.core.agent.registry import ToolContext, registry
+    from neo2.core.tools.computer import apps
 
     monkeypatch.setenv("HOST_DATABASE_URL", "postgres://svc:hunter2@db/prod")
     envs: list = []

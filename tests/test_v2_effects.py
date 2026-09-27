@@ -1,6 +1,6 @@
 """Nothing the suite (or a scratch script run with NEO_NO_EFFECTS=1) runs can act on the Mac.
 
-neo/effects.py refuses every real effect at the lowest layer of its path. Here each choke point is
+neo2/core/effects.py refuses every real effect at the lowest layer of its path. Here each choke point is
 driven with nothing faked above it, its lowest primitive swapped for a sentinel that fails the test
 if reached: the effect must be refused before it. The same paths in NEO.app's mode (not under
 pytest, NEO_NO_EFFECTS unset) reach their sentinel: nothing is refused there, and reaching it shows
@@ -33,8 +33,8 @@ from unittest import mock
 
 import pytest
 
-from neo import effects
-from neo.agent.registry import ToolContext
+from neo2.core import effects
+from neo2.core.agent.registry import ToolContext
 
 
 class Reached(BaseException):
@@ -98,7 +98,7 @@ class Sentinels:
 
     def skylight(self) -> None:
         """The WindowServer's private calls behind bringing an app to the front."""
-        from neo.tools.computer import focus
+        from neo2.core.tools.computer import focus
 
         sl = SimpleNamespace(
             _SLPSSetFrontProcessWithOptions=self.fn("_SLPSSetFrontProcessWithOptions", poses_as="ctypes"),
@@ -219,7 +219,7 @@ def case(kind: str, *, app: bool = True):
 
 @case("process")
 def open_an_app(s):
-    from neo.tools.computer import apps
+    from neo2.core.tools.computer import apps
 
     s.spawn()
     return lambda: asyncio.run(apps.open_app("Safari"))
@@ -227,7 +227,7 @@ def open_an_app(s):
 
 @case("process")
 def open_a_web_page(s):
-    from neo.tools.computer import apps
+    from neo2.core.tools.computer import apps
 
     s.spawn()
     return lambda: asyncio.run(apps.open_url("https://example.com"))
@@ -235,7 +235,7 @@ def open_a_web_page(s):
 
 @case("process")
 def reveal_a_file_in_finder(s):
-    from neo.tools.computer import apps
+    from neo2.core.tools.computer import apps
 
     s.spawn()
     return lambda: asyncio.run(apps.finder_reveal(str(s.tmp)))
@@ -243,7 +243,7 @@ def reveal_a_file_in_finder(s):
 
 @case("process")
 def run_applescript(s):
-    from neo.tools.computer import apps
+    from neo2.core.tools.computer import apps
 
     s.spawn()
     return lambda: asyncio.run(apps.osascript('tell application "Finder" to activate'))
@@ -251,7 +251,7 @@ def run_applescript(s):
 
 @case("process")
 def run_applescript_with_arguments(s):
-    from neo.decide import media
+    from neo2.core.decide import media
 
     s.spawn()
     return lambda: asyncio.run(media._osascript("on run argv\nreturn item 1 of argv\nend run", ["x"], 5))
@@ -259,7 +259,7 @@ def run_applescript_with_arguments(s):
 
 @case("process")
 def open_a_file_in_the_app_that_imports_it(s):
-    from neo.decide.kinds import schedule
+    from neo2.core.decide.kinds import schedule
 
     s.spawn()
     return lambda: asyncio.run(schedule._open_with("com.apple.iCal", str(s.tmp / "event.ics")))
@@ -267,7 +267,7 @@ def open_a_file_in_the_app_that_imports_it(s):
 
 @case("process")
 def mute_the_mac(s):
-    from neo.tools import system
+    from neo2.core.tools import system
 
     s.spawn()
     return lambda: asyncio.run(system.volume({"action": "mute"}, ToolContext()))
@@ -275,7 +275,7 @@ def mute_the_mac(s):
 
 @case("process")
 def sleep_the_display(s):
-    from neo.tools import system
+    from neo2.core.tools import system
 
     s.spawn()
     return lambda: asyncio.run(system.sleep_display({}, ToolContext()))
@@ -283,7 +283,7 @@ def sleep_the_display(s):
 
 @case("process")
 def a_shell_command(s):
-    from neo.tools.computer import shell
+    from neo2.core.tools.computer import shell
 
     s.spawn()
     return lambda: asyncio.run(shell.run("ls"))  # read-only, so no confirmation: straight to the shell
@@ -291,7 +291,7 @@ def a_shell_command(s):
 
 @case("process")
 def capture_a_window(s):
-    from neo.tools.computer import screen
+    from neo2.core.tools.computer import screen
 
     s.mp.setattr(screen, "can_capture", lambda: True)
     s.spawn()
@@ -300,7 +300,7 @@ def capture_a_window(s):
 
 @case("process")
 def say_it_aloud(s):
-    from neo import app
+    from neo2.core import app
 
     s.spawn()
     return lambda: app._say_aloud("hello")
@@ -324,7 +324,7 @@ def a_shell_through_os_system(s):
 
 @case("model")
 def start_the_local_model_server(s):
-    from neo.providers import local_server
+    from neo2.core.providers import local_server
 
     async def down(port=8080):
         return False
@@ -338,7 +338,7 @@ def start_the_local_model_server(s):
 def start_the_page_reader(s):
     import playwright.async_api
 
-    from neo.tools import render
+    from neo2.core.tools import render
 
     s.put(playwright.async_api, "async_playwright")
     return lambda: asyncio.run(render._start_playwright())
@@ -348,7 +348,7 @@ def start_the_page_reader(s):
 def start_neos_browser(s):
     import playwright.async_api
 
-    from neo.tools import browser
+    from neo2.core.tools import browser
 
     s.put(playwright.async_api, "async_playwright")
     return lambda: asyncio.run(browser._Browser()._launch())
@@ -358,14 +358,14 @@ def start_neos_browser(s):
 
 
 def _ask(provider) -> Callable[[], object]:
-    from neo.providers.base import Message
+    from neo2.core.providers.base import Message
 
     return lambda: asyncio.run(asyncio.wait_for(provider.complete([Message("user", "hi")]), 30))
 
 
 @case("network", app=False)
 def the_openai_client(s):  # Groq's (and the local server's) protocol
-    from neo.providers.openai_compat import OpenAICompatProvider
+    from neo2.core.providers.openai_compat import OpenAICompatProvider
 
     s.network()
     return _ask(OpenAICompatProvider(name="groq", base_url=s.url6 + "/v1", api_key="test", model="m"))
@@ -373,8 +373,8 @@ def the_openai_client(s):  # Groq's (and the local server's) protocol
 
 @case("network", app=False)
 def the_anthropic_client(s):
-    from neo import config
-    from neo.providers.claude import ClaudeProvider
+    from neo2.core import config
+    from neo2.core.providers.claude import ClaudeProvider
 
     s.network()
     s.mp.setenv("ANTHROPIC_API_KEY", "test")
@@ -385,8 +385,8 @@ def the_anthropic_client(s):
 
 @case("network", app=False)
 def the_gemini_client(s):
-    from neo import config
-    from neo.providers.gemini import GeminiProvider
+    from neo2.core import config
+    from neo2.core.providers.gemini import GeminiProvider
 
     s.network()
     s.mp.setenv("GEMINI_API_KEY", "test")
@@ -401,7 +401,7 @@ def a_gemini_live_session(s):
 
     s.network()
     s.mp.setenv("GOOGLE_GEMINI_BASE_URL", s.url4)
-    client = genai.Client(api_key="test")  # as neo/voice/live.py makes it
+    client = genai.Client(api_key="test")  # as neo2/core/voice/live.py makes it
 
     async def connect():
         async with client.aio.live.connect(model="m", config={}):
@@ -438,7 +438,7 @@ def a_download(s):
 
 @case("network", app=False)
 def a_web_search(s):
-    from neo.tools import web
+    from neo2.core.tools import web
 
     s.search()
     return lambda: web._one("despacito", 3, "duckduckgo")
@@ -446,7 +446,7 @@ def a_web_search(s):
 
 @case("network", app=False)
 def a_news_search(s):
-    from neo.tools import web
+    from neo2.core.tools import web
 
     s.search()
     return lambda: web._news("despacito", 3)
@@ -454,7 +454,7 @@ def a_news_search(s):
 
 @case("network", app=False)
 def a_video_search(s):
-    from neo.decide import media
+    from neo2.core.decide import media
 
     s.search()
     return lambda: media._video_search("despacito", 3)
@@ -462,7 +462,7 @@ def a_video_search(s):
 
 @case("network", app=False)
 def a_text_search(s):
-    from neo.decide import media
+    from neo2.core.decide import media
 
     s.search()
     return lambda: media._text_search("despacito", 3)
@@ -470,7 +470,7 @@ def a_text_search(s):
 
 @case("network", app=False)
 def a_site_search(s):
-    from neo.decide import sites
+    from neo2.core.decide import sites
 
     s.search()
     return lambda: sites._search("youtube", "us-en")
@@ -485,7 +485,7 @@ def _fake_laya(s):
 
 @case("model")
 def load_laya_for_a_question(s):
-    from neo.reflex import zeroshot
+    from neo2.core.reflex import zeroshot
 
     _fake_laya(s)
     return lambda: zeroshot._open("/nowhere/typed-decisions")
@@ -493,8 +493,8 @@ def load_laya_for_a_question(s):
 
 @case("model")
 def load_laya_for_the_reflex(s):
-    from neo import models
-    from neo.reflex import features
+    from neo2.core import models
+    from neo2.core.reflex import features
 
     _fake_laya(s)
     s.mp.setattr(models, "laya_dir", lambda encoder="english": "/nowhere/laya")  # never the real cache
@@ -503,8 +503,8 @@ def load_laya_for_the_reflex(s):
 
 @case("model")
 def load_the_on_device_voice(s):
-    from neo import models
-    from neo.voice import local
+    from neo2.core import models
+    from neo2.core.voice import local
 
     s.mp.setitem(sys.modules, "mlx_audio.stt.utils", SimpleNamespace(load=s.fn("stt_load", poses_as="mlx_audio")))
     s.mp.setitem(
@@ -521,7 +521,7 @@ def load_the_on_device_voice(s):
 
 @case("model")
 def load_the_memory_embedder(s):
-    from neo.memory import embed
+    from neo2.core.memory import embed
 
     model = s.cls("SentenceTransformer", poses_as="sentence_transformers")
     s.mp.setitem(sys.modules, "sentence_transformers", SimpleNamespace(SentenceTransformer=model))
@@ -542,7 +542,7 @@ _OTHER_APP = 1
 def a_click(s):
     import Quartz
 
-    from neo.tools.computer import input as inp
+    from neo2.core.tools.computer import input as inp
 
     s.put(Quartz, "CGEventPost", poses_as="objc")
     return lambda: inp.click(5, 5)
@@ -552,7 +552,7 @@ def a_click(s):
 def typing_into_another_app(s):
     import Quartz
 
-    from neo.decide import axkit
+    from neo2.core.decide import axkit
 
     s.put(Quartz, "CGEventPostToPid", poses_as="objc")
     return lambda: axkit._type(_OTHER_APP, "hi", "return")
@@ -562,7 +562,7 @@ def typing_into_another_app(s):
 def return_in_another_app(s):
     import Quartz
 
-    from neo.decide import media
+    from neo2.core.decide import media
 
     s.put(Quartz, "CGEventPostToPid", poses_as="objc")
     return lambda: media._post_return(_OTHER_APP)
@@ -572,7 +572,7 @@ def return_in_another_app(s):
 def an_ax_value_set(s):
     import ApplicationServices
 
-    from neo.decide import media
+    from neo2.core.decide import media
 
     s.put(ApplicationServices, "AXUIElementSetAttributeValue", poses_as="objc")
     return lambda: media._set(object(), "AXValue", "hi")
@@ -582,19 +582,19 @@ def an_ax_value_set(s):
 def an_ax_press(s):
     import ApplicationServices
 
-    from neo.decide import media
+    from neo2.core.decide import media
 
     s.put(ApplicationServices, "AXUIElementPerformAction", poses_as="objc")
     return lambda: media._perform(object(), "AXPress")
 
 
-from neo.tools.computer import ax as _ax  # noqa: E402
+from neo2.core.tools.computer import ax as _ax  # noqa: E402
 
 _REAL_RAISE_WINDOW = _ax.raise_window  # (tests/conftest.py makes it a no-op in every test)
 
 
 def _element():
-    from neo.tools.computer import ax
+    from neo2.core.tools.computer import ax
 
     return ax.Element("e1", "AXButton", "OK", "", 0, 0, 20, 20, actions=["AXPress"], ref=object())
 
@@ -603,7 +603,7 @@ def _element():
 def a_press_by_id(s):
     import ApplicationServices
 
-    from neo.tools.computer import ax
+    from neo2.core.tools.computer import ax
 
     s.mp.setattr(ax, "_last_tree", {"e1": _element()})
     s.put(ApplicationServices, "AXUIElementPerformAction", poses_as="objc")
@@ -614,7 +614,7 @@ def a_press_by_id(s):
 def a_value_set_by_id(s):
     import ApplicationServices
 
-    from neo.tools.computer import ax
+    from neo2.core.tools.computer import ax
 
     field = ax.Element("e1", "AXTextField", "Search", "", 0, 0, 200, 20, ref=object())  # values go into text inputs only
     s.mp.setattr(ax, "_last_tree", {"e1": field})
@@ -626,7 +626,7 @@ def a_value_set_by_id(s):
 def a_press_of_the_element_in_hand(s):
     import ApplicationServices
 
-    from neo.tools.computer import ax
+    from neo2.core.tools.computer import ax
 
     s.put(ApplicationServices, "AXUIElementPerformAction", poses_as="objc")
     return lambda: ax.press_element(_element())
@@ -636,7 +636,7 @@ def a_press_of_the_element_in_hand(s):
 def a_text_area_focused_through_accessibility(s):
     import ApplicationServices
 
-    from neo.tools.computer import ax
+    from neo2.core.tools.computer import ax
 
     s.put(ApplicationServices, "AXUIElementSetAttributeValue", poses_as="objc")
     return lambda: ax.focus_el(object())
@@ -646,7 +646,7 @@ def a_text_area_focused_through_accessibility(s):
 def the_window_under_the_pointer_raised(s):
     import ApplicationServices
 
-    from neo.tools.computer import ax
+    from neo2.core.tools.computer import ax
 
     win, other = object(), object()
     s.mp.setattr(ax, "_attr", lambda el, name, default=None: "AXWindow" if name == "AXRole" else other)
@@ -656,7 +656,7 @@ def the_window_under_the_pointer_raised(s):
 
 @case("focus")
 def the_windowserver_front_switch(s):
-    from neo.tools.computer import focus
+    from neo2.core.tools.computer import focus
 
     s.skylight()
     return lambda: focus.force_front(os.getpid())
@@ -664,7 +664,7 @@ def the_windowserver_front_switch(s):
 
 @case("focus")
 def an_app_activated(s):
-    from neo.tools.computer import apps, focus
+    from neo2.core.tools.computer import apps, focus
 
     app = SimpleNamespace(
         localizedName=lambda: "Sentinel",
@@ -686,7 +686,7 @@ def an_app_activated(s):
 def the_screen_recording_question(s):
     import Quartz
 
-    from neo.tools.computer import screen
+    from neo2.core.tools.computer import screen
 
     s.mp.setattr(screen, "can_capture", lambda: False)
     s.put(Quartz, "CGRequestScreenCaptureAccess", poses_as="objc")
@@ -697,7 +697,7 @@ def the_screen_recording_question(s):
 def the_accessibility_question(s):
     import ApplicationServices
 
-    from neo import permissions
+    from neo2.core import permissions
 
     s.mp.setattr(permissions, "missing", lambda: ["Accessibility"])
     s.mp.delenv("NEO_LAUNCHED_BY_APP", raising=False)
@@ -709,7 +709,7 @@ def the_accessibility_question(s):
 def the_input_events_question(s):
     import Quartz
 
-    from neo import permissions
+    from neo2.core import permissions
 
     s.mp.setattr(permissions, "missing", lambda: ["Input events"])
     s.mp.delenv("NEO_LAUNCHED_BY_APP", raising=False)
@@ -719,7 +719,7 @@ def the_input_events_question(s):
 
 @case("permission")
 def the_automation_question(s):
-    from neo.decide import media
+    from neo2.core.decide import media
 
     lib = SimpleNamespace(
         AECreateDesc=lambda *a: 0,
@@ -734,7 +734,7 @@ def the_automation_question(s):
 
 @case("calendar")
 def the_calendar_store(s):
-    from neo.decide import eventkit
+    from neo2.core.decide import eventkit
 
     s.mp.setattr(eventkit, "_store_obj", None)
     s.mp.setattr(
@@ -745,7 +745,7 @@ def the_calendar_store(s):
 
 @case("contacts")
 def the_contacts_store(s):
-    from neo.decide import people
+    from neo2.core.decide import people
 
     s.mp.setattr(
         people, "_cn", lambda: SimpleNamespace(CNContactStore=s.cls("CNContactStore", poses_as="objc"))
@@ -755,7 +755,7 @@ def the_contacts_store(s):
 
 @case("audio")
 def the_speaker(s):
-    from neo.voice import audio
+    from neo2.core.voice import audio
 
     s.mp.setattr(audio.sd, "OutputStream", s.cls("OutputStream", poses_as="sounddevice"))
     return audio.Speaker().start
@@ -763,7 +763,7 @@ def the_speaker(s):
 
 @case("audio")
 def the_microphone(s):
-    from neo.voice import audio
+    from neo2.core.voice import audio
 
     s.mp.setattr(audio.sd, "RawInputStream", s.cls("RawInputStream", poses_as="sounddevice"))
     return audio.Mic().start
@@ -771,9 +771,9 @@ def the_microphone(s):
 
 @case("files")
 def a_note_file_in_the_users_documents(s):
-    from neo import config
-    from neo.decide.kinds import note
-    from neo.decide.run import Req
+    from neo2.core import config
+    from neo2.core.decide.kinds import note
+    from neo2.core.decide.run import Req
 
     s.mp.delenv("NEO_NOTES_DIR", raising=False)  # the release default: ~/Documents/NEO Notes
     s.mp.setattr(config, "_settings", None)
@@ -816,7 +816,7 @@ def test_the_suite_runs_with_effects_off():
 def test_the_suite_widens_nothing():
     """Nothing is allowed outside a test's own opt-in, and neither Laya nor the voice is on, whatever
     the environment says (test_the_environment_cannot_widen_the_suite runs this with it saying so)."""
-    from neo import config
+    from neo2.core import config
 
     assert not effects._allowed
     assert (os.environ["NEO_REFLEX"], os.environ["NEO_VOICE"]) == ("off", "off")
@@ -826,7 +826,7 @@ def test_the_suite_widens_nothing():
 def test_the_environment_cannot_widen_the_suite():
     """NEO_TEST_RENDER=1 left exported in a shell once let every test reach the network and start
     Chromium; NEO_REFLEX=laya would load the 1.7 GB model into any test that asked the reflex."""
-    root = Path(effects.__file__).resolve().parent.parent
+    root = Path(effects.__file__).resolve().parents[2]  # neo2/core/effects.py → the checkout
     env = {**os.environ, "NEO_TEST_RENDER": "1", "NEO_REFLEX": "laya", "NEO_VOICE": "local"}
     here = "tests/test_v2_effects.py::test_the_suite_widens_nothing"
     run = [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", here]
@@ -960,7 +960,7 @@ def _call(fn, *args):
 def test_a_spy_that_calls_the_real_api_is_no_fake(shape, s):
     import Quartz
 
-    from neo.tools.computer import input as inp
+    from neo2.core.tools.computer import input as inp
 
     real = s.fn("CGEventPost", poses_as="objc")  # stands for PyObjC's own CGEventPost
     s.mp.setattr(Quartz, "CGEventPost", _spies(real)[shape])
@@ -973,12 +973,12 @@ def test_a_spy_that_calls_the_real_api_is_no_fake(shape, s):
 def test_a_clean_process_is_neo_app_and_the_switch_turns_it_off(tmp_path):
     """Detected for real, not patched: a process that isn't pytest and doesn't set NEO_NO_EFFECTS
     has effects on and no audit hook; with NEO_NO_EFFECTS=1 a program it starts is refused."""
-    root = Path(effects.__file__).resolve().parent.parent
+    root = Path(effects.__file__).resolve().parents[2]  # neo2/core/effects.py → the checkout
     env = {k: v for k, v in os.environ.items() if k not in ("PYTEST_CURRENT_TEST", "NEO_NO_EFFECTS")}
     env["PYTHONPATH"] = str(root)
     marker = tmp_path / "ran"
     code = (
-        "import os, sys, neo.effects as e\n"
+        "import os, sys, neo2.core.effects as e\n"
         "assert 'pytest' not in sys.modules and os.path.dirname(e.__file__).startswith(sys.argv[1])\n"
         "print(repr(e.why_off()), e._hooked)\n"
         "if e.why_off():\n"
@@ -999,9 +999,9 @@ def test_a_clean_process_is_neo_app_and_the_switch_turns_it_off(tmp_path):
 def test_a_tests_own_fake_of_the_primitive_is_let_through(monkeypatch):
     import Quartz
 
-    from neo.decide import eventkit
-    from neo.tools.computer import input as inp
-    from neo.voice import audio
+    from neo2.core.decide import eventkit
+    from neo2.core.tools.computer import input as inp
+    from neo2.core.voice import audio
 
     posted = []
     monkeypatch.setattr(Quartz, "CGEventPost", lambda tap, ev: posted.append(ev))
@@ -1035,7 +1035,7 @@ def test_the_real_calendar_and_contacts_are_refused(monkeypatch):
     """The genuine frameworks, nothing swapped: refused before a store is made."""
     pytest.importorskip("EventKit")
     pytest.importorskip("Contacts")
-    from neo.decide import eventkit, people
+    from neo2.core.decide import eventkit, people
 
     monkeypatch.setattr(eventkit, "_store_obj", None)
     with pytest.raises(effects.EffectRefused, match="Calendar"):
@@ -1243,9 +1243,9 @@ def elsewhere(monkeypatch):
 def test_the_offline_brain_is_refused_on_loopback(elsewhere, monkeypatch):
     """No keys in the suite: the brain chain ends at the local model server NEO.app runs on
     127.0.0.1:8080 - a real model."""
-    from neo import providers
-    from neo.providers import openai_compat
-    from neo.providers.base import Message
+    from neo2.core import providers
+    from neo2.core.providers import openai_compat
+    from neo2.core.providers.base import Message
 
     monkeypatch.setattr(openai_compat, "local", functools.partial(openai_compat.local, port=elsewhere.port))
     monkeypatch.setattr(providers, "_cache", {})
@@ -1288,7 +1288,7 @@ def test_no_proxy_carries_a_client_past_the_checks(elsewhere, monkeypatch):
 def test_the_users_env_files_are_never_read_with_effects_off(monkeypatch, tmp_path):
     """~/.neo/.env holds the user's real API keys: a scratch script (NEO_NO_EFFECTS=1) must not
     pick them up, as the suite never does."""
-    from neo import config
+    from neo2.core import config
 
     env = tmp_path / ".env"
     env.write_text("GEMINI_API_KEY=key-from-the-users-env-file\n")
@@ -1299,7 +1299,7 @@ def test_the_users_env_files_are_never_read_with_effects_off(monkeypatch, tmp_pa
 
 
 def test_neo_app_reads_its_env_file(monkeypatch, tmp_path, neo_app):
-    from neo import config
+    from neo2.core import config
 
     env = tmp_path / ".env"
     env.write_text("GEMINI_API_KEY=key-from-the-users-env-file\n")
@@ -1319,12 +1319,12 @@ def test_play_through_the_session_with_its_fast_paths_acts_on_nothing(s, monkeyp
     import playwright.async_api
     import Quartz
 
-    from neo import events
-    from neo.agent.registry import registry
-    from neo.agent.session import Session
-    from neo.reflex.schema import Decision
-    from neo.tools import load_all
-    from neo.tools import media as media_tool
+    from neo2.core import events
+    from neo2.core.agent.registry import registry
+    from neo2.core.agent.session import Session
+    from neo2.core.reflex.schema import Decision
+    from neo2.core.tools import load_all
+    from neo2.core.tools import media as media_tool
 
     class Reflex:
         async def decide(self, text):

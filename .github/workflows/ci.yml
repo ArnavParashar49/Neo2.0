@@ -34,9 +34,9 @@ jobs:
           uv pip install --no-deps -e .
           uv pip install pytest pytest-asyncio ruff
       - name: Lint
-        run: .venv/bin/ruff check neo neo2 tests
+        run: .venv/bin/ruff check neo neo2 tests scripts   # neo: the checkout's compatibility shim  neo2-codemod: keep
       - name: Compile
-        run: .venv/bin/python -m compileall -q neo neo2
+        run: .venv/bin/python -m compileall -q neo neo2   # neo2-codemod: keep (the shim too)
       - name: Tests
         run: .venv/bin/python -m pytest -q -p no:cacheprovider
 

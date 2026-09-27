@@ -12,9 +12,9 @@ from pathlib import Path
 
 import pytest
 
-from neo.decide import aescript, sdef
-from neo.decide.kinds import schedule
-from neo.tools.computer import legacy
+from neo2.core.decide import aescript, sdef
+from neo2.core.decide.kinds import schedule
+from neo2.core.tools.computer import legacy
 
 FIX = Path(__file__).parent / "fixtures" / "decide" / "sdef"
 WHEN = datetime(2026, 10, 1, 13, 0)

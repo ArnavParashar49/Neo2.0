@@ -14,8 +14,8 @@ import time
 import numpy as np
 import pytest
 
-from neo.reflex import learn, memory, outcomes
-from neo.reflex.schema import Decision
+from neo2.core.reflex import learn, memory, outcomes
+from neo2.core.reflex.schema import Decision
 
 _ids = itertools.count(1)
 
@@ -34,7 +34,7 @@ class Clock:
 
 @pytest.fixture
 def clock(monkeypatch):
-    from neo.tools import load_all
+    from neo2.core.tools import load_all
 
     load_all()  # which tools are fast decides quick_action vs agent_task
     c = Clock()
@@ -403,7 +403,7 @@ def test_a_request_that_never_finishes_is_dropped(clock):
 
 
 def test_nothing_is_tracked_with_learning_off(clock, monkeypatch):
-    from neo import config
+    from neo2.core import config
 
     monkeypatch.setenv("NEO_LEARN", "off")
     monkeypatch.setattr(config, "_settings", None)
@@ -411,7 +411,7 @@ def test_nothing_is_tracked_with_learning_off(clock, monkeypatch):
     assert len(outcomes.ledger()) == 0
 
 
-# ---- neo/decide's task kinds -----------------------------------------------------------------------
+# ---- neo2/core/decide's task kinds -----------------------------------------------------------------------
 def test_a_task_kind_is_learned_only_when_it_worked(clock):
     k = ask("play some lofi beats", tool="play_music")
     assert outcomes.decided(k, "play_media", "spotify", True)
@@ -511,7 +511,7 @@ def test_a_correction_to_a_content_tool_keeps_nothing():
 
 # ---- dataset: the user's verified rows win --------------------------------------------------------
 def test_own_verified_rows_override_every_other_source():
-    from neo.reflex import dataset
+    from neo2.core.reflex import dataset
 
     d = learn._path("x").parent
     d.mkdir(parents=True, exist_ok=True)
@@ -599,7 +599,7 @@ def test_memory_without_an_embedding_from_the_reflex_does_nothing():
 
 
 def test_the_reflex_consults_the_memory(monkeypatch):
-    import neo.reflex as reflex_mod
+    import neo2.core.reflex as reflex_mod
 
     class Laya:
         def __init__(self, attrs=True):
@@ -640,7 +640,7 @@ def test_memory_is_rebuilt_from_stored_corrections_and_stops_when_busy():
 
 
 def test_memory_rebuild_only_uses_an_already_loaded_laya(monkeypatch):
-    import neo.reflex as reflex_mod
+    import neo2.core.reflex as reflex_mod
 
     monkeypatch.setattr(reflex_mod, "_laya", None)
     assert not memory.rebuild_soon(lambda: True)
@@ -663,7 +663,7 @@ def test_memory_rebuild_only_uses_an_already_loaded_laya(monkeypatch):
 
 # ---- erase ------------------------------------------------------------------------------------------
 def test_erase_forgets_requests_in_flight_and_the_memory(clock):
-    from neo import privacy
+    from neo2.core import privacy
 
     remember()
     k = ask("open safari please")
@@ -686,11 +686,11 @@ def _settle():
 def voice(monkeypatch):
     from test_v2_speech_gate import FakeLive, FakeSpk
 
-    from neo import config, events
-    from neo.agent.registry import Registry, ToolOutput
-    from neo.events import EventBus
-    from neo.tools import load_all
-    from neo.voice import live as live_mod
+    from neo2.core import config, events
+    from neo2.core.agent.registry import Registry, ToolOutput
+    from neo2.core.events import EventBus
+    from neo2.core.tools import load_all
+    from neo2.core.voice import live as live_mod
 
     load_all()
     monkeypatch.setenv("GEMINI_API_KEY", "test")
@@ -711,7 +711,7 @@ def voice(monkeypatch):
         memory_context = ""
 
         async def handle(self, text, **kw):  # what the real session reports for a relayed run
-            from neo.agent.session import Reply
+            from neo2.core.agent.session import Reply
 
             outcomes.route("j-relay", "agent")
             outcomes.agent_done("j-relay", [("web_search", True), ("web_fetch", True)], stopped="done", answer="Here's the summary.")
@@ -787,11 +787,11 @@ def test_live_talking_over_the_answer_at_once_is_a_defect(voice):
 def session(monkeypatch):
     from test_v2_session import FakeChain
 
-    from neo import events
-    from neo.agent import session as sess_mod
-    from neo.agent.registry import Registry, ToolOutput
-    from neo.events import EventBus
-    from neo.tools import load_all
+    from neo2.core import events
+    from neo2.core.agent import session as sess_mod
+    from neo2.core.agent.registry import Registry, ToolOutput
+    from neo2.core.events import EventBus
+    from neo2.core.tools import load_all
 
     load_all()
     monkeypatch.setattr(events, "_bus", EventBus())
@@ -808,7 +808,7 @@ def session(monkeypatch):
         intent = "quick_action"
 
         async def decide(self, text):
-            from neo.reflex import is_bare_stop
+            from neo2.core.reflex import is_bare_stop
 
             if is_bare_stop(text):
                 return Decision("stop", 1.0, False, 0.0, False, 0.0, "rules")
@@ -1039,7 +1039,7 @@ def test_a_stop_right_after_a_slow_answer_is_a_defect(clock):
 def test_talking_over_the_local_voice_is_a_verdict(clock):
     from types import SimpleNamespace
 
-    from neo.voice.local import LocalVoice
+    from neo2.core.voice.local import LocalVoice
 
     k = ask("open safari please")
     quick(k, ("open_app", True))
@@ -1079,8 +1079,8 @@ def _v2_head(dim, mu):
 
 def _laya(tmp_path, monkeypatch, head, vec):
     """A LayaReflex with this head whose encoder embeds every text as `vec` (no model loaded)."""
-    from neo.reflex import features as feats
-    from neo.reflex import laya_reflex as lr
+    from neo2.core.reflex import features as feats
+    from neo2.core.reflex import laya_reflex as lr
 
     path = tmp_path / "head.json"
     path.write_text(json.dumps(head))
@@ -1114,7 +1114,7 @@ def test_the_margin_is_recorded(clock):
 
 
 def test_the_real_reflex_consults_the_memory(tmp_path, monkeypatch):
-    import neo.reflex as reflex_mod
+    import neo2.core.reflex as reflex_mod
 
     r = _laya(tmp_path, monkeypatch, _v2_head(DIM, C), emb(5))
     remember()
@@ -1123,7 +1123,7 @@ def test_the_real_reflex_consults_the_memory(tmp_path, monkeypatch):
 
 
 def test_the_memory_is_not_rebuilt_with_a_reflex_that_exposes_no_embedding(monkeypatch):
-    import neo.reflex as reflex_mod
+    import neo2.core.reflex as reflex_mod
 
     calls = []
 
@@ -1191,7 +1191,7 @@ def test_expired_rows_leave_the_file_within_a_day(monkeypatch):
 
 
 def test_own_verified_rows_keep_the_templates_safety_labels():
-    from neo.reflex import dataset
+    from neo2.core.reflex import dataset
 
     base = dataset.build(5)
     text = next(r["text"] for r in base if r["source"] == "template" and r["destructive"] and learn.skeleton(r["text"]) == r["text"])
@@ -1223,7 +1223,7 @@ def test_live_a_call_the_server_withdrew_is_no_row(voice):
 
 
 def test_session_the_stop_button_is_a_verdict_too(session):
-    from neo.app import App
+    from neo2.core.app import App
 
     app = App()
     app.session = session
@@ -1243,8 +1243,8 @@ def test_session_a_cancelled_chat_or_quick_run_settles_at_once(session, monkeypa
 
     from test_v2_session import FakeChain
 
-    from neo.agent import session as sess_mod
-    from neo.agent.registry import Registry
+    from neo2.core.agent import session as sess_mod
+    from neo2.core.agent.registry import Registry
 
     class SlowChain(FakeChain):
         async def stream(self, messages, **kw):
@@ -1272,9 +1272,9 @@ def test_session_a_cancelled_chat_or_quick_run_settles_at_once(session, monkeypa
 
 @pytest.mark.parametrize("second", ["needs_confirm", "max_steps"])
 def test_session_what_follows_a_yes_still_counts(session, monkeypatch, second):
-    from neo.agent import confirm
-    from neo.agent import session as sess_mod
-    from neo.agent.loop import AgentResult, Step
+    from neo2.core.agent import confirm
+    from neo2.core.agent import session as sess_mod
+    from neo2.core.agent.loop import AgentResult, Step
 
     session.reflex.intent = "agent_task"
     runs = []
@@ -1332,7 +1332,7 @@ def test_a_bare_live_stop_long_after_does_not_reopen_the_window(clock):
 
 
 def test_the_row_remembers_which_brain_read_the_request(clock):
-    from neo.reflex import teacher
+    from neo2.core.reflex import teacher
 
     k = ask("tell me a fun fact about octopuses", intent="chat")
     outcomes.route(k, "chat")

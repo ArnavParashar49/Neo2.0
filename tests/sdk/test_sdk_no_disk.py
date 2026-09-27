@@ -98,7 +98,7 @@ async def test_memory_in_a_file_of_the_hosts_choosing(tmp_path):
     async with neo2.AsyncAgent(cfg, provider=brain) as agent:
         await agent.ask("please store that I enjoy tea")
         assert mem.exists() and not (agent.data_dir / "memory.sqlite3").exists()
-        from neo.security import policy
+        from neo2.core.security import policy
 
         assert policy.is_secret(mem) and policy.is_secret(str(mem) + "-wal")  # NEO's tools never read it
         await agent.ask("what do I like?")
@@ -121,7 +121,7 @@ async def test_memory_is_never_a_database_neo_didnt_make(tmp_path):
     notes.write_bytes(b"not a database")
     (tmp_path / "notes.bin-journal").write_bytes(b"x")
     neo_apps = tmp_path / "neo-app-memory.sqlite3"  # NEO.app's own memory: a NEO database, not an agent's
-    from neo.memory.store import Store
+    from neo2.core.memory.store import Store
 
     Store(neo_apps).close()
     (tmp_path / "a-folder").mkdir()
@@ -151,7 +151,7 @@ async def test_neo_apps_data_where_neo_data_dir_moved_it_is_never_an_agents(tmp_
     """NEO.app's data moved with NEO_DATA_DIR (or its memory with NEO_MEMORY_PATH): never an
     agent's folder or memory, and secret to every agent's tools (read from the environment only —
     an embedded agent never opens ~/.neo/.env to find out)."""
-    from neo.security import policy
+    from neo2.core.security import policy
 
     app = tmp_path / "moved-neo"
     app.mkdir()
@@ -169,7 +169,7 @@ async def test_neo_apps_data_where_neo_data_dir_moved_it_is_never_an_agents(tmp_
     ):
         with pytest.raises(ValueError, match="NEO.app's own data"):
             neo2.AgentConfig(**bad)
-    from neo.config import LibrarySettings
+    from neo2.core.config import LibrarySettings
 
     with pytest.raises(ValueError, match="NEO.app's own data"):
         LibrarySettings(data_dir=app / "sub")  # the settings an agent runs with check it too
@@ -202,8 +202,8 @@ async def test_two_live_agents_never_share_a_folder(tmp_path):
 async def test_a_closed_agents_data_stays_secret_to_the_others(tmp_path):
     """One agent per tenant, idle ones closed: a live one's tools never read what a closed one
     kept — its folder (memory, audit log, browser profile), its memory file, its secret paths."""
-    from neo import runtime
-    from neo.security import policy
+    from neo2.core import runtime
+    from neo2.core.security import policy
 
     a_dir, a_mem, vault = tmp_path / "tenants" / "a", tmp_path / "dbs" / "a.sqlite3", tmp_path / "vault"
     cfg = neo2.AgentConfig(tools="none", data_dir=a_dir, memory=neo2.MemoryConfig(path=a_mem), extra_secret_paths=(vault,))
@@ -239,7 +239,7 @@ async def test_a_failed_construction_leaves_no_temp_dir(tmp_path, monkeypatch):
     with pytest.raises(ValueError):
         neo2.AsyncAgent(neo2.AgentConfig(extra_secret_paths=("relative/but/fine",), tools="nonsense"), provider=ScriptedBrain())
     assert made == []  # refused before any folder was made
-    from neo import config
+    from neo2.core import config
 
     monkeypatch.setattr(config.LibrarySettings, "ensure_dirs", lambda self: (_ for _ in ()).throw(OSError("disk full")))
     with pytest.raises(OSError):
@@ -267,7 +267,7 @@ async def test_two_live_agents_never_share_a_memory(tmp_path):
 
 
 async def test_a_rejected_host_tool_leaves_nothing_behind():
-    from neo import runtime
+    from neo2.core import runtime
 
     before = set(map(id, runtime.live_runtimes()))
 

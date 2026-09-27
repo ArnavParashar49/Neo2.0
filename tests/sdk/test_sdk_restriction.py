@@ -10,7 +10,7 @@ import sys
 import pytest
 
 import neo2
-from neo.agent.registry import catalog
+from neo2.core.agent.registry import catalog
 from neo2.testing import ScriptedBrain, ToolCall, Turn
 
 pytestmark = pytest.mark.portable  # Linux or macOS, any install (what needs an extra skips): CI's sdk-core job
@@ -26,7 +26,7 @@ mac_only = pytest.mark.skipif(
 def mac_catalog(monkeypatch):
     """NEO.app's whole catalog loaded in this process, its Mac tools' handlers replaced by
     recorders: anything that reached one would show up in `ran`."""
-    from neo.tools import load_all
+    from neo2.core.tools import load_all
 
     load_all()  # NEO.app's loader, before any agent exists (library mode is off)
     ran: list[str] = []
@@ -38,7 +38,7 @@ def mac_catalog(monkeypatch):
 
 @mac_only
 async def test_lock_the_screen_never_runs_a_mac_tool(mac_catalog):
-    from neo.agent import fastpath
+    from neo2.core.agent import fastpath
 
     assert fastpath.match("lock the screen")[0] == "sleep_display"  # NEO.app's own fast path
     brain = ScriptedBrain(["I can't lock the screen from here."])
@@ -101,7 +101,7 @@ async def test_the_run_after_an_approval_offers_only_the_agents_tools(mac_catalo
 
 async def test_the_agent_registry_is_a_strict_copy(monkeypatch):
     """Changing NEO.app's catalog entry later changes nothing in an agent built before."""
-    from neo.tools import load
+    from neo2.core.tools import load
 
     load("web")
     t = catalog().get("clock")
@@ -138,8 +138,8 @@ async def test_an_embedded_agents_request_never_takes_the_utterance_lane(monkeyp
     """neo2 hands Session.handle origin "user" for source="user" (never from_user): a host's text all
     the same, whoever typed it. Neither source may pick and press on its own (by_utterance) — both
     keep the exact fast paths, like Live's relays."""
-    from neo.agent import session as sess
-    from neo.agent.registry import RegisteredTool, utterance_lane
+    from neo2.core.agent import session as sess
+    from neo2.core.agent.registry import RegisteredTool, utterance_lane
 
     lane_tool = RegisteredTool("t_utt", "", {}, lambda a, c: "", by_utterance=True)
     seen = []

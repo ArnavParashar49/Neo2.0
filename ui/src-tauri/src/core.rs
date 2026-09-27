@@ -4,7 +4,7 @@
 //! Recording): the core it starts inherits them. The core also watches its parent and exits if
 //! the app goes away without stopping it (force quit, crash), so a core with the mic open can't
 //! be left behind; if one ever is, the next launch recognises it by its pidfile and replaces it.
-//! A core started some other way (a developer's `python -m neo`) is used as-is.
+//! A core started some other way (a developer's `python -m neo2`) is used as-is.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
@@ -24,6 +24,8 @@ const GRACE: Duration = Duration::from_secs(12); // the core saves its session s
 const STARTUP_GRACE: Duration = Duration::from_secs(120); // loading models can take this long
 const UNRESPONSIVE: Duration = Duration::from_secs(60); // websocket gone this long → hung
 const RETRY_AFTER_GIVING_UP: Duration = Duration::from_secs(600);
+/// How the core is started: `python -u -m neo2` (NEO's package was `neo` before 2.1).
+const CORE_ARGS: [&str; 3] = ["-u", "-m", "neo2"];
 
 #[derive(Clone, Default)]
 pub struct Core {
@@ -127,6 +129,21 @@ fn core_dir() -> PathBuf {
     runtime_dir()
 }
 
+/// A runtime installed before 2.1 (NEO's package was the top-level `neo`, and its `neo2` had no
+/// `__main__`): `-m neo2` can't start there, so say what fixes it instead of crash-looping. Only
+/// that pair counts: an editable checkout's venv has neither, and NeuralEnsemble's `neo` next to
+/// a current `neo2` has both.
+fn runtime_predates_app(dir: &std::path::Path) -> bool {
+    let Ok(libs) = fs::read_dir(dir.join(".venv").join("lib")) else {
+        return false;
+    };
+    libs.flatten().any(|e| {
+        let site = e.path().join("site-packages");
+        let old = site.join("neo").join("__init__.py"); // neo2-codemod: keep (the old package, on purpose)
+        old.exists() && !site.join("neo2").join("__main__.py").exists()
+    })
+}
+
 fn port_in_use() -> bool {
     let addr = SocketAddr::from(([127, 0, 0, 1], PORT));
     TcpStream::connect_timeout(&addr, Duration::from_millis(300)).is_ok()
@@ -147,6 +164,14 @@ fn alive(pid: i32) -> bool {
     unsafe { libc::kill(pid, 0) == 0 }
 }
 
+/// A command line (`ps -o command=`) of NEO's core: `… python -u -m neo2`, or the same with `neo`,
+/// the package's name when an older NEO.app started it. Not NEO's training commands
+/// (`-m neo2.core.reflex.finetune`), nor anything else.
+fn is_core_command(line: &str) -> bool {
+    let args: Vec<&str> = line.split_whitespace().collect();
+    args.windows(2).any(|w| w[0] == "-m" && (w[1] == "neo2" || w[1] == "neo"))
+}
+
 /// A core this app started earlier and lost (its parent is gone, so it was re-parented to
 /// launchd): stop it, so this launch owns the core again.
 fn reclaim_orphan() {
@@ -160,7 +185,7 @@ fn reclaim_orphan() {
     let Ok(out) = out else { return };
     let line = String::from_utf8_lossy(&out.stdout).trim().to_string();
     let orphaned = line.split_whitespace().next() == Some("1");
-    if orphaned && line.contains("-m neo") {
+    if orphaned && is_core_command(&line) {
         log(&format!("found an orphaned core (pid {pid}) — stopping it"));
         unsafe {
             libc::kill(pid, libc::SIGTERM);
@@ -221,7 +246,7 @@ fn spawn(dir: &PathBuf, sink: Arc<Mutex<RotatingLog>>) -> std::io::Result<Child>
         std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin:/usr/sbin:/sbin".into())
     );
     let mut child = Command::new(dir.join(".venv").join("bin").join("python"))
-        .args(["-u", "-m", "neo"])
+        .args(CORE_ARGS)
         .current_dir(dir)
         .env("PATH", path)
         .env("PYTHONUNBUFFERED", "1")
@@ -305,6 +330,11 @@ impl Core {
             let msg = "not installed — run scripts/install-app.sh".to_string();
             self.set_status(&msg);
             log(&format!("no NEO runtime in {}", dir.display()));
+            return;
+        }
+        if runtime_predates_app(&dir) {
+            self.set_status("runtime older than the app — run scripts/install-app.sh");
+            log(&format!("the runtime in {} is from before 2.1 (no neo2/__main__.py): run scripts/install-app.sh", dir.display()));
             return;
         }
         let _ = fs::create_dir_all(logs_dir());
@@ -540,6 +570,37 @@ mod tests {
         assert!(p.contains("<string>/Applications/NEO &amp; Co.app/Contents/MacOS/neo-ui</string>"));
         assert!(!p.contains("/usr/bin/open"));
         assert!(p.contains("LimitLoadToSessionType"));
+    }
+
+    #[test]
+    fn the_core_is_started_as_neo2_and_an_orphan_is_known_by_either_name() {
+        assert_eq!(CORE_ARGS, ["-u", "-m", "neo2"]);
+        let runtime = "/Users/a/Library/Application Support/NEO/.venv/bin/python";
+        assert!(is_core_command(&format!("1 {runtime} -u -m neo2")));
+        assert!(is_core_command(&format!("1 {runtime} -u -m neo"))); // an older NEO.app's core  neo2-codemod: keep
+        assert!(!is_core_command(&format!("1 {runtime} -m neo2.core.reflex.finetune")));
+        assert!(!is_core_command(&format!("1 {runtime} -m neo2.mcp --tools web")));
+        assert!(!is_core_command("1 /usr/bin/python3 -m neonode"));
+        assert!(!is_core_command("1 /Applications/NEO.app/Contents/MacOS/neo-ui"));
+    }
+
+    #[test]
+    fn a_runtime_from_before_2_1_is_told_apart() {
+        let dir = std::env::temp_dir().join(format!("neo-runtime-test-{}", std::process::id()));
+        let site = dir.join(".venv").join("lib").join("python3.12").join("site-packages");
+        let touch = |rel: &str| {
+            let f = site.join(rel);
+            fs::create_dir_all(f.parent().unwrap()).unwrap();
+            fs::write(f, "").unwrap();
+        };
+        assert!(!runtime_predates_app(&dir)); // no venv: "not installed" says so
+        touch("neo2/__init__.py");
+        assert!(!runtime_predates_app(&dir)); // neo2 only (an editable checkout has neither)
+        touch("neo/__init__.py"); // neo2-codemod: keep
+        assert!(runtime_predates_app(&dir)); // the old `neo` distribution, whose neo2 can't run
+        touch("neo2/__main__.py");
+        assert!(!runtime_predates_app(&dir)); // current, next to NeuralEnsemble's neo
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]

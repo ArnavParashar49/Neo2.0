@@ -1,4 +1,4 @@
-"""neo.decide.run: the loop every kind shares. A scripted fake driver stands in for the kinds'
+"""neo2.core.decide.run: the loop every kind shares. A scripted fake driver stands in for the kinds'
 drivers (none exists yet) and the engine's choice is fixed per test; outcomes are learned into
 the test's own data dir. Nothing is launched or scripted."""
 
@@ -9,11 +9,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from neo import privacy
-from neo.decide import engine, inventory, media, run
-from neo.decide.engine import Candidate
-from neo.decide.inventory import App
-from neo.decide.run import Effect, Outcome, Plan, Recipient, Req
+from neo2.core import privacy
+from neo2.core.decide import engine, inventory, media, run
+from neo2.core.decide.engine import Candidate
+from neo2.core.decide.inventory import App
+from neo2.core.decide.run import Effect, Outcome, Plan, Recipient, Req
 
 
 @pytest.fixture(autouse=True)
@@ -384,7 +384,7 @@ def test_a_plan_round_trips_and_rejects_anything_malformed():
 
 
 def test_to_output_keeps_halts_and_the_speech_choice():
-    from neo.agent.confirm import ask_user
+    from neo2.core.agent.confirm import ask_user
 
     out = run.to_output(run.Result("Saved in Notebook.", True, say=False))
     assert (out.text, out.ok, out.halt, out.say) == ("Saved in Notebook.", True, False, False)

@@ -9,10 +9,10 @@ import types
 
 import pytest
 
-import neo.tools.computer as comp
-from neo.agent import confirm
-from neo.agent.registry import ToolContext, registry
-from neo.tools.computer import apps, ax, focus, pointer, policy
+import neo2.core.tools.computer as comp
+from neo2.core.agent import confirm
+from neo2.core.agent.registry import ToolContext, registry
+from neo2.core.tools.computer import apps, ax, focus, pointer, policy
 
 OK, NO_VALUE, UNSUPPORTED, CANNOT_COMPLETE = 0, -25212, -25205, -25204
 _REAL_HIT = ax.hit  # (the suite's conftest swaps it for "nothing there" in every test)
@@ -342,7 +342,7 @@ def test_set_value_never_fills_a_password_field_or_flips_a_checkbox(fake):
 
 
 def test_set_value_reads_back_and_is_honest_when_the_field_ignores_it(fake, monkeypatch):
-    from neo.decide import axkit
+    from neo2.core.decide import axkit
 
     field = El("AXTextField", "Search", value="", frame=(10, 60, 200, 24))
     ids = _one(fake, field, name="Web", pid=5)
@@ -426,7 +426,7 @@ def test_a_text_area_with_nothing_on_screen_is_not_clicked(monkeypatch):
 
 
 def test_neo_is_told_by_its_process_family_and_its_overlay_by_name(monkeypatch):
-    from neo.decide import media
+    from neo2.core.decide import media
 
     monkeypatch.setattr(media, "_self_family", lambda: frozenset({500, 501}))
     monkeypatch.setattr(media, "responsible_pid", lambda pid: {777: 501}.get(pid, pid))
@@ -463,7 +463,7 @@ def test_an_app_running_a_shell_is_told_by_its_processes(monkeypatch):
 
 
 def test_a_chromium_or_electron_apps_web_tree_is_switched_on_while_its_ids_are_used(monkeypatch):
-    from neo.decide import axkit
+    from neo2.core.decide import axkit
 
     monkeypatch.setattr(ax, "_web_held", {})
     app = types.SimpleNamespace(bundleURL=lambda: types.SimpleNamespace(path=lambda: "/Applications/Slack.app"))
@@ -481,7 +481,7 @@ def test_a_chromium_or_electron_apps_web_tree_is_switched_on_while_its_ids_are_u
 
 
 def test_a_native_app_is_left_alone(monkeypatch):
-    from neo.decide import axkit
+    from neo2.core.decide import axkit
 
     monkeypatch.setattr(ax, "_web_held", {})
     app = types.SimpleNamespace(bundleURL=lambda: types.SimpleNamespace(path=lambda: "/System/Applications/Chess.app"))

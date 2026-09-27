@@ -12,12 +12,12 @@ from pathlib import Path
 import pytest
 from neo_lib import ScriptedBrain, make_runtime
 
-from neo import runtime
-from neo.agent import confirm
-from neo.agent.registry import RegisteredTool
-from neo.agent.session import Session
-from neo.providers import BrainPool
-from neo.providers.base import ToolCall, Turn
+from neo2.core import runtime
+from neo2.core.agent import confirm
+from neo2.core.agent.registry import RegisteredTool
+from neo2.core.agent.session import Session
+from neo2.core.providers import BrainPool
+from neo2.core.providers.base import ToolCall, Turn
 
 _OBJ = {"type": "object", "properties": {}}
 
@@ -47,9 +47,9 @@ def home(tmp_path, monkeypatch):
 
 
 async def test_two_agents_at_once_share_nothing(tmp_path, home, monkeypatch):
-    from neo import events
-    from neo.memory.store import store
-    from neo.reflex import learn, outcomes
+    from neo2.core import events
+    from neo2.core.memory.store import store
+    from neo2.core.reflex import learn, outcomes
 
     app_bus = events.EventBus()
     monkeypatch.setattr(events, "_bus", app_bus)
@@ -85,7 +85,7 @@ async def test_two_agents_at_once_share_nothing(tmp_path, home, monkeypatch):
     async def ask(rt, text):
         sc = rt.scope()
         with runtime.bind(sc):
-            from neo.events import bus
+            from neo2.core.events import bus
 
             bus().subscribe(lambda ev: seen[rt.name].append((ev.type, ev.data.get("name", ""))))
             sc.session = Session()
@@ -153,7 +153,7 @@ async def test_two_agents_at_once_share_nothing(tmp_path, home, monkeypatch):
 
 
 async def test_an_unbound_request_fails_closed_once_an_agent_exists(tmp_path, monkeypatch):
-    from neo import config
+    from neo2.core import config
 
     make_runtime(tmp_path / "a", "a")
     monkeypatch.setattr(config, "_settings", None)  # (the test helper loaded NEO.app's tools first)
@@ -164,7 +164,7 @@ async def test_an_unbound_request_fails_closed_once_an_agent_exists(tmp_path, mo
 
 
 async def test_a_raw_thread_inside_an_agent_fails_closed(tmp_path):
-    from neo.config import settings
+    from neo2.core.config import settings
 
     rt = make_runtime(tmp_path / "a", "a")
     errors: list = []
@@ -186,7 +186,7 @@ async def test_a_raw_thread_inside_an_agent_fails_closed(tmp_path):
 
 async def test_neo_app_is_unaffected_by_an_agent_that_existed_earlier(tmp_path, monkeypatch):
     """The embedded-mode switch is sticky for a process; the app itself never sets it."""
-    from neo import config
+    from neo2.core import config
 
     assert not runtime.library_mode()
     monkeypatch.setattr(config, "_settings", None)
@@ -198,10 +198,10 @@ async def test_neo_app_is_unaffected_by_an_agent_that_existed_earlier(tmp_path, 
 async def test_task_kind_tools_run_their_legacy_scripts_with_no_dry_run(tmp_path, monkeypatch, decide_modes):
     """NEO.app ships these kinds in shadow (the legacy script, then a dry run of the new driver,
     logged to decide_shadow.log). An embedded agent runs the legacy script only."""
-    from neo.agent.registry import ToolContext, registry
-    from neo.decide import shadow
-    from neo.tools import web
-    from neo.tools.computer import apps
+    from neo2.core.agent.registry import ToolContext, registry
+    from neo2.core.decide import shadow
+    from neo2.core.tools import web
+    from neo2.core.tools.computer import apps
 
     decide_modes(web_search="shadow", open_app="shadow")  # what NEO.app would do
     opened: list[str] = []
@@ -252,7 +252,7 @@ async def test_one_task_asking_two_agents_carries_nothing_between_them(tmp_path)
     assert any("A's private notes" in t for t in brain_a.inputs)  # A was told
     assert not any("A's private notes" in t for t in brain_b.inputs + brain_b.systems)  # B never hears it
     with runtime.bind(b.scope()):
-        from neo.agent.session import _with_conversation
+        from neo2.core.agent.session import _with_conversation
 
         assert _with_conversation("x") == "x"
 
@@ -261,8 +261,8 @@ async def test_a_request_leaves_nothing_behind_in_its_callers_task(tmp_path):
     """handle() used to leave its extras and taint set in the calling task: approving a card of
     agent B that B's session didn't adopt (a direct call staged it), right after serving agent A
     from the same task, ran B's action with A's extras."""
-    from neo.agent import session as sess_mod
-    from neo.agent.registry import ToolContext, registry
+    from neo2.core.agent import session as sess_mod
+    from neo2.core.agent.registry import ToolContext, registry
 
     seen: list[dict] = []
 
@@ -293,7 +293,7 @@ async def test_a_request_leaves_nothing_behind_in_its_callers_task(tmp_path):
 async def test_a_typed_yes_still_carries_its_own_requests_extras(tmp_path):
     """Inside a request (a typed "yes" answering a card no session adopted), the answering
     request's own extras still reach the approved call, as before."""
-    from neo.agent.registry import ToolContext, registry
+    from neo2.core.agent.registry import ToolContext, registry
 
     seen: list[dict] = []
 

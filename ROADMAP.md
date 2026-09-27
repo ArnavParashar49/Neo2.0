@@ -55,7 +55,7 @@ mic ─► wake word (local) ─► voice backend
 ## Phases
 
 - [x] **0. Toolchain** — uv + Python 3.12, Rust, Tauri CLI, branch `v2`
-- [x] **1. Core** — `neo/` package: providers (Gemini / Groq / local MLX / Claude), agent loop, registry, confirm gate, Laya reflex + synthetic dataset + local head training
+- [x] **1. Core** — `neo2/core/` package: providers (Gemini / Groq / local MLX / Claude), agent loop, registry, confirm gate, Laya reflex + synthetic dataset + local head training
 - [x] **2. Computer control** — AX tree observation, CGEvent input, screenshot fallback, AppleScript app tools, shell/files
 - [x] **3. Voice** — wake word (Vosk) → Parakeet → brain → Kokoro with barge-in; Gemini Live backend with `agent_task` delegation
 - [x] **4. UI** — Tauri 2 + React overlay with thinking-orbs, transcript, confirm buttons, tray, ⌥⌘ (⌘⇧Space fallback)
@@ -84,7 +84,7 @@ mic ─► wake word (local) ─► voice backend
 - `GEMINI_API_KEY` (and optionally `GROQ_API_KEY`) in `.env` to exercise the agent path end to end.
 - macOS **Accessibility** permission for whatever launches NEO (Terminal / NEO.app) — screen recording is already granted.
 - Microphone permission on first voice run.
-- First real-world tuning pass: add misroutes to `~/.neo/reflex_extra.jsonl`, retrain (`python -m neo.reflex.finetune`).
+- First real-world tuning pass: add misroutes to `~/.neo/reflex_extra.jsonl`, retrain (`python -m neo2.core.reflex.finetune`).
 
 ### Reliability + memory (2026-09-26)
 
@@ -120,8 +120,8 @@ mic ─► wake word (local) ─► voice backend
 ### Dictation lane + Laya v2 (2026-09-26)
 
 - Sequential test "open notes → type Laptops in the heading → type some points about laptops" over the Live session: 18 s end to end (was minutes / stalled). Fixes on the way: Live session kept alive by typed text and model turns, empty text areas visible to `ax_tree`, `ax_find` keeps ids, app resolution ignores helper processes, persisted Gemini cooldowns + no retry on slow 503s + sticky brain demotion, superseded screen dumps stubbed within a run, agent_task dedupe in Live, `activate_app` waits for focus (AppleScript fallback).
-- Dictation lane: `type_text` / `hotkey` / `dictate` fast paths (`neo/tools/computer/__init__.py`), early actor waits for the sentence end on dictation, fast paths win even when the reflex says agent_task, agent prompt lists what already ran.
-- Laya v2 (`neo/reflex/finetune.py`): every decision from one encoder pass (~20 ms vs ~126 ms) — intent, destructive, needs_screen (distilled from Laya's zero-shot answers) and a tool head; zero-shot consulted only under 0.6 confidence. Training data +12.3k real utterances from CLINC150 and MASSIVE mapped onto NEO's labels (`neo/reflex/hf_data.py`). The session acts on Laya's tool choice: no-arg tools run with no model at all; others get a single-tool light call.
+- Dictation lane: `type_text` / `hotkey` / `dictate` fast paths (`neo2/core/tools/computer/__init__.py`), early actor waits for the sentence end on dictation, fast paths win even when the reflex says agent_task, agent prompt lists what already ran.
+- Laya v2 (`neo2/core/reflex/finetune.py`): every decision from one encoder pass (~20 ms vs ~126 ms) — intent, destructive, needs_screen (distilled from Laya's zero-shot answers) and a tool head; zero-shot consulted only under 0.6 confidence. Training data +12.3k real utterances from CLINC150 and MASSIVE mapped onto NEO's labels (`neo2/core/reflex/hf_data.py`). The session acts on Laya's tool choice: no-arg tools run with no model at all; others get a single-tool light call.
 
 ### Silent commands + control layer (2026-09-26)
 
@@ -134,7 +134,7 @@ mic ─► wake word (local) ─► voice backend
 
 Two adversarial reviews (≈235 agents) confirmed 44 defects in the silent-command / control / dictation batch; all fixed with regression tests (199 green):
 
-- Early actor rewritten on a planner (`neo/agent/fastpath.py`): a plan covers the whole utterance or nothing; payload tools (type/dictate/click/note/memory/search) take the rest of the sentence ("type salt and pepper" is never split), a trailing command is split off ("… and press enter"); mid-sentence only opt-in tools run (open_app, volume, brightness); one-shot claims replace the 30 s dedupe (a repeated command runs again; the model's own call for an early action doesn't); Live never runs tools inside the receive loop and never re-runs the whole utterance at turn end.
+- Early actor rewritten on a planner (`neo2/core/agent/fastpath.py`): a plan covers the whole utterance or nothing; payload tools (type/dictate/click/note/memory/search) take the rest of the sentence ("type salt and pepper" is never split), a trailing command is split off ("… and press enter"); mid-sentence only opt-in tools run (open_app, volume, brightness); one-shot claims replace the 30 s dedupe (a repeated command runs again; the model's own call for an early action doesn't); Live never runs tools inside the receive loop and never re-runs the whole utterance at turn end.
 - Dictation: pronouns / messages / things go to the model ("write that down", "write an email to Sam", "write the report"); only UI places are stripped as targets; compose cues need count nouns; line breaks never send (single-line fields join, chat apps use shift+return, shells never get a multi-line enter); never types into password fields.
 - Control: click only on whole-word labels in the focused window, visible, unambiguous; vague labels ("click it") go to the model; browser-only chords (reload, top/bottom) only in browsers; "undo" only right after NEO typed; "new note" goes to Notes; a failed quick action hands the request to the agent.
 - Live: keystrokes run in the order asked; a question in the same breath as a command is answered; server-cancelled calls get no response; no stale turn across sessions.
@@ -143,14 +143,14 @@ Two adversarial reviews (≈235 agents) confirmed 44 defects in the silent-comma
 ### App focus (2026-09-26)
 
 - Root causes of "typed into Claude": NEO didn't check which app was in front; macOS cooperative activation blocks a background process's `activate`/`open -a` while the user is busy elsewhere; and NSWorkspace's `frontmostApplication` / `runningApplications` never refresh without a Cocoa run loop (stale front app, blind to apps launched after start).
-- Fixes: WindowServer focus switch (`neo/tools/computer/focus.py`, the SkyLight calls AltTab/yabai use) — 0.15–0.2 s from the background, verified while the user was in Claude; front app and running apps read fresh from LaunchServices (`lsappinfo`); a Cocoa run-loop pump in the core; every keystroke/typing/click goes only to NEO's target app, confirmed in front, else NEEDS_USER and nothing is sent.
+- Fixes: WindowServer focus switch (`neo2/core/tools/computer/focus.py`, the SkyLight calls AltTab/yabai use) — 0.15–0.2 s from the background, verified while the user was in Claude; front app and running apps read fresh from LaunchServices (`lsappinfo`); a Cocoa run-loop pump in the core; every keystroke/typing/click goes only to NEO's target app, confirmed in front, else NEEDS_USER and nothing is sent.
 - Live: a plain command the model wraps in agent_task runs through the fast paths on the user's own words.
 
 ### Faster answers + Laya learns from use (2026-09-26)
 
 - Weather tool on Open-Meteo (free, no key; "here" = remembered city → `NEO_HOME_LOCATION` → IP location): first spoken word ~2.5 s, was ~40 s through search + agent.
 - Web search races DuckDuckGo, Brave and Bing (first with results wins, 4 s cap): ~1 s per search, was 2–6 s. Live: at most 2 searches + 1 page read per question, identical calls answered once, news=true for "latest" questions, simple questions never go to the agent. "Who won the last F1 race": first word at 3.9 s, was 18.7 s.
-- Laya learns from use (`neo/reflex/learn.py`): what actually happened labels each request — Live's tool choice (none → chat, one tool → quick action, agent_task), or the agent needing no tool / one fast tool. Rows in `~/.neo/reflex_extra.jsonl` (weighted 3×, always trained on); after ≥30 new rows and 3 idle minutes the heads retrain in-process on the loaded Laya and hot-swap — only if they score at least as well on a fixed hash-based held-out set.
+- Laya learns from use (`neo2/core/reflex/learn.py`): what actually happened labels each request — Live's tool choice (none → chat, one tool → quick action, agent_task), or the agent needing no tool / one fast tool. Rows in `~/.neo/reflex_extra.jsonl` (weighted 3×, always trained on); after ≥30 new rows and 3 idle minutes the heads retrain in-process on the loaded Laya and hot-swap — only if they score at least as well on a fixed hash-based held-out set.
 - Tests are isolated from the real `~/.neo` (a leaked row and earlier test artefacts in memory were removed; backup kept).
 
 ### NEO.app (2026-09-26)
@@ -177,12 +177,18 @@ A 54-agent audit found 45 gaps across security, reliability, packaging, onboardi
 
 ### Laya data: Hindi, Hinglish, public sets (2026-09-26)
 
-- `python -m neo.reflex.hf_data` builds ~45k train rows from 12 pinned public sources plus 2 opt-in (`neo/reflex/sources.py`: revision, licence and label mapping of each) and a 29.8k-row benchmark, `reflex_eval.jsonl` (Hinglish-TOP, MTOP en/hi, CLINC, MASSIVE en/hi test splits) that `dataset.build()` never reads. Its sources are always loaded, and a train row is held out when its sentence (punctuation- and spacing-insensitive) or group is the benchmark's, transitively over translation groups. `dataset.benchmark(rows)` drops what NEO's own rows share with it. Rows carry `lang` (en / hi / hinglish), `split`, `group`, `reply` and, when the source knows, `kind` (neo/decide task kinds), `destructive`, `screen`.
+- `python -m neo2.core.reflex.hf_data` builds ~45k train rows from 12 pinned public sources plus 2 opt-in (`neo2/core/reflex/sources.py`: revision, licence and label mapping of each) and a 29.8k-row benchmark, `reflex_eval.jsonl` (Hinglish-TOP, MTOP en/hi, CLINC, MASSIVE en/hi test splits) that `dataset.build()` never reads. Its sources are always loaded, and a train row is held out when its sentence (punctuation- and spacing-insensitive) or group is the benchmark's, transitively over translation groups. `dataset.benchmark(rows)` drops what NEO's own rows share with it. Rows carry `lang` (en / hi / hinglish), `split`, `group`, `reply` and, when the source knows, `kind` (neo2/core/decide task kinds), `destructive`, `screen`.
 - Labels follow what a sentence says, not only its source intent (a translation takes its English source's): how-to questions are chat, calendar lookups for another day aren't `calendar_today`, deletes filed under "update" are destructive, reminders for someone else are messages, bare "quiet" / "चुप रहो" to an alarm and "cancel this message" are stop, thanks alone is chat, clicks don't mark `screen`. MTOP's people and presence intents are skipped, and an unmapped intent is reported instead of becoming an agent task.
 - Measured motivation (research): Hinglish tool accuracy 0.57 → 0.85 and Devanagari 0.31 → 0.82 with Hinglish / Hindi rows; Hinglish small talk is misrouted 98 % of the time without Hinglish chat rows.
 - New label sources: SGD for destructive (bookings, payments, transfers; playing and calendar entries stay reversible), reply and stop; TOPv2/MTOP for send_message; glaive for notes/mail/calendar tools; AgentNet/OmniACT for agent tasks and needs_screen (only when the wording points at the screen). MASSIVE's "be quiet" / "shut up" mute rows are now `stop`.
-- `neo/reflex/templates_hi.py`: romanised-Hindi templates for every class with explicit labels (Hinglish destructive recall was 0.17–0.33) and 250 Hinglish + 50 Devanagari stop phrases, added to `dataset.build()` as NEO's own rows.
+- `neo2/core/reflex/templates_hi.py`: romanised-Hindi templates for every class with explicit labels (Hinglish destructive recall was 0.17–0.33) and 250 Hinglish + 50 Devanagari stop phrases, added to `dataset.build()` as NEO's own rows.
 - Leyzer (the only public open_app / search_site set) is opt-in: the repository hosting its data is CC-BY-NC-ND although its HF card says CC-BY. `sentence_types` is opt-in too: it states no licence.
+
+### One name: neo2 (2026-09-27)
+
+- NEO's package moved into the library's: `neo2.core` (it was the top-level `neo`, which NeuralEnsemble's PyPI `neo` also installs). The distribution is `neo2` (2.1.0, unpublished until the owner publishes it); `python -m neo2` is NEO.app's core, and NEO.app starts it that way (its orphan check also knows an older app's core). Unchanged: `~/.neo`, every `NEO_*` variable, the bundle id, the websocket protocol, the audit log, the memory database and the `neo` / `neo.audit` logger names.
+- `scripts/codemod_neo2.py` did the rewrite and runs again after merging a branch that predates it (idempotent; lists what it won't decide). A branch older than `c475799` merges that first, then main, so git follows the move; then the codemod and `ruff check --fix` (README → Development). A checkout's `neo` shim keeps old imports and the old `-m` entry points working, as the same modules, with one DeprecationWarning; the wheel has no `neo`. `scripts/install-app.sh` replaces the old `neo` distribution in NEO.app's runtime.
+- After pulling 2.1, run `scripts/install-app.sh` before `tauri dev`: a dev build uses the installed runtime when there is one, and a runtime from before 2.1 can't start `-m neo2`. The app then says so ("runtime older than the app") instead of crash-looping.
 
 ### Next
 
@@ -196,7 +202,7 @@ A 54-agent audit found 45 gaps across security, reliability, packaging, onboardi
 | planner, goal dispatcher, agent swarm, sub_agents, hybrid/agents | one agent loop with provider-native parallel tool calls |
 | 271-folder `skills/` | ~10 curated skills loaded on demand |
 | ~7k lines of PySide6 UI | Tauri + Vue overlay (~10 MB runtime) |
-| litellm, model_pool, chromadb | `neo/providers`, SQLite + local embeddings |
+| litellm, model_pool, chromadb | `neo2/core/providers`, SQLite + local embeddings |
 | YOLO / DeepFace local vision | Gemini vision on request only |
 | flight_finder, youtube, etc. | browser + computer use |
 | Windows/Linux deep paths, ARIA leftovers | macOS-first shims |

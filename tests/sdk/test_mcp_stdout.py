@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from neo import effects
+from neo2.core import effects
 
 pytest.importorskip("mcp")
 

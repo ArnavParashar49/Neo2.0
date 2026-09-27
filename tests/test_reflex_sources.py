@@ -1,4 +1,4 @@
-"""Public reflex data (neo/reflex/sources.py, hf_data.py), the Hinglish templates and how
+"""Public reflex data (neo2/core/reflex/sources.py, hf_data.py), the Hinglish templates and how
 dataset.build() takes them in. Hermetic: every file comes from tests/fixtures/reflex_sources
 (invented sentences in each source's format), nothing touches the network or ~/.neo."""
 
@@ -14,8 +14,8 @@ from pathlib import Path
 
 import pytest
 
-from neo.reflex import hf_data, templates_hi
-from neo.reflex import sources as S
+from neo2.core.reflex import hf_data, templates_hi
+from neo2.core.reflex import sources as S
 
 FIX = Path(__file__).parent / "fixtures" / "reflex_sources"
 
@@ -103,7 +103,7 @@ def test_clinc_mapping_kind_destructive_and_eval_split(fx):
     w = t["what is the forecast for tomorrow in boston"]
     assert (w["intent"], w["tool"], w["kind"], w["destructive"], w["screen"]) == ("quick_action", "weather", "other", False, False)
     assert t["set an alarm for six thirty am"]["kind"] == "add_reminder"
-    assert "kind" not in t["how do you say good night in german"]  # chat never reaches neo/decide
+    assert "kind" not in t["how do you say good night in german"]  # chat never reaches neo2/core/decide
     assert t["please wire two hundred dollars to my savings"]["destructive"] is True
     assert t["is it going to snow in denver this weekend"]["split"] == "eval"
     assert skip["clinc:unmapped:made_up_label"] == 1  # listed as unmapped in the build report
@@ -361,7 +361,7 @@ def test_hwu64_stop_and_polite_requests_as_reply_negatives(fx):
 
 
 def test_emitted_kinds_are_decide_task_kinds():
-    from neo.decide.engine import TASKS
+    from neo2.core.decide.engine import TASKS
 
     assert set(S.KINDS) <= set(TASKS)
 
@@ -448,7 +448,7 @@ def test_sample_round_robin_respects_total_and_cap():
 
 
 def test_main_writes_train_and_eval_files_with_the_row_schema(fx, monkeypatch, tmp_path):
-    from neo.config import settings
+    from neo2.core.config import settings
 
     monkeypatch.setattr(hf_data, "Fetcher", lambda cache: fx)
     monkeypatch.setattr(sys, "argv", ["hf_data", "--with", "leyzer"])
@@ -525,7 +525,7 @@ def test_hinglish_stop_phrases():
     assert all(any(c in x for c in templates_hi.STOP_CORE) for x in p)
     assert "hatao" not in p  # "ye file hatao" deletes
     assert not any(x.split()[0] == x.split()[-1] and len(x.split()) > 2 for x in p)  # no "yaar … yaar"
-    # a bare "band karo" usually means "turn it off" (neo/reflex/__init__.py's stop rule agrees)
+    # a bare "band karo" usually means "turn it off" (neo2/core/reflex/__init__.py's stop rule agrees)
     assert all("bolna band karo" in x for x in p if "band kar" in x)
     # no honorific on the rude form ("chup kar ji"), no "quickly" on "not now" ("abhi nahi jaldi")
     assert not any(x.endswith(" ji") and (x.startswith("oye ") or x[: -len(" ji")].split(" ", 1)[-1] in templates_hi._TU_FORM
@@ -537,10 +537,10 @@ def test_hinglish_stop_phrases():
 
 
 def test_hinglish_template_rows_cover_every_class_with_valid_labels():
-    import neo.tools
-    from neo.agent.registry import registry
+    import neo2.core.tools
+    from neo2.core.agent.registry import registry
 
-    neo.tools.load_all()
+    neo2.core.tools.load_all()
     tools = {t.name for t in registry().all()}
     rows = templates_hi.rows()
     assert rows == templates_hi.rows()
@@ -569,8 +569,8 @@ def test_hinglish_template_rows_cover_every_class_with_valid_labels():
 
 # ---- dataset.build() -------------------------------------------------------------------------------
 def test_dataset_build_passes_new_labels_and_never_trains_on_eval():
-    from neo.config import settings
-    from neo.reflex import dataset
+    from neo2.core.config import settings
+    from neo2.core.reflex import dataset
 
     data = settings().data_dir
     data.mkdir(parents=True, exist_ok=True)
@@ -601,8 +601,8 @@ def test_dataset_build_passes_new_labels_and_never_trains_on_eval():
 
 
 def test_benchmark_drops_the_sentences_neo_trains_on():
-    from neo.config import settings
-    from neo.reflex import dataset
+    from neo2.core.config import settings
+    from neo2.core.reflex import dataset
 
     data = settings().data_dir
     data.mkdir(parents=True, exist_ok=True)
@@ -617,7 +617,7 @@ def test_benchmark_drops_the_sentences_neo_trains_on():
 
 
 def test_dataset_build_includes_the_hinglish_templates():
-    from neo.reflex import dataset
+    from neo2.core.reflex import dataset
 
     out = dataset.build(n_per_class=5)
     hi = [r for r in out if r.get("lang") in ("hinglish", "hi")]
@@ -630,8 +630,8 @@ def test_dataset_build_includes_the_hinglish_templates():
 def test_generated_rows_keep_their_explicit_labels_and_unknown_stays_unknown():
     import json
 
-    from neo.config import settings
-    from neo.reflex import dataset
+    from neo2.core.config import settings
+    from neo2.core.reflex import dataset
 
     rows = [
         {"text": "Priya ko mail bhej do ki kal milte hain", "intent": "agent_task", "kind": "send_email",

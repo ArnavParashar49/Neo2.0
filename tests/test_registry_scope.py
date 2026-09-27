@@ -6,12 +6,12 @@ import asyncio
 
 import pytest
 
-from neo import runtime
-from neo.agent import fastpath
-from neo.agent.loop import run_agent
-from neo.agent.registry import RegisteredTool, Registry, ToolContext, catalog, registry, tool
-from neo.events import EventBus
-from neo.providers.base import ToolCall, Turn
+from neo2.core import runtime
+from neo2.core.agent import fastpath
+from neo2.core.agent.loop import run_agent
+from neo2.core.agent.registry import RegisteredTool, Registry, ToolContext, catalog, registry, tool
+from neo2.core.events import EventBus
+from neo2.core.providers.base import ToolCall, Turn
 
 WEB = ["web_search", "web_fetch", "weather", "clock"]
 
@@ -131,8 +131,8 @@ def test_copies_are_independent_of_the_catalog(web_agent):
 
 
 def test_task_modes_rewrite_the_catalog_not_an_agent(web_agent, monkeypatch, tmp_path):
-    from neo.config import LibrarySettings
-    from neo.tools import tasks
+    from neo2.core.config import LibrarySettings
+    from neo2.core.tools import tasks
 
     agent = runtime.Runtime("mac", LibrarySettings(data_dir=tmp_path / "mac"), catalog().subset(["search_site"]))
     legacy = catalog().get("search_site").parameters
@@ -155,7 +155,7 @@ def test_library_mode_unbound_registry_fails_closed():
 
 
 def test_more_tools_only_finds_the_agents_tools(web_agent):
-    from neo.agent.toolselect import selector
+    from neo2.core.agent.toolselect import selector
 
     with runtime.bind(web_agent.scope()):
         found = [t.name for t in selector().search("run a shell command, click a button, send an email", k=20)]
@@ -182,7 +182,7 @@ def test_an_agent_gets_the_as_registered_surface_whatever_the_app_runs(decide_mo
     hidden): an agent, whose kinds run their legacy scripts, gets the tools as registered."""
     from neo_lib import make_runtime
 
-    from neo.tools import tasks
+    from neo2.core.tools import tasks
 
     decide_modes(web_search="on", add_event="on", read_calendar="on")
     names = ["search_site", "calendar_add", "calendar_today"]

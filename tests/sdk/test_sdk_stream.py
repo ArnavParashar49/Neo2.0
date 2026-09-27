@@ -36,8 +36,8 @@ class SlowBrain(ScriptedBrain):
 @pytest.fixture
 def chat_reflex(monkeypatch):
     """The reflex reads every request as conversation (an embedded agent's is off by default)."""
-    from neo.reflex import Reflex
-    from neo.reflex.schema import Decision
+    from neo2.core.reflex import Reflex
+    from neo2.core.reflex.schema import Decision
 
     async def chat(self, text):
         return Decision("chat", 0.99, False, 0.0, False, 0.0, source="test")
@@ -133,7 +133,7 @@ async def test_two_concurrent_requests_are_kept_apart():
     bb = SlowBrain([Turn(tool_calls=[ToolCall("1", "weather", {"place": "Oslo"})]), "B done."])
     a = neo2.AsyncAgent(neo2.AgentConfig(tools="web", fast_paths=False), provider=ba)
     b = neo2.AsyncAgent(neo2.AgentConfig(tools="web", fast_paths=False), provider=bb)
-    import neo.tools.weather as weather
+    import neo2.core.tools.weather as weather
 
     async def fake_weather(args, ctx):
         await asyncio.sleep(0.01)

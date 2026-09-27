@@ -1,4 +1,4 @@
-"""neo.decide.kinds.note: write_note through a notes app's own dictionary (made, read back, looked
+"""neo2.core.decide.kinds.note: write_note through a notes app's own dictionary (made, read back, looked
 for after a timeout, never made twice), its New command (⌘N found by shortcut), and a Markdown
 file that never replaces another. osascript, the AX tree and the app launch are faked; the file
 goes to the test's own folder. Every generated script is compiled (darwin), never run."""
@@ -18,11 +18,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from neo import config
-from neo.decide import aescript, engine, inventory, media, run, sdef
-from neo.decide.engine import Candidate
-from neo.decide.inventory import App
-from neo.decide.kinds import note
+from neo2.core import config
+from neo2.core.decide import aescript, engine, inventory, media, run, sdef
+from neo2.core.decide.engine import Candidate
+from neo2.core.decide.inventory import App
+from neo2.core.decide.kinds import note
 
 US, RS = aescript.US, aescript.RS
 
@@ -412,7 +412,7 @@ def test_a_line_break_is_typed_as_shift_return_never_return(world, monkeypatch):
     world.chosen.append(cand(JOTTER, "ax_new"))
     box = El("AXTextArea", AXValue="")
     FakeUI(monkeypatch, box, value_sticks=False)
-    from neo.decide import axkit
+    from neo2.core.decide import axkit
 
     typed = []
 
@@ -442,7 +442,7 @@ def test_no_empty_editor_is_partial_and_the_next_way_is_tried(world, monkeypatch
 def test_the_editor_is_asked_off_the_loop(world, monkeypatch):
     import threading
 
-    from neo.decide import axkit
+    from neo2.core.decide import axkit
 
     world.chosen.append(cand(JOTTER, "ax_new"))
     FakeUI(monkeypatch, El("AXTextArea", AXValue=""))
@@ -477,7 +477,7 @@ def test_text_that_went_in_but_reads_back_wrong_is_unknown(world, monkeypatch):
         return True
 
     monkeypatch.setattr(media, "_set", cut)
-    monkeypatch.setattr("neo.decide.axkit._pid_of", lambda el: None)
+    monkeypatch.setattr("neo2.core.decide.axkit._pid_of", lambda el: None)
     r = write(title="Shopping")
     assert not r.ok and "may have written it in Jotter" in r.text
     assert not config.settings().notes_dir.exists()
@@ -526,7 +526,7 @@ def test_a_folder_notes_may_not_go_to_is_refused(world, monkeypatch, tmp_path):
 
 
 def test_a_file_that_ran_out_of_time_before_its_write_is_never_written_later(world, monkeypatch):
-    from neo.tools.computer import policy
+    from neo2.core.tools.computer import policy
 
     world.chosen.append(cand(None, "file"))
     monkeypatch.setitem(note.BUDGET_S, "file", 0.1)
@@ -610,7 +610,7 @@ def test_doc_like(app, yes):
 
 def test_the_real_engine_puts_the_notes_app_first_and_the_file_last(monkeypatch):
     monkeypatch.setitem(engine.TASKS, "write_note", dataclasses.replace(engine.TASKS["write_note"], fallback="file"))
-    monkeypatch.setitem(engine.DRIVERS, "write_note", "neo.decide.kinds.note")
+    monkeypatch.setitem(engine.DRIVERS, "write_note", "neo2.core.decide.kinds.note")
     monkeypatch.setattr(engine, "_zero_shot_can_answer", lambda: False)
     monkeypatch.setattr(engine, "_inventory", lambda: [NOTEBOOK, JOTTER])
     cands = asyncio.run(engine.choose("write_note", "make a note saying"))
@@ -653,7 +653,7 @@ def test_an_installed_app_the_user_named_that_did_not_take_it_is_said(world, mon
 
 def test_an_app_named_only_inside_the_note_is_not_where_it_goes(monkeypatch):
     monkeypatch.setitem(engine.TASKS, "write_note", dataclasses.replace(engine.TASKS["write_note"], fallback="file"))
-    monkeypatch.setitem(engine.DRIVERS, "write_note", "neo.decide.kinds.note")
+    monkeypatch.setitem(engine.DRIVERS, "write_note", "neo2.core.decide.kinds.note")
     monkeypatch.setattr(engine, "_zero_shot_can_answer", lambda: False)
     monkeypatch.setattr(engine, "_inventory", lambda: [NOTEBOOK, PLANNER])
 
@@ -678,7 +678,7 @@ def test_an_app_named_only_inside_the_note_is_not_where_it_goes(monkeypatch):
 
 def test_a_notes_app_used_now_and_then_comes_before_the_file(monkeypatch):
     monkeypatch.setitem(engine.TASKS, "write_note", dataclasses.replace(engine.TASKS["write_note"], fallback="file"))
-    monkeypatch.setitem(engine.DRIVERS, "write_note", "neo.decide.kinds.note")
+    monkeypatch.setitem(engine.DRIVERS, "write_note", "neo2.core.decide.kinds.note")
     monkeypatch.setattr(engine, "_zero_shot_can_answer", lambda: False)
     now = time.time()
     for days, ago in [(2, 10), (1, 40), (0, 80)]:
@@ -721,7 +721,7 @@ def test_a_shadow_preview_touches_no_app(world):
 
 def test_the_dictionary_route_sets_everything_the_old_script_set(monkeypatch):
     """Equivalence with the legacy tool: every property its record set is set here too, by code."""
-    from neo.tools.computer import legacy
+    from neo2.core.tools.computer import legacy
 
     seen = []
 
@@ -742,7 +742,7 @@ def test_the_dictionary_route_sets_everything_the_old_script_set(monkeypatch):
 
 def test_through_the_real_engine_to_the_file_when_the_app_cannot(monkeypatch):
     monkeypatch.setitem(engine.TASKS, "write_note", dataclasses.replace(engine.TASKS["write_note"], fallback="file"))
-    monkeypatch.setitem(engine.DRIVERS, "write_note", "neo.decide.kinds.note")
+    monkeypatch.setitem(engine.DRIVERS, "write_note", "neo2.core.decide.kinds.note")
     monkeypatch.setattr(engine, "_zero_shot_can_answer", lambda: False)
     monkeypatch.setattr(engine, "_inventory", lambda: [NOTEBOOK])
 

@@ -16,8 +16,8 @@ import pytest
 from neo_lib import make_runtime
 from pydantic import ValidationError
 
-from neo import effects, runtime
-from neo.config import DECIDE_DEFAULTS, LibrarySettings, Settings
+from neo2.core import effects, runtime
+from neo2.core.config import DECIDE_DEFAULTS, LibrarySettings, Settings
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -45,7 +45,7 @@ def test_the_environment_and_env_files_never_reach_an_embedded_agent(tmp_path):
     code = textwrap.dedent(
         f"""
         import json
-        from neo.config import LibrarySettings, Settings
+        from neo2.core.config import LibrarySettings, Settings
         app = Settings()
         lib = LibrarySettings(data_dir={str(tmp_path / "agent")!r})
         print(json.dumps({{
@@ -79,7 +79,7 @@ def test_env_files_even_when_passed_are_ignored(tmp_path, monkeypatch):
 
 
 def test_a_checkout_reads_its_own_env_file_an_installed_package_does_not(tmp_path):
-    from neo import config
+    from neo2.core import config
 
     assert config._env_files(ROOT) == (config.USER_ENV, ROOT / ".env")
     assert config._env_files(tmp_path) == (config.USER_ENV,)  # site-packages has no pyproject.toml
@@ -181,14 +181,14 @@ def two(tmp_path):
 
 
 def test_each_agent_gets_its_own_everything(two):
-    from neo import privacy
-    from neo.agent.early import early
-    from neo.agent.registry import registry
-    from neo.agent.toolselect import selector
-    from neo.config import settings
-    from neo.events import bus
-    from neo.memory.store import store
-    from neo.tools.browser import _browser
+    from neo2.core import privacy
+    from neo2.core.agent.early import early
+    from neo2.core.agent.registry import registry
+    from neo2.core.agent.toolselect import selector
+    from neo2.core.config import settings
+    from neo2.core.events import bus
+    from neo2.core.memory.store import store
+    from neo2.core.tools.browser import _browser
 
     seen = {}
     for rt in two:
@@ -218,7 +218,7 @@ def test_each_agent_gets_its_own_everything(two):
 
 
 def test_each_conversation_has_its_own_bus(two):
-    from neo.events import bus
+    from neo2.core.events import bus
 
     a = two[0]
     with runtime.bind(a.scope("one")):
@@ -229,7 +229,7 @@ def test_each_conversation_has_its_own_bus(two):
 
 
 def test_memory_writes_stay_in_each_agents_file(two):
-    from neo.memory.store import store
+    from neo2.core.memory.store import store
 
     a, b = two
     with runtime.bind(a.scope()):
@@ -243,7 +243,7 @@ def test_memory_writes_stay_in_each_agents_file(two):
 
 
 def test_memory_off_means_no_store(tmp_path):
-    from neo.memory.store import MemoryDisabled, store
+    from neo2.core.memory.store import MemoryDisabled, store
 
     rt = make_runtime(tmp_path / "a")
     with runtime.bind(rt.scope()), pytest.raises(MemoryDisabled):
@@ -252,7 +252,7 @@ def test_memory_off_means_no_store(tmp_path):
 
 
 def test_the_memory_file_is_private_whatever_the_umask(tmp_path):
-    from neo.memory.store import store
+    from neo2.core.memory.store import store
 
     rt = make_runtime(tmp_path / "a", memory_enabled=True)
     old = os.umask(0o022)
@@ -265,14 +265,14 @@ def test_the_memory_file_is_private_whatever_the_umask(tmp_path):
 
 
 def test_unbound_accessors_fail_closed_in_library_mode(two):
-    from neo import privacy
-    from neo.agent.early import early
-    from neo.agent.registry import registry
-    from neo.agent.toolselect import selector
-    from neo.config import decide_mode, settings
-    from neo.events import bus
-    from neo.memory.store import store
-    from neo.tools.browser import _browser
+    from neo2.core import privacy
+    from neo2.core.agent.early import early
+    from neo2.core.agent.registry import registry
+    from neo2.core.agent.toolselect import selector
+    from neo2.core.config import decide_mode, settings
+    from neo2.core.events import bus
+    from neo2.core.memory.store import store
+    from neo2.core.tools.browser import _browser
 
     for fn in (settings, registry, bus, store, selector, early, _browser, privacy.generation, lambda: decide_mode("x")):
         with pytest.raises(runtime.NoRuntimeError):
@@ -280,10 +280,10 @@ def test_unbound_accessors_fail_closed_in_library_mode(two):
 
 
 def test_app_mode_still_uses_the_module_globals(monkeypatch):
-    from neo import config, events, privacy
-    from neo.agent import early as early_mod
-    from neo.agent import toolselect
-    from neo.memory import store as store_mod
+    from neo2.core import config, events, privacy
+    from neo2.core.agent import early as early_mod
+    from neo2.core.agent import toolselect
+    from neo2.core.memory import store as store_mod
 
     monkeypatch.setattr(store_mod, "_store", None)  # restored afterwards: no store leaks out
     for mod, name, factory in (
@@ -302,8 +302,8 @@ def test_app_mode_still_uses_the_module_globals(monkeypatch):
 
 
 def test_inside_an_agent_every_task_kind_is_legacy(two, monkeypatch):
-    from neo import config
-    from neo.agent import prompt
+    from neo2.core import config
+    from neo2.core.agent import prompt
 
     monkeypatch.setenv("NEO_DECIDE_MODES", "web_search=on")
     monkeypatch.setattr(config, "_settings", None)
@@ -317,7 +317,7 @@ def test_inside_an_agent_every_task_kind_is_legacy(two, monkeypatch):
 
 
 def test_an_agents_requests_never_reach_the_learning_ledger(two):
-    from neo.reflex import learn, outcomes
+    from neo2.core.reflex import learn, outcomes
 
     with runtime.bind(two[0].scope()):
         outcomes.begin("j1", "open safari")
@@ -327,7 +327,7 @@ def test_an_agents_requests_never_reach_the_learning_ledger(two):
 
 
 def test_the_apps_erase_is_not_an_agents(two):
-    from neo import privacy
+    from neo2.core import privacy
 
     with runtime.bind(two[0].scope()), pytest.raises(RuntimeError, match="app's erase"):
         asyncio.run(privacy.forget_everything())
@@ -380,8 +380,8 @@ def test_the_browser_follows_the_agents_settings(two, monkeypatch):
     fake = types.ModuleType("playwright.async_api")
     fake.async_playwright = lambda: _PW()  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "playwright.async_api", fake)
-    from neo import effects
-    from neo.tools.browser import _browser
+    from neo2.core import effects
+    from neo2.core.tools.browser import _browser
 
     monkeypatch.setattr(effects, "_allowed", {"browser"})  # the Playwright above is the test's own fake
 
@@ -398,7 +398,7 @@ def test_the_browser_follows_the_agents_settings(two, monkeypatch):
 
 
 def test_weather_never_guesses_here_from_the_network_for_an_agent(two, monkeypatch):
-    from neo.tools import weather
+    from neo2.core.tools import weather
 
     calls = []
 
@@ -433,7 +433,7 @@ def test_the_pins_survive_assignment_and_copies(tmp_path, monkeypatch):
 
 
 def test_a_library_runtime_takes_only_pinned_library_settings(tmp_path, monkeypatch):
-    from neo.agent.registry import Registry
+    from neo2.core.agent.registry import Registry
 
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
 
@@ -454,9 +454,9 @@ def test_a_library_runtime_takes_only_pinned_library_settings(tmp_path, monkeypa
 def test_a_library_runtime_turns_library_mode_on(tmp_path):
     import threading
 
-    from neo import config
-    from neo.agent import confirm
-    from neo.agent.registry import Registry
+    from neo2.core import config
+    from neo2.core.agent import confirm
+    from neo2.core.agent.registry import Registry
 
     assert not runtime.library_mode()
     rt = runtime.Runtime("a", LibrarySettings(data_dir=tmp_path / "a"), Registry())
@@ -479,7 +479,7 @@ def test_a_library_runtime_turns_library_mode_on(tmp_path):
 
 
 def test_confirmation_cant_be_switched_off_inside_an_agent(tmp_path):
-    from neo.agent import confirm
+    from neo2.core.agent import confirm
 
     rt = make_runtime(tmp_path / "a")
     object.__setattr__(rt.settings, "confirm_destructive", False)  # past every guard above
@@ -506,7 +506,7 @@ def test_a_rejected_key_never_shows_in_the_error(tmp_path, monkeypatch):
 
 
 def test_an_unbound_erase_changes_nothing_before_it_fails(tmp_path):
-    from neo import privacy
+    from neo2.core import privacy
 
     rt = make_runtime(tmp_path / "a")
     before = privacy._generation

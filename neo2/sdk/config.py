@@ -18,11 +18,11 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 
-from neo.config import BrainName
+from neo2.core.config import BrainName
 
 __all__ = ["AgentConfig", "MemoryConfig"]
 
-_GATE_TTL_S = 120.0  # neo.agent.confirm._TTL_S: an approval must come before the card lapses
+_GATE_TTL_S = 120.0  # neo2.core.agent.confirm._TTL_S: an approval must come before the card lapses
 
 
 @dataclass(frozen=True)
@@ -30,7 +30,7 @@ class MemoryConfig:
     """Long-term memory in a SQLite file of the host's choosing: a new (or empty) file, or one NEO
     made for an agent before — never a database of the host's own (NEO marks the one it makes)."""
 
-    path: Path  # e.g. /srv/neo/u42/memory.sqlite3
+    path: Path  # e.g. /srv/myapp/u42/memory.sqlite3
     cloud: Literal["full", "profile", "off"] = "profile"  # how much of it rides along to the cloud model
     playbooks: bool = True  # recall and save the tool paths of past tasks
     summaries: bool = False  # summarise long conversations into memory
@@ -115,7 +115,7 @@ class AgentConfig(BaseModel):
             raise ValueError('reflex="lite" needs gemini_api_keys (it calls Gemini Flash-Lite itself)')
         if self.memory is True and self.data_dir is None:
             raise ValueError("memory=True keeps it in data_dir/memory.sqlite3: set data_dir, or pass MemoryConfig(path=...)")
-        from neo.config import _refuse_neo_home
+        from neo2.core.config import _refuse_neo_home
 
         for what, p in (
             ("data_dir", self.data_dir),
@@ -137,8 +137,8 @@ class AgentConfig(BaseModel):
         return self.memory
 
     def library_settings(self, data_dir: Path) -> Any:
-        """NEO's settings for this agent, with `data_dir` its folder (neo.config.LibrarySettings)."""
-        from neo.config import LibrarySettings
+        """NEO's settings for this agent, with `data_dir` its folder (neo2.core.config.LibrarySettings)."""
+        from neo2.core.config import LibrarySettings
 
         keys = [k.get_secret_value().strip() for k in self.gemini_api_keys]
         keys = [k for k in keys if k]
@@ -188,7 +188,7 @@ class AgentConfig(BaseModel):
         and a file inside ~/.neo (NEO.app's own settings) is refused. NEO_DATA_DIR in the process
         environment is where NEO.app keeps its data, so it's refused as an agent's folder: name the
         agent's with another `prefix`, or pass data_dir= as an override."""
-        from neo.config import _refuse_neo_home
+        from neo2.core.config import _refuse_neo_home
 
         env: dict[str, str] = {}
         for f in env_files:

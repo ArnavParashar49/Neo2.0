@@ -3,7 +3,7 @@ queries, each a card, then the brain gave up).
 
 * policy.script_facts: a statement-by-statement reader, not a regex — what only reads runs
   without a card (unless the request is tainted), everything else asks;
-* a yes "for this task" (neo.agent.grants): later calls of the same tool on the same app in the
+* a yes "for this task" (neo2.core.agent.grants): later calls of the same tool on the same app in the
   same task run without a card, never a dangerous one, never after new untrusted reading, never
   in another task;
 * Accessibility off: the first tool that needs it stops the run with how to turn it on;
@@ -20,15 +20,15 @@ import json
 
 import pytest
 
-import neo.agent.session as sess_mod
-from neo.agent import confirm, grants
-from neo.agent.registry import RegisteredTool, ToolContext, registry
-from neo.agent.session import Session, answer_of, scope_of
-from neo.events import EventBus, bus
-from neo.providers.base import ToolCall, Turn
-from neo.reflex.schema import Decision
-from neo.tools.computer import policy
-from neo.tools.computer.policy import script_facts, script_is_read_only
+import neo2.core.agent.session as sess_mod
+from neo2.core.agent import confirm, grants
+from neo2.core.agent.registry import RegisteredTool, ToolContext, registry
+from neo2.core.agent.session import Session, answer_of, scope_of
+from neo2.core.events import EventBus, bus
+from neo2.core.providers.base import ToolCall, Turn
+from neo2.core.reflex.schema import Decision
+from neo2.core.tools.computer import policy
+from neo2.core.tools.computer.policy import script_facts, script_is_read_only
 
 _OBJ = {"type": "object", "properties": {}}
 
@@ -245,7 +245,7 @@ def test_ui_scripting_is_told_apart_from_other_system_events_scripts():
 @pytest.fixture
 def ran(monkeypatch):
     """apps.osascript never runs: it records the script and answers `ran.reply`."""
-    from neo.tools.computer import apps
+    from neo2.core.tools.computer import apps
 
     class Ran(list):
         reply = "ok"
@@ -263,7 +263,7 @@ def ran(monkeypatch):
 
 
 def _script(script: str, ctx: ToolContext | None = None):
-    from neo.tools import load_all
+    from neo2.core.tools import load_all
 
     load_all()
     return asyncio.run(registry().invoke("applescript", {"script": script}, ctx or ToolContext(user_text="x")))
@@ -296,7 +296,7 @@ def test_a_script_that_keeps_failing_on_an_app_stops_being_retried(ran):
             other = await registry().invoke("applescript", {"script": 'tell application "Music" to get sound volume'}, ToolContext())
         return outs, other
 
-    from neo.tools import load_all
+    from neo2.core.tools import load_all
 
     load_all()
     outs, other = asyncio.run(go())
@@ -317,7 +317,7 @@ def test_outside_a_task_failures_are_not_counted(ran):
 
 @pytest.fixture
 def ax_off(monkeypatch):
-    from neo.tools.computer import ax
+    from neo2.core.tools.computer import ax
 
     monkeypatch.setattr(ax, "is_trusted", lambda: False)
 
@@ -339,8 +339,8 @@ def ax_off(monkeypatch):
     ],
 )
 def test_without_accessibility_the_tools_that_need_it_ask_the_user(ax_off, ran, name, args, monkeypatch):
-    from neo.tools import load_all
-    from neo.tools.computer import inp
+    from neo2.core.tools import load_all
+    from neo2.core.tools.computer import inp
 
     load_all()
     for f in ("click", "drag", "scroll", "hotkey", "type_text"):
@@ -357,7 +357,7 @@ def test_without_accessibility_scripts_that_dont_touch_the_ui_still_run(ax_off, 
 
 
 def test_accessibility_is_asked_about_once_per_task(ax_off):
-    from neo.tools import load_all
+    from neo2.core.tools import load_all
 
     load_all()
 
@@ -380,7 +380,7 @@ def test_osascript_refusing_assistive_access_is_the_same_question(ran):
 
 
 def _audit_lines() -> list[dict]:
-    from neo.config import settings
+    from neo2.core.config import settings
 
     try:
         return [json.loads(ln) for ln in settings().audit_log.read_text().splitlines()]
@@ -493,8 +493,8 @@ class Brain:
 
 @pytest.fixture
 def session_env(monkeypatch, tmp_path, ran):
-    from neo import config, events
-    from neo.tools import load_all
+    from neo2.core import config, events
+    from neo2.core.tools import load_all
 
     monkeypatch.setattr(config, "_settings", None)
     monkeypatch.setenv("NEO_DATA_DIR", str(tmp_path))
@@ -712,7 +712,7 @@ def test_a_no_still_wins(text):
 
 
 def test_the_prompt_steers_canvas_apps_to_screenshot_and_click():
-    from neo.agent.prompt import persona
+    from neo2.core.agent.prompt import persona
 
     p = persona()
     assert "Chess" in p and "screenshot" in p and "coordinates" in p
@@ -774,7 +774,7 @@ def test_a_process_picked_by_a_variable_is_neither_read_only_nor_grantable():
 
 
 def test_the_overlay_can_answer_for_the_task(monkeypatch):
-    from neo import app as app_mod
+    from neo2.core import app as app_mod
 
     a = app_mod.App()
     calls = []
@@ -943,7 +943,7 @@ def _granted_chess_task(taint: tuple[str, ...] = ()) -> str:
     ],
 )
 def test_a_chess_grant_never_covers_system_events_or_the_frontmost_app(ran, script):
-    from neo.tools import load_all
+    from neo2.core.tools import load_all
 
     load_all()
     t = _granted_chess_task()
@@ -959,7 +959,7 @@ def test_a_chess_grant_never_covers_system_events_or_the_frontmost_app(ran, scri
 
 def test_a_grant_ends_at_new_untrusted_reading_even_by_a_tool_already_read(ran):
     """Taint is a set of names; the grant counts every untrusted result after the yes."""
-    from neo.tools import load_all
+    from neo2.core.tools import load_all
 
     load_all()
     t = _granted_chess_task()
@@ -983,7 +983,7 @@ def test_a_grant_ends_at_new_untrusted_reading_even_by_a_tool_already_read(ran):
 
 
 def test_a_granted_calls_own_reading_keeps_the_grant(ran):
-    from neo.tools import load_all
+    from neo2.core.tools import load_all
 
     load_all()
     t = _granted_chess_task(("ax_tree",))
@@ -1038,7 +1038,7 @@ def test_scope_words_with_a_yes_are_a_yes_for_the_task(text):
 
 
 def test_erasing_everything_ends_every_grant(monkeypatch):
-    from neo import app as app_mod
+    from neo2.core import app as app_mod
 
     t = _granted_chess_task()
     assert grants.active(t)
@@ -1047,7 +1047,7 @@ def test_erasing_everything_ends_every_grant(monkeypatch):
     async def nothing():
         return {}
 
-    monkeypatch.setattr("neo.privacy.forget_everything", nothing)
+    monkeypatch.setattr("neo2.core.privacy.forget_everything", nothing)
     asyncio.run(a.erase())
     assert grants.active(t) == []
 
@@ -1177,7 +1177,7 @@ def test_a_grant_covers_what_it_can_see_pressed(script):
 def test_after_a_granted_read_a_click_by_place_still_asks(ran):
     """What a granted call reads back doesn't end the grant — so a grant never covers a press it
     can't check by the element's label."""
-    from neo.tools import load_all
+    from neo2.core.tools import load_all
 
     load_all()
     t = _granted_chess_task(("ax_tree",))

@@ -23,16 +23,16 @@ import re
 
 import pytest
 
-import neo.agent.session as sess_mod
-from neo import events
-from neo.agent import fastpath
-from neo.agent.registry import Registry, ToolContext, ToolOutput, registry
-from neo.agent.session import Reply, Session
-from neo.decide import games, inventory, sites
-from neo.decide.inventory import App
-from neo.events import EventBus
-from neo.reflex.schema import Decision
-from neo.tools import load_all
+import neo2.core.agent.session as sess_mod
+from neo2.core import events
+from neo2.core.agent import fastpath
+from neo2.core.agent.registry import Registry, ToolContext, ToolOutput, registry
+from neo2.core.agent.session import Reply, Session
+from neo2.core.decide import games, inventory, sites
+from neo2.core.decide.inventory import App
+from neo2.core.events import EventBus
+from neo2.core.reflex.schema import Decision
+from neo2.core.tools import load_all
 
 CHESS = App(
     bundle_id="test.boards.chess", name="Chess", path="/System/Applications/Chess.app", category="board-games"
@@ -87,7 +87,7 @@ MUSIC = [
     "play the weeknd",
     "play lo-fi beats",
     "play something by queen",
-    "play chess by abba",  # a credit: the recording of that name (see neo.decide.games)
+    "play chess by abba",  # a credit: the recording of that name (see neo2.core.decide.games)
     "play chess from the musical",
     "play chess on youtube",  # a place that is no everyday word: a site, as before
     "play chess on tunes",  # another app: music in it
@@ -303,7 +303,7 @@ def test_music_still_takes_the_fast_path(agent, monkeypatch):
 
 
 def test_the_voice_lane_hands_open_and_play_to_the_agent(agent):
-    from neo.voice import live
+    from neo2.core.voice import live
 
     assert live._command_steps("open chess and play as white") is None
     assert live._command_steps("play chess as white") is None
@@ -317,7 +317,7 @@ def test_the_voice_lane_hands_open_and_play_to_the_agent(agent):
 def test_opened_mid_sentence_the_rest_is_still_no_song(monkeypatch, mac):
     """The local voice loop: "open chess" runs while the user is still talking; at the end the rest,
     "play as white", is read with the whole sentence, so nothing plays and all of it goes on."""
-    from neo.agent.early import EarlyActor
+    from neo2.core.agent.early import EarlyActor
 
     opened = []
 
@@ -353,7 +353,7 @@ def test_the_agent_run_gets_the_app_and_the_tools_to_open_it(monkeypatch, mac):
         last_used = last_model = "fake"
 
     async def fake_run_agent(goal, **kw):
-        from neo.agent.loop import AgentResult
+        from neo2.core.agent.loop import AgentResult
 
         seen.update(kw, goal=goal)
         return AgentResult("Your move.", "done", [], [])
@@ -378,8 +378,8 @@ def test_the_agent_run_gets_the_app_and_the_tools_to_open_it(monkeypatch, mac):
 
 @pytest.fixture
 def player(monkeypatch, mac):
-    from neo.decide import media as media_mod
-    from neo.tools import media
+    from neo2.core.decide import media as media_mod
+    from neo2.core.tools import media
 
     asked: list[str] = []
 
@@ -434,7 +434,7 @@ def test_the_refusal_needs_the_game_installed(player, mac):
 
 
 def test_the_agent_prompt_covers_play_a_game_as_a_side():
-    from neo.agent.prompt import persona
+    from neo2.core.agent.prompt import persona
 
     p = persona()
     assert '"Play <game>" ("play chess as white"' in p
@@ -442,7 +442,7 @@ def test_the_agent_prompt_covers_play_a_game_as_a_side():
 
 
 def test_live_is_told_a_game_is_no_music():
-    from neo.voice import live
+    from neo2.core.voice import live
 
     load_all()
     extra = live._live_extra()
@@ -621,7 +621,7 @@ def test_play_music_plays_what_the_user_asked_for_as_music(player, query, said):
 def test_the_logs_lane_never_searches_for_a_video(monkeypatch, mac):
     """Laya's one-tool lane with play_music, and the model calling it: an unfamiliar wording of
     "play chess" still gets the refusal, never play_best."""
-    from neo.decide import media as media_mod
+    from neo2.core.decide import media as media_mod
 
     asked, results = [], []
 
@@ -633,7 +633,7 @@ def test_the_logs_lane_never_searches_for_a_video(monkeypatch, mac):
         last_used = last_model = "fake"
 
     async def fake_run_agent(goal, **kw):
-        from neo.agent.loop import AgentResult
+        from neo2.core.agent.loop import AgentResult
 
         out = await registry().get("play_music").handler({"query": "chess as white"}, kw["ctx"])
         results.append(out)
@@ -686,7 +686,7 @@ def test_only_an_agent_that_can_open_the_game_is_sent_to_play_it(mac, tmp_path):
     tools': a host's agent with no way to open an app handles "play chess" as any other request."""
     from neo_lib import make_runtime
 
-    from neo import runtime
+    from neo2.core import runtime
 
     host = make_runtime(tmp_path / "host", "host", ["weather"])
     player = make_runtime(tmp_path / "player", "player", ["open_app", "click", "screenshot"])
@@ -699,8 +699,8 @@ def test_only_an_agent_that_can_open_the_game_is_sent_to_play_it(mac, tmp_path):
 def test_a_game_runs_required_tools_come_from_the_agents_own_selector(tmp_path):
     from neo_lib import make_runtime
 
-    from neo import runtime
-    from neo.agent import toolselect
+    from neo2.core import runtime
+    from neo2.core.agent import toolselect
 
     rt = make_runtime(tmp_path / "a", "a", ["weather", "open_app"])
     with runtime.bind(rt.scope()):

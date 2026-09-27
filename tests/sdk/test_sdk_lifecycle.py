@@ -31,7 +31,7 @@ def _wire(calls: list):
 
 
 async def test_requests_leave_nothing_in_neo_apps_learning_state(tmp_path, monkeypatch):
-    from neo.reflex import learn, outcomes
+    from neo2.core.reflex import learn, outcomes
 
     calls: list = []
     brain = ScriptedBrain(
@@ -57,7 +57,7 @@ async def test_requests_leave_nothing_in_neo_apps_learning_state(tmp_path, monke
 
 
 async def test_task_kinds_run_their_legacy_scripts_inside_an_agent(tmp_path):
-    from neo.config import decide_mode
+    from neo2.core.config import decide_mode
 
     modes: list = []
 
@@ -78,8 +78,8 @@ async def test_task_kinds_run_their_legacy_scripts_inside_an_agent(tmp_path):
     reason="search_site opens the Mac's browser: macOS with the [mac] extra",
 )
 async def test_search_site_runs_its_legacy_script_and_leaves_no_task_kind_files(tmp_path, monkeypatch):
-    from neo.decide import shadow
-    from neo.tools.computer import apps
+    from neo2.core.decide import shadow
+    from neo2.core.tools.computer import apps
 
     opened: list[str] = []
     dry_runs: list = []
@@ -219,9 +219,9 @@ async def test_cancel_stops_every_kind_of_request(tmp_path):
 
 
 async def test_aclose_stops_every_request_in_flight_and_nothing_reopens(tmp_path):
-    from neo import runtime
-    from neo.memory.store import store
-    from neo.tools.browser import _browser
+    from neo2.core import runtime
+    from neo2.core.memory.store import store
+    from neo2.core.tools.browser import _browser
 
     ran: list = []
     entered = {k: asyncio.Event() for k in ("tool", "continuation", "quick")}
@@ -295,7 +295,7 @@ async def test_a_dropped_agent_frees_its_folder_and_closes_its_card(tmp_path):
 async def test_an_agents_finalizer_takes_no_lock(tmp_path, monkeypatch):
     """The GC can run a dropped agent's finalizer while this very thread holds the live-agents
     lock (any allocation in there may trigger it): the finalizer must never wait for that lock."""
-    from neo import runtime
+    from neo2.core import runtime
 
     class NoReentry:
         def __init__(self):
@@ -345,7 +345,7 @@ async def test_cancel_closes_a_pending_card():
 
 
 async def test_forget_all_erases_only_this_agents_own_files(tmp_path, monkeypatch):
-    from neo import privacy
+    from neo2.core import privacy
 
     async def never(*a, **kw):
         raise AssertionError("an embedded agent must never run NEO.app's erase")
@@ -372,8 +372,8 @@ async def test_forget_all_erases_only_this_agents_own_files(tmp_path, monkeypatc
         r = await agent.ask("what's my locker number?")
         assert r.steps[0].summary == "Nothing relevant in memory."  # works again, empty
         assert (other_dd / "memory.sqlite3").exists()
-        from neo import runtime
-        from neo.memory.store import store
+        from neo2.core import runtime
+        from neo2.core.memory.store import store
 
         with runtime.bind(other._rt.scope()):
             assert [m.text for m in store().recall("bike")] == ["my bike is blue"]
@@ -382,7 +382,7 @@ async def test_forget_all_erases_only_this_agents_own_files(tmp_path, monkeypatc
 async def test_forget_all_deletes_a_memory_file_only_while_its_neos_own(tmp_path):
     import sqlite3
 
-    from neo.config import agent_memory_db
+    from neo2.core.config import agent_memory_db
 
     mem = tmp_path / "db" / "u42.sqlite3"
     cfg = neo2.AgentConfig(tools="none", memory=neo2.MemoryConfig(path=mem))
@@ -423,7 +423,7 @@ async def test_close_closes_the_cards_and_is_final(tmp_path):
     with pytest.raises(RuntimeError, match="closed"):
         agent.stream("hi")
     assert calls == [] and (tmp_path / "a" / "audit.log").exists()
-    from neo import runtime
+    from neo2.core import runtime
 
     assert agent._rt not in runtime.live_runtimes()
 

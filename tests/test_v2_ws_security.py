@@ -8,7 +8,7 @@ import socket
 
 import websockets
 
-from neo.server import ws as ws_mod
+from neo2.core.server import ws as ws_mod
 
 
 def _free_port() -> int:
@@ -18,7 +18,7 @@ def _free_port() -> int:
 
 
 async def _server(monkeypatch):
-    from neo import config
+    from neo2.core import config
 
     port = _free_port()
     monkeypatch.setenv("NEO_WS_PORT", str(port))
@@ -74,7 +74,7 @@ def test_only_the_overlay_gets_in(monkeypatch):
 
 def test_token_file_is_private_and_stable():
     a, b = ws_mod.ws_token(), ws_mod.ws_token()
-    from neo.config import settings
+    from neo2.core.config import settings
 
     path = settings().data_dir / "ws-token"
     assert a == b and len(a) >= 32 and oct(os.stat(path).st_mode & 0o777) == "0o600"

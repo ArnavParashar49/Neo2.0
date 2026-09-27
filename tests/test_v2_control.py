@@ -6,15 +6,15 @@ import asyncio
 
 import pytest
 
-from neo.agent.registry import ToolContext, registry
-from neo.agent.session import _match_fast_path
-from neo.events import EventBus
+from neo2.core.agent.registry import ToolContext, registry
+from neo2.core.agent.session import _match_fast_path
+from neo2.core.events import EventBus
 
 
 @pytest.fixture(autouse=True)
 def _env(tmp_path, monkeypatch):
-    from neo import config, events
-    from neo.tools import load_all
+    from neo2.core import config, events
+    from neo2.core.tools import load_all
 
     monkeypatch.setattr(config, "_settings", None)
     monkeypatch.setenv("NEO_DATA_DIR", str(tmp_path))
@@ -66,8 +66,8 @@ def test_control_fast_paths(text, expected):
 
 
 def test_click_text_prefers_exact_titles_and_buttons(monkeypatch):
-    from neo.tools import computer as comp
-    from neo.tools.computer import ax
+    from neo2.core.tools import computer as comp
+    from neo2.core.tools.computer import ax
 
     els = [
         ax.Element("e1", "AXStaticText", "Play next episode", "", 0, 0, 200, 20, actions=[]),
@@ -93,14 +93,14 @@ def test_click_text_prefers_exact_titles_and_buttons(monkeypatch):
 
 
 def test_click_text_asks_when_ambiguous(monkeypatch):
-    from neo.tools.computer import ax
+    from neo2.core.tools.computer import ax
 
     els = [
         ax.Element("e1", "AXButton", "Save draft", "", 0, 0, 40, 40, actions=["AXPress"]),
         ax.Element("e2", "AXButton", "Save as", "", 50, 0, 40, 40, actions=["AXPress"]),
     ]
     monkeypatch.setattr(ax, "window_elements", lambda app=None: ("Mail", (0, 0, 1000, 800), els))
-    from neo.tools import computer as comp
+    from neo2.core.tools import computer as comp
 
     monkeypatch.setattr(comp.apps, "_target", None)
     monkeypatch.setattr(comp.apps, "front_name", lambda: "Mail")
@@ -111,8 +111,8 @@ def test_click_text_asks_when_ambiguous(monkeypatch):
 
 
 def test_scroll_fast_path_uses_the_pointer(monkeypatch):
-    from neo.tools import computer as comp
-    from neo.tools.computer import ax
+    from neo2.core.tools import computer as comp
+    from neo2.core.tools.computer import ax
 
     monkeypatch.setattr(ax, "app_at", lambda x, y: "Safari")  # never this machine's real screen
     monkeypatch.setattr(comp.inp, "mouse_position", lambda: (640.0, 400.0))
@@ -123,7 +123,7 @@ def test_scroll_fast_path_uses_the_pointer(monkeypatch):
     asyncio.run(registry().invoke(tool, args, ToolContext(user_text="")))
     assert seen == {"x": 640.0, "y": 400.0, "dy": -8}
     # an explicit coordinate on a display left of the main one is a real coordinate, not "the pointer"
-    from neo.tools.computer import screen
+    from neo2.core.tools.computer import screen
 
     left = screen.Display(2, -1920.0, 0.0, 1920.0, 1080.0)
     monkeypatch.setattr(screen, "displays", lambda: [screen.Display(1, 0.0, 0.0, 1512.0, 982.0), left])
@@ -132,7 +132,7 @@ def test_scroll_fast_path_uses_the_pointer(monkeypatch):
 
 
 def test_control_tools_are_quiet_and_live_direct():
-    from neo.voice import live
+    from neo2.core.voice import live
 
     for n in ("click_text", "hotkey", "type_text", "dictate", "open_app"):
         assert n in live._DIRECT_TOOLS and registry().get(n).quiet
@@ -141,10 +141,10 @@ def test_control_tools_are_quiet_and_live_direct():
 
 
 def test_dictate_appends_on_a_new_line_when_the_note_has_text(monkeypatch):
-    import neo.providers as prov
-    from neo.providers.base import Turn
-    from neo.tools import computer as comp
-    from neo.tools.computer import ax
+    import neo2.core.providers as prov
+    from neo2.core.providers.base import Turn
+    from neo2.core.tools import computer as comp
+    from neo2.core.tools.computer import ax
 
     typed = []
 
@@ -176,13 +176,13 @@ def test_dictate_appends_on_a_new_line_when_the_note_has_text(monkeypatch):
 def test_scroll_is_callable_without_coordinates():
     t = registry().get("scroll")
     assert t.parameters.get("required", []) == [] and t.quiet
-    from neo.voice import live
+    from neo2.core.voice import live
 
     assert "scroll" in live._DIRECT_TOOLS
 
 
 def test_confirmation_expires(monkeypatch):
-    from neo.agent import confirm
+    from neo2.core.agent import confirm
 
     monkeypatch.setattr(confirm, "_TTL_S", 0.01)
     confirm.stage("trash", {"path": "/x"}, "move /x to the Trash")
@@ -194,7 +194,7 @@ def test_confirmation_expires(monkeypatch):
 
 
 def test_search_site_builds_real_search_urls(monkeypatch):
-    from neo.tools import web
+    from neo2.core.tools import web
 
     monkeypatch.setattr(web, "_country", lambda: "IN")
     assert web.site_search_url("amazon", "crucial x9 pro 2tb") == "https://www.amazon.in/s?k=crucial+x9+pro+2tb"
@@ -207,7 +207,7 @@ def test_search_site_builds_real_search_urls(monkeypatch):
         return f"Opened {url} in Chrome"
 
     monkeypatch.setattr(web, "_country", lambda: "")
-    from neo.tools.computer import apps
+    from neo2.core.tools.computer import apps
 
     monkeypatch.setattr(apps, "open_app", fake_open)
     out = asyncio.run(registry().invoke("search_site", {"site": "youtube", "query": "lofi"}, ToolContext(user_text="")))
@@ -217,10 +217,10 @@ def test_search_site_builds_real_search_urls(monkeypatch):
 
 
 def test_agent_gets_the_spoken_conversation(monkeypatch):
-    import neo.agent.session as sess_mod
-    from neo.agent.session import Session
-    from neo.providers.base import Turn
-    from neo.reflex.schema import Decision
+    import neo2.core.agent.session as sess_mod
+    from neo2.core.agent.session import Session
+    from neo2.core.providers.base import Turn
+    from neo2.core.reflex.schema import Decision
 
     seen = {}
 
@@ -266,7 +266,7 @@ def test_weather_fast_paths(text, place, when):
 
 
 def test_weather_formats_open_meteo(monkeypatch):
-    from neo.tools import weather as w
+    from neo2.core.tools import weather as w
 
     class Resp:
         def __init__(self, j):
@@ -305,13 +305,13 @@ def test_weather_formats_open_meteo(monkeypatch):
 
 
 def test_live_caps_searching_per_question():
-    from neo.voice import live
+    from neo2.core.voice import live
 
     assert live._LOOKUP_BUDGET == {"web_search": 2, "web_fetch": 1} and {"weather", "web_fetch"} <= live._DIRECT_TOOLS
 
 
 def test_fourth_lookup_in_one_question_is_refused(monkeypatch):
-    import neo.voice.live as live_mod
+    import neo2.core.voice.live as live_mod
 
     calls = []
 
@@ -339,7 +339,7 @@ def test_fourth_lookup_in_one_question_is_refused(monkeypatch):
 
 
 def test_identical_read_only_calls_run_once_per_question(monkeypatch):
-    import neo.voice.live as live_mod
+    import neo2.core.voice.live as live_mod
 
     calls = []
 
@@ -369,7 +369,7 @@ def test_identical_read_only_calls_run_once_per_question(monkeypatch):
 
 
 def test_a_failed_lookup_may_be_tried_again(monkeypatch):
-    import neo.voice.live as live_mod
+    import neo2.core.voice.live as live_mod
 
     calls = []
 
@@ -399,7 +399,7 @@ def test_a_failed_lookup_may_be_tried_again(monkeypatch):
 def test_spoken_context_expires_and_is_quoted_briefly():
     import time as _t
 
-    import neo.voice.live as live_mod
+    import neo2.core.voice.live as live_mod
 
     v = live_mod.LiveVoice.__new__(live_mod.LiveVoice)
 
@@ -434,7 +434,7 @@ def test_review_regressions_in_fast_paths(text, expected):
 
 
 def test_open_notes_and_search_amazon_is_two_steps():
-    from neo.agent.fastpath import plan
+    from neo2.core.agent.fastpath import plan
 
     assert plan("open notes and search for ssd on amazon") == [
         ("open_app", {"target": "notes"}),
@@ -443,10 +443,10 @@ def test_open_notes_and_search_amazon_is_two_steps():
 
 
 def test_quick_path_hands_a_failed_lookup_to_the_agent(monkeypatch):
-    import neo.agent.session as sess_mod
-    from neo.agent.session import Session
-    from neo.providers.base import Turn
-    from neo.reflex.schema import Decision
+    import neo2.core.agent.session as sess_mod
+    from neo2.core.agent.session import Session
+    from neo2.core.providers.base import Turn
+    from neo2.core.reflex.schema import Decision
 
     async def no_place(a, c):
         return "Error: I couldn't find 'the office'."

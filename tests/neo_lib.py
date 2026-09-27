@@ -1,4 +1,4 @@
-"""Helpers for tests that embed NEO agents (neo.runtime) — built directly, as the SDK will."""
+"""Helpers for tests that embed NEO agents (neo2.core.runtime) — built directly, as the SDK will."""
 
 from __future__ import annotations
 
@@ -6,9 +6,9 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
-from neo import runtime
-from neo.agent.registry import catalog
-from neo.config import LibrarySettings
+from neo2.core import runtime
+from neo2.core.agent.registry import catalog
+from neo2.core.config import LibrarySettings
 
 
 def make_runtime(
@@ -17,7 +17,7 @@ def make_runtime(
     """An agent with its own LibrarySettings (only `settings` passed in), a strict copy of these
     catalog tools, and its data dir created. Library mode comes on with it, as it does for the
     SDK; `library=False` turns it back off, for a test of NEO.app's own path next to an agent."""
-    from neo.tools import load_all
+    from neo2.core.tools import load_all
 
     if not runtime.library_mode():  # NEO.app's loader (task modes read the app's settings)
         load_all()
@@ -36,7 +36,7 @@ class ScriptedBrain:
     supports_tools = True
 
     def __init__(self, turns, *, name: str = "scripted", model: str = "script-1") -> None:
-        from neo.providers.base import Turn
+        from neo2.core.providers.base import Turn
 
         self.turns = [Turn(text=t) if isinstance(t, str) else t for t in turns]
         self.name, self.model = name, model
@@ -46,7 +46,7 @@ class ScriptedBrain:
         self.calls = 0
 
     async def complete(self, messages, *, system="", tools=None, effort="medium", max_tokens=4096):
-        from neo.providers.base import Turn
+        from neo2.core.providers.base import Turn
 
         self.calls += 1
         self.systems.append(system)
@@ -63,7 +63,7 @@ class ScriptedBrain:
 
 def scripted(rt: runtime.Runtime, turns, **kw) -> ScriptedBrain:
     """Make `turns` the agent's only brain, for every purpose."""
-    from neo.providers import BrainPool
+    from neo2.core.providers import BrainPool
 
     brain = ScriptedBrain(turns, **kw)
     rt.brains = BrainPool(overrides=dict.fromkeys(("agent", "fast", "vision", "light", "offline"), [brain]))
