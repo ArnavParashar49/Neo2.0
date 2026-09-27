@@ -224,6 +224,8 @@ def failure_words(name: str, e: ProviderError) -> str:
     """One brain's failure as a short spoken clause: "Gemini is out of free quota until 9:00"."""
     import time as _time
 
+    if isinstance(w := getattr(e, "words", None), str) and w:
+        return w  # its own words (Cerebras: a spent budget, a refused key — not "out of free quota")
     who = spoken_name(name)
     kind = getattr(e, "kind", "error")
     if kind == "quota":
@@ -255,6 +257,8 @@ _SPOKEN_NAME = {
     "gemini_lite": "Gemini Lite",
     "groq": "Groq",
     "groq_vision": "Groq's vision model",
+    "cerebras": "Cerebras",
+    "cerebras_vision": "Cerebras vision",
     "local": "the local model",
     "claude": "Claude",
 }

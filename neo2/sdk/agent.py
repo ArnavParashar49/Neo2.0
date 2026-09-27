@@ -1104,6 +1104,8 @@ def _usable(cfg: AgentConfig, name: str) -> bool:
         return cfg.groq_api_key is not None
     if name == "claude":
         return cfg.anthropic_api_key is not None
+    if name in ("cerebras", "cerebras_vision"):
+        return cfg.cerebras_api_key is not None
     return name == "local"
 
 

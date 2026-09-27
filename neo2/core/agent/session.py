@@ -227,7 +227,12 @@ class Session:
             if own:
                 reset.append((_conversation, token))
         try:
-            return await self._handle(text, images=images, from_user=from_user, origin=origin)
+            reply = await self._handle(text, images=images, from_user=from_user, origin=origin)
+            # What a paid brain has to say (Cerebras: 80% of the day's budget used, skipped until
+            # midnight, a refused key) is heard with the reply — each once a day, this agent's only.
+            from neo2.core.providers.cerebras_hooks import add_spoken_notes
+
+            return add_spoken_notes(reply)
         finally:
             for var, tok in reversed(reset):
                 var.reset(tok)
@@ -516,6 +521,11 @@ class Session:
         # if it must: the reflex's screen signal alone doesn't buy it the vision chain.
         needs_screen = bool(images or (d and d.needs_screen and not only))
         if needs_screen:
+            # A screen task: a paid Cerebras key's connection opens now, while the task is set up
+            # (a cold round trip is ~0.9 s). Nothing without a key; never waits, never raises.
+            from neo2.core.providers.cerebras_hooks import prewarm_soon
+
+            prewarm_soon()
             purpose = "vision"
         elif only or (d and d.intent == "quick_action"):
             purpose = "light"  # one simple action the regex fast path didn't cover

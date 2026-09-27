@@ -89,6 +89,17 @@ def doctor() -> int:
         bool(s.groq_api_key),
         "free at console.groq.com" if not s.groq_api_key else "",
     )
+    if s.cerebras_api_key:  # (optional and paid: no key is no problem)
+        from neo2.core.providers import cerebras
+
+        st = cerebras.status()
+        row(
+            "CEREBRAS_API_KEY (optional, paid)",
+            not st.get("refused"),
+            st.get("refused") or f"${st.get('today_usd', 0):.4f} of ${st.get('budget_usd', 0):.2f} spent today",
+        )
+    else:
+        print("  · CEREBRAS_API_KEY (optional, paid) — not set")
     print("macOS permissions (grant to the app that runs NEO: Terminal / the NEO app)")
     if sys.platform == "darwin":
         from neo2.core.tools.computer import ax, screen

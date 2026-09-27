@@ -37,7 +37,7 @@ def _env_files(root: Path) -> tuple[Path, ...]:
 
 _ENV_FILES = _env_files(PROJECT_ROOT)
 
-BrainName = Literal["gemini", "gemini_lite", "groq", "local", "claude", "groq_vision"]
+BrainName = Literal["gemini", "gemini_lite", "groq", "local", "claude", "groq_vision", "cerebras", "cerebras_vision"]
 VoiceBackend = Literal["auto", "live", "local", "off"]
 DecideMode = Literal["legacy", "shadow", "on", "off"]
 
@@ -69,6 +69,9 @@ class Settings(BaseSettings):
     )  # extra keys, comma-separated
     groq_api_key: str = Field(default="", validation_alias="GROQ_API_KEY", repr=False)
     anthropic_api_key: str = Field(default="", validation_alias="ANTHROPIC_API_KEY", repr=False)
+    # A paid Cerebras key (the user adds it themselves): its brains join the chains only with it
+    # set and a daily budget above 0 (neo2.core.providers.cerebras_hooks.enabled).
+    cerebras_api_key: str = Field(default="", validation_alias="CEREBRAS_API_KEY", repr=False)
 
     # ---- brains ----------------------------------------------------------------------
     brain: BrainName = "gemini"  # primary agentic brain
@@ -89,6 +92,24 @@ class Settings(BaseSettings):
     cloud_eyes: Literal["auto", "on"] = "auto"
     local_model: str = "mlx-community/gemma-4-12B-it-4bit"
     claude_model: str = "claude-opus-5"
+    # Cerebras (neo2.core.providers.cerebras): the fast text brain ahead of Groq, and a seeing one
+    # ahead of Groq's vision model. Spend is usage × price per model ($ per million tokens in / out;
+    # JSON entries override or add), against a daily budget: 80% is said, then it is skipped until
+    # midnight. 0 turns Cerebras off.
+    cerebras_model: str = "gpt-oss-120b"
+    cerebras_vision_model: str = "qwen-3.8-27b"
+    cerebras_daily_budget: float = 0.50
+    cerebras_prices: Annotated[dict[str, Any] | str, NoDecode] = ""
+
+    @field_validator("cerebras_daily_budget", mode="before")
+    @classmethod
+    def _cerebras_budget(cls, v):
+        """A typo (or "$1") must not stop NEO from starting: an unreadable budget is the default."""
+        try:
+            f = float(str(v).strip().lstrip("$"))
+        except (TypeError, ValueError):
+            return 0.50
+        return f if f == f and 0 <= f < float("inf") else 0.50
 
     # ---- reflex ----------------------------------------------------------------------
     reflex: Literal["laya", "lite", "off"] = "laya"

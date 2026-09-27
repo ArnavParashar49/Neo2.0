@@ -35,6 +35,7 @@ if TYPE_CHECKING:
     import openai
 
 __all__ = [
+    "Cerebras",
     "Claude",
     "Failover",
     "Gemini",
@@ -140,6 +141,18 @@ def Claude(
     if client is None:
         client = _need("anthropic", "claude").AsyncAnthropic(api_key=api_key)
     return mod.ClaudeProvider(model, client=client)
+
+
+def Cerebras(
+    api_key: str, *, vision: bool = False, model: str | None = None, daily_budget: float = 0.5
+) -> Provider:
+    """Cerebras (paid, very fast): gpt-oss-120b, or with `vision` qwen-3.8-27b, which sees (at
+    most 2 pictures a request). `daily_budget`: dollars a day this object may spend (usage × the
+    published prices, counted per answer; 0: never) — its spend, limits and warm connection live
+    in the object, in memory only."""
+    return _need("neo2.core.providers.cerebras", "openai").hosted(
+        api_key, vision=vision, model=model, daily_budget=daily_budget
+    )
 
 
 def Failover(*providers: Provider, sticky: bool = True) -> Provider:

@@ -50,6 +50,7 @@ class AgentConfig(BaseModel):
     gemini_api_keys: tuple[SecretStr, ...] = ()
     groq_api_key: SecretStr | None = None
     anthropic_api_key: SecretStr | None = None
+    cerebras_api_key: SecretStr | None = None  # paid: its brains join ahead of Groq's (budget: $0.50/day)
     # "laya" (NEO.app's local model) is one process-wide model: not for embedded agents yet.
     reflex: Literal["off", "lite", "laya"] = "off"
     embeddings: Literal["off", "local"] = "off"  # "local" downloads a small embedding model
@@ -151,6 +152,7 @@ class AgentConfig(BaseModel):
             "gemini_api_keys": ",".join(keys[1:]),
             "groq_api_key": self.groq_api_key.get_secret_value() if self.groq_api_key else "",
             "anthropic_api_key": self.anthropic_api_key.get_secret_value() if self.anthropic_api_key else "",
+            "cerebras_api_key": self.cerebras_api_key.get_secret_value() if self.cerebras_api_key else "",
             "reflex": self.reflex,
             "embeddings": self.embeddings,
             "memory_enabled": mem is not None,
@@ -181,7 +183,7 @@ class AgentConfig(BaseModel):
     def from_env(
         cls, *, prefix: str = "NEO_", env_files: Sequence[str | Path] = (), **overrides: Any
     ) -> AgentConfig:
-        """Read keys (GEMINI_API_KEY, GEMINI_API_KEYS, GROQ_API_KEY, ANTHROPIC_API_KEY) and this
+        """Read keys (GEMINI_API_KEY, GEMINI_API_KEYS, GROQ_API_KEY, ANTHROPIC_API_KEY, CEREBRAS_API_KEY) and this
         config's fields (`prefix` + FIELD, e.g. NEO_BRAIN, NEO_TOOLS) from `env_files` (later ones
         win), then the process environment, then `overrides`. Only when asked for: an AgentConfig
         built directly reads none of it. Confirmation isn't a field — nothing here turns it off —
@@ -202,11 +204,11 @@ class AgentConfig(BaseModel):
         keys = list(dict.fromkeys(k.strip() for k in keys if k.strip()))
         if keys:
             values["gemini_api_keys"] = tuple(keys)
-        for name in ("groq_api_key", "anthropic_api_key"):
+        for name in ("groq_api_key", "anthropic_api_key", "cerebras_api_key"):
             if env.get(name.upper(), "").strip():
                 values[name] = env[name.upper()].strip()
         for name, field in cls.model_fields.items():
-            if name in ("gemini_api_keys", "groq_api_key", "anthropic_api_key"):
+            if name in ("gemini_api_keys", "groq_api_key", "anthropic_api_key", "cerebras_api_key"):
                 continue
             raw = env.get(f"{prefix}{name.upper()}")
             if raw is None or raw.strip() == "":

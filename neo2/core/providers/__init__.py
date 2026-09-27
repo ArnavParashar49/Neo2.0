@@ -147,6 +147,14 @@ def _build(name: BrainName) -> Provider:
         p = ClaudeProvider()
     elif name == "groq_vision":
         p = _groq_vision()
+    elif name == "cerebras":
+        from neo2.core.providers.cerebras import cerebras
+
+        p = cerebras()
+    elif name == "cerebras_vision":
+        from neo2.core.providers.cerebras import cerebras_vision
+
+        p = cerebras_vision()
     else:
         raise ProviderError(f"unknown brain {name}")
     return p
@@ -241,7 +249,8 @@ def _cooling_error(p: Provider, until: float) -> ProviderError:
     """Why a cooling brain can't be asked: its own words when it knows them (Gemini: quota or
     overload, `cooling_error()`), else the wait it asked for — a wait longer than any rate-limit
     pause is a spent quota until then."""
-    own = getattr(p, "cooling_error", None)
+    # (Cerebras: cooling_reason() — out for the day, in its own words; None for a short wait)
+    own = getattr(p, "cooling_error", None) or getattr(p, "cooling_reason", None)
     if callable(own):
         try:
             e = own()
@@ -447,7 +456,9 @@ class Chain:
         if pixels and any(n in seeing for n, _ in failures):
             return NoEyes(failures, seeing=seeing, photo=photo)  # a brain that sees couldn't answer
         s = settings()
-        if not pool().overrides and not (s.gemini_api_key or s.groq_api_key or s.anthropic_api_key):
+        if not pool().overrides and not (
+            s.gemini_api_key or s.groq_api_key or s.anthropic_api_key or getattr(s, "cerebras_api_key", "")
+        ):
             return ProviderError(
                 "no API key set — add GEMINI_API_KEY to .env (free at aistudio.google.com/apikey)"
             )
@@ -644,7 +655,7 @@ def _needs_eyes(messages: list[Message]) -> bool:
 # steps with a picture, into _EYES_ONLY too).
 EYES: tuple[BrainName, ...] = ("gemini", "gemini_lite", "claude", "groq_vision")
 # Brains that never see (a picture step never goes to them; they take the steps without one).
-_TEXT_ONLY: frozenset[str] = frozenset({"groq", "local"})
+_TEXT_ONLY: frozenset[str] = frozenset({"groq", "local", "cerebras"})
 # Seeing fallbacks that only ever answer a step with a picture, never one without (the vision chain
 # has them as eyes, not among its own brains): Groq's vision model's per-minute budget is kept for
 # the pixel steps — an AX-only step goes to a text brain instead.
@@ -668,8 +679,13 @@ def brain(purpose: Purpose = "agent", *, effort: Effort | None = None) -> Chain:
     """The chain for `purpose`. `effort`: the run's thinking policy (neo2.core.providers.effort)."""
     if own := _hosts(purpose):
         return Chain(own, sticky=purpose != "vision", effort=effort)
+    from neo2.core.providers.cerebras_hooks import with_cerebras, with_cerebras_eyes
+
     s = settings()
     eyes = _fallback_eyes(s)
+    # Cerebras (a paid key, DECISIONS 49): its seeing brain ahead of Groq's among the seeing
+    # fallbacks — only where cloud fallbacks may see at all (a local-first user's pictures stay here)
+    eyes = with_cerebras_eyes(eyes, s) if eyes else eyes
     if purpose == "fast":
         order: list[BrainName | None] = [s.fast_brain, s.brain, s.offline_brain]
     elif purpose == "vision":
@@ -680,7 +696,8 @@ def brain(purpose: Purpose = "agent", *, effort: Effort | None = None) -> Chain:
             n for n in (s.brain, *EYES) if n not in _TEXT_ONLY and (n == s.brain or n not in _EYES_ONLY)
         ]
         order = vision + [n for n in (s.brain, s.fast_brain, s.offline_brain) if n not in vision]
-        return Chain(_dedupe(order), sticky=False, eyes=eyes, effort=effort)
+        # (Cerebras: its text brain ahead of Groq; its seeing one after the seeing brains, when enabled)
+        return Chain(_dedupe(with_cerebras(_dedupe(order), purpose, s)), sticky=False, eyes=eyes, effort=effort)
     elif purpose == "offline":
         return Chain(_dedupe([s.offline_brain]), effort=effort)  # (no cloud eyes: offline means here)
     elif purpose == "light":
@@ -688,7 +705,7 @@ def brain(purpose: Purpose = "agent", *, effort: Effort | None = None) -> Chain:
         order = ["gemini_lite", s.fast_brain, s.brain, s.offline_brain]
     else:
         order = [s.brain, s.fast_brain, s.offline_brain]
-    return Chain(_dedupe(order), eyes=eyes, effort=effort)
+    return Chain(_dedupe(with_cerebras(_dedupe(order), purpose, s)), eyes=eyes, effort=effort)
 
 
 # ---- how big a picture may be --------------------------------------------------------------------
