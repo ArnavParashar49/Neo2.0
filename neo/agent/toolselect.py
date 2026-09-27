@@ -240,9 +240,12 @@ def _names_an_app(text: str) -> bool:
         return False
     try:
         from neo.decide import inventory
+        from neo.tools.computer import ax
 
         apps = inventory.snapshot()
-        return bool(apps) and inventory.named_span(text, apps) is not None
+        hit = inventory.named_span(text, apps) if apps else None
+        # "…in NEO's browser": NEO itself is no app the request is about
+        return hit is not None and not ax.is_neo(0, str(getattr(hit[0], "name", "")))
     except Exception:  # noqa: BLE001 - can't tell: nothing is left out
         return False
 

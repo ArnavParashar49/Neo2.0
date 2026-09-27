@@ -527,6 +527,9 @@ def test_names_an_app_reads_only_the_last_scan(monkeypatch):
     monkeypatch.setattr(inventory, "snapshot", lambda: [app])
     monkeypatch.setattr(inventory, "named_span", lambda text, apps: (app, 15, 21) if "boardy" in text.lower() else None)
     assert toolselect._names_an_app("scroll down in Boardy") and not toolselect._names_an_app("scroll down")
+    neo_app = types.SimpleNamespace(name="NEO")
+    monkeypatch.setattr(inventory, "named_span", lambda text, apps: (neo_app, 0, 3))
+    assert not toolselect._names_an_app("scroll down in neo's browser")  # NEO's own browser is meant
 
 
 def test_a_run_off_the_screen_keeps_its_families():
@@ -535,3 +538,27 @@ def test_a_run_off_the_screen_keeps_its_families():
     sel = toolselect.ToolSelector(_catalog_like()).select("search the web and open the page in the browser")
     assert {"browser_open", "browser_read", "browser_click"} <= set(sel.names)
     assert len(sel.names) <= toolselect._MAX_TOOLS
+
+
+# ---- stale pictures -----------------------------------------------------------------------------------
+
+
+def test_an_after_look_goes_stale_once_a_newer_picture_is_in_the_run():
+    from neo.providers.history import OBSERVATIONS
+
+    old = ToolResult("a", "click", "Clicked.", images=[PNG])
+    shot = ToolResult("b", "screenshot", "Screenshot s2.", images=[PNG])
+    new = ToolResult("c", "click", "Clicked again.", images=[PNG])
+    msgs = [
+        Message.user("go"),
+        Message.assistant("", [ToolCall("a", "click", {})]), Message.tool([old]),
+        Message.assistant("", [ToolCall("b", "screenshot", {})]), Message.tool([shot]),
+        Message.assistant("", [ToolCall("c", "click", {})]), Message.tool([new]),
+    ]  # fmt: skip
+    batch.drop_stale_after_looks(msgs, 0, OBSERVATIONS)
+    assert not old.images and old.content == "Clicked."  # its words stay, its pixels go
+    assert shot.images and new.images  # a look is the observations' business; the newest stays
+    kept = ToolResult("d", "click", "Clicked.", images=[PNG])
+    history = [Message.user("before"), Message.assistant("", [ToolCall("d", "click", {})]), Message.tool([kept])]
+    batch.drop_stale_after_looks([*history, Message.user("now", images=[PNG])], len(history), OBSERVATIONS)
+    assert kept.images  # before this run: not this run's to trim
