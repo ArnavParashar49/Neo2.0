@@ -86,7 +86,9 @@ Approver = Callable[[ApprovalRequest], "Awaitable[Approval | None] | Approval | 
 
 class ApprovalReentryError(RuntimeError):
     """ask() or stream() was called while an approver was deciding: an approver must be a human's
-    answer, never another model run (and never this agent asking itself)."""
+    answer, never another model run (and never this agent asking itself). Also: ask(), stream()
+    or call_tool() going back into a conversation from inside its own approved action (an approved
+    host tool asking the agent again there), which would run under that approval."""
 
 
 # Set while an approver runs (and in everything it starts): ask() and stream() refuse.

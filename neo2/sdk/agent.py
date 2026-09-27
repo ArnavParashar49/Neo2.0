@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import copy
 import dataclasses
 import importlib.util
@@ -40,7 +41,7 @@ from neo.providers.base import ImagePart
 from neo.reflex import Reflex
 from neo.runtime import UnsupportedPlatform
 from neo2 import events as ev
-from neo2.sdk.approval import Approval, ApprovalRequest, _approving, guard_reentry
+from neo2.sdk.approval import Approval, ApprovalReentryError, ApprovalRequest, _approving, guard_reentry
 from neo2.sdk.config import AgentConfig
 from neo2.sdk.hosttools import HostTool, check_name, host_tool
 from neo2.sdk.results import Result, StepRecord, ToolInfo, ToolOutcome
@@ -154,6 +155,15 @@ class _Req:
 
 
 _req_var: ContextVar[_Req | None] = ContextVar("neo2_request", default=None)
+# The approved calls a running request was started from, outermost first (an approved host tool
+# that asked the agent again): the request never runs under them, but going back into one of
+# their conversations while they run is refused (see AsyncAgent._refuse_reentry).
+_started_under: ContextVar[tuple[Any, ...]] = ContextVar("neo2_started_under", default=())
+
+
+def _fresh_request(under: tuple[Any, ...]) -> None:
+    confirm.fresh_request()
+    _started_under.set(under)
 
 
 @dataclass
@@ -299,6 +309,7 @@ class AsyncAgent:
         untrusted ("caller"). Neither ever grants anything."""
         guard_reentry()
         self._check_open()
+        self._refuse_reentry(conversation)
         return await self._own(
             self._ask(
                 text, images=images, context=context, tool_context=tool_context, conversation=conversation, source=source
@@ -310,7 +321,21 @@ class AsyncAgent:
         """ask(), as the events of that request while it runs; the last one is Completed."""
         guard_reentry()
         self._check_open()
+        self._refuse_reentry(ask_kwargs.get("conversation", "default"))
         return self._stream(text, ask_kwargs)
+
+    def _refuse_reentry(self, conversation: Any) -> None:
+        """A request can't go back into a conversation from inside that conversation's approved
+        call (a host tool that, approved, asks this agent again there — directly or through a
+        request in another conversation). It would run inside that approval, and a card it staged
+        would wait forever for the answer the approved call is still part of."""
+        sc = self._rt.scopes.get(conversation) if isinstance(conversation, str) else None
+        if sc is not None and confirm.approving_in(sc.gate, (*_started_under.get(), confirm.held())):
+            raise ApprovalReentryError(
+                f"a request went back into conversation {conversation!r} from inside its own approved action "
+                "(an approved tool asking this agent again): it would run under that approval. Send the "
+                "follow-up to another conversation, or after the approved call returns."
+            )
 
     async def _stream(self, text: str, kw: dict[str, Any]) -> AsyncIterator[ev.Event]:
         queue: asyncio.Queue[Any] = asyncio.Queue()
@@ -491,7 +516,14 @@ class AsyncAgent:
         return True
 
     def _start(self, coro: Coroutine[Any, Any, Any], conversation: str) -> asyncio.Task[Any]:
-        task = asyncio.ensure_future(coro)
+        """Start a request as a task of the agent's own, in a context of its own: never under the
+        approval, task or tool call of the code that started it (asyncio would copy those in). An
+        approved host tool asking again gets a request of its own, asked afresh."""
+        held = confirm.held()
+        under = _started_under.get() + ((held,) if held is not None else ())
+        ctx = contextvars.copy_context()
+        ctx.run(_fresh_request, under)
+        task = asyncio.get_running_loop().create_task(coro, context=ctx)
         self._tasks[task] = conversation if isinstance(conversation, str) else ""
         task.add_done_callback(self._tasks_done)
         return task
@@ -819,6 +851,7 @@ class AsyncAgent:
         t = self._rt.registry.get(real) if real else None
         if t is None or t.hidden:
             return ToolOutcome("error", f"Unknown tool: {name}", (), None, False)
+        self._refuse_reentry(turn.conversation)
         return await self._own(self._calling(real, dict(args or {}), turn, bool(t.untrusted)), turn.conversation)
 
     async def _calling(self, real: str, args: dict[str, Any], turn: ToolTurn, untrusted: bool) -> ToolOutcome:
