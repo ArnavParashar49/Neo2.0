@@ -120,3 +120,54 @@ def test_a_blind_brains_screenshot_says_no_numbers(shots, monkeypatch):
     for a in ({}, {"x": 10, "y": 20, "w": 300, "h": 200}, {"zoom": True, "x": 300, "y": 200}):
         out = asyncio.run(tools_pointer.screenshot(a, ToolContext(origin="agent", extras={"blind": True})))
         assert out.ok and not re.search(r"\d", out.text), out.text
+
+
+# ---- eyes-ocr -------------------------------------------------------------------------------------------
+
+
+def test_click_text_reads_the_screen_when_accessibility_names_nothing(monkeypatch):
+    from neo2.core.agent.registry import ToolOutput
+    from neo2.core.tools.computer import ocr, tools_label
+
+    async def no_guard(want=""):
+        return None
+
+    monkeypatch.setattr(gates, "_guard_front", no_guard)
+    monkeypatch.setattr(ax, "window_elements", lambda app=None: ("Game", (0.0, 0.0, 800.0, 600.0), []))
+    asked = []
+
+    async def fallback(a, c, *, app, window, els=None, pid=0):
+        asked.append((a["label"], app, window))
+        return ToolOutput("Clicked the words 'Hint'")
+
+    monkeypatch.setattr(ocr, "click_text_fallback", fallback)
+    out = asyncio.run(tools_label.click_text({"label": "Hint"}, ToolContext(origin="agent")))
+    assert asked == [("Hint", "Game", (0.0, 0.0, 800.0, 600.0))] and out.text.startswith("Clicked the words")
+
+    async def unread(a, c, **k):
+        return None  # the screen couldn't be read: the tool's own answer
+
+    monkeypatch.setattr(ocr, "click_text_fallback", unread)
+    assert "is called 'Hint'" in asyncio.run(tools_label.click_text({"label": "Hint"}, ToolContext(origin="agent")))
+
+
+def test_an_outcome_says_which_words_changed(monkeypatch):
+    from neo2.core.tools.computer import ocr
+
+    monkeypatch.setattr(ocr, "sample_change", lambda b, a: "“Start” → “Stop”")
+    before = pointer.Look(ax.Scene(), ["b"])
+    out = pointer.Outcome("Changed: the screen changed around (1, 2).", "", True)
+    got = asyncio.run(pointer._words(out, before, pointer.Look(ax.Scene(), ["a"])))
+    assert got.details == "“Start” → “Stop”"
+    same = pointer.Outcome("Nothing visibly changed.", "", False)
+    assert asyncio.run(pointer._words(same, before, pointer.Look(ax.Scene(), ["a"]))).details == ""
+
+
+def test_text_marks_are_clicked_by_id_through_the_pointer_with_their_words_gated():
+    import inspect
+
+    from neo2.core.tools.computer import ocr
+
+    assert "ocr.install()" in inspect.getsource(tools_pointer)  # (at import: text marks work from the start)
+    assert ocr.install()
+    assert pointer._id_resolvers["t"] is ocr.resolve_mark and pointer._id_labels["t"] is ocr.mark_labels

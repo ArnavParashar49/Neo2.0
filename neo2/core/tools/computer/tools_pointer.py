@@ -9,7 +9,7 @@ import math
 
 from neo2.core.agent import confirm
 from neo2.core.agent.registry import ToolContext, ToolOutput
-from neo2.core.tools.computer import apps, ax, focus, gates, marks, phrases, pointer, screen, tools_ax
+from neo2.core.tools.computer import apps, ax, focus, gates, marks, ocr, phrases, pointer, screen, tools_ax
 from neo2.core.tools.computer._catalog import _p, tool
 
 SCREENSHOT_PARAMS = _p(
@@ -120,7 +120,20 @@ async def screenshot(a: dict, c: ToolContext) -> ToolOutput:
         what = f"all of {display.words()}"
         others = [d for d in shown if d.index != display.index]
     collected = await walk
-    if c.get("blind"):
+    blind = bool(c.get("blind"))
+    ocr.warm()  # (NEO.app: Vision loads in the background for the next read)
+    # The words on the picture where Accessibility names little of it (always for a brain that
+    # can't see): text marks, clicked by id (click id=t…) through the same gates.
+    frame = getattr(cap, "frame", None)
+    tm = []
+    if frame is not None and cap.clickable:
+        tm = await ocr.look_marks(
+            frame, (cap.x0, cap.y0, cap.w * cap.ppp, cap.h * cap.ppp), named=collected.marks,
+            window=collected.window, blind=blind, app=collected.app, pid=collected.pid,
+        )  # fmt: skip
+        if tm:
+            gates._taint(c, "screen")
+    if blind:
         # A brain that can't see gets no picture's numbers in any form (no mapping, no sizes, no
         # places): what the picture holds, by element id only.
         text = (
@@ -128,7 +141,7 @@ async def screenshot(a: dict, c: ToolContext) -> ToolOutput:
             "act on: use the element ids below, or ax_tree's (click id=…, ax_press), or tell the user the model "
             "that can see the screen is busy."
         )
-        return ToolOutput(text + marks.for_shot(collected, None, c), images=[cap.part], fence=False)
+        return ToolOutput(text + marks.for_shot(collected, None, c) + ocr.marks_block(tm, None, blind=True), images=[cap.part], fence=False)
     if not cap.clickable:
         # The window server's bounds didn't match the picture (a shadow, a window that moved, one
         # off screen): no mapping to click through — for looking at only.
@@ -140,7 +153,7 @@ async def screenshot(a: dict, c: ToolContext) -> ToolOutput:
     shot = pointer.remember(cap.x0, cap.y0, cap.ppp, cap.w, cap.h, covered=getattr(cap, "covered", ()))
     # NEO's own words (the mapping) aren't fenced; the picture is what came from the screen, and so
     # are the controls' labels (fenced by marks.for_shot, which taints the request).
-    text = pointer.note(shot, what, others) + marks.for_shot(collected, shot, c)
+    text = pointer.note(shot, what, others) + marks.for_shot(collected, shot, c) + ocr.marks_block(tm, shot, blind=False)
     return ToolOutput(text, images=[cap.part], fence=False)
 
 
@@ -212,3 +225,8 @@ async def drag(a: dict, c: ToolContext) -> str | ToolOutput:
 )
 async def scroll(a: dict, c: ToolContext) -> str | ToolOutput:
     return await pointer.scroll_tool(a, c)
+
+
+# Text marks (words read off the screen, ids t…) are clicked and dragged like any element id, their
+# words judged by the click gate with what is under the point.
+ocr.install()

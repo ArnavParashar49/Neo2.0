@@ -766,8 +766,11 @@ def samples_from(frame: Frame, points: list[tuple[float, float]], r: float = _SA
     out = []
     for px, py in points:
         box = frame.box(px - r, py - r, 2 * r, 2 * r)
-        sample = frame.image.crop(box).convert("L").resize((_SAMPLE_GRID, _SAMPLE_GRID), Image.BILINEAR)
+        full = frame.image.crop(box)
+        sample = full.convert("L").resize((_SAMPLE_GRID, _SAMPLE_GRID), Image.BILINEAR)
         sample.info["via"] = frame.backend
+        # (the full-detail crop, for reading which words changed there: ocr.sample_change)
+        sample.info["full"], sample.info["ppp"] = full, frame.ppp
         out.append(sample)
     return out
 

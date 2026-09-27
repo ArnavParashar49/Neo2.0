@@ -7,7 +7,7 @@ import asyncio
 import re
 
 from neo2.core.agent.registry import ToolContext, ToolOutput
-from neo2.core.tools.computer import ax, gates, phrases, pointer
+from neo2.core.tools.computer import ax, gates, ocr, phrases, pointer
 from neo2.core.tools.computer import input as inp
 from neo2.core.tools.computer._catalog import _p, tool
 
@@ -47,6 +47,10 @@ async def click_text(a: dict, c: ToolContext) -> str | ToolOutput:
     exact = [e for e in cands if e.title.lower().strip() == label or (not e.title and e.value.lower().strip() == label)]
     hits = exact or [e for e in cands if word.search(e.title) or word.search(e.value)]
     if not hits:
+        # Nothing Accessibility names so: the window's words read off the screen (a canvas, a board,
+        # a dialog the app draws itself), clicked through the same checks as any click.
+        if (out := await ocr.click_text_fallback(a, c, app=app, window=frame, els=els)) is not None:
+            return out
         return f"Error: nothing in the front window of {app} is called '{a['label']}'."
     if not exact and len({(e.title or e.value).lower() for e in hits}) > 1:
         names = ", ".join(sorted({(e.title or e.value)[:30] for e in hits})[:4])

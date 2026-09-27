@@ -868,14 +868,32 @@ async def outcome(
         first = await look(pid, pts, like=before.pixels)
         out = compare(before, first, where, only_at_points)
         if out.changed is not False:
-            return out
+            return await _words(out, before, first)
         early, _cost = await _scene_meanwhile(before, pid, clock, LOOK_S + LOOK_AGAIN_S, only_at_points, first.cost)
         if early is None:
-            return compare(before, await look(pid, pts, like=before.pixels), where, only_at_points)
+            last = await look(pid, pts, like=before.pixels)
+            return await _words(compare(before, last, where, only_at_points), before, last)
     if settle:
         await clock.sleep(LOOK_S)
-    seen = compare(before, await look(pid, pts, like=before.pixels), where, only_at_points)
-    return seen if seen.changed else early  # (a change that went back by now still happened)
+    now = await look(pid, pts, like=before.pixels)
+    seen = compare(before, now, where, only_at_points)
+    return await _words(seen, before, now) if seen.changed else early  # (a change that went back by now still happened)
+
+
+async def _words(out: Outcome, before: Look, now: Look) -> Outcome:
+    """A change at the points, said in the words that changed there ("Start" → "Stop"), read off the
+    samples' full-detail crops (ocr.sample_change: only where they differ; nothing without Vision)."""
+    if out.changed is not True or not before.pixels or not now.pixels:
+        return out
+    try:
+        from neo2.core.tools.computer import ocr
+
+        words = await asyncio.to_thread(ocr.sample_change, before.pixels, now.pixels)
+    except Exception:  # noqa: BLE001 - the words are a help: the outcome stands without them
+        return out
+    if words:
+        out.details = "; ".join(p for p in (out.details, words) if p)  # (screen data: fenced in the report)
+    return out
 
 
 async def scene_change(before: Look, pid: int) -> Outcome:

@@ -176,6 +176,19 @@ async def observe(
             "the picture is the way in: act at its pixels with its shot id.)" if shot is not None else "a picture (image=true) or ax_tree may show more.)"
         )
     if shot is not None:
+        # The words on the picture where Accessibility names little of the window: text marks (t…).
+        try:
+            from neo2.core.tools.computer import ocr
+
+            pic = screen.last_frame(5.0)
+            tm = await ocr.look_marks(
+                pic, marks.area_of(shot), named=got.marks, window=got.window, app=name, pid=pid
+            ) if pic is not None else []  # fmt: skip
+        except Exception:  # noqa: BLE001 - the words are a help, never the look's failure
+            tm = []
+        if tm:
+            text += ocr.marks_block(tm, shot, blind=False)
+            listed = listed or "text marks"
         for fn in list(_notes):
             try:
                 extra = fn(shot, img, ctx)
