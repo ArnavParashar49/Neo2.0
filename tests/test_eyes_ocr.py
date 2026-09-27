@@ -44,9 +44,10 @@ class FakeVision:
     of words fewer than ``fast_min_px`` pixels tall garbles them, and words in a script none of the
     languages asked for is written in come back as nothing."""
 
-    def __init__(self, words: dict[int, str], *, fast_min_px: int = 16, acc=VISION_ACCURATE, fast=VISION_FAST):
+    def __init__(self, words: dict[int, str], *, fast_min_px: int = 16, acc=VISION_ACCURATE, fast=VISION_FAST, drop=None):
         self.words = words
         self.fast_min_px = fast_min_px
+        self.drop = drop  # drop(words, fast, n-th call) → True: this read misses them (Vision does, now and then)
         self.acc, self.fst = list(acc), list(fast)
         self.calls: list[dict] = []
 
@@ -75,6 +76,8 @@ class FakeVision:
             x0, y0, x1, y1 = b
             if not ocr.scripts(text) <= readable | {"LATIN"} or "DEVANAGARI" in ocr.scripts(text):
                 continue  # (Vision returns nothing for a script it can't read)
+            if self.drop and self.drop(text, fast, len(self.calls)):
+                continue
             said = text
             if fast and y1 - y0 < self.fast_min_px:
                 said = text.replace("a", "s").replace("n", "rK")  # "Start" → "Stsrt", "Cancel" → "CarKcel"
@@ -261,7 +264,31 @@ def test_a_fast_exact_find_is_taken_without_an_accurate_read():
     use(eng)
     got = ocr.find_in(frame, "Start")
     assert isinstance(got, ocr.Found) and got.exact and got.level == ocr.FAST
-    assert [c["fast"] for c in eng.calls] == [True]
+    # Two fast reads, framed differently (the second with a border), agreeing: no accurate read.
+    assert [c["fast"] for c in eng.calls] == [True, True] and eng.calls[1]["size"] == (848, 648)
+    assert near(got.point, (320.0, 208.0), 1.0)
+
+
+def test_a_copy_one_read_dropped_still_makes_the_find_ambiguous():
+    # Two "Start" buttons; the first fast read drops one, the other reads disagree on which: the union
+    # of what was read has both — ambiguous, never the one a lucky read happened to keep.
+    frame, eng = scene([("Start", (40.0, 40.0, 40.0, 16.0)), ("Start", (300.0, 200.0, 40.0, 16.0))])
+    order = iter([True, False, False, True, False, False])
+    eng.drop = lambda text, fast, n: n == 1 and next(order)  # (call 1: the first read, drops the first copy)
+    use(eng)
+    got = ocr.find_in(frame, "Start")
+    assert isinstance(got, ocr.Ambiguous) and len(got.options) == 2
+    frame, eng = scene([("Start", (40.0, 40.0, 40.0, 16.0)), ("Start", (300.0, 200.0, 40.0, 16.0))])
+    seen = []
+
+    def only_first_read_misses(text, fast, n):
+        seen.append(n)
+        return n == 1 and len([m for m in seen if m == 1]) == 1  # the first read drops the first copy only
+
+    eng.drop = only_first_read_misses
+    use(eng)
+    got = ocr.find_in(frame, "Start")
+    assert isinstance(got, ocr.Ambiguous) and [c["fast"] for c in eng.calls] == [True, True, False]
 
 
 def test_a_fast_miss_or_a_lookalike_is_settled_by_an_accurate_read():
@@ -292,6 +319,64 @@ def test_hindi_words_are_never_searched_for_and_the_answer_says_why():
     use(eng)
     got = ocr.find_in(frame, "नया खेल")
     assert isinstance(got, ocr.Missing) and "Devanagari" in got.why and eng.calls == []
+
+
+def test_pieces_cover_everything_and_their_cores_meet():
+    for total, limit, ov in ((3024, 2400, 320), (5000, 2400, 320), (2400, 2400, 320), (100, 2400, 320)):
+        cuts = ocr._cuts(total, limit, ov)
+        assert cuts[0][0] == 0 and cuts[-1][1] == total and all(e - s <= limit for s, e, _, _ in cuts)
+        assert cuts[0][2] == 0 and cuts[-1][3] == total and all(a[3] == b[2] for a, b in zip(cuts, cuts[1:], strict=False))
+        assert all(s <= cs < ce <= e for s, e, cs, ce in cuts)
+
+
+def test_a_big_accurate_read_is_cut_into_pieces_and_nothing_is_read_twice():
+    # A whole Retina display (3024 px wide): read accurately in two overlapping pieces, each ≤ 2400 px.
+    frame, eng = scene(
+        [("Left", (40.0, 40.0, 60.0, 14.0)), ("Across the cut", (700.0, 300.0, 120.0, 14.0)), ("Right", (1400.0, 900.0, 60.0, 14.0))],
+        size_pt=(1512.0, 982.0),
+    )
+    use(eng)
+    r = ocr.read(frame, plan=ocr.Plan(False, ("en-US",)))
+    assert len(eng.calls) == 2 and all(c["size"][0] <= ocr._ACCURATE_MAX_PX for c in eng.calls)
+    assert [ln.text for ln in r.lines] == ["Left", "Across the cut", "Right"]
+    assert near(r.lines[1].box, (700.0, 300.0, 120.0, 14.0), 1.0)  # whole, from the piece that holds it
+    eng.calls.clear()
+    ocr.read(frame, plan=ocr.Plan(True, ("en-US",)))
+    assert len(eng.calls) == 1  # a fast read takes the display whole
+
+
+def test_a_second_framing_maps_back_to_the_same_places():
+    frame, eng = scene([("Start", (220.0, 90.0, 40.0, 14.0))], x0=100.0, y0=50.0)
+    use(eng)
+    plain, padded = ocr.read(frame), ocr.read(frame, pad=ocr._PAD_PX)
+    assert eng.calls[1]["size"] == (800 + 48, 600 + 48)
+    assert near(plain.lines[0].box, padded.lines[0].box, 0.01)
+
+
+def test_merge_keeps_the_trusted_reads_lines_and_adds_what_it_missed():
+    acc = _reading([("Start", 1.0, (100.0, 100.0, 40.0, 14.0))])
+    fast = _reading([("Stsrt", 0.5, (101.0, 100.0, 40.0, 14.0)), ("Hint", 0.5, (300.0, 100.0, 40.0, 14.0))], ocr.FAST)
+    m = ocr.merge(acc, fast)
+    assert [ln.text for ln in m.lines] == ["Start", "Hint"] and m.level == ocr.ACCURATE
+
+
+def test_a_garbled_accurate_read_cant_hide_what_a_fast_read_got_right():
+    # Measured: the accurate mode read a bordered "Start" as "StartR" in some framings, while fast read
+    # both copies right. For a find, every read's words count.
+    acc = _reading([("StartR", 1.0, (953.0, 217.0, 31.0, 13.0)), ("Start", 1.0, (1111.0, 211.0, 30.0, 14.0))])
+    fast = _reading([("Start", 0.5, (955.0, 218.0, 26.0, 10.0)), ("Start", 0.5, (1112.0, 212.0, 26.0, 10.0))], ocr.FAST)
+    assert isinstance(ocr.match(ocr.merge(acc, fast, keep_all_words=True), "Start"), ocr.Ambiguous)
+    got = ocr.match(ocr.merge(acc, fast, keep_all_words=True), "Start", sheet=(560.0, 90.0, 500.0, 170.0))
+    assert isinstance(got, ocr.Found) and got.exact and near(got.point, (968.0, 223.0), 0.5)
+    assert isinstance(ocr.match(ocr.merge(acc, fast), "Start"), ocr.Found)  # (a listing's merge would have hidden it)
+
+
+def test_other_words_that_share_letters_are_no_lookalikes():
+    r = _reading([("Start", 0.5, (100.0, 100.0, 40.0, 14.0)), ("Share…", 0.5, (100.0, 200.0, 40.0, 14.0)), ("Stsrt", 0.5, (300.0, 300.0, 40.0, 14.0))])
+    found = ocr.match(_reading([("Start", 0.5, (100.0, 100.0, 40.0, 14.0))]), "Start")
+    assert ocr._lookalikes(r, "Start", found)  # "Stsrt": a garbled copy
+    r2 = _reading([("Start", 0.5, (100.0, 100.0, 40.0, 14.0)), ("Share…", 0.5, (100.0, 200.0, 40.0, 14.0)), ("Settings", 0.5, (100.0, 240.0, 40.0, 14.0))])
+    assert not ocr._lookalikes(r2, "Start", found)
 
 
 # ---- text marks ----------------------------------------------------------------------------------------------
@@ -369,7 +454,7 @@ def test_text_marks_read_accurately_and_leave_out_protected_windows(monkeypatch)
     use(eng)
     monkeypatch.setattr(ocr, "protected_rects", lambda area: [(240.0, 0.0, 160.0, 100.0)])
     marks = ocr.text_marks(frame, covered=[((10.0, 190.0, 60.0, 30.0), "Save")], app=APP, pid=PID)
-    assert [m.text for m in marks] == ["Score 12"] and eng.calls[-1]["fast"] is False
+    assert [m.text for m in marks] == ["Score 12"] and [c["fast"] for c in eng.calls] == [False, True]
     assert "Approve" not in marks[0].context
     monkeypatch.setattr(ocr, "protected_rects", lambda area: None)  # the window server can't say: nothing read
     assert ocr.text_marks(frame) == []
@@ -430,6 +515,24 @@ def test_sample_change_reads_the_full_detail_crops_only_where_the_samples_differ
     assert got == "“Start” → “Stop”"
     plain = Image.new("L", (24, 24), 40)
     assert ocr.sample_change([plain], [Image.new("L", (24, 24), 160)]) == ""  # no full-detail crops kept
+
+
+def test_a_word_one_read_missed_is_not_reported_gone():
+    before, _ = scene([("Start", (40.0, 50.0, 40.0, 14.0)), ("Score 3", (40.0, 90.0, 60.0, 14.0))], size_pt=(160.0, 160.0))
+    after, _ = scene([("Start", (40.0, 50.0, 40.0, 14.0)), ("Score 4", (40.0, 90.0, 60.0, 14.0))], size_pt=(160.0, 160.0))
+    eng = FakeVision({10: "Start", 22: "Score 3"})
+    reads = []
+
+    def recognize(image, **kw):
+        reads.append(image.size)
+        eng.words = {10: "Start", 22: "Score 3" if len(reads) == 1 else "Score 4"}
+        return FakeVision.recognize(eng, image, **kw)
+
+    eng.recognize = recognize
+    eng.drop = lambda text, fast, n: text == "Start" and n == 2  # the after read (unframed) misses "Start"
+    use(eng)
+    said = ocr.compare_pictures(before, after)
+    assert said == "“Score 3” → “Score 4”" and len(reads) == 3  # looked for "Start" again: still there
 
 
 # ---- never in the suite, never in the background -----------------------------------------------------------

@@ -43,6 +43,7 @@ import asyncio
 import difflib
 import itertools
 import logging
+import math
 import re
 import sys
 import threading
@@ -66,6 +67,12 @@ FAST, ACCURATE = "fast", "accurate"
 _FAST_PX_PER_PT = 1.8  # fewer pixels per point than this: a fast read garbles — scale up first
 _UPSCALE_TO = 2.0  # …to this many pixels per point
 _MAX_EDGE = 4096  # never scale a picture past this long edge
+# An accurate read of a picture longer than this (pixels) drops or merges small stacked labels (measured
+# on a Retina display: whole 1512×982 pt it found 2 of 6 buttons; cut at ≤2424 px, 6 of 6): cut it.
+_ACCURATE_MAX_PX = 2400
+_FAST_MAX_PX = 4096
+_OVERLAP_PT = 160  # the pieces overlap this much (a label shorter than this is whole in one)
+_PAD_PX = 24  # the second framing: this much border
 _MIN_CONF = 0.4  # Vision's confidences are coarse (fast 0.5, accurate 1.0; noise 0.3): below this, noise
 _RUN_WAIT_S = 5.0  # one recognition at a time (Vision queues concurrent ones anyway)
 _LABEL_MAX = 60  # words quoted in a result, at most this long
@@ -524,16 +531,48 @@ def _crop(px: Pixels, area: Box | None) -> tuple[Image.Image, float, float]:
     return px.image.crop((left, top, right, bottom)), px.x0 + left * px.ppp, px.y0 + top * px.ppp
 
 
+def _cuts(total: int, limit: int, overlap: int) -> list[tuple[int, int, int, int]]:
+    """How to cut ``total`` pixels into pieces of at most ``limit`` that overlap by ``overlap``: (start,
+    end, core start, core end) each — a piece keeps only what is centred in its core (the cores tile
+    the whole, so nothing read twice is kept twice, and a line up to ``overlap`` long that crosses a
+    cut is whole in the piece that keeps it)."""
+    if total <= limit:
+        return [(0, total, 0, total)]
+    overlap = min(overlap, limit // 2)
+    n = math.ceil((total - overlap) / (limit - overlap))
+    size = min(limit, math.ceil((total + (n - 1) * overlap) / n))
+    spans = [(min(i * (size - overlap), total - size), min(i * (size - overlap), total - size) + size) for i in range(n)]
+    out = []
+    for i, (s, e) in enumerate(spans):
+        cs = 0 if i == 0 else (spans[i - 1][1] + s) // 2
+        ce = total if i == n - 1 else (e + spans[i + 1][0]) // 2
+        out.append((s, e, cs, ce))
+    return out
+
+
+def _pad(img: Image.Image, pad: int) -> Image.Image:
+    """``img`` framed by ``pad`` pixels of its own corners' shade (another framing of the same words)."""
+    from PIL import ImageOps
+
+    w, h = img.size
+    shade = round(sum(int(img.getpixel(p)) for p in ((0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1))) / 4)
+    return ImageOps.expand(img, border=pad, fill=shade)
+
+
 def read(
     frame: Any,
     area: Box | None = None,
     *,
     plan: Plan | None = None,
     ranges: Callable[[str], list[tuple[int, int]]] | None = None,
+    pad: int = 0,
 ) -> Reading:
-    """Read the words in ``area`` of a frame (all of it when None), at the frame's full resolution —
-    scaled up 2× first when a fast read would get too few pixels per point. Raises Failed when there is
-    no engine or it fails."""
+    """Read the words in ``area`` of a frame (all of it when None) at the frame's full resolution:
+    scaled up 2× first when a fast read would get too few pixels per point; an accurate read of more
+    than _ACCURATE_MAX_PX on a side cut into overlapping pieces (whole, it drops or merges small
+    stacked labels). ``pad``: frame the picture with this many pixels of its own shade first (a
+    second framing: a read that dropped words may not drop them again). Raises Failed when there is no
+    engine or it fails."""
     e = engine()
     if e is None:
         raise Failed("no text recognition on this Mac")
@@ -551,21 +590,44 @@ def read(
         if k > 1.05:
             grey = grey.resize((max(1, round(grey.width * k)), max(1, round(grey.height * k))), Image.BICUBIC)
             per_pt *= k
-    try:
-        raws = e.recognize(grey, fast=plan.fast, languages=list(plan.languages), auto=plan.auto, ranges=ranges)
-    except Failed:
-        raise
-    except effects.EffectRefused:
-        raise
-    except Exception as ex:  # noqa: BLE001 - an engine error is a failed read, never a crash of the tool
-        raise Failed(f"text recognition failed ({type(ex).__name__})") from ex
+    kx, ky = w_pt / grey.width, h_pt / grey.height  # screen points per pixel of what is read
+    limit = _FAST_MAX_PX if plan.fast else _ACCURATE_MAX_PX
+    overlap = round(_OVERLAP_PT * per_pt)
     lines = []
-    for r in raws:
-        text = " ".join(str(r.text).split())
-        if not text:
-            continue
-        parts = tuple((s, en, _to_screen(b, x0, y0, w_pt, h_pt)) for s, en, b in r.parts)
-        lines.append(Line(text, float(r.conf), _to_screen(r.box, x0, y0, w_pt, h_pt), parts))
+    rows, cols = _cuts(grey.height, limit, overlap), _cuts(grey.width, limit, overlap)
+    for ri, (ys, ye, ycs, yce) in enumerate(rows):
+        for ci, (xs, xe, xcs, xce) in enumerate(cols):
+            piece = grey if (xs, ys, xe, ye) == (0, 0, grey.width, grey.height) else grey.crop((xs, ys, xe, ye))
+            if pad:
+                piece = _pad(piece, pad)
+            pw, ph = piece.size
+
+            def in_pixels(b: Box, xs=xs, ys=ys, pw=pw, ph=ph) -> Box:
+                bx, by, bw, bh = b  # (0–1 of the piece, from its bottom left)
+                return xs - pad + bx * pw, ys - pad + (1.0 - by - bh) * ph, bw * pw, bh * ph
+
+            def to_screen(b: Box) -> Box:
+                x, y, w, h = in_pixels(b)
+                return x0 + x * kx, y0 + y * ky, w * kx, h * ky
+
+            try:
+                raws = e.recognize(piece, fast=plan.fast, languages=list(plan.languages), auto=plan.auto, ranges=ranges)
+            except (Failed, effects.EffectRefused):
+                raise
+            except Exception as ex:  # noqa: BLE001 - an engine error is a failed read, never a crash of the tool
+                raise Failed(f"text recognition failed ({type(ex).__name__})") from ex
+            # What is centred in this piece's core (the first and last pieces reach past the edges).
+            left, right = (-math.inf if ci == 0 else xcs), (math.inf if ci == len(cols) - 1 else xce)
+            top, bottom = (-math.inf if ri == 0 else ycs), (math.inf if ri == len(rows) - 1 else yce)
+            for r in raws:
+                text = " ".join(str(r.text).split())
+                if not text:
+                    continue
+                bx, by, bw, bh = in_pixels(r.box)
+                if not (left <= bx + bw / 2 < right and top <= by + bh / 2 < bottom):
+                    continue
+                parts = tuple((s_, e_, to_screen(b_)) for s_, e_, b_ in r.parts)
+                lines.append(Line(text, float(r.conf), to_screen(r.box), parts))
     lines.sort(key=lambda ln: (round(ln.box[1] / 6), ln.box[0]))
     ms = (time.perf_counter() - t0) * 1000
     return Reading(tuple(lines), (x0, y0, w_pt, h_pt), FAST if plan.fast else ACCURATE, ms, px.t, per_pt)
@@ -578,6 +640,27 @@ def without(reading: Reading, rects: Iterable[Box]) -> Reading:
         return reading
     keep = tuple(ln for ln in reading.lines if not any(_inside(ln.center, r) for r in rects))
     return replace(reading, lines=keep)
+
+
+def merge(*readings: Reading, keep_all_words: bool = False) -> Reading:
+    """One reading of a place from several reads of it (pass the most trusted read first).
+
+    Any read may drop a word now and then, or garble one — measured on 30 framings of a window: 2–3
+    drops in either mode, and the accurate mode reading a bordered "Start" as "StartR". The union
+    rarely misses what is there. By default a later read adds only lines where no kept line sits (a
+    listing never shows the same place twice); ``keep_all_words`` adds every line whose words aren't
+    already kept there (a find: the garbled "StartR" can't hide the "Start" another read got right)."""
+    kept: list[Line] = []
+    for r in readings:
+        for ln in r.lines:
+            k = key(ln.text)
+            if not any(
+                (_inside(ln.center, o.box) or _inside(o.center, ln.box)) and (not keep_all_words or key(o.text) == k)
+                for o in kept
+            ):
+                kept.append(ln)
+    kept.sort(key=lambda ln: (round(ln.box[1] / 6), ln.box[0]))
+    return replace(readings[0], lines=tuple(kept), ms=sum(r.ms for r in readings))
 
 
 # ---- matching words -------------------------------------------------------------------------------------
@@ -735,30 +818,55 @@ def _lookalikes(reading: Reading, label: str, found: Found) -> bool:
         words = key(ln.text).split()
         for i in range(max(1, len(words) - n + 1)):
             chunk = " ".join(words[i : i + n])
-            if chunk and chunk != want and difflib.SequenceMatcher(None, chunk, want).ratio() >= 0.6:
+            if chunk and chunk != want and difflib.SequenceMatcher(None, chunk, want).ratio() >= 0.75:
                 return True
     return False
 
 
-def find_in(frame: Any, label: str, *, area: Box | None = None, sheet: Box | None = None, hide: Iterable[Box] = ()) -> Result:
-    """Find ``label``'s words in a frame (sync; in a thread). A fast read first, taken only when it
-    reads the words exactly, in one place (in the open sheet when there is one), with nothing that
-    merely looks like them elsewhere; otherwise — and for any script fast can't read — an accurate read
-    decides. ``hide``: screen rectangles whose words never count (a protected app's windows)."""
+def _sure(got: Result, reading: Reading, label: str, sheet: Box | None) -> bool:
+    """Is a fast find one to act on without a closer look: exactly the words, in one place, in the open
+    sheet when there is one, and nothing elsewhere that merely looks like them?"""
+    return (
+        isinstance(got, Found)
+        and got.exact
+        and (sheet is None or bool(got.where))
+        and not _lookalikes(reading, label, got)
+    )
+
+
+def find_in(
+    frame: Any, label: str, *, area: Box | None = None, sheet: Box | None = None, hide: Iterable[Box] = ()
+) -> Result:
+    """Find ``label``'s words in a frame (sync; in a thread).
+
+    Fast first: taken when two fast reads, framed differently, each find exactly the words in one and
+    the same place (in the open sheet when there is one) with nothing that merely looks like them
+    elsewhere — about 2 × 6–25 ms. Otherwise, and for any script fast can't read, an accurate read
+    decides, over everything read so far (a second copy any read saw makes the find ambiguous: a read
+    now and then drops a word, and the copy it dropped may be the one meant). ``hide``: screen
+    rectangles whose words never count (a protected app's windows)."""
     if bad := unreadable(label):
         return Missing(label, f"this Mac's text recognition can't read {bad}")
-    first = plan_for(label, want_fast=True)
-    if first is None:
+    fast_plan = plan_for(label, want_fast=True)
+    if fast_plan is None:
         raise Failed("this Mac's text recognition can't be asked")
     rng = _ranges_for(label)
     hide = list(hide)
-    if first.fast:
-        fast = without(read(frame, area, plan=first, ranges=rng), hide)
-        got = match(fast, label, sheet=sheet)
-        if isinstance(got, Found) and got.exact and (sheet is None or got.where) and not _lookalikes(fast, label, got):
-            return got
-    second = plan_for(label, want_fast=False) or first
-    return match(without(read(frame, area, plan=second, ranges=rng), hide), label, sheet=sheet)
+    seen: list[Reading] = []
+
+    def look(plan: Plan, pad: int = 0) -> Reading:
+        r = without(read(frame, area, plan=plan, ranges=rng, pad=pad), hide)
+        seen.append(r)
+        return r
+
+    if fast_plan.fast:
+        first = match(look(fast_plan), label, sheet=sheet)
+        if _sure(first, seen[-1], label, sheet):
+            again = match(look(fast_plan, _PAD_PX), label, sheet=sheet)
+            if _sure(again, seen[-1], label, sheet) and _overlap(first.box, again.box):  # type: ignore[union-attr]
+                return first
+    closer = look(plan_for(label, want_fast=False) or fast_plan)
+    return match(merge(closer, *seen[:-1], keep_all_words=True), label, sheet=sheet)
 
 
 # ---- text marks: t1…tn ----------------------------------------------------------------------------------
@@ -922,7 +1030,11 @@ def text_marks(
     if hide is None or plan is None:
         return []
     try:
-        reading = without(read(px, area, plan=plan), hide)
+        reading = read(px, area, plan=plan)
+        quick = plan_for("", want_fast=True)
+        if quick is not None and quick.fast:  # (a second read catches most of the words one drops: +6–25 ms)
+            reading = merge(reading, read(px, area, plan=quick))
+        reading = without(reading, hide)
     except (Failed, ValueError) as ex:
         log.info("no text marks: %s", ex)
         return []
@@ -1018,8 +1130,14 @@ class Change:
 
 
 def _similar(a: str, b: str) -> bool:
+    """The same words, give or take a read's wobble — never when a number in them differs (a score, a
+    count: "Score 3" → "Score 4" is the change)."""
     ka, kb = key(a), key(b)
-    return ka == kb or difflib.SequenceMatcher(None, ka, kb).ratio() >= 0.85
+    if ka == kb:
+        return True
+    if re.findall(r"\d+", ka) != re.findall(r"\d+", kb):
+        return False
+    return difflib.SequenceMatcher(None, ka, kb).ratio() >= 0.85
 
 
 def diff(before: Reading, after: Reading) -> Change:
@@ -1080,17 +1198,31 @@ def sample_change(before: list | None, after: list | None) -> str:
             continue
         ppp = float(b.info.get("ppp") or a.info.get("ppp") or 0.5)
         try:
-            plan = plan_for("")
-            if plan is None:
-                return ""
-            rb = read(Pixels(fb, 0.0, 0.0, ppp), plan=plan)
-            ra = read(Pixels(fa, 0.0, 0.0, ppp), plan=plan)
+            said = compare_pictures(Pixels(fb, 0.0, 0.0, ppp), Pixels(fa, 0.0, 0.0, ppp))
         except (Failed, ValueError, effects.EffectRefused) as ex:
             log.info("no words compared: %s", ex)
             return ""
-        if said := words_changed(rb, ra):
+        if said:
             out.append(said)
     return "; ".join(out)
+
+
+def compare_pictures(before: Any, after: Any, area: Box | None = None, *, plan: Plan | None = None) -> str:
+    """What the words did between two pictures of the same place (frames; ``area`` in screen points):
+    words_changed of a read of each — a word only one read missed is no change, so words that seem
+    gone (or new) are looked for again in a second framing of the picture that lacks them first."""
+    plan = plan or plan_for("")
+    if plan is None:
+        return ""
+    rb, ra = read(before, area, plan=plan), read(after, area, plan=plan)
+    c = diff(rb, ra)
+    if not c:
+        return ""
+    if c.gone:
+        ra = merge(ra, read(after, area, plan=plan, pad=_PAD_PX))
+    if c.new:
+        rb = merge(rb, read(before, area, plan=plan, pad=_PAD_PX))
+    return words_changed(rb, ra)
 
 
 # ---- the screen: capture, protected windows -------------------------------------------------------------
