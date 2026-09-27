@@ -1,0 +1,737 @@
+"""Cerebras: the fast paid brain (decision 49).
+
+Two brains on one account (CEREBRAS_API_KEY, which the user adds to ~/.neo/.env):
+
+- ``cerebras`` — gpt-oss-120b, text only: the fast text brain for steps that need no picture,
+  tried ahead of Groq;
+- ``cerebras_vision`` — qwen-3.8-27b, which sees: a seeing fallback when Gemini is overloaded,
+  tried ahead of Groq's vision brain. At most 2 pictures and 10 MiB per request (the API's
+  limits): older pictures are left out with a note, and when even the newest can't go the request
+  is refused (RequestTooLarge) — a brain that answers as if it saw must have seen.
+
+Both speak the OpenAI chat-completions protocol at https://api.cerebras.ai/v1
+(neo.providers.openai_compat), with these differences:
+
+Speed. The server answers in ~15 ms, but a cold round trip (TCP + TLS) is ~0.9 s. So an agent's
+two Cerebras brains share one connection pool (one per agent, per event loop), kept open for two
+minutes between steps, and :func:`prewarm` opens it when a screen task starts: ``GET /v1/models``,
+which spends no tokens and also refreshes which models this key may use.
+
+Thinking. Both models reason inside ``max_tokens`` (``max_tokens=16`` came back with no text and
+finish_reason "length"). A request always leaves room for that (:data:`ROOM`, by effort), passes
+``reasoning_effort`` (the effort the caller asked for: low for UI steps), and a reply that ran out of
+room anyway is asked once more with low effort and twice the room before it counts as a failure
+(Truncated: request-shaped, so the chain tries the next brain without benching this one).
+
+Limits. Every response's ``x-ratelimit-*`` headers (limit / remaining / reset, per window) are kept
+per model; a request that would not fit a window is not sent: a wait of up to
+:data:`SLEEP_MAX_S` is slept, a longer one is a RateLimited with that wait (the chain fails over,
+or sits it out when every brain is down). Nothing is hardcoded: what the server says is the limit.
+
+Money. Each answer's usage × the price table (neo.providers.spend) is added to today's total,
+against a daily budget (``cerebras_daily_budget``, $0.50 by default). Crossing 80% is said once a
+day; once it's spent, Cerebras is skipped until midnight, and NEO says so. An invalid key (401) or
+an account out of credits (402, or a billing message) is refused for the day with the reason
+spoken; a model this key may not use (403, 404) takes only that brain out.
+
+Settings (read with defaults, so this module works before and after they are declared in
+neo/config.py): ``cerebras_api_key`` (CEREBRAS_API_KEY), ``cerebras_model``,
+``cerebras_vision_model``, ``cerebras_daily_budget``, ``cerebras_prices``. An embedded agent's
+account, ledger and connections are its own (its BrainPool, its data dir).
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import math
+import re
+import threading
+import time
+import weakref
+from collections.abc import AsyncIterator, Mapping, Sequence
+from dataclasses import dataclass, field, replace
+from pathlib import Path
+from typing import Any, Literal
+
+import httpx
+from openai import APIConnectionError, APIStatusError, APITimeoutError, AsyncOpenAI
+
+from neo import runtime
+from neo.providers import spend
+from neo.providers.base import (
+    Message,
+    Overloaded,
+    ProviderError,
+    QuotaExhausted,
+    RateLimited,
+    RequestTooLarge,
+    ToolResult,
+    ToolSpec,
+    Turn,
+    Unavailable,
+)
+from neo.providers.fit import Fitted, estimate
+from neo.providers.openai_compat import OpenAICompatProvider, Truncated, _retry_after
+
+log = logging.getLogger(__name__)
+
+BASE_URL = "https://api.cerebras.ai/v1"
+TEXT_BRAIN = "cerebras"
+VISION_BRAIN = "cerebras_vision"
+TEXT_MODEL = "gpt-oss-120b"
+VISION_MODEL = "qwen-3.8-27b"
+DEFAULT_BUDGET = 0.50  # dollars a day
+SPOKEN = {TEXT_BRAIN: "Cerebras", VISION_BRAIN: "Cerebras vision"}
+
+# Context windows on a paid key (inference-docs.cerebras.ai); a model not listed gets the smaller
+# free-tier window, and a 413 teaches the rest (openai_compat).
+CONTEXT = {"gpt-oss-120b": 131_072, "qwen-3.8-27b": 131_072}
+DEFAULT_CONTEXT = 65_536
+MAX_PICTURES = 2
+MAX_REQUEST_BYTES = 10 * 1024 * 1024
+_REQUEST_SLACK = 64 * 1024  # JSON framing, tool schemas' escaping: the estimate is an estimate
+# Room a reply always gets, by effort: the reasoning is spent from max_tokens before the answer.
+ROOM: dict[str, int] = {"low": 1024, "medium": 2048, "high": 4096}
+MAX_ROOM = 32_768  # a retry's room never grows past this (paid-tier output limit: 40K)
+_STREAM_REASONING = 256  # a streamed answer's unseen reasoning, when the server reports no usage
+
+KEEPALIVE_S = 120.0  # a warm connection outlives the few seconds between an agent's steps
+TIMEOUT = httpx.Timeout(30.0, connect=5.0)  # it answers in well under a second: a hang fails over
+PREWARM_TIMEOUT_S = 5.0
+PREWARM_IDLE_S = 20.0  # a connection used this recently is still warm: no prewarm
+MODELS_TTL_S = 6 * 3600.0
+SLEEP_MAX_S = 2.0  # a rate window that reopens this soon is waited for, not failed over
+DAILY_S = 3600.0  # a limit that reopens later than this is a daily one: out until then
+
+# Words in an error that mean the account can't pay (any status), or the key itself is refused.
+_BILLING = re.compile(
+    r"insufficient[_ ](?:funds|credits?|balance)|out of credits?|no (?:remaining )?credits?|credit balance"
+    r"|billing|payment[_ ]required|top[- ]?up|add (?:a )?payment",
+    re.I,
+)
+_BAD_KEY = re.compile(r"invalid[_ ]api[_ ]key|incorrect api key|wrong api key|api key (?:is )?(?:invalid|revoked)", re.I)
+
+# Tests hand in an httpx.MockTransport here: nothing leaves the process.
+_transport: httpx.AsyncBaseTransport | None = None
+
+
+class Refused(QuotaExhausted):
+    """Cerebras is out until `until` for a reason no retry fixes today: the key was refused, the
+    account is out of credits, today's budget is spent, or a daily limit is used up. `words`: the
+    reason as the user hears it."""
+
+    def __init__(self, msg: str = "", *, until: float, words: str) -> None:
+        super().__init__(msg, until=until)
+        self.words = words
+
+
+# ---- settings --------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Conf:
+    api_key: str = field(default="", repr=False)
+    model: str = TEXT_MODEL
+    vision_model: str = VISION_MODEL
+    daily_budget: float = DEFAULT_BUDGET
+    prices: Mapping[str, tuple[float, float]] = field(default_factory=lambda: dict(spend.PRICES))
+    data_dir: Path | None = None  # the ledger's folder (None: in memory only)
+
+
+def conf(s: Any = None) -> Conf:
+    """Cerebras' settings from `s` (default: the bound agent's settings, else NEO.app's)."""
+    if s is None:
+        from neo.config import settings
+
+        s = settings()
+    dd = getattr(s, "data_dir", None)
+    return Conf(
+        api_key=str(getattr(s, "cerebras_api_key", "") or "").strip(),
+        model=str(getattr(s, "cerebras_model", "") or TEXT_MODEL).strip(),
+        vision_model=str(getattr(s, "cerebras_vision_model", "") or VISION_MODEL).strip(),
+        daily_budget=spend.budget(getattr(s, "cerebras_daily_budget", DEFAULT_BUDGET), DEFAULT_BUDGET),
+        prices=spend.prices(getattr(s, "cerebras_prices", None)),
+        data_dir=Path(dd) if dd else None,
+    )
+
+
+# ---- rate limits -----------------------------------------------------------------------------
+
+_HEADER = re.compile(r"x-ratelimit-(limit|remaining|reset)-(requests|tokens)(?:-([a-z]+))?")
+_DURATION = re.compile(r"(?:([\d.]+)h)?(?:([\d.]+)m(?!s))?(?:([\d.]+)s)?(?:([\d.]+)ms)?")
+
+
+def _seconds(v: str) -> float | None:
+    """A reset header's value: seconds ("11.38"), or a duration ("1m2.5s", "250ms")."""
+    v = v.strip()
+    try:
+        f = float(v)
+        return f if math.isfinite(f) and f >= 0 else None
+    except ValueError:
+        pass
+    m = _DURATION.fullmatch(v)
+    if not v or not m or not any(m.groups()):
+        return None
+    try:
+        h, mi, s, ms = (float(x) if x else 0.0 for x in m.groups())
+    except ValueError:
+        return None
+    return h * 3600 + mi * 60 + s + ms / 1000
+
+
+@dataclass
+class Window:
+    limit: float | None = None
+    remaining: float | None = None
+    reset_at: float | None = None  # epoch seconds
+
+
+class Limits:
+    """One model's rate windows, as the server's x-ratelimit-* headers last described them."""
+
+    def __init__(self) -> None:
+        self.windows: dict[tuple[str, str], Window] = {}
+
+    def update(self, headers: Mapping[str, str], now: float) -> None:
+        for k, v in headers.items():
+            m = _HEADER.fullmatch(k.lower())
+            if not m:
+                continue
+            what, kind, span = m.groups()
+            w = self.windows.setdefault((kind, span or ""), Window())
+            if what == "reset":
+                if (secs := _seconds(str(v))) is not None:
+                    w.reset_at = now + secs
+                continue
+            try:
+                n = float(v)
+            except ValueError:
+                continue
+            if math.isfinite(n):
+                setattr(w, what, n)
+
+    def wait(self, tokens: int, now: float) -> tuple[float, str] | None:
+        """(seconds, which window) until a request of ~`tokens` prompt tokens fits every window
+        the server reported; None when it fits now (or nothing was reported)."""
+        worst: tuple[float, str] | None = None
+        for (kind, span), w in self.windows.items():
+            if w.remaining is None or w.reset_at is None or w.reset_at <= now:
+                continue
+            need = 1 if kind == "requests" else max(1, tokens)
+            if w.remaining < need:
+                secs = w.reset_at - now
+                if worst is None or secs > worst[0]:
+                    worst = (secs, f"{kind} per {span or 'minute'}")
+        return worst
+
+    def refused_for(self, now: float) -> float | None:
+        """After a 429: seconds until the window that ran out reopens — one with nothing (or under
+        a tenth) left, else the soonest per-minute one; None when the server described none."""
+        low, minute = [], []
+        for (_kind, span), w in self.windows.items():
+            if w.reset_at is None or w.reset_at <= now:
+                continue
+            if w.remaining is not None and (w.remaining < 1 or (w.limit and w.remaining < 0.1 * w.limit)):
+                low.append(w.reset_at - now)
+            elif span in ("", "minute"):
+                minute.append(w.reset_at - now)
+        if low:
+            return max(low)
+        return min(minute) if minute else None
+
+
+# ---- the account -----------------------------------------------------------------------------
+
+
+class Account:
+    """One Cerebras key as one agent uses it: its connections, rate windows, the models it may
+    use, today's spend and refusals. Shared by that agent's two Cerebras brains."""
+
+    def __init__(self, c: Conf, *, ledger: spend.Ledger | None = None, base_url: str = BASE_URL) -> None:
+        self.conf = c
+        self.base_url = base_url
+        path = Path(c.data_dir) / spend.FILE if c.data_dir else None
+        self.ledger = ledger or spend.Ledger(
+            path, daily_budget=c.daily_budget, price_table=c.prices, key=c.api_key
+        )
+        self.limits: dict[str, Limits] = {}
+        self.offered: set[str] | None = None  # model ids /v1/models listed for this key
+        self.offered_at = 0.0
+        self.missing: dict[str, float] = {}  # model → until: "no such model" (404)
+        self.last_io = 0.0  # time.monotonic() of the last response: the connection is warm
+        self._pending: list[str] = []
+        self._lock = threading.Lock()
+        self._loop: Any = None  # the event loop the connections belong to (None: not used yet)
+        self._transport: httpx.AsyncBaseTransport | None = None
+        self._clients: dict[str, AsyncOpenAI] = {}
+
+    # connections ------------------------------------------------------------------------------
+    def client(self, model: str) -> AsyncOpenAI:
+        """The client for `model`'s requests. Every model's client shares one connection pool
+        (a warm connection serves both brains); a new event loop gets a new pool, since
+        connections belong to the loop that opened them."""
+        try:
+            loop: Any = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        with self._lock:
+            if loop is not None and self._loop is not None and self._loop() is not loop:
+                self._transport, self._clients, self._loop = None, {}, None
+            if loop is not None and self._loop is None:
+                self._loop = weakref.ref(loop)
+            if self._transport is None:
+                self._transport = _transport or httpx.AsyncHTTPTransport(
+                    limits=httpx.Limits(max_connections=32, max_keepalive_connections=8, keepalive_expiry=KEEPALIVE_S)
+                )
+            c = self._clients.get(model)
+            if c is None:
+                http = httpx.AsyncClient(
+                    transport=self._transport,
+                    timeout=TIMEOUT,
+                    event_hooks={"response": [self._hook(model)]},
+                )
+                c = self._clients[model] = AsyncOpenAI(
+                    base_url=self.base_url,
+                    api_key=self.conf.api_key or "none",
+                    http_client=http,
+                    timeout=TIMEOUT,
+                    max_retries=0,  # a 429 fails over at once; a stale connection is retried here
+                )
+            return c
+
+    def _hook(self, model: str):
+        async def on_response(resp: httpx.Response) -> None:
+            self.last_io = time.monotonic()
+            if model:
+                self.limits.setdefault(model, Limits()).update(resp.headers, time.time())
+
+        return on_response
+
+    # what may go ------------------------------------------------------------------------------
+    def blocked_until(self, model: str, now: float | None = None) -> float:
+        """When this model can be asked again without a refusal or a closed rate window (0: now)."""
+        now = time.time() if now is None else now
+        t = 0.0
+        for scope in ("account", model):
+            if (r := self.ledger.refusal(scope)) is not None:
+                t = max(t, r[1])
+        if self.ledger.over():
+            t = max(t, self.ledger.midnight())
+        if (lim := self.limits.get(model)) is not None and (w := lim.wait(1, now)) is not None:
+            t = max(t, now + w[0])
+        t = max(t, self.missing.get(model, 0.0))
+        return t if t > now else 0.0
+
+    async def admit(self, model: str, tokens: int, name: str) -> None:
+        """Raise unless a request of ~`tokens` prompt tokens may go to `model` now. Nothing here
+        touches the network: every refusal was learnt earlier (or is today's budget)."""
+        for scope in ("account", model):
+            if (r := self.ledger.refusal(scope)) is not None:
+                raise Refused(f"{name}: {r[0]}", until=r[1], words=r[0])
+        if self.ledger.over():
+            b = self.ledger.daily_budget
+            words = f"Cerebras' daily budget of ${b:.2f} is used up" if b > 0 else "Cerebras' daily budget is $0"
+            self.say_once("spent", f"{words}; skipping it until tomorrow")
+            raise Refused(f"{name}: {words}", until=self.ledger.midnight(), words=words)
+        now = time.time()
+        if self.missing.get(model, 0.0) > now or (self.offered and model not in self.offered):
+            raise Unavailable(f"{name}: Cerebras doesn't offer {model} to this key")
+        if (lim := self.limits.get(model)) is not None and (w := lim.wait(tokens, now)) is not None:
+            secs, which = w
+            if secs <= SLEEP_MAX_S:
+                log.info(f"[brain] {name}: waiting {secs:.1f}s for its {which} limit")
+                await asyncio.sleep(secs)
+                return
+            if secs > DAILY_S:
+                words = f"Cerebras' {which} limit is used up"
+                raise Refused(f"{name}: {words}", until=now + secs, words=words)
+            raise RateLimited(f"{name}: {which} limit reached", retry_after=secs)
+
+    # errors -----------------------------------------------------------------------------------
+    def classify(self, e: APIStatusError, model: str, name: str) -> ProviderError | None:
+        """Cerebras' own meaning of an HTTP error (None: the generic mapping applies)."""
+        code, text = e.status_code, _error_text(e)
+        now = time.time()
+        if code == 401 or _BAD_KEY.search(text):
+            return self._refuse("account", "Cerebras refused the API key (CEREBRAS_API_KEY)", name, e)
+        if code == 402 or _BILLING.search(text):
+            return self._refuse("account", "Cerebras says the account is out of credits", name, e)
+        if code == 403:
+            return self._refuse(model, f"Cerebras doesn't let this key use {model}", name, e)
+        if code == 404:
+            self.missing[model] = now + MODELS_TTL_S
+            return Unavailable(f"{name}: Cerebras doesn't offer {model} to this key")
+        if code == 429:
+            waits = []
+            if model in self.limits and (w := self.limits[model].refused_for(now)) is not None:
+                waits.append(w)
+            if (ra := _retry_after(e)) is not None:
+                waits.append(ra)
+            wait = max(waits) if waits else None
+            if wait is not None and wait > DAILY_S:
+                words = "Cerebras' daily limit is used up"
+                return Refused(f"{name}: {e}", until=now + wait, words=words)
+            return RateLimited(f"{name}: {e}", retry_after=wait)
+        if code >= 500:
+            return Overloaded(f"{name}: {e}", retry_after=_retry_after(e))
+        return None
+
+    def _refuse(self, scope: str, words: str, name: str, e: Exception) -> Refused:
+        until = self.ledger.refuse(scope, words)
+        self.say_once(f"refused:{scope}", f"{words}; skipping it for today")
+        log.warning(f"[brain] {name}: {words} (HTTP {getattr(e, 'status_code', '?')}); refused until midnight")
+        return Refused(f"{name}: {words}", until=until, words=words)
+
+    # money ------------------------------------------------------------------------------------
+    def spent(self, model: str, tokens_in: int, tokens_out: int) -> None:
+        crossed = self.ledger.add(model, tokens_in, tokens_out)
+        b = self.ledger.daily_budget
+        if "warn" in crossed and "spent" not in crossed:
+            self._pending.append(f"Cerebras has used ${self.ledger.today():.2f} of today's ${b:.2f} budget")
+        if "spent" in crossed:
+            self._pending.append(f"Cerebras' daily budget of ${b:.2f} is used up; I'll skip it until tomorrow")
+
+    # what the user hears ----------------------------------------------------------------------
+    def say_once(self, tag: str, text: str) -> None:
+        """Queue `text` for the user, once a day per `tag`."""
+        if self.ledger.mark_said(tag):
+            self._pending.append(text)
+
+    async def announce(self) -> None:
+        """Say what's queued (the budget warning, a refusal) on the agent's own bus: shown as the
+        turn's progress line, as every brain switch is. Never to another agent's or NEO.app's."""
+        while self._pending:
+            text = self._pending.pop(0)
+            log.warning(f"[brain] {text}")
+            if runtime.current_scope() is None and runtime.library_mode():
+                continue  # a host's own provider, called with no agent bound: nobody to tell
+            try:
+                from neo.events import bus
+
+                await bus().note(text)
+            except Exception as e:  # noqa: BLE001 — a note must never fail the answer
+                log.info(f"[brain] couldn't show a Cerebras note: {type(e).__name__}")
+
+    # warming up -------------------------------------------------------------------------------
+    async def prewarm(self, *, idle_s: float = PREWARM_IDLE_S) -> bool:
+        """Open (or keep open) the connection before it's needed, and refresh which models this
+        key may use. Free: /v1/models spends no tokens. False when nothing was done."""
+        if self.ledger.refusal("account") is not None or self.ledger.over():
+            return False
+        fresh = self.offered is not None and time.time() - self.offered_at < MODELS_TTL_S
+        if time.monotonic() - self.last_io < idle_s and fresh:
+            return False
+        try:
+            page = await asyncio.wait_for(self.client("").models.list(), PREWARM_TIMEOUT_S)
+        except APIStatusError as e:
+            self.classify(e, self.conf.model, TEXT_BRAIN)  # a refused key is learnt before the task needs it
+            await self.announce()
+            return False
+        except Exception as e:  # noqa: BLE001 — a failed warm-up costs nothing; the request will tell
+            log.info(f"[brain] cerebras prewarm failed: {type(e).__name__}")
+            return False
+        ids = {str(getattr(m, "id", "")) for m in getattr(page, "data", None) or []} - {""}
+        if ids:
+            self.offered, self.offered_at = ids, time.time()
+        return True
+
+
+def _error_text(e: APIStatusError) -> str:
+    body = getattr(e, "body", None)
+    try:
+        extra = json.dumps(body) if body is not None else ""
+    except (TypeError, ValueError):
+        extra = str(body)
+    return f"{e} {extra}"
+
+
+# ---- one agent's account ---------------------------------------------------------------------
+
+_accounts: weakref.WeakKeyDictionary[Any, Account] = weakref.WeakKeyDictionary()
+_accounts_lock = threading.Lock()
+
+
+def account(c: Conf | None = None) -> Account:
+    """The bound agent's Cerebras account (its BrainPool's), else NEO.app's; made on first use,
+    and again when the settings changed (a new key)."""
+    from neo.providers import pool
+
+    c = c or conf()
+    if not c.api_key:
+        raise Unavailable("CEREBRAS_API_KEY is not set")
+    owner = pool()
+    with _accounts_lock:
+        a = _accounts.get(owner)
+        if a is None or a.conf != c:
+            a = _accounts[owner] = Account(c)
+        return a
+
+
+# ---- the brains ------------------------------------------------------------------------------
+
+
+class CerebrasProvider(OpenAICompatProvider):
+    raise_truncated = True
+    stream_effort = "low"  # a chat answer: quick thinking
+
+    def __init__(self, acct: Account, *, model: str, name: str, vision: bool) -> None:
+        super().__init__(
+            name=name,
+            model=model,
+            base_url=acct.base_url,
+            supports_vision=vision,
+            reasoning_effort=True,
+            token_budget=CONTEXT.get(model, DEFAULT_CONTEXT),
+            client=acct.client(model),
+        )
+        self.account = acct
+        # what one request may carry (providers.image_limit reads these): only the seeing brain
+        self.max_images = MAX_PICTURES if vision else 0
+        self.max_request_bytes = MAX_REQUEST_BYTES
+
+    def client(self) -> AsyncOpenAI:
+        return self.account.client(self.model)
+
+    def cooling_until(self) -> float:
+        now = time.time()
+        t = max(super().cooling_until(), self.account.blocked_until(self.model, now))
+        return t if t > now else 0.0
+
+    def _error(self, e: Exception) -> ProviderError:
+        if isinstance(e, APIStatusError) and (mine := self.account.classify(e, self.model, self.name)) is not None:
+            if isinstance(mine, RateLimited) and mine.retry_after:
+                self._cool_until = time.time() + mine.retry_after
+            return mine
+        return super()._error(e)
+
+    def _spent(self, usage: Any, f: Fitted, text: str = "") -> None:
+        tin = getattr(usage, "prompt_tokens", None)
+        tout = getattr(usage, "completion_tokens", None)
+        if not isinstance(tin, int):
+            tin = f.tokens  # the estimate of what was sent
+        if not isinstance(tout, int):
+            tout = math.ceil(len(text.encode("utf-8", "ignore")) / 3) + _STREAM_REASONING
+        try:
+            self.account.spent(self.model, tin, tout)
+        except Exception as e:  # noqa: BLE001 — counting must never lose the answer it counts
+            log.warning(f"[brain] {self.name}: couldn't count its spend ({type(e).__name__})")
+
+    def _prepare(self, messages: list[Message], system: str, tools: list[ToolSpec] | None) -> list[Message]:
+        if not self.supports_vision:
+            return messages
+        room = self.max_request_bytes - _text_bytes(messages, system, tools) - _REQUEST_SLACK
+        return cap_pictures(messages, most=self.max_images, max_bytes=room, name=self.name)
+
+    async def complete(
+        self,
+        messages: list[Message],
+        *,
+        system: str = "",
+        tools: list[ToolSpec] | None = None,
+        effort: Literal["low", "medium", "high"] = "medium",
+        max_tokens: int = 4096,
+    ) -> Turn:
+        try:
+            messages = self._prepare(messages, system, tools)
+            await self.account.admit(self.model, estimate(messages, system, tools, vision=self.supports_vision), self.name)
+            room = max(max_tokens, ROOM.get(effort, ROOM["medium"]))
+            retried: set[str] = set()
+            while True:
+                try:
+                    return await super().complete(
+                        messages, system=system, tools=tools, effort=effort, max_tokens=room
+                    )
+                except Truncated:
+                    if "room" in retried:
+                        raise
+                    retried.add("room")
+                    effort, room = "low", min(max(room * 2, ROOM["high"]), MAX_ROOM)
+                    log.info(f"[brain] {self.name}: no room left for the answer; again with {room} tokens, low effort")
+                except Unavailable as e:
+                    if "connection" in retried or not _stale(e):
+                        raise
+                    retried.add("connection")  # a kept-alive connection the server had closed
+                except RateLimited as e:
+                    wait = e.retry_after
+                    if "rate" in retried or isinstance(e, QuotaExhausted) or wait is None or wait > SLEEP_MAX_S:
+                        raise
+                    retried.add("rate")
+                    await asyncio.sleep(wait)
+        finally:
+            await self.account.announce()
+
+    async def stream(self, messages: list[Message], *, system: str = "", max_tokens: int = 2048) -> AsyncIterator[str]:
+        try:
+            messages = self._prepare(messages, system, None)
+            await self.account.admit(self.model, estimate(messages, system, None, vision=self.supports_vision), self.name)
+            produced = False
+            async for chunk in super().stream(messages, system=system, max_tokens=max(max_tokens, ROOM["low"])):
+                produced = True
+                yield chunk
+            if not produced:  # its thinking used all the room: nothing was said, another brain may say it
+                raise Truncated(f"{self.name}: no room left for the answer")
+        finally:
+            await self.account.announce()
+
+
+def _stale(e: ProviderError) -> bool:
+    """A connection error that isn't a timeout: most likely a kept-alive connection the server
+    had closed just as it was reused. Asked again at once, on a new one."""
+    cause = e.__cause__
+    return isinstance(cause, APIConnectionError) and not isinstance(cause, APITimeoutError)
+
+
+def _text_bytes(messages: list[Message], system: str, tools: list[ToolSpec] | None) -> int:
+    n = len(system.encode("utf-8", "ignore"))
+    for m in messages:
+        n += len(m.text.encode("utf-8", "ignore"))
+        n += sum(len(r.content.encode("utf-8", "ignore")) for r in m.tool_results)
+        n += sum(len(json.dumps(c.args, ensure_ascii=False).encode()) for c in m.tool_calls)
+    for t in tools or ():
+        n += len(t.description.encode("utf-8", "ignore")) + len(json.dumps(t.parameters).encode())
+    return n
+
+
+def _b64(n: int) -> int:
+    return 4 * math.ceil(n / 3)
+
+
+def cap_pictures(messages: list[Message], *, most: int, max_bytes: int, name: str = VISION_BRAIN) -> list[Message]:
+    """`messages` with at most `most` pictures, newest first, whose base64 fits in `max_bytes`; the
+    older ones are left out with a note. RequestTooLarge when even the newest can't go: a brain
+    that sees must not answer about a picture it never got. Never mutates `messages`."""
+    out = list(messages)
+    kept = size = 0
+    first = True
+    note = f" [older picture left out: this brain takes at most {most} per request]"
+
+    def take(images: list) -> list:
+        nonlocal kept, size, first
+        keep = []
+        for im in reversed(images):  # newest last
+            b = _b64(len(im.data))
+            if kept < most and size + b <= max_bytes:
+                keep.append(im)
+                kept += 1
+                size += b
+            elif first:
+                raise RequestTooLarge(f"{name}: the picture is too large to send ({b / 1048576:.1f} MiB as base64)")
+            first = False
+        return list(reversed(keep))
+
+    for i in range(len(out) - 1, -1, -1):
+        m = out[i]
+        if m.role == "tool" and any(r.images for r in m.tool_results):
+            results: list[ToolResult] = []
+            for r in reversed(m.tool_results):
+                if not r.images:
+                    results.append(r)
+                    continue
+                ims = take(r.images)
+                results.append(r if len(ims) == len(r.images) else replace(r, content=r.content + note, images=ims))
+            results.reverse()
+            if any(a is not b for a, b in zip(results, m.tool_results, strict=True)):
+                out[i] = replace(m, tool_results=results)
+        elif m.images:
+            ims = take(m.images)
+            if len(ims) != len(m.images):
+                out[i] = replace(m, text=m.text + note, images=ims)
+    return out
+
+
+def cerebras(model: str | None = None) -> CerebrasProvider:
+    """The text brain (gpt-oss-120b by default) on the bound agent's account."""
+    c = conf()
+    if not c.api_key:
+        raise Unavailable("CEREBRAS_API_KEY is not set")
+    return CerebrasProvider(account(c), model=model or c.model, name=TEXT_BRAIN, vision=False)
+
+
+def cerebras_vision(model: str | None = None) -> CerebrasProvider:
+    """The seeing brain (qwen-3.8-27b by default) on the bound agent's account."""
+    c = conf()
+    if not c.api_key:
+        raise Unavailable("CEREBRAS_API_KEY is not set")
+    return CerebrasProvider(account(c), model=model or c.vision_model, name=VISION_BRAIN, vision=True)
+
+
+def hosted(
+    api_key: str,
+    *,
+    vision: bool = False,
+    model: str | None = None,
+    daily_budget: float = DEFAULT_BUDGET,
+    prices: Any = None,
+) -> CerebrasProvider:
+    """A host's own Cerebras brain (neo2.providers): its account, spend and limits live in the
+    object, in memory only (never a file, a global or ~/.neo)."""
+    if not api_key:
+        raise ProviderError("Cerebras needs an API key")
+    c = Conf(api_key=api_key, daily_budget=spend.budget(daily_budget, DEFAULT_BUDGET), prices=spend.prices(prices))
+    return CerebrasProvider(
+        Account(c),
+        model=model or (VISION_MODEL if vision else TEXT_MODEL),
+        name=VISION_BRAIN if vision else TEXT_BRAIN,
+        vision=vision,
+    )
+
+
+async def prewarm() -> bool:
+    """Open the connection to Cerebras before the first step of a screen task needs it (a cold
+    round trip is ~0.9 s of the step). Nothing without a key, after a refusal, or when the
+    connection is still warm; never raises."""
+    try:
+        c = conf()
+        if not c.api_key:
+            return False
+        return await account(c).prewarm()
+    except Exception as e:  # noqa: BLE001 — a warm-up must never fail the task it's for
+        log.info(f"[brain] cerebras prewarm skipped: {type(e).__name__}")
+        return False
+
+
+# ---- where the brains go in a chain ----------------------------------------------------------
+
+_SEEING = frozenset({"gemini", "gemini_lite", "claude"})
+
+
+def with_cerebras(order: Sequence[str | None], purpose: str) -> list[str | None]:
+    """A brain() purpose's order with Cerebras placed as decision 49 says: the text brain right
+    ahead of Groq (no Groq: ahead of the offline brain, else last); for "vision" also the seeing
+    one right ahead of Groq's vision brain (none: right after the seeing brains). "offline" is
+    left alone, and so is an order that already names them. A missing key costs nothing: the
+    chain skips a brain it can't make."""
+    out = list(order)
+    if purpose == "offline":
+        return out
+    if purpose == "vision" and VISION_BRAIN not in out:
+        at = out.index("groq_vision") if "groq_vision" in out else 0
+        if "groq_vision" not in out:
+            while at < len(out) and out[at] in _SEEING:
+                at += 1
+        out.insert(at, VISION_BRAIN)
+    if TEXT_BRAIN not in out:
+        if "groq" in out:
+            out.insert(out.index("groq"), TEXT_BRAIN)
+        elif "local" in out:
+            out.insert(out.index("local"), TEXT_BRAIN)
+        else:
+            out.append(TEXT_BRAIN)
+    return out
+
+
+def status() -> dict[str, Any]:
+    """Today's Cerebras spend, for `python -m neo --doctor` (no network)."""
+    c = conf()
+    if not c.api_key:
+        return {"key": False}
+    a = account(c)
+    r = a.ledger.refusal("account")
+    return {
+        "key": True,
+        "today_usd": round(a.ledger.today(), 4),
+        "budget_usd": a.ledger.daily_budget,
+        "refused": r[0] if r else "",
+    }
