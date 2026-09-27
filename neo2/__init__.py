@@ -20,7 +20,8 @@ to MCP clients.
 
 Everything here is loaded on first use (PEP 562): ``import neo2`` loads only the standard
 library, and ``from neo2 import AsyncAgent`` loads NEO's core without any model, vendor SDK,
-macOS framework or browser.
+macOS framework or browser. NEO's core is :mod:`neo2.core`, the package NEO.app runs
+(``python -m neo2``).
 """
 
 from __future__ import annotations
