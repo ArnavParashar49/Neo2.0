@@ -25,7 +25,7 @@ from neo2.core.agent.prompt import build as build_prompt
 from neo2.core.agent.registry import USERS_WORDS, Origin, ToolContext, ToolOutput, fence, registry, voiced
 from neo2.core.config import settings
 from neo2.core.events import NeoState, bus
-from neo2.core.providers import brain
+from neo2.core.providers import brain, cerebras_hooks
 from neo2.core.providers.base import ImagePart, Message, ToolResult
 from neo2.core.providers.history import (
     OBSERVATIONS,
@@ -226,8 +226,12 @@ class Session:
             token = _conversation.set(conversation)
             if own:
                 reset.append((_conversation, token))
+        cerebras_hooks.prewarm_soon()  # (a paid key only) its connection opens while this is routed
         try:
-            return await self._handle(text, images=images, from_user=from_user, origin=origin)
+            # What Cerebras has to say (80% of today's budget, the budget spent) goes with the reply.
+            return cerebras_hooks.add_spoken_notes(
+                await self._handle(text, images=images, from_user=from_user, origin=origin)
+            )
         finally:
             for var, tok in reversed(reset):
                 var.reset(tok)

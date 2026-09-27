@@ -28,6 +28,7 @@ from neo2.core.providers.base import (
     Turn,
     spoken_name,
 )
+from neo2.core.providers.cerebras_hooks import with_cerebras, with_cerebras_eyes
 
 __all__ = [
     "AllBrainsFailed", "BrainPool", "Chain", "ProviderError", "RateLimited", "brain", "image_limit", "make", "pool",
@@ -115,6 +116,14 @@ def _build(name: BrainName) -> Provider:
         from neo2.core.providers.claude import ClaudeProvider
 
         p = ClaudeProvider()
+    elif name == "cerebras":
+        from neo2.core.providers.cerebras import cerebras
+
+        p = cerebras()
+    elif name == "cerebras_vision":
+        from neo2.core.providers.cerebras import cerebras_vision
+
+        p = cerebras_vision()
     else:
         raise ProviderError(f"unknown brain {name}")
     return p
@@ -161,11 +170,17 @@ class Chain:
     too large, not running — so the task can end with that reason spoken. Demotions are the
     agent's own (its BrainPool), NEO.app's module `_demoted` when nothing is bound — except in a
     chain of a host's own providers that the host calls itself (neo2.providers.Failover, no agent
-    bound): that one keeps them itself and touches nothing of NEO.app's."""
+    bound): that one keeps them itself and touches nothing of NEO.app's.
 
-    def __init__(self, names: Sequence[BrainName | Provider], *, sticky: bool = True) -> None:
+    `eyes`: seeing brains asked only for a step working from a picture, after the chain's own ones
+    that see and ahead of those that can't (Cerebras' seeing model while Gemini is overloaded)."""
+
+    def __init__(
+        self, names: Sequence[BrainName | Provider], *, sticky: bool = True, eyes: Sequence[BrainName] = ()
+    ) -> None:
         self.names = list(names)  # brain names, or provider instances (a host's own), in order
         self.sticky = sticky
+        self.eyes = [n for n in eyes if n not in self.names]
         self.last_used: str = ""
         self.last_model: str = ""
         self._missing: list[tuple[str, ProviderError]] = []
@@ -200,6 +215,19 @@ class Chain:
             out.sort(key=lambda p: _cooling(p) > now)
         return out
 
+    def _eye_brains(self) -> list[Provider]:
+        """The seeing fallbacks that are set up (a missing key: skipped, as in _providers)."""
+        out: list[Provider] = []
+        for n in self.eyes:
+            try:
+                p = make(n)
+            except Exception as e:  # noqa: BLE001 — not set up (no key, no package): it can't look
+                log.info(f"[brain] {n} unavailable: {e}")
+                continue
+            if getattr(p, "supports_vision", False):
+                out.append(p)
+        return out
+
     def _order(self) -> list[BrainName | Provider]:
         if not self.sticky:
             return list(self.names)
@@ -222,7 +250,9 @@ class Chain:
 
     @property
     def supports_vision(self) -> bool:
-        return any(p.supports_vision for p in self._providers())
+        return any(p.supports_vision for p in self._providers()) or any(
+            getattr(p, "supports_vision", False) for p in self._eye_brains()
+        )
 
     @property
     def image_limit(self) -> tuple[int, int] | None:
@@ -244,7 +274,9 @@ class Chain:
         if self._hosts_only():  # no key of NEO's could have been missing
             return AllBrainsFailed(failures + self._missing)
         s = settings()
-        if not pool().overrides and not (s.gemini_api_key or s.groq_api_key or s.anthropic_api_key):
+        if not pool().overrides and not (
+            s.gemini_api_key or s.groq_api_key or s.anthropic_api_key or getattr(s, "cerebras_api_key", "")
+        ):
             return ProviderError(
                 "no API key set — add GEMINI_API_KEY to .env (free at aistudio.google.com/apikey)"
             )
@@ -285,7 +317,7 @@ class Chain:
         failures: list[tuple[str, ProviderError]] = []
         providers = self._providers()
         if _has_picture(messages):
-            providers = _eyes_first(providers)
+            providers = _eyes_first(_with_eyes(providers, self._eye_brains()))
         for p in providers:
             try:
                 turn = _seen_by(
@@ -352,6 +384,21 @@ def _eyes_first(providers: list[Provider]) -> list[Provider]:
     return [providers[k[-1]] for k in sorted(order)]
 
 
+def _with_eyes(providers: list[Provider], eyes: list[Provider]) -> list[Provider]:
+    """`providers` with the seeing fallbacks `eyes` (cloud brains) among the cloud ones: just before
+    a brain on this Mac that comes after a cloud brain (the user's last resort), else last. So
+    _eyes_first asks them after the chain's own brains that see and before those that can't, and
+    never ahead of a brain on this Mac the user put first."""
+    if not eyes:
+        return providers
+    at = len(providers)
+    for i, p in enumerate(providers):
+        if getattr(p, "on_device", False) and any(not getattr(q, "on_device", False) for q in providers[:i]):
+            at = i
+            break
+    return [*providers[:at], *eyes, *providers[at:]]
+
+
 def _has_picture(messages: list[Message]) -> bool:
     """Does the request being worked on carry a picture (a screenshot it took, a photo sent)?"""
     from neo2.core.providers.history import request_start
@@ -368,9 +415,11 @@ def brain(purpose: Purpose = "agent") -> Chain:
         order: list[BrainName | None] = [s.fast_brain, s.brain, s.offline_brain]
     elif purpose == "vision":
         # Only brains that can see the screenshot come first; text-only ones would drop it silently.
-        vision: list[BrainName | None] = [n for n in (s.brain, "gemini", "claude") if n not in ("groq", "local")]
+        vision: list[BrainName | None] = [
+            n for n in (s.brain, "gemini", "claude") if n not in ("groq", "local", "cerebras")
+        ]
         order = vision + [n for n in (s.brain, s.fast_brain, s.offline_brain) if n not in vision]
-        return Chain(_dedupe(order), sticky=False)
+        return Chain(_dedupe(with_cerebras(order, purpose, s)), sticky=False)
     elif purpose == "offline":
         order = [s.offline_brain]
     elif purpose == "light":
@@ -378,7 +427,10 @@ def brain(purpose: Purpose = "agent") -> Chain:
         order = ["gemini_lite", s.fast_brain, s.brain, s.offline_brain]
     else:
         order = [s.brain, s.fast_brain, s.offline_brain]
-    return Chain(_dedupe(order))
+    # Cerebras (a paid key: nothing without one) ahead of Groq, and its seeing model a fallback for
+    # a step working from a picture (never offline's: offline means this Mac).
+    eyes = with_cerebras_eyes((), s) if purpose != "offline" else ()
+    return Chain(_dedupe(with_cerebras(order, purpose, s)), eyes=eyes)
 
 
 def image_limit(purpose: Purpose = "vision") -> tuple[int, int] | None:

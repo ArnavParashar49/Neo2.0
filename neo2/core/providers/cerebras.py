@@ -645,8 +645,8 @@ class CerebrasProvider(OpenAICompatProvider):
         ):
             if isinstance(mine, RateLimited) and mine.retry_after:
                 self._cool_until = time.time() + mine.retry_after
-            return mine
-        return super()._error(e)
+            return _without_key(mine, self.account.conf.api_key)
+        return _without_key(super()._error(e), self.account.conf.api_key)
 
     def _spent(self, usage: Any, f: Fitted, text: str = "") -> None:
         tin = getattr(usage, "prompt_tokens", None)
@@ -735,6 +735,14 @@ class CerebrasProvider(OpenAICompatProvider):
                 raise Truncated(f"{self.name}: no room left for the answer")
         finally:
             await self.account.announce()
+
+
+def _without_key(e: ProviderError, key: str) -> ProviderError:
+    """`e` with the key cut out of its message, should a server have echoed it back: the chain logs
+    a failure's message and a stop message may say it."""
+    if key and any(key in str(a) for a in e.args):
+        e.args = tuple(str(a).replace(key, "[CEREBRAS_API_KEY]") for a in e.args)
+    return e
 
 
 def _stale(e: ProviderError) -> bool:

@@ -34,7 +34,8 @@ __all__ = [
 
 # Hermetic: no test may read the developer's real keys or settings (~/.neo/.env, ./.env).
 Settings.model_config["env_file"] = None
-for _k in ("GEMINI_API_KEY", "GEMINI_API_KEYS", "GROQ_API_KEY", "ANTHROPIC_API_KEY", "NEO_DECIDE_MODES"):
+for _k in ("GEMINI_API_KEY", "GEMINI_API_KEYS", "GROQ_API_KEY", "ANTHROPIC_API_KEY", "CEREBRAS_API_KEY",
+           "NEO_DECIDE_MODES"):  # fmt: skip
     os.environ.pop(_k, None)
 
 from neo2.core.decide import shadow as _shadow  # noqa: E402

@@ -62,6 +62,8 @@ type BMode = "docked" | "focus" | "mini" | "popped";
 function brainName(m: TurnMeta): string {
   if (m.route === "quick") return "quick action · no model";
   const model = m.model || m.brain;
+  // Cerebras serves gpt-oss-120b under the same id Groq's shows after its "openai/" prefix
+  if (m.brain?.startsWith("cerebras")) return `Cerebras ${model}`;
   const pretty = model
     .replace(/^openai\//, "")
     .replace(/^gemini-(\d+\.\d+)-flash$/, "Gemini $1 Flash")

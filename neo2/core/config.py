@@ -37,7 +37,7 @@ def _env_files(root: Path) -> tuple[Path, ...]:
 
 _ENV_FILES = _env_files(PROJECT_ROOT)
 
-BrainName = Literal["gemini", "gemini_lite", "groq", "local", "claude"]
+BrainName = Literal["gemini", "gemini_lite", "groq", "local", "claude", "cerebras", "cerebras_vision"]
 VoiceBackend = Literal["auto", "live", "local", "off"]
 DecideMode = Literal["legacy", "shadow", "on", "off"]
 
@@ -69,6 +69,7 @@ class Settings(BaseSettings):
     )  # extra keys, comma-separated
     groq_api_key: str = Field(default="", validation_alias="GROQ_API_KEY", repr=False)
     anthropic_api_key: str = Field(default="", validation_alias="ANTHROPIC_API_KEY", repr=False)
+    cerebras_api_key: str = Field(default="", validation_alias="CEREBRAS_API_KEY", repr=False)
 
     # ---- brains ----------------------------------------------------------------------
     brain: BrainName = "gemini"  # primary agentic brain
@@ -81,6 +82,22 @@ class Settings(BaseSettings):
     groq_model: str = "openai/gpt-oss-120b"
     local_model: str = "mlx-community/gemma-4-12B-it-4bit"
     claude_model: str = "claude-opus-5"
+    # Cerebras (optional, paid; neo2.core.providers.cerebras): a text brain tried ahead of Groq and a
+    # seeing fallback when Gemini is out, within a daily budget in dollars (0: never used).
+    cerebras_model: str = "gpt-oss-120b"
+    cerebras_vision_model: str = "qwen-3.8-27b"
+    cerebras_daily_budget: float = 0.50
+    cerebras_prices: Annotated[dict[str, Any] | str, NoDecode] = ""
+
+    @field_validator("cerebras_daily_budget", mode="before")
+    @classmethod
+    def _cerebras_budget(cls, v):
+        """"$1.25", " 0.5 " or 2 — and a typo is the default, never a reason not to start."""
+        try:
+            f = float(str(v).strip().lstrip("$"))
+        except (TypeError, ValueError):
+            return 0.50
+        return f if f == f and 0 <= f < float("inf") else 0.50
 
     # ---- reflex ----------------------------------------------------------------------
     reflex: Literal["laya", "lite", "off"] = "laya"
