@@ -11,6 +11,7 @@ from pathlib import Path
 import Quartz as Q
 from PIL import Image
 
+from neo import effects
 from neo.providers.base import ImagePart
 
 _MAX_W = 1600  # keep token cost sane; 14"/16" MBP logical widths are 1512/1728
@@ -25,10 +26,16 @@ def display_points() -> tuple[int, int]:
     return int(b.size.width), int(b.size.height)
 
 
+def _request_access() -> None:
+    """macOS's Screen Recording question (once; after that it points to System Settings)."""
+    effects.guard("permission", "ask macOS for Screen Recording", via=Q.CGRequestScreenCaptureAccess)
+    Q.CGRequestScreenCaptureAccess()
+
+
 def capture(region: tuple[int, int, int, int] | None = None) -> tuple[ImagePart, float]:
     """Return (png image, scale) where scale = points-per-image-pixel."""
     if not can_capture():
-        Q.CGRequestScreenCaptureAccess()
+        _request_access()
         raise PermissionError(
             "Screen Recording permission is off. Enable it for this app in System Settings → "
             "Privacy & Security → Screen Recording, then try again."
@@ -90,7 +97,7 @@ def capture_window(window_id: int, region: tuple[float, float, float, float] | N
     a page without the browser's tabs, say. For looking at it, not for clicking: no coordinates
     come with it."""
     if not can_capture():
-        Q.CGRequestScreenCaptureAccess()
+        _request_access()
         raise PermissionError(
             "Screen Recording permission is off. Enable it for this app in System Settings → "
             "Privacy & Security → Screen Recording, then try again."

@@ -13,6 +13,7 @@ from pathlib import Path
 
 import httpx
 
+from neo import effects
 from neo.config import settings
 
 _proc: subprocess.Popen | None = None
@@ -33,6 +34,7 @@ async def ensure_running(port: int = 8080, model: str | None = None, wait_s: flo
     if await is_up(port):
         return True
     model = model or settings().local_model
+    effects.guard("model", f"start a local model server ({model})")
     log = settings().data_dir / "local_server.log"
     _proc = subprocess.Popen(
         [sys.executable, "-m", "mlx_lm", "server", "--model", model, "--port", str(port)],

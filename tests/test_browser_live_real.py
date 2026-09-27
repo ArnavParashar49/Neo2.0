@@ -16,9 +16,10 @@ from neo.agent.registry import ToolContext, registry
 from neo.events import current_job
 from neo.tools import browser, browser_live
 
-pytestmark = pytest.mark.skipif(
-    os.environ.get("NEO_TEST_RENDER") != "1", reason="real headless Chromium: NEO_TEST_RENDER=1"
-)
+pytestmark = [
+    pytest.mark.skipif(os.environ.get("NEO_TEST_RENDER") != "1", reason="real headless Chromium: NEO_TEST_RENDER=1"),
+    pytest.mark.usefixtures("real_browser"),
+]
 
 FORM = """<!doctype html><title>Form</title><main><h1>Profile</h1>
 <label>Security answer <input id=a name=answer type=text></label><br>

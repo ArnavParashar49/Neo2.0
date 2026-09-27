@@ -19,6 +19,7 @@ import unicodedata
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
+from neo import effects
 from neo.decide._objc import pooled
 
 if TYPE_CHECKING:
@@ -231,7 +232,9 @@ def _matches(phrase: str, c: Any) -> bool:
 
 
 def _store() -> Any:
-    return _cn().CNContactStore.alloc().init()
+    cls = _cn().CNContactStore
+    effects.guard("contacts", "open the user's Contacts", via=cls)
+    return cls.alloc().init()
 
 
 def _by_name(store: Any, phrase: str) -> list[Any]:
