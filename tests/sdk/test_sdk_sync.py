@@ -11,6 +11,8 @@ import neo2
 from neo2 import events as ev
 from neo2.testing import ScriptedBrain, ToolCall, Turn
 
+pytestmark = pytest.mark.portable  # no macOS or extra needed: CI's sdk-core job runs it on Linux too
+
 
 def _wire(calls):
     @neo2.host_tool(risk="destructive")

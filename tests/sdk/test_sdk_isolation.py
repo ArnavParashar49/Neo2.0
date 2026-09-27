@@ -4,8 +4,12 @@ scratch repro behind the SDK: B's user's "yes" ran A's staged wire_money.)"""
 
 from __future__ import annotations
 
+import pytest
+
 import neo2
 from neo2.testing import ScriptedBrain, ToolCall, Turn
+
+pytestmark = pytest.mark.portable  # no macOS or extra needed: CI's sdk-core job runs it on Linux too
 
 
 def _wire(calls: list):

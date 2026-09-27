@@ -31,6 +31,8 @@ from neo2.sdk.approval import ApprovalRequest
 from neo2.sdk.results import ToolOutcome
 from neo2.testing import ScriptedBrain, ToolCall, Turn
 
+pytestmark = pytest.mark.portable  # no macOS or extra needed: CI's sdk-core job runs it on Linux too
+
 ROOT = Path(__file__).resolve().parents[2]
 NAME = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
 PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16

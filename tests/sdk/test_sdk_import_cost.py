@@ -10,6 +10,10 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
+pytestmark = pytest.mark.portable  # no macOS or extra needed: CI's sdk-core job runs it on Linux too
+
 ROOT = Path(__file__).resolve().parents[2]
 HEAVY = (
     "torch",
@@ -95,3 +99,16 @@ def test_a_first_web_request_never_loads_a_model_or_the_mac_frameworks(tmp_path)
     )
     assert got["status"] == ["done", "done"]
     assert got["heavy"] == []
+
+
+def test_the_adapters_and_the_mcp_server_load_on_first_use_without_their_sdks(tmp_path):
+    got = _run(
+        "import sys, json\n"
+        "import neo2\n"
+        "a, m = neo2.adapters, neo2.mcp\n"
+        "import neo2.adapters.openai, neo2.adapters.anthropic, neo2.adapters.gemini, neo2.adapters.langchain\n"
+        f"heavy = [x for x in {(*HEAVY, 'mcp', 'mcp_types', 'langchain_core')!r} if x in sys.modules]\n"
+        "print(json.dumps({'names': [a.__name__, m.__name__], 'heavy': heavy, 'main': callable(m.main)}))\n",
+        tmp_path,
+    )
+    assert got == {"names": ["neo2.adapters", "neo2.mcp"], "heavy": [], "main": True}

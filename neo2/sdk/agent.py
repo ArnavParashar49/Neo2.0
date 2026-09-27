@@ -1083,6 +1083,15 @@ def _tools_for(cfg: AgentConfig) -> list[str]:
         names = [n for n in names if n != "memory"]
     elif "memory" not in names and resolve("memory", cfg.exclude_tools, platform=plat):
         names.append("memory")  # memory on: its tool comes with it (unless excluded)
+    if plat == "darwin" and importlib.util.find_spec("AppKit") is None:  # installed without [mac]
+        from neo.tools import MACOS_ONLY
+
+        asked = [n for n in names if n in MACOS_ONLY and n in explicit]
+        if asked:
+            raise UnsupportedPlatform(
+                f"{', '.join(asked)}: NEO's macOS tools need its [mac] extra (pyobjc), which isn't installed"
+            )
+        names = [n for n in names if n not in MACOS_ONLY]  # "all": left out, not refused
     errors = load(names, platform=plat)
     cat = catalog()
     missing = [n for n in names if cat.get(n) is None]
@@ -1100,7 +1109,7 @@ def _tools_for(cfg: AgentConfig) -> list[str]:
         if "playwright" in req and not has_playwright:
             if n in explicit:
                 raise UnsupportedPlatform(
-                    f"{n} needs NEO's browser: pip install playwright && playwright install chromium"
+                    f"{n} needs NEO's browser: its [browser] extra (playwright), then `playwright install chromium`"
                 )
             continue
         keep.append(n)

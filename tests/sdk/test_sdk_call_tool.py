@@ -3,6 +3,7 @@ that shares one context — so what one call read counts for the next, as in NEO
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import re
 import sys
@@ -13,6 +14,8 @@ import pytest
 import neo2
 from neo.agent import confirm
 from neo2.testing import ScriptedBrain
+
+pytestmark = pytest.mark.portable  # no macOS or extra needed: CI's sdk-core job runs it on Linux too
 
 PAGE = (
     "<html><head><title>Deals</title></head><body><article><h1>Laptop deals</h1>"
@@ -26,6 +29,7 @@ PAGE = (
 @pytest.fixture
 def fake_web(monkeypatch):
     """web_fetch without a network: every host is public, every page is PAGE."""
+    pytest.importorskip("trafilatura")  # web_fetch reads pages with it: the [web] extra
     from neo.security import policy
 
     monkeypatch.setattr(policy, "private_host", lambda url: "")
@@ -207,7 +211,10 @@ async def test_exported_specs_validate(tmp_path):
         assert "injected" not in json.dumps(agent.export_tools("openai_chat"))  # copies, not ours
 
 
-@pytest.mark.skipif(sys.platform != "darwin", reason="NEO's Mac tools register only on macOS")
+@pytest.mark.skipif(
+    sys.platform != "darwin" or importlib.util.find_spec("AppKit") is None,
+    reason="NEO's Mac tools: macOS with the [mac] extra",
+)
 async def test_hidden_tools_are_never_exported_or_callable(tmp_path):
     async with neo2.AsyncAgent(neo2.AgentConfig(tools="mac_read", data_dir=tmp_path / "m"), provider=ScriptedBrain()) as agent:
         assert agent._rt.registry.get("page_read") is None  # not in mac_read at all

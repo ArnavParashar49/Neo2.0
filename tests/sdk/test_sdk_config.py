@@ -14,6 +14,8 @@ from neo import runtime
 from neo2.sdk import agent as agent_mod
 from neo2.testing import ScriptedBrain
 
+pytestmark = pytest.mark.portable  # no macOS or extra needed: CI's sdk-core job runs it on Linux too
+
 
 def test_defaults_are_the_quiet_ones():
     c = neo2.AgentConfig()
@@ -141,6 +143,7 @@ def test_an_agent_needs_a_brain():
 
 
 async def test_named_brains_come_from_the_configs_keys_only(monkeypatch):
+    pytest.importorskip("google.genai")  # the [gemini] extra
     from neo.providers import gemini
 
     keys: list[str] = []
@@ -211,7 +214,29 @@ async def test_the_browser_needs_playwright(monkeypatch):
         assert not any(t.name.startswith("browser_") for t in a.tools)  # "all": left out, not refused
 
 
+async def test_the_mac_tools_need_the_mac_extra(monkeypatch):
+    """macOS without pyobjc (NEO installed without its [mac] extra): asking for a Mac tool names
+    the extra, and "all" leaves the Mac tools out instead of failing to import them."""
+    import importlib.util
+
+    from neo.tools import MACOS_ONLY
+
+    real = importlib.util.find_spec
+    monkeypatch.setattr(agent_mod, "_platform", lambda: "darwin")
+    monkeypatch.setattr(importlib.util, "find_spec", lambda n, *a: None if n == "AppKit" else real(n, *a))
+    with pytest.raises(neo2.UnsupportedPlatform, match=r"\[mac\] extra"):
+        neo2.AsyncAgent(neo2.AgentConfig(tools="mac_read"), provider=ScriptedBrain())
+    with pytest.raises(neo2.UnsupportedPlatform, match=r"^shell: "):
+        neo2.AsyncAgent(neo2.AgentConfig(tools=("web", "shell")), provider=ScriptedBrain())
+    async with neo2.AsyncAgent(neo2.AgentConfig(tools="all"), provider=ScriptedBrain()) as a:
+        names = {t.name for t in a.tools}
+    assert {"web_search", "web_fetch", "weather", "clock"} <= names
+    assert not names & MACOS_ONLY
+
+
 def test_provider_factories_read_no_settings(monkeypatch):
+    for sdk in ("openai", "google.genai", "anthropic"):  # the [brains] extra
+        pytest.importorskip(sdk)
     runtime.set_library_mode()  # any settings() call with no agent bound now raises
     from neo2 import providers
 
@@ -244,7 +269,7 @@ def test_a_missing_vendor_sdk_names_the_extra(monkeypatch):
         return real(name, *a)
 
     monkeypatch.setattr(providers.importlib, "import_module", no_openai)
-    with pytest.raises(providers.ProviderError, match=r"neo2\[openai\]"):
+    with pytest.raises(providers.ProviderError, match=r"\[openai\] extra"):
         providers.Groq("k")
 
 

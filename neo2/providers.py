@@ -57,7 +57,7 @@ def _need(module: str, extra: str) -> Any:
     try:
         return importlib.import_module(module)
     except ImportError as e:
-        raise ProviderError(f"{extra} support isn't installed: pip install 'neo2[{extra}]' ({e})") from None
+        raise ProviderError(f"{extra} support isn't installed: install NEO with its [{extra}] extra ({e})") from None
 
 
 def OpenAICompatible(

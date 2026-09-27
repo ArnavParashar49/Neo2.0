@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import gc
+import importlib.util
 import sys
 import threading
 import time
@@ -15,6 +16,8 @@ import pytest
 
 import neo2
 from neo2.testing import ScriptedBrain, ToolCall, Turn
+
+pytestmark = pytest.mark.portable  # no macOS or extra needed: CI's sdk-core job runs it on Linux too
 
 
 def _wire(calls: list):
@@ -70,7 +73,10 @@ async def test_task_kinds_run_their_legacy_scripts_inside_an_agent(tmp_path):
     assert modes and set(modes[0].values()) == {"legacy"}
 
 
-@pytest.mark.skipif(sys.platform != "darwin", reason="search_site opens the Mac's browser")
+@pytest.mark.skipif(
+    sys.platform != "darwin" or importlib.util.find_spec("AppKit") is None,
+    reason="search_site opens the Mac's browser: macOS with the [mac] extra",
+)
 async def test_search_site_runs_its_legacy_script_and_leaves_no_task_kind_files(tmp_path, monkeypatch):
     from neo.decide import shadow
     from neo.tools.computer import apps

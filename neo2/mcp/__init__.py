@@ -25,7 +25,7 @@ stderr before it imports anything, so a stray print (NEO's, a library's or a chi
 lands on stderr.
 
 This module is standard library only; the server itself (``neo2.mcp.server``) needs the ``mcp``
-package (``mcp>=2,<3``).
+package (``mcp>=2.2,<3``: NEO's ``[mcp]`` extra).
 """
 
 from __future__ import annotations
@@ -168,7 +168,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             from neo2.mcp.server import ServerOptions, run_stdio
         except ImportError as e:
             print(
-                f"neo2.mcp: the MCP server needs the mcp package (pip install 'mcp>=2,<3'): {e}",
+                f"neo2.mcp: the MCP server needs the mcp package, NEO's [mcp] extra (mcp>=2.2,<3): {e}",
                 file=sys.stderr,
             )
             return 2

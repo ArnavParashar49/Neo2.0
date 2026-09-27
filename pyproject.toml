@@ -2,50 +2,19 @@
 name = "neo"
 version = "2.1.0"
 description = "NEO — a free, local-first AI agent for your Mac"
-requires-python = ">=3.11,<3.13"
+requires-python = ">=3.12,<3.13"  # neo/decide uses 3.12 syntax (PEP 695)
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "Arnav Parashar" }]
 dependencies = [
-  # brains
-  "google-genai>=2.20",
-  "openai>=2",
-  "anthropic>=1",
-  # reflex (local decision model)
-  "laya>=0.3",
-  # local voice (Apple Silicon)
-  "mlx-audio; sys_platform == 'darwin'",
-  "mlx-lm; sys_platform == 'darwin'",
-  "misaki[en]; sys_platform == 'darwin'",
-  "vosk",
-  "sounddevice",
-  "soundfile",
-  "silero-vad",            # speech detection (5 s listening window)
-  "torch",                 # Laya, silero
-  "sentence-transformers", # memory + tool-selection embeddings
-  "playwright",            # NEO's own browser tool
-  # macOS control
-  "pyobjc-framework-Cocoa; sys_platform == 'darwin'",
-  "pyobjc-framework-Quartz; sys_platform == 'darwin'",
-  "pyobjc-framework-ApplicationServices; sys_platform == 'darwin'",
-  # calendars, reminders and contacts through the system stores (the same pyobjc release)
-  "pyobjc-framework-EventKit>=12.2,<13; sys_platform == 'darwin'",
-  "pyobjc-framework-Contacts>=12.2,<13; sys_platform == 'darwin'",
-  # tools
-  "pillow",
-  "httpx",
-  "ddgs",
-  "tld",                   # a site's registrable domain (neo.decide.sites)
-  "lxml",                  # a site's own search form / OpenSearch description
-  "trafilatura",
-  "pypdf",
-  "python-dateutil",       # recurring events (RRULE) when a calendar is read by script
-  # core
+  # The core: `import neo2`, an embedded agent (neo2.AsyncAgent / Agent) and NEO's agent loop, with
+  # the weather and clock tools. Everything else is an extra below; NEO.app installs them all
+  # (scripts/install-app.sh: requirements.lock, the `app` extra's exact versions).
   "numpy",
+  "httpx",
   "pydantic>=2",
   "pydantic-settings>=2.7",  # NoDecode (config.py)
   "python-dotenv",
-  "websockets>=13",
 ]
 
 [project.urls]
@@ -57,9 +26,48 @@ LinkedIn = "https://www.linkedin.com/in/arnavparashar49/"
 [project.optional-dependencies]
 dev = ["pytest", "pytest-asyncio", "ruff", "mypy"]
 train = ["datasets"]  # python -m neo.reflex.hf_data (Laya's Hugging Face training rows)
+# brains: a vendor SDK is imported only when its provider is built
+gemini = ["google-genai>=2.20"]
+openai = ["openai>=2"]  # OpenAI, Groq, and any OpenAI-compatible or local server
+claude = ["anthropic>=1"]
+brains = ["neo[gemini,openai,claude]"]
+# tools
+web = ["ddgs", "trafilatura", "pypdf"]  # web_search, web_fetch (pages and PDFs)
+browser = ["playwright"]  # NEO's own browser tool; then: playwright install chromium
+mac = [  # the macOS tools: see, click, type, apps, files, shell, mail, calendar, notes
+  "pyobjc-framework-Cocoa; sys_platform == 'darwin'",
+  "pyobjc-framework-Quartz; sys_platform == 'darwin'",
+  "pyobjc-framework-ApplicationServices; sys_platform == 'darwin'",
+  # calendars, reminders and contacts through the system stores (the same pyobjc release)
+  "pyobjc-framework-EventKit>=12.2,<13; sys_platform == 'darwin'",
+  "pyobjc-framework-Contacts>=12.2,<13; sys_platform == 'darwin'",
+  "pillow",
+  "tld",  # a site's registrable domain (neo.decide.sites)
+  "lxml",  # a site's own search form / OpenSearch description
+  "python-dateutil",  # recurring events (RRULE) when a calendar is read by script
+]
+embeddings = ["sentence-transformers"]  # memory + tool-selection embeddings
+reflex = ["laya>=0.3", "torch"]  # Laya, NEO.app's local decision model
+voice = [  # local voice (Apple Silicon)
+  "mlx-audio; sys_platform == 'darwin'",
+  "misaki[en]; sys_platform == 'darwin'",
+  "vosk",
+  "sounddevice",
+  "soundfile",
+  "silero-vad",  # speech detection (5 s listening window)
+  "torch",  # silero
+]
+local = ["mlx-lm; sys_platform == 'darwin'"]  # python -m neo --local: the offline brain
+server = ["websockets>=13"]  # the overlay's websocket
+mcp = ["mcp>=2.2,<3"]  # python -m neo2.mcp (neo2-mcp)
+langchain = ["langchain-core>=1,<2"]  # neo2.adapters.langchain
+# NEO.app: exactly the dependencies it has always had
+app = ["neo[brains,web,embeddings,reflex,mac,browser,voice,local,server]"]
+all = ["neo[app,mcp,langchain]"]
 
 [project.scripts]
 neo = "neo.main:main"
+neo2-mcp = "neo2.mcp:main"
 
 [build-system]
 requires = ["setuptools>=77"]  # SPDX license expression (PEP 639)
@@ -68,9 +76,15 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 include = ["neo*"]
 
+[tool.setuptools.package-data]
+neo2 = ["py.typed"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+markers = [
+  "portable: runs with the core install alone, on Linux as on macOS (CI's sdk-core job: pytest -m portable)",
+]
 
 [tool.ruff]
 target-version = "py312"

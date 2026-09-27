@@ -73,7 +73,7 @@ _EXPORTS: dict[str, tuple[str, str]] = {
     "NoRuntimeError": ("neo.runtime", "NoRuntimeError"),
     "UnsupportedPlatform": ("neo.runtime", "UnsupportedPlatform"),
 }
-_SUBMODULES = ("events", "providers", "testing", "macos", "sdk")
+_SUBMODULES = ("events", "providers", "testing", "macos", "sdk", "adapters", "mcp")
 
 __all__ = [*_EXPORTS, *_SUBMODULES]
 

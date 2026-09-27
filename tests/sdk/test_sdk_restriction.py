@@ -4,6 +4,7 @@ catalog holds in the same process."""
 
 from __future__ import annotations
 
+import importlib.util
 import sys
 
 import pytest
@@ -12,8 +13,13 @@ import neo2
 from neo.agent.registry import catalog
 from neo2.testing import ScriptedBrain, ToolCall, Turn
 
+pytestmark = pytest.mark.portable  # no macOS or extra needed: CI's sdk-core job runs it on Linux too
+
 WEB = {"web_search", "web_fetch", "weather", "clock"}
-mac_only = pytest.mark.skipif(sys.platform != "darwin", reason="NEO's Mac tools register only on macOS")
+mac_only = pytest.mark.skipif(
+    sys.platform != "darwin" or importlib.util.find_spec("AppKit") is None,
+    reason="NEO's Mac tools: macOS with the [mac] extra",
+)
 
 
 @pytest.fixture
