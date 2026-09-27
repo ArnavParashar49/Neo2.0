@@ -103,9 +103,13 @@ pyobjc-core==12.2.2
 pyobjc-framework-applicationservices==12.2.2
 pyobjc-framework-cocoa==12.2.2
 pyobjc-framework-contacts==12.2.2
+pyobjc-framework-coremedia==12.2.2
+pyobjc-framework-coreml==12.2.2
 pyobjc-framework-coretext==12.2.2
 pyobjc-framework-eventkit==12.2.2
 pyobjc-framework-quartz==12.2.2
+pyobjc-framework-screencapturekit==12.2.2
+pyobjc-framework-vision==12.2.2
 pyparsing==3.3.3
 pypdf==6.19.0
 python-dateutil==2.9.0.post0
