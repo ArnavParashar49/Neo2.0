@@ -3,8 +3,10 @@ refuses every one under pytest: a test fakes the step it needs instead)."""
 
 import os
 
-os.environ.setdefault("NEO_REFLEX", "off")  # never load Laya (1.7 GB) inside the test suite
-os.environ.setdefault("NEO_VOICE", "off")
+# Never Laya (1.7 GB) or the on-device voice inside the suite, whatever the environment says: a test
+# that wants one sets it for itself (monkeypatch.setenv) and fakes the load.
+os.environ["NEO_REFLEX"] = "off"
+os.environ["NEO_VOICE"] = "off"
 
 from pathlib import Path
 
@@ -27,9 +29,6 @@ __all__ = [
 Settings.model_config["env_file"] = None
 for _k in ("GEMINI_API_KEY", "GEMINI_API_KEYS", "GROQ_API_KEY", "ANTHROPIC_API_KEY", "NEO_DECIDE_MODES"):
     os.environ.pop(_k, None)
-
-if os.environ.get("NEO_TEST_RENDER") == "1":  # the one real check: a headless Chromium reading a public page
-    effects.allow("browser", "network")
 
 from neo.decide import shadow as _shadow  # noqa: E402
 
@@ -93,6 +92,14 @@ def _no_shadow_dry_runs(monkeypatch):
         facts.close()
 
     monkeypatch.setattr(_shadow, "later", drop)
+
+
+@pytest.fixture
+def real_browser():
+    """The one real check (NEO_TEST_RENDER=1, which skips the tests asking for this otherwise): a
+    headless Chromium and the public page it reads, for that test only."""
+    with effects.allow("browser", "network"):
+        yield
 
 
 @pytest.fixture

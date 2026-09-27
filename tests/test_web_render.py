@@ -815,8 +815,6 @@ def test_a_browser_that_will_not_start_is_not_retried_at_once(browser):
 
 
 def test_the_suite_never_starts_a_real_browser():
-    if os.environ.get("NEO_TEST_RENDER") == "1":
-        pytest.skip("the real browser is on for this run")
     with pytest.raises(effects.EffectRefused, match="Chromium"):
         asyncio.run(render._start_playwright())
 
@@ -827,7 +825,7 @@ def test_the_suite_never_starts_a_real_browser():
 @pytest.mark.skipif(
     os.environ.get("NEO_TEST_RENDER") != "1", reason="real headless Chromium: NEO_TEST_RENDER=1"
 )
-def test_a_real_script_built_page_is_read():
+def test_a_real_script_built_page_is_read(real_browser):
     async def go():
         try:
             fetched = await web.web_fetch({"url": "https://quotes.toscrape.com/js/"}, ToolContext())

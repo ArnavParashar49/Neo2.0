@@ -71,9 +71,11 @@ class LocalVoice:
         from mlx_audio.stt.utils import load as stt_load
         from mlx_audio.tts.utils import load_model as tts_load
 
-        from neo import models
+        from neo import effects, models
 
+        effects.guard("model", f"load the speech-to-text model ({s.stt_model}) into memory", via=stt_load)
         self._stt = stt_load(models.local_path(s.stt_model))  # pinned revisions for the defaults
+        effects.guard("model", f"load the text-to-speech model ({s.tts_model}) into memory", via=tts_load)
         self._tts = tts_load(models.local_path(s.tts_model))
         try:
             from silero_vad import VADIterator, load_silero_vad

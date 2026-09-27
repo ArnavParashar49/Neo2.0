@@ -30,8 +30,9 @@ def load_encoder(encoder: str, device: str):
     """The pinned Laya checkpoint for `encoder` ("multilingual" | "english")."""
     import laya
 
-    from neo import models
+    from neo import effects, models
 
+    effects.guard("model", f"load Laya's {encoder} checkpoint into memory", via=laya.load)
     # fp16 autocast never beat fp32 on the M3 Pro at any row count (neither did compile or fast=True,
     # which stay off); laya would switch it on at 5 rows.
     os.environ.setdefault("LAYA_MPS_AMP_MIN_ROWS", "1000000")
