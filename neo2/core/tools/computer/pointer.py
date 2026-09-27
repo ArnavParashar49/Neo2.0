@@ -35,7 +35,7 @@ import re
 import secrets
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -385,6 +385,45 @@ def set_grid_check(fn: GridCheck | None) -> None:
     _grid_check = fn
 
 
+# A board's squares (form "cell"): the board helper looks at the board right before the input — still
+# where NEO found it, else refused (nothing is done) — and says after it what changed on the board,
+# in square names only. ``before(aims)`` → a state (raises to refuse); ``after(state)`` → (words,
+# changed: None = couldn't tell).
+CellBefore = Callable[[list["Aim"]], Awaitable[Any]]
+CellAfter = Callable[[Any], Awaitable[tuple[str, "bool | None"]]]
+_cell_before: CellBefore | None = None
+_cell_after: CellAfter | None = None
+
+
+def set_cell_checks(before: CellBefore | None, after: CellAfter | None) -> None:
+    global _cell_before, _cell_after
+    _cell_before, _cell_after = before, after
+
+
+async def _cells_before(aims: list[Aim]) -> Any:
+    """The board helper's look right before an input on its squares (None: no square in it)."""
+    if _cell_before is None or not any(w.form == "cell" for w in aims):
+        return None
+    try:
+        return await _cell_before(aims)
+    except Refused:
+        raise
+    except Exception as e:  # noqa: BLE001 - the helper's refusal (a BoardError…) or its failure: nothing is done
+        raise _helper_error(e) from None
+
+
+async def _cells_after(state: Any, text: str, ok: bool) -> tuple[str, bool]:
+    """The board helper's words after the input (NEO's own: square names), and ok unless it saw the
+    board unchanged."""
+    if state is None or _cell_after is None:
+        return text, ok
+    try:
+        said, changed = await _cell_after(state)
+    except Exception:  # noqa: BLE001 - the words are a help: the result stands without them
+        return text, ok
+    return (text + "\n" + said if said else text), ok and changed is not False
+
+
 @dataclass
 class Aim:
     """Where one end of an input goes (screen points) and how the call said it."""
@@ -397,6 +436,7 @@ class Aim:
     pid: int = 0  # its app's process (form "id")
     owner: str = ""  # its app's name (form "id")
     labels: list[str] = field(default_factory=list)  # a helper's mark's own words (form "mark"): for the gate
+    cell: str = ""  # a board square's name as the call gave it (form "cell")
 
     @property
     def numbers(self) -> bool:
@@ -563,7 +603,7 @@ def _cell(a: dict, key: str, blind: bool) -> Aim:
     except Exception as e:  # noqa: BLE001 - the helper's refusal (a BoardError…) or its failure: nothing is done
         raise _helper_error(e) from None
     _on_screen([(x, y)], blind=blind, what=f"square {name}")
-    return Aim((x, y), "cell", shot, f"square {name}")
+    return Aim((x, y), "cell", shot, f"square {name}", cell=name)
 
 
 async def aim(a: dict, ctx: ToolContext, tool: str = "click", end: str = "") -> Aim | None:
@@ -1398,6 +1438,7 @@ async def click_tool(a: dict, c: ToolContext):
         # A point nothing could be told about before now shows something: judged like the rest.
         if t.relabeled and (gate := await g._gate_click(a, [(t.hits[0].label, t.hits[0].app)])):
             return gate
+        cells = await _cells_before([where])  # (a board's square: the board still where NEO found it)
     except Refused as r:
         return g._refused(c, r)
     h = t.hits[0]
@@ -1410,7 +1451,8 @@ async def click_tool(a: dict, c: ToolContext):
     before = await g._watch(c, pid, pts, hover=pts[0])
     await asyncio.to_thread(inp.click, *pts[0], button=button, count=count, mods=mods)
     if before is None:
-        return with_effect(ToolOutput(head + g._input_doubt()), effect_of(None))
+        text, ok = await _cells_after(cells, head + g._input_doubt(), True)
+        return with_effect(ToolOutput(text, ok=ok), effect_of(None))
     spot = _spot(where, pts[0], blind_ctx)
     out = await outcome(before, pid, pts, [spot], settle=wants_after_look(c, [where]))
     if not at_the_point(h, where.pictured):
@@ -1419,6 +1461,7 @@ async def click_tool(a: dict, c: ToolContext):
     if snapped is not None:
         under.append(snapped.words())
     text, ok = report(head, out, under, g._input_doubt())
+    text, ok = await _cells_after(cells, text, ok)
     if any(under) or out.details:
         g._taint(c, "screen")
     return await _finish(c, ToolOutput(text, ok=ok), out, [where], pts, h)
@@ -1455,6 +1498,7 @@ async def drag_tool(a: dict, c: ToolContext):
             await bring(t, pts, blind=blind_ctx)
             if t.relabeled and (gate := await g._gate_drop(a, t)):
                 return gate
+        cells = await _cells_before(ends)  # (a board's squares: the board still where NEO found it)
     except Refused as r:
         return g._refused(c, r)
     src, dst = t.hits
@@ -1472,7 +1516,8 @@ async def drag_tool(a: dict, c: ToolContext):
         head += f" (brought {t.brought} to the front first)"
     head += "."
     if before is None:
-        return with_effect(ToolOutput(head + g._input_doubt()), effect_of(None))
+        text, ok = await _cells_after(cells, head + g._input_doubt(), True)
+        return with_effect(ToolOutput(text, ok=ok), effect_of(None))
     out = await outcome(
         before, pid, pts, [f"the start {starts}", f"the end {stops}"], between_apps, settle=wants_after_look(c, ends)
     )
@@ -1483,6 +1528,7 @@ async def drag_tool(a: dict, c: ToolContext):
         )
     under = [f"start {words(src)}" if words(src) else "", f"end {words(dst)}" if words(dst) else ""]
     text, ok = report(head, out, under, g._input_doubt())
+    text, ok = await _cells_after(cells, text, ok)
     if any(under) or out.details:
         g._taint(c, "screen")
     return await _finish(c, ToolOutput(text, ok=ok), out, ends, pts, src)

@@ -47,7 +47,7 @@ from neo2.core.tools.computer import input as inp  # noqa: F401
 # comes before click_text: its fast paths claim only words that name a menu ("click New Window in the
 # File menu"), which click_text's generic "click X" would otherwise take.
 ORDER: tuple[str, ...] = (
-    "ax_tree", "ax_find", "screenshot", "look", "apps_running", "ax_press", "ax_set_value", "click", "drag",
+    "ax_tree", "ax_find", "screenshot", "map_board", "look", "apps_running", "ax_press", "ax_set_value", "click", "drag",
     "scroll", "type_text", "dictate", "hotkey", "menu_command", "click_text", "open_app", "activate_app",
     "quit_app", "close", "applescript", "open_url", "page_read", "safari_read",
     # (the task tools, neo2/core/tools/tasks.py, come here)

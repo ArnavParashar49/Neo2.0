@@ -5,11 +5,24 @@ in gates.py."""
 from __future__ import annotations
 
 import asyncio
+import io
 import math
 
 from neo2.core.agent import confirm
 from neo2.core.agent.registry import ToolContext, ToolOutput
-from neo2.core.tools.computer import apps, ax, focus, gates, marks, ocr, phrases, pointer, screen, tools_ax
+from neo2.core.tools.computer import (
+    apps,
+    ax,
+    board,
+    focus,
+    gates,
+    marks,
+    ocr,
+    phrases,
+    pointer,
+    screen,
+    tools_ax,
+)
 from neo2.core.tools.computer._catalog import _p, tool
 
 SCREENSHOT_PARAMS = _p(
@@ -32,7 +45,8 @@ SCREENSHOT_PARAMS = _p(
     "screenshot",
     pointer.SCREENSHOT_DESCRIPTION
     + " By default it is the front window of the app NEO works in (app: another app's); zoom with x,y (and "
-    "w,h) for a close look at small things.",
+    "w,h) for a close look at small things. "
+    + board.SCREENSHOT_WORDS,
     SCREENSHOT_PARAMS,
     category="computer",
     slow=True,
@@ -133,6 +147,14 @@ async def screenshot(a: dict, c: ToolContext) -> ToolOutput:
         )  # fmt: skip
         if tm:
             gates._taint(c, "screen")
+    # A board or grid in the picture (on evidence: the window's part drawn in one piece): its squares
+    # by name, so a move is "cell e2" and NEO computes the point (board.py). NEO's own words only.
+    shot = None
+    board_note = ""
+    if cap.clickable:
+        shot = pointer.remember(cap.x0, cap.y0, cap.ppp, cap.w, cap.h, covered=getattr(cap, "covered", ()))
+        if not zoom:
+            board_note = await asyncio.to_thread(_board_note, cap, shot, collected, blind)
     if blind:
         # A brain that can't see gets no picture's numbers in any form (no mapping, no sizes, no
         # places): what the picture holds, by element id only.
@@ -141,7 +163,8 @@ async def screenshot(a: dict, c: ToolContext) -> ToolOutput:
             "act on: use the element ids below, or ax_tree's (click id=…, ax_press), or tell the user the model "
             "that can see the screen is busy."
         )
-        return ToolOutput(text + marks.for_shot(collected, None, c) + ocr.marks_block(tm, None, blind=True), images=[cap.part], fence=False)
+        text += marks.for_shot(collected, None, c) + ocr.marks_block(tm, None, blind=True)
+        return ToolOutput(text + (f"\n{board_note}" if board_note else ""), images=[cap.part], fence=False)
     if not cap.clickable:
         # The window server's bounds didn't match the picture (a shadow, a window that moved, one
         # off screen): no mapping to click through — for looking at only.
@@ -150,11 +173,45 @@ async def screenshot(a: dict, c: ToolContext) -> ToolOutput:
             "place to click, take a screenshot of the display or a region)."
         )
         return ToolOutput(text + marks.for_shot(collected, None, c), images=[cap.part], fence=False)
-    shot = pointer.remember(cap.x0, cap.y0, cap.ppp, cap.w, cap.h, covered=getattr(cap, "covered", ()))
     # NEO's own words (the mapping) aren't fenced; the picture is what came from the screen, and so
     # are the controls' labels (fenced by marks.for_shot, which taints the request).
     text = pointer.note(shot, what, others) + marks.for_shot(collected, shot, c) + ocr.marks_block(tm, shot, blind=False)
-    return ToolOutput(text, images=[cap.part], fence=False)
+    return ToolOutput(text + (f"\n{board_note}" if board_note else ""), images=[cap.part], fence=False)
+
+
+def _board_note(cap, shot: pointer.Shot, collected: marks.Collected, blind: bool) -> str:
+    """The screenshot note's board part (board.look): on the picture the model gets, with the
+    window's part drawn in one piece as the evidence (from the marks' walk: no second walk), and no
+    board read under an open sheet or dialog. "" when there is nothing to say or it can't be told."""
+    try:
+        from PIL import Image
+
+        img = Image.open(io.BytesIO(cap.part.data))
+        img.load()
+        pic = board.Picture.from_shot(img.convert("RGB"), shot)
+        win = collected.window if collected.pid else None
+        canvas = board.canvas_area(win, collected.frames) if win is not None else None
+        return board.look(
+            pic, shot=shot.id, blind=blind, sheet=bool(collected.blocker), area=canvas or win,
+            canvas=canvas is not None, window=win,
+        )  # fmt: skip
+    except Exception:  # noqa: BLE001 - the board's words are a help, never the screenshot's failure
+        return ""
+
+
+@tool(
+    "map_board",
+    board.MAP_BOARD_DESCRIPTION,
+    board.MAP_BOARD_PARAMS,
+    category="computer",
+    untrusted=True,
+    read_only=True,
+)
+async def map_board(a: dict, c: ToolContext) -> ToolOutput:
+    """A board NEO couldn't find itself, from a seeing model's four corners (refined and checked), or
+    which side a side's pieces start on. Changes nothing on the screen: no event, no AX action."""
+    text, ok = await asyncio.to_thread(board.map_board, a, blind=bool(c.get("blind")))
+    return ToolOutput(text, ok=ok, fence=False)
 
 
 async def _working_window(asked: str) -> tuple[int, str, int] | None:
@@ -205,12 +262,17 @@ def _at(x: float, y: float) -> str:
 # snapped, gated again, brought forward and looked at after), calling the gates through this package.
 
 
-@tool("click", pointer.CLICK_DESCRIPTION, pointer.CLICK_PARAMETERS, category="computer", quiet=True)
+def _with(params: dict, extra: dict) -> dict:
+    """A tool's parameters with a helper's own (a board's squares) added."""
+    return {**params, "properties": {**params["properties"], **extra}}
+
+
+@tool("click", pointer.CLICK_DESCRIPTION, _with(pointer.CLICK_PARAMETERS, board.CELL_ARG), category="computer", quiet=True)
 async def click(a: dict, c: ToolContext) -> str | ToolOutput:
     return await pointer.click_tool(a, c)
 
 
-@tool("drag", pointer.DRAG_DESCRIPTION, pointer.DRAG_PARAMETERS, category="computer", quiet=True)
+@tool("drag", pointer.DRAG_DESCRIPTION, _with(pointer.DRAG_PARAMETERS, board.DRAG_CELL_ARGS), category="computer", quiet=True)
 async def drag(a: dict, c: ToolContext) -> str | ToolOutput:
     return await pointer.drag_tool(a, c)
 
@@ -218,7 +280,7 @@ async def drag(a: dict, c: ToolContext) -> str | ToolOutput:
 @tool(
     "scroll",
     pointer.SCROLL_DESCRIPTION,
-    pointer.SCROLL_PARAMETERS,
+    _with(pointer.SCROLL_PARAMETERS, board.CELL_ARG),
     category="computer",
     fast_path=phrases._SCROLL,
     quiet=True,
@@ -230,3 +292,66 @@ async def scroll(a: dict, c: ToolContext) -> str | ToolOutput:
 # Text marks (words read off the screen, ids t…) are clicked and dragged like any element id, their
 # words judged by the click gate with what is under the point.
 ocr.install()
+
+
+# ---- a board's squares (board.py through the pointer's seams) ------------------------------------------
+# click cell="e2" / drag from="e2" to="e4": the board helper gives the square's point (a brain that
+# can't see gets squares only on a board NEO found itself), nothing snaps inside a board, the board is
+# looked at right before the input (still where NEO found it, else nothing is done) and after it (what
+# changed, in square names). Every gate, protected-app and sheet check of the pointer runs as for any point.
+
+
+def _cell_point(cell: str, shot, *, blind: bool) -> tuple[float, float]:
+    a = {"cell": cell, **({"shot": shot.id} if shot is not None else {})}
+    pts, _b, _names = board.points_for(a, ("cell",), blind=blind, displays=screen.displays())
+    return pts[0]
+
+
+def _on_a_board(x: float, y: float) -> bool:
+    b = board.latest()
+    if b is None:
+        return False
+    rx, ry, rw, rh = board.region(b, 0.0)
+    return rx <= x < rx + rw and ry <= y < ry + rh
+
+
+def _board_picture(b: board.Board) -> board.Picture:
+    """The board's area now, captured the same way before and after an input (halved on Retina: a
+    board's look is the same at any scale)."""
+    frame = screen.grab(board.region(b))
+    img, ppp = frame.image, frame.ppp
+    if ppp < 0.99:
+        k = max(1, round(1 / ppp))
+        img, ppp = img.reduce(k), ppp * k
+    return board.Picture.of(img.convert("RGB"), frame.x0, frame.y0, ppp)
+
+
+async def _board_before(aims: list[pointer.Aim]) -> tuple[board.Board, str, str] | None:
+    if pointer._cell_resolver is not _cell_point:
+        return None  # (the squares came from another resolver — a test's — not this board helper)
+    cells = [w for w in aims if w.form == "cell"]
+    a = {"cell": cells[0].cell, **({"shot": cells[0].shot.id} if cells[0].shot is not None else {})}
+    _pts, b, _names = board.points_for(a, ("cell",))
+    names = [b.name(*b.parse(w.cell)) for w in cells]
+    try:
+        pic = await asyncio.to_thread(_board_picture, b)
+    except Exception:  # noqa: BLE001 - no picture now: a board NEO can't check is never acted on
+        raise board.BoardError(
+            "Error: NEO couldn't look at the board just now, so it can't check it's still where it was — nothing "
+            "was done; take a screenshot first."
+        ) from None
+    board.before_move(b, pic)  # (the board still where NEO found it, else BoardError: nothing is done)
+    frm = names[0] if len(names) > 1 else ""
+    return b, frm, names[-1]
+
+
+async def _board_after(state: tuple[board.Board, str, str]) -> tuple[str, bool | None]:
+    b, frm, to = state
+    pic = await asyncio.to_thread(_board_picture, b)
+    m = board.after_move(b, pic, frm, to)
+    return m.said, m.changed
+
+
+pointer.set_cell_resolver(_cell_point)
+pointer.set_grid_check(_on_a_board)
+pointer.set_cell_checks(_board_before, _board_after)

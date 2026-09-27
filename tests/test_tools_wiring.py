@@ -295,3 +295,112 @@ def test_the_users_words_naming_no_control_may_name_a_menu_command(monkeypatch):
     assert out.text == "Chose Game › New Game" and asked == [("start a new game", "user")]
     out = asyncio.run(tools_label.click_text(a, ToolContext(origin="agent")))  # a model's label: no menu guess
     assert len(asked) == 1 and "is called" in out
+
+
+# ---- eyes-board ----------------------------------------------------------------------------------------
+
+
+class _Board:
+    window = None
+
+    def parse(self, name):
+        return ("abcdefgh".index(name[0]), 8 - int(name[1]))
+
+    def name(self, col, row):
+        return f"{'abcdefgh'[col]}{8 - row}"
+
+
+def test_squares_go_through_the_board_helper_and_its_checks(monkeypatch):
+    from neo2.core.tools.computer import board
+
+    b = _Board()
+    monkeypatch.setattr(pointer, "_cell_resolver", tools_pointer._cell_point)
+    monkeypatch.setattr(board, "points_for", lambda a, keys, **k: ([(100.0, 200.0)], b, [a["cell"]]))
+    monkeypatch.setattr(tools_pointer, "_board_picture", lambda bb: "pic")
+    seen = []
+    monkeypatch.setattr(board, "before_move", lambda bb, pic, **k: seen.append(("before", pic)))
+    monkeypatch.setattr(board, "after_move", lambda bb, pic, frm="", to="", **k: board.Move(f"On the board: {frm}→{to}.", True))
+    aims = [pointer.Aim((1.0, 2.0), "cell", None, "square e2", cell="e2"), pointer.Aim((3.0, 4.0), "cell", None, "square e4", cell="e4")]
+    state = asyncio.run(pointer._cells_before(aims))
+    assert seen == [("before", "pic")] and state == (b, "e2", "e4")
+    text, ok = asyncio.run(pointer._cells_after(state, "Dragged e2 → e4.", True))
+    assert ok and text.endswith("On the board: e2→e4.")
+
+    def stale(bb, pic, **k):
+        raise board.BoardError("Error: the board isn't where NEO last saw it — take a new screenshot first; nothing was done.")
+
+    monkeypatch.setattr(board, "before_move", stale)
+    with pytest.raises(pointer.Refused, match="isn't where NEO last saw it"):
+        asyncio.run(pointer._cells_before(aims[:1]))  # (nothing is posted)
+    monkeypatch.setattr(board, "after_move", lambda bb, pic, frm="", to="", **k: board.Move("Nothing changed on the board.", False))
+    assert asyncio.run(pointer._cells_after((b, "", "e4"), "Clicked.", True)) == ("Clicked.\nNothing changed on the board.", False)
+
+
+def test_a_board_that_cannot_be_looked_at_is_never_acted_on(monkeypatch):
+    from neo2.core.tools.computer import board
+
+    monkeypatch.setattr(pointer, "_cell_resolver", tools_pointer._cell_point)
+    monkeypatch.setattr(board, "points_for", lambda a, keys, **k: ([(100.0, 200.0)], _Board(), [a["cell"]]))
+
+    def no_picture(b):
+        raise PermissionError("no Screen Recording")
+
+    monkeypatch.setattr(tools_pointer, "_board_picture", no_picture)
+    with pytest.raises(pointer.Refused, match="nothing was done"):
+        asyncio.run(pointer._cells_before([pointer.Aim((1.0, 2.0), "cell", None, "square e2", cell="e2")]))
+
+
+def test_the_screenshot_note_names_a_boards_squares(shots, monkeypatch):
+    from neo2.core.tools.computer import marks
+
+    async def collect(area, ctx=None, *, pid=0, deadline_s=0.8):
+        return marks.Collected(app="Pages", pid=pid, window=(10.0, 20.0, 800.0, 600.0), frames=[(10.0, 60.0, 800.0, 560.0, "AXGroup")])
+
+    looked = []
+    monkeypatch.setattr(marks, "collect", collect)
+    monkeypatch.setattr(tools_pointer, "_board_note", lambda cap, shot, col, blind: looked.append((col.frames, blind)) or "Board: squares a1–h8.")
+    monkeypatch.setattr(apps, "target", lambda: "Pages")
+    out = _run({})
+    assert out.text.endswith("Board: squares a1–h8.") and looked == [([(10.0, 60.0, 800.0, 560.0, "AXGroup")], False)]
+    out = asyncio.run(tools_pointer.screenshot({}, ToolContext(origin="agent", extras={"blind": True})))
+    assert out.text.endswith("Board: squares a1–h8.") and looked[-1][1] is True
+
+
+def test_map_board_is_a_read_only_tool_that_acts_on_nothing():
+    from neo2.core.agent.registry import catalog
+    from neo2.core.tools import PRESETS, load_all
+    from neo2.mcp.server import INPUT_TOOLS
+
+    load_all()
+    t = catalog().get("map_board")
+    assert t is not None and t.read_only and "map_board" not in INPUT_TOOLS
+    assert "map_board" in PRESETS["mac"] and "map_board" in PRESETS["mac_read"]
+    for name, key in (("click", "cell"), ("scroll", "cell"), ("drag", "from"), ("drag", "to")):
+        assert key in catalog().get(name).parameters["properties"], (name, key)
+
+
+def test_a_real_flat_board_in_the_picture_the_model_gets_is_named_without_coordinates():
+    import io
+    import re
+
+    from eyes_board_synth import flat_screen
+
+    from neo2.core.tools.computer import board, marks
+
+    board.forget()
+    img, truth = flat_screen()
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=85)  # (as the model gets it)
+    cap = SimpleNamespace(part=ImagePart(buf.getvalue(), "image/jpeg"))
+    shot = pointer.remember(0.0, 0.0, 1.0, img.width, img.height)
+    col = marks.Collected(app="Game", pid=4242, window=(0.0, 0.0, 1512.0, 982.0), frames=[])
+    try:
+        for blind in (False, True):
+            note = tools_pointer._board_note(cap, shot, col, blind)
+            assert "8×8" in note and 'cell="<square>"' in note, note
+            assert not re.search(r"\(\d+(?:\.\d+)?,\s*\d+", note)  # no points in any form
+        (x, y) = tools_pointer._cell_point("e2", shot, blind=True)
+        bx, by, bw, bh = truth["board"]
+        assert bx <= x <= bx + bw and by <= y <= by + bh  # the square's point, computed by NEO
+    finally:
+        board.forget()

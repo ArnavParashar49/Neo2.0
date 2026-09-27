@@ -80,6 +80,9 @@ class Collected:
     marks: list[Mark] = field(default_factory=list)
     more: int = 0  # elements left off the list
     refused: str = ""  # why nothing is listed: "protected", "Accessibility is off", "slow" (not in time)
+    # Every walked element's frame and role (screen points: x, y, w, h, role): where a window is drawn
+    # in one piece with no accessible parts (the board helper's canvas evidence — never a second walk).
+    frames: list[tuple[float, float, float, float, str]] = field(default_factory=list)
 
 
 # Ids issued for marks lately (an input "by mark" gets the picture after it).
@@ -390,7 +393,8 @@ def collect_sync(
         chosen, more = pick(els, area, window=window, blocked=blocked, limit=limit)
         _remember([m.id for m in chosen])  # (an input by one of these gets the picture after it)
         kind = next(iter(set(blocked.values())), "")
-        return Collected(name, pid, title, window, kind, chosen, more)
+        frames = [(e.x, e.y, e.w, e.h, e.role) for e in els]
+        return Collected(name, pid, title, window, kind, chosen, more, frames=frames)
     except Exception:  # noqa: BLE001 - marks are a help, never a failure of the look
         return Collected()
 

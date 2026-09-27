@@ -68,6 +68,9 @@ async def forget_everything() -> dict[str, int]:
             from neo2.core.tools.computer import resolve
 
             resolve.forget()  # the resolver's picks and handoffs kept for scoring (memory only)
+            from neo2.core.tools.computer import board
+
+            board.forget()  # boards seen on the screen, and their pictures (memory only)
         except ImportError:  # (no macOS frameworks)
             pass
     from neo2.core.decide.kinds import schedule
