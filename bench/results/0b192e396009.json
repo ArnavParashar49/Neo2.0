@@ -1,7 +1,7 @@
 {
  "schema": 1,
- "sha": "fec394e24687",
- "when": "2026-09-27T21:14:20",
+ "sha": "0b192e396009",
+ "when": "2026-09-27T21:25:42",
  "python": "3.12.14",
  "params": {
   "ax_latency_ms": [
@@ -60,26 +60,26 @@
    "brings": 0,
    "ok": true,
    "worked": true,
-   "said": "Screenshot s5-eb5d attached (all of display 1: 1512×982 pt at (0,0)); the image is 1512×982 px. To act on something in it, give its pixel position in this image",
+   "said": "Screenshot s5-95d8 attached (all of display 1: 1512×982 pt at (0,0)); the image is 1512×982 px. To act on something in it, give its pixel position in this image",
    "slept_in": [],
-   "py_ms_p50": 67.83,
-   "py_ms_p90": 670.59,
+   "py_ms_p50": 66.93,
+   "py_ms_p90": 686.67,
    "steady": true,
    "modeled_ms": {
     "cli": {
-     "0.05": 268.4,
-     "0.15": 269.6,
-     "0.5": 273.8,
-     "0.9": 278.6
+     "0.05": 267.5,
+     "0.15": 268.7,
+     "0.5": 272.9,
+     "0.9": 277.7
     },
     "sck": {
-     "0.05": 168.4,
-     "0.15": 169.6,
-     "0.5": 173.8,
-     "0.9": 178.6
+     "0.05": 167.5,
+     "0.15": 168.7,
+     "0.5": 172.9,
+     "0.9": 177.7
     }
    },
-   "neo_ms": 269.6,
+   "neo_ms": 268.7,
    "target": {
     "p0": 250,
     "p1": 120
@@ -97,26 +97,26 @@
    "brings": 0,
    "ok": true,
    "worked": true,
-   "said": "Screenshot s10-eb5d attached (region 900×800 pt at screen (360,90)); the image is 900×800 px. To act on something in it, give its pixel position in this image w",
+   "said": "Screenshot s10-95d8 attached (region 900×800 pt at screen (360,90)); the image is 900×800 px. To act on something in it, give its pixel position in this image w",
    "slept_in": [],
-   "py_ms_p50": 60.21,
-   "py_ms_p90": 61.1,
+   "py_ms_p50": 58.57,
+   "py_ms_p90": 60.61,
    "steady": true,
    "modeled_ms": {
     "cli": {
-     "0.05": 260.8,
-     "0.15": 262.0,
-     "0.5": 266.2,
-     "0.9": 271.0
+     "0.05": 259.2,
+     "0.15": 260.4,
+     "0.5": 264.6,
+     "0.9": 269.4
     },
     "sck": {
-     "0.05": 160.8,
-     "0.15": 162.0,
-     "0.5": 166.2,
-     "0.9": 171.0
+     "0.05": 159.2,
+     "0.15": 160.4,
+     "0.5": 164.6,
+     "0.9": 169.4
     }
    },
-   "neo_ms": 262.0,
+   "neo_ms": 260.4,
    "target": {
     "p0": 250,
     "p1": 120
@@ -134,23 +134,23 @@
    "brings": 0,
    "ok": true,
    "worked": true,
-   "said": "Screenshot s15-eb5d attached (a zoom on 768×512 px of 240×160 pt around screen (400,130)); the image is 768×512 px. To act on something in it, give its pixel po",
+   "said": "Screenshot s15-95d8 attached (a zoom on 768×512 px of 240×160 pt around screen (400,130)); the image is 768×512 px. To act on something in it, give its pixel po",
    "slept_in": [],
-   "py_ms_p50": 5.65,
-   "py_ms_p90": 5.75,
+   "py_ms_p50": 5.64,
+   "py_ms_p90": 5.77,
    "steady": true,
    "modeled_ms": {
     "cli": {
      "0.05": 206.2,
      "0.15": 207.4,
-     "0.5": 211.7,
+     "0.5": 211.6,
      "0.9": 216.4
     },
     "sck": {
      "0.05": 106.2,
-     "0.15": 107.5,
-     "0.5": 111.7,
-     "0.9": 116.5
+     "0.15": 107.4,
+     "0.5": 111.6,
+     "0.9": 116.4
     }
    },
    "neo_ms": 207.4,
@@ -177,24 +177,24 @@
     "neo2.core.tools.computer.pointer:sleep",
     "neo2.core.tools.computer.wait:_sleep_sync"
    ],
-   "py_ms_p50": 5.02,
-   "py_ms_p90": 22.83,
+   "py_ms_p50": 5.23,
+   "py_ms_p90": 23.33,
    "steady": true,
    "modeled_ms": {
     "cli": {
-     "0.05": 679.4,
-     "0.15": 688.7,
-     "0.5": 721.2,
-     "0.9": 758.4
+     "0.05": 679.6,
+     "0.15": 688.9,
+     "0.5": 721.4,
+     "0.9": 758.6
     },
     "sck": {
-     "0.05": 479.4,
-     "0.15": 488.7,
-     "0.5": 521.2,
-     "0.9": 558.4
+     "0.05": 479.6,
+     "0.15": 488.9,
+     "0.5": 521.4,
+     "0.9": 558.6
     }
    },
-   "neo_ms": 688.7,
+   "neo_ms": 688.9,
    "target": {
     "p0": 550,
     "p1": 250
@@ -219,8 +219,8 @@
     "neo2.core.tools.computer.pointer:sleep",
     "neo2.core.tools.computer.wait:_sleep_sync"
    ],
-   "py_ms_p50": 6.46,
-   "py_ms_p90": 6.75,
+   "py_ms_p50": 6.51,
+   "py_ms_p90": 7.52,
    "steady": true,
    "modeled_ms": {
     "cli": {
@@ -260,21 +260,21 @@
     "neo2.core.tools.computer.pointer:sleep",
     "neo2.core.tools.computer.wait:_sleep_sync"
    ],
-   "py_ms_p50": 9.42,
-   "py_ms_p90": 9.95,
+   "py_ms_p50": 9.48,
+   "py_ms_p90": 9.59,
    "steady": true,
    "modeled_ms": {
     "cli": {
      "0.05": 1112.2,
      "0.15": 1118.3,
-     "0.5": 1139.6,
-     "0.9": 1164.0
+     "0.5": 1139.7,
+     "0.9": 1164.1
     },
     "sck": {
      "0.05": 912.2,
      "0.15": 918.3,
-     "0.5": 939.6,
-     "0.9": 964.0
+     "0.5": 939.7,
+     "0.9": 964.1
     }
    },
    "neo_ms": 1118.3,
@@ -295,14 +295,14 @@
    "brings": 0,
    "ok": true,
    "worked": true,
-   "said": "Scrolled down 5 at (785,496) in Safari. Changed: the screen changed around (785, 496). After-look s35-eb5d attached (1100×800 pt at screen (120,70)); the image ",
+   "said": "Scrolled down 5 at (785,496) in Safari. Changed: the screen changed around (785, 496). After-look s35-95d8 attached (1100×800 pt at screen (120,70)); the image ",
    "slept_in": [
     "neo2.core.tools.computer.pointer:before",
     "neo2.core.tools.computer.pointer:sleep",
     "neo2.core.tools.computer.wait:_sleep_sync"
    ],
-   "py_ms_p50": 13.54,
-   "py_ms_p90": 14.31,
+   "py_ms_p50": 13.52,
+   "py_ms_p90": 14.05,
    "steady": true,
    "modeled_ms": {
     "cli": {
@@ -341,8 +341,8 @@
     "neo2.core.tools.computer.pointer:sleep",
     "neo2.core.tools.computer.wait:_sleep_sync"
    ],
-   "py_ms_p50": 0.53,
-   "py_ms_p90": 13.68,
+   "py_ms_p50": 0.54,
+   "py_ms_p90": 11.76,
    "steady": true,
    "modeled_ms": {
     "cli": {
@@ -381,8 +381,8 @@
     "neo2.core.tools.computer.pointer:sleep",
     "neo2.core.tools.computer.wait:_sleep_sync"
    ],
-   "py_ms_p50": 1.06,
-   "py_ms_p90": 1.25,
+   "py_ms_p50": 1.15,
+   "py_ms_p90": 1.27,
    "steady": true,
    "modeled_ms": {
     "cli": {
@@ -418,24 +418,24 @@
    "worked": true,
    "said": "Pressed e83 (Button 'Options…') Changed: a sheet or dialog opened. <untrusted source=\"screen\"> now showing a sheet “Options” “Options” (buttons: Done) </untrust",
    "slept_in": [],
-   "py_ms_p50": 1.13,
-   "py_ms_p90": 1.23,
+   "py_ms_p50": 1.16,
+   "py_ms_p90": 1.22,
    "steady": true,
    "modeled_ms": {
     "cli": {
-     "0.05": 2.8,
-     "0.15": 6.2,
-     "0.5": 18.1,
-     "0.9": 31.7
+     "0.05": 2.9,
+     "0.15": 6.3,
+     "0.5": 18.2,
+     "0.9": 31.8
     },
     "sck": {
-     "0.05": 2.8,
-     "0.15": 6.2,
-     "0.5": 18.1,
-     "0.9": 31.7
+     "0.05": 2.9,
+     "0.15": 6.3,
+     "0.5": 18.2,
+     "0.9": 31.8
     }
    },
-   "neo_ms": 6.2,
+   "neo_ms": 6.3,
    "target": {
     "p0": 450,
     "p1": 200
@@ -455,8 +455,8 @@
    "worked": true,
    "said": "Pressed e136 (CheckBox 'Remember me') Changed: the element changed.",
    "slept_in": [],
-   "py_ms_p50": 1.1,
-   "py_ms_p90": 1.14,
+   "py_ms_p50": 1.07,
+   "py_ms_p90": 1.13,
    "steady": true,
    "modeled_ms": {
     "cli": {
@@ -494,8 +494,8 @@
    "slept_in": [
     "neo2.core.tools.computer.wait:_sleep_sync"
    ],
-   "py_ms_p50": 0.56,
-   "py_ms_p90": 0.91,
+   "py_ms_p50": 0.58,
+   "py_ms_p90": 0.93,
    "steady": true,
    "modeled_ms": {
     "cli": {
@@ -531,24 +531,24 @@
    "worked": true,
    "said": "App: Safari — window \"Front\" e729 Window \"Front\" @(120,70 1100x800) e730 Button \"Tool 0\" @(130,80 32x28) e731 Button \"Tool 1\" @(170,80 32x28) e732 Button \"Tool ",
    "slept_in": [],
-   "py_ms_p50": 1.84,
-   "py_ms_p90": 1.99,
+   "py_ms_p50": 1.92,
+   "py_ms_p90": 1.94,
    "steady": true,
    "modeled_ms": {
     "cli": {
-     "0.05": 16.2,
-     "0.15": 44.9,
-     "0.5": 145.3,
-     "0.9": 260.1
+     "0.05": 16.3,
+     "0.15": 45.0,
+     "0.5": 145.4,
+     "0.9": 260.2
     },
     "sck": {
-     "0.05": 16.2,
-     "0.15": 44.9,
-     "0.5": 145.3,
-     "0.9": 260.1
+     "0.05": 16.3,
+     "0.15": 45.0,
+     "0.5": 145.4,
+     "0.9": 260.2
     }
    },
-   "neo_ms": 44.9,
+   "neo_ms": 45.0,
    "target": {
     "p0": 200,
     "p1": 150,
@@ -571,21 +571,21 @@
    "slept_in": [
     "ax:multi"
    ],
-   "py_ms_p50": 0.14,
-   "py_ms_p90": 0.24,
+   "py_ms_p50": 0.16,
+   "py_ms_p90": 0.21,
    "steady": true,
    "modeled_ms": {
     "cli": {
      "0.05": 1500.2,
      "0.15": 1500.3,
-     "0.5": 1500.6,
-     "0.9": 1501.0
+     "0.5": 1500.7,
+     "0.9": 1501.1
     },
     "sck": {
      "0.05": 1500.2,
      "0.15": 1500.3,
-     "0.5": 1500.6,
-     "0.9": 1501.0
+     "0.5": 1500.7,
+     "0.9": 1501.1
     }
    },
    "neo_ms": 1500.3,
@@ -610,24 +610,24 @@
    "slept_in": [
     "neo2.core.tools.computer.wait:_sleep_sync"
    ],
-   "py_ms_p50": 3.67,
-   "py_ms_p90": 3.8,
+   "py_ms_p50": 3.58,
+   "py_ms_p90": 3.75,
    "steady": true,
    "modeled_ms": {
     "cli": {
-     "0.05": 527.7,
-     "0.15": 576.5,
-     "0.5": 747.3,
-     "0.9": 942.5
+     "0.05": 527.6,
+     "0.15": 576.4,
+     "0.5": 747.2,
+     "0.9": 942.4
     },
     "sck": {
-     "0.05": 527.7,
-     "0.15": 576.5,
-     "0.5": 747.3,
-     "0.9": 942.5
+     "0.05": 527.6,
+     "0.15": 576.4,
+     "0.5": 747.2,
+     "0.9": 942.4
     }
    },
-   "neo_ms": 576.5,
+   "neo_ms": 576.4,
    "target": {
     "p0": 200,
     "p1": 120,
@@ -648,8 +648,8 @@
    "worked": true,
    "said": "Hit(pid=501, app='Safari', label='Tool 3', role='AXButton', regular=True, sheet='', el=<AXButton 'Tool 3'>, window=<AXWindow 'Front'>)",
    "slept_in": [],
-   "py_ms_p50": 0.13,
-   "py_ms_p90": 0.21,
+   "py_ms_p50": 0.14,
+   "py_ms_p90": 0.2,
    "steady": true,
    "modeled_ms": {
     "cli": {
@@ -729,11 +729,11 @@
     "posted": 8,
     "brings": 0,
     "acted": 2,
-    "py_ms": 146.85
+    "py_ms": 149.89
    },
-   "neo_s": 1.703,
+   "neo_s": 1.706,
    "model_s": 36.0,
-   "modeled_s": 37.7,
+   "modeled_s": 37.71,
    "answer": "Moved e2 to e4.",
    "targets": {
     "round_trips": 2,
@@ -822,11 +822,11 @@
     "posted": 8,
     "brings": 1,
     "acted": 4,
-    "py_ms": 151.03
+    "py_ms": 141.87
    },
-   "neo_s": 1.721,
+   "neo_s": 1.712,
    "model_s": 96.0,
-   "modeled_s": 97.72,
+   "modeled_s": 97.71,
    "answer": "Moved e2 to e4.",
    "targets": {
     "round_trips": 4
@@ -898,7 +898,7 @@
     "posted": 3,
     "brings": 0,
     "acted": 1,
-    "py_ms": 30.02
+    "py_ms": 30.1
    },
    "neo_s": 0.792,
    "model_s": 25.0,
@@ -974,7 +974,7 @@
     "posted": 3,
     "brings": 0,
     "acted": 1,
-    "py_ms": 9.45
+    "py_ms": 9.62
    },
    "neo_s": 0.772,
    "model_s": 25.0,
@@ -1019,7 +1019,7 @@
     "posted": 0,
     "brings": 0,
     "acted": 1,
-    "py_ms": 3.28
+    "py_ms": 3.03
    },
    "neo_s": 0.006,
    "model_s": 0,
@@ -1066,7 +1066,7 @@
     "posted": 0,
     "brings": 0,
     "acted": 1,
-    "py_ms": 2.47
+    "py_ms": 2.51
    },
    "neo_s": 0.01,
    "model_s": 0,
@@ -1133,7 +1133,7 @@
     "posted": 0,
     "brings": 0,
     "acted": 1,
-    "py_ms": 6.74
+    "py_ms": 6.38
    },
    "neo_s": 0.018,
    "model_s": 15.0,
@@ -1180,7 +1180,7 @@
     "posted": 0,
     "brings": 0,
     "acted": 1,
-    "py_ms": 2.95
+    "py_ms": 3.19
    },
    "neo_s": 0.01,
    "model_s": 0,
@@ -1227,7 +1227,7 @@
     "posted": 0,
     "brings": 0,
     "acted": 0,
-    "py_ms": 1.89
+    "py_ms": 1.97
    },
    "neo_s": 0.006,
    "model_s": 0,
@@ -1274,7 +1274,7 @@
     "posted": 0,
     "brings": 0,
     "acted": 0,
-    "py_ms": 1.09
+    "py_ms": 1.23
    },
    "neo_s": 0.005,
    "model_s": 0,
@@ -1343,7 +1343,7 @@
     "posted": 0,
     "brings": 0,
     "acted": 2,
-    "py_ms": 5.06
+    "py_ms": 5.26
    },
    "neo_s": 0.019,
    "model_s": 20.0,
@@ -1391,7 +1391,7 @@
     "posted": 2,
     "brings": 1,
     "acted": 1,
-    "py_ms": 54.04
+    "py_ms": 54.15
    },
    "neo_s": 0.056,
    "model_s": 0,
@@ -1452,7 +1452,7 @@
     "posted": 0,
     "brings": 0,
     "acted": 0,
-    "py_ms": 2.48
+    "py_ms": 2.4
    },
    "neo_s": 0.002,
    "model_s": 24.0,
@@ -1517,7 +1517,7 @@
     "posted": 0,
     "brings": 0,
     "acted": 1,
-    "py_ms": 4.55
+    "py_ms": 4.72
    },
    "neo_s": 0.016,
    "model_s": 15.0,
