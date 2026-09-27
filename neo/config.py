@@ -37,7 +37,7 @@ class Settings(BaseSettings):
     @classmethod
     def settings_customise_sources(
         cls, settings_cls, init_settings, env_settings, dotenv_settings, file_secret_settings
-    ):  # noqa: ANN001, ANN206 - pydantic-settings' own signature
+    ):  # pydantic-settings calls it with these, by name
         """With effects off (a test, a scratch script run with NEO_NO_EFFECTS=1), never the .env
         files: ~/.neo/.env holds the user's real API keys."""
         if effects.why_off():
