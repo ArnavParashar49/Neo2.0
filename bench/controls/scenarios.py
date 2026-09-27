@@ -20,6 +20,9 @@ name only when ``click`` takes a ``cell``, skips its checking screenshot only wh
 result came with a picture, sends several actions in one turn only when the prompt says it may,
 starts without a look only when the request already carries one, and uses ``menu_command`` only
 when that tool is offered. So round trips fall when NEO's code offers these, and not before.
+
+The scripted reflex gives each request the scenario's intent and screen need, and a tool only where
+the scenario models Laya's tool head naming one (``Scenario.tool``: the menu command).
 """
 
 from __future__ import annotations
@@ -580,6 +583,10 @@ class Scenario:
     note: str = ""
     targets: dict[str, Any] = field(default_factory=dict)  # the plan's per-task targets (round trips)
     last_app: str = ""  # the app NEO last worked in (a moment ago): "" — none
+    # The tool Laya's tool head names for the request, and how sure it is (the bench's reflex runs no
+    # model: this is the scenario's model of it). "" — none named, as for most requests.
+    tool: str = ""
+    tool_p: float = 0.0
 
 
 def _moved(*mv: tuple[str, str]) -> Callable[[World, dict], bool]:
@@ -730,6 +737,10 @@ SCENARIOS: list[Scenario] = [
     Scenario(
         "menu_command", "start a new game", lambda: board_world(),
         lambda w: menu_policy(), _new_game, intent="quick_action", targets={"round_trips": 0},
+        tool="menu_command", tool_p=0.95,
+        note="Laya's tool head names menu_command (the lane the plan routes menu commands to), and the lane grounds "
+             "New Game in the words itself; with no tool named, nothing in the words points at a control "
+             "and a model is asked",
     ),
     Scenario(
         "open_and_type", "open Notes and type hello", lambda: world(lambda w: big_app(), lambda w: notes_app(), front="Safari"),
