@@ -11,12 +11,16 @@ alone, never from the user's data: "भेजें" is the OS's "Send", "नय
   of each takes about 11 s; loading every table twice through the frameworks' links, ~47 s).
   Library mode (NEO embedded in another app) never scans.
 * **An app's own tables** (its ``.loctable`` and ``.lproj/*.strings``) are read on first contact
-  (:func:`for_pid`, a few ms) and kept in RAM only: they aren't the OS's, so never written down.
+  and kept in RAM only: they aren't the OS's, so never written down. Only near the top of the
+  bundle's Resources and within a bound (a big app's Resources hold tens of thousands of files); an
+  app with none is remembered, so the next contact costs nothing. Callers ask for them only when
+  there are words in another script to read (:func:`for_pid`).
 * **The confirmation gate** reads it through ``neo.security.policy``'s back-translation hook, which
   this module registers on import: a Hindi "भेजें" is gated as the "Send" it is. Until the index is
   built, :func:`ready` is False and :func:`readable` says no for a label in a script NEO can't read
   back into English: the paths that press things by themselves fail closed on it (they ask, or hand
-  the choice to the model) instead of guessing.
+  the choice to the model) instead of guessing. A text of several sentences is readable only when
+  every one of them is (one known sentence says nothing about the next).
 
 Screen text is only ever looked up here, never obeyed: a lookup returns the OS's strings.
 """
@@ -55,6 +59,7 @@ __all__ = [
     "non_latin",
     "ready",
     "english_sources",
+    "exact_sources",
     "localized",
     "readable",
     "os_match",
@@ -85,6 +90,9 @@ _MAX_TABLE = 64 << 20  # a table bigger than this isn't UI text
 _APPS_KEPT = 8  # app bundles' tables kept in RAM
 _APP_MAX_FILES = 400
 _APP_MAX_BYTES = 32 << 20
+_APP_MAX_DEPTH = 1  # an app's own UI tables sit in its Resources or one folder down, never deeper
+_APP_MAX_ENTRIES = 3000  # files and folders looked at in one bundle's Resources, at most
+_EMPTY_KEPT = 256  # app bundles remembered as having no tables to read
 _SYSTEM_VERSION = "/System/Library/CoreServices/SystemVersion.plist"
 
 
@@ -178,6 +186,7 @@ class Index:
 
 _system: Index | None = None  # the OS's index, once loaded or built
 _apps: OrderedDict[str, Index] = OrderedDict()  # app bundle path → its own tables (RAM only)
+_no_tables: OrderedDict[str, None] = OrderedDict()  # app bundles with nothing to read (not walked again)
 _apps_lock = threading.Lock()
 
 
@@ -196,6 +205,15 @@ def _indexes() -> list[Index]:
     with _apps_lock:
         mine = list(reversed(_apps.values()))  # the app contacted last first
     return mine + ([_system] if _system is not None else [])
+
+
+def exact_sources(text: str) -> tuple[str, ...]:
+    """The English strings the OS (or an app contacted lately) translates as ``text``, exactly as it
+    is: never pieced together from some of its sentences. () for Latin-script text."""
+    if not text or not non_latin(text):
+        return ()
+    key = norm(text)
+    return tuple(dict.fromkeys(s for ix in _indexes() for s in ix.back.get(key, ())))[:24]
 
 
 def english_sources(text: str) -> tuple[str, ...]:
@@ -228,9 +246,10 @@ def localized(english: str) -> tuple[str, ...]:
 
 
 def readable(text: str) -> bool:
-    """Can NEO read this label in English - it's in Latin script, or the OS says what it is? A path
-    that presses something by itself asks instead when it can't (fail closed)."""
-    return not non_latin(text) or bool(english_sources(text))
+    """Can NEO read this label or text in English - it's in Latin script, or the OS says what it is
+    (the whole of it, or every sentence of it)? A path that presses something by itself asks instead
+    when it can't (fail closed)."""
+    return not policy.unread(text, lookup=exact_sources)
 
 
 def os_match(request: str, label: str) -> bool:
@@ -248,7 +267,7 @@ def os_match(request: str, label: str) -> bool:
 
 
 # The gate reads localized labels through this (neo.security.policy.commits): data handed over.
-policy.use_back_translations(english_sources)
+policy.use_back_translations(english_sources, whole=exact_sources)
 
 
 # ---- reading string tables ---------------------------------------------------------------------------
@@ -370,12 +389,22 @@ def _add(pairs: dict[str, set[str]], en_tab: dict[str, str], loc_tabs: dict[str,
                 pairs.setdefault(en, set()).add(loc)
 
 
-def _tables(roots: Iterable[str], suffix: str = ".loctable") -> Iterator[str]:
+def _tables(
+    roots: Iterable[str], suffix: str = ".loctable", *, max_depth: int | None = None, max_entries: int | None = None
+) -> Iterator[str]:
     """Every string table under the roots, once each (links are not followed: a framework's
-    Versions/Current is the same files again)."""
+    Versions/Current is the same files again). ``max_depth``: folders below a root walked into;
+    ``max_entries``: files and folders looked at in all, after which the walk stops."""
     seen: set[tuple[int, int]] = set()
+    looked = 0
     for root in roots:
-        for d, _dirs, files in os.walk(root):
+        base = root.rstrip(os.sep).count(os.sep)
+        for d, dirs, files in os.walk(root):
+            looked += len(files) + len(dirs)
+            if max_entries is not None and looked > max_entries:
+                return
+            if max_depth is not None and d.rstrip(os.sep).count(os.sep) - base >= max_depth:
+                dirs[:] = []  # (pruned: os.walk goes no deeper)
             for f in files:
                 if not f.endswith(suffix):
                     continue
@@ -456,7 +485,7 @@ def _bundle_pairs(path: str, langs: tuple[str, ...], max_len: int = MAX_LEN) -> 
     if not res.is_dir():
         return pairs
     files, budget = 0, _APP_MAX_BYTES
-    for table in _tables([str(res)]):
+    for table in _tables([str(res)], max_depth=_APP_MAX_DEPTH, max_entries=_APP_MAX_ENTRIES):
         files += 1
         if files > _APP_MAX_FILES or budget <= 0:
             return pairs
@@ -485,7 +514,8 @@ def _bundle_pairs(path: str, langs: tuple[str, ...], max_len: int = MAX_LEN) -> 
 
 
 def for_bundle(path: str) -> Index | None:
-    """The app bundle's own UI strings (read once, kept in RAM among the last few apps)."""
+    """The app bundle's own UI strings (read once, kept in RAM among the last few apps; a bundle
+    with none is remembered as such, so it is never walked again)."""
     if not path:
         return None
     key = os.path.realpath(path)
@@ -493,6 +523,9 @@ def for_bundle(path: str) -> Index | None:
         if key in _apps:
             _apps.move_to_end(key)
             return _apps[key]
+        if key in _no_tables:
+            _no_tables.move_to_end(key)
+            return Index(langs=LANGS)
     try:
         ix = Index.of(_bundle_pairs(key, LANGS), langs=LANGS)
     except OSError:
@@ -501,6 +534,10 @@ def for_bundle(path: str) -> Index | None:
         _apps[key] = ix
         while len(_apps) > _APPS_KEPT:
             _apps.popitem(last=False)
+        if not len(ix):
+            _no_tables[key] = None
+            while len(_no_tables) > _EMPTY_KEPT:
+                _no_tables.popitem(last=False)
     return ix
 
 
@@ -516,7 +553,8 @@ def _bundle_path(pid: int) -> str:
 
 
 def for_pid(pid: int) -> Index | None:
-    """The running app's own UI strings, on first contact (a few ms; later from RAM)."""
+    """The running app's own UI strings, on first contact (a few ms for most apps, and bounded for
+    a big one; later from RAM). Ask for them only when there are words in another script to read."""
     return for_bundle(_bundle_path(pid)) if pid else None
 
 

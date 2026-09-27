@@ -19,13 +19,16 @@ from neo.security import policy
 
 @pytest.fixture(autouse=True)
 def _clean_index():
-    before, apps = U._system, dict(U._apps)
+    before, apps, empty = U._system, dict(U._apps), dict(U._no_tables)
     U.install(None)
     U._apps.clear()
+    U._no_tables.clear()
     yield
     U.install(before)
     U._apps.clear()
     U._apps.update(apps)
+    U._no_tables.clear()
+    U._no_tables.update(empty)
 
 
 def _table(path: Path, body: dict) -> Path:
@@ -219,3 +222,55 @@ async def test_the_idle_loop_builds_once_neo_is_idle(monkeypatch):
 
     await asyncio.wait_for(asyncio.gather(U.idle_loop(lambda: idle["now"], idle_s=0, poll_s=0.01), flip()), 2)
     assert len(built) == 1 and U.ready() and callable(built[0]["busy"])
+
+
+# ---- review fixes ------------------------------------------------------------------------------------------
+
+
+def test_readable_needs_every_sentence_read(tmp_path):
+    """One sentence the OS knows doesn't make a sheet readable: the next one might say what's lost."""
+    U.install(U.Index.of({"Choose the players.": ["खिलाड़ी चुनें।"], "New Game": ["नया गेम"]}, "t"))
+    assert U.readable("खिलाड़ी चुनें।") and U.readable("नया गेम")
+    assert not U.readable("खिलाड़ी चुनें। आपकी सारी प्रगति मिट जाएगी।")  # the second: no English
+    assert not U.readable("नया गेम खिलाड़ी चुनें।")  # two strings joined with a space: no one string
+
+
+def test_an_apps_tables_are_found_without_walking_its_whole_bundle(tmp_path, monkeypatch, capsys):
+    """Hermetic: a bundle whose Resources hold thousands of files in deep folders (a big office
+    app's) and no Hindi at all. The first contact reads only near the top, within a bound; an app
+    with no tables is remembered, so the next contact costs nothing (after the RAM cache let it go)."""
+    import time
+
+    app = tmp_path / "Big.app"
+    res = app / "Contents" / "Resources"
+    _table(res / "Localizable.loctable", {"en": {"n": "New Round"}, "hi": {"n": "नया राउंड"}})
+    for d in range(60):
+        deep = res / f"pack{d}" / "a" / "b" / "c"
+        deep.mkdir(parents=True)
+        for f in range(40):
+            (deep / f"f{f}.dat").write_bytes(b"x")
+    _table(res / "pack0" / "a" / "b" / "c" / "Deep.loctable", {"en": {"d": "Deep"}, "hi": {"d": "गहरा"}})
+    seen = []
+    real_walk = os.walk
+
+    def walk(top, *a, **k):
+        for d, dirs, files in real_walk(top, *a, **k):
+            seen.append(len(files) + len(dirs))
+            yield d, dirs, files
+
+    monkeypatch.setattr(U.os, "walk", walk)
+    t0 = time.perf_counter()
+    ix = U.for_bundle(str(app))
+    first_ms = (time.perf_counter() - t0) * 1000
+    assert ix is not None and U.english_sources("नया राउंड") == ("New Round",)
+    assert U.english_sources("गहरा") == ()  # too deep to be the app's own UI tables: never walked to
+    assert sum(seen) <= U._APP_MAX_ENTRIES + 64, sum(seen)
+    empty = tmp_path / "NoTables.app" / "Contents" / "Resources"
+    for d in range(3):
+        (empty / f"d{d}").mkdir(parents=True)
+    assert len(U.for_bundle(str(tmp_path / "NoTables.app"))) == 0
+    U._apps.clear()  # the RAM cache let it go (other apps used since)
+    monkeypatch.setattr(U, "_bundle_pairs", lambda *a, **k: pytest.fail("walked again"))
+    assert len(U.for_bundle(str(tmp_path / "NoTables.app"))) == 0
+    with capsys.disabled():
+        print(f"\n[bench] first contact with a 2,400-file bundle: {first_ms:.1f} ms, {sum(seen)} entries looked at")

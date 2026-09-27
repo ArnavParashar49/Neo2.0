@@ -109,9 +109,10 @@ def test_sheet_consequence(text, loses):
 
 def test_sheet_consequence_reads_hindi_through_its_english():
     hi = "इस क्रिया को पहले जैसा नहीं किया जा सकता है।"
-    assert not policy.sheet_consequence(hi)
-    policy.use_back_translations(lambda t: {hi: ["This action cannot be undone."]}.get(t, []))
-    assert policy.sheet_consequence(hi)
+    ok = "खिलाड़ी चुनें।"
+    assert policy.sheet_consequence(hi) and policy.sheet_consequence(ok)  # nothing reads them yet: asked (fail closed)
+    policy.use_back_translations(lambda t: {hi: ["This action cannot be undone."], ok: ["Choose the players."]}.get(t, []))
+    assert policy.sheet_consequence(hi) and not policy.sheet_consequence(ok)
 
 
 def test_policy_stays_pure_stdlib():
@@ -156,3 +157,80 @@ def test_the_os_hindi_forms_of_commit_labels_are_gated():
         assert len(benign) >= 100
     finally:
         uistrings.install(before)
+
+
+# ---- review fixes: words read piece by piece, and what nothing reads fails closed ----------------------------
+
+_HI = {
+    "ठीक है": ["OK"],
+    "निर्यात करें": ["Export"],
+    "हटाएँ": ["Delete"],
+    "सभी आइटम हटाएँ": ["Delete All Items"],
+    "इसे पूर्ववत नहीं किया जा सकता।": ["This can't be undone."],
+    "आपके बदलाव सहेजे गए।": ["Your changes were saved."],
+    "खिलाड़ी चुनें।": ["Choose the players."],
+}
+
+
+def test_a_joined_menu_path_is_read_part_by_part():
+    """A submenu command is gated with its path: a joined Hindi path is no one string the OS has,
+    so each part is read back on its own ("Export › Delete" asks; so must its Hindi)."""
+    policy.use_back_translations(lambda t: _HI.get(t, []))
+    assert policy.commits("Export › Delete")
+    assert policy.commits("निर्यात करें › हटाएँ")
+    assert "Delete" in policy.back_translations("निर्यात करें › हटाएँ")
+    assert not policy.commits("निर्यात करें")
+
+
+def test_a_localized_ok_in_a_dialog_is_read_text_by_text_and_fails_closed():
+    policy.use_back_translations(lambda t: _HI.get(t, []))
+    joined = "सभी आइटम हटाएँ इसे पूर्ववत नहीं किया जा सकता।"  # a title and a text, joined with a space
+    assert policy.commits("ठीक है", joined)  # no one string reads it: asked (fail closed)
+    assert policy.commits("ठीक है", ["सभी आइटम हटाएँ", "इसे पूर्ववत नहीं किया जा सकता।"])  # each part read
+    assert not policy.commits("ठीक है", ["आपके बदलाव सहेजे गए।"])  # read, and harmless
+    assert policy.commits("ठीक है", ["आपके बदलाव सहेजे गए।", "आपकी सारी प्रगति मिट जाएगी।"])  # one part unread
+    assert not policy.commits("OK", ["Your changes were saved."]) and policy.commits("OK", ["Saved.", "This can't be undone."])
+
+
+def test_a_sheet_nothing_can_read_counts_as_saying_something_ends():
+    hi = "इस क्रिया को पहले जैसा नहीं किया जा सकता है।"
+    assert policy.sheet_consequence(hi)  # no back-translations: can't tell, so yes (fail closed)
+    policy.use_back_translations(lambda t: _HI.get(t, []))
+    assert not policy.sheet_consequence(["खिलाड़ी चुनें।"])
+    assert policy.sheet_consequence(["खिलाड़ी चुनें।", "आपकी सारी प्रगति मिट जाएगी।"])  # the second sentence: unread
+    assert policy.sheet_consequence("खिलाड़ी चुनें। आपकी सारी प्रगति मिट जाएगी।")
+    assert not policy.sheet_consequence(["Start a New Game?", "खिलाड़ी चुनें।"])
+    assert not policy.sheet_consequence("Café au lait?")  # Latin with accents is English-readable
+
+
+def test_unread_names_foreign_words_nothing_reads():
+    assert not policy.unread("New Game") and not policy.unread("Réglages…")
+    assert policy.unread("नया गेम")  # nothing registered
+    policy.use_back_translations(lambda t: _HI.get(t, []))
+    assert not policy.unread("हटाएँ") and not policy.unread("निर्यात करें › हटाएँ")
+    assert policy.unread("खिलाड़ी चुनें। आपकी सारी प्रगति मिट जाएगी।") and not policy.unread("खिलाड़ी चुनें।")
+
+
+def test_the_click_gate_reads_the_dialog_behind_a_localized_ok():
+    """The click gate reads a dialog's words only behind a plain OK (policy._GENERIC_OK): a Hindi
+    "ठीक है" is that OK, so a Hindi delete dialog behind it asks, as the English one does."""
+    from neo.agent import confirm
+    from neo.tools import computer as comp
+    from neo.tools.computer import ax
+
+    def static(*texts):
+        return [ax.Element(f"s{i}", "AXStaticText", "", t, 0, 0, 1, 1) for i, t in enumerate(texts)]
+
+    policy.use_back_translations(lambda t: _HI.get(t, []))
+    confirm.cancel("test setup")
+    try:
+        assert policy._GENERIC_OK.match("ठीक है") and policy._GENERIC_OK.match("OK") and not policy._GENERIC_OK.match("हटाएँ")
+        assert policy._GENERIC_OK.pattern.startswith("^")  # still the regex for everything else it's asked
+        gate = comp._ask_before_click("click", {"id": "e9"}, "ठीक है", "Some App", static("सभी आइटम हटाएँ", "इसे पूर्ववत नहीं किया जा सकता।"))
+        assert gate and gate.startswith("NEEDS_CONFIRM")
+        confirm.cancel("next")
+        assert comp._ask_before_click("click", {"id": "e9"}, "ठीक है", "Some App", static("आपके बदलाव सहेजे गए।")) is None
+        gate = comp._ask_before_click("click", {"id": "e9"}, "OK", "Some App", static("Delete All Items", "This can't be undone."))
+        assert gate and gate.startswith("NEEDS_CONFIRM")
+    finally:
+        confirm.cancel("test over")

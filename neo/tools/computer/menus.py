@@ -6,24 +6,32 @@ the strict rules below. Anything else is asked (the user's words) or handed to t
 choices as ids (a model's words).
 
 * **Never the system (Apple) menu.** The menu bar's first item is left out when the menus are read
-  and refused again when an item is pressed; nothing in the Services submenu (other apps'
-  commands) or in NEO's own or a protected app's menus.
-* **A menu item is gated twice**: like a button, by its title (``policy.commits``, in any language
-  the OS string index reads back into English), and like its keyboard shortcut (the key gate).
+  and refused again when an item is pressed, however many items the bar has; nothing in the
+  Services submenu (other apps' commands) or in NEO's own or a protected app's menus.
+* **A menu item is gated twice**: like a button, by its path below the top menu ("Share › AirDrop";
+  ``policy.commits``, each part read back into English on its own in any language the OS string
+  index knows), and like its keyboard shortcut (the key gate).
 * **A sheet is answered by itself only when all of these hold** (DECISIONS 46): the request is the
   user's own words (origin "user"); the sheet belongs to the menu's own app (the same pid); exactly
-  one of its buttons has its words, as they are, in the user's words; that button doesn't commit;
-  the sheet's text carries no loss or consequence wording (checked whatever the button); and the
-  request is fully used up by the menu item, that button and filler words. Otherwise NEO asks.
+  one of its buttons has its words, as they are, in the user's words - words the command's name
+  didn't take ("print" chooses Print…, it doesn't also answer its Print); that button doesn't
+  commit; the sheet's text carries no loss or consequence wording (checked whatever the button);
+  and the request is fully used up by the menu item, that button and filler words. Otherwise NEO
+  asks - the user in words (also after their yes to one of their own commands), a model with ids.
 * **Fail closed on words NEO can't read**: a label in a script with no English back-translation
-  (Hindi while the OS index isn't built) is never pressed by itself - NEO asks first.
+  (Hindi while the OS index isn't built) is never pressed by itself - NEO asks first. A sheet's
+  title and texts are read back one by one and sentence by sentence; one that nothing reads counts
+  as saying something is lost.
 * **Screen text is data**: the sheet's words are fenced for a model and only ever matched against
-  the user's own words.
+  the user's own words; a menu path a model didn't give (grounded around its words) is fenced too.
+  Two titles that account for the request equally are a question, never a pick: a window's, a
+  page's or a file's title can repeat any words the user says.
 * **Which element is pressed is decided once**: the item (or button) gated is the one pressed.
 
 Matching is lexical and live (an exact title, or the title's words in order in the request). The
 OS-strings stage (a Hindi request, an English menu) runs in shadow unless ``settings.resolver`` is
-"live" (DECISIONS 40); every grounding is logged to the shadow log without its words.
+"live" (DECISIONS 40); every grounding is logged to the shadow log without its words. An app's own
+string tables are read only when there are words in another script to read.
 """
 
 from __future__ import annotations
@@ -62,7 +70,9 @@ __all__ = [
 # the resolver is promoted to "live"; a command it picks never gets its sheet answered by itself.
 meaning: Callable[[str, list[str]], int | None] | None = None
 
-_SETTLE_S = 0.6  # how long a press is watched for a sheet, a new window or a title change
+_SETTLE_S = 0.6  # the longest a press is watched for a sheet, a new window or a title change
+_QUIET_S = 0.3  # nothing changed this long after a press: it shows nothing (no sheet is coming)
+_GRACE_S = 0.2  # after a first change (the focus moved), a sheet may still follow this long
 _CLOSE_S = 1.0  # how long an answered sheet is watched for closing
 _EVERY_S = 0.03
 _MENU_TTL_S = 2.0  # a menu bar read is reused this long (a claim, then the run)
@@ -153,6 +163,23 @@ def _span(req: list[str], want: list[str]) -> tuple[int, int] | None:
         if req[i : i + n] == want:
             return i, i + n
     return None
+
+
+def _span_free(req: list[str], want: list[str], taken: set[int]) -> tuple[int, int] | None:
+    """Like :func:`_span`, among words nothing else took: a word that named the command can't
+    also name the button that answers its sheet ("print" is the Print… command, not its Print)."""
+    n = len(want)
+    for i in range(len(req) - n + 1) if n else ():
+        if req[i : i + n] == want and not taken.intersection(range(i, i + n)):
+            return i, i + n
+    return None
+
+
+def _weight(title_words: list[str] | tuple[str, ...]) -> int:
+    """How much of a request a title accounts for: its words that name something (a title that
+    wraps the request's words in filler words - "Open a New Private Window", a page's - is no
+    better a match than the command itself)."""
+    return sum(1 for w in title_words if w not in _FILLER)
 
 
 def _strip_frame(phrase: str) -> str:
@@ -267,12 +294,12 @@ def _walk_menu(menu: Any, path: tuple[str, ...], out: list[Item], pid: int, dept
 
 def _read_fallback(pid: int, limit: int = 1500) -> list[Item]:
     """The menu bar's commands by plain attribute reads (before the AX core's batched reader):
-    never the bar's first item, the system menu."""
+    never the bar's first item, the system menu - whatever else the bar holds (even nothing)."""
     bar = ax._attr(ax._app_el(pid), "AXMenuBar")
     tops = list(ax._attr(bar, "AXChildren") or []) if bar is not None else []
     out: list[Item] = []
     for i, top in enumerate(tops):
-        if i == 0 and len(tops) >= 2:
+        if i == 0:
             continue
         if ax._str(ax._attr(top, "AXRole")) != "AXMenuBarItem":
             continue
@@ -299,7 +326,7 @@ def _in_system_menu(item: Any) -> bool:
             if ax._str(ax._attr(p, "AXRole")) == "AXMenuBarItem":
                 bar = ax._attr(p, "AXParent")
                 items = list(ax._attr(bar, "AXChildren") or []) if bar is not None else []
-                return len(items) >= 2 and ax._same(items[0], p)
+                return not items or ax._same(items[0], p)  # (a bar that can't be read: yes)
             p = ax._attr(p, "AXParent")
     except Exception:  # noqa: BLE001
         return True
@@ -425,7 +452,9 @@ def _in_menu(it: Any, ask: _Ask) -> bool:
 
 
 def _best(hits: list[tuple[int, Any, set[int]]]) -> tuple[Any, set[int], list]:
-    """The longest title that matched, if only one title did (the enabled one of equal titles)."""
+    """The title that accounts for the most of the request, if only one title does (the enabled one
+    of equal titles); two titles that account for as much are a question, never a pick - a title
+    the screen controls (a window's, a page's, a file's) can repeat any words the user says."""
     if not hits:
         return None, set(), []
     top = max(h[0] for h in hits)
@@ -450,7 +479,7 @@ def _ground(ask: _Ask, items: list) -> _Pick:
         it, used, opts = _best(exact)
         if it is not None or opts:
             return _Pick(it, "exact", used, opts)
-        within = [(len(t), i, set()) for i in cands if (t := _toks(i.title)) and _span(want, t)]
+        within = [(_weight(t), i, set()) for i in cands if (t := _toks(i.title)) and _span(want, t)]
         it, used, opts = _best(within)
         if it is None and not opts:
             around = [(len(want), i, set()) for i in cands if _span(_toks(i.title), want)]
@@ -460,7 +489,7 @@ def _ground(ask: _Ask, items: list) -> _Pick:
         request = ask.item
     else:
         req = _toks(ask.text)
-        hits = [(len(t), i, set()) for i in cands if (t := _toks(i.title)) and _span(req, t)]
+        hits = [(_weight(t), i, set()) for i in cands if (t := _toks(i.title)) and _span(req, t)]
         it, used, opts = _best(hits)
         if it is not None or opts:
             return _Pick(it, "lexical", used, opts)
@@ -547,6 +576,58 @@ async def _watch(pid: int, before: Any, timeout: float, until=_differs) -> Any:
         await _sleep(_EVERY_S)
 
 
+def _new_sheet(b: Any, s: Any) -> bool:
+    return bool(getattr(s, "sheet", "")) and s.sheet != getattr(b, "sheet", "")
+
+
+async def _settle(pid: int, before: Any) -> Any:
+    """The scene after a press: at once when a sheet shows; a moment after a first change (the
+    focus often moves before the sheet it makes shows); soon when nothing changes at all; and never
+    longer than ``_SETTLE_S``."""
+    start = _now()
+    changed_at: float | None = None
+    while True:
+        now = await asyncio.to_thread(_scene, pid)
+        t = _now()
+        if _new_sheet(before, now) or t - start >= _SETTLE_S:
+            return now
+        if changed_at is None and _differs(before, now):
+            changed_at = t
+        if (changed_at is not None and t - changed_at >= _GRACE_S) or (changed_at is None and t - start >= _QUIET_S):
+            return now
+        await _sleep(_EVERY_S)
+
+
+def _users_lane(c: ToolContext) -> bool:
+    """Is this result for the user rather than a model: their own words, or the run after their yes
+    to a card that one of their own commands asked (it runs in no agent task; the session says its
+    result to them)? A session may say which with ``extras["lane"]`` ("user" / "agent")."""
+    if c.origin == "user":
+        return True
+    if c.origin != "approval":
+        return False
+    lane = c.extras.get("lane") if isinstance(c.extras, dict) else None
+    if lane in ("user", "agent"):
+        return lane == "user"
+    try:
+        from neo.agent import grants
+
+        return not grants.current()
+    except Exception:  # noqa: BLE001 - can't tell: the user's (asked in words, never answered by itself)
+        return True
+
+
+def _shown(item: Any, pick: _Pick, c: ToolContext, *, quote: bool = False) -> str:
+    """The command's menu path for a result. As it is for the user, or when it is the caller's own
+    words; for a model that got words it didn't give (a title grounded around its words, a page's),
+    fenced as the screen's, and the request marked as having read the screen."""
+    where = _where(item)
+    if _users_lane(c) or pick.stage == "exact":
+        return f"“{where}”" if quote else where
+    _gates()._taint(c, "screen")
+    return "this menu command:\n" + fence("screen", where)
+
+
 def _press_item(item: Any) -> str:
     """AXPress on the item, through the one door every AX action takes (the watcher, the effects
     switch). The AX core's press_menu_item refuses the system menu and disabled items again."""
@@ -572,17 +653,21 @@ def _blocker(pid: int) -> Any:
 async def _gate_item(item: Any, name: str, pid: int, a: dict, c: ToolContext, pick: _Pick, ask: _Ask) -> str | ToolOutput | None:
     g = _gates()
     where = _where(item)
-    if not all(uistrings.readable(p) for p in item.path):  # fail closed: words NEO can't read in English
+    # sends, deletes, quits…: the item with its submenus ("Share › AirDrop"), not the top menu's name.
+    # The gate reads a joined path part by part (policy.back_translations): a Hindi "… › हटाएँ" is
+    # the "… › Delete" it is, though no one OS string is the whole path.
+    label = " › ".join(item.path[1:]) or item.title
+    committing = policy.commits(label)
+    if not committing and not all(uistrings.readable(p) for p in item.path):
+        # fail closed: words NEO can't read in English (one question: a committing one asks below)
         gate = confirm.gated("menu_command", a, f"choose “{where[:80]}” in {name}")
         if isinstance(gate, str):
             return gate
-    # sends, deletes, quits…: the item with its submenus ("Share › AirDrop"), not the top menu's name
-    label = " › ".join(item.path[1:]) or item.title
     if gate := await g._ask_first("menu_command", a, label, name, []):
         return gate
     if (chord := _chord(item)) and (gate := await g._ask_before_keys(a, chord, name, c, pid)):
         return gate  # the same question its keyboard shortcut would ask
-    if ask.user and pick.stage != "exact" and _sounds_destructive(ask.user) and not policy.commits(label):
+    if ask.user and pick.stage != "exact" and _sounds_destructive(ask.user) and not committing:
         # "remove …" grounded on a title that removes nothing: not what was meant
         return ToolOutput(f"Error: “{where}” doesn't sound like what was asked — which command?", ok=False)
     return None
@@ -601,8 +686,9 @@ async def _run(a: dict, c: ToolContext, *, claim: bool) -> ToolOutput | str | No
     if not isinstance(got, tuple):
         return None if claim else got
     name, pid = got
-    await asyncio.to_thread(uistrings.for_pid, pid)  # the app's own strings, on first contact
     items = await asyncio.to_thread(_commands, pid)
+    if _other_script(ask, items):  # the app's own strings, on first contact - only when there's
+        await asyncio.to_thread(uistrings.for_pid, pid)  # something in another script to read
     pick = _ground(ask, items)
     req = _toks(ask.user)
     extra = frozenset(_toks(name)) | frozenset(_toks(ask.menu)) | frozenset(w for p in ask.path for w in _toks(p))
@@ -619,22 +705,25 @@ async def _run(a: dict, c: ToolContext, *, claim: bool) -> ToolOutput | str | No
     if claim and rest:
         return None  # the request says more than this command: the model decides
     item = pick.item
-    where = _where(item)
     if not getattr(item, "enabled", True):
-        return ToolOutput(f"Error: “{where}” can't be chosen right now (it's greyed out).", ok=False)
+        return ToolOutput(f"Error: {_shown(item, pick, c, quote=True)} can't be chosen right now (it's greyed out).", ok=False)
     if await asyncio.to_thread(_in_system_menu, item):
         return None if claim else ToolOutput(SYSTEM_MENU, ok=False)
     if gate := await _gate_item(item, name, pid, a, c, pick, ask):
         return gate
     before = await asyncio.to_thread(_scene, pid)
-    said = await asyncio.to_thread(_press_item, item)
+    pressed = await asyncio.to_thread(_press_item, item)
     _forget(pid)
-    if said.startswith("Error"):
-        return ToolOutput(said, ok=False)
+    if pressed.startswith("Error"):
+        if _users_lane(c) or pick.stage == "exact":
+            return ToolOutput(pressed, ok=False)
+        g._taint(c, "screen")  # (the AX core's words may quote the title)
+        return ToolOutput("Error: that menu command couldn't be chosen.\n" + fence("screen", pressed.removeprefix("Error: ")), ok=False)
+    said = f"Chose {_shown(item, pick, c)}"  # the AX core's own words may quote a title a model didn't give
     if await asyncio.to_thread(ax.regular, pid):
         apps.set_target(name)  # "…, then type": the typing goes to this app
-    after = await _watch(pid, before, _SETTLE_S)
-    if getattr(after, "sheet", "") and after.sheet != getattr(before, "sheet", ""):
+    after = await _settle(pid, before)
+    if _new_sheet(before, after):
         return await _answer_sheet(item, ask, pick, name, pid, a, c, after, said, req, extra)
     out = ToolOutput(said + ("" if said.endswith(".") else "."))
     changed: bool | None = None
@@ -646,6 +735,12 @@ async def _run(a: dict, c: ToolContext, *, claim: bool) -> ToolOutput | str | No
     elif getattr(before, "known", False) and getattr(after, "known", False):
         changed = False  # (a command may rightly change nothing anyone sees: not a failure)
     return _with_effect(out, changed=changed, scene_changed=bool(changed))
+
+
+def _other_script(ask: _Ask, items: list) -> bool:
+    """Words in another script to read - in the request, or on the menu bar (a Hindi UI)?"""
+    said = " ".join((ask.user, ask.item, ask.menu, ask.text, *ask.path))
+    return uistrings.non_latin(said) or any(uistrings.non_latin(getattr(i, "title", "") or "") for i in items)
 
 
 def _used(req: list[str], pick: _Pick) -> set[int]:
@@ -704,8 +799,13 @@ async def _answer_sheet(
     kind = getattr(blk, "kind", "") if blk is not None else "sheet"
     kind = "dialog" if kind in ("modal", "dialog") else "sheet"
     title = (getattr(blk, "title", "") or "").strip() if blk is not None else ""
-    text = (getattr(blk, "text", "") or "").strip() if blk is not None else ""
-    words = " ".join(x for x in (title, text) if x) or after.sheet
+    # Its words as the separate texts it shows (a title, each static text): each is read back into
+    # English on its own - joined, a Hindi title and text are no one string the OS has.
+    texts = getattr(blk, "texts", None) if blk is not None else None
+    if not isinstance(texts, (list, tuple)):
+        texts = [(getattr(blk, "text", "") or "")] if blk is not None else []
+    parts = [x for x in (title, *(str(t or "").strip() for t in texts)) if x]
+    words = " ".join(parts) or after.sheet
     buttons = [b for b in (getattr(blk, "buttons", None) or []) if _button_label(b)] if blk is not None else []
     pushable = [b for b in buttons if getattr(b, "role", "") == "AXButton" and getattr(b, "enabled", True)]
 
@@ -723,9 +823,9 @@ async def _answer_sheet(
         why = "another app came in front"
     else:
         hits = []
-        for b in pushable:
+        for b in pushable:  # the button's words: in the user's words, and not the ones the command took
             t = _toks(_button_label(b))
-            if t and (sp := _span(req, t)):
+            if t and (sp := _span_free(req, t, pick.used)):
                 hits.append((len(t), b, set(range(*sp))))
         top = max((h[0] for h in hits), default=0)
         best = [h for h in hits if h[0] == top]
@@ -733,11 +833,11 @@ async def _answer_sheet(
             btn, used = best[0][1], best[0][2]
         if btn is None:
             why = "no single button named in the request" if not best else "several buttons named"
-        elif not all(uistrings.readable(x) for x in (_button_label(btn), title, text) if x):
+        elif not all(uistrings.readable(x) for x in (_button_label(btn), *parts)):
             why = "words NEO can't read in English"
-        elif policy.commits(_button_label(btn), words):
+        elif policy.commits(_button_label(btn), parts):
             why = "that button commits"
-        elif policy.sheet_consequence(words):
+        elif policy.sheet_consequence(parts):
             why = "the sheet says something ends or is lost"
         elif _sounds_destructive(ask.user):
             why = "the request sounds destructive"
@@ -759,7 +859,7 @@ async def _answer_sheet(
         )
         return _with_effect(ToolOutput(text_out, say=None if closed else True), changed=True, scene_changed=True, sheet="" if closed else now.sheet)
     labels = [_button_label(b) for b in (pushable or buttons)]
-    if c.origin == "user":
+    if _users_lane(c):  # the user's own command (or the run after their yes to it): asked in words
         choices = " or ".join(f"“{x[:30]}”" for x in labels[:_OPTIONS]) or "its buttons"
         quoted = f" “{words[:120]}”" if words else ""
         return ToolOutput(confirm.ask_user(f"{name} opened a {kind}{quoted} — {choices}? Which one should I press?"), ok=True)
@@ -872,18 +972,22 @@ _FIELD_ROLES = frozenset({"AXTextField", "AXSearchField", "AXComboBox", "AXTextA
 _FIELD_NOUN = r"(?:field|box|text\s*box|input(?:\s+box)?|bar|area)"
 _NOT_PREP = r"(?:(?!\b(?:in|into|on|inside)\b)[^,;])"
 _FIELD_WORDS = frozenset({"field", "box", "textbox", "text", "input", "bar", "area"})
+# Places that name no field: where the cursor is ("the message box", "the text field", the browser's
+# "address bar"). "type … in" one of them is type_text's (typing at the cursor, as before): a label
+# lookup would fail there, or land on a field that only happens to be called so.
+_GENERIC_PLACE = rf"(?:(?:the|this|my)\s+)?(?:(?:message|chat|comment|text|input|body)(?:\s+{_FIELD_NOUN})?|(?:address|url)\s+bar)"
 _FIELD_RX = [
     # "type hello in the search field", "enter 42 into the amount box"
     re.compile(
-        rf"^(?:type|enter|put|write|input|fill\s+in|add)\s+(?P<text>.+?)\s+(?:in|into|in\s+to|on|inside)\s+(?:the\s+)?"
-        rf"(?P<field>{_NOT_PREP}{{1,40}}?)\s+{_FIELD_NOUN}$",
+        rf"^(?:type|enter|put|write|input|fill\s+in|add)\s+(?P<text>.+?)\s+(?:in|into|in\s+to|on|inside)\s+"
+        rf"(?!{_GENERIC_PLACE}$)(?:the\s+)?(?P<field>{_NOT_PREP}{{1,40}}?)\s+{_FIELD_NOUN}$",
         re.I,
     ),
     # "fill the subject field with Lunch"
     re.compile(rf"^fill\s+(?:in\s+|out\s+)?(?:the\s+)?(?P<field>[^,;]{{1,40}}?)\s+{_FIELD_NOUN}\s+with\s+(?P<text>.+)$", re.I),
     # Hinglish: "search box mein cats likho"
     re.compile(
-        r"^(?P<field>[^,;]{1,40}?)\s+(?:field|box|bar)\s+(?:mein|me|main)\s+(?P<text>.+?)\s+"
+        r"^(?!(?:message|chat|comment|text|input|body)\s+(?:field|box|bar)\s)(?P<field>[^,;]{1,40}?)\s+(?:field|box|bar)\s+(?:mein|me|main)\s+(?P<text>.+?)\s+"
         r"(?:likho|likh\s+do|type\s+karo|type\s+kar\s+do|daalo|daal\s+do|dalo|bharo|bhar\s+do)$",
         re.I,
     ),
@@ -913,15 +1017,17 @@ def parse_field(text: str) -> tuple[str, str] | None:
     return None
 
 
+# "type … in the X field" types into a field that holds nothing (it never types over what one
+# holds: it asks); only "fill the X field with …" replaces what it holds ("replace": True).
 FIELD_FAST_PATHS: list[tuple[str, dict]] = [
     (
         rf"{_LEAD}(?:type|enter|put|write|input)\s+(?P<text>\"[^\"]+\"|“[^”]+”|'[^']+'|.+?)\s+(?:in|into|in\s+to|on|inside)\s+"
-        rf"(?:the\s+)?(?P<field>{_NOT_PREP}{{1,40}}?)\s+{_FIELD_NOUN}{_TAIL}",
+        rf"(?!{_GENERIC_PLACE}{_TAIL})(?:the\s+)?(?P<field>{_NOT_PREP}{{1,40}}?)\s+{_FIELD_NOUN}{_TAIL}",
         {"text": "<text>", "field": "<field>"},
     ),
     (
         rf"{_LEAD}fill\s+(?:in\s+|out\s+)?(?:the\s+)?(?P<field>[^,;]{{1,40}}?)\s+{_FIELD_NOUN}\s+with\s+(?P<text>.+?){_TAIL}",
-        {"text": "<text>", "field": "<field>"},
+        {"text": "<text>", "field": "<field>", "replace": True},
     ),
 ]
 
@@ -971,14 +1077,26 @@ def _ground_field(phrase: str, els: list) -> tuple[Any, list]:
     return None, []
 
 
-async def fill_field(text: str, field_name: str, c: ToolContext, *, app: str = "") -> ToolOutput:
+async def fill_field(text: str, field_name: str, c: ToolContext, *, app: str = "", replace: bool = False) -> ToolOutput:
     """Type ``text`` into the field called ``field_name`` in the front (or named) app's window: that
     field, found by its label, set through Accessibility and read back. Never a password field,
-    never NEO's own or a protected app's."""
-    return _out(await _fill(text, field_name, c, app))
+    never NEO's own or a protected app's. A field that already holds text is never typed over
+    unless ``replace`` ("fill the X field with …"): the user is asked, a model told how."""
+    return _out(await _fill(text, field_name, c, app, replace))
 
 
-async def _fill(text: str, field_name: str, c: ToolContext, app: str) -> str | ToolOutput:
+def _held(e: Any) -> str:
+    """What the field holds now (read again when it can be: the list may be a moment old)."""
+    live = ""
+    if e.ref is not None:
+        try:
+            live = ax._str(ax._attr(e.ref, "AXValue"))
+        except Exception:  # noqa: BLE001 - can't be read again: what the list said
+            live = ""
+    return (live or getattr(e, "value", "") or "").strip()
+
+
+async def _fill(text: str, field_name: str, c: ToolContext, app: str, replace: bool = False) -> str | ToolOutput:
     g = _gates()
     if err := g._needs_input():
         return err
@@ -999,10 +1117,23 @@ async def _fill(text: str, field_name: str, c: ToolContext, app: str) -> str | T
         return ToolOutput(f"Error: no field called “{field_name[:40]}” in the front window of {name}.", ok=False)
     if e.role == "AXSecureTextField" or (e.ref is not None and await asyncio.to_thread(ax.secure, e.ref)):
         return ToolOutput("Error: that's a password field — NEO never fills those.", ok=False)
+    label = _field_label(e) or e.role.removeprefix("AX")
+    shown, note = f"“{label[:40]}”", ""
+    if not _users_lane(c) and _toks(label) != _toks(field_name):  # the screen's words, beyond the model's
+        g._taint(c, "screen")
+        shown, note = "the field", "\nThe field's label:\n" + fence("screen", label[:40])
+    if not replace and await asyncio.to_thread(_held, e):
+        # typing adds, it never throws away: what the field holds (a draft) stays unless asked
+        if _users_lane(c):
+            return confirm.ask_user(f"“{label[:40]}” already has text in it — should I replace it with “{text[:40]}”?")
+        return ToolOutput(
+            f"Error: {shown} in {name} already has text in it — nothing was typed over it. To replace what it "
+            f"holds, call again with replace=true; to add to it, click at its end and use type_text.{note}",
+            ok=False,
+        )
     out = await asyncio.to_thread(ax.set_el_value, e, text)
     if out.startswith("Error"):
         return ToolOutput(out, ok=False)
     if await asyncio.to_thread(ax.regular, pid):
         apps.set_target(name)
-    label = _field_label(e) or e.role.removeprefix("AX")
-    return _with_effect(ToolOutput(f"Typed “{text[:60]}” into “{label[:40]}” in {name}."), changed=True)
+    return _with_effect(ToolOutput(f"Typed “{text[:60]}” into {shown} in {name}.{note}"), changed=True)
