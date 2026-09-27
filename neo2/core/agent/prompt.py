@@ -82,7 +82,9 @@ _HOW_TO_WORK: tuple[tuple[str, frozenset[str] | None], ...] = (
         "- Act on a window's elements by their ids or names where it has them. When the window shows no\n"
         "  accessible elements where its content is (ax_tree lists little beyond the window and its menus:\n"
         "  a board, a canvas, a map, a picture), take a screenshot and click or drag at pixel positions in\n"
-        "  it, passing its shot id. Don't script your way around it.\n",
+        "  it, passing its shot id — on a board whose squares the screenshot's note names, name squares\n"
+        "  instead (click cell=…, drag from=… to=…) and NEO works out the points. Don't script your way\n"
+        "  around it.\n",
         frozenset({"screenshot", "click"}),
     ),
     (_SCREEN_STEPS[0], frozenset({"screenshot", "click", "drag", "scroll"})),

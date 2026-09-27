@@ -797,3 +797,16 @@ def test_the_script_rule_comes_with_applescript_when_more_tools_brings_it_in(mon
     b2 = Brain(Turn(tool_calls=[_call(1, "more_tools", query="applescript")]), Turn(text="ok"))
     asyncio.run(run_agent("x", provider=b2, system=prompt.build(), reg=reg, ev=EventBus(), tools=tools))
     assert "System Events" not in b2.seen[1][-1].tool_results[0].content
+
+
+def test_click_text_pressed_and_watched_through_accessibility_is_verified():
+    """click_text that pressed its control through Accessibility and saw it change checked its own
+    work, like ax_press: no check turn for it. Clicked with the mouse (no Effect), it didn't."""
+    watched = ToolResult("c1", "click_text", "Clicked 'Start' (Button)")
+    watched.effect = _eff(True)
+    assert batch.verified("click_text", watched)
+    mouse = ToolResult("c2", "click_text", "Clicked 'Start' (Button) at (10, 20)")
+    assert not batch.verified("click_text", mouse)
+    sheet = ToolResult("c3", "click_text", "Clicked 'New…' (Button)")
+    sheet.effect = _eff(True, sheet="“Save?”")
+    assert not batch.verified("click_text", sheet)  # (a sheet opened: the model answers it first)

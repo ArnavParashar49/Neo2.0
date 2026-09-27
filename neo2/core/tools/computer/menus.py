@@ -281,45 +281,6 @@ def _where(item: Any) -> str:
     return " › ".join(getattr(item, "path", ()) or (item.title,))
 
 
-def _walk_menu(menu: Any, path: tuple[str, ...], out: list[Item], pid: int, depth: int, limit: int) -> None:
-    for mi in ax._attr(menu, "AXChildren") or []:
-        if len(out) >= limit:
-            return
-        if ax._str(ax._attr(mi, "AXRole")) != "AXMenuItem":
-            continue
-        title = ax._str(ax._attr(mi, "AXTitle")).strip()
-        if not title:
-            continue  # a separator
-        try:
-            mods = int(ax._attr(mi, "AXMenuItemCmdModifiers") or 0)
-        except (TypeError, ValueError):
-            mods = 0
-        en = ax._attr(mi, "AXEnabled")
-        item = Item(title, (*path, title), en is None or bool(en), ax._str(ax._attr(mi, "AXMenuItemCmdChar")), mods, ref=mi, pid=pid)
-        out.append(item)
-        if depth < 4:
-            for sub in ax._attr(mi, "AXChildren") or []:
-                if ax._str(ax._attr(sub, "AXRole")) == "AXMenu":
-                    _walk_menu(sub, item.path, out, pid, depth + 1, limit)
-
-
-def _read_fallback(pid: int, limit: int = 1500) -> list[Item]:
-    """The menu bar's commands by plain attribute reads (before the AX core's batched reader):
-    never the bar's first item, the system menu - whatever else the bar holds (even nothing)."""
-    bar = ax._attr(ax._app_el(pid), "AXMenuBar")
-    tops = list(ax._attr(bar, "AXChildren") or []) if bar is not None else []
-    out: list[Item] = []
-    for i, top in enumerate(tops):
-        if i == 0:
-            continue
-        if ax._str(ax._attr(top, "AXRole")) != "AXMenuBarItem":
-            continue
-        name = ax._str(ax._attr(top, "AXTitle")).strip()
-        for m in ax._attr(top, "AXChildren") or []:
-            _walk_menu(m, (name,), out, pid, 1, limit)
-    return out
-
-
 def _in_system_menu(item: Any) -> bool:
     """Is the item in the system (Apple) menu - under the menu bar's first item? Told by where it
     sits (ax.in_system_menu), never by its words; when it can't be told, yes (nothing is pressed)."""
@@ -336,8 +297,8 @@ _menus: dict[int, tuple[float, list]] = {}
 
 
 def _read(pid: int) -> list:
-    fn = getattr(ax, "menu_items", None)
-    return list(fn(pid)) if fn is not None else _read_fallback(pid)
+    """The menu bar's commands, as the AX core reads them (batched; never the system menu's)."""
+    return list(ax.menu_items(pid))
 
 
 def _commands(pid: int) -> list:
@@ -634,20 +595,12 @@ def _shown(item: Any, pick: _Pick, c: ToolContext, *, quote: bool = False) -> st
 def _press_item(item: Any) -> str:
     """AXPress on the item, through the one door every AX action takes (the watcher, the effects
     switch). The AX core's press_menu_item refuses the system menu and disabled items again."""
-    fn = getattr(ax, "press_menu_item", None)
-    if fn is not None:
-        return fn(item)
-    el = ax.Element(id="menu", role="AXMenuItem", title=item.title, value="", x=0, y=0, w=0, h=0, actions=["AXPress"], ref=item.ref)
-    out = ax.press_el(el)
-    return out if out.startswith("Error") else f"Chose {_where(item)}"
+    return ax.press_menu_item(item)
 
 
 def _blocker(pid: int) -> Any:
     """The sheet or dialog now in the way in this app, with its controls as ids (AX core), or None."""
-    fn = getattr(ax, "blockers", None)
-    if fn is None:
-        return None
-    for b in fn(pid) or []:
+    for b in ax.blockers(pid) or []:
         if getattr(b, "kind", "") in ("sheet", "modal", "dialog"):
             return b
     return None
@@ -1040,14 +993,8 @@ def _field_label(e: Any) -> str:
 
 
 def _fields(name: str, pid: int) -> list:
-    fn = getattr(ax, "visible_elements", None)
-    if fn is not None:
-        try:
-            els = list(fn(pid, interactive=True, limit=120))
-        except TypeError:
-            els = list(fn(pid))
-    else:
-        _, _, els = ax.window_elements(name or None)
+    """The front window's text fields that can take text now (the AX core's list of what shows)."""
+    els = list(ax.visible_elements(pid, interactive=True, limit=120))
     return [e for e in els if e.role in _FIELD_ROLES and e.enabled and e.w > 0 and e.h > 0]
 
 

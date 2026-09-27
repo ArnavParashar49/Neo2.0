@@ -444,6 +444,13 @@ def move_policy(world: World, moves: list[tuple[str, str]], *, app_name: str = "
         cells = "cell" in params(tools, "click")
         batch = may_batch(system, tools)
         todo = st.setdefault("todo", [sq for mv in moves for sq in mv])
+        # A call NEO skipped (an earlier one in the same reply failed, missed or changed the screen)
+        # never ran: its square goes back on the list, as a model sends it again after it looks.
+        last_msg = msgs[-1] if msgs and msgs[-1].role == "tool" else None
+        sent = st.pop("sent", [])
+        if last_msg is not None and sent:
+            again = [sq for sq, r in zip(sent, last_msg.tool_results, strict=False) if r.content.startswith("skipped:")]
+            todo[0:0] = again
         base = st.get("base", 0)
         mine = results(msgs)[base:]
         shots = [r for r in mine if r.name in ("screenshot", "look", "observe") and r.images] + [r for r in mine if r.images]
@@ -455,10 +462,10 @@ def move_policy(world: World, moves: list[tuple[str, str]], *, app_name: str = "
             first = next((m for m in msgs if m.role == "user"), None)
             seen = [r.content for r in mine if r.name in ("screenshot", "look", "observe")] + [first.text if first else ""]
             if last is not None and last.name == "click" and last.content.startswith("Error"):
-                if "screenshot" not in last.content or st.get("relooked"):
+                if "screenshot" not in last.content or st.get("relooked") or not sent:
                     return say(last.content)
                 st["relooked"] = True  # (the board moved or wasn't known: look, then the same square again)
-                todo.insert(0, st.pop("sent", [""])[-1] or todo[0])
+                todo.insert(0, sent[-1])
                 return turn(call("screenshot"))
             if not any(_BOARD_FOUND.search(t or "") for t in seen):
                 if any(r.name == "screenshot" for r in mine):
@@ -572,6 +579,7 @@ class Scenario:
     sees: bool = True
     note: str = ""
     targets: dict[str, Any] = field(default_factory=dict)  # the plan's per-task targets (round trips)
+    last_app: str = ""  # the app NEO last worked in (a moment ago): "" — none
 
 
 def _moved(*mv: tuple[str, str]) -> Callable[[World, dict], bool]:
@@ -671,6 +679,7 @@ SCENARIOS: list[Scenario] = [
         "chess_move", "make the first move e4", lambda: board_world(),
         lambda w: move_policy(w, [("e2", "e4")]), _moved(("e2", "e4")),
         needs_screen=True, targets={"round_trips": 2, "round_trips_p0": 3, "seconds": 10.0},
+        last_app="Chess", note="a move in the game NEO is playing (it opened Chess a moment ago)",
     ),
     Scenario(
         "chess_full", "play chess as white and make the first move e4", lambda: board_world(front="Safari"),

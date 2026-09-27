@@ -550,19 +550,29 @@ def _words_only(monkeypatch):
 
 
 def test_the_chess_threshold_waits_for_the_after_look_too(monkeypatch):
-    """Squares by name alone (click cell=) leave the scripted brain a checking screenshot after its
-    moves: five round trips (a screenshot to find the board, two clicks, a screenshot, the answer).
-    The ≤4 threshold switches on only once click results carry the after-look picture as well; ≤3
-    once the prompt also allows several actions in one turn."""
+    """Squares by name alone (click cell=), with the board in the request's first look, leave the
+    scripted brain a checking screenshot after its moves: four round trips (two clicks, a
+    screenshot, the answer). The ≤3 threshold switches on only once click results carry the
+    after-look picture as well; ≤2 once the prompt also allows several actions in one turn; one more
+    without the early first look."""
     _words_only(monkeypatch)
     feats = R.features()
-    assert feats["cell_click"] and not feats["after_look"]
+    assert feats["cell_click"] and not feats["after_look"] and feats["prefetch_look"]
     assert R.chess_trips_limit(feats) is None  # (so test_chess_move_round_trips would skip)
     r = _scenario("chess_move")
-    assert r["pass"] and r["round_trips"] == 5, r
-    assert r["tools"] == ["screenshot", "click", "click", "screenshot"]
-    assert R.chess_trips_limit({**feats, "after_look": True}) == 4
-    assert R.chess_trips_limit({**feats, "after_look": True, "batching": True}) == 3
+    assert r["pass"] and r["round_trips"] == 4, r
+    assert r["tools"] == ["click", "click", "screenshot"]
+    assert R.chess_trips_limit({**feats, "after_look": True}) == 3
+    assert R.chess_trips_limit({**feats, "after_look": True, "batching": True}) == 2
+    assert R.chess_trips_limit({**feats, "after_look": True, "prefetch_look": False}) == 4
+
+
+def test_the_chess_move_starts_from_the_boards_squares_in_its_first_look():
+    """The move is in the game NEO last worked in: the request comes with NEO's first look at it —
+    the board's squares by name — so the first model call names the square it moves (no screenshot,
+    no ax_tree first)."""
+    r = _scenario("chess_move")
+    assert r["pass"] and r["tools"][0] == "click" and "screenshot" not in r["tools"], r
 
 
 def test_after_look_is_found_by_what_a_models_click_returns(monkeypatch):

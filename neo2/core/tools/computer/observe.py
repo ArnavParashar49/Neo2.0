@@ -38,8 +38,9 @@ LOOK_PARAMETERS = {
 }
 
 # NEO's own notes about a picture (the board helper: "board 8×8 at …, squares a1–h8"): each
-# ``fn(shot, image, ctx)`` → text (NEO's words, or "" for nothing to say).
-Note = Callable[[pointer.Shot, object, ToolContext], str]
+# ``fn(shot, image, ctx)`` → text (NEO's words, or "" for nothing to say); a note that takes a
+# ``collected`` keyword also gets the look's own walk (marks.Collected: the window, its elements).
+Note = Callable[..., str]
 _notes: list[Note] = []
 
 
@@ -191,7 +192,7 @@ async def observe(
             listed = listed or "text marks"
         for fn in list(_notes):
             try:
-                extra = fn(shot, img, ctx)
+                extra = fn(shot, img, ctx, collected=got) if pointer._hears(fn, "collected") else fn(shot, img, ctx)
             except Exception:  # noqa: BLE001 - a helper's note is never the look's failure
                 extra = ""
             if extra:

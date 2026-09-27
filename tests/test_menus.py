@@ -210,24 +210,6 @@ async def test_the_system_menu_is_never_pressed(world):
     assert world.pressed == [] and not out.ok
 
 
-def test_the_fallback_reader_never_lists_the_first_bar_item(monkeypatch):
-    class El:
-        def __init__(self, role, title="", kids=(), **kw):
-            self.a = {"AXRole": role, "AXTitle": title, "AXChildren": list(kids), **kw}
-
-    def menu(*items):
-        return El("AXMenu", kids=items)
-
-    apple = El("AXMenuBarItem", "", [menu(El("AXMenuItem", "Restart…"), El("AXMenuItem", "Shut Down…"))])
-    game = El("AXMenuBarItem", "Game", [menu(El("AXMenuItem", "New Game", AXMenuItemCmdChar="N"), El("AXMenuItem", ""))])
-    bar = El("AXMenuBar", kids=[apple, game])
-    root = El("AXApplication", AXMenuBar=bar)
-    monkeypatch.setattr(ax, "_app_el", lambda pid: root)
-    monkeypatch.setattr(ax, "_attr", lambda el, name, default=None: el.a.get(name, default) if el is not None else default)
-    got = menus._read_fallback(PID)
-    assert [i.where() for i in got] == ["Game › New Game"] and got[0].key == "N"
-
-
 async def test_services_and_submenu_titles_are_not_commands(world):
     names = [i.where() for i in menus._commands(PID)]
     assert "Game Box › Services › Make Sticky Note" not in names
@@ -644,7 +626,6 @@ def test_the_apple_menu_is_left_out_even_alone_on_the_bar(monkeypatch):
     monkeypatch.setattr(ax, "_app_el", lambda pid: root)
     monkeypatch.setattr(ax, "_attr", lambda el, name, default=None: el.a.get(name, default) if el is not None else default)
     monkeypatch.delattr(ax, "in_system_menu", raising=False)
-    assert menus._read_fallback(PID) == []
     assert menus._in_system_menu(menus.Item("Restart…", ("", "Restart…"), ref=restart))
     lone = El("AXMenuItem", "Orphan")  # a menu item whose bar can't be read: can't tell, so yes
     lone.a["AXParent"] = El("AXMenuBarItem", "X")

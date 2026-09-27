@@ -77,11 +77,12 @@ def world(monkeypatch):
     pids = {"Quillpad": 101, "Wayfarer": 102, "Vaultkeeper": 103, "Tablero": 104, "NEO": 99}
     w = types.SimpleNamespace(
         front=("Quillpad", 101), installed=installed, scanned=True, walks=0, shots=0, walk_s=0.0,
-        switch_to=None, capture=_png(800, 600), trees={}, above=[], region_shots=[], web=False,
+        switch_to=None, capture=_png(800, 600), trees={}, above=[], region_shots=[], web=False, deadlines=[],
     )
 
-    def snapshot(app=None, *, max_lines=250):
+    def snapshot(app=None, *, max_lines=250, deadline_s=None):
         w.walks += 1
+        w.deadlines.append(deadline_s)
         pid = pids.get(app) if app else w.front[1]
         if w.web and pid not in ax._web_held:
             # a Chromium or Electron app: its web tree is switched on by this walk and held (ax._expose_web),
@@ -307,6 +308,42 @@ def test_a_picture_of_that_window_alone_only_when_the_screen_is_needed_and_the_b
     assert blind.picture is None and world.shots == 1 and blind.taint == ("ax_tree",)
 
 
+def test_a_board_in_the_first_looks_picture_is_named_by_its_squares(world):
+    """A board NEO finds in the first look's picture comes with its squares' names, so the first
+    model call can name a square (click cell=…) without a screenshot of its own. Only a board NEO
+    found — never a hint, never a coordinate; a window with none says nothing about boards."""
+    import io
+    import re
+
+    from PIL import Image, ImageDraw
+
+    from neo2.core.tools.computer import board
+
+    img = Image.new("RGB", (800, 600), (200, 200, 205))
+    d = ImageDraw.Draw(img)
+    for r in range(8):
+        for c in range(8):
+            d.rectangle([160 + 60 * c, 60 + 60 * r, 219 + 60 * c, 119 + 60 * r],
+                        fill=(238, 238, 210) if (r + c) % 2 == 0 else (118, 150, 86))  # fmt: skip
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    world.capture = buf.getvalue()
+    board.forget()
+    try:
+        look = _look("in quillpad, what does this page say", _decision(screen_p=0.9))
+        assert look.picture is not None and "8×8" in look.board and 'cell="<square>"' in look.board
+        assert f"[{look.board}]" in look.block()
+        assert not re.search(r"\(\d+(?:\.\d+)?,\s*\d+", look.board)  # no points in any form
+        (x, y) = board.points_for({"cell": "r1c1"}, ("cell",))[0][0]
+        assert abs(x - (100 + 190 * 0.5)) <= 3 and abs(y - (50 + 90 * 0.5)) <= 3  # the square's middle, on the window
+        board.forget()
+        world.capture = _png(800, 600)
+        plain = _look("in quillpad, what does this page say", _decision(screen_p=0.9))
+        assert plain.picture is not None and plain.board == "" and "board" not in plain.block().lower()
+    finally:
+        board.forget()
+
+
 def test_screen_recording_is_never_asked_for(world, monkeypatch):
     monkeypatch.setattr(screen, "can_capture", lambda: False)
     monkeypatch.setattr(screen, "_request_access", lambda: pytest.fail("asked for Screen Recording"))
@@ -446,6 +483,7 @@ async def test_a_look_not_ready_by_its_deadline_is_dropped(world, monkeypatch):
     p = prefetch.start("in quillpad, press new page", _decision(tool="click_text"))
     assert await prefetch.collect(p, ["ax_tree"]) is None
     assert time.monotonic() - t < 0.25  # the first call never waits for a slow app
+    assert world.deadlines[-1] == 0.05  # (and the walk itself was told to end by then: the AX core stops it)
     # …and that app's next requests don't wait for it at all, for a while
     walks = world.walks
     t = time.monotonic()
@@ -542,7 +580,7 @@ async def test_no_screen_tools_in_this_agent_no_look(world, monkeypatch):
 
 
 async def test_a_failed_walk_leaves_the_run_to_look_for_itself(world, monkeypatch):
-    def broken(app=None, *, max_lines=250):
+    def broken(app=None, *, max_lines=250, deadline_s=None):
         raise RuntimeError("AX went away")
 
     monkeypatch.setattr(ax, "snapshot", broken)
@@ -604,6 +642,31 @@ def test_in_a_run_a_newer_look_or_a_change_on_screen_makes_it_stale(world, newer
     prefetch.supersede(msgs)
     assert prefetch.MARK not in msgs[0].text and msgs[0].images == []
     assert pointer.get_shot(look.picture.shot) is None  # its pixels can't be clicked by after it's gone
+
+
+def test_a_stale_first_look_keeps_how_its_boards_squares_are_named(world):
+    """Mid-run, the first look goes stale once a move changes the screen — but the board is still
+    there: NEO's words on how its squares are named stay (not the pieces as they stood). A finished
+    run keeps none of it."""
+    import dataclasses
+
+    look = _look("in quillpad, what does this page say", _decision(screen_p=0.9))
+    words = (
+        "NEO found a board of 8×8 squares. Squares are named a1–h8: White at the bottom. To act on a square, "
+        'name it — click cell="<square>" — and NEO works out the points. Pieces now, top row first: 8/8/8/8/8/8/8/8.'
+    )
+    look = dataclasses.replace(look, board=words)
+    goal, images = look.attach("make the first move e4", [], ToolContext())
+    moved = ToolResult("c1", "click", "Left-clicked (square e2) in Quillpad. Changed: the screen changed around e2.")
+    msgs = [Message.user(goal, images=images), Message.assistant("", [ToolCall("c1", "click", {"cell": "e2"})]),
+            Message.tool([moved])]  # fmt: skip
+    prefetch.supersede(msgs)
+    assert prefetch.MARK not in msgs[0].text and msgs[0].images == []
+    assert msgs[0].text.endswith("and NEO works out the points.]") and "Pieces now" not in msgs[0].text
+    assert msgs[0].text.startswith(f"make the first move e4\n\n{prefetch.STUB}\n[NEO found a board of 8×8")
+    done = [Message.user(look.attach("make the first move e4", [], ToolContext())[0])]
+    prefetch.forget(done)
+    assert done[0].text == f"make the first move e4\n\n{prefetch.STUB}"
 
 
 def _loop_wired():

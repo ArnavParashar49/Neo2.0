@@ -1399,6 +1399,9 @@ def install(world: World, *, clock: bool = True) -> Iterator[Env]:
             wins = world.window_list()
             if number and opts & Quartz.kCGWindowListOptionIncludingWindow:
                 return [w for w in wins if w["kCGWindowNumber"] == number]
+            if number and opts & Quartz.kCGWindowListOptionOnScreenAboveWindow:  # (front to back: those before it)
+                at = next((i for i, w in enumerate(wins) if w["kCGWindowNumber"] == number), len(wins))
+                return wins[:at]
             return wins
 
         p.set(Quartz, "CGWindowListCopyWindowInfo", window_list)
@@ -1476,7 +1479,10 @@ def install(world: World, *, clock: bool = True) -> Iterator[Env]:
             mod_name, fn_name, *rest = hook
             with contextlib.suppress(ImportError):
                 mod = importlib.import_module(mod_name)
-                p.set(mod, fn_name, _captured(fs, rest[0] if rest else None), only_if_present=True)
+                p.set(mod, fn_name, _captured(fs, rest[0] if rest else None, rest[1] if len(rest) > 1 else None),
+                      only_if_present=True)  # fmt: skip
+        with contextlib.suppress(ImportError):  # ScreenCaptureKit is "installed" here: sck_capture decides
+            p.set(importlib.import_module("neo2.core.tools.computer.sck"), "enabled", lambda: True, only_if_present=True)
         # the clock
         if clock:
             p.set(asyncio, "sleep", world.clock.asleep)
@@ -1501,17 +1507,31 @@ def install(world: World, *, clock: bool = True) -> Iterator[Env]:
 
 
 # The functions that capture the screen in-process (ScreenCaptureKit, CGWindowList), as (module,
-# function) or (module, function, adapt). Each call is answered by FakeScreen.capture_in_process(region)
-# — counted in ``captures`` (``in_process``: charged ScreenCaptureKit's cost, never free) — with a PIL
-# image of the region (x, y, w, h in points, top-left origin; the ``region`` keyword or the first
-# argument) at 2 px per point. When the real function returns something else (PNG or JPEG bytes, a
-# CGImage…), ``adapt(image)`` turns the picture into that. A capture workstream adds its own.
-CAPTURE_HOOKS: list[tuple[str, str] | tuple[str, str, Callable[[Any], Any]]] = []
+# function), (module, function, adapt) or (module, function, adapt, region_of). Each call is answered
+# by FakeScreen.capture_in_process(region) — counted in ``captures`` (``in_process``: charged
+# ScreenCaptureKit's cost, never free) — with a PIL image of the region (x, y, w, h in points, top-left
+# origin; the ``region`` keyword or the first argument, or ``region_of(world, *args, **kwargs)``) at
+# 2 px per point. When the real function returns something else (PNG or JPEG bytes, a CGImage…),
+# ``adapt(image)`` turns the picture into that.
 
 
-def _captured(fs: FakeScreen, adapt: Callable[[Any], Any] | None) -> Callable:
+def _window_region(world: World, window_id: Any, *a: Any, **k: Any) -> tuple[float, float, float, float] | None:
+    b = next((w["kCGWindowBounds"] for w in world.window_list() if w["kCGWindowNumber"] == int(window_id)), None)
+    return (b["X"], b["Y"], b["Width"], b["Height"]) if b else None
+
+
+CAPTURE_HOOKS: list[tuple] = [
+    # eyes-capture's ScreenCaptureKit path (settings().sck_capture; off by default): a rectangle on a
+    # display, and one window's own pixels
+    ("neo2.core.tools.computer.sck", "capture_rect", None, lambda world, x, y, w, h, *a, **k: (x, y, w, h)),
+    ("neo2.core.tools.computer.sck", "capture_window", None, _window_region),
+]
+
+
+def _captured(fs: FakeScreen, adapt: Callable[[Any], Any] | None, region_of: Callable[..., Any] | None = None) -> Callable:
     def capture(*a: Any, **k: Any) -> Any:
-        img = fs.capture_in_process(k.get("region") or (a[0] if a else None))
+        region = region_of(fs.world, *a, **k) if region_of is not None else (k.get("region") or (a[0] if a else None))
+        img = fs.capture_in_process(region)
         if adapt is None:
             return img
         with METER.fake():  # (the conversion stands in for the real function's own: not NEO's)

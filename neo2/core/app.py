@@ -288,6 +288,13 @@ async def run() -> None:
         from neo2.core.decide import uistrings
 
         asyncio.create_task(uistrings.idle_loop(_idle))
+        # When the user starts talking (the wake word, the start of speech: prefetch.prewarm), text
+        # recognition loads too, so a screenshot's first read of the words on it doesn't pay for it.
+        # (The memory embedder the resolver's meaning stage uses is warmed above, at start.)
+        from neo2.core.agent import prefetch
+        from neo2.core.tools.computer import ocr
+
+        prefetch.register_warmer(ocr.warm)
     asyncio.create_task(_checkpoint_loop(app, _idle))
     bus().subscribe(_log_activity)
     print("NEO is running. Say 'Neo', or type in the overlay.")

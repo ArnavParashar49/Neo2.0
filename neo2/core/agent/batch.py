@@ -22,36 +22,23 @@ enough:
 * whether several actions per reply are invited at all (``batch_actions``, off until the user's
   A/B on the self-test window says otherwise — DECISIONS 47).
 
-What an action did is its **Effect** (Step 0's seam: ``ToolOutput.effect``). Until that lands, a
-tool reports it in its words, and those are read instead. Everything here only reads results: it
-never acts, and never lets an action past a gate — each call still passes its own.
+What an action did is its **Effect** (``ToolOutput.effect``, copied onto the loop's result). A
+tool that sets none reports it in its words, and those are read instead. Everything here only
+reads results: it never acts, and never lets an action past a gate — each call still passes its own.
 """
 
 from __future__ import annotations
 
 import asyncio
-import os
 from collections.abc import Collection, Sequence
-from dataclasses import dataclass
 from typing import Any
 
 from neo2.core import logger, runtime
+from neo2.core.agent.registry import Effect  # noqa: F401 - what an action did (ToolOutput.effect)
 from neo2.core.providers.base import ImagePart, Message, ToolCall, ToolResult, ToolSpec
 
 log = logger(__name__)
 
-try:  # Step 0's seam (ToolOutput.effect): the same fields, whichever lands first
-    from neo2.core.agent.registry import Effect  # type: ignore[attr-defined]
-except ImportError:  # until the seam lands
-
-    @dataclass
-    class Effect:  # type: ignore[no-redef]
-        """What an input did, as NEO saw it."""
-
-        changed: bool | None = None  # something visibly changed where it acted (None: couldn't tell)
-        scene_changed: bool = False  # the front app, the window, a sheet or the focus changed
-        sheet: str = ""  # a sheet or dialog open after it (its words: screen data)
-        looked: bool = False  # the result carries a picture of the state after it
 
 
 # ---- what an action did ------------------------------------------------------------------------------
@@ -69,9 +56,11 @@ _SCENE_WORDS = (
     "the window changed",
 )
 # NEO's actions that check their own work through Accessibility: a value read back after it was
-# set (the tool fails otherwise), a press or a menu item whose element, window or sheet changed.
+# set (the tool fails otherwise), a press or a menu item whose element, window or sheet changed —
+# click_text's too, when it pressed the control through Accessibility and watched it (its Effect
+# then says what changed; a click it had to make with the mouse carries none: not verified).
 _READ_BACK = frozenset({"ax_set_value"})
-_AX_PRESS = frozenset({"ax_press", "menu_command"})
+_AX_PRESS = frozenset({"ax_press", "menu_command", "click_text"})
 # What a skipped action's result says (history.halted() knows "skipped: " is no result).
 SKIPPED = "skipped: an earlier action in this turn {why} — look at its result first, then decide"
 _HALTS = ("NEEDS_CONFIRM", "NEEDS_USER", "skipped: ")
@@ -198,19 +187,15 @@ def finished(calls: Sequence[ToolCall], results: Sequence[ToolResult]) -> bool:
 
 
 def _setting(name: str, app_default: Any, library_default: Any) -> Any:
-    """A setting the integrator adds to neo2.core.config (``batch_actions``, ``replay_flows``). Until it's
-    there: NEO.app reads ``NEO_<NAME>`` itself; an embedded agent never reads the environment."""
+    """A setting of neo2.core.config (``batch_actions``, ``replay_flows``: NEO_<NAME> in NEO.app's
+    environment and .env). None — not said — is ``app_default`` in NEO.app and ``library_default``
+    for an embedded agent."""
     from neo2.core.config import settings
 
     v = getattr(settings(), name, None)
     if v is not None:
         return v
-    if runtime.library_bound():
-        return library_default
-    raw = os.environ.get(f"NEO_{name.upper()}")
-    if raw is None or not raw.strip():
-        return app_default
-    return raw.strip().lower() not in ("0", "false", "off", "no")
+    return library_default if runtime.library_bound() else app_default
 
 
 def enabled() -> bool:

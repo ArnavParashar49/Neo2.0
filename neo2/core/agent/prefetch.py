@@ -73,49 +73,14 @@ _slow_until: dict[int, float] = {}  # pid -> time.monotonic() until which it's s
 # ---- settings -----------------------------------------------------------------------------------
 
 
-_KEYS = ("prefetch_look", "prefetch_look_s", "prewarm_resolver")  # the integrator adds them to neo2.core.config
-_read_keys: tuple[Any, dict[str, Any]] | None = None  # (the settings object, its values of _KEYS)
-_with_keys: type | None = None
-
-
 def _setting(name: str, app_default: Any, library_default: Any) -> Any:
-    """A setting the integrator adds to neo2.core.config (:data:`_KEYS`). Until it's there: NEO.app reads it
-    from where Settings reads every other one (:func:`_unlisted`); an embedded agent never reads the
-    environment or a file, and gets the library default."""
+    """A setting of neo2.core.config (``prefetch_look``, ``prefetch_look_s``, ``prewarm_resolver``;
+    NEO_<NAME> in NEO.app's environment and .env): an embedded agent gets its host's, or the library
+    default when the host's settings don't say."""
     v = getattr(settings(), name, None)
     if v is not None:
         return v
-    if runtime.library_bound():
-        return library_default
-    v = _unlisted(name)
-    return app_default if v is None else v
-
-
-def _unlisted(name: str) -> Any:
-    """``NEO_<NAME>`` as neo2.core.config would read it if it had the key: from the environment and NEO.app's
-    .env files (~/.neo/.env: never with effects off), parsed the same way — by Settings itself, with
-    the keys added. Once per settings object (a reload of NEO.app's settings is a new one)."""
-    global _read_keys, _with_keys
-    s = settings()
-    got = _read_keys
-    if got is None or got[0] is not s:
-        from neo2.core.config import Settings
-
-        if _with_keys is None:
-
-            class _WithKeys(Settings):
-                prefetch_look: bool | None = None
-                prefetch_look_s: float | None = None
-                prewarm_resolver: bool | None = None
-
-            _with_keys = _WithKeys
-        try:
-            # the .env files Settings reads now (a test's, none, or NEO.app's)
-            values = _with_keys(_env_file=Settings.model_config.get("env_file")).model_dump(include=set(_KEYS))
-        except Exception:  # noqa: BLE001 - a value that doesn't parse: the defaults
-            values = {}
-        got = _read_keys = (s, values)
-    return got[1].get(name)
+    return library_default if runtime.library_bound() else app_default
 
 
 def enabled() -> bool:
@@ -185,16 +150,11 @@ class Target:
 
 
 def _gates() -> Any:
-    """Where the gate helpers live: the frozen gate module once computer/__init__.py is split, the
-    package until then. Looked up at call time, like the handlers do."""
-    try:
-        from neo2.core.tools.computer import gates  # type: ignore[attr-defined]
+    """The frozen gate module (neo2.core.tools.computer.gates), looked up at call time like the
+    handlers do (a test may swap a helper in it)."""
+    from neo2.core.tools.computer import gates
 
-        return gates
-    except ImportError:
-        from neo2.core.tools import computer
-
-        return computer
+    return gates
 
 
 def _protected(name: str, pid: int) -> bool:
@@ -328,17 +288,30 @@ def compact(raw: str) -> str:
     return "\n".join(out)
 
 
-def _elements(app: str, pid: int) -> str | None:
+# The AX core's line for a large view with no accessible parts (ax._canvas_line): a board's evidence.
+_CANVAS = re.compile(r"no accessible parts \(a board or canvas\):[^@\n]*@\((-?\d+),(-?\d+) (\d+)x(\d+)\)")
+
+
+@dataclass(frozen=True)
+class _Listed:
+    text: str  # compact: ids, roles and labels
+    canvas: tuple[float, float, float, float] | None = None  # a view drawn in one piece (screen points)
+
+
+def _elements(app: str, pid: int) -> _Listed | None:
     """The app's window as a compact list, or None (another process answers to its name, or the
     app didn't answer)."""
     from neo2.core.tools.computer import ax
 
     if ax.pid_for_app(app) != pid:
         return None  # its name picks another process: never list a different app's window
-    raw = ax.snapshot(app, max_lines=MAX_LINES)
+    # (the walk ends by the first look's own deadline: a slow or hung app never holds the request up)
+    raw = ax.snapshot(app, max_lines=MAX_LINES, deadline_s=_deadline_s())
     if not isinstance(raw, str) or not raw.strip() or raw.lstrip().startswith(("Error", "NEEDS_")):
         return None
-    return compact(raw)
+    m = _CANVAS.search(raw)
+    canvas = tuple(float(v) for v in m.groups()) if m else None
+    return _Listed(compact(raw), canvas)  # type: ignore[arg-type]
 
 
 def _window_bounds(window_id: int) -> tuple[float, float, float, float] | None:
@@ -409,6 +382,7 @@ class Picture:
     shot: str  # the shot id its pixels are clicked by
     size: tuple[int, int]  # pixels
     covered: bool = False  # another window is in front of part of it: the screen's pixels, not its own
+    window: tuple[float, float, float, float] | None = None  # the window's frame on screen (points)
 
 
 def _picture(pid: int) -> Picture | None:
@@ -438,7 +412,7 @@ def _picture(pid: int) -> Picture | None:
         if not w or not h:
             return None
         shot = pointer.remember(bounds[0], bounds[1], bounds[2] / w, w, h)
-        return Picture(img, shot.id, (w, h))
+        return Picture(img, shot.id, (w, h), window=bounds)
     if any(not opid or _protected(owner, opid) for owner, opid in over):
         return None  # a protected app's window (or nobody's) is in front of it: none of its pixels go anywhere
     region = _on_screen(bounds)
@@ -449,7 +423,28 @@ def _picture(pid: int) -> Picture | None:
     if not w or not h:
         return None
     shot = pointer.remember(region[0], region[1], ppp, w, h)
-    return Picture(img, shot.id, (w, h), covered=True)
+    return Picture(img, shot.id, (w, h), covered=True, window=bounds)
+
+
+def _board(pic: Picture, canvas: tuple[float, float, float, float] | None) -> str:
+    """NEO's words about a board in the first look's picture — its squares by name, so the first
+    model call can name them (click cell=…) without a screenshot of its own — or "". Only a board NEO
+    finds: a flat one anywhere in the window; one seen at an angle only in the large view with no
+    accessible parts the walk reported (``canvas``). Never a hint, never a coordinate."""
+    from PIL import Image
+
+    from neo2.core.tools.computer import board, pointer
+
+    shot = pointer.get_shot(pic.shot)
+    if shot is None:
+        return ""
+    img = Image.open(io.BytesIO(pic.image.data))
+    img.load()
+    s = board.survey(
+        board.Picture.from_shot(img.convert("RGB"), shot), shot=shot.id, area=canvas or pic.window,
+        canvas=canvas is not None, window=pic.window,
+    )  # fmt: skip
+    return board.note(s.board, s.since, blind=False) if s.board is not None else ""
 
 
 _OURS: weakref.WeakValueDictionary[int, ImagePart] = weakref.WeakValueDictionary()  # pictures attached
@@ -465,6 +460,7 @@ class Look:
     elements: str  # compact: ids, roles, labels — no coordinates
     picture: Picture | None = None
     ms: float = 0.0
+    board: str = ""  # NEO's words about a board in the picture (its squares by name), or ""
 
     @property
     def images(self) -> list[ImagePart]:
@@ -500,6 +496,8 @@ class Look:
                 f'position in this image with shot="{self.picture.shot}". If you can\'t see it, use the '
                 "element ids above — never coordinates.]"
             )
+            if self.board:
+                parts.append(f"[{self.board}]")
         return "\n".join(parts)
 
     def attach(
@@ -565,7 +563,13 @@ async def _look(text: str, want: Want, game: Any, sees: bool, seen: dict[str, in
         if not isinstance(pic, Exception):
             raise pic  # (effects off: a test that didn't fake the capture)
         pic = None  # no picture: the list still stands
-    return Look(tgt.app, tgt.pid, tgt.why, els[0], pic, (time.perf_counter() - t0) * 1000)
+    words = ""
+    if pic is not None:
+        try:
+            words = await asyncio.to_thread(_board, pic, els[0].canvas)
+        except Exception:  # noqa: BLE001 - the board's words are a help, never the look's failure
+            words = ""
+    return Look(tgt.app, tgt.pid, tgt.why, els[0].text, pic, (time.perf_counter() - t0) * 1000, words)
 
 
 @dataclass
@@ -684,15 +688,21 @@ def _let_go(shot: str) -> None:
         shots.pop(shot, None)
 
 
-def _stub(m: Message) -> bool:
+_BOARD_LINE = re.compile(r"^\[(NEO (?:found|mapped) (?:a board|a grid) .*?)(?: Pieces now\b.*)?\]$", re.M)
+
+
+def _stub(m: Message, *, keep_board: bool = False) -> bool:
     """Replace an attached first look in this goal message with a one-line stub (and drop its
-    picture, and its shot id). True when there was one."""
+    picture, and its shot id). ``keep_board``: NEO's words on how a board's squares are named stay
+    (mid-run, the board is still there — its pieces as they stood are dropped). True when there was one."""
     head, sep, rest = m.text.partition("\n\n" + MARK)
     if not sep:
         return False
-    m.text = f"{head}\n\n{STUB}"
+    tail = rest.rsplit("</untrusted>", 1)[-1]  # NEO's own notes, after the fenced list
+    board = _BOARD_LINE.search(tail) if keep_board else None
+    m.text = f"{head}\n\n{STUB}" + (f"\n[{board.group(1).strip()}]" if board else "")
     m.images = [im for im in m.images if _OURS.get(id(im)) is not im]
-    if found := _SHOT.search(rest.rsplit("</untrusted>", 1)[-1]):  # NEO's own note, after the fenced list
+    if found := _SHOT.search(tail):
         _let_go(found.group(1))
     return True
 
@@ -722,7 +732,7 @@ def supersede(messages: Sequence[Message], *, start: int = 0) -> None:
         return
     for m in messages[first + 1 :]:
         if m.role == "tool" and any(_stale_after(r) for r in m.tool_results):
-            _stub(messages[first])
+            _stub(messages[first], keep_board=True)
             return
 
 

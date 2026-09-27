@@ -289,6 +289,8 @@ def _headline() -> float:
 
 # Tools that act for real on the fake Mac. The rest (a program, a file, the web, AppleScript, opening
 # things) get a fake handler that records the call; opening or switching apps moves the fake world.
+FIRST_LOOK_SLACK_S = 2.5  # the fakes' own real time (an AX tree of Python objects, a PNG written and read)
+
 _REAL_TOOLS = frozenset({
     "ax_tree", "ax_find", "screenshot", "apps_running", "ax_press", "ax_set_value", "click", "drag", "scroll",
     "type_text", "hotkey", "click_text", "activate_app",
@@ -347,7 +349,7 @@ class _Reflex:
 
 
 async def run_scenario(sc: Any) -> dict:
-    from bench.controls.fakes import MODEL_S, FakeBrain, install
+    from bench.controls.fakes import MODEL_S, NEO_PID, FakeBrain, install
     from neo2.core.agent import confirm, fastpath, grants
     from neo2.core.agent import session as sess
     from neo2.core.agent.registry import Registry, registry
@@ -365,7 +367,21 @@ async def run_scenario(sc: Any) -> dict:
     with install(w) as env:
         p = env.patches
         p.set(embed, "embed_texts", lambda texts: None)
-        p.set(apps, "_target", None)
+        p.set(apps, "_target", (sc.last_app, time.time()) if getattr(sc, "last_app", "") else None)
+        # the Mac's installed apps, as the last scan of them found them (the early first look reads them)
+        from neo2.core.decide import inventory
+
+        installed = [inventory.App(bundle_id=a.bundle or f"bench.{a.name.lower()}", name=a.name, path=f"/Applications/{a.name}.app")
+                     for a in w.apps.values() if a.pid != NEO_PID]  # fmt: skip
+        p.set(inventory, "snapshot", lambda: list(installed))
+        # (the fake screen's picture drawn now: its drawing is the bench's time, not NEO's — and never
+        # counted against a deadline NEO keeps in real time, like the early first look's, which gets
+        # room for the fakes' own time too: what the look costs NEO is counted like any other work)
+        env.screen.frame()
+        from neo2.core.agent import prefetch
+
+        real_deadline = prefetch._deadline_s
+        p.set(prefetch, "_deadline_s", lambda: real_deadline() + FIRST_LOOK_SLACK_S)
 
         def brain_for(purpose: str = "agent") -> FakeBrain:
             brain.purposes.append(purpose)
@@ -471,14 +487,19 @@ def run_scenarios(only: list[str] | None = None) -> dict:
 def chess_trips_limit(feats: dict[str, Any]) -> int | None:
     """The chess move's round-trip threshold once everything it needs is in (None: not yet). Squares
     by name (click cell=) drop the ax_tree and the look before each click — but NEO names squares
-    only on a board it found in a picture it took, so one screenshot comes first; the scripted brain
+    only on a board it found in a picture it took, so a screenshot comes first; the scripted brain
     drops its checking screenshots only when a click's result carries the after-look picture: 4
-    (screenshot, click, click, answer). Both clicks in one turn when the prompt allows several
-    actions: 3. (A request that already carries the first look — the early first look, when NEO last
-    worked in the game — saves one more.)"""
+    (screenshot, click, click, answer). The early first look — the move is in the game NEO is
+    playing, the one it last worked in — brings the board's squares with the request: 3. Both clicks
+    in one turn when the prompt allows several actions: one fewer."""
     if not (feats.get("cell_click") and feats.get("after_look")):
         return None
-    return 3 if feats.get("batching") else 4
+    trips = 4
+    if feats.get("prefetch_look"):
+        trips -= 1
+    if feats.get("batching"):
+        trips -= 1
+    return trips
 
 
 def menu_zero_ready(feats: dict[str, Any]) -> bool:

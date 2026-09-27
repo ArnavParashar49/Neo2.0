@@ -17,6 +17,7 @@ from neo2.core.tools.computer import (
     focus,
     gates,
     marks,
+    observe,
     ocr,
     phrases,
     pointer,
@@ -179,27 +180,65 @@ async def screenshot(a: dict, c: ToolContext) -> ToolOutput:
     return ToolOutput(text + (f"\n{board_note}" if board_note else ""), images=[cap.part], fence=False)
 
 
-def _board_note(cap, shot: pointer.Shot, collected: marks.Collected, blind: bool, region=None) -> str:
-    """The screenshot note's board part (board.look): on the picture the model gets, with the
-    window's part drawn in one piece as the evidence (from the marks' walk: no second walk), and no
-    board read under an open sheet or dialog. A region screenshot is judged by itself: the part of
-    it drawn in one piece (a board a model took a close picture of, however small a share of its
-    window it is). "" when there is nothing to say or it can't be told."""
-    try:
-        from PIL import Image
+def board_words(
+    data: bytes,
+    shot: pointer.Shot,
+    *,
+    window: tuple[float, float, float, float] | None,
+    frames: list,
+    blind: bool,
+    sheet: bool = False,
+    region: tuple[float, float, float, float] | None = None,
+    hints: bool = True,
+) -> str:
+    """NEO's words about a board in a picture it took (board.look): on the picture the model gets,
+    with the window's part drawn in one piece as the evidence (``frames``: the window's elements from
+    the walk already made — never a second walk), and no board read under an open sheet or dialog.
+    A region screenshot is judged by itself: the part of it drawn in one piece (a board a model took a
+    close picture of, however small a share of its window it is). ``hints`` False: only a board NEO
+    found — never the "give its corners" hint. No coordinates in any of it."""
+    from PIL import Image
 
-        img = Image.open(io.BytesIO(cap.part.data))
-        img.load()
-        pic = board.Picture.from_shot(img.convert("RGB"), shot)
+    img = Image.open(io.BytesIO(data))
+    img.load()
+    pic = board.Picture.from_shot(img.convert("RGB"), shot)
+    view = tuple(float(v) for v in region) if region else window
+    canvas = board.canvas_area(view, frames) if view is not None else None
+    area, evidence = canvas or view, canvas is not None
+    if hints:
+        return board.look(pic, shot=shot.id, blind=blind, sheet=sheet, area=area, canvas=evidence, window=window)
+    s = board.survey(pic, shot=shot.id, area=area, canvas=evidence, sheet=sheet, window=window)
+    return board.note(s.board, s.since, blind=blind) if s.board is not None else ""
+
+
+def _board_note(cap, shot: pointer.Shot, collected: marks.Collected, blind: bool, region=None) -> str:
+    """The screenshot note's board part (see board_words). "" when there is nothing to say or it
+    can't be told."""
+    try:
         win = collected.window if collected.pid else None
-        view = tuple(float(v) for v in region) if region else win
-        canvas = board.canvas_area(view, collected.frames) if view is not None else None
-        return board.look(
-            pic, shot=shot.id, blind=blind, sheet=bool(collected.blocker), area=canvas or view,
-            canvas=canvas is not None, window=win,
-        )  # fmt: skip
+        return board_words(
+            cap.part.data, shot, window=win, frames=collected.frames, blind=blind, sheet=bool(collected.blocker), region=region
+        )
     except Exception:  # noqa: BLE001 - the board's words are a help, never the screenshot's failure
         return ""
+
+
+def _look_note(shot: pointer.Shot, img, ctx: ToolContext, collected: marks.Collected | None = None) -> str:
+    """The ``look`` tool's board part: a board NEO finds in the picture of the window it looked at
+    (the look's own walk is the evidence), its squares by name — never a hint to map one."""
+    if img is None or collected is None:
+        return ""
+    try:
+        win = collected.window if collected.pid else None
+        return board_words(
+            img.data, shot, window=win, frames=collected.frames, blind=bool(ctx.get("blind")),
+            sheet=bool(collected.blocker), hints=False,
+        )  # fmt: skip
+    except Exception:  # noqa: BLE001 - a help, never the look's failure
+        return ""
+
+
+observe.add_note(_look_note)
 
 
 @tool(

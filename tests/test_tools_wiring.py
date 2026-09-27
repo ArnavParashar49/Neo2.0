@@ -474,3 +474,35 @@ def test_a_region_screenshot_is_its_own_evidence_for_a_board(monkeypatch):
         assert "8×8" in note, note
     finally:
         board.forget()
+
+
+def test_a_look_names_a_boards_squares_and_never_hints():
+    """The look tool's picture gets the board's words too (observe.add_note, with the look's own
+    walk as the evidence) — only a board NEO found: never the "give its corners" hint."""
+    import io
+
+    from eyes_board_synth import flat_screen
+    from PIL import Image
+
+    from neo2.core.tools.computer import board, marks, observe
+
+    assert tools_pointer._look_note in observe._notes and pointer._hears(tools_pointer._look_note, "collected")
+    board.forget()
+    img, truth = flat_screen()
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=85)
+    part = ImagePart(buf.getvalue(), "image/jpeg")
+    shot = pointer.remember(0.0, 0.0, 1.0, img.width, img.height)
+    col = marks.Collected(app="Game", pid=4242, window=(0.0, 0.0, 1512.0, 982.0), frames=[])
+    ctx = ToolContext()
+    try:
+        note = tools_pointer._look_note(shot, part, ctx, collected=col)
+        assert "8×8" in note and 'cell="<square>"' in note, note
+        board.forget()
+        blank = Image.new("RGB", (1512, 982), (230, 230, 230))
+        buf = io.BytesIO()
+        blank.save(buf, format="JPEG", quality=85)
+        assert tools_pointer._look_note(shot, ImagePart(buf.getvalue(), "image/jpeg"), ctx, collected=col) == ""
+        assert tools_pointer._look_note(shot, None, ctx, collected=col) == ""  # (no picture: a blind brain's look)
+    finally:
+        board.forget()
