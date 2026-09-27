@@ -120,7 +120,9 @@ class ToolSelector:
         needs_screen: bool = False,
         playbook_tools: list[str] | None = None,
         history_tools: list[str] | None = None,
+        required: tuple[str, ...] = (),
     ) -> Selection:
+        """`required`: tools the caller knows the run needs (a game's run opens the app)."""
         scores = self._scores(text)
         ranked = sorted(scores.items(), key=lambda kv: -kv[1])
         chosen: dict[str, str] = {}
@@ -129,6 +131,9 @@ class ToolSelector:
         for n in ALWAYS:
             if n in self.reg:
                 chosen[n] = "always"
+        for n in required:
+            if n in self.reg:
+                chosen.setdefault(n, "required")
         if needs_screen:
             for n in SCREEN:
                 if n in self.reg:
