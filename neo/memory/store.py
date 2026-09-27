@@ -221,6 +221,11 @@ class Store:
             self._db.commit()
             return n > 0
 
+    def close(self) -> None:
+        """Close the database (an embedded agent's, when its host closes or erases it)."""
+        with self._lock:
+            self._db.close()
+
     def forget_all(self) -> dict[str, int]:
         """Delete every memory, playbook and session summary, and reclaim the space on disk."""
         with self._lock:

@@ -121,6 +121,12 @@ class ToolSelector:
         playbook_tools: list[str] | None = None,
         history_tools: list[str] | None = None,
     ) -> Selection:
+        if runtime.library_bound():
+            shown = [t.name for t in self.reg.all() if not t.hidden]
+            if len(shown) <= _MAX_TOOLS:
+                # An embedded agent's few tools, its host's among them: all of them, every time
+                # (a keyword match would hide a host tool the request didn't happen to name).
+                return Selection(shown, dict.fromkeys(shown, "all"))
         scores = self._scores(text)
         ranked = sorted(scores.items(), key=lambda kv: -kv[1])
         chosen: dict[str, str] = {}

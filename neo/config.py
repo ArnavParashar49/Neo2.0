@@ -170,6 +170,7 @@ class Settings(BaseSettings):
     # ---- paths -----------------------------------------------------------------------
     data_dir: Path = Path.home() / ".neo"
     models_path: Path | None = None  # downloaded models (default: data_dir/models)
+    memory_path: Path | None = None  # the memory database (default: data_dir/memory.sqlite3)
     extra_secret_paths: list[Path] = []  # never read or written by NEO's tools (data_dir never is)
 
     @property
@@ -187,7 +188,7 @@ class Settings(BaseSettings):
     def _expand(cls, v):  # NEO_DATA_DIR=~/.neo must not create a literal "~" directory
         return Path(str(v)).expanduser().resolve()
 
-    @field_validator("models_path", mode="before")
+    @field_validator("models_path", "memory_path", mode="before")
     @classmethod
     def _expand_opt(cls, v):
         return None if v in (None, "") else Path(str(v)).expanduser().resolve()
@@ -203,7 +204,7 @@ class Settings(BaseSettings):
 
     @property
     def memory_db(self) -> Path:
-        return self.data_dir / "memory.sqlite3"
+        return self.memory_path or self.data_dir / "memory.sqlite3"
 
     @property
     def models_dir(self) -> Path:
@@ -226,7 +227,7 @@ class LibrarySettings(Settings):
     package — a host process's NEO_CONFIRM_DESTRUCTIVE=false or its own keys must not reach an
     agent it didn't give them to. `data_dir` is required, and is the agent's own folder: never
     ~/.neo, inside it or holding it (however it's named), never a folder of other files, and never
-    another live agent's (neo.runtime). `models_path` is never in ~/.neo either.
+    another live agent's (neo.runtime). `models_path` and `memory_path` are never in ~/.neo either.
     Pinned whatever is passed: confirmation on; every task kind runs its legacy script (the
     evidence-chosen drivers, their dry runs and their learning are process-wide, NEO.app's);
     Laya's learning and its teacher off; notes that no notes app could take go under data_dir.
@@ -293,6 +294,8 @@ class LibrarySettings(Settings):
         _refuse_neo_home(self.data_dir)
         if self.models_path is not None:
             _refuse_neo_home(self.models_path, "models_path")
+        if self.memory_path is not None:
+            _refuse_neo_home(self.memory_path, "memory_path")
         _refuse_real_data_under_tests(self.data_dir)
         _refuse_foreign_folder(self.data_dir)
         for k, v in self._pins().items():
@@ -307,6 +310,8 @@ class LibrarySettings(Settings):
         _refuse_neo_home(self.data_dir)
         if self.models_path is not None:
             _refuse_neo_home(self.models_path, "models_path")
+        if self.memory_path is not None:
+            _refuse_neo_home(self.memory_path, "memory_path")
         off = sorted(k for k, v in self._pins().items() if getattr(self, k) != v)
         if self.reflex not in ("lite", "off"):
             off.append("reflex")

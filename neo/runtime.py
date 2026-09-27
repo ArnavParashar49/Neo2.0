@@ -199,6 +199,23 @@ def _refuse_shared_data_dir(rt: Runtime) -> None:
                 f"data_dir {mine} is another agent's ({other.name!r} uses {other.settings.data_dir}): "
                 "give each agent its own folder, or close the other first"
             )
+    # A memory database kept outside the data dir (memory_path) is one agent's too: never another
+    # agent's file, in another's folder, or holding another's.
+    own_db = _memory_db(rt.settings)
+    for other in _live:
+        if not other.library:
+            continue
+        their_db = _memory_db(other.settings)
+        pairs = [(mine, their_db)] if their_db is not None else []
+        if own_db is not None:
+            pairs += [(own_db, Path(other.settings.data_dir))] + ([(own_db, their_db)] if their_db is not None else [])
+        if any(overlaps(a, b) for a, b in pairs):
+            raise ValueError(f"that memory database is another agent's ({other.name!r}): give each agent its own")
+
+
+def _memory_db(s: Settings) -> Path | None:
+    p = getattr(s, "memory_path", None)
+    return Path(p) if p is not None else None
 
 
 def live_runtimes() -> list[Runtime]:
@@ -215,6 +232,7 @@ def secret_roots() -> list[Path]:
         s = rt.settings
         roots.append(Path(s.data_dir))
         roots.extend(Path(p) for p in getattr(s, "extra_secret_paths", None) or ())
+        roots.extend(_memory_files(s))
         roots.extend(Path(p) for p in rt.secret_paths)
     from neo import config
 
@@ -222,9 +240,16 @@ def secret_roots() -> list[Path]:
     if app is not None:
         roots.append(Path(app.data_dir))
         roots.extend(Path(p) for p in getattr(app, "extra_secret_paths", None) or ())
+        roots.extend(_memory_files(app))
     out: list[Path] = []
     for p in roots:
         p = Path(str(p)).expanduser()
         if p not in out:
             out.append(p)
     return out
+
+
+def _memory_files(s: Settings) -> list[Path]:
+    """A memory database kept outside the data dir (`memory_path`), with SQLite's side files."""
+    p = _memory_db(s)
+    return [] if p is None else [p, *(p.with_name(p.name + x) for x in ("-wal", "-shm", "-journal"))]

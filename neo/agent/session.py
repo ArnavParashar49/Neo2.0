@@ -128,6 +128,7 @@ class Session:
     _summarized: int = 0  # history[:_summarized] is already in a session summary
     _chunk_started: float = field(default_factory=time.time)
     _bg: set = field(default_factory=set)  # background summaries in flight
+    _expiries: set = field(default_factory=set)  # the timers that close unanswered questions
     _hist_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     max_agent_jobs: int = _MAX_AGENT_JOBS  # agent runs at once; more wait their turn
     _agent_slots: asyncio.Semaphore = field(init=False)
@@ -519,7 +520,9 @@ class Session:
         self._pending_tool, self._pending_args, self._pending_action = p.tool, dict(p.params), p.action_id
         self._pending_taint, self._pending_origin = list(taint), origin
         self._pending_extras = dict(extras if extras is not None else _request_extras.get())
-        asyncio.create_task(self._expire_confirm(p.action_id))
+        t = asyncio.create_task(self._expire_confirm(p.action_id))
+        self._expiries.add(t)  # kept, so whoever closes the session can stop it
+        t.add_done_callback(self._expiries.discard)
 
     def _drop_pending(self) -> None:
         self._pending_tool, self._pending_args, self._pending_action = "", {}, ""
