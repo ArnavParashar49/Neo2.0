@@ -208,7 +208,8 @@ def test_the_old_tests_intent_holds():
 @pytest.mark.parametrize(
     "script, app, danger",
     [
-        ('tell application "System Events" to tell process "Chess" to click button 1 of window 1', "Chess", ""),
+        ('tell application "System Events" to tell process "Chess" to click button "Start" of window 1', "Chess", ""),
+        ('tell application "System Events" to tell process "Chess" to click button 1 of window 1', "Chess", "its place"),
         ('tell application "Chess" to activate', "Chess", ""),
         ('tell application "Terminal" to do script "ls"', "Terminal", "runs code"),
         ('tell application "Safari" to do JavaScript "1" in document 1', "Safari", "runs code"),
@@ -512,7 +513,10 @@ def _call(i, script):
 
 
 NEW_GAME = 'tell application "System Events" to tell process "Chess" to click menu item "New Game" of menu 1 of menu bar item "Game" of menu bar 1'
-PICK_WHITE = 'tell application "System Events" to tell process "Chess" to click pop up button 1 of sheet 1 of window 1'
+PICK_WHITE = (
+    'tell application "System Events" to tell process "Chess" to click menu item "White" of menu 1 of '
+    'pop up button 1 of sheet 1 of window 1'
+)
 START = 'tell application "System Events" to tell process "Chess" to click button "Start" of sheet 1 of window 1'
 
 
@@ -866,9 +870,9 @@ def test_a_grant_covers_only_reading_and_clicking_in_an_ordinary_app(script):
     "script",
     [
         'tell application "System Events" to tell process "Chess" to click menu item "New Game" of menu 1 of menu bar 1',
-        'tell application "System Events" to click button 1 of window 1 of process "Chess"',
-        'tell application "System Events" to tell process "Chess" to perform action "AXPress" of button 1 of window 1',
-        'tell application "System Events" to tell process "Chess" to select row 2 of table 1 of window 1',
+        'tell application "System Events" to click button "Start" of window 1 of process "Chess"',
+        'tell application "System Events" to tell process "Chess" to perform action "AXPress" of button "Start" of window 1',
+        'tell application "System Events" to tell process "Chess" to select row "Level 3" of table 1 of window 1',
         'tell application "System Events" to set frontmost of process "Chess" to true',
         'tell application "System Events" to tell process "Chess" to set value of text field 1 of window 1 to "x"',
         'tell application "Chess" to activate',
@@ -1075,3 +1079,133 @@ def test_system_events_by_its_bundle_id_is_system_events():
 def test_an_app_named_in_a_tell_counts_even_when_nothing_inside_acts_on_it():
     f = script_facts('tell application "Chess"\n  tell application "Finder" to activate\nend tell')
     assert f.app == "" and "more than one app" in f.danger
+
+
+# ---- second review: what a one-word `set` changes, what a grant can see pressed ------------------
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        # inside an app's tell, `set <word> to` sets the app's own property when it has one by that name
+        'tell application "Calendar" to tell event 1 of calendar "Work" to set recurrence to "FREQ=DAILY"',
+        'tell application "Calendar"\n  tell event 1 of calendar "Work"\n    set recurrence to "FREQ=DAILY"\n'
+        "  end tell\nend tell",
+        'tell application "Music" to tell current track to set bookmark to 0',
+        'tell application "Calendar" to tell event 1 of calendar "Work" to set {recurrence} to {"FREQ=DAILY"}',
+        'tell application "Calendar"\n  tell event 1 of calendar "Work"\n    repeat with recurrence in {"FREQ=DAILY"}\n'
+        "      log recurrence\n    end repeat\n  end tell\nend tell",
+        # …and so does a tell of System Events' own objects (a file's flags): only its app level and
+        # its UI have no one-word property that isn't a word of reading
+        'tell application "System Events" to tell file "/tmp/x" to set stationery to true',
+    ],
+)
+def test_a_one_word_set_inside_an_apps_tell_may_be_its_property(script):
+    f = script_facts(script)
+    assert not f.read_only and f.danger, f
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        # names no app's dictionary uses (its terms are lower-case words): the script's own
+        'tell application "Calendar" to tell event 1 of calendar "Work" to set theSummary to summary',
+        'tell application "Music"\n  set trackName to name of current track\n  set t to artist of current track\n'
+        "  set track_2 to album of current track\nend tell\nreturn trackName & t & track_2",
+        'tell application "Calendar"\n  repeat with anEvent in every event of calendar "Work"\n'
+        "    log summary of anEvent\n  end repeat\nend tell",
+        # System Events' process UI: every one-word property there is a word of reading
+        'tell application "System Events" to tell process "Chess" to set names to name of windows\nreturn names',
+    ],
+)
+def test_a_variable_no_app_term_could_be_is_the_scripts_own(script):
+    assert script_is_read_only(script), script_facts(script)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        # an element picked by its place: what it does can't be read from the script
+        'tell application "System Events" to tell process "TextEdit" to click button 3 of window 1',
+        'tell application "System Events" to click button 1 of window 1 of process "Chess"',
+        'tell application "System Events" to tell process "Chess" to select row 2 of table 1 of window 1',
+        'tell application "System Events" to tell process "Chess" to perform action "AXPress" of button 1 of window 1',
+        'tell application "System Events" to tell process "Chess" to click (first button whose name is "Start") of window 1',
+        'tell application "System Events" to tell process "Chess" to set value of checkbox 1 of window 1 to 1',
+        'tell application "System Events" to tell process "Chess" to set selected of row 2 of table 1 of window 1 to true',
+        'tell application "System Events" to tell process "Chess" to tell checkbox 1 of window 1 to set value to 1',
+        'tell application "System Events" to tell process "Chess" to tell button "Start" of window 1 to perform action "AXPress"',
+        # a label that says nothing about what it confirms
+        'tell application "System Events" to tell process "Chess" to click button "OK" of sheet 1 of window 1',
+        'tell application "System Events" to tell process "Chess" to click button "Continue" of window 1',
+        # an action besides pressing, showing a menu or raising a window (AXConfirm is Return)
+        'tell application "System Events" to tell process "TextEdit" to perform action "AXConfirm" of text field 1 of window 1',
+        'tell application "System Events" to tell process "TextEdit" to perform action "AXConfirm" of button "Save" of window 1',
+        'tell application "System Events" to tell process "Chess" to perform action "AXIncrement" of slider "Level" of window 1',
+    ],
+)
+def test_a_grant_never_covers_what_it_cant_see_pressed(script):
+    f = script_facts(script)
+    assert f.danger and not f.read_only, f
+    assert f.app in ("Chess", "TextEdit"), f  # its card still names the app
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        NEW_GAME,
+        START,
+        PICK_WHITE,
+        'tell application "System Events" to tell process "Chess" to perform action "AXPress" of button "Start" of sheet 1 '
+        "of window 1",
+        'tell application "System Events" to tell process "Chess" to perform action "AXRaise" of window 1',
+        'tell application "System Events" to tell process "Chess" to perform action "AXShowMenu" of pop up button 1 of '
+        "sheet 1 of window 1",
+        'tell application "System Events" to tell process "Chess" to select menu item "White" of menu 1 of pop up button 1 '
+        "of window 1",
+        'tell application "System Events" to tell process "Chess" to set value of text field 1 of window 1 to "e2e4"',
+        'tell application "System Events" to tell process "Chess" to set value of checkbox "Show hints" of window 1 to 1',
+        'tell application "System Events" to tell process "Chess" to set focused of text field 1 of window 1 to true',
+        'tell application "System Events" to tell process "Chess" to set frontmost to true',
+    ],
+)
+def test_a_grant_covers_what_it_can_see_pressed(script):
+    f = script_facts(script)
+    assert f.app == "Chess" and f.danger == "", f
+
+
+def test_after_a_granted_read_a_click_by_place_still_asks(ran):
+    """What a granted call reads back doesn't end the grant — so a grant never covers a press it
+    can't check by the element's label."""
+    from neo.tools import load_all
+
+    load_all()
+    t = _granted_chess_task(("ax_tree",))
+    by_place = 'tell application "System Events" to tell process "Chess" to click button 3 of window 1'
+
+    async def go():
+        ctx = ToolContext(user_text="x", taint=["ax_tree"])
+        with grants.task(t):
+            read = await registry().invoke("applescript", {"script": CHESS_READS[1]}, ctx)
+            click = await registry().invoke("applescript", {"script": by_place}, ctx)
+        return read, click
+
+    read, click = asyncio.run(go())
+    assert read.ok and not read.halt and click.halt and ran == [CHESS_READS[1]]
+    assert confirm.card(confirm.peek())["scopes"] == []
+
+
+@pytest.mark.parametrize("text", ["to the task", "for the task", "to this task", "to the whole task"])
+def test_to_the_task_alone_is_no_yes(text):
+    assert answer_of(text) is None and scope_of(text) == "once"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "for this task", "for the whole task", "for the entire task", "for the rest of the task",
+        "for this whole task", "yes to the task", "ok for the task", "yes to this task", "for the task, yes",
+    ],
+)
+def test_the_task_words_that_are_a_yes(text):
+    assert answer_of(text) is True and scope_of(text) == "task"

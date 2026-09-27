@@ -923,7 +923,7 @@ _SCRIPT_TRIES = 2  # failed scripts on one app in one task before NEO stops tryi
     "applescript",
     "Run AppleScript and return its result. Only for what an app exposes to scripting that no "
     "dedicated tool covers - not for seeing or clicking in an app's window (ax_tree, screenshot, "
-    "click, type_text and hotkey do that). Scripts that only read (get/count/exists/set a variable) "
+    "click, type_text and hotkey do that). Scripts that only read (get/count/exists/set a camelCase variable) "
     "run straight away; the user approves anything else. After two failures on an app, stop "
     "scripting it.",
     _p({"script": {"type": "string"}}, ["script"]),

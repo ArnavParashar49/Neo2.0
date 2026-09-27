@@ -388,8 +388,9 @@ _AS_DENIED_PHRASES = frozenset(
 )
 _AS_PHRASE_MAX = max(len(p.split()) for p in _AS_PHRASES | _AS_DENIED_PHRASES)
 _AS_PHRASE_WORDS = frozenset(w for p in _AS_PHRASES for w in p.split())
-# Properties a model may mean to change with `set <word> to …` inside a tell block: never taken
-# for a script's own variable.
+# Properties a model may mean to change with `set <word> to …`: never taken for a script's own
+# variable. Belt and braces only: inside an app's tell, what keeps the app's property from passing
+# for a variable is the reader's `known` and _own_name, not this list.
 _AS_SETTABLE = _terms(
     """
     mute muted shuffle volume label tag mode view state level brightness speed rate loop looping
@@ -491,6 +492,11 @@ _AS_UI_PROPS = _terms(
 # in one named app's window. Everything else a script does is asked about every time.
 _AS_UI_VERBS = frozenset({"click", "perform", "select"})
 _AS_UI_SET = frozenset({"value", "selected", "focused", "frontmost"})
+# `perform action "…"` a grant may cover: pressing (an element named by its label), showing its
+# menu, raising a window. Not AXConfirm (Return), AXCancel, AXIncrement / AXDecrement (a value).
+_AS_UI_ACTIONS = frozenset({"axpress", "axshowmenu", "axraise"})
+# Where `set value of … to` is typing, whichever the field: what it changes is the text it shows.
+_AS_UI_TEXT_ENTRY = frozenset({"text field", "text area", "combo box"})
 # Apps no task-wide yes ever covers, whatever the script does in them: they run commands or
 # scripts (a click or a typed line there is a shell), or hold NEO's own cards and the Mac's
 # security settings. Names and bundle ids, compared case-insensitively.
@@ -673,12 +679,29 @@ def _valid_local(t: _Tok) -> bool:
     )
 
 
-# Where a statement is: (terms, app, proc). `terms`: whose terminology its words are — the
+def _own_name(t: _Tok) -> bool:
+    """A name no app's dictionary uses: its terms are whole lower-case words, a space between two
+    (Apple's scripting guidelines) — so `theRule`, `track_2`, `n` are the script's own, where
+    `recurrence` may be the app's property (`set recurrence to …` in Calendar's event changes it)."""
+    raw = t.raw
+    return (
+        len(raw) == 1
+        or "_" in raw
+        or any(c.isdigit() for c in raw)
+        or (any(c.islower() for c in raw) and any(c.isupper() for c in raw[1:]))
+    )
+
+
+# Where a statement is: (terms, app, proc, known). `terms`: whose terminology its words are — the
 # innermost `tell application "X"`'s name folded ("id:…" for an app named by its id), "" at the
 # top. `app`: that app as written. `proc`: inside System Events, the process "X" a `tell` block is
-# about ("" = none: System Events' own objects).
-_Ctx = tuple[str, str, str]
-_TOP: _Ctx = ("", "", "")
+# about ("" = none: System Events' own objects). `known`: every one-word property the statement's
+# object can have is a word of reading, so `set <word> to` can only make a variable — true at the
+# top, at System Events' app level and in a process's UI (a fixed dictionary NEO has read); false
+# inside any other app's tell and on System Events' own objects (files, disks, preferences), where
+# only a name no app term could be (_own_name) is the script's own.
+_Ctx = tuple[str, str, str, bool]
+_TOP: _Ctx = ("", "", "", True)
 
 
 def _is_term(t: _Tok) -> bool:
@@ -701,8 +724,10 @@ def _literal_after(toks: list[_Tok], i: int) -> str | None:
 class _ScriptReader:
     """Reads a script statement by statement; `ok` says whether every one only reads — or, with
     `grant`, only reads or clicks, presses, chooses and fills in one named app's window (what a
-    yes "for this task" may cover). As it reads, it notes what each statement touches (`targets`)
-    and whether it reaches into an app's UI through System Events (`ui`).
+    yes "for this task" may cover, when every press can be checked by its label). As it reads, it
+    notes what each statement touches (`targets`), whether it reaches into an app's UI through
+    System Events (`ui`), and the labels of what it presses (`labels`) or why they can't be read
+    (`unchecked`).
 
     Terminology follows the innermost `tell application "…"`: inside it, a word the app
     defines means the app's command or property. So a variable counts as the script's own only
@@ -717,11 +742,13 @@ class _ScriptReader:
         self.stack: list[tuple[str, _Ctx]] = []
         self.targets: dict[str, str] = {}  # every app and process a statement touches (folded → as written)
         self.ui = False
+        self.labels: list[str] = []  # the labels of what it presses or chooses
+        self.unchecked: list[str] = []  # why what it presses can't be checked by its label
 
     def ok(self) -> bool:
         for collect in (True, False):  # first learn the variables, then check every use
             self.collect, self.stack = collect, []
-            self.targets, self.ui = {}, False
+            self.targets, self.ui, self.labels, self.unchecked = {}, False, [], []
             for line in self.lines:
                 ctx = self.stack[-1][1] if self.stack else _TOP
                 if not self._stmt(line, ctx, line=True):
@@ -732,7 +759,7 @@ class _ScriptReader:
 
     # ---- variables ----------------------------------------------------------------------
     def _assign(self, t: _Tok, ctx: _Ctx) -> bool:
-        if not _valid_local(t):
+        if not _valid_local(t) or not (ctx[3] or _own_name(t)):
             return False
         self.assigned.setdefault(t.text, set()).add(ctx[0])
         return True
@@ -758,7 +785,7 @@ class _ScriptReader:
         System Events' own, and it stays a target — a process name never relabels it."""
         if self.collect:
             return
-        terms, app, proc = ctx
+        terms, app, proc, _ = ctx
         procs: list[str] = []
         for i, x in enumerate(toks):
             if x.kind == "w" and x.text in _AS_APP_WORDS + _AS_PROC_WORDS and (name := _literal_after(toks, i)):
@@ -907,21 +934,52 @@ class _ScriptReader:
     def _act(self, t: list[_Tok], ctx: _Ctx) -> bool | None:
         """The acts a yes for this task may cover (None: the statement isn't one of them).
         `activate` inside an app's tell; inside System Events, `click` / `select` / `perform
-        action "AX…" of` an element of a named process's window."""
-        terms, app, proc = ctx
+        action "AX…" of` an element of a named process's window. What a grant presses is checked
+        by its label (_COMMIT, a bare "OK"), so pressing an element picked by its place (`button
+        3`, `first button whose …`) or an action other than a press, a menu or a raise is noted in
+        `unchecked`: the script keeps its app on its card, and no grant covers it."""
+        terms, app, proc, _ = ctx
         h = t[0].text if t[0].kind == "w" else ""
         if h == "activate" and len(t) == 1 and app and terms != _SE and not proc:
             self._hit([], ctx, act=True)
             return True
         if terms == _SE and h in _AS_UI_VERBS and len(t) > 1:
             obj = t[1:]
-            if h == "perform" and not obj[0].is_("action"):
+            if h == "perform" and (len(obj) < 2 or not obj[0].is_("action")):
                 return False
             if not self._expr(obj, ctx):
                 return False  # `click at {x, y}`: a point on the screen, in whichever app is there
+            if h != "perform":
+                self._press(obj)
+            elif obj[1].kind != "s" or (what := obj[1].text.strip().casefold()) not in _AS_UI_ACTIONS:
+                self._uncheck("it performs an action other than a press, a menu or raising a window")
+            elif what == "axpress":
+                self._press(obj[3:] if len(obj) > 3 and obj[2].is_("of") else [])
             self._hit(obj, ctx, act=True)
             return True
         return None
+
+    def _press(self, elem: list[_Tok]) -> None:
+        """Pressing or choosing `elem`: its label goes to `labels` when it's named by one (`button
+        "Start" [of …]`); picked by its place, nothing can say what it does."""
+        if self.collect:
+            return
+        if (
+            len(elem) >= 2
+            and elem[0].kind == "w"
+            and elem[0].text in _AS_UI_ELEMENTS
+            and elem[0].text not in ("action", "actions", "attribute", "attributes")
+            and elem[1].kind == "s"
+            and elem[1].text.strip()
+            and (len(elem) == 2 or elem[2].is_("of"))
+        ):
+            self.labels.append(elem[1].text)
+        else:
+            self._uncheck("it presses something picked by its place, not by its label")
+
+    def _uncheck(self, why: str) -> None:
+        if not self.collect:
+            self.unchecked.append(why)
 
     def _open(self, kind: str, ctx: _Ctx) -> bool:
         self.stack.append((kind, ctx))
@@ -934,7 +992,7 @@ class _ScriptReader:
             return None
         if t[0].kind == "w" and not _is_term(t[0]):
             return None  # tell <variable>: whatever it holds
-        terms, app, proc = ctx
+        terms, app, proc, known = ctx
         apps = [i for i, x in enumerate(t) if x.kind == "w" and x.text in _AS_APP_WORDS]
         procs = [i for i, x in enumerate(t) if x.kind == "w" and x.text in _AS_PROC_WORDS]
         if len(apps) > 1 or len(procs) > 1:
@@ -950,14 +1008,25 @@ class _ScriptReader:
                 terms = _SE  # what it touches is worked out statement by statement
             elif not self.collect:
                 self._add(name)  # compiling `tell application "X"` may launch X: it counts
+        # tell disk 1 / tell folder "x": System Events' own objects, not a process's UI
+        se_own = terms == _SE and any(
+            _is_term(x)
+            and x.text not in _AS_GENERIC
+            and x.text not in _AS_UI_ELEMENTS
+            and x.text not in _AS_UI_PROPS
+            and x.text not in _AS_APP_WORDS
+            for x in t
+        )
         if procs:
             proc = _literal_after(t, procs[0]) or ""
-        elif terms == _SE and any(
-            _is_term(x) and x.text not in _AS_GENERIC and x.text not in _AS_UI_ELEMENTS and x.text not in _AS_UI_PROPS
-            for x in t
-        ):
-            proc = ""  # tell disk 1 / tell folder "x": System Events' own objects
-        return (terms, app, proc)
+            known = terms == _SE and not se_own  # a process and its window
+        elif se_own:
+            proc, known = "", False
+        elif apps:
+            known = terms == _SE and apps[0] == 0  # System Events itself, not an object in another app
+        else:
+            known = known and terms == _SE and bool(proc)  # a window or a sheet of a process
+        return (terms, app, proc, known)
 
     def _repeat(self, t: list[_Tok], ctx: _Ctx) -> bool:
         if not t:
@@ -987,12 +1056,23 @@ class _ScriptReader:
         target = t[:k]
         words = [x.kind + x.text for x in target]
         if self.grant and ctx[0] == _SE and target[0].kind == "w" and target[0].text in _AS_UI_SET:
-            # set value of text field 1 of window 1 to …; set frontmost of process "X" to true;
-            # inside tell process "X": set frontmost to true
-            if (len(target) == 1 and ctx[2]) or (len(target) >= 3 and target[1].is_("of") and self._expr(target[2:], ctx)):
-                self._hit(target, ctx, act=True)
-                return True
-            return False
+            # set frontmost of process "X" to true; inside tell process "X": set frontmost to true;
+            # set value of text field 1 of window 1 to …: typing. Choosing (a checkbox's value, a
+            # row's selected) is pressing: checked by the element's label, as a click is.
+            prop, elem = target[0].text, target[2:]
+            if len(target) == 1:
+                if not ctx[2]:
+                    return False
+                if prop not in ("frontmost", "focused"):
+                    self._press([])  # the tell's own element: no label to read
+            elif len(target) >= 3 and target[1].is_("of") and self._expr(elem, ctx):
+                typing = prop == "value" and elem[0].kind == "w" and elem[0].text in _AS_UI_TEXT_ENTRY
+                if prop not in ("frontmost", "focused") and not typing:
+                    self._press(elem)
+            else:
+                return False
+            self._hit(target, ctx, act=True)
+            return True
         if len(target) == 1:
             return self._assign(target[0], ctx)
         if words[0] == "p{" and words[-1] == "p}":  # set {a, b} to {1, 2}
@@ -1073,7 +1153,8 @@ class ScriptFacts:
     process "X" in System Events' place only where all a statement touches is that process's window.
     `app`: the one app it acts on ("" = none, several, or picked at run time). `ui`: it reads or
     drives an app's UI through System Events, which takes Accessibility. `danger`: why a task-wide
-    yes never covers it ("" = one can: it only reads, clicks or fills in one ordinary app's window)."""
+    yes never covers it ("" = one can: it only reads, fills in, or clicks by label in one ordinary
+    app's window)."""
 
     __slots__ = ("read_only", "apps", "app", "ui", "danger")
 
@@ -1117,6 +1198,10 @@ def script_facts(script: str) -> ScriptFacts:
         danger = "keystrokes go to whichever app is in front"
     elif _COMMIT.search(src):
         danger = "it may send, buy, delete or grant something"
+    elif shaped and reader.unchecked:
+        danger = reader.unchecked[0]
+    elif shaped and any(_GENERIC_OK.match(label) for label in reader.labels):
+        danger = "its OK or Continue says nothing about what it confirms"
     elif _SCRIPT_REACHES_OUT.search(code):
         danger = "it reaches outside the app (files, links or the Mac itself)"
     elif _SCRIPT_MAC_MENUS.search(src):

@@ -50,9 +50,11 @@ _NO = re.compile(
 # allow karo", "is task ke liye haan". It answers the question like any yes; the calls of the same
 # kind on the same app that follow in this task then run without asking (never a risky one).
 _YES_WORD = r"(?:yes|yeah|yep|yup|sure|ok(?:ay)?|go ahead|allow(?:\s+it)?|haan|haan?\s+ji|ji\s+haan?|th(?:ee|i)k\s+hai|हाँ|हां|जी\s+(?:हाँ|हां))"
-# Words that approve by themselves: "for this task", "allow all", "sab allow karo".
+# Words that approve by themselves: "for this task", "for the whole task", "allow all", "sab allow
+# karo". Not "to the task" / "for the task": said alone, they're about the task, not a yes to it.
 _SCOPE_ALONE = (
-    r"(?:for|to)\s+(?:this|the)\s+(?:whole\s+|entire\s+)?task|for\s+the\s+rest\s+of\s+(?:this|the)\s+task"
+    r"for\s+this\s+(?:whole\s+|entire\s+)?task|for\s+the\s+(?:whole|entire)\s+task"
+    r"|for\s+the\s+rest\s+of\s+(?:this|the)\s+task"
     r"|allow\s+(?:all|everything)(?:\s+for\s+(?:this|the)\s+task)?"
     r"|(?:sab|sabhi|sab\s+kuch)\s+(?:allow|ok)\s+(?:karo|kar\s+do|kardo|kar\s+dijiye)"
     r"|(?:is|iss|poore|pure)\s+task\s+ke\s+liye\s+allow\s+(?:karo|kar\s+do)"
@@ -62,6 +64,7 @@ _SCOPE_ALONE = (
 # and "sab ke liye" is "for everyone" — an answer about the card, not an approval.
 _SCOPE_WITH_YES = (
     r"to\s+(?:all|everything)|for\s+(?:all|everything)"
+    r"|to\s+(?:this|the)\s+(?:whole\s+|entire\s+)?task|for\s+the\s+task"
     r"|(?:sab|sabhi)\s+ke\s+liye|(?:is|iss|poore|pure)\s+task\s+ke\s+liye"
     r"|(?:इस|पूरे)\s+(?:टास्क|काम)\s+के\s+लिए|सब\s+के\s+लिए"
 )

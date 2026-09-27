@@ -13,8 +13,13 @@ without a card, except:
 * another app: asked;
 * the request has read something new and untrusted since the grant (a page, a mail, a file, a
   screenshot — even from a tool it had used before): asked, since that text could be steering
-  the model. Every untrusted result in a task is counted (`read_untrusted`); only what the granted
-  calls themselves read back from the granted app doesn't count;
+  the model. Every untrusted result in a task is counted (`read_untrusted`) except what the
+  granted calls themselves read back from the granted app — and that can be someone else's words
+  too (a mail client's messages, a page in a browser). So a grant never rests on nothing new
+  having been read: what it covers is checked call by call. It presses only elements named by
+  their label, never one whose label sends, buys, deletes or grants, nor a bare "OK" (for
+  AppleScript, policy.script_facts); pressing an element picked by its place (`button 3`) is
+  asked about every time;
 * another task: a grant never outlives its task, and never reaches another job running at the
   same moment (the task id travels in a context variable, like confirm's approvals).
 
@@ -174,7 +179,8 @@ def for_card(action_id: str) -> Grant | None:
 def read_untrusted(tool: str) -> None:
     """A tool has handed the model untrusted content (a page, a mail, the screen) in the current
     task. Every such result after a yes "for this task" ends what that yes covers — except what a
-    call the grant let through reads back from its own app."""
+    call the grant let through reads back from its own app, which may still be a third party's
+    text: the grant's own limits (by-label presses only, see the module doc) are what hold then."""
     tid = current()
     if not tid:
         return
