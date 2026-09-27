@@ -5,42 +5,57 @@ in gates.py."""
 from __future__ import annotations
 
 import asyncio
+import math
 
 from neo2.core.agent import confirm
 from neo2.core.agent.registry import ToolContext, ToolOutput
-from neo2.core.tools.computer import ax, gates, phrases, pointer, screen, tools_ax
+from neo2.core.tools.computer import apps, ax, focus, gates, phrases, pointer, screen, tools_ax
 from neo2.core.tools.computer import input as inp
 from neo2.core.tools.computer._catalog import _p, tool
+
+SCREENSHOT_PARAMS = _p(
+    {
+        "x": {"type": "integer"},
+        "y": {"type": "integer"},
+        "w": {"type": "integer"},
+        "h": {"type": "integer"},
+        "display": {"type": "integer"},
+        "app": {"type": "string", "description": "an app whose front window to take (default: the app NEO works in)"},
+        "zoom": {
+            "type": "boolean",
+            "description": "a close look at full detail around x,y (screen points); w,h its size (default 320×200)",
+        },
+    }
+)
 
 
 @tool(
     "screenshot",
-    "Take a screenshot: a whole display (display: its number, 1 = main), or a region x,y,w,h in screen "
-    "points. Use when ax_tree is not enough (game boards, maps, drawing and other canvas "
+    "Take a screenshot: the front window of the app NEO works in (or of app), a whole display (display: its "
+    "number, 1 = main), a region x,y,w,h in screen points, or a zoom (zoom with x,y and optionally w,h) for "
+    "small things. Use when ax_tree is not enough (game boards, maps, drawing and other canvas "
     "apps, Electron apps, images, layout questions). Its note gives the image size and a shot id: to "
     "click, drag or scroll at something in the picture, pass its pixel position in the image with that "
     "shot id and NEO maps it to the screen.",
-    _p(
-        {
-            "x": {"type": "integer"},
-            "y": {"type": "integer"},
-            "w": {"type": "integer"},
-            "h": {"type": "integer"},
-            "display": {"type": "integer"},
-        }
-    ),
+    SCREENSHOT_PARAMS,
     category="computer",
     slow=True,
     untrusted=True,
     read_only=True,
 )
 async def screenshot(a: dict, c: ToolContext) -> ToolOutput:
-    import io
-
-    from PIL import Image
-
     region = None
-    if all(a.get(k) is not None for k in ("x", "y", "w", "h")):
+    zoom = bool(a.get("zoom"))
+    if zoom:
+        try:
+            zx, zy = float(a["x"]), float(a["y"])
+            zw = float(a["w"]) if a.get("w") not in (None, "") else float(screen.ZOOM_W)
+            zh = float(a["h"]) if a.get("h") not in (None, "") else float(screen.ZOOM_H)
+        except (KeyError, TypeError, ValueError):
+            return ToolOutput("Error: a zoom needs x and y (screen points; w and h optional)", ok=False)
+        if not all(math.isfinite(v) for v in (zx, zy, zw, zh)) or zw <= 0 or zh <= 0:
+            return ToolOutput("Error: a zoom's x, y, w and h must be finite, and w and h positive", ok=False)
+    elif all(a.get(k) is not None for k in ("x", "y", "w", "h")):
         try:
             region = tuple(int(float(a[k])) for k in ("x", "y", "w", "h"))
         except (TypeError, ValueError):
@@ -49,6 +64,11 @@ async def screenshot(a: dict, c: ToolContext) -> ToolOutput:
             return ToolOutput("Error: region width and height must be positive", ok=False)
     shown = await asyncio.to_thread(screen.displays)
     display = shown[0]
+    if zoom:
+        home = screen.display_at(zx, zy) if hasattr(screen, "display_at") else None
+        home = home or next((d for d in shown if d.contains(zx, zy)), None)
+        if home is None:
+            return ToolOutput(f"Error: ({zx:g}, {zy:g}) is off every screen ({'; '.join(d.words() for d in shown)})", ok=False)
     if region:
         # Only the part on a screen exists in the picture: cut the region to the display it starts on,
         # so its pixels always span exactly the region the note names.
@@ -58,7 +78,8 @@ async def screenshot(a: dict, c: ToolContext) -> ToolOutput:
         w = int(min(region[2], home.x + home.w - region[0]))
         h = int(min(region[3], home.y + home.h - region[1]))
         region = (region[0], region[1], w, h)
-    if a.get("display") not in (None, "") and not region:
+    display_asked = a.get("display") not in (None, "")
+    if display_asked and not region and not zoom:
         try:
             want = int(a["display"])
         except (TypeError, ValueError):
@@ -66,21 +87,60 @@ async def screenshot(a: dict, c: ToolContext) -> ToolOutput:
         display = next((d for d in shown if d.index == want), None)
         if display is None:
             return ToolOutput(f"Error: there's no display {want} ({'; '.join(d.words() for d in shown)})", ok=False)
+    # The app NEO works in, when one is known and nothing else was asked for: its front window (fewer
+    # of other apps' pixels, more detail per token). Never NEO's own or a protected app's window.
+    win = None if (region or zoom or display_asked) else await _working_window(str(a.get("app") or ""))
     try:
-        img, scale = await asyncio.to_thread(screen.capture, region, None if region else display)
+        if zoom:
+            cap = await asyncio.to_thread(screen.zoom, zx, zy, zw, zh, display=home)
+        elif win is not None:
+            cap = await asyncio.to_thread(screen.window_shot, win[0])
+        else:
+            cap = await asyncio.to_thread(screen.shot, region, None if region else display)
     except PermissionError as e:
         return ToolOutput(confirm.ask_user(str(e)), ok=False)
-    w, h = Image.open(io.BytesIO(img.data)).size
-    x0, y0 = (region[0], region[1]) if region else (display.x, display.y)
-    shot = pointer.remember(x0, y0, scale, w, h)
-    if region:
-        what = f"region {region[2]}×{region[3]} pt at screen ({region[0]},{region[1]})"
+    if zoom:
+        what = f"a zoom on {cap.w}×{cap.h} px of {zw:g}×{zh:g} pt around screen ({zx:g},{zy:g})"
         others: list = []
+    elif win is not None:
+        what = f"{win[1]}'s front window"
+        others = []
+    elif region:
+        what = f"region {region[2]}×{region[3]} pt at screen ({region[0]},{region[1]})"
+        others = []
     else:
         what = f"all of {display.words()}"
         others = [d for d in shown if d.index != display.index]
+    if not cap.clickable:
+        # The window server's bounds didn't match the picture (a shadow, a window that moved, one
+        # off screen): no mapping to click through — for looking at only.
+        text = (
+            f"Screenshot attached ({what}, for looking only: its pixels can't be mapped to the screen — for a "
+            "place to click, take a screenshot of the display or a region)."
+        )
+        return ToolOutput(text, images=[cap.part], fence=False)
+    shot = pointer.remember(cap.x0, cap.y0, cap.ppp, cap.w, cap.h)
     # NEO's own words (the mapping) aren't fenced; the picture is what came from the screen.
-    return ToolOutput(pointer.note(shot, what, others), images=[img], fence=False)
+    return ToolOutput(pointer.note(shot, what, others), images=[cap.part], fence=False)
+
+
+async def _working_window(asked: str) -> tuple[int, str, int] | None:
+    """(window id, app name, pid) of the front window of ``asked`` — else of the app NEO works in —
+    when it has one on screen; None for NEO's own and a protected app's (the whole display then)."""
+    name = asked or apps.target() or ""
+    if not name:
+        return None
+    try:
+        run = await asyncio.to_thread(apps._running, name)
+        if run is None:
+            return None
+        pid, real = int(run.processIdentifier()), str(run.localizedName() or name)
+        if not pid or ax.is_neo(pid, real) or gates._protected(real, pid):
+            return None
+        wid = await asyncio.to_thread(focus.front_window_id, pid)
+    except Exception:  # noqa: BLE001 - can't tell: the whole display
+        return None
+    return (wid, real, pid) if wid else None
 
 
 async def _element_spot(eid: str, verb: str = "click") -> tuple[ax.Element, int, str, tuple[float, float]] | str | ToolOutput:

@@ -117,7 +117,7 @@ class World:
     def scene(self, pid):
         return ax.Scene(front=self.front[0], front_pid=self.front[1], title="Chess", sheet=self.sheet, known=True)
 
-    def sample(self, pts, r=60):
+    def sample(self, pts, r=60, frame=None, like=None):
         self.samples += 1
         if self.late and self.samples == 3:  # a page that redraws only after a moment
             self.version += 1
@@ -548,7 +548,7 @@ def _hover_world(world, monkeypatch, at=(612.0, 540.0)):
         order.append(ev["kind"])
         base(ev)
 
-    def sample(pts, r=60):
+    def sample(pts, r=60, frame=None, like=None):
         order.append("SAMPLE")
         world.samples += 1
         hovered = abs(world.q.pointer[0] - at[0]) < 20 and abs(world.q.pointer[1] - at[1]) < 20

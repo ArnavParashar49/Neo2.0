@@ -149,16 +149,17 @@ def test_coordinates_from_a_brain_that_saw_nothing_are_refused_in_the_run(monkey
 
 
 def test_the_screenshot_note_reaches_the_model_unfenced_and_a_look_is_not_an_act(monkeypatch):
-    def capture(region=None, display=None):
+    def shot(region=None, display=None, **_):
         from io import BytesIO
+        from types import SimpleNamespace
 
         from PIL import Image
 
         buf = BytesIO()
-        Image.new("RGB", (1512, 982)).save(buf, format="PNG")
-        return ImagePart(buf.getvalue()), 1.0
+        Image.new("RGB", (1512, 982)).save(buf, format="JPEG")
+        return SimpleNamespace(part=ImagePart(buf.getvalue(), "image/jpeg"), x0=0.0, y0=0.0, ppp=1.0, w=1512, h=982, clickable=True)
 
-    monkeypatch.setattr(screen, "capture", capture)
+    monkeypatch.setattr(screen, "shot", shot)
     b = Script([Turn(tool_calls=[ToolCall("t1", "screenshot", {})]), Turn(text="It's your move.")])
     res = asyncio.run(run_agent("whose move is it?", provider=b, system="", ev=EventBus(),
                                 tools=[registry().get("screenshot").spec()]))  # fmt: skip

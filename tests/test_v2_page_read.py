@@ -199,12 +199,17 @@ def test_a_window_is_captured_by_its_id_and_scaled_down(monkeypatch):
         Image.new("RGB", (3200, 1000), "white").save(cmd[-1], format="PNG")
 
     asked: list[int] = []
+    # (no window server here: Q has nothing but the permission question, and the bounds and what is
+    # over the window are unknown, said outright)
     monkeypatch.setattr(screen, "Q", SimpleNamespace(CGRequestScreenCaptureAccess=lambda: asked.append(1)))
+    monkeypatch.setattr(screen, "_window_bounds", lambda wid: None)
+    monkeypatch.setattr(screen, "_window_stack", lambda wid: None)
+    monkeypatch.setattr(screen, "_main_scale", lambda: 2.0)
     monkeypatch.setattr(screen.subprocess, "run", run)
     monkeypatch.setattr(screen, "can_capture", lambda: True)
     img = screen.capture_window(77)
-    assert ran[0][:-1] == ["screencapture", "-x", "-o", "-t", "png", "-l", "77"]
-    assert Image.open(io.BytesIO(img.data)).size == (1600, 500) and img.mime == "image/png"
+    assert ran[0][:-1] == ["screencapture", "-x", "-t", "tiff", "-o", "-l", "77"]  # (uncompressed: eyes-capture)
+    assert Image.open(io.BytesIO(img.data)).size == (1600, 500) and img.mime == "image/jpeg"
     monkeypatch.setattr(screen, "can_capture", lambda: False)
     with pytest.raises(PermissionError):
         screen.capture_window(77)
@@ -228,6 +233,7 @@ def test_a_window_capture_is_cut_to_the_page(monkeypatch):
 
     monkeypatch.setattr(screen.subprocess, "run", run)
     monkeypatch.setattr(screen, "can_capture", lambda: True)
+    monkeypatch.setattr(screen, "_window_stack", lambda wid: (4321, []))  # (on screen, nothing over it)
     monkeypatch.setattr(screen, "_window_bounds", lambda wid: (100.0, 50.0, 1600.0, 1000.0))
     img = Image.open(io.BytesIO(screen.capture_window(77, (100.0, 130.0, 1600.0, 920.0)).data))
     assert img.size == (1600, 920) and img.getpixel((10, 0)) == (255, 255, 255)

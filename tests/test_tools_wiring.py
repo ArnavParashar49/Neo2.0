@@ -1,0 +1,88 @@
+"""The tools group's wiring after the split: the eyes (capture, marks, OCR, board) and the commands
+(resolver, menus) reach the handlers in tools_*.py through the frozen gates. Hermetic: every capture,
+Accessibility read and event is faked."""
+
+from __future__ import annotations
+
+import asyncio
+from types import SimpleNamespace
+
+import pytest
+
+pytest.importorskip("Quartz")
+
+from neo2.core.agent.registry import ToolContext  # noqa: E402
+from neo2.core.providers.base import ImagePart  # noqa: E402
+from neo2.core.tools.computer import apps, ax, focus, gates, pointer, screen, tools_pointer  # noqa: E402
+
+
+def _cap(kind="full", *, clickable=True, x0=0.0, y0=0.0, ppp=1.0, w=100, h=80):
+    return SimpleNamespace(
+        part=ImagePart(b"x", "image/jpeg"), x0=x0, y0=y0, ppp=ppp, w=w, h=h, kind=kind, clickable=clickable,
+        covered=(), frame=None, window_id=0, pid=0,
+    )  # fmt: skip
+
+
+class _App:
+    def __init__(self, pid, name):
+        self._pid, self._name = pid, name
+
+    def processIdentifier(self):  # noqa: N802 - AppKit's name
+        return self._pid
+
+    def localizedName(self):  # noqa: N802
+        return self._name
+
+
+@pytest.fixture
+def shots(monkeypatch):
+    took: list[tuple] = []
+    monkeypatch.setattr(screen, "shot", lambda region=None, display=None, **k: took.append(("shot", region)) or _cap())
+    monkeypatch.setattr(screen, "zoom", lambda x, y, w, h, **k: took.append(("zoom", x, y, w, h)) or _cap("zoom", ppp=0.5))
+    monkeypatch.setattr(screen, "window_shot", lambda wid, *a, **k: took.append(("window", wid)) or _cap("window", x0=10, y0=20))
+    monkeypatch.setattr(apps, "_running", lambda name: _App(4321, "Pages") if name.lower() == "pages" else None)
+    monkeypatch.setattr(focus, "front_window_id", lambda pid: 77 if pid == 4321 else 0)
+    monkeypatch.setattr(ax, "is_neo", lambda pid, name="": False)
+    return took
+
+
+def _run(a: dict):
+    return asyncio.run(tools_pointer.screenshot(a, ToolContext(origin="agent")))
+
+
+def test_a_screenshot_takes_the_working_apps_front_window(shots, monkeypatch):
+    monkeypatch.setattr(apps, "target", lambda: "Pages")
+    out = _run({})
+    assert shots == [("window", 77)] and "Pages's front window" in out.text and out.images
+    assert pointer.get_shot(out.text.split()[1]).x0 == 10  # clicks map through the window's own origin
+
+
+def test_the_whole_display_when_asked_or_when_no_app_is_known(shots, monkeypatch):
+    monkeypatch.setattr(apps, "target", lambda: None)
+    _run({})
+    monkeypatch.setattr(apps, "target", lambda: "Pages")
+    _run({"display": 1})
+    _run({"x": 0, "y": 0, "w": 50, "h": 50})
+    assert [s[0] for s in shots] == ["shot", "shot", "shot"]
+
+
+def test_never_a_protected_apps_or_neos_window(shots, monkeypatch):
+    monkeypatch.setattr(apps, "target", lambda: "Pages")
+    monkeypatch.setattr(gates, "_protected", lambda name, pid=0: name == "Pages")
+    _run({})
+    monkeypatch.setattr(gates, "_protected", lambda name, pid=0: False)
+    monkeypatch.setattr(ax, "is_neo", lambda pid, name="": True)
+    _run({"app": "Pages"})
+    assert [s[0] for s in shots] == ["shot", "shot"]
+
+
+def test_a_window_picture_that_cannot_be_mapped_is_for_looking_only(shots, monkeypatch):
+    monkeypatch.setattr(screen, "window_shot", lambda wid, *a, **k: _cap("window", clickable=False))
+    out = _run({"app": "Pages"})
+    assert "for looking only" in out.text and 'shot="' not in out.text
+
+
+def test_a_zoom_around_a_point(shots):
+    out = _run({"zoom": True, "x": 300, "y": 200})
+    assert shots == [("zoom", 300.0, 200.0, float(screen.ZOOM_W), float(screen.ZOOM_H))] and "zoom" in out.text
+    assert not _run({"zoom": True, "x": 300}).ok  # a zoom needs its point
