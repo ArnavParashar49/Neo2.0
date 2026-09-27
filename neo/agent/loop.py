@@ -19,7 +19,7 @@ from neo.agent.registry import registry as default_registry
 from neo.config import settings
 from neo.events import EventBus, NeoState
 from neo.events import bus as default_bus
-from neo.providers.base import Message, Provider, ToolCall, ToolResult, ToolSpec, Turn
+from neo.providers.base import AllBrainsFailed, Message, Provider, ToolCall, ToolResult, ToolSpec, Turn
 
 Stopped = Literal["done", "max_steps", "needs_confirm", "needs_user", "thrash", "error"]
 
@@ -55,6 +55,18 @@ def _truncate(text: str, limit: int) -> str:
         return text
     head = int(limit * 0.7)
     return text[:head] + f"\n…[{len(text) - limit} chars trimmed]…\n" + text[-(limit - head) :]
+
+
+def _model_trouble(e: Exception, steps: list[Step]) -> str:
+    """What the user hears when no brain could take the next step: which brain, and whether it's
+    out of quota, can't take a request this long, isn't running — not a raw stack of errors."""
+    if not isinstance(e, AllBrainsFailed):
+        return f"I hit a problem talking to the model: {e}"
+    said = e.spoken()
+    if steps:
+        n = len(steps)
+        said += f" I'd done {n} step{'s' if n != 1 else ''} of it before that."
+    return said
 
 
 def _halt_kind(text: str) -> Stopped | None:
@@ -250,7 +262,7 @@ async def run_agent(
             turn: Turn = await provider.complete(messages, system=system, tools=tools, effort=effort)
         except Exception as e:  # noqa: BLE001
             await _settle(ev, idle_on_finish, job)
-            return AgentResult(f"I hit a problem talking to the model: {e}", "error", steps, messages)
+            return AgentResult(_model_trouble(e, steps), "error", steps, messages)
 
         messages.append(Message.assistant(turn.text, turn.tool_calls, raw=turn.raw))
         if not turn.tool_calls:

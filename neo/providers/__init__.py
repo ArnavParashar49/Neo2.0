@@ -7,11 +7,23 @@ unreachable, so a free-tier 429 degrades gracefully instead of failing the turn.
 
 from __future__ import annotations
 
+import asyncio
+import time as _time
 from collections.abc import AsyncIterator
 from typing import Literal
 
 from neo.config import BrainName, settings
-from neo.providers.base import Message, Provider, ProviderError, RateLimited, ToolSpec, Turn
+from neo.providers.base import (
+    AllBrainsFailed,
+    Message,
+    Provider,
+    ProviderError,
+    RateLimited,
+    ToolSpec,
+    Turn,
+)
+
+__all__ = ["AllBrainsFailed", "Chain", "ProviderError", "RateLimited", "brain", "make"]
 
 Purpose = Literal["agent", "fast", "vision", "offline", "light"]
 
@@ -48,37 +60,56 @@ def make(name: BrainName) -> Provider:
 
 
 _DEMOTE_S = 300.0  # a brain that just failed goes to the back of the line for this long
+_WAIT_MAX_S = 30.0  # every brain failed but one only asked for a short wait: wait, then ask it again
 
 # Shared across chains: once Gemini has fallen over in one request, the next request (a fresh
 # Chain each time) should not pay the same failed round trips before reaching Groq.
 _demoted: dict[str, float] = {}
 
+# A request-shaped failure says nothing about the brain's health: the next request may be fine.
+_NO_DEMOTE = ("bad_request", "too_large")
+
+
+def _cooling(p: Provider) -> float:
+    """When a brain that knows it's spent (every Gemini key out of quota) can be asked again."""
+    try:
+        return float(getattr(p, "cooling_until", lambda: 0.0)() or 0.0)
+    except Exception:  # noqa: BLE001
+        return 0.0
+
 
 class Chain:
     """Ordered providers with automatic failover on RateLimited / ProviderError.
 
-    A provider that fails is *demoted* for a few minutes: still available, but tried after the
-    ones that work. `sticky=False` keeps the given order regardless (the vision chain must not
-    let a text-only brain answer first and silently drop the screenshot)."""
+    A provider that fails is *demoted* for a few minutes (a spent quota: until it resets): still
+    available, but tried after the ones that work. `sticky=False` keeps the given order regardless
+    (the vision chain must not let a text-only brain answer first and silently drop the screenshot).
+    When every brain fails, the error is an AllBrainsFailed that says, per brain, why — quota,
+    too large, not running — so the task can end with that reason spoken."""
 
     def __init__(self, names: list[BrainName], *, sticky: bool = True) -> None:
         self.names = names
         self.sticky = sticky
         self.last_used: str = ""
         self.last_model: str = ""
+        self._missing: list[tuple[str, ProviderError]] = []
 
     def _providers(self) -> list[Provider]:
         out: list[Provider] = []
+        self._missing = []
         for n in self._order():
             try:
                 out.append(make(n))
             except ProviderError as e:  # missing key → skip silently
                 print(f"[brain] {n} unavailable: {e}")
+                self._missing.append((n, e))
+        if self.sticky:
+            # A brain that knows it's spent (all its quota) goes last: the next one is asked at once.
+            now = _time.time()
+            out.sort(key=lambda p: _cooling(p) > now)
         return out
 
     def _order(self) -> list[BrainName]:
-        import time as _time
-
         if not self.sticky:
             return list(self.names)
         now = _time.time()
@@ -86,10 +117,13 @@ class Chain:
         return healthy + [n for n in self.names if n not in healthy]
 
     @staticmethod
-    def _demote(name: str) -> None:
-        import time as _time
-
-        _demoted[name] = _time.time() + _DEMOTE_S
+    def _demote(name: str, e: ProviderError | None = None) -> None:
+        if e is not None and getattr(e, "kind", "") in _NO_DEMOTE:
+            return
+        until = _time.time() + _DEMOTE_S
+        if e is not None and getattr(e, "kind", "") == "quota":
+            until = max(until, float(getattr(e, "until", 0.0) or 0.0))
+        _demoted[name] = until
 
     @property
     def name(self) -> str:
@@ -101,13 +135,33 @@ class Chain:
 
     supports_tools = True
 
-    def _no_brain(self, errors: list[str]) -> ProviderError:
+    def _no_brain(self, failures: list[tuple[str, ProviderError]]) -> ProviderError:
         s = settings()
         if not (s.gemini_api_key or s.groq_api_key or s.anthropic_api_key):
             return ProviderError(
                 "no API key set — add GEMINI_API_KEY to .env (free at aistudio.google.com/apikey)"
             )
-        return ProviderError("all brains failed: " + "; ".join(errors)[:300])
+        return AllBrainsFailed(failures + self._missing)
+
+    async def _failed(self, p: Provider, e: ProviderError, failures: list[tuple[str, ProviderError]]) -> None:
+        print(f"[brain] {p.name} failed ({type(e).__name__}: {str(e)[:80]}); trying next")
+        failures.append((p.name, e))
+        if self.sticky:
+            self._demote(p.name, e)
+        from neo.events import bus
+
+        await bus().note(f"{p.name.capitalize()} unavailable, switching brain")
+
+    @staticmethod
+    def _short_wait(failures: list[tuple[str, ProviderError]]) -> tuple[float, str] | None:
+        """(seconds, brain) when some brain failed only for a moment (a per-minute limit, a busy
+        spell) and asked us to wait no longer than _WAIT_MAX_S."""
+        waits = [
+            (float(w), n)
+            for n, e in failures
+            if (w := getattr(e, "retry_after", None)) is not None and 0 <= float(w) <= _WAIT_MAX_S
+        ]
+        return min(waits) if waits else None
 
     async def complete(
         self,
@@ -118,28 +172,42 @@ class Chain:
         effort="medium",
         max_tokens: int = 4096,
     ) -> Turn:
-        errors: list[str] = []
-        for p in self._providers():
+        failures: list[tuple[str, ProviderError]] = []
+        providers = self._providers()
+        for p in providers:
             try:
                 turn = await p.complete(
                     messages, system=system, tools=tools, effort=effort, max_tokens=max_tokens
                 )
                 self.last_used, self.last_model = p.name, getattr(p, "model", "")
                 return turn
-            except (RateLimited, ProviderError) as e:
-                print(f"[brain] {p.name} failed ({type(e).__name__}: {str(e)[:80]}); trying next")
-                errors.append(f"{p.name}: {str(e)[:80]}")
-                if self.sticky:
-                    self._demote(p.name)
-                from neo.events import bus
+            except ProviderError as e:
+                await self._failed(p, e, failures)
+        if (wait := self._short_wait(failures)) is not None:
+            # Every brain is out, but one only for seconds (Groq's per-minute budget): a long
+            # task is worth that pause rather than ending here.
+            secs, name = wait
+            p = next(p for p in providers if p.name == name)
+            print(f"[brain] every brain failed; waiting {secs:.0f}s for {name}")
+            from neo.events import bus
 
-                await bus().note(f"{p.name.capitalize()} unavailable, switching brain")
-        raise self._no_brain(errors)
+            await bus().note(f"Waiting {secs:.0f}s for {name.capitalize()}'s rate limit")
+            await asyncio.sleep(secs + 0.5)
+            try:
+                turn = await p.complete(
+                    messages, system=system, tools=tools, effort=effort, max_tokens=max_tokens
+                )
+                self.last_used, self.last_model = p.name, getattr(p, "model", "")
+                return turn
+            except ProviderError as e:
+                failures = [(n, x) for n, x in failures if n != name]
+                await self._failed(p, e, failures)
+        raise self._no_brain(failures)
 
     async def stream(
         self, messages: list[Message], *, system: str = "", max_tokens: int = 2048
     ) -> AsyncIterator[str]:
-        errors: list[str] = []
+        failures: list[tuple[str, ProviderError]] = []
         for p in self._providers():
             produced = False
             try:
@@ -148,13 +216,13 @@ class Chain:
                     yield chunk
                 self.last_used, self.last_model = p.name, getattr(p, "model", "")
                 return
-            except (RateLimited, ProviderError) as e:
+            except ProviderError as e:
                 if produced:  # can't restart a half-streamed answer
                     raise
-                errors.append(f"{p.name}: {str(e)[:80]}")
+                failures.append((p.name, e))
                 if self.sticky:
-                    self._demote(p.name)
-        raise self._no_brain(errors)
+                    self._demote(p.name, e)
+        raise self._no_brain(failures)
 
 
 def brain(purpose: Purpose = "agent") -> Chain:

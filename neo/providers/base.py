@@ -25,6 +25,9 @@ class ToolCall:
     name: str
     args: dict[str, Any]
     signature: bytes | None = None  # Gemini thought_signature — must be echoed back verbatim
+    # The model that wrote this call. Its signature is only valid for that model: after a switch
+    # (quota, overload) another one gets the documented bypass value instead.
+    source: str = ""
 
 
 @dataclass
@@ -109,8 +112,112 @@ class Provider(Protocol):
 
 
 class ProviderError(RuntimeError):
-    pass
+    """A brain couldn't answer. ``kind`` says why, in words the failover chain acts on and the
+    user can be told: see :func:`failure_words`."""
+
+    kind = "error"
 
 
 class RateLimited(ProviderError):
-    """429 — caller may fail over to another brain."""
+    """429 — caller may fail over to another brain. ``retry_after``: seconds the brain asked us
+    to wait, when it said (a per-minute limit clears in seconds; a quota does not)."""
+
+    kind = "rate"
+
+    def __init__(self, msg: str = "", *, retry_after: float | None = None) -> None:
+        super().__init__(msg)
+        self.retry_after = retry_after
+
+
+class QuotaExhausted(RateLimited):
+    """Every key/model of this brain is out of quota until ``until`` (epoch seconds): asking again
+    before then only costs round trips."""
+
+    kind = "quota"
+
+    def __init__(self, msg: str = "", *, until: float = 0.0) -> None:
+        import time as _time
+
+        super().__init__(msg, retry_after=max(0.0, until - _time.time()) if until else None)
+        self.until = until
+
+
+class BadRequest(ProviderError):
+    """The brain rejected *this request* (a 400): another brain may take it; this one is fine."""
+
+    kind = "bad_request"
+
+
+class RequestTooLarge(BadRequest):
+    """The request doesn't fit this brain's context or per-request token limit, even trimmed."""
+
+    kind = "too_large"
+
+
+class Overloaded(ProviderError):
+    """The brain is up but too busy to answer (5xx); it usually clears within a minute or two."""
+
+    kind = "busy"
+
+    def __init__(self, msg: str = "", *, retry_after: float | None = None) -> None:
+        super().__init__(msg)
+        self.retry_after = retry_after
+
+
+class Unavailable(ProviderError):
+    """The brain isn't there at all: no key, the local server isn't running, no network."""
+
+    kind = "offline"
+
+
+def failure_words(name: str, e: ProviderError) -> str:
+    """One brain's failure as a short spoken clause: "Gemini is out of free quota until 9:00"."""
+    import time as _time
+
+    who = _SPOKEN_NAME.get(name, name.capitalize())
+    kind = getattr(e, "kind", "error")
+    if kind == "quota":
+        until = getattr(e, "until", 0.0)
+        when = ""
+        if until and until - _time.time() < 36 * 3600:
+            t = _time.localtime(until)
+            when = f" until {t.tm_hour % 12 or 12}:{t.tm_min:02d} {'AM' if t.tm_hour < 12 else 'PM'}"
+        return f"{who} is out of free quota{when}"
+    if kind == "rate":
+        return f"{who} is rate-limited right now"
+    if kind == "busy":
+        return f"{who} is overloaded right now"
+    if kind == "too_large":
+        return f"{who} couldn't take a request this long"
+    if kind == "offline":
+        return f"{who} isn't available ({str(e)[:60]})" if name != "local" else f"{who} isn't running"
+    if kind == "bad_request":
+        return f"{who} rejected the request"
+    return f"{who} failed ({str(e)[:60]})"
+
+
+_SPOKEN_NAME = {
+    "gemini": "Gemini",
+    "gemini_lite": "Gemini Lite",
+    "groq": "Groq",
+    "local": "the local model",
+    "claude": "Claude",
+}
+
+
+class AllBrainsFailed(ProviderError):
+    """Every brain in a chain failed; ``failures`` is (brain name, its error) in the order tried."""
+
+    def __init__(self, failures: list[tuple[str, ProviderError]]) -> None:
+        self.failures = failures
+        super().__init__("all brains failed: " + "; ".join(f"{n}: {str(e)[:80]}" for n, e in failures)[:300])
+        kinds = {getattr(e, "kind", "error") for _, e in failures}
+        self.kind = kinds.pop() if len(kinds) == 1 else "error"
+
+    def spoken(self) -> str:
+        """Why the task stopped, for the user: which brain, and quota vs error."""
+        parts = [failure_words(n, e) for n, e in self.failures]
+        if not parts:
+            return "I couldn't reach any model, so I stopped."
+        said = parts[0] if len(parts) == 1 else ", ".join(parts[:-1]) + " and " + parts[-1]
+        return f"I had to stop: {said}."

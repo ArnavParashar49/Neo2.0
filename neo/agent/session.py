@@ -24,6 +24,7 @@ from neo.config import settings
 from neo.events import NeoState, bus
 from neo.providers import brain
 from neo.providers.base import ImagePart, Message, ToolResult
+from neo.providers.history import continues_request
 from neo.reflex import Reflex, is_bare_stop, outcomes
 from neo.reflex.schema import Decision
 
@@ -684,10 +685,24 @@ class Session:
 
     def _trimmed(self) -> list[Message]:
         """Recent history for the model. Tool results older than the last two turns are stubbed —
-        they were consumed when fresh and are the bulk of the tokens otherwise."""
-        h = self.history[-_MAX_HISTORY:]
-        while h and h[0].role == "tool":  # never start a transcript with a tool-result turn
-            h = h[1:]
+        they were consumed when fresh and are the bulk of the tokens otherwise.
+
+        The window opens at a user turn. Cut anywhere else — inside an agent run, which is where a
+        long confirm-by-confirm task puts the cut after a few approvals — and the transcript would
+        begin with a tool call whose result, or a result whose call, lies outside it: Gemini
+        refuses that with a 400, and the task dies."""
+        hist = self.history
+        start = max(0, len(hist) - _MAX_HISTORY)
+        cut = next((i for i in range(start, len(hist)) if hist[i].role == "user"), None)
+        if cut is None:  # one turn longer than the window: keep that turn whole
+            cut = next((i for i in range(start - 1, -1, -1) if hist[i].role == "user"), len(hist))
+        h = hist[cut:]
+        if h and continues_request(h[0]):
+            # Opened on "[User confirmed …]" after many approvals: the request itself stays in view,
+            # or the model is told to "continue the task" without being told which.
+            ask = next((m for m in reversed(hist[:cut]) if m.role == "user" and not continues_request(m)), None)
+            if ask is not None:
+                h = [ask, *h]
         keep_from = _last_user_index(h, 2)
         out: list[Message] = []
         for i, m in enumerate(h):

@@ -14,16 +14,23 @@ import anthropic
 
 from neo.config import settings
 from neo.providers.base import (
+    BadRequest,
     Message,
+    Overloaded,
     ProviderError,
     RateLimited,
+    RequestTooLarge,
     ToolCall,
     ToolSpec,
     Turn,
+    Unavailable,
     Usage,
 )
+from neo.providers.fit import fit
+from neo.providers.history import normalize
 
 _EFFORT = {"low": "low", "medium": "medium", "high": "xhigh"}
+_TOKEN_BUDGET = 200_000  # context window
 
 
 def _img(im) -> dict[str, Any]:
@@ -34,10 +41,9 @@ def _img(im) -> dict[str, Any]:
 
 
 def _to_messages(messages: list[Message]) -> list[dict[str, Any]]:
-    # Anthropic requires the transcript to open with a user turn: drop any orphaned prefix.
-    start = next((i for i, m in enumerate(messages) if m.role == "user"), len(messages))
+    # Opens with a user turn, every tool_use answered at once (neo.providers.history).
     out: list[dict[str, Any]] = []
-    for m in messages[start:]:
+    for m in normalize(messages):
         if m.role == "user":
             content: list[dict[str, Any]] = [_img(i) for i in m.images]
             if m.text or not content:
@@ -71,15 +77,33 @@ def _tools(specs: list[ToolSpec] | None) -> list[dict[str, Any]]:
     return [{"name": s.name, "description": s.description, "input_schema": s.parameters} for s in specs or []]
 
 
+def _error(e: Exception) -> ProviderError:
+    if isinstance(e, anthropic.RateLimitError):
+        return RateLimited(str(e))
+    if isinstance(e, anthropic.APIStatusError):
+        low = str(e).lower()
+        if e.status_code == 413 or "prompt is too long" in low or "too many tokens" in low:
+            return RequestTooLarge(f"claude: {e}")
+        if e.status_code == 529 or e.status_code >= 500:
+            return Overloaded(f"claude: {e}")
+        if 400 <= e.status_code < 500:
+            return BadRequest(f"claude: {e}")
+        return ProviderError(f"claude: {e}")
+    if isinstance(e, anthropic.APIConnectionError):
+        return Unavailable(f"claude: connection error: {e}")
+    return ProviderError(f"claude: {e}")
+
+
 class ClaudeProvider:
     name = "claude"
     supports_vision = True
     supports_tools = True
+    token_budget = _TOKEN_BUDGET
 
     def __init__(self, model: str | None = None) -> None:
         s = settings()
         if not s.anthropic_api_key:
-            raise ProviderError("ANTHROPIC_API_KEY is not set")
+            raise Unavailable("ANTHROPIC_API_KEY is not set")
         self.model = model or s.claude_model
         self._client = anthropic.AsyncAnthropic(api_key=s.anthropic_api_key)
 
@@ -92,24 +116,30 @@ class ClaudeProvider:
         effort: Literal["low", "medium", "high"] = "medium",
         max_tokens: int = 4096,
     ) -> Turn:
+        out = max(max_tokens, 16000)
+        f = fit(
+            messages,
+            system=system,
+            tools=tools,
+            budget=self.token_budget,
+            max_tokens=out,
+            vision=True,
+            name=self.name,
+        )
         try:
             resp = await self._client.beta.messages.create(
                 model=self.model,
-                max_tokens=max(max_tokens, 16000),
+                max_tokens=f.max_tokens,
                 system=system or anthropic.NOT_GIVEN,
-                messages=_to_messages(messages),
-                tools=_tools(tools) or anthropic.NOT_GIVEN,
+                messages=_to_messages(f.messages),
+                tools=_tools(f.tools) or anthropic.NOT_GIVEN,
                 thinking={"type": "adaptive"},
                 output_config={"effort": _EFFORT[effort]},
                 betas=["server-side-fallback-2026-07-01"],
                 fallbacks="default",
             )
-        except anthropic.RateLimitError as e:
-            raise RateLimited(str(e)) from e
-        except anthropic.APIStatusError as e:
-            raise ProviderError(f"claude: {e}") from e
-        except anthropic.APIConnectionError as e:
-            raise ProviderError(f"claude: connection error: {e}") from e
+        except (anthropic.APIStatusError, anthropic.APIConnectionError) as e:
+            raise _error(e) from e
 
         if resp.stop_reason == "refusal":
             return Turn(text="I can't help with that one.")
@@ -118,7 +148,9 @@ class ClaudeProvider:
             if b.type == "text":
                 turn.text += b.text
             elif b.type == "tool_use":
-                turn.tool_calls.append(ToolCall(id=b.id, name=b.name, args=dict(b.input or {})))
+                turn.tool_calls.append(
+                    ToolCall(id=b.id, name=b.name, args=dict(b.input or {}), source=self.model)
+                )
             elif b.type == "thinking" and getattr(b, "thinking", ""):
                 turn.thinking += b.thinking
         turn.usage = Usage(resp.usage.input_tokens, resp.usage.output_tokens)
@@ -127,19 +159,25 @@ class ClaudeProvider:
     async def stream(
         self, messages: list[Message], *, system: str = "", max_tokens: int = 2048
     ) -> AsyncIterator[str]:
+        f = fit(
+            messages,
+            system=system,
+            budget=self.token_budget,
+            max_tokens=max(max_tokens, 16000),
+            vision=True,
+            name=self.name,
+        )
         try:
             async with self._client.beta.messages.stream(
                 model=self.model,
-                max_tokens=max(max_tokens, 16000),
+                max_tokens=f.max_tokens,
                 system=system or anthropic.NOT_GIVEN,
-                messages=_to_messages(messages),
+                messages=_to_messages(f.messages),
                 output_config={"effort": "low"},
                 betas=["server-side-fallback-2026-07-01"],
                 fallbacks="default",
             ) as st:
                 async for text in st.text_stream:
                     yield text
-        except anthropic.RateLimitError as e:
-            raise RateLimited(str(e)) from e
         except (anthropic.APIStatusError, anthropic.APIConnectionError) as e:
-            raise ProviderError(f"claude: {e}") from e
+            raise _error(e) from e
