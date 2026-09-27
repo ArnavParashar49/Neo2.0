@@ -19,6 +19,7 @@ __all__ = [
     "_no_real_embeddings",
     "_fresh_learning_state",
     "_no_shadow_dry_runs",
+    "_no_real_browser",
 ]
 
 # Hermetic: no test may read the developer's real keys or settings (~/.neo/.env, ./.env).
@@ -87,6 +88,20 @@ def _no_shadow_dry_runs(monkeypatch):
         facts.close()
 
     monkeypatch.setattr(_shadow, "later", drop)
+
+
+@pytest.fixture(autouse=True)
+def _no_real_browser(monkeypatch):
+    """web_fetch renders a page its scripts build in a headless Chromium: never inside the suite
+    (the one real check runs with NEO_TEST_RENDER=1). Tests fake the browser instead."""
+    if os.environ.get("NEO_TEST_RENDER") == "1":
+        return
+    from neo.tools import render
+
+    async def refuse():
+        raise render.RenderError("no real browser in the test suite")
+
+    monkeypatch.setattr(render, "_start_playwright", refuse)
 
 
 @pytest.fixture
