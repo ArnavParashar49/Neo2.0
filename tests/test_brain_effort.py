@@ -686,3 +686,107 @@ def test_typing_waits_for_a_field_that_takes_text_or_the_old_time(monkeypatch):
 def test_the_wait_never_passes_its_cap_and_a_mac_that_cant_answer_gets_the_old_wait(monkeypatch):
     assert _wait(monkeypatch, Mac(front_at=99.0)) == pytest.approx(2.0, abs=0.06)
     assert _wait(monkeypatch, Mac(fail=True)) == pytest.approx(0.8, abs=0.01)
+
+
+# ---- through the real agent loop (the wiring the integrator adds, emulated) ---------------------------
+
+
+def _board_registry(miss_second_click: bool):
+    from neo.agent.registry import RegisteredTool, Registry, ToolOutput
+
+    reg, clicks = Registry(), [0]
+
+    async def ax_tree(a, ctx):
+        return ToolOutput("window “Board”: the board area has no accessible elements")
+
+    async def screenshot(a, ctx):
+        return ToolOutput("Screenshot s1 attached.", images=[PNG], fence=False)
+
+    async def click(a, ctx):
+        clicks[0] += 1
+        if miss_second_click and clicks[0] == 2:
+            return ToolOutput("Clicked. Nothing visibly changed there within 1s — it may have missed", ok=False)
+        return ToolOutput("Clicked. Changed: the screen changed around the point.")
+
+    reg.register(RegisteredTool("ax_tree", "look", {"type": "object"}, ax_tree, parallel_safe=True))
+    reg.register(RegisteredTool("screenshot", "look", {"type": "object"}, screenshot))
+    reg.register(RegisteredTool("click", "click", {"type": "object"}, click))
+    return reg
+
+
+class Scripted(Brain):
+    def __init__(self, name, calls, **kw):
+        super().__init__(name, **kw)
+        self.turns = [Turn(tool_calls=[ToolCall(f"t{i}", n, a)]) for i, (n, a) in enumerate(calls)] + [Turn(text="Done.")]
+
+    async def complete(self, messages, **kw):
+        await super().complete(messages, **kw)
+        return self.turns[min(sum(m.role == "assistant" for m in messages), len(self.turns) - 1)]
+
+
+_MOVE = [("ax_tree", {}), ("screenshot", {}), ("click", {"shot": "s1", "x": 1, "y": 2}), ("screenshot", {}),
+         ("click", {"shot": "s1", "x": 3, "y": 4}), ("screenshot", {}), ("click", {"shot": "s1", "x": 3, "y": 5})]  # fmt: skip
+
+
+def test_in_the_loop_a_low_run_steps_up_after_the_miss_and_back_down(monkeypatch):
+    from neo.agent.loop import run_agent
+    from neo.events import EventBus
+
+    g = Scripted("gemini", _MOVE)
+    _brains(monkeypatch, gemini=g)
+    reg = _board_registry(miss_second_click=True)
+    chain = prov.brain("vision", effort=Effort(start_level(_d(), screen=True, knob="low")))
+    res = asyncio.run(run_agent("move e2 to e4", provider=chain, system="", reg=reg, ev=EventBus(), effort="high",
+                                tools=[t.spec() for t in reg._tools.values()]))  # fmt: skip
+    assert res.stopped == "done"
+    # the miss (5th step's click) → medium until a click works → low again, and for the loop's [verify] turn
+    assert g.asked == ["low", "low", "low", "low", "low", "medium", "medium", "low", "low"]
+    # the default setting: every step at 'high', exactly as before
+    g2 = Scripted("gemini", _MOVE)
+    _brains(monkeypatch, gemini=g2)
+    chain = prov.brain("vision", effort=Effort(start_level(_d(), screen=True)))
+    asyncio.run(run_agent("move e2 to e4", provider=chain, system="", reg=_board_registry(True), ev=EventBus(),
+                          effort="high", tools=[t.spec() for t in reg._tools.values()]))  # fmt: skip
+    assert set(g2.asked) == {"high"} and len(g2.asked) == 9
+
+
+def test_in_the_loop_a_bound_budget_ends_the_run_inside_its_limit(monkeypatch):
+    """Only a rate-limited seeing brain left (a 50 s wait before every step): the chain used to sit
+    out a wait that ended past the run's limit; bound to the run's clock, it stops first."""
+    from neo.agent.loop import run_agent
+    from neo.events import EventBus
+
+    now = [0.0]
+    real_sleep = asyncio.sleep
+
+    async def fake_sleep(s, *a, **k):
+        now[0] += float(s)
+        await real_sleep(0)
+
+    class Throttled(Scripted):
+        fresh = True
+
+        async def complete(self, messages, **kw):
+            self.fresh = not self.fresh
+            if not self.fresh:
+                raise RateLimited("429 tokens per minute", retry_after=50.0)
+            now[0] += 5.0
+            return await super().complete(messages, **kw)
+
+    gv = Throttled("groq_vision", _MOVE)
+    _brains(monkeypatch, groq_vision=gv)
+    monkeypatch.setattr(prov.asyncio, "sleep", fake_sleep)
+    chain = prov.Chain(["groq_vision"], sticky=False)
+
+    class Bound:  # run_agent's wiring: each step asked within the run's time left
+        def __getattr__(self, k):
+            return getattr(chain, k)
+
+        async def complete(self, *a, **kw):
+            with budget.seconds(180.0 - now[0], clock=lambda: now[0]):
+                return await chain.complete(*a, **kw)
+
+    reg = _board_registry(False)
+    res = asyncio.run(run_agent("move e2 to e4", provider=Bound(), system="", reg=reg, ev=EventBus(),
+                                tools=[t.spec() for t in reg._tools.values()]))  # fmt: skip
+    assert now[0] <= 180.0 and res.stopped == "error" and "time limit" in res.text
