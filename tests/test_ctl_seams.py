@@ -689,3 +689,163 @@ def test_ax_set_value_types_no_line_break_where_the_value_did_not_take(monkeypat
     typed.clear()
     asyncio.run(tools_ax.ax_set_value({"id": "e7", "value": "no breaks here"}, ToolContext(origin="agent")))
     assert typed == [(4242, "no breaks here", "")]
+
+
+# ---- the system (Apple) menu: never pressed, clicked or answered -------------------------------------
+
+
+class _MenuEl:
+    def __init__(self, role, title="", parent=None):
+        self.role, self.title, self.parent, self.children = role, title, parent, []
+        if parent is not None:
+            parent.children.append(self)
+
+
+def _menu_bar(monkeypatch):
+    """A menu bar as every app's AX tree has it: the system's menu first, then the app's own."""
+    from neo.tools.computer import ax
+
+    bar = _MenuEl("AXMenuBar")
+    apple, app_menu = _MenuEl("AXMenuBarItem", "Apple", bar), _MenuEl("AXMenuBarItem", "TextEdit", bar)
+    system = _MenuEl("AXMenu", "", apple)
+    items = {t: _MenuEl("AXMenuItem", t, system) for t in ("Restart…", "Shut Down…", "Force Quit…", "Log Out")}
+    new = _MenuEl("AXMenuItem", "New", _MenuEl("AXMenu", "", app_menu))
+    window = _MenuEl("AXWindow", "Untitled")
+    context = _MenuEl("AXMenuItem", "Restart", _MenuEl("AXMenu", "", window))  # a context menu's own item
+
+    def attr(el, name, default=None):
+        if not isinstance(el, _MenuEl):
+            return default
+        got = {"AXRole": el.role, "AXTitle": el.title, "AXParent": el.parent, "AXChildren": el.children}.get(name)
+        return got if got not in (None, [], "") else default
+
+    monkeypatch.setattr(ax, "_attr", attr)
+    return apple, items, new, context
+
+
+def test_the_system_menu_is_told_by_its_place_in_the_menu_bar(monkeypatch):
+    from neo.tools.computer import gates
+
+    apple, items, new, context = _menu_bar(monkeypatch)
+    assert gates._in_system_menu(apple) and all(gates._in_system_menu(el) for el in items.values())
+    assert not gates._in_system_menu(new) and not gates._in_system_menu(context)
+    assert not gates._in_system_menu(context.parent.parent)  # (a window is no menu)
+
+
+def _menu_world(monkeypatch):
+    from neo.agent import confirm
+    from neo.tools.computer import ax, tools_ax
+
+    apple, items, new, context = _menu_bar(monkeypatch)
+    els = {f"e{n}": ax.Element(f"e{n}", "AXMenuItem", el.title, "", 20, 40 + 22 * n, 220, 22, actions=["AXPress", "AXCancel"], ref=el)
+           for n, el in enumerate([*items.values(), new], start=1)}  # fmt: skip
+    monkeypatch.setattr(ax, "get", lambda eid: els.get(eid))
+    monkeypatch.setattr(tools_ax, "_element_pid", lambda el: 555)  # the front app's pid (its menu bar)
+    monkeypatch.setattr(ax, "app_of", lambda ref: "TextEdit")
+    monkeypatch.setattr(ax, "is_neo", lambda pid, name="": False)
+    monkeypatch.setattr(ax, "app_names", lambda pid: {"textedit"})
+    monkeypatch.setattr(ax, "regular", lambda pid: True)
+    pressed = []
+    monkeypatch.setattr(ax, "press_el", lambda e: pressed.append(e.title) or f"Pressed {e.id}")
+    monkeypatch.setattr(ax, "press_element", lambda e: pressed.append(e.title) or "Pressed")
+    monkeypatch.setattr(confirm, "gated", lambda *a, **k: "NEEDS_CONFIRM: x")
+    return els, pressed
+
+
+@pytest.mark.parametrize("eid", ["e1", "e2", "e3", "e4"])
+def test_ax_press_and_click_by_id_never_touch_the_system_menu(monkeypatch, eid):
+    from neo.agent.registry import ToolContext
+    from neo.tools.computer import input as inp
+    from neo.tools.computer import tools_ax, tools_pointer
+
+    els, pressed = _menu_world(monkeypatch)
+    clicked = []
+    monkeypatch.setattr(inp, "click", lambda *a, **k: clicked.append(a))
+    out = asyncio.run(tools_ax.ax_press({"id": eid}, ToolContext(origin="agent")))
+    assert pressed == [] and not out.ok and "system menu" in out.text, out
+    out = asyncio.run(tools_pointer.click({"id": eid}, ToolContext(origin="agent")))
+    assert clicked == [] and not out.ok and "system menu" in out.text, out
+    asyncio.run(tools_ax.ax_press({"id": "e5"}, ToolContext(origin="agent")))  # the app's own menu: pressed
+    assert pressed == ["New"]
+
+
+def test_a_click_at_a_system_menu_item_is_refused(monkeypatch):
+    from neo.agent.registry import ToolContext
+    from neo.tools.computer import ax, tools_pointer
+    from neo.tools.computer import input as inp
+
+    _apple, items, _new, _context = _menu_bar(monkeypatch)
+    monkeypatch.setattr(ax, "hit", lambda x, y: ax.Hit(pid=555, app="TextEdit", label="Restart…", role="AXMenuItem", regular=True, el=items["Restart…"]))
+    monkeypatch.setattr(ax, "is_neo", lambda pid, name="": False)
+    monkeypatch.setattr(ax, "app_names", lambda pid: {"textedit"})
+    clicked = []
+    monkeypatch.setattr(inp, "click", lambda *a, **k: clicked.append(a))
+    out = asyncio.run(tools_pointer.click({"x": 60, "y": 90}, ToolContext(user_text="restart", origin="agent")))
+    assert clicked == [] and not out.ok and "system menu" in out.text, out
+
+
+def test_click_text_never_picks_a_system_menu_item(monkeypatch):
+    from neo.agent.registry import ToolContext
+    from neo.tools.computer import ax, gates, tools_label
+
+    els, pressed = _menu_world(monkeypatch)
+
+    async def none(*a, **k):
+        return None
+
+    monkeypatch.setattr(gates, "_guard_front", none)
+    shown = [els["e1"]]  # an open Apple menu, its "Restart…" the only match
+    monkeypatch.setattr(ax, "window_elements", lambda app=None: ("TextEdit", (0, 0, 800, 600), shown))
+    out = asyncio.run(tools_label.click_text({"label": "restart"}, ToolContext(origin="agent")))
+    assert pressed == [] and str(out).startswith("Error"), out
+    game = ax.Element("e9", "AXButton", "Restart", "", 300, 300, 80, 24, actions=["AXPress"], ref=None)
+    shown.append(game)  # a game's own Restart button beside it: that one, never the system's
+    asyncio.run(tools_label.click_text({"label": "restart"}, ToolContext(origin="agent")))
+    assert pressed == ["Restart"]
+
+
+# ---- click_text's mouse fallback: what is really under the spot is gated too -------------------------
+
+
+def _fallback_world(monkeypatch, hit):
+    from neo.agent import confirm
+    from neo.tools.computer import ax, gates, pointer
+    from neo.tools.computer import input as inp
+
+    async def none(*a, **k):
+        return None
+
+    monkeypatch.setattr(gates, "_guard_front", none)
+    e = ax.Element("e3", "AXStaticText", "Archive", "", 100, 100, 60, 20, actions=[], ref=None)  # no AXPress
+    monkeypatch.setattr(ax, "window_elements", lambda app=None: ("Notes", (0, 0, 800, 600), [e]))
+    monkeypatch.setattr(pointer, "spot", lambda frame: (130.0, 110.0))
+    monkeypatch.setattr(ax, "hit", lambda x, y: hit)
+    monkeypatch.setattr(ax, "is_neo", lambda pid, name="": False)
+    monkeypatch.setattr(ax, "app_names", lambda pid: {hit.app.lower()})
+    staged, clicked = [], []
+    monkeypatch.setattr(confirm, "gated", lambda *a, **k: staged.append(a[2]) or "NEEDS_CONFIRM: x")
+    monkeypatch.setattr(inp, "click", lambda *a, **k: clicked.append(a))
+    return staged, clicked
+
+
+def test_click_texts_fallback_never_clicks_another_apps_window_over_the_element(monkeypatch):
+    from neo.agent.registry import ToolContext
+    from neo.tools.computer import ax, tools_label
+
+    # another app's floating panel covers the spot: its "Send" button is what the click would hit
+    staged, clicked = _fallback_world(monkeypatch, ax.Hit(pid=77, app="Mail", label="Send", role="AXButton", regular=True))
+    out = asyncio.run(tools_label.click_text({"label": "archive"}, ToolContext(origin="agent")))
+    assert clicked == [] and not out.ok and out.text.startswith("Error") and "Mail" in out.text, out
+
+
+def test_click_texts_fallback_asks_first_when_the_spot_is_a_committing_control(monkeypatch):
+    from neo.agent.registry import ToolContext
+    from neo.tools.computer import ax, tools_label
+
+    # the same app, but what lies under the spot is its "Send" button, not the text meant
+    staged, clicked = _fallback_world(monkeypatch, ax.Hit(pid=0, app="Notes", label="Send", role="AXButton", regular=True))
+    out = asyncio.run(tools_label.click_text({"label": "archive"}, ToolContext(origin="agent")))
+    assert clicked == [] and staged and "Send" in staged[0] and str(out).startswith("NEEDS_CONFIRM"), out
+    staged, clicked = _fallback_world(monkeypatch, ax.Hit(pid=0, app="Notes", label="Archive", role="AXStaticText"))
+    asyncio.run(tools_label.click_text({"label": "archive"}, ToolContext(origin="agent")))
+    assert staged == [] and clicked == [(130.0, 110.0)]  # the text meant: clicked

@@ -16,6 +16,8 @@ these helpers through this module at call time (``gates._ask_first(...)``, never
   pid, failing closed, never brought forward: _NEVER_TYPE_INTO, _protected, _protected_at,
   _protected_hit, _off_limits_el, _refuse_protected, _protected_out, _guard_front; the controls
   self-test's one exception, by pid, while it runs: allow_test_window, _test_window_front.
+- The system (Apple) menu, off limits the same way wherever it shows: _in_system_menu,
+  _outside_system_menu.
 - Reading the screen taints the request: _taint, _read_from_screen, _refused, _watch, _changes.
 """
 
@@ -227,7 +229,8 @@ async def _protected_at(owner: str, x: float, y: float) -> bool:
 
 def _refuse_protected() -> str:
     return confirm.ask_user(
-        "that's NEO's own window (or an app I'm not allowed to touch) — I won't click or type there."
+        "that's NEO's own window, the system menu or an app I'm not allowed to touch — I won't click or "
+        "type there."
     )
 
 
@@ -237,9 +240,12 @@ def _protected_out() -> ToolOutput:
 
 
 async def _protected_hit(h: ax.Hit, x: float, y: float) -> bool:
-    """Is what :func:`ax.hit` found at (x, y) NEO's own window (any of its processes) or a protected
-    app's? When it couldn't name an owner, the window server is asked; when nobody can say, yes."""
+    """Is what :func:`ax.hit` found at (x, y) NEO's own window (any of its processes), the system
+    menu or a protected app's? When it couldn't name an owner, the window server is asked; when
+    nobody can say, yes."""
     if h.pid and ax.is_neo(h.pid, h.app):
+        return True
+    if h.el is not None and h.role in (*_MENU_ROLES, "") and await asyncio.to_thread(_in_system_menu, h.el):
         return True
     if h.pid or h.app:
         return _protected(h.app, h.pid)
@@ -247,13 +253,47 @@ async def _protected_hit(h: ax.Hit, x: float, y: float) -> bool:
 
 
 async def _off_limits_el(e: ax.Element, pid: int, owner: str) -> bool:
-    """Is an ax_tree element NEO's own or a protected app's? By its process when that is known,
-    else by its owner's name, else by whose window is at its centre (fail closed)."""
+    """Is an ax_tree element NEO's own, in the system menu, or a protected app's? By its process
+    when that is known, else by its owner's name, else by whose window is at its centre (fail
+    closed)."""
     if pid and ax.is_neo(pid, owner):
+        return True
+    if e.role in _MENU_ROLES and e.ref is not None and await asyncio.to_thread(_in_system_menu, e.ref):
         return True
     if pid:
         return _protected(owner, pid)
     return await _protected_at(owner, *e.center)
+
+
+# ---- the system menu --------------------------------------------------------------------
+# The first menu of every app's menu bar is the system's (the Apple menu): Restart…, Shut Down…,
+# Log Out, Force Quit… — served by other processes, for the whole Mac. Nothing of NEO's ever
+# presses, clicks or answers anything in it: it is off limits like a protected app, by its place in
+# the menu bar (never by its words, in whatever language they are).
+_MENU_ROLES = frozenset({"AXMenuBarItem", "AXMenu", "AXMenuItem"})
+
+
+def _in_system_menu(el) -> bool:
+    """Is this Accessibility element the system menu or in it — the first item of a menu bar, or a
+    menu or item under it? Only menus are walked up: anything else is in no menu bar."""
+    node = el
+    for _ in range(16):
+        if node is None:
+            return False
+        role = ax._str(ax._attr(node, "AXRole"))
+        if role == "AXMenuBarItem":
+            bar = ax._attr(node, "AXParent")
+            items = (ax._attr(bar, "AXChildren") or []) if bar is not None else []
+            return bool(items) and ax._same(items[0], node)
+        if role not in _MENU_ROLES:
+            return False
+        node = ax._attr(node, "AXParent")
+    return True  # menus nested deeper than any app's: not told apart, so not touched
+
+
+def _outside_system_menu(els: list) -> list:
+    """The elements that are neither the system menu nor in it (a label match never picks one)."""
+    return [e for e in els if not (e.role in _MENU_ROLES and e.ref is not None and _in_system_menu(e.ref))]
 
 
 # The controls self-test's own test window (neo.selftest.controls), by its pid, while that test

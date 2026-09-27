@@ -43,7 +43,7 @@ async def click_text(a: dict, c: ToolContext) -> str | ToolOutput:
     def visible(e) -> bool:
         return e.w > 0 and e.h > 0 and e.x + e.w > fx and e.y + e.h > fy and e.x < fx + fw and e.y < fy + fh
 
-    cands = [e for e in els if e.enabled and visible(e)]
+    cands = await asyncio.to_thread(gates._outside_system_menu, [e for e in els if e.enabled and visible(e)])
     exact = [e for e in cands if e.title.lower().strip() == label or (not e.title and e.value.lower().strip() == label)]
     hits = exact or [e for e in cands if word.search(e.title) or word.search(e.value)]
     if not hits:
@@ -79,9 +79,17 @@ async def click_text(a: dict, c: ToolContext) -> str | ToolOutput:
     if spot is None:
         return f"Error: '{name}' isn't on screen — scroll to it or move its window first."
     try:
-        await pointer.probe([spot])  # never NEO's own window over it
+        t = await pointer.probe([spot])  # never NEO's own window over it
     except pointer.Refused as r:
         return gates._refused(c, r)
+    # The click lands on whatever is at the spot now: that must be the element's app, and what is
+    # there is gated like the element was (another control can sit over part of it).
+    h = t.hits[0]
+    mine = await asyncio.to_thread(ax.pid_of, e.ref) if e.ref is not None else 0
+    if (h.pid and mine and h.pid != mine) or (not (h.pid and mine) and h.app and app and h.app != app):
+        return ToolOutput(f"Error: {h.app or 'another window'} covers '{name}' — look again (ax_tree) before clicking.", ok=False)
+    if gate := await gates._gate_click(a, [(h.label, h.app or app)]):
+        return gate
     await asyncio.to_thread(inp.click, *spot)
     return f"Clicked '{name}' ({e.role.removeprefix('AX')}) at {tuple(map(int, spot))}" + gates._input_doubt()
 
