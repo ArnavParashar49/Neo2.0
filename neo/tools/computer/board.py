@@ -726,6 +726,8 @@ class Board:
     def parse(self, name: str) -> tuple[int, int]:
         """(col, row) of a square's name, or ValueError saying which names this board takes."""
         s = re.sub(r"\s+", "", str(name or "")).lower()
+        if not s:
+            raise ValueError(f"a square's name is needed ({self.names()}).")
         m = re.fullmatch(r"r(?:ow)?(\d{1,2})c(?:ol)?(\d{1,2})", s)
         if m:
             row, col = int(m.group(1)) - 1, int(m.group(2)) - 1
@@ -746,7 +748,7 @@ class Board:
             o = self.orientation
             col, row = {"bottom": (f, 8 - r), "top": (7 - f, r - 1), "left": (r - 1, f), "right": (8 - r, 7 - f)}[o]
             return col, row
-        raise ValueError(f"{str(name)[:20]!r} isn't a square's name here: use {self.name(0, 0)} … {self.name(self.cols - 1, self.rows - 1)}.")
+        raise ValueError(f"{str(name)[:20]!r} isn't a square's name here ({self.names()}).")
 
     def names(self) -> str:
         return f"{self.name(0, self.rows - 1)}–{self.name(self.cols - 1, 0)}" if self.chess else f"r1c1–r{self.rows}c{self.cols}"
