@@ -287,7 +287,7 @@ def _progression(lines: list[tuple[float, float, float]], min_lines: int):
             k = np.searchsorted(pos[:i], prev)
             for kk in (np.clip(k - 1, 0, i - 1), np.clip(k, 0, i - 1)):
                 ok &= ~((np.abs(pos[kk] - prev) <= np.maximum(2.5, steps * 0.05)) & (np.abs(st[kk] - s0) <= slack) & (np.abs(en[kk] - e0) <= slack))
-        for j, step, sl in zip(js[ok].tolist(), steps[ok].tolist(), slack[ok].tolist(), strict=True):
+        for j, sl in zip(js[ok].tolist(), slack[ok].tolist(), strict=True):
             picked = [float(pos[i]), float(pos[j])]
             too_many = False
             while True:
