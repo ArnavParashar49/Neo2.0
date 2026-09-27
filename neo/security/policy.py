@@ -1307,6 +1307,14 @@ def commits(label: str, context: str = "") -> bool:
     return bool(_GENERIC_OK.match(label or "") and _CONSEQUENCE.search(context or ""))
 
 
+def drop_commits(label: str, window_words: str = "") -> bool:
+    """A drop that deletes, sends or shares where it lands: onto something whose label says so (the
+    Trash), or into a window whose own words say it does (an AirDrop window: "share instantly with
+    people nearby"; its recipients are just names). What is dragged never counts — a file called
+    "report.pdf" is a file, not a button."""
+    return bool(_COMMIT.search(label or "") or _CONSEQUENCE.search(window_words or ""))
+
+
 # ---- URLs ------------------------------------------------------------------------------------
 _DOC_EXT = re.compile(
     r"\.(?:pdf|txt|md|rtf|rtfd|docx?|xlsx?|pptx?|key|pages|numbers|csv|tsv|json|png|jpe?g|gif|heic|"

@@ -28,6 +28,7 @@ __all__ = [
     "_no_shadow_dry_runs",
     "_app_mode",
     "_accessibility_on",
+    "_no_real_screen",
     "_no_task_grants",
 ]
 
@@ -124,6 +125,34 @@ def _accessibility_on(monkeypatch):
     except ImportError:  # no macOS frameworks (the core install's portable run): nothing to fake
         return
     monkeypatch.setattr(ax, "is_trusted", lambda: True)
+
+
+@pytest.fixture(autouse=True)
+def _no_real_screen(monkeypatch):
+    """The input tools look at the real screen around every click (what's under the point, a
+    picture before and after) and ask macOS whether events may be posted: in the suite nothing is
+    under any point, no picture can be taken, one 1512×982 display, and posting is allowed. A test
+    that needs a world fakes these itself."""
+    from neo.tools.computer import ax, pointer, screen
+    from neo.tools.computer import input as inp
+
+    monkeypatch.setattr(inp, "can_post", lambda: True)
+    monkeypatch.setattr(ax, "hit", lambda x, y: ax.Hit())
+    monkeypatch.setattr(ax, "window_owner_at", lambda x, y: ("", 0))  # (the window server: no window there)
+    monkeypatch.setattr(ax, "scene", lambda pid: ax.Scene())
+    monkeypatch.setattr(ax, "raise_window", lambda h: False)
+    monkeypatch.setattr(ax, "focused_element_text", lambda: "")
+    monkeypatch.setattr(screen, "sample_points", lambda pts, r=60: None)
+    monkeypatch.setattr(screen, "displays", lambda: [screen.Display(1, 0.0, 0.0, 1512.0, 982.0)])
+    monkeypatch.setattr(pointer, "LOOK_S", 0.0)
+    monkeypatch.setattr(pointer, "LOOK_AGAIN_S", 0.0)
+    monkeypatch.setattr(pointer, "SETTLE_S", 0.0)
+    # The app NEO works in is per test (bringing a real one forward is refused: neo/effects.py), and
+    # no app runs a shell unless a test says so.
+    from neo.tools.computer import apps, focus
+
+    monkeypatch.setattr(apps, "_target", None)
+    monkeypatch.setattr(focus, "hosts_shell", lambda pid, depth=3: False)
 
 
 @pytest.fixture(autouse=True)

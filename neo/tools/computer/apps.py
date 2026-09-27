@@ -112,8 +112,6 @@ async def bring_front(name: str, *, wait: float = 1.5) -> tuple[bool, str]:
     """Make the app frontmost and confirm it. First the WindowServer switch window managers
     use (works from a background process while the user is busy elsewhere), then the public
     APIs. Returns (is_front, the app's real name)."""
-    from neo.tools.computer.focus import force_front
-
     a = None
     for _ in range(max(1, int(wait / 0.1))):  # a just-launched app takes a moment to register
         a = await asyncio.to_thread(_running, name)
@@ -122,6 +120,23 @@ async def bring_front(name: str, *, wait: float = 1.5) -> tuple[bool, str]:
         await asyncio.sleep(0.1)
     if a is None:
         return False, name
+    return await _raise(a)
+
+
+async def bring_pid_front(pid: int) -> tuple[bool, str]:
+    """:func:`bring_front` for the app with this pid (the owner of a point on screen: no name to
+    look up, and two apps may share one)."""
+    from AppKit import NSRunningApplication
+
+    a = await asyncio.to_thread(NSRunningApplication.runningApplicationWithProcessIdentifier_, int(pid))
+    if a is None:
+        return False, ""
+    return await _raise(a)
+
+
+async def _raise(a) -> tuple[bool, str]:
+    from neo.tools.computer.focus import force_front
+
     real, pid = a.localizedName(), int(a.processIdentifier())
     if await _wait_front(pid, 0.05):
         return True, real

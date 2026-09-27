@@ -157,3 +157,144 @@ def pid_running(name: str) -> list[tuple[str, int]]:
     hits = [(n, pid, t) for n, pid, t in running() if n.lower() == want or want in n.lower()]
     hits.sort(key=lambda x: (x[0].lower() != want, x[2] != "Foreground"))
     return [(n, pid) for n, pid, _ in hits]
+
+
+_DEFAULT_SHELLS = frozenset({"sh", "bash", "zsh", "csh", "tcsh", "ksh", "dash", "fish"})
+
+
+def _shells() -> frozenset[str]:
+    """The login shells this Mac lists (/etc/shells), by program name."""
+    try:
+        with open("/etc/shells", encoding="utf-8") as f:
+            names = {line.strip().rsplit("/", 1)[-1] for line in f if line.strip().startswith("/")}
+        return frozenset(names) or _DEFAULT_SHELLS
+    except OSError:
+        return _DEFAULT_SHELLS
+
+
+class _BSDInfo(ctypes.Structure):
+    """struct proc_bsdinfo (sys/proc_info.h): a process's name and its controlling terminal."""
+
+    _fields_ = [
+        ("pbi_flags", ctypes.c_uint32), ("pbi_status", ctypes.c_uint32), ("pbi_xstatus", ctypes.c_uint32),
+        ("pbi_pid", ctypes.c_uint32), ("pbi_ppid", ctypes.c_uint32), ("pbi_uid", ctypes.c_uint32),
+        ("pbi_gid", ctypes.c_uint32), ("pbi_ruid", ctypes.c_uint32), ("pbi_rgid", ctypes.c_uint32),
+        ("pbi_svuid", ctypes.c_uint32), ("pbi_svgid", ctypes.c_uint32), ("rfu_1", ctypes.c_uint32),
+        ("pbi_comm", ctypes.c_char * 16), ("pbi_name", ctypes.c_char * 32), ("pbi_nfiles", ctypes.c_uint32),
+        ("pbi_pgid", ctypes.c_uint32), ("pbi_pjobc", ctypes.c_uint32), ("e_tdev", ctypes.c_uint32),
+        ("e_tpgid", ctypes.c_uint32), ("pbi_nice", ctypes.c_int32), ("pbi_start_tvsec", ctypes.c_uint64),
+        ("pbi_start_tvusec", ctypes.c_uint64),
+    ]  # fmt: skip
+
+
+_PROC_PIDTBSDINFO = 3
+_PROC_PIDLISTFDS = 1
+_PROC_PIDFDVNODEPATHINFO = 2
+_PROX_FDTYPE_VNODE = 1
+# struct vnode_fdinfowithpath (sys/proc_info.h): a proc_fileinfo (24 bytes), a vnode_info (152), then
+# the path (MAXPATHLEN).
+_VNODE_PATH_AT = 24 + 152
+_VNODE_INFO_SIZE = _VNODE_PATH_AT + 1024
+_NO_TTY = 0xFFFFFFFF
+_libproc: ctypes.CDLL | bool | None = None
+
+
+class _FDInfo(ctypes.Structure):
+    """struct proc_fdinfo: one open file of a process, and what kind it is."""
+
+    _fields_ = [("proc_fd", ctypes.c_int32), ("proc_fdtype", ctypes.c_uint32)]
+
+
+def _proclib():
+    global _libproc
+    if _libproc is None:
+        try:
+            lib = ctypes.CDLL("/usr/lib/libproc.dylib")
+            lib.proc_listchildpids.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_int]
+            lib.proc_listchildpids.restype = ctypes.c_int
+            lib.proc_pidinfo.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_uint64, ctypes.c_void_p, ctypes.c_int]
+            lib.proc_pidinfo.restype = ctypes.c_int
+            lib.proc_pidfdinfo.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_void_p, ctypes.c_int]
+            lib.proc_pidfdinfo.restype = ctypes.c_int
+            _libproc = lib
+        except (OSError, AttributeError):
+            _libproc = False
+    return _libproc or None
+
+
+def _children(pid: int) -> list[int]:
+    lib = _proclib()
+    if lib is None:
+        return []
+    buf = (ctypes.c_int * 512)()
+    n = lib.proc_listchildpids(int(pid), buf, ctypes.sizeof(buf))
+    return [int(buf[i]) for i in range(max(0, min(n, 512))) if buf[i] > 0]
+
+
+def _proc(pid: int) -> tuple[str, bool]:
+    """(program name, whether it runs on a terminal device) of a process; ("", False) if unknown."""
+    lib = _proclib()
+    if lib is None:
+        return "", False
+    info = _BSDInfo()
+    if lib.proc_pidinfo(int(pid), _PROC_PIDTBSDINFO, 0, ctypes.byref(info), ctypes.sizeof(info)) != ctypes.sizeof(info):
+        return "", False
+    return info.pbi_comm.decode(errors="replace"), info.e_tdev != _NO_TTY
+
+
+def _pty_master(path: str) -> bool:
+    """A pseudo-terminal's master side, as an open file's path shows it."""
+    return path == "/dev/ptmx" or (path.startswith("/dev/pty") and len(path) == len("/dev/ptyp0"))
+
+
+def _holds_pty(pid: int) -> bool:
+    """Does this process itself hold a pseudo-terminal's master side — the end a terminal draws
+    from and types into? (Read from its open files; this user's own processes only.)"""
+    lib = _proclib()
+    if lib is None or not pid or pid <= 1:
+        return False
+    fds = (_FDInfo * 2048)()
+    n = lib.proc_pidinfo(int(pid), _PROC_PIDLISTFDS, 0, fds, ctypes.sizeof(fds))
+    for i in range(max(0, min(n // ctypes.sizeof(_FDInfo), 2048))):
+        if fds[i].proc_fdtype != _PROX_FDTYPE_VNODE:
+            continue
+        info = ctypes.create_string_buffer(_VNODE_INFO_SIZE)
+        if lib.proc_pidfdinfo(int(pid), fds[i].proc_fd, _PROC_PIDFDVNODEPATHINFO, info, _VNODE_INFO_SIZE) != _VNODE_INFO_SIZE:
+            continue
+        path = info.raw[_VNODE_PATH_AT:].split(b"\0", 1)[0].decode(errors="replace")
+        if _pty_master(path):
+            return True
+    return False
+
+
+def _shell_below(pid: int, depth: int) -> bool:
+    """A shell this Mac lists in /etc/shells, on a terminal device, among the process's children
+    (or theirs, ``depth`` levels down)."""
+    shells = _shells()
+    level = [pid]
+    for _ in range(depth):
+        nxt: list[int] = []
+        for p in level:
+            for child in _children(p):
+                name, tty = _proc(child)
+                if tty and name.lstrip("-") in shells:
+                    return True
+                nxt.append(child)
+        level = nxt[:256]
+    return False
+
+
+def hosts_shell(pid: int, depth: int = 3) -> str:
+    """Does this app run an interactive shell, where a Return runs whatever is on the command line?
+    Told by its own processes, never by its name:
+
+    "terminal" — the app itself holds a pseudo-terminal's master side: a terminal app, every view
+    of it a command line (iTerm2 too, whose shells run under a server that isn't its child);
+    "pane" — a shell on a terminal device runs under the app's helpers only: a terminal pane in an
+    editor or a chat app, a command line only while the keyboard is in it (ax.focused_terminal);
+    "" — neither."""
+    if not pid or pid <= 1:
+        return ""
+    if _holds_pty(pid):
+        return "terminal"
+    return "pane" if _shell_below(pid, depth) else ""

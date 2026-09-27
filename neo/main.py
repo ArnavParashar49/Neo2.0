@@ -94,6 +94,13 @@ def doctor() -> int:
         from neo.tools.computer import ax, screen
 
         row("Accessibility", ax.is_trusted(), "System Settings → Privacy & Security → Accessibility")
+        from neo.tools.computer.input import can_post
+
+        row(
+            "Sending clicks and keys",
+            can_post(),
+            "System Settings → Privacy & Security → Accessibility: turn NEO off and on again",
+        )
         row(
             "Screen Recording",
             screen.can_capture(),

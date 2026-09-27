@@ -56,7 +56,8 @@ def test_openai_messages_round_trip_tool_ids_and_vision_flag():
     assert m[2]["tool_calls"][0]["id"] == "call_1"
     assert json.loads(m[2]["tool_calls"][0]["function"]["arguments"]) == {}
     assert m[3]["role"] == "tool" and m[3]["tool_call_id"] == "call_1"
-    assert "[screenshot attached]" in m[3]["content"]  # no vision → image dropped but flagged
+    # no vision → no image, and told plainly it can't see it (not "[screenshot attached]")
+    assert "can't see this picture" in m[3]["content"] and "[screenshot attached]" not in m[3]["content"]
     mv = _to_messages(_history(), "", vision=True)
     img = mv[-1]["content"][1]["image_url"]["url"]
     assert img.startswith("data:image/png;base64,") and base64.b64decode(img.split(",")[1]) == b"png"

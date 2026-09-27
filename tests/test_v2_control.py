@@ -118,10 +118,15 @@ def test_scroll_fast_path_uses_the_pointer(monkeypatch):
     monkeypatch.setattr(comp.inp, "mouse_position", lambda: (640.0, 400.0))
     seen = {}
     monkeypatch.setattr(comp.inp, "scroll", lambda x, y, dy, dx: seen.update(x=x, y=y, dy=dy) or "ok")
+    monkeypatch.setattr(comp.inp, "move", lambda x, y: None)  # (a model's scroll: the pointer rests there first)
     tool, args = _match_fast_path("scroll down")
     asyncio.run(registry().invoke(tool, args, ToolContext(user_text="")))
     assert seen == {"x": 640.0, "y": 400.0, "dy": -8}
-    # an explicit coordinate left of the main display is a real coordinate, not "the pointer"
+    # an explicit coordinate on a display left of the main one is a real coordinate, not "the pointer"
+    from neo.tools.computer import screen
+
+    left = screen.Display(2, -1920.0, 0.0, 1920.0, 1080.0)
+    monkeypatch.setattr(screen, "displays", lambda: [screen.Display(1, 0.0, 0.0, 1512.0, 982.0), left])
     asyncio.run(registry().invoke("scroll", {"x": -300, "y": 200, "dy": -3}, ToolContext(user_text="")))
     assert seen == {"x": -300, "y": 200, "dy": -3}
 

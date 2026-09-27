@@ -583,6 +583,11 @@ def an_ax_press(s):
     return lambda: media._perform(object(), "AXPress")
 
 
+from neo.tools.computer import ax as _ax  # noqa: E402
+
+_REAL_RAISE_WINDOW = _ax.raise_window  # (tests/conftest.py makes it a no-op in every test)
+
+
 def _element():
     from neo.tools.computer import ax
 
@@ -606,7 +611,8 @@ def a_value_set_by_id(s):
 
     from neo.tools.computer import ax
 
-    s.mp.setattr(ax, "_last_tree", {"e1": _element()})
+    field = ax.Element("e1", "AXTextField", "Search", "", 0, 0, 200, 20, ref=object())  # values go into text inputs only
+    s.mp.setattr(ax, "_last_tree", {"e1": field})
     s.put(ApplicationServices, "AXUIElementSetAttributeValue", poses_as="objc")
     return lambda: ax.set_value("e1", "hi")
 
@@ -619,6 +625,28 @@ def a_press_of_the_element_in_hand(s):
 
     s.put(ApplicationServices, "AXUIElementPerformAction", poses_as="objc")
     return lambda: ax.press_element(_element())
+
+
+@case("accessibility")
+def a_text_area_focused_through_accessibility(s):
+    import ApplicationServices
+
+    from neo.tools.computer import ax
+
+    s.put(ApplicationServices, "AXUIElementSetAttributeValue", poses_as="objc")
+    return lambda: ax.focus_el(object())
+
+
+@case("focus")
+def the_window_under_the_pointer_raised(s):
+    import ApplicationServices
+
+    from neo.tools.computer import ax
+
+    win, other = object(), object()
+    s.mp.setattr(ax, "_attr", lambda el, name, default=None: "AXWindow" if name == "AXRole" else other)
+    s.put(ApplicationServices, "AXUIElementPerformAction", poses_as="objc")
+    return lambda: _REAL_RAISE_WINDOW(ax.Hit(pid=os.getpid(), app="Sentinel", window=win))
 
 
 @case("focus")

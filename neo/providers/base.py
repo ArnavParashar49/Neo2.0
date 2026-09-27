@@ -89,6 +89,18 @@ class Turn:
     # The tools the brain was actually shown for this reply, when fitting its request left some
     # out (None: all it was given). `more_tools` hands back from these, not from the full list.
     offered: list[str] | None = None
+    # False: the brain that wrote this reply has no vision — no picture it was sent reached it, so
+    # any screen coordinates in its calls were never seen (the agent loop refuses those).
+    sees: bool = True
+
+
+# What a text-only brain reads in place of a picture: plainly that it can't see it (a note like
+# "[screenshot attached]" let one click at coordinates it made up — the Chess run).
+BLIND_PICTURE = (
+    "[You can't see this picture: this model has no vision. Don't click, drag or scroll at "
+    "coordinates from it — use ax_tree element ids or click_text, or tell the user the screen "
+    "can't be read right now.]"
+)
 
 
 class Provider(Protocol):

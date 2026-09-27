@@ -50,6 +50,9 @@ class ToolOutput:
     # Overrides the tool's `quiet` for a success: True makes a quiet action speak (a first use,
     # a guessed time, a result NEO couldn't check), False keeps an answer tool's success silent.
     say: bool | None = None
+    # An untrusted tool's text reaches the model fenced as data. False: the text is NEO's own words
+    # only (a screenshot's note on how its pixels map to the screen — the picture is the untrusted part).
+    fence: bool = True
 
 
 def voiced(out: ToolOutput, quiet: bool) -> bool:

@@ -42,9 +42,20 @@ _HOW_TO_WORK: tuple[tuple[str, frozenset[str] | None], ...] = (
     ),
     (
         "- When an app's content is a canvas or a board — Chess and other games, maps, drawing and photo\n"
-        "  apps — or ax_tree shows little beyond the window and its menus, take a screenshot and click at\n"
-        "  the coordinates it shows. Don't script your way around it.\n",
+        "  apps — or ax_tree shows little beyond the window and its menus, take a screenshot and click or\n"
+        "  drag at pixel positions in it, passing its shot id. Don't script your way around it.\n",
         frozenset({"screenshot", "click"}),
+    ),
+    (
+        "- On the screen, work observe → act → verify: look, make one move, then look again (a new\n"
+        "  screenshot of the same area) and compare before the next move. Each click, drag or scroll result\n"
+        "  says what was under the pointer and whether anything changed. On a board or canvas, \"nothing\n"
+        "  visibly changed\" means the move didn't land — look again and correct it. \"No change was seen\n"
+        "  near\" a button or link means NEO couldn't see its effect: take a screenshot and check before\n"
+        "  clicking it again, since a click that worked elsewhere (a cart, a track) would happen twice.\n"
+        "  Never report either as done. A sheet or dialog that opened must be answered first. If a result\n"
+        "  says you can't see the screen, don't guess coordinates: use ax_tree ids or tell the user.\n",
+        frozenset({"screenshot", "click", "drag", "scroll"}),
     ),
     (
         "- \"Play <game>\" (\"play chess as white\", \"a game of chess against you\") when that game is an app on\n"

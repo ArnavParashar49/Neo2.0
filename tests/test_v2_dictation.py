@@ -95,21 +95,28 @@ def test_type_text_presses_return_between_lines(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "app, focus, expected",
+    "app, focus, shell, expected",
     [
-        ("Safari", "AXTextField", ["a b"]),  # single-line field: joined, never submitted
-        ("Slack", "AXTextArea", ["a", "<shift+return>", "b"]),  # chat: a line break, not "send"
-        ("Terminal", "AXTextArea", ["a b"]),  # a shell never gets a multi-line enter
-        ("Notes", "AXTextArea", ["a", "<return>", "b"]),
+        ("Safari", "AXTextField", False, ["a b"]),  # single-line field: joined, never submitted
+        ("Slack", "AXTextArea", False, ["a", "<shift+return>", "b"]),  # chat: a line break, not "send"
+        ("Terminal", "AXTextArea", True, ["a b"]),  # a shell never gets a multi-line enter
+        ("Notes", "AXTextArea", False, ["a", "<return>", "b"]),
+        # by evidence, not by name: any app running a shell, any chat box (a web one too)
+        ("WezTerm", "AXTextArea", True, ["a b"]),
+        ("Beeper", "AXTextArea", False, ["a", "<shift+return>", "b"]),
     ],
 )
-def test_line_breaks_never_send(monkeypatch, app, focus, expected):
+def test_line_breaks_never_send(monkeypatch, app, focus, shell, expected):
     typed = _stub_typing(monkeypatch)
+    from neo.tools.computer import focus as focus_mod
+
+    monkeypatch.setattr(focus_mod, "hosts_shell", lambda pid, depth=3: shell)
     front[0] = app
     role[0] = focus
     try:
         out = asyncio.run(registry().invoke("type_text", {"text": "a\nb"}, ToolContext(user_text="")))
         assert out.ok and typed == expected
+        assert ("as one line" in out.text) == shell  # joined for a shell, and the result says why
     finally:
         front[0], role[0] = "Notes", "AXTextArea"
 

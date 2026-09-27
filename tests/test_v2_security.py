@@ -346,15 +346,26 @@ def test_after_reading_untrusted_content_memory_writes_ask():
 
 def test_return_in_a_terminal_and_committing_clicks_ask(monkeypatch):
     import neo.tools.computer as comp
+    from neo.tools.computer import focus
 
+    # What a Return does is told by evidence: the app runs a shell (its own processes say so), or
+    # the focus is in a multi-line input outside a document editor — never by the app's name.
+    shells = {11}
+    monkeypatch.setattr(focus, "hosts_shell", lambda pid, depth=3: pid in shells)
+    monkeypatch.setattr(comp.ax, "focused_role", lambda: ("AXTextArea", ""))
     monkeypatch.setattr(comp.ax, "focused_element_text", lambda: "user@mac ~ % rm -rf ~/Documents")
-    gate = asyncio.run(comp._ask_before_keys({"keys": "return"}, "return", "Terminal", ToolContext()))
+    gate = asyncio.run(comp._ask_before_keys({"keys": "return"}, "return", "Terminal", ToolContext(), 11))
     assert gate and gate.startswith(confirm.NEEDS_CONFIRM) and "rm -rf" in confirm.peek().detail
     confirm.cancel("t")
-    assert asyncio.run(comp._ask_before_keys({"keys": "return"}, "return", "Notes", ToolContext())) is None
-    # Return in a chat app sends — fine when the user asked, asked first after reading a page
-    assert asyncio.run(comp._ask_before_keys({"keys": "return"}, "return", "Messages", ToolContext())) is None
-    assert asyncio.run(comp._ask_before_keys({"keys": "return"}, "return", "Messages", ToolContext(taint=["web_fetch"])))
+    gate = asyncio.run(comp._ask_before_keys({"keys": "return"}, "return", "WezTerm", ToolContext(), 11))
+    assert gate and gate.startswith(confirm.NEEDS_CONFIRM)  # an unlisted terminal: same evidence, same question
+    confirm.cancel("t")
+    assert asyncio.run(comp._ask_before_keys({"keys": "return"}, "return", "Notes", ToolContext(), 12)) is None
+    # Return in a chat box sends — fine when the user asked, asked first after reading a page
+    assert asyncio.run(comp._ask_before_keys({"keys": "return"}, "return", "Messages", ToolContext(), 13)) is None
+    assert asyncio.run(comp._ask_before_keys({"keys": "return"}, "return", "Messages", ToolContext(taint=["web_fetch"]), 13))
+    confirm.cancel("t")
+    assert asyncio.run(comp._ask_before_keys({"keys": "return"}, "return", "Beeper", ToolContext(taint=["web_fetch"]), 14))
     confirm.cancel("t")
     assert comp._ask_before_click("click_text", {"label": "Send"}, "Send", "Mail")
     confirm.cancel("t")
