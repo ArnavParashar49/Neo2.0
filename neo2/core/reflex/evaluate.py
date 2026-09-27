@@ -2,9 +2,9 @@
 NEO acts on for destructive, stop and the screen (and how often each goes off by mistake), tool and
 kind accuracy, calibration, and decision latency.
 
-    python -m neo.reflex.evaluate                                # the current head
-    python -m neo.reflex.evaluate --head old.json --head new.json   # side by side (before / after)
-    python -m neo.reflex.evaluate --eval bench.jsonl --latency 0
+    python -m neo2.core.reflex.evaluate                                # the current head
+    python -m neo2.core.reflex.evaluate --head old.json --head new.json   # side by side (before / after)
+    python -m neo2.core.reflex.evaluate --eval bench.jsonl --latency 0
 
 Rows: the benchmark in ``reflex_eval.jsonl`` ({text, intent, tool?, kind?, lang?, source?}) when
 there is one, minus every sentence the training data has (dataset.benchmark), plus the training
@@ -23,10 +23,10 @@ from pathlib import Path
 
 import numpy as np
 
-from neo.config import settings
-from neo.reflex.dataset import benchmark
-from neo.reflex.features import embed_only, head_probs, load_encoder, parse_head
-from neo.reflex.finetune import (
+from neo2.core.config import settings
+from neo2.core.reflex.dataset import benchmark
+from neo2.core.reflex.features import embed_only, head_probs, load_encoder, parse_head
+from neo2.core.reflex.finetune import (
     GENERATED,
     HF,
     cancels,
@@ -37,7 +37,7 @@ from neo.reflex.finetune import (
     slices,
     training_rows,
 )
-from neo.reflex.schema import INTENT_CRITERIA
+from neo2.core.reflex.schema import INTENT_CRITERIA
 
 _INTENTS = list(INTENT_CRITERIA)
 _STOP = _INTENTS.index("stop")
@@ -55,13 +55,13 @@ def _bench(path: Path, trained: list[dict]) -> list[dict]:
 def _encoder_of(path: Path) -> str | None:
     """The encoder a head file was trained for; None (after saying why) if it isn't a head NEO can
     run."""
-    from neo import models
+    from neo2.core import models
 
     try:
         h = json.loads(Path(path).read_text())
         sub = h.get("subfolder", "") if isinstance(h, dict) else None
     except (OSError, ValueError) as e:
-        print(f"{path}: no head there ({str(e)[:80]}) — train one with python -m neo.reflex.finetune")
+        print(f"{path}: no head there ({str(e)[:80]}) — train one with python -m neo2.core.reflex.finetune")
         return None
     enc = next((e for e, f in models.LAYA_SUBFOLDERS.items() if f == sub), None)
     if enc is None:
@@ -162,7 +162,7 @@ def _gpu_busy() -> int:
 
 def _latency(agent, encoder: str, path: Path, texts: list[str]) -> dict[str, float]:
     """p50/p90 of a whole decide() (embed + every head + rules), one utterance at a time."""
-    from neo.reflex.laya_reflex import LayaReflex
+    from neo2.core.reflex.laya_reflex import LayaReflex
 
     r = LayaReflex(encoder=encoder, head=path, agent=agent)
     for t in texts[:5]:

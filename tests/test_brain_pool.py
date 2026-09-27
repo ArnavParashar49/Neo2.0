@@ -10,9 +10,9 @@ from pathlib import Path
 import pytest
 from neo_lib import make_runtime
 
-from neo import effects, runtime
-from neo import providers as prov
-from neo.providers.base import ProviderError, RateLimited, Turn
+from neo2.core import effects, runtime
+from neo2.core import providers as prov
+from neo2.core.providers.base import ProviderError, RateLimited, Turn
 
 
 class Fake:
@@ -38,7 +38,7 @@ class Fake:
 
 @pytest.fixture
 def genai_clients(monkeypatch):
-    gem = pytest.importorskip("neo.providers.gemini")
+    gem = pytest.importorskip("neo2.core.providers.gemini")
     made: list[str] = []
 
     class Client:
@@ -141,8 +141,8 @@ def test_a_hosts_own_failover_called_directly_keeps_to_itself(tmp_path, monkeypa
     or after): what it demotes is its own, and when every provider fails it says so. It never
     reaches NEO.app's demotions or settings (~/.neo/.env, ~/.neo/models), nor asks for an agent."""
     import neo2.providers
-    from neo import config
-    from neo.providers.base import AllBrainsFailed
+    from neo2.core import config
+    from neo2.core.providers.base import AllBrainsFailed
 
     monkeypatch.setattr(prov, "_demoted", {})
     if agents:
@@ -162,9 +162,9 @@ def test_a_hosts_own_failover_called_directly_keeps_to_itself(tmp_path, monkeypa
 
 def test_constructors_given_everything_read_no_settings(genai_clients):
     """Hosts build providers before any agent exists: that must not reach NEO.app's settings."""
-    from neo.providers.claude import ClaudeProvider
-    from neo.providers.gemini import GeminiProvider
-    from neo.providers.openai_compat import OpenAICompatProvider
+    from neo2.core.providers.claude import ClaudeProvider
+    from neo2.core.providers.gemini import GeminiProvider
+    from neo2.core.providers.openai_compat import OpenAICompatProvider
 
     runtime.set_library_mode()  # an unbound settings() would raise NoRuntimeError
     g = GeminiProvider("gemini-x", keys=["k1", "k1", "k2"], fallback_models=["gemini-y"])
@@ -185,7 +185,7 @@ def test_gemini_quota_memory_goes_to_the_agents_data_dir(tmp_path, genai_clients
     """The brain an agent's pool built from its keys keeps its quota windows in that agent's data
     dir — fixed when it was built, whoever's context saves them later. A host's own provider object
     keeps them in itself: no file anywhere."""
-    from neo.providers import gemini as gem
+    from neo2.core.providers import gemini as gem
 
     monkeypatch.setattr(prov, "_cache", {})
     a = make_runtime(tmp_path / "a", "a", gemini_api_key="k-a")
@@ -214,7 +214,7 @@ def test_gemini_quota_memory_goes_to_the_agents_data_dir(tmp_path, genai_clients
 def test_neo_apps_pool_is_the_module_cache(monkeypatch, genai_clients):
     monkeypatch.setattr(prov, "_cache", {})
     monkeypatch.setenv("GEMINI_API_KEY", "app-key")
-    from neo import config
+    from neo2.core import config
 
     monkeypatch.setattr(config, "_settings", None)
     p = prov.make("gemini")
@@ -227,7 +227,7 @@ def test_neo_apps_pool_is_the_module_cache(monkeypatch, genai_clients):
 
 def test_an_agent_never_falls_back_to_a_local_server(tmp_path):
     """Whatever answers on 127.0.0.1:8080 of the host's machine is nobody's brain for an agent."""
-    from neo.config import Settings
+    from neo2.core.config import Settings
 
     a = make_runtime(tmp_path / "a", "a", gemini_api_key="k-a")
     with runtime.bind(a.scope()):
@@ -270,10 +270,10 @@ def test_a_hosts_provider_built_before_any_agent_reads_no_settings(tmp_path):
     code = textwrap.dedent(
         """
         import json, os
-        from neo import config
-        from neo.config import Settings
-        from neo.providers.claude import ClaudeProvider
-        from neo.providers.gemini import GeminiProvider
+        from neo2.core import config
+        from neo2.core.config import Settings
+        from neo2.core.providers.claude import ClaudeProvider
+        from neo2.core.providers.gemini import GeminiProvider
 
         c, g = ClaudeProvider(api_key="sk-host"), GeminiProvider(api_key="k-host")
         d = Settings.model_fields
@@ -291,8 +291,8 @@ def test_a_hosts_provider_built_before_any_agent_reads_no_settings(tmp_path):
 
 
 def test_the_teacher_still_uses_the_apps_gemini_model(monkeypatch, genai_clients):
-    from neo import config
-    from neo.reflex import teacher
+    from neo2.core import config
+    from neo2.core.reflex import teacher
 
     monkeypatch.setenv("GEMINI_API_KEY", "app-key")
     monkeypatch.setenv("NEO_GEMINI_MODEL", "gemini-custom")

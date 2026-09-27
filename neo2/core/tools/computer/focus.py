@@ -5,7 +5,7 @@ request to activate another app while the user is busy in a different one (NSRun
 AppleScript `activate` and `open -a` all fail or land seconds later). Window managers (yabai,
 AltTab, Amethyst) switch focus with the WindowServer calls in SkyLight instead: make the process
 frontmost as if the user did it, make its window key, raise it. These are private APIs — so every
-call is optional, and `neo/tools/computer/apps.py::bring_front` falls back to the public ones.
+call is optional, and `neo2/core/tools/computer/apps.py::bring_front` falls back to the public ones.
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ import ctypes
 import ctypes.util
 import subprocess
 
-from neo import effects
+from neo2.core import effects
 
 _SKYLIGHT = "/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight"
 _HISERVICES = "/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices"

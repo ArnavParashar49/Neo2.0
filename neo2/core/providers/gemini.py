@@ -40,8 +40,9 @@ from google import genai
 from google.genai import errors as gerrors
 from google.genai import types as gt
 
-from neo.config import Settings, settings
-from neo.providers.base import (
+from neo2.core import logger
+from neo2.core.config import Settings, settings
+from neo2.core.providers.base import (
     BadRequest,
     Message,
     Overloaded,
@@ -55,10 +56,10 @@ from neo.providers.base import (
     Unavailable,
     Usage,
 )
-from neo.providers.fit import fit
-from neo.providers.history import flatten, normalize
+from neo2.core.providers.fit import fit
+from neo2.core.providers.history import flatten, normalize
 
-log = logging.getLogger(__name__)
+log = logger(__name__)
 
 _LEVEL = {"low": gt.ThinkingLevel.LOW, "medium": gt.ThinkingLevel.MEDIUM, "high": gt.ThinkingLevel.HIGH}
 _SKIP_SIGNATURE = b"skip_thought_signature_validator"
@@ -121,7 +122,7 @@ def _signature(c: ToolCall, model: str) -> bytes:
 
 def _to_contents(messages: list[Message], model: str = "") -> list[gt.Content]:
     """The history as Gemini contents for `model` (whose own signatures are echoed; any other
-    brain's calls get the bypass). Normalized first: see neo.providers.history."""
+    brain's calls get the bypass). Normalized first: see neo2.core.providers.history."""
     out: list[gt.Content] = []
     for m in normalize(messages):
         if m.role == "user":
@@ -180,7 +181,7 @@ def _pretty(model: str) -> str:
 
 
 async def _note(text: str) -> None:
-    from neo.events import bus
+    from neo2.core.events import bus
 
     await bus().note(text)
 

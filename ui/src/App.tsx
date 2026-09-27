@@ -635,7 +635,7 @@ export default function App() {
       <div className="head-text" data-tauri-drag-region>
         <div className="title" data-tauri-drag-region>NEO</div>
         <div className={"status" + (neo.connected ? "" : " off")} data-tauri-drag-region aria-live="polite">
-          {neo.connected ? LABEL[shown] : inTauri ? "Core not running — menu bar → Restart NEO" : "core offline — run  python -m neo"}
+          {neo.connected ? LABEL[shown] : inTauri ? "Core not running — menu bar → Restart NEO" : "core offline — run  python -m neo2"}
         </div>
         {neo.note && <div className="note" data-tauri-drag-region aria-live="polite">{neo.note}</div>}
       </div>

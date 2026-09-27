@@ -186,7 +186,7 @@ class Decision:
     reply: bool = True  # does the user want an answer, or just the thing done (silently)?
     reply_p: float = 1.0
     margin: float | None = None  # top intent probability minus the runner-up (Laya only)
-    kind: str = ""  # an action's task kind (a neo/decide TASKS key), when the reflex has a kind head
+    kind: str = ""  # an action's task kind (a neo2/core/decide TASKS key), when the reflex has a kind head
     kind_p: float = 0.0
 
     @property

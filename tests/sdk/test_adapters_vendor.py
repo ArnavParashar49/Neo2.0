@@ -21,13 +21,13 @@ from pydantic import BaseModel
 from vendor_shapes import assert_conforms, assert_rejected
 
 import neo2
-from neo import effects
-from neo.providers.base import ImagePart
 from neo2.adapters import anthropic as neo_anthropic
 from neo2.adapters import gemini as neo_gemini
 from neo2.adapters import langchain as neo_lc
 from neo2.adapters import openai as neo_openai
 from neo2.adapters._common import agent_parameters
+from neo2.core import effects
+from neo2.core.providers.base import ImagePart
 from neo2.sdk.approval import ApprovalRequest
 from neo2.sdk.results import ToolOutcome
 from neo2.testing import ScriptedBrain, ToolCall, Turn
@@ -517,7 +517,7 @@ def test_the_adapters_import_no_vendor_sdk_and_no_decide(tmp_path):
         if not k.startswith(("NEO_", "GEMINI", "GROQ", "ANTHROPIC", "OPENAI", "PYTEST"))
     }
     env.update(HOME=str(home), PYTHONPATH=str(ROOT), NEO_DATA_DIR=str(tmp_path / "app_data"))
-    heavy = ("openai", "anthropic", "google.genai", "langchain_core", "neo.decide", "torch", "AppKit")
+    heavy = ("openai", "anthropic", "google.genai", "langchain_core", "neo2.core.decide", "torch", "AppKit")
     code = (
         "import sys, json, asyncio\n"
         "import neo2.adapters, neo2.adapters.openai, neo2.adapters.anthropic, neo2.adapters.gemini\n"

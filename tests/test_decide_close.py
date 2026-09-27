@@ -8,10 +8,10 @@ import asyncio
 
 import pytest
 
-from neo.decide import close, inventory, media
-from neo.decide.inventory import App
-from neo.decide.sdef import Command, Dictionary
-from neo.tools.computer import apps as mac
+from neo2.core.decide import close, inventory, media
+from neo2.core.decide.inventory import App
+from neo2.core.decide.sdef import Command, Dictionary
+from neo2.core.tools.computer import apps as mac
 
 
 def browser_dict(tab="CrTb", url="URL ", title="pnam", title_name="title") -> Dictionary:
@@ -82,9 +82,9 @@ def test_a_browser_that_does_not_script_its_tabs_is_skipped():
 
 
 def test_close_needs_no_card_and_is_what_the_fast_path_runs(monkeypatch):
-    from neo.agent import fastpath
-    from neo.agent.registry import registry
-    from neo.tools import load_all
+    from neo2.core.agent import fastpath
+    from neo2.core.agent.registry import registry
+    from neo2.core.tools import load_all
 
     load_all()
     t = registry().get("close")

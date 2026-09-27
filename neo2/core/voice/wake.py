@@ -11,7 +11,7 @@ import tempfile
 import zipfile
 from pathlib import Path
 
-from neo.config import settings
+from neo2.core.config import settings
 
 _MODEL = "vosk-model-small-en-us-0.15"
 _URL = f"https://alphacephei.com/vosk/models/{_MODEL}.zip"

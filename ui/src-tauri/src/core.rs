@@ -4,7 +4,7 @@
 //! Recording): the core it starts inherits them. The core also watches its parent and exits if
 //! the app goes away without stopping it (force quit, crash), so a core with the mic open can't
 //! be left behind; if one ever is, the next launch recognises it by its pidfile and replaces it.
-//! A core started some other way (a developer's `python -m neo`) is used as-is.
+//! A core started some other way (a developer's `python -m neo2`) is used as-is.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
@@ -24,6 +24,8 @@ const GRACE: Duration = Duration::from_secs(12); // the core saves its session s
 const STARTUP_GRACE: Duration = Duration::from_secs(120); // loading models can take this long
 const UNRESPONSIVE: Duration = Duration::from_secs(60); // websocket gone this long → hung
 const RETRY_AFTER_GIVING_UP: Duration = Duration::from_secs(600);
+/// How the core is started: `python -u -m neo2` (NEO's package was `neo` before 2.1).
+const CORE_ARGS: [&str; 3] = ["-u", "-m", "neo2"];
 
 #[derive(Clone, Default)]
 pub struct Core {
@@ -147,6 +149,14 @@ fn alive(pid: i32) -> bool {
     unsafe { libc::kill(pid, 0) == 0 }
 }
 
+/// A command line (`ps -o command=`) of NEO's core: `… python -u -m neo2`, or the same with `neo`,
+/// the package's name when an older NEO.app started it. Not NEO's training commands
+/// (`-m neo2.core.reflex.finetune`), nor anything else.
+fn is_core_command(line: &str) -> bool {
+    let args: Vec<&str> = line.split_whitespace().collect();
+    args.windows(2).any(|w| w[0] == "-m" && (w[1] == "neo2" || w[1] == "neo"))
+}
+
 /// A core this app started earlier and lost (its parent is gone, so it was re-parented to
 /// launchd): stop it, so this launch owns the core again.
 fn reclaim_orphan() {
@@ -160,7 +170,7 @@ fn reclaim_orphan() {
     let Ok(out) = out else { return };
     let line = String::from_utf8_lossy(&out.stdout).trim().to_string();
     let orphaned = line.split_whitespace().next() == Some("1");
-    if orphaned && line.contains("-m neo") {
+    if orphaned && is_core_command(&line) {
         log(&format!("found an orphaned core (pid {pid}) — stopping it"));
         unsafe {
             libc::kill(pid, libc::SIGTERM);
@@ -221,7 +231,7 @@ fn spawn(dir: &PathBuf, sink: Arc<Mutex<RotatingLog>>) -> std::io::Result<Child>
         std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin:/usr/sbin:/sbin".into())
     );
     let mut child = Command::new(dir.join(".venv").join("bin").join("python"))
-        .args(["-u", "-m", "neo"])
+        .args(CORE_ARGS)
         .current_dir(dir)
         .env("PATH", path)
         .env("PYTHONUNBUFFERED", "1")
@@ -540,6 +550,18 @@ mod tests {
         assert!(p.contains("<string>/Applications/NEO &amp; Co.app/Contents/MacOS/neo-ui</string>"));
         assert!(!p.contains("/usr/bin/open"));
         assert!(p.contains("LimitLoadToSessionType"));
+    }
+
+    #[test]
+    fn the_core_is_started_as_neo2_and_an_orphan_is_known_by_either_name() {
+        assert_eq!(CORE_ARGS, ["-u", "-m", "neo2"]);
+        let runtime = "/Users/a/Library/Application Support/NEO/.venv/bin/python";
+        assert!(is_core_command(&format!("1 {runtime} -u -m neo2")));
+        assert!(is_core_command(&format!("1 {runtime} -u -m neo"))); // an older NEO.app's core  neo2-codemod: keep
+        assert!(!is_core_command(&format!("1 {runtime} -m neo2.core.reflex.finetune")));
+        assert!(!is_core_command(&format!("1 {runtime} -m neo2.mcp --tools web")));
+        assert!(!is_core_command("1 /usr/bin/python3 -m neonode"));
+        assert!(!is_core_command("1 /Applications/NEO.app/Contents/MacOS/neo-ui"));
     }
 
     #[test]

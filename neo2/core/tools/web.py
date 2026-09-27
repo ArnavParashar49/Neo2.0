@@ -4,18 +4,18 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
-import logging
 import re
 from urllib.parse import urlsplit
 
 import httpx
 
-from neo.agent.registry import ToolContext, tool
-from neo.config import decide_mode
-from neo.tools import render
+from neo2.core import logger
+from neo2.core.agent.registry import ToolContext, tool
+from neo2.core.config import decide_mode
+from neo2.core.tools import render
 
 # The table of known sites and their search pages: web_search's legacy, until the kind is on.
-from neo.tools.sites_legacy import _ENGINE_RE, _SITE_RE, site_search_url
+from neo2.core.tools.sites_legacy import _ENGINE_RE, _SITE_RE, site_search_url
 
 # "search for it on amazon", "open that one on google": the thing comes from the conversation,
 # which only the model has — never a fast path.
@@ -27,19 +27,19 @@ _VAGUE_QUERY_AFTER_FOR = r"(?!(?:for\s+)?(?:it|this|that|these|those|them|one|(?
 # a site as the user says it: a name or a domain, up to three words ("<brand> maps")
 _SITE = r"(?P<site>[\w.+-]+(?:\s+[\w.+-]+){0,2})"
 
-log = logging.getLogger(__name__)
+log = logger(__name__)
 
 
-# While web_search is on, which site a search means is told by evidence (neo.decide.kinds.site):
+# While web_search is on, which site a search means is told by evidence (neo2.core.decide.kinds.site):
 # the patterns with a site table give way to generic ones whose checks claim known sites only.
 def _legacy_fp(filled: dict) -> bool:
     return decide_mode("web_search") != "on"
 
 
 def _claims_web(filled: dict) -> bool:
-    if decide_mode("web_search") != "on":  # before the import: legacy never loads neo.decide
+    if decide_mode("web_search") != "on":  # before the import: legacy never loads neo2.core.decide
         return False
-    from neo.decide.kinds import site
+    from neo2.core.decide.kinds import site
 
     return site.claims_web_search(filled)
 
@@ -47,7 +47,7 @@ def _claims_web(filled: dict) -> bool:
 def _claims_site(filled: dict) -> bool:
     if decide_mode("web_search") != "on":
         return False
-    from neo.decide.kinds import site
+    from neo2.core.decide.kinds import site
 
     return site.claims_search_site(filled)
 
@@ -192,8 +192,8 @@ async def web_search(a: dict, c: ToolContext) -> str:
     requires=frozenset({"web"}),  # NEO's [web] extra (trafilatura, pypdf)
 )
 async def web_fetch(a: dict, c: ToolContext) -> str:
-    from neo.agent import confirm
-    from neo.security import policy
+    from neo2.core.agent import confirm
+    from neo2.core.security import policy
 
     if importlib.util.find_spec("trafilatura") is None:  # before anything is downloaded
         return "Error: reading pages needs the trafilatura package (NEO's [web] extra), which isn't installed."
@@ -396,7 +396,7 @@ def _site(url: str) -> str:
     requires=frozenset({"macos"}),  # opens the Mac's own browser
 )
 async def search_site(a: dict, c: ToolContext):
-    from neo.tools.computer import apps
+    from neo2.core.tools.computer import apps
 
     site, query = str(a["site"]).strip(), str(a["query"]).strip()
     q = " ".join(query.lower().split()).removeprefix("for ").strip(" .!?")
@@ -405,9 +405,9 @@ async def search_site(a: dict, c: ToolContext):
     query = query.strip()[4:].strip() if query.lower().startswith("for ") else query
     m = decide_mode("web_search")
     if m == "on":
-        from neo.agent import confirm
-        from neo.decide import run
-        from neo.decide.kinds import site as sk
+        from neo2.core.agent import confirm
+        from neo2.core.decide import run
+        from neo2.core.decide.kinds import site as sk
 
         if c.tainted() and sk.carries_data(site, query):
             gate = confirm.gated(
@@ -422,10 +422,10 @@ async def search_site(a: dict, c: ToolContext):
     url = site_search_url(site, query)
     out = await apps.open_app(url)
     if m == "shadow":
-        from neo.decide import shadow
+        from neo2.core.decide import shadow
 
         with shadow.starting("web_search"):
-            from neo.decide.kinds import site as sk
+            from neo2.core.decide.kinds import site as sk
 
             ok = not out.startswith(("Error", "NEEDS_"))
             shadow.later("web_search", sk.shadow(site, url), legacy_ok=ok)

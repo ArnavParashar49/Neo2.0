@@ -5,8 +5,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from neo.reflex.hardneg import hard_negatives
-from neo.reflex.learn import EXTRA
+from neo2.core.reflex.hardneg import hard_negatives
+from neo2.core.reflex.learn import EXTRA
 
 D = 12
 OFFSET = np.eye(D)[0] * 10.0  # the direction every Laya embedding shares

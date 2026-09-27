@@ -16,8 +16,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Literal
 
-from neo import effects
-from neo.decide._objc import pooled
+from neo2.core import effects
+from neo2.core.decide._objc import pooled
 
 __all__ = [
     "Entity",
@@ -139,7 +139,7 @@ def available(entity: Entity = "event") -> str:
 
 
 def usage_declared(entity: Entity) -> bool:
-    from neo.decide import evidence
+    from neo2.core.decide import evidence
 
     return bool(evidence.responsible_usage().intersection(_USAGE[entity]))
 

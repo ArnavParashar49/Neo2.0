@@ -2,7 +2,7 @@
 
 Every tool module registers into one process-wide *catalog* (:func:`catalog`). NEO.app uses it
 as is: with no agent bound, :func:`registry` *is* the catalog. An agent embedded in another app
-(neo.runtime) gets its own strict registry — a copy of just the catalog tools it was given, plus
+(neo2.core.runtime) gets its own strict registry — a copy of just the catalog tools it was given, plus
 its host's tools — and :func:`registry` returns that one while the agent is bound. So a tool
 module imported in the middle of a run (the web tools import the policy lazily) grows the
 catalog, never an agent's tool set.
@@ -26,16 +26,15 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import inspect
-import logging
 import time
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-from neo import runtime
-from neo.providers.base import ImagePart, ToolSpec
+from neo2.core import logger, runtime
+from neo2.core.providers.base import ImagePart, ToolSpec
 
-log = logging.getLogger(__name__)
+log = logger(__name__)
 
 Risk = Literal["safe", "reversible", "destructive"]
 
@@ -171,7 +170,7 @@ class Registry:
         )
 
     async def invoke(self, name: str, args: dict[str, Any], ctx: ToolContext) -> ToolOutput:
-        from neo.agent import confirm, grants
+        from neo2.core.agent import confirm, grants
 
         # `confirm` / `cancel` belong to the user, not to a tool call: whatever a model passes is
         # dropped here (approval travels through confirm.approved()). So are NEO's own `_` args
@@ -208,7 +207,7 @@ class Registry:
             r = t.handler(args or {}, ctx)
             if inspect.isawaitable(r):
                 r = await asyncio.wait_for(r, t.timeout)
-            from neo.agent.confirm import Halt
+            from neo2.core.agent.confirm import Halt
 
             if isinstance(r, ToolOutput):
                 if isinstance(r.text, Halt):
@@ -227,7 +226,7 @@ class Registry:
 
 
 _registry: Registry | None = None
-# The fields NEO.app's task modes rewrote on a catalog entry (neo.tools.tasks.apply_modes), as the
+# The fields NEO.app's task modes rewrote on a catalog entry (neo2.core.tools.tasks.apply_modes), as the
 # tool registered them: an agent's copy always gets these (its task kinds run their legacy scripts).
 AS_REGISTERED: dict[str, dict[str, Any]] = {}
 

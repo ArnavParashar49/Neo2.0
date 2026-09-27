@@ -17,7 +17,7 @@ and afterwards the fields the user filled read as "(filled by you)".
 
 Every coordinate in the protocol is page viewport CSS px. The protocol itself is the overlay's
 (ui/src/browser/types.ts); this module is its core side. Playwright objects come from
-neo.tools.browser (imported lazily: that module imports this one).
+neo2.core.tools.browser (imported lazily: that module imports this one).
 """
 
 from __future__ import annotations
@@ -38,10 +38,10 @@ from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urljoin, urlsplit
 
-from neo.agent import confirm
-from neo.agent.loop import add_pause_clock
-from neo.config import settings
-from neo.events import app_bus, bus
+from neo2.core.agent import confirm
+from neo2.core.agent.loop import add_pause_clock
+from neo2.core.config import settings
+from neo2.core.events import app_bus, bus
 
 V = 1  # protocol version
 
@@ -266,7 +266,7 @@ def site_name(url: str) -> str:
     if _local_host(host):
         return host
     try:
-        from neo.decide.sites import registrable
+        from neo2.core.decide.sites import registrable
 
         reg = registrable(host) or host
     except Exception:  # noqa: BLE001 — no public-suffix data: the last two labels
@@ -938,7 +938,7 @@ class Live:
             return set()
 
     async def _keep_values(self, page: Any) -> None:
-        from neo.tools import browser
+        from neo2.core.tools import browser
 
         vals = await browser._user_values(page)
         if not vals:
@@ -1240,7 +1240,7 @@ class Live:
             self._broadcast(
                 "browser_close", {k: v for k, v in {**sent, "alive": False}.items() if k != "poster"}
             )
-        from neo.tools import browser
+        from neo2.core.tools import browser
 
         await browser._b.close()
 
@@ -1331,7 +1331,7 @@ class Live:
         self._spawn(self._follow_open_page())
 
     async def _follow_open_page(self) -> None:
-        from neo.tools import browser
+        from neo2.core.tools import browser
 
         pages = browser._b.pages()
         if pages:
@@ -1343,7 +1343,7 @@ class Live:
         """A tab opened. While the user has the page, the card follows it (NEO follows its own)."""
         s = self.s
         if s is not None and s.controller == "user" and not s.ended:
-            from neo.tools import browser
+            from neo2.core.tools import browser
 
             browser._b.current = page
 
@@ -1387,7 +1387,7 @@ class Live:
                 h = await cdp.send("Page.getNavigationHistory")
                 i, n = int(h.get("currentIndex", 0)), len(h.get("entries") or [])
                 s.can_back, s.can_forward = i > 0, i < n - 1
-        from neo.tools import browser
+        from neo2.core.tools import browser
 
         pages = browser._b.pages()
         tabs: dict = {
@@ -1423,8 +1423,8 @@ class Live:
         """The site's icon as a small data URL (≤ 8 KB). The page names it, so the request is plain:
         no cookies or logins of NEO's profile go with it, and it never reaches this Mac or the local
         network from a page that isn't there itself (every redirect is checked the same way)."""
-        from neo.security import policy
-        from neo.tools import browser
+        from neo2.core.security import policy
+        from neo2.core.tools import browser
 
         local_page = _local_host(_host(origin))
         try:
@@ -1622,7 +1622,7 @@ class Live:
         page = self.page
         rects: list[tuple[float, float, float, float]] = []
         if page is not None and self.user_touched(page):
-            from neo.tools import browser
+            from neo2.core.tools import browser
 
             said = (await browser._user_values(page) or set()) | self.remembered(page)
             got_rects = await _filled_rects(page, said)
@@ -2402,7 +2402,7 @@ class Live:
     async def _relaunch(self, url: str) -> None:
         """Start NEO's browser again at the page it was on — under the page lock, so a NEO step
         never has the browser closed under it."""
-        from neo.tools import browser
+        from neo2.core.tools import browser
 
         async with self.lock:
             await browser.relaunch(url)
@@ -2411,7 +2411,7 @@ class Live:
             self._user_has_it()
 
     async def _navigate(self, action: str, m: dict) -> str:
-        from neo.tools import browser
+        from neo2.core.tools import browser
 
         page, cdp = self.page, self.cdp
         if action == "tab":
@@ -2436,7 +2436,7 @@ class Live:
         return ""
 
     async def _reopen(self, sid: Any, url: str) -> str:
-        from neo.tools import browser
+        from neo2.core.tools import browser
 
         if self.s is not None and not self.s.ended:
             return "busy"

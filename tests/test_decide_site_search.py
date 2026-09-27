@@ -1,4 +1,4 @@
-"""neo.decide.kinds.site: search_site by evidence, page_read for any browser, and the web fast-path
+"""neo2.core.decide.kinds.site: search_site by evidence, page_read for any browser, and the web fast-path
 checks. The browser is a fake that only records (pages "opened", words "typed", keys "pressed"),
 site pages come from an httpx.MockTransport and the site search is a fake: nothing is launched,
 no URL is opened, no key reaches a real app and no network is used. Sites are fixtures."""
@@ -15,12 +15,12 @@ from urllib.parse import quote_plus
 import httpx
 import pytest
 
-from neo.decide import axkit, engine, inventory, learned, sites, workspace
-from neo.decide.inventory import App
-from neo.decide.kinds import launch
-from neo.decide.kinds import site as web
-from neo.tools.computer import apps as apps_mod
-from neo.tools.computer import focus, policy
+from neo2.core.decide import axkit, engine, inventory, learned, sites, workspace
+from neo2.core.decide.inventory import App
+from neo2.core.decide.kinds import launch
+from neo2.core.decide.kinds import site as web
+from neo2.core.tools.computer import apps as apps_mod
+from neo2.core.tools.computer import focus, policy
 
 WEBBY = App(bundle_id="test.webby", name="Webby", path="/Applications/Webby.app", handles=("https", "http"))
 SURFER = App(
@@ -399,8 +399,8 @@ class Brain:
 @pytest.fixture
 def eyes(monkeypatch):
     """The screenshot path, faked: the browser's front window, its picture and the vision brain."""
-    from neo.providers.base import ImagePart
-    from neo.tools.computer import screen
+    from neo2.core.providers.base import ImagePart
+    from neo2.core.tools.computer import screen
 
     seen = {
         "windows": [],
@@ -472,7 +472,7 @@ def test_page_read_never_reads_a_browser_behind_another_app(monkeypatch, eyes):
 
 
 def test_neos_own_processes_and_overlay_count_as_its_own(monkeypatch):
-    from neo.decide import media
+    from neo2.core.decide import media
 
     monkeypatch.setattr(web, "_own", web.__dict__["_own"])  # the real one, not the Browser fake's
     monkeypatch.setattr(media, "_self_family", lambda: frozenset({500, 501}))
@@ -523,7 +523,7 @@ def test_page_read_looks_at_a_screenshot_when_the_page_has_little_text(monkeypat
 
 
 def test_page_read_says_why_when_it_can_neither_read_nor_look(monkeypatch, eyes):
-    from neo.tools.computer import screen
+    from neo2.core.tools.computer import screen
 
     def no_screen(wid, region=None):
         raise PermissionError("off")
@@ -557,7 +557,7 @@ def in_a_host(tmp_path, monkeypatch):
 
     from neo_lib import make_runtime
 
-    from neo import runtime
+    from neo2.core import runtime
 
     monkeypatch.setattr(sys, "executable", "/Applications/Acme Desk.app/Contents/MacOS/python3")
     rt = make_runtime(tmp_path / "a", "a", ["page_read"])
@@ -568,9 +568,9 @@ def in_a_host(tmp_path, monkeypatch):
 def test_in_a_host_page_read_asks_for_the_hosts_accessibility(monkeypatch, eyes, in_a_host):
     """Accessibility off and no picture either: a question for the host's user naming the host app
     (as the ax tools ask), not an error that tells them to turn something on for NEO."""
-    from neo.agent import confirm
-    from neo.agent.registry import ToolContext, registry
-    from neo.tools.computer import screen
+    from neo2.core.agent import confirm
+    from neo2.core.agent.registry import ToolContext, registry
+    from neo2.core.tools.computer import screen
 
     def no_screen(wid, region=None):
         raise PermissionError("off")
@@ -585,8 +585,8 @@ def test_in_a_host_page_read_asks_for_the_hosts_accessibility(monkeypatch, eyes,
 
 
 def test_in_a_host_page_read_asks_for_the_hosts_screen_recording(monkeypatch, eyes, in_a_host):
-    from neo.agent import confirm
-    from neo.tools.computer import screen
+    from neo2.core.agent import confirm
+    from neo2.core.tools.computer import screen
 
     def no_screen(wid, region=None):
         raise PermissionError("off")
@@ -614,9 +614,9 @@ def test_the_screenshot_goes_to_the_hosts_own_vision_brain(monkeypatch, in_a_hos
     one of them that can see, never by none."""
     from neo_lib import ScriptedBrain
 
-    from neo import providers as prov
-    from neo.providers.base import ImagePart
-    from neo.tools.computer import screen
+    from neo2.core import providers as prov
+    from neo2.core.providers.base import ImagePart
+    from neo2.core.tools.computer import screen
 
     text_only = ScriptedBrain(["(can't see)"], name="host-text")
     text_only.supports_vision = False
@@ -638,7 +638,7 @@ def test_the_screenshot_goes_to_the_hosts_own_vision_brain(monkeypatch, in_a_hos
 def test_page_read_answers_the_users_own_words_from_the_page(monkeypatch, eyes):
     """No model is waiting to read the page (a fast path ran it): NEO answers from it, the page
     handed to the model fenced as untrusted, in the user's language."""
-    from neo import providers
+    from neo2.core import providers
 
     b = Browser(monkeypatch)
     b.url = "https://www.shopkart.in/deals"
@@ -676,7 +676,7 @@ def test_the_page_is_readable_by_its_letters():
 
 
 def test_the_vision_chain_has_only_brains_that_can_see(monkeypatch):
-    from neo import providers
+    from neo2.core import providers
 
     class P:
         def __init__(self, sees):
@@ -814,8 +814,8 @@ def test_the_address_bar_starts_a_browser_that_isnt_running(monkeypatch):
 
 
 def test_the_engine_gets_these_drivers_methods(monkeypatch):
-    monkeypatch.setitem(engine.DRIVERS, "web_search", "neo.decide.kinds.site")
-    monkeypatch.setitem(engine.DRIVERS, "open_app", "neo.decide.kinds.launch")
+    monkeypatch.setitem(engine.DRIVERS, "web_search", "neo2.core.decide.kinds.site")
+    monkeypatch.setitem(engine.DRIVERS, "open_app", "neo2.core.decide.kinds.launch")
     cands = asyncio.run(engine.choose("web_search", "search cats on surfer", APPS))
     assert [(c.key, c.methods) for c in cands] == [("test.surfer", ("address_bar",)), ("web", ("web",))]
     cands = asyncio.run(engine.choose("web_search", "search cats in notebook", APPS))

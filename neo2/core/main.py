@@ -1,8 +1,8 @@
 """NEO entry point.
 
-python -m neo            # full assistant: voice + overlay server
-python -m neo --text     # text REPL in the terminal (no voice, no UI)
-python -m neo --doctor   # check keys, permissions, models
+python -m neo2            # full assistant: voice + overlay server
+python -m neo2 --text     # text REPL in the terminal (no voice, no UI)
+python -m neo2 --doctor   # check keys, permissions, models
 """
 
 from __future__ import annotations
@@ -12,8 +12,8 @@ import asyncio
 import os
 import sys
 
-from neo.config import settings
-from neo.events import bus
+from neo2.core.config import settings
+from neo2.core.events import bus
 
 
 def _print_event(ev) -> None:
@@ -32,10 +32,10 @@ def _print_event(ev) -> None:
 
 
 async def text_repl(verbose: bool) -> None:
-    from neo.agent.session import Session
-    from neo.memory.store import store
-    from neo.reflex import warmup
-    from neo.tools import load_all
+    from neo2.core.agent.session import Session
+    from neo2.core.memory.store import store
+    from neo2.core.reflex import warmup
+    from neo2.core.tools import load_all
 
     load_all()
     sess = Session()
@@ -59,9 +59,9 @@ async def text_repl(verbose: bool) -> None:
         sess.memory_context = store().prompt_context(text)
         reply = await sess.handle(text, from_user=True)
         print(f"neo> {reply.text}")
-    from neo.memory.summarize import summarize_session
-    from neo.tools import render
-    from neo.tools.browser import shutdown as close_browser
+    from neo2.core.memory.summarize import summarize_session
+    from neo2.core.tools import render
+    from neo2.core.tools.browser import shutdown as close_browser
 
     await close_browser()
     await render.shutdown()
@@ -91,7 +91,7 @@ def doctor() -> int:
     )
     print("macOS permissions (grant to the app that runs NEO: Terminal / the NEO app)")
     if sys.platform == "darwin":
-        from neo.tools.computer import ax, screen
+        from neo2.core.tools.computer import ax, screen
 
         row("Accessibility", ax.is_trusted(), "System Settings → Privacy & Security → Accessibility")
         row(
@@ -123,7 +123,7 @@ async def _erase_everything() -> dict:
 
     import websockets
 
-    from neo.config import settings
+    from neo2.core.config import settings
 
     s = settings()
     token_file = s.data_dir / "ws-token"
@@ -146,17 +146,17 @@ async def _erase_everything() -> dict:
             f"NEO is running but didn't confirm the erase ({str(e)[:80] or 'no answer'}). "
             "Use the menu-bar icon → Erase NEO's Memory…, or quit NEO and run this again."
         ) from e
-    from neo.privacy import forget_everything
+    from neo2.core.privacy import forget_everything
 
     return await forget_everything()
 
 
 def main() -> None:
     os.umask(0o077)  # everything NEO writes (memory, logs, learned examples) is private to this user
-    from neo import log_to_stdout
+    from neo2.core import log_to_stdout
 
     log_to_stdout()  # NEO's status lines, as NEO.app's core.log and the terminal have always shown them
-    ap = argparse.ArgumentParser(prog="neo")
+    ap = argparse.ArgumentParser(prog="neo2")
     ap.add_argument("--text", action="store_true", help="text REPL, no voice/UI")
     ap.add_argument("--doctor", action="store_true", help="check setup")
     ap.add_argument(
@@ -175,7 +175,7 @@ def main() -> None:
         print("Erased: " + ", ".join(f"{n} {k}" for k, n in counts.items()))
         return
     if args.local:
-        from neo.providers.local_server import ensure_running
+        from neo2.core.providers.local_server import ensure_running
 
         ok = asyncio.run(ensure_running(wait_s=3600))
         print(
@@ -191,7 +191,7 @@ def main() -> None:
     if args.text:
         asyncio.run(text_repl(args.verbose))
         return
-    from neo.app import run
+    from neo2.core.app import run
 
     asyncio.run(run())
 

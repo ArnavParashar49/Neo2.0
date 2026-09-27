@@ -11,7 +11,7 @@ import pydantic
 import pytest
 
 import neo2
-from neo.agent.registry import ToolOutput
+from neo2.core.agent.registry import ToolOutput
 from neo2.testing import ScriptedBrain, ToolCall, Turn
 
 pytestmark = pytest.mark.portable  # Linux or macOS, any install (what needs an extra skips): CI's sdk-core job
@@ -207,7 +207,7 @@ def test_a_requests_own_sources_are_never_a_tools_name():
     own: "caller" (a model wrote the task) and "context" (the context passed with it), which the
     adapters and the MCP approval text read as the outer model's own words. A tool with either
     name would pass off third-party output as those."""
-    from neo.tools import PRESETS, REFUSED
+    from neo2.core.tools import PRESETS, REFUSED
     from neo2.sdk.hosttools import RESERVED_NAMES
 
     assert {"caller", "context"} <= RESERVED_NAMES

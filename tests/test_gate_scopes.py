@@ -11,9 +11,9 @@ import stat
 import pytest
 from neo_lib import make_runtime
 
-from neo import runtime
-from neo.agent import confirm
-from neo.agent.registry import RegisteredTool, ToolContext, registry
+from neo2.core import runtime
+from neo2.core.agent import confirm
+from neo2.core.agent.registry import RegisteredTool, ToolContext, registry
 
 _OBJ = {"type": "object", "properties": {}}
 
@@ -135,9 +135,9 @@ def test_asking_the_same_card_again_keeps_its_id_and_is_collected(agents):
 async def test_the_sink_sees_what_parallel_read_only_tools_staged(tmp_path):
     """memory is read-only (parallel_safe) yet stages after an untrusted read; the loop runs it
     in an asyncio.gather child, whose ContextVar changes never reach the parent — the list does."""
-    from neo.agent.loop import run_agent
-    from neo.events import EventBus
-    from neo.providers.base import ToolCall, Turn
+    from neo2.core.agent.loop import run_agent
+    from neo2.core.events import EventBus
+    from neo2.core.providers.base import ToolCall, Turn
 
     rt = make_runtime(tmp_path / "m", "m", ["memory", "clock"], memory_enabled=True)
 
@@ -180,7 +180,7 @@ def test_library_mode_never_stages_into_a_shared_slot():
 
 
 def test_neo_apps_audit_lines_are_unchanged(tmp_path):
-    from neo.config import settings
+    from neo2.core.config import settings
 
     old = os.umask(0o022)
     try:
@@ -209,7 +209,7 @@ async def test_neo_apps_audit_lines_match_the_released_ones(monkeypatch):
     import time
     from pathlib import Path
 
-    from neo.config import settings
+    from neo2.core.config import settings
 
     ids = iter(range(1, 100))
     monkeypatch.setattr(secrets, "token_hex", lambda n: f"{next(ids):016x}")

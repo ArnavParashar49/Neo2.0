@@ -13,7 +13,7 @@ import pytest
 
 
 def _ax():
-    return pytest.importorskip("neo.tools.computer.ax")
+    return pytest.importorskip("neo2.core.tools.computer.ax")
 
 
 def test_ax_find_keeps_ids_from_the_tree_the_model_holds(monkeypatch):
@@ -69,7 +69,7 @@ def test_pid_for_app_prefers_the_real_app_over_a_helper(monkeypatch):
             return apps
 
     monkeypatch.setattr(ax, "NSWorkspace", WS)  # the objc class itself can't be patched
-    from neo.tools.computer import focus
+    from neo2.core.tools.computer import focus
 
     monkeypatch.setattr(focus, "pid_running", lambda name: [])  # use the stubbed workspace list
     assert ax.pid_for_app("Notes") == 2
@@ -86,8 +86,8 @@ def test_empty_text_inputs_are_listed():
 
 
 def test_chain_demotes_a_failed_brain_for_a_while(monkeypatch):
-    import neo.providers as prov
-    from neo.providers.base import ProviderError, Turn
+    import neo2.core.providers as prov
+    from neo2.core.providers.base import ProviderError, Turn
 
     calls: list[str] = []
 
@@ -127,10 +127,10 @@ def test_chain_demotes_a_failed_brain_for_a_while(monkeypatch):
 
 
 def test_gemini_cooldowns_persist_and_slow_5xx_is_not_retried(monkeypatch, tmp_path):
-    gem = pytest.importorskip("neo.providers.gemini")
+    gem = pytest.importorskip("neo2.core.providers.gemini")
     from google.genai import errors as gerrors
 
-    from neo import config
+    from neo2.core import config
 
     monkeypatch.setattr(config, "_settings", None)
     monkeypatch.setenv("NEO_DATA_DIR", str(tmp_path))
@@ -181,7 +181,7 @@ def test_gemini_cooldowns_persist_and_slow_5xx_is_not_retried(monkeypatch, tmp_p
 
 
 def test_live_quiet_since_counts_typed_text_and_model_turns():
-    live = pytest.importorskip("neo.voice.live")
+    live = pytest.importorskip("neo2.core.voice.live")
 
     class Spk:
         last_stop = 0.0
@@ -204,8 +204,8 @@ def test_live_quiet_since_counts_typed_text_and_model_turns():
 
 
 def test_older_observations_are_stubbed_before_each_model_call():
-    from neo.agent.loop import _supersede_observations
-    from neo.providers.base import ImagePart, Message, ToolResult
+    from neo2.core.agent.loop import _supersede_observations
+    from neo2.core.providers.base import ImagePart, Message, ToolResult
 
     big = "e1 Window\n" * 200
     msgs = [
@@ -227,7 +227,7 @@ def test_older_observations_are_stubbed_before_each_model_call():
 
 
 def test_fresh_app_lookup_prefers_the_real_app(monkeypatch):
-    from neo.tools.computer import focus
+    from neo2.core.tools.computer import focus
 
     monkeypatch.setattr(
         focus,
@@ -239,7 +239,7 @@ def test_fresh_app_lookup_prefers_the_real_app(monkeypatch):
 
 
 def test_core_never_prompts_when_the_app_launched_it(monkeypatch):
-    from neo import permissions
+    from neo2.core import permissions
 
     monkeypatch.setattr(permissions, "missing", lambda: ["Accessibility"])
     prompted = []

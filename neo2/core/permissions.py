@@ -12,7 +12,7 @@ import os
 import sys
 import time
 
-from neo import effects
+from neo2.core import effects
 
 _PROMPT_EVERY_S = 24 * 3600
 
@@ -43,7 +43,7 @@ def request_missing() -> list[str]:
     gaps = missing()
     if not gaps or os.environ.get("NEO_LAUNCHED_BY_APP"):
         return gaps
-    from neo.config import settings
+    from neo2.core.config import settings
 
     stamp = settings().data_dir / "permissions-prompted"
     try:

@@ -7,8 +7,8 @@ import os
 import re
 from pathlib import Path
 
-from neo.agent import confirm
-from neo.security import policy
+from neo2.core.agent import confirm
+from neo2.core.security import policy
 
 _SECRET_ENV = re.compile(r"KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|SESSION|COOKIE|AUTH", re.I)
 # Embedded in another app, NEO's commands get only these of the host process's environment: a
@@ -25,7 +25,7 @@ def looks_destructive(cmd: str) -> bool:
 def _env() -> dict[str, str]:
     """The user's environment minus anything that looks like a credential (NEO's API keys too).
     For an embedded agent: only the basics (_HOST_ENV_OK and the locale)."""
-    from neo import runtime
+    from neo2.core import runtime
 
     if runtime.library_bound():
         env = {k: v for k, v in os.environ.items() if k in _HOST_ENV_OK or k.startswith("LC_")}

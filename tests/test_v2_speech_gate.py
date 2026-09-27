@@ -10,8 +10,8 @@ from types import SimpleNamespace as NS
 import numpy as np
 import pytest
 
-from neo.agent.registry import Registry, ToolOutput
-from neo.events import EventBus
+from neo2.core.agent.registry import Registry, ToolOutput
+from neo2.core.events import EventBus
 
 
 class FakeSpk:
@@ -80,9 +80,9 @@ DONE = sc(turn_complete=True)
 
 @pytest.fixture
 def voice(monkeypatch):
-    from neo import config, events
-    from neo.tools import load_all
-    from neo.voice import live as live_mod
+    from neo2.core import config, events
+    from neo2.core.tools import load_all
+    from neo2.core.voice import live as live_mod
 
     load_all()
     monkeypatch.setenv("GEMINI_API_KEY", "test")
@@ -101,13 +101,13 @@ def voice(monkeypatch):
         memory_context = ""
 
         async def command(self, text, steps):
-            from neo.agent.session import Reply
+            from neo2.core.agent.session import Reply
 
             lane.append((text, [t for t, _ in steps]))
             return Reply("did it", "quick", silent=True)
 
         async def handle(self, text, **kw):
-            from neo.agent.session import Reply
+            from neo2.core.agent.session import Reply
 
             return Reply("agent did it", "agent", silent=True)
 
@@ -128,7 +128,7 @@ async def feed(v, *msgs, settle=0.05):
 
 
 def test_a_command_is_done_silently_even_if_the_model_narrates(voice, monkeypatch):
-    from neo import config
+    from neo2.core import config
 
     monkeypatch.setenv("NEO_LIVE_COMMAND_LANE", "false")  # the model path on its own
     monkeypatch.setattr(config, "_settings", None)
@@ -173,7 +173,7 @@ def test_search_on_a_site_is_a_command_not_a_question(voice):
 
 
 def test_a_failed_step_is_spoken_but_a_finished_step_is_not(voice, monkeypatch):
-    from neo import config
+    from neo2.core import config
 
     monkeypatch.setenv("NEO_LIVE_COMMAND_LANE", "false")
     monkeypatch.setattr(config, "_settings", None)
@@ -191,7 +191,7 @@ def test_a_failed_step_is_spoken_but_a_finished_step_is_not(voice, monkeypatch):
 
 
 def test_multi_step_progress_is_never_narrated(voice, monkeypatch):
-    from neo import config
+    from neo2.core import config
 
     monkeypatch.setenv("NEO_LIVE_COMMAND_LANE", "false")
     monkeypatch.setattr(config, "_settings", None)
@@ -267,7 +267,7 @@ def test_the_lane_is_tracked_so_stop_can_cancel_it(voice):
 
 
 def test_a_typed_question_after_a_quiet_step_is_answered(voice, monkeypatch):
-    from neo import config
+    from neo2.core import config
 
     monkeypatch.setenv("NEO_LIVE_COMMAND_LANE", "false")
     monkeypatch.setattr(config, "_settings", None)
@@ -283,8 +283,8 @@ def test_a_typed_question_after_a_quiet_step_is_answered(voice, monkeypatch):
 
 
 def test_an_approved_action_via_the_models_call_stays_quiet(voice):
-    from neo.agent import confirm
-    from neo.agent.session import Reply
+    from neo2.core.agent import confirm
+    from neo2.core.agent.session import Reply
 
     async def answer(yes, **kw):
         confirm.cancel("t")
@@ -308,7 +308,7 @@ def test_an_approved_action_via_the_models_call_stays_quiet(voice):
 
 
 def test_the_same_open_again_is_a_retry_but_the_same_keystroke_is_not(voice, monkeypatch):
-    from neo import config
+    from neo2.core import config
 
     monkeypatch.setenv("NEO_LIVE_COMMAND_LANE", "false")
     monkeypatch.setattr(config, "_settings", None)
@@ -331,7 +331,7 @@ def test_the_same_open_again_is_a_retry_but_the_same_keystroke_is_not(voice, mon
 
 
 def _states(monkeypatch):
-    from neo.events import bus
+    from neo2.core.events import bus
 
     seen = []
     orig = bus().publish
@@ -346,7 +346,7 @@ def _states(monkeypatch):
 
 
 def test_a_silent_reply_to_a_command_never_shows_speaking(voice, monkeypatch):
-    from neo import config
+    from neo2.core import config
 
     monkeypatch.setenv("NEO_LIVE_COMMAND_LANE", "false")
     monkeypatch.setattr(config, "_settings", None)
@@ -384,7 +384,7 @@ def test_a_real_answer_after_leading_silence_is_still_spoken(voice):
     ],
 )
 def test_a_polite_frame_does_not_make_a_command_a_question(text, asks):
-    from neo.voice.live import _asks
+    from neo2.core.voice.live import _asks
 
     assert _asks(text) is asks
 
@@ -394,8 +394,8 @@ def test_a_polite_frame_does_not_make_a_command_a_question(text, asks):
     [("Neo, open YouTube, please.", False), ("Okay, open YouTube", False), ("open notes and type hi", True)],
 )
 def test_a_vocative_comma_is_not_a_second_step(text, multi):
-    from neo.tools import load_all
-    from neo.voice.live import _multi_step
+    from neo2.core.tools import load_all
+    from neo2.core.voice.live import _multi_step
 
     load_all()
     assert _multi_step(text) is multi
@@ -405,7 +405,7 @@ def test_a_vocative_comma_is_not_a_second_step(text, multi):
 
 
 def _lane_off(monkeypatch):
-    from neo import config
+    from neo2.core import config
 
     monkeypatch.setenv("NEO_LIVE_COMMAND_LANE", "false")
     monkeypatch.setattr(config, "_settings", None)
@@ -452,8 +452,8 @@ def test_a_real_reply_keeps_its_pauses(voice):
     ],
 )
 def test_the_lane_never_cuts_a_payload_short(text, steps):
-    from neo.tools import load_all
-    from neo.voice.live import _command_steps
+    from neo2.core.tools import load_all
+    from neo2.core.voice.live import _command_steps
 
     load_all()
     assert _command_steps(text) == steps
@@ -469,8 +469,8 @@ def test_a_title_ending_in_a_polite_word_plays_whole(voice):
     ["close this tab and please", "open notes and please", "open notes and for me", "open notes and, please?"],
 )
 def test_a_sentence_ending_in_and_please_is_not_over(text):
-    from neo.tools import load_all
-    from neo.voice.live import _command_steps
+    from neo2.core.tools import load_all
+    from neo2.core.voice.live import _command_steps
 
     load_all()
     assert _command_steps(text) is None and _command_steps(text, settled=True) is None
@@ -489,8 +489,8 @@ def test_a_sentence_ending_in_and_please_is_not_over(text):
     ],
 )
 def test_a_capability_question_is_left_to_the_model(text):
-    from neo.tools import load_all
-    from neo.voice.live import _command_steps
+    from neo2.core.tools import load_all
+    from neo2.core.voice.live import _command_steps
 
     load_all()
     assert _command_steps(text) is None
@@ -508,8 +508,8 @@ def test_a_capability_question_is_left_to_the_model(text):
     ],
 )
 def test_a_polite_command_that_names_its_target_still_runs_on_the_lane(text, tool):
-    from neo.tools import load_all
-    from neo.voice.live import _command_steps
+    from neo2.core.tools import load_all
+    from neo2.core.voice.live import _command_steps
 
     load_all()
     assert [t for t, _ in _command_steps(text) or []] == [tool]
@@ -522,8 +522,8 @@ def test_a_capability_question_is_answered_out_loud(voice):
 
 @pytest.mark.parametrize("text", ["Neil, close this tab", "Zara open YouTube", "Nio open Notes"])
 def test_words_to_someone_else_are_left_to_the_model(text):
-    from neo.tools import load_all
-    from neo.voice.live import _command_steps
+    from neo2.core.tools import load_all
+    from neo2.core.voice.live import _command_steps
 
     load_all()
     assert _command_steps(text) is None
@@ -552,8 +552,8 @@ def test_words_to_someone_else_are_left_to_the_model(text):
     ],
 )
 def test_a_polite_question_is_still_a_question(text, asks):
-    from neo.tools import load_all
-    from neo.voice.live import _asks
+    from neo2.core.tools import load_all
+    from neo2.core.voice.live import _asks
 
     load_all()
     assert _asks(text) is asks
@@ -574,7 +574,7 @@ def test_a_polite_question_the_agent_answers_is_spoken(voice, monkeypatch):
 
 
 def test_a_memory_write_goes_straight_back_to_listening(voice, monkeypatch):
-    from neo.events import bus
+    from neo2.core.events import bus
 
     seen = _states(monkeypatch)
 
@@ -588,7 +588,7 @@ def test_a_memory_write_goes_straight_back_to_listening(voice, monkeypatch):
 
 
 def test_steps_of_a_command_go_straight_back_to_listening(voice, monkeypatch):
-    from neo.events import bus
+    from neo2.core.events import bus
 
     _lane_off(monkeypatch)
     seen = _states(monkeypatch)
@@ -604,8 +604,8 @@ def test_steps_of_a_command_go_straight_back_to_listening(voice, monkeypatch):
 
 
 def test_an_older_settle_never_cuts_a_newer_thinking_short(voice, monkeypatch):
-    from neo.events import bus
-    from neo.voice import live as live_mod
+    from neo2.core.events import bus
+    from neo2.core.voice import live as live_mod
 
     monkeypatch.setattr(live_mod, "_THINK_SETTLE_S", 0.1)
 
@@ -622,8 +622,8 @@ def test_an_older_settle_never_cuts_a_newer_thinking_short(voice, monkeypatch):
 
 
 def test_a_can_you_the_tool_itself_accepts_still_runs_on_the_lane():
-    from neo.tools import load_all
-    from neo.voice.live import _command_steps
+    from neo2.core.tools import load_all
+    from neo2.core.voice.live import _command_steps
 
     load_all()
     assert _command_steps("Can you type hello?") == [("type_text", {"text": "hello"})]  # as before c6848e0
@@ -632,8 +632,8 @@ def test_a_can_you_the_tool_itself_accepts_still_runs_on_the_lane():
 def test_a_yes_to_a_browse_card_answers_it(monkeypatch):
     from types import SimpleNamespace
 
-    from neo.tools import browse
-    from neo.voice.live import _answers
+    from neo2.core.tools import browse
+    from neo2.core.voice.live import _answers
 
     p = SimpleNamespace(tool="browser_click", action_id="browser_click:abc")
     assert _answers("browser_click", p) and _answers("agent_task", p)

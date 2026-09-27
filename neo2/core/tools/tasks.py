@@ -1,10 +1,10 @@
 """Task tools: notes, reminders, the calendar and mail.
 
-Each tool switches on `mode(kind)`, the user's `decide_modes` setting (neo.config):
-- `legacy` runs today's scripts (neo/tools/computer/legacy.py);
+Each tool switches on `mode(kind)`, the user's `decide_modes` setting (neo2.core.config):
+- `legacy` runs today's scripts (neo2/core/tools/computer/legacy.py);
 - `shadow` runs them too, and the kind's driver works out in the background what it would have
-  done (neo.decide.shadow): it opens, asks and learns nothing;
-- `on` hands the request to the kind's driver (neo/decide/kinds).
+  done (neo2.core.decide.shadow): it opens, asks and learns nothing;
+- `on` hands the request to the kind's driver (neo2/core/decide/kinds).
 
 A kind's new surface (the tool's description and parameters, its new fast paths, Live's direct
 tools) shows only while the kind is on: in shadow nothing a model or the user sees changes.
@@ -16,11 +16,11 @@ import functools
 from collections.abc import Callable
 from typing import Any
 
-from neo.agent.registry import AS_REGISTERED, ToolContext, catalog
-from neo.agent.registry import tool as _register
-from neo.config import DecideMode, decide_mode
-from neo.decide import shadow
-from neo.tools.computer import legacy
+from neo2.core.agent.registry import AS_REGISTERED, ToolContext, catalog
+from neo2.core.agent.registry import tool as _register
+from neo2.core.config import DecideMode, decide_mode
+from neo2.core.decide import shadow
+from neo2.core.tools.computer import legacy
 
 # Every tool here uses this Mac's own apps and stores.
 tool = functools.partial(_register, requires=frozenset({"macos"}))
@@ -46,7 +46,7 @@ def when_on(kind: str, check: Callable[[dict], bool] | None = None) -> Callable[
 
 def _schedule_check(kind: str) -> Callable[[dict], bool]:
     def check(filled: dict) -> bool:
-        from neo.decide.kinds import schedule
+        from neo2.core.decide.kinds import schedule
 
         return schedule.check(kind, filled)
 
@@ -162,7 +162,7 @@ def _legacy_ok(out: str) -> bool:
     slow=True,
 )
 async def mail_send(a: dict, c: ToolContext) -> str:
-    from neo.agent import confirm
+    from neo2.core.agent import confirm
 
     if confirm.as_bool(a.get("send")):
         gate = confirm.gated(
@@ -205,14 +205,14 @@ async def mail_send(a: dict, c: ToolContext) -> str:
 async def mail_unread(a: dict, c: ToolContext):
     m = mode("read_mail")
     if m == "on":
-        from neo.decide import run
-        from neo.decide.kinds import mail
+        from neo2.core.decide import run
+        from neo2.core.decide.kinds import mail
 
         return run.to_output(await mail.unread(a, _said(c, a)))
     out = await legacy.mail_unread(int(a.get("limit") or 10))
     if m == "shadow":
         with shadow.starting("read_mail"):
-            from neo.decide.kinds import mail
+            from neo2.core.decide.kinds import mail
 
             shadow.later("read_mail", mail.preview(a, _said(c, a), legacy=out), legacy_ok=_legacy_ok(out))
     return out
@@ -232,14 +232,14 @@ async def _schedule(kind: str, a: dict, c: ToolContext, run_legacy: Callable[[],
     """One schedule kind's request in its mode (see the module docstring)."""
     m = mode(kind)
     if m == "on":
-        from neo.decide import run
-        from neo.decide.kinds import schedule
+        from neo2.core.decide import run
+        from neo2.core.decide.kinds import schedule
 
         return run.to_output(await schedule.carry_out(kind, a, _said(c, a), ask_access=True))
     out = await run_legacy()
     if m == "shadow":
         with shadow.starting(kind):
-            from neo.decide.kinds import schedule
+            from neo2.core.decide.kinds import schedule
 
             facts = {"legacy_ok": _legacy_ok(out)}
             if kind == "read_calendar":  # the events legacy listed ("Nothing on the calendar today." is none)
@@ -377,8 +377,8 @@ async def calendar_add(a: dict, c: ToolContext):
 async def notes_create(a: dict, c: ToolContext):
     m = mode("write_note")
     if m == "on":
-        from neo.decide import run
-        from neo.decide.kinds import note
+        from neo2.core.decide import run
+        from neo2.core.decide.kinds import note
 
         return run.to_output(await note.write(a, _said(c, a)))
     title, body = (a.get("title") or "").strip(), (a.get("body") or "").strip()
@@ -387,7 +387,7 @@ async def notes_create(a: dict, c: ToolContext):
     out = await legacy.notes_create(title, body, a.get("folder", ""))
     if m == "shadow":
         with shadow.starting("write_note"):
-            from neo.decide.kinds import note
+            from neo2.core.decide.kinds import note
 
             shadow.later("write_note", note.preview(a, _said(c, a)), legacy_ok=_legacy_ok(out))
     return out

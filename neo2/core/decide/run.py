@@ -1,7 +1,7 @@
 """Carrying out a task kind: the loop every kind shares, and what NEO learns from each attempt.
 
 A driver knows how to do one kind with one app (or route) and method; this module decides the
-order, the budgets and when to stop, generalising :func:`neo.decide.media.play_best`:
+order, the budgets and when to stop, generalising :func:`neo2.core.decide.media.play_best`:
 
 * :func:`run_best` - reversible and read kinds: the engine's candidates in order, each method
   behind its permission gate, until one works;
@@ -28,9 +28,9 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 if TYPE_CHECKING:
-    from neo.agent.registry import ToolOutput
-    from neo.decide.engine import Candidate
-    from neo.decide.inventory import App
+    from neo2.core.agent.registry import ToolOutput
+    from neo2.core.decide.engine import Candidate
+    from neo2.core.decide.inventory import App
 
 __all__ = [
     "Effect",
@@ -205,14 +205,14 @@ _gen: ContextVar[int | None] = ContextVar("neo_run_generation", default=None)
 
 def begin_request() -> None:
     """Note which memory this request started with (see :func:`erased`)."""
-    from neo import privacy
+    from neo2.core import privacy
 
     _gen.set(privacy.generation())
 
 
 def erased() -> bool:
     """The user erased NEO's memory after this request started: learn nothing from it."""
-    from neo import privacy
+    from neo2.core import privacy
 
     started = _gen.get()
     return started is not None and started != privacy.generation()
@@ -246,7 +246,7 @@ def record(kind: str, key: str, method: str, out: Outcome) -> None:
     anything else blamed unless its reason isn't the app's fault."""
     if erased():
         return
-    from neo.decide import engine
+    from neo2.core.decide import engine
 
     try:
         if out.ok:
@@ -306,11 +306,11 @@ async def _gate(app: App | None, method: str) -> Outcome | None:
     if app is None or app.kind == "route":
         return None  # a framework route checks its own access
     if method.startswith("script"):
-        from neo.decide import aescript
+        from neo2.core.decide import aescript
 
         return await aescript.control_gate(app)
     if method.startswith("ax"):
-        from neo.decide import axkit
+        from neo2.core.decide import axkit
 
         if not axkit.trusted():
             return Outcome(
@@ -366,7 +366,7 @@ async def _note(trail: list[str]) -> None:
     line = "Tried: " + "; ".join(trail)
     print(f"[decide] {line}")
     try:
-        from neo.events import bus
+        from neo2.core.events import bus
 
         await bus().note(line[:300])
     except Exception:  # noqa: BLE001 - a note is a nicety
@@ -382,7 +382,7 @@ def _one_reason(outs: list[Outcome]) -> Outcome | None:
 
 async def run_best(driver: Driver, req: Req, *, max_attempts: int = 6) -> Result:
     """Do ``req`` with the best candidate that works, trying the next on a clean failure."""
-    from neo.decide import engine
+    from neo2.core.decide import engine
 
     begin_request()
     sigs = [s for s in (req.sig, *req.also) if s]
@@ -446,7 +446,7 @@ async def run_plan(driver: Driver, plan: Plan, req: Req) -> Outcome:
     """Carry out an approved send: only the approved app, only its planned methods, in order.
     After a commit there is never another method; a clean failure of every method is returned
     for the caller to offer the next app on a new card."""
-    from neo.decide import engine, inventory
+    from neo2.core.decide import engine, inventory
 
     begin_request()
     app = inventory.app_for_bundle(plan.app_key) or await asyncio.to_thread(inventory.app_by_id, plan.app_key)
@@ -479,8 +479,8 @@ def to_output(r: Result) -> ToolOutput:
     """A driver's result as the tool's output (a NEEDS_USER / NEEDS_CONFIRM halt stays one). A
     question for the user and an add that may have happened are no failure: nobody (a fast path
     handing over to the agent, a model, Live) should try them again."""
-    from neo.agent.confirm import Halt
-    from neo.agent.registry import ToolOutput
+    from neo2.core.agent.confirm import Halt
+    from neo2.core.agent.registry import ToolOutput
 
     halt = isinstance(r.text, Halt)
     out = ToolOutput(str(r.text), ok=r.ok or r.unsure or halt, halt=halt)

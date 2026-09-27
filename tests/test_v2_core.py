@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import asyncio
 
-from neo.agent import confirm
-from neo.agent.loop import run_agent
-from neo.agent.registry import RegisteredTool, Registry, ToolContext
-from neo.events import EventBus, NeoState
-from neo.providers.base import Message, ToolCall, Turn
+from neo2.core.agent import confirm
+from neo2.core.agent.loop import run_agent
+from neo2.core.agent.registry import RegisteredTool, Registry, ToolContext
+from neo2.core.events import EventBus, NeoState
+from neo2.core.providers.base import Message, ToolCall, Turn
 
 
 class FakeBrain:
@@ -66,7 +66,7 @@ def test_registry_invoke_and_errors():
 
 
 def test_confirm_gate_roundtrip(tmp_path, monkeypatch):
-    from neo import config
+    from neo2.core import config
 
     monkeypatch.setattr(config, "_settings", None)
     monkeypatch.setenv("NEO_DATA_DIR", str(tmp_path))
@@ -110,7 +110,7 @@ def test_loop_runs_tools_then_answers():
 
 
 def test_loop_halts_on_confirm(tmp_path, monkeypatch):
-    from neo import config
+    from neo2.core import config
 
     monkeypatch.setattr(config, "_settings", None)
     monkeypatch.setenv("NEO_DATA_DIR", str(tmp_path))

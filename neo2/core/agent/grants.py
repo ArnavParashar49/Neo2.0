@@ -23,11 +23,11 @@ without a card, except:
 * another task: a grant never outlives its task, and never reaches another job running at the
   same moment (the task id travels in a context variable, like confirm's approvals);
 * another conversation: the tasks, grants, notes and untrusted-read counts live in the
-  confirmation gate's own :class:`Book` (neo.agent.confirm.Gate), so a task id carried into
+  confirmation gate's own :class:`Book` (neo2.core.agent.confirm.Gate), so a task id carried into
   another gate's context is no task there, and two sessions never share a grant or a count.
 
 Grants are NEO.app's: only its own gate gives them. An agent embedded in another app
-(neo.runtime) never does — its cards offer no scope (``scopes: []``) and every yes stays one-off,
+(neo2.core.runtime) never does — its cards offer no scope (``scopes: []``) and every yes stays one-off,
 since its host approves each staged action through its own route; its notes and counts still
 work, per conversation.
 
@@ -108,9 +108,9 @@ _call: ContextVar[_Call | None] = ContextVar("neo_grant_call", default=None)
 
 
 def _book() -> Book:
-    """The current conversation's book: the gate's (neo.agent.confirm), NEO.app's when nothing is
+    """The current conversation's book: the gate's (neo2.core.agent.confirm), NEO.app's when nothing is
     bound. In library mode with nothing bound this fails closed, like the gate."""
-    from neo.agent.confirm import current_gate
+    from neo2.core.agent.confirm import current_gate
 
     return current_gate().grants
 
@@ -294,7 +294,7 @@ def _prune(book: Book) -> None:
 
 
 def _audit(action_id: str, tool: str, params: dict, status: str) -> None:
-    from neo.agent.confirm import audit
+    from neo2.core.agent.confirm import audit
 
     audit(action_id, tool, params, status)
 
@@ -302,6 +302,6 @@ def _audit(action_id: str, tool: str, params: dict, status: str) -> None:
 def reset() -> None:
     """Forget every grant NEO.app's gate gave, with its tasks and notes (tests; an erase). An
     embedded agent's conversations keep theirs in their own gates, which go with them."""
-    from neo.agent.confirm import app_gate
+    from neo2.core.agent.confirm import app_gate
 
     app_gate().grants.clear()

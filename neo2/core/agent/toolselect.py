@@ -22,10 +22,10 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from neo import runtime
-from neo.agent.registry import RegisteredTool, Registry
-from neo.agent.registry import registry as default_registry
-from neo.providers.base import ToolSpec
+from neo2.core import runtime
+from neo2.core.agent.registry import RegisteredTool, Registry
+from neo2.core.agent.registry import registry as default_registry
+from neo2.core.providers.base import ToolSpec
 
 ALWAYS = {"memory"}
 SCREEN = {
@@ -83,7 +83,7 @@ class ToolSelector:
         if self._vecs is not None and names == self._vec_names:
             return names, self._vecs
         try:
-            from neo.memory.embed import embed_texts
+            from neo2.core.memory.embed import embed_texts
 
             v = embed_texts([f"{t.name.replace('_', ' ')}: {t.description}" for t in tools])
         except Exception:  # noqa: BLE001
@@ -96,7 +96,7 @@ class ToolSelector:
     def _scores(self, text: str) -> dict[str, float]:
         mat = self._tool_matrix()
         if mat is not None:
-            from neo.memory.embed import embed_texts
+            from neo2.core.memory.embed import embed_texts
 
             q = embed_texts([text])
             if q is not None:
@@ -194,7 +194,7 @@ _selector: ToolSelector | None = None
 
 
 def selector() -> ToolSelector:
-    """The bound agent's selector, over its own tools (neo.runtime), else NEO.app's."""
+    """The bound agent's selector, over its own tools (neo2.core.runtime), else NEO.app's."""
     rt = runtime.current_runtime()
     if rt is not None:
         return rt.get_or_create("selector", lambda: ToolSelector(rt.registry))

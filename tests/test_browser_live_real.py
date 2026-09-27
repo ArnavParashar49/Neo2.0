@@ -12,9 +12,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
-from neo.agent.registry import ToolContext, registry
-from neo.events import current_job
-from neo.tools import browser, browser_live
+from neo2.core.agent.registry import ToolContext, registry
+from neo2.core.events import current_job
+from neo2.core.tools import browser, browser_live
 
 pytestmark = [
     pytest.mark.skipif(os.environ.get("NEO_TEST_RENDER") != "1", reason="real headless Chromium: NEO_TEST_RENDER=1"),
@@ -60,8 +60,8 @@ class Channel:
 
 @pytest.fixture
 async def real(monkeypatch):
-    from neo import config
-    from neo.tools import load_all
+    from neo2.core import config
+    from neo2.core.tools import load_all
 
     monkeypatch.setenv("NEO_BROWSER_VIEW", "chat")
     monkeypatch.setattr(config, "_settings", None)

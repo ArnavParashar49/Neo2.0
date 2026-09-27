@@ -19,11 +19,11 @@ import unicodedata
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
-from neo import effects
-from neo.decide._objc import pooled
+from neo2.core import effects
+from neo2.core.decide._objc import pooled
 
 if TYPE_CHECKING:
-    from neo.decide.inventory import App
+    from neo2.core.decide.inventory import App
 
 __all__ = [
     "Handle",
@@ -118,7 +118,7 @@ def status() -> str:
 
 
 def usage_declared() -> bool:
-    from neo.decide import evidence
+    from neo2.core.decide import evidence
 
     return "NSContactsUsageDescription" in evidence.responsible_usage()
 
@@ -344,7 +344,7 @@ def _resolve(phrase: str, need: Need) -> Resolution:
             return Resolution("ok", Person(literal.value, handles=(literal,), source="literal"))
         p = _person(owner)
         return Resolution("ok", Person(p.display, p.contact_id, (literal,), "literal", p.org))
-    from neo.decide import learned
+    from neo2.core.decide import learned
 
     key = phrase_key(phrase)
     if bound := learned.get("bindings", key):
@@ -378,7 +378,7 @@ def bind(phrase: str, p: Person, h: Handle) -> None:
     """The user approved a card for this person: remember which contact (and which of their
     handles, by label) the phrase meant - never the number or address itself."""
     if p.contact_id:
-        from neo.decide import learned
+        from neo2.core.decide import learned
 
         learned.put("bindings", phrase_key(phrase), {"contact_id": p.contact_id, "label": h.label})
 

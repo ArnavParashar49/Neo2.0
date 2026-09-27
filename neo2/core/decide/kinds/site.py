@@ -3,7 +3,7 @@ the page the user is looking at read back (its text through Accessibility, else 
 browser's window as the vision brain sees it).
 
 The site word becomes a host (and maybe a section, "<brand> maps" -> /maps) by evidence
-(:mod:`neo.decide.sites`: a domain as written, a site learned here, an installed web app's site, a
+(:mod:`neo2.core.decide.sites`: a domain as written, a site learned here, an installed web app's site, a
 region-aware web search). Its search is the template a landing there confirmed, else what the site
 itself publishes, best first by NEO's record with that site: OpenSearch, JSON-LD, a GET search
 form. One page is opened per request: when it isn't the search, the same tab falls back to the
@@ -29,13 +29,13 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote_plus
 
-from neo.decide import run
-from neo.decide._objc import pooled
-from neo.decide.run import Effect, Outcome, Result
+from neo2.core.decide import run
+from neo2.core.decide._objc import pooled
+from neo2.core.decide.run import Effect, Outcome, Result
 
 if TYPE_CHECKING:
-    from neo.decide.inventory import App
-    from neo.decide.sites import SiteRes, Template
+    from neo2.core.decide.inventory import App
+    from neo2.core.decide.sites import SiteRes, Template
 
 __all__ = [
     "KIND",
@@ -84,7 +84,7 @@ _VERDICTS = {
 
 
 def _is_browser(app: App) -> bool:
-    from neo.decide import engine
+    from neo2.core.decide import engine
 
     return engine._is_browser(app)
 
@@ -98,14 +98,14 @@ def methods_for(app: App, kind: str | None = None) -> tuple[str, ...]:
 @pooled
 def default_browser() -> App | None:
     """The app that opens https links."""
-    from neo.decide import inventory, workspace
+    from neo2.core.decide import inventory, workspace
 
     bid = workspace.default_handler("https")
     return (inventory.app_for_bundle(bid) or inventory.app_by_id(bid)) if bid else None
 
 
 def _named_browser(word: str, apps: list[App]) -> App | None:
-    from neo.decide import inventory
+    from neo2.core.decide import inventory
 
     app = inventory.named_in(word, apps) if word.strip() else None
     return app if app is not None and _is_browser(app) else None
@@ -114,8 +114,8 @@ def _named_browser(word: str, apps: list[App]) -> App | None:
 async def _open(browser: App, url: str) -> tuple[int | None, str]:
     """Open ``url`` in the browser, brought to the front: (its pid, or None and why not). A page
     that didn't open is no method's fault: the caller stops with the reason 'not_found'."""
-    from neo.decide.kinds import launch
-    from neo.tools.computer import apps
+    from neo2.core.decide.kinds import launch
+    from neo2.core.tools.computer import apps
 
     out = await apps.open_url(url, browser.bundle_id, browser.name)
     if out.startswith("Error"):
@@ -133,7 +133,7 @@ def _await_landing(
     """(verdict, address) once the tab is on ``host``'s site (any site when ''), inside its section
     ``prefix``, holding the words of ``query`` (any page when ''), or at the deadline: off_site
     (another site), no_query (the site, but not the search or not the section) or blank."""
-    from neo.decide import axkit, sites
+    from neo2.core.decide import axkit, sites
 
     deadline, url = time.monotonic() + wait_s, ""
     while True:
@@ -156,7 +156,7 @@ def _await_landing(
 def _watch(
     pid: int, path: str, host: str, prefix: str, query: str, wait_s: float, stop: threading.Event
 ) -> tuple[str, str]:
-    from neo.decide import axkit
+    from neo2.core.decide import axkit
 
     app_el = axkit.app_el(pid)
     changed = axkit.enable_web_tree(app_el, axkit.runtime(path))
@@ -178,7 +178,7 @@ def _box_flow(
     stop: threading.Event,
 ) -> tuple[str, str]:
     """The site's own search box, on the page the tab shows: the words typed, then Return."""
-    from neo.decide import axkit, sites
+    from neo2.core.decide import axkit, sites
 
     app_el = axkit.app_el(pid)
     changed = axkit.enable_web_tree(app_el, axkit.runtime(path))
@@ -215,7 +215,7 @@ def _bar_flow(
     title): ``text`` typed for the user's own search engine, then Return. The field must be the
     browser's own (never the page's: Return there could submit a form) and the one the command
     focused: the focus moved to it, or it has kept the focus since (the bar already had it)."""
-    from neo.decide import axkit
+    from neo2.core.decide import axkit
 
     app_el = axkit.app_el(pid)
     before = axkit.attr(app_el, "AXFocusedUIElement")
@@ -264,7 +264,7 @@ async def landing(
     ('done', url) when on ``host``'s site, inside its section ``prefix``, holding ``query``'s words;
     else 'off_site', 'no_query', 'blank' (no address showed) or 'untrusted' (no Accessibility, so
     NEO can't tell)."""
-    from neo.decide import axkit
+    from neo2.core.decide import axkit
 
     if not await asyncio.to_thread(axkit.trusted):
         return "untrusted", ""
@@ -291,7 +291,7 @@ async def _template(browser: App, url: str, res: SiteRes, query: str) -> Outcome
 
 async def _site_box(browser: App, res: SiteRes, query: str, pid: int | None) -> Outcome:
     """``pid``: the browser, when its tab already shows the site; else the site's page is opened."""
-    from neo.decide import axkit
+    from neo2.core.decide import axkit
 
     if pid is None:
         pid, why = await _open(browser, f"https://{res.host}{res.prefix or '/'}")
@@ -304,9 +304,9 @@ async def _site_box(browser: App, res: SiteRes, query: str, pid: int | None) -> 
 
 
 async def _address_bar(browser: App, text: str, query: str) -> Outcome:
-    from neo.agent.confirm import ask_user
-    from neo.decide import axkit
-    from neo.decide.kinds import launch
+    from neo2.core.agent.confirm import ask_user
+    from neo2.core.decide import axkit
+    from neo2.core.decide.kinds import launch
 
     if not await asyncio.to_thread(axkit.trusted):
         return Outcome(False, _NO_AX, reason="permission")
@@ -322,14 +322,14 @@ async def _address_bar(browser: App, text: str, query: str) -> Outcome:
 
 
 def _blamed(out: Outcome) -> bool:
-    from neo.decide import engine
+    from neo2.core.decide import engine
 
     return not out.ok and out.reason not in engine.NO_BLAME
 
 
 def _ordered(key: str, templates: list[Template]) -> list[Template]:
     """Best first by NEO's record with this site (the seeds give discovery's own order)."""
-    from neo.decide import engine
+    from neo2.core.decide import engine
 
     return sorted(templates, key=lambda t: -engine.prior(KIND, key, _METHOD[t.how]))
 
@@ -337,7 +337,7 @@ def _ordered(key: str, templates: list[Template]) -> list[Template]:
 async def _first_template(res: SiteRes) -> Template | None:
     """The template to try: the one a landing confirmed (no network), else the best the site
     publishes (which costs reading its page)."""
-    from neo.decide import sites
+    from neo2.core.decide import sites
 
     if t := sites.learned_template(res.host, res.prefix):
         return t
@@ -358,7 +358,7 @@ def _said(out: Outcome, where: str, query: str, browser: str, first: bool) -> Re
 
 
 async def _on_site(site: str, res: SiteRes, query: str, browser: App) -> Result:
-    from neo.decide import sites
+    from neo2.core.decide import sites
 
     where, first, pid = res.key, res.how == "search", None
     if t := await _first_template(res):
@@ -390,8 +390,8 @@ async def _on_site(site: str, res: SiteRes, query: str, browser: App) -> Result:
 async def search(site: str, query: str, *, browser: str = "") -> Result:
     """Open a search for ``query`` on the website ``site`` names, in ``browser`` (the name the user
     said) or the default browser, and check it landed. The tool's gates ran before this."""
-    from neo.decide import engine, inventory, sites
-    from neo.decide.kinds import launch
+    from neo2.core.decide import engine, inventory, sites
+    from neo2.core.decide.kinds import launch
 
     run.begin_request()
     s, q = " ".join(str(site or "").split()), " ".join(str(query or "").split())
@@ -465,7 +465,7 @@ def _own(pid: int, name: str) -> bool:
     if pid <= 0:
         return False
     try:
-        from neo.decide import media
+        from neo2.core.decide import media
 
         family = media._self_family()
         return pid in family or media.responsible_pid(pid) in family
@@ -480,8 +480,8 @@ def _front_browser() -> tuple[App | None, int | None, str]:
     browser whose window is frontmost on screen, else the default browser. Another app in front (a
     document, a mail, a chat): (None, None, its name) - "this page" is that app's, and no browser
     tab behind it is read."""
-    from neo.decide import axkit, inventory
-    from neo.tools.computer.focus import front_app
+    from neo2.core.decide import axkit, inventory
+    from neo2.core.tools.computer.focus import front_app
 
     name, pid = front_app()
     front = inventory.app_for_pid(pid) if pid else None
@@ -498,7 +498,7 @@ def _front_browser() -> tuple[App | None, int | None, str]:
 
 def _settle(area: object, deadline: float, stop: threading.Event) -> None:
     """A web tree just switched on fills in over a moment: wait until its top stops growing."""
-    from neo.decide import axkit
+    from neo2.core.decide import axkit
 
     def shape() -> int:
         return sum(1 for _ in axkit._bfs(area, 400, 4))
@@ -521,7 +521,7 @@ def _read_flow(
 ) -> tuple[str, str, str, View | None]:
     """(address, title, text, where on screen it shows) of the browser's front tab; ``stop`` set
     (cancelled, timed out) ends the walk of its tree."""
-    from neo.decide import axkit
+    from neo2.core.decide import axkit
 
     app_el = axkit.app_el(pid)
     changed = axkit.enable_web_reading(app_el, axkit.runtime(path))
@@ -554,7 +554,7 @@ def _readable(text: str) -> bool:
 def _vision_chain() -> Any:
     """The vision brains that can see an image, in the vision chain's order (a text-only brain
     answering instead would make up what the page shows)."""
-    from neo.providers import Chain, ProviderError, brain, make
+    from neo2.core.providers import Chain, ProviderError, brain, make
 
     names = []
     for n in brain("vision").names:
@@ -590,8 +590,8 @@ async def _look(pid: int, browser: App, ask: str, view: View | None = None) -> t
     not). With ``ask``, its answer to the user's words. ``view`` (known with Accessibility on): the
     part of the screen the page shows, which is all that is captured (never the browser's tabs,
     whose titles are the user's other pages)."""
-    from neo.providers.base import Message
-    from neo.tools.computer import focus, screen
+    from neo2.core.providers.base import Message
+    from neo2.core.tools.computer import focus, screen
 
     wid = await asyncio.to_thread(focus.front_window_id, pid)
     if not wid:
@@ -630,9 +630,9 @@ _ANSWER = (
 
 async def _answer(ask: str, page: str) -> Result:
     """NEO's own answer to the user's words from the page (no model is waiting to read it)."""
-    from neo.agent.registry import fence
-    from neo.providers import brain
-    from neo.providers.base import Message
+    from neo2.core.agent.registry import fence
+    from neo2.core.providers import brain
+    from neo2.core.providers.base import Message
 
     msg = f"The user said: “{ask}”\n\n{fence('page_read', page)}"
     try:
@@ -652,11 +652,11 @@ def _page(url: str, title: str, how: str, text: str) -> str:
 def _host_app() -> str:
     """Embedded in another app: that app's name, which macOS holds responsible for the agent's
     permissions ("" = NEO.app, or not embedded)."""
-    from neo import runtime
+    from neo2.core import runtime
 
     if not runtime.library_bound():
         return ""
-    from neo.tools import computer
+    from neo2.core.tools import computer
 
     return computer._host_app() or "the app this agent runs in"
 
@@ -664,7 +664,7 @@ def _host_app() -> str:
 def _no_screen() -> str:
     if not _host_app():
         return _NO_SCREEN
-    from neo.tools import computer
+    from neo2.core.tools import computer
 
     return f"{_SCREEN_OFF}{computer._host_who()}"
 
@@ -673,8 +673,8 @@ def _cant_read(browser: App, trusted: bool, err: str) -> Result:
     """Neither the page's text nor a screenshot: why. Embedded, a permission that is off is a
     question for the host app's user, naming that app (as the ax tools ask)."""
     if _host_app():
-        from neo.agent.confirm import ask_user
-        from neo.tools import computer
+        from neo2.core.agent.confirm import ask_user
+        from neo2.core.tools import computer
 
         if not trusted:
             return Result(computer._ax_off_reply(), False)
@@ -691,7 +691,7 @@ async def page_read(limit: int = PAGE_CHARS, ask: str = "") -> Result:
     little text to read (a video, a picture, a PDF, a canvas), what the vision brain sees in a
     screenshot of the browser's front window. The result says which it was. With ``ask`` (the
     user's own words, no model waiting to read the page), NEO's answer to them from it instead."""
-    from neo.decide import axkit
+    from neo2.core.decide import axkit
 
     browser, pid, other = await asyncio.to_thread(_front_browser)
     if other:
@@ -731,8 +731,8 @@ async def page_read(limit: int = PAGE_CHARS, ask: str = "") -> Result:
 def carries_data(site: str, query: str) -> bool:
     """Would this search carry data out (the shape policy.url_carries_data guards: a long or
     random-looking query or host)? For the taint gate, before anything opens."""
-    from neo.decide import sites
-    from neo.tools.computer import policy
+    from neo2.core.decide import sites
+    from neo2.core.tools.computer import policy
 
     return policy.url_carries_data(f"https://{sites._domain(site) or 'site.invalid'}/?q={quote_plus(query)}")
 
@@ -740,7 +740,7 @@ def carries_data(site: str, query: str) -> bool:
 def claims_search_site(filled: dict) -> bool:
     """search_site's fast path, on cached evidence only: the site is one NEO knows is a website
     (a domain, a site learned here, a web app's site). Anything else goes to a model."""
-    from neo.decide import sites
+    from neo2.core.decide import sites
 
     return sites.site_like(str(filled.get("site") or "")) is True
 
@@ -751,7 +751,7 @@ _PREPS = frozenset({"in", "on", "at"})
 def _place(words: str) -> str | None:
     """What ``words`` after "in/on/at" (or before "for") are, by local evidence: 'site', 'time',
     'app' (an installed app, "my <x>", "the <x> app"), or None when that can't be told."""
-    from neo.decide import sites, when
+    from neo2.core.decide import sites, when
 
     like = sites.site_like(words)
     if like:
@@ -764,7 +764,7 @@ def _place(words: str) -> str | None:
 def _topic(words: str) -> bool:
     """A phrase of everyday words ("cheap flights"), which names no site. One word alone may be a
     site's name that is also an everyday word, which only a model can tell."""
-    from neo.decide import sites
+    from neo2.core.decide import sites
 
     return len(words.split()) >= 2 and sites.everyday(words)
 
@@ -799,8 +799,8 @@ async def shadow(site: str, legacy_url: str = "") -> dict[str, str | bool]:
     web search, and discovery reads the site's front page): how the site was told ('app',
     'browser', 'unresolved', or how sites.resolve found it), its host, the first method, and
     whether legacy's search page ``legacy_url`` is on the same site. Never the query."""
-    from neo.decide import inventory, sites
-    from neo.decide.kinds import launch
+    from neo2.core.decide import inventory, sites
+    from neo2.core.decide.kinds import launch
 
     s = " ".join(str(site or "").split())
     apps = await asyncio.to_thread(inventory.inventory)

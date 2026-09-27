@@ -3,7 +3,7 @@
 Everything lives under ``~/.neo`` (data dir) unless overridden. API keys come from the
 environment or a ``.env`` file in the project root; nothing is written to Git.
 
-An agent embedded in another app (neo.runtime) has :class:`LibrarySettings` instead: only what
+An agent embedded in another app (neo2.core.runtime) has :class:`LibrarySettings` instead: only what
 the host passes in — never the environment, ~/.neo/.env or ~/.neo itself — and
 :func:`settings` returns them while that agent is bound.
 """
@@ -21,9 +21,9 @@ from typing import Annotated, Any, Literal, get_args
 from pydantic import Field, ValidationError, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, PydanticBaseSettingsSource, SettingsConfigDict
 
-from neo import effects, runtime
+from neo2.core import effects, runtime
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+PROJECT_ROOT = Path(__file__).resolve().parents[2]  # neo2/core/config.py → the checkout (or site-packages)
 # Keys and settings: ~/.neo/.env (where NEO.app's installed runtime looks), and a checkout's own
 # .env on top when running from source (a checkout has a pyproject.toml; installed as a package,
 # PROJECT_ROOT is site-packages, whose .env is nobody's).
@@ -145,7 +145,7 @@ class Settings(BaseSettings):
     # Dock shows it, its bundle id or its executable's name, any case: '["MyApp"]' or
     # '["com.example.myapp"]' in NEO_PROTECTED_APPS. The bundle id is the one that can't drift.
     protected_apps: list[str] = []
-    fast_paths: bool = True  # zero-LLM regex commands (neo.agent.fastpath)
+    fast_paths: bool = True  # zero-LLM regex commands (neo2.core.agent.fastpath)
 
     # ---- memory & prompt ---------------------------------------------------------------
     embeddings: Literal["local", "off"] = "local"  # off: keyword-only recall, no local model
@@ -157,7 +157,7 @@ class Settings(BaseSettings):
     include_username: bool = True  # the macOS user name in the prompt's context line
     browser_headless: bool = False  # NEO's own browser window (visible: the user can step in)
 
-    # ---- task kinds (neo/decide) -------------------------------------------------------
+    # ---- task kinds (neo2/core/decide) -------------------------------------------------------
     # How each kind runs (notes, reminders, calendar, mail…): "legacy" = today's scripts,
     # "shadow" = those, while the new path only logs what it would have chosen, "on" = the new
     # path, "off" = a new kind stays unavailable. A kind left out gets its release default.
@@ -257,13 +257,13 @@ class Settings(BaseSettings):
 
 
 class LibrarySettings(Settings):
-    """The settings of an agent embedded in another app (neo.runtime).
+    """The settings of an agent embedded in another app (neo2.core.runtime).
 
     Only what the host passes in: never the environment, ~/.neo/.env or a .env next to the
     package — a host process's NEO_CONFIRM_DESTRUCTIVE=false or its own keys must not reach an
     agent it didn't give them to. `data_dir` is required, and is the agent's own folder: never
     ~/.neo, inside it or holding it (however it's named), never a folder of other files, and never
-    another live agent's (neo.runtime). `models_path` and `memory_path` are never in ~/.neo either.
+    another live agent's (neo2.core.runtime). `models_path` and `memory_path` are never in ~/.neo either.
     Pinned whatever is passed: confirmation on; every task kind runs its legacy script (the
     evidence-chosen drivers, their dry runs and their learning are process-wide, NEO.app's);
     Laya's learning and its teacher off; notes that no notes app could take go under data_dir;
@@ -346,7 +346,7 @@ class LibrarySettings(Settings):
         return self
 
     def check(self) -> None:
-        """Raise unless these are still as validated (neo.runtime, for an agent it's given):
+        """Raise unless these are still as validated (neo2.core.runtime, for an agent it's given):
         a copy made without validation (model_construct) or edited past the freeze is refused."""
         _refuse_neo_home(self.data_dir)
         if self.models_path is not None:
@@ -488,7 +488,7 @@ _NEO_TABLES = re.compile(r"memory|memory_vec|memory_fts(?:_[a-z]+)?|playbook|pla
 
 
 def agent_memory_db(path: str | os.PathLike) -> bool:
-    """`path` is a memory database NEO made for an embedded agent (neo.memory.store.Store with
+    """`path` is a memory database NEO made for an embedded agent (neo2.core.memory.store.Store with
     agent=True): SQLite, marked with AGENT_DB_ID, holding NEO's tables and nothing else. Read
     without leaving a trace: the header first, and SQLite only for NEO's own file."""
     try:
@@ -544,7 +544,7 @@ _settings: Settings | None = None
 
 
 def settings() -> Settings:
-    """The bound agent's settings (neo.runtime), else NEO.app's — built on first use."""
+    """The bound agent's settings (neo2.core.runtime), else NEO.app's — built on first use."""
     rt = runtime.current_runtime()
     if rt is not None:
         return rt.settings

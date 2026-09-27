@@ -8,7 +8,7 @@ UI → Server  : {"cmd": "text", "text": "..."}      send a typed request
                {"cmd": "stop"}                     interrupt speech / cancel
                {"cmd": "wake"}                     arm the voice session
                {"cmd": "state"}                    ask for a snapshot
-               {"cmd": "browser_*", …}             NEO's browser card (neo/tools/browser_live.py)
+               {"cmd": "browser_*", …}             NEO's browser card (neo2/core/tools/browser_live.py)
 
 NEO's browser card has its own lane: its commands go straight to the browser (never through the
 event bus, never logged — they carry what the user types), its JSON messages go out beside the
@@ -39,10 +39,10 @@ from urllib.parse import parse_qs, urlparse
 import websockets
 from websockets.asyncio.server import ServerConnection, serve
 
-from neo import health
-from neo.agent import confirm
-from neo.config import settings
-from neo.events import bus
+from neo2.core import health
+from neo2.core.agent import confirm
+from neo2.core.config import settings
+from neo2.core.events import bus
 
 # A port probe or a half-open socket isn't a websocket client; don't dump a traceback for it.
 logging.getLogger("websockets.server").setLevel(logging.CRITICAL)
@@ -114,7 +114,7 @@ class UIServer:
     async def start(self) -> None:
         s = settings()
         bus().subscribe(self._relay)
-        from neo.tools.browser_live import live
+        from neo2.core.tools.browser_live import live
 
         live.channel = self
         self._token = ws_token()
@@ -166,7 +166,7 @@ class UIServer:
 
     def _gone(self, c: ServerConnection) -> None:
         if (cl := self._clients.pop(c, None)) is not None:
-            from neo.tools.browser_live import live
+            from neo2.core.tools.browser_live import live
 
             live.viewer_gone(cl)
             # A client that stopped reading is cut off for good: close its socket, so the overlay
@@ -179,7 +179,7 @@ class UIServer:
     def broadcast(
         self, type_: str, data: dict[str, Any], *, recent: bool = False, replay: dict[str, Any] | None = None
     ) -> None:
-        """A browser card message (neo/tools/browser_live.py). The card's opening and closing are
+        """A browser card message (neo2/core/tools/browser_live.py). The card's opening and closing are
         part of the transcript (replayed — as `replay` when given: what late-joining overlays may
         see of it); the rest goes only to clients that show the card."""
         msg = {"type": type_, "data": data, "ts": time.time()}
@@ -211,7 +211,7 @@ class UIServer:
             self._gone(c)
 
     async def _handle(self, c: ServerConnection) -> None:
-        from neo.tools.browser_live import live
+        from neo2.core.tools.browser_live import live
 
         cl = _Client(c)
         # The hello goes first, before anything the bus relays to this client.

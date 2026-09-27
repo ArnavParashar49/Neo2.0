@@ -10,7 +10,7 @@ import time
 
 import httpx
 
-from neo.agent.registry import ToolContext, tool
+from neo2.core.agent.registry import ToolContext, tool
 
 _FORECAST = "https://api.open-meteo.com/v1/forecast"
 _GEOCODE = "https://geocoding-api.open-meteo.com/v1/search"
@@ -38,12 +38,12 @@ def _geocode(place: str, client: httpx.Client) -> tuple[float, float, str] | Non
 
 def _home(client: httpx.Client) -> tuple[float, float, str] | None:
     global _here
-    from neo.config import settings
+    from neo2.core.config import settings
 
     for place in (_remembered_city(), settings().home_location):
         if place and (g := _geocode(place, client)):
             return g
-    from neo import runtime
+    from neo2.core import runtime
 
     if runtime.library_bound():
         # Embedded in another app, "here" from the network is the server's location (the same
@@ -63,7 +63,7 @@ def _home(client: httpx.Client) -> tuple[float, float, str] | None:
 
 def _remembered_city() -> str:
     try:
-        from neo.memory.store import store
+        from neo2.core.memory.store import store
 
         db = store()._db
         row = db.execute(

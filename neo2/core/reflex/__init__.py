@@ -8,14 +8,14 @@ and two concurrent forward passes (or a load racing a call) trip a Metal command
 from __future__ import annotations
 
 import asyncio
-import logging
 import re
 import threading
 
-from neo.config import settings
-from neo.reflex.schema import Decision, Intent, wants_reply
+from neo2.core import logger
+from neo2.core.config import settings
+from neo2.core.reflex.schema import Decision, Intent, wants_reply
 
-log = logging.getLogger(__name__)
+log = logger(__name__)
 
 # Only the bare words cancel everything; "stop the timer" / "quit the app" are commands. Hindi and
 # Hinglish too ("bas karo", "ruk jao", "चुप"): every trained head gets those wrong, the rule can't.
@@ -48,7 +48,7 @@ def get_laya():
     with _lock:
         if _laya is None and not _laya_failed and settings().reflex == "laya":
             try:
-                from neo.reflex.laya_reflex import LayaReflex
+                from neo2.core.reflex.laya_reflex import LayaReflex
 
                 _laya = LayaReflex()
             except Exception as e:  # noqa: BLE001 — missing torch/model → cloud fallback
@@ -77,14 +77,14 @@ class Reflex:
             kind = getattr(laya, "last_kind", None)
         if emb is None or center is None:
             return d
-        from neo.reflex import memory
+        from neo2.core.reflex import memory
 
         # A request the user corrected a moment ago gets the fix now, not after the next retrain.
         return memory.recall(d, text, emb, center, kind)
 
     def _get_lite(self):
         if self._lite is None and settings().gemini_api_key:
-            from neo.reflex.lite import LiteReflex
+            from neo2.core.reflex.lite import LiteReflex
 
             self._lite = LiteReflex()
         return self._lite
@@ -133,7 +133,7 @@ def warmup(reflex: Reflex | None = None) -> None:
     def _load() -> None:
         get_laya()
         try:
-            from neo.memory import embed
+            from neo2.core.memory import embed
 
             embed._get()
         except Exception as e:  # noqa: BLE001

@@ -7,7 +7,7 @@
    only partly name an app by ("<app>.com") is the website;
 3. an everyday noun for a kind of app ("my email", "the browser"): the app this user uses for
    that kind (the engine's top candidate that is used), or the default handler of those links;
-4. a website the word names (neo.decide.sites: a domain, a site learned here, an installed
+4. a website the word names (neo2.core.decide.sites: a domain, a site learned here, an installed
    web-app's site, a region-aware web search), opened in the default browser; words with a ':'
    or a '/' are no site's name and are never looked up;
 5. nothing, said honestly: there is no "www.<word>.com" guess.
@@ -28,13 +28,13 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from neo.decide import run
-from neo.decide._objc import pooled
-from neo.decide.run import Effect, Outcome, Result
+from neo2.core.decide import run
+from neo2.core.decide._objc import pooled
+from neo2.core.decide.run import Effect, Outcome, Result
 
 if TYPE_CHECKING:
-    from neo.decide.inventory import App
-    from neo.decide.sites import SiteRes
+    from neo2.core.decide.inventory import App
+    from neo2.core.decide.sites import SiteRes
 
 __all__ = [
     "KIND",
@@ -77,7 +77,7 @@ def methods_for(app: App, kind: str | None = None) -> tuple[str, ...]:
 
 
 def _handler_app(scheme: str, apps: list[App]) -> App | None:
-    from neo.decide import inventory, workspace
+    from neo2.core.decide import inventory, workspace
 
     bid = workspace.default_handler(scheme)
     if not bid:
@@ -87,7 +87,7 @@ def _handler_app(scheme: str, apps: list[App]) -> App | None:
 
 def _used(kind: str, app: App, now: float) -> bool:
     """The user uses the app (the engine's own test), or it has done this kind for NEO."""
-    from neo.decide import engine
+    from neo2.core.decide import engine
 
     recent = bool(app.last_used) and now - float(app.last_used or 0) < engine.USED_WITHIN_S
     return bool(app.running or app.days_used_30 or recent or engine.proven(kind, app.bundle_id))
@@ -95,7 +95,7 @@ def _used(kind: str, app: App, now: float) -> bool:
 
 async def _used_app(kind: str, text: str, apps: list[App]) -> App | None:
     """The kind's top candidate among the apps this user uses (never a route or a fallback)."""
-    from neo.decide import engine
+    from neo2.core.decide import engine
 
     try:
         cands = await engine.choose(kind, text, apps)
@@ -137,7 +137,7 @@ def _address(t: str) -> str | None:
 
 def _named(t: str, apps: list[App]) -> App | None:
     """The app the words name, unless they are a domain that only contains one of its names."""
-    from neo.decide import inventory, sites
+    from neo2.core.decide import inventory, sites
 
     hit = inventory.named_span(t, apps)
     if hit is None:
@@ -150,7 +150,7 @@ def _named(t: str, apps: list[App]) -> App | None:
 async def decide(target: str, apps: list[App] | None = None) -> Choice:
     """What ``target`` means on this Mac (see the module docstring). Opens nothing; a site word
     may cost one web search (cached)."""
-    from neo.decide import inventory, kinds, sites
+    from neo2.core.decide import inventory, kinds, sites
 
     t = " ".join(str(target or "").split())
     if not t:
@@ -184,7 +184,7 @@ async def decide(target: str, apps: list[App] | None = None) -> Choice:
 
 async def _open(args: list[str]) -> tuple[int, str]:
     """`open` with these arguments: (exit code, why not)."""
-    from neo.tools.computer import apps
+    from neo2.core.tools.computer import apps
 
     code, _out, err = await apps._run(["open", *args], OPEN_S)
     return code, err
@@ -198,7 +198,7 @@ async def start(app: App) -> str:
 
 async def wait_pid(bundle_id: str, wait_s: float = PID_S) -> int | None:
     """The app's pid once it runs (None if it hasn't started within ``wait_s``)."""
-    from neo.decide import axkit
+    from neo2.core.decide import axkit
 
     deadline = time.monotonic() + wait_s
     while True:
@@ -222,7 +222,7 @@ def _running_name(pid: int) -> str:
 async def bring_front(app: App) -> tuple[bool, str, int | None]:
     """Bring the running app to the front and confirm it: (it is frontmost, the name it runs
     under, its pid). Found by bundle id, so an app running under another name still counts."""
-    from neo.tools.computer import apps
+    from neo2.core.tools.computer import apps
 
     pid = await wait_pid(app.bundle_id)
     name = (await asyncio.to_thread(_running_name, pid) if pid else "") or app.name
@@ -231,7 +231,7 @@ async def bring_front(app: App) -> tuple[bool, str, int | None]:
 
 
 async def _open_given(ch: Choice) -> Result:
-    from neo.tools.computer import apps
+    from neo2.core.tools.computer import apps
 
     if ch.url.lower().startswith(("http://", "https://")):
         text = await apps.open_url(ch.url)
@@ -245,8 +245,8 @@ async def _open_given(ch: Choice) -> Result:
 
 
 async def _open_app(app: App) -> Result:
-    from neo.agent.confirm import ask_user
-    from neo.tools.computer import apps
+    from neo2.core.agent.confirm import ask_user
+    from neo2.core.tools.computer import apps
 
     if why := await start(app):
         run.record(KIND, app.bundle_id, "open", Outcome(False, why))
@@ -263,9 +263,9 @@ async def _open_app(app: App) -> Result:
 
 
 async def _open_site(word: str, url: str, res: SiteRes) -> Result:
-    from neo.decide import sites
-    from neo.decide.kinds import site as web
-    from neo.tools.computer import apps
+    from neo2.core.decide import sites
+    from neo2.core.decide.kinds import site as web
+    from neo2.core.tools.computer import apps
 
     browser = await asyncio.to_thread(web.default_browser)
     text = await apps.open_url(url, browser.bundle_id if browser else "", browser.name if browser else "")
@@ -312,7 +312,7 @@ async def open_target(target: str) -> Result:
 
 def _agrees(ch: Choice, legacy: str) -> bool:
     """Did legacy (its reply) open the same thing?"""
-    from neo.decide import sites
+    from neo2.core.decide import sites
 
     url = _URL_IN_TEXT.search(legacy or "")
     failed = (legacy or "").startswith("Error")

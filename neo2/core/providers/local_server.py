@@ -13,8 +13,8 @@ from pathlib import Path
 
 import httpx
 
-from neo import effects
-from neo.config import settings
+from neo2.core import effects
+from neo2.core.config import settings
 
 _proc: subprocess.Popen | None = None
 

@@ -14,12 +14,12 @@ from collections.abc import Awaitable, Callable
 
 import numpy as np
 
-from neo.agent.early import early
-from neo.agent.registry import registry
-from neo.config import settings
-from neo.events import NeoState, bus
-from neo.voice.audio import MIC_RATE, Mic, Speaker, rms
-from neo.voice.wake import WakeSpotter
+from neo2.core.agent.early import early
+from neo2.core.agent.registry import registry
+from neo2.core.config import settings
+from neo2.core.events import NeoState, bus
+from neo2.core.voice.audio import MIC_RATE, Mic, Speaker, rms
+from neo2.core.voice.wake import WakeSpotter
 
 TextHandler = Callable[[str], Awaitable[None]]
 
@@ -71,7 +71,7 @@ class LocalVoice:
         from mlx_audio.stt.utils import load as stt_load
         from mlx_audio.tts.utils import load_model as tts_load
 
-        from neo import effects, models
+        from neo2.core import effects, models
 
         effects.guard("model", f"load the speech-to-text model ({s.stt_model}) into memory", via=stt_load)
         self._stt = stt_load(models.local_path(s.stt_model))  # pinned revisions for the defaults
@@ -115,7 +115,7 @@ class LocalVoice:
 
     async def interrupt(self) -> None:
         """Stop speaking and abandon the in-flight request (barge-in / stop button)."""
-        from neo.reflex import outcomes
+        from neo2.core.reflex import outcomes
 
         # Cut off right as NEO started speaking: its answer was wrong (Laya learns from that).
         early = time.time() - self._speaking_since <= outcomes.EARLY_S if self._speaking else None

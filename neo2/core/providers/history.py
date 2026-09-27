@@ -26,7 +26,7 @@ from __future__ import annotations
 import json
 import re
 
-from neo.providers.base import Message, ToolCall, ToolResult
+from neo2.core.providers.base import Message, ToolCall, ToolResult
 
 NO_RESULT = "(no result: this step was cut short)"
 

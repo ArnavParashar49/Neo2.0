@@ -181,7 +181,7 @@ def responsible_usage() -> frozenset[str]:
     """The usage keys declared by the app macOS holds responsible for NEO (NEO.app, or the
     terminal it runs from): macOS asks the user on that app's behalf, and asking for something it
     doesn't declare may end the process, so nothing is requested without the key."""
-    from neo.decide import media
+    from neo2.core.decide import media
 
     exe = media._proc_path(media.responsible_pid(os.getpid()))
     i = exe.find(".app/")

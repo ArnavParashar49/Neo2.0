@@ -7,21 +7,21 @@ import asyncio
 
 import pytest
 
-import neo.agent.session as sess_mod
-from neo.agent import confirm
-from neo.agent.registry import RegisteredTool, ToolContext, ToolOutput, registry, voiced
-from neo.agent.session import Session, answer_of
-from neo.events import EventBus, NeoState, bus
-from neo.providers.base import ToolCall, Turn
-from neo.reflex.schema import Decision
+import neo2.core.agent.session as sess_mod
+from neo2.core.agent import confirm
+from neo2.core.agent.registry import RegisteredTool, ToolContext, ToolOutput, registry, voiced
+from neo2.core.agent.session import Session, answer_of
+from neo2.core.events import EventBus, NeoState, bus
+from neo2.core.providers.base import ToolCall, Turn
+from neo2.core.reflex.schema import Decision
 
 _OBJ = {"type": "object", "properties": {}}
 
 
 @pytest.fixture(autouse=True)
 def _env(tmp_path, monkeypatch):
-    from neo import config, events
-    from neo.tools import load_all
+    from neo2.core import config, events
+    from neo2.core.tools import load_all
 
     monkeypatch.setattr(config, "_settings", None)
     monkeypatch.setenv("NEO_DATA_DIR", str(tmp_path))
@@ -330,7 +330,7 @@ def test_origin_of_a_fast_path_and_of_a_model_call(monkeypatch):
 
 
 def test_a_model_call_is_agent_origin_whoever_started_the_run():
-    from neo.agent.loop import run_agent
+    from neo2.core.agent.loop import run_agent
 
     seen: list = []
     reg = type(registry())()
@@ -352,7 +352,7 @@ def _live_voice(session=None):
     import threading
     from types import SimpleNamespace
 
-    import neo.voice.live as live_mod
+    import neo2.core.voice.live as live_mod
 
     sent: list = []
 
@@ -373,7 +373,7 @@ def _live_voice(session=None):
 def test_live_calls_are_live_origin_and_honour_say(monkeypatch):
     from types import SimpleNamespace
 
-    import neo.voice.live as live_mod
+    import neo2.core.voice.live as live_mod
 
     seen: list = []
 
@@ -403,7 +403,7 @@ def test_live_hands_over_the_users_words_or_its_models_goal(monkeypatch, asked, 
 
 
 def test_the_early_actor_runs_the_users_words(monkeypatch):
-    from neo.agent.early import EarlyActor
+    from neo2.core.agent.early import EarlyActor
 
     seen: list = []
     _recorder(monkeypatch, seen)

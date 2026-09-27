@@ -24,7 +24,7 @@ event, or as soon as the next, unrelated request starts; only then does it becom
 * stopped or talked over within 3 s of NEO answering (and no rephrase) → nothing; a defect.
 
 Nothing here touches disk: only settled rows (via learn.record, skeleton text only) and daily
-counters without any text. NEO_LEARN=off turns it off; neo.privacy's erase forgets it.
+counters without any text. NEO_LEARN=off turns it off; neo2.core.privacy's erase forgets it.
 """
 
 from __future__ import annotations
@@ -32,17 +32,16 @@ from __future__ import annotations
 import contextvars
 import functools
 import itertools
-import logging
 import re
 import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-from neo import runtime
-from neo.reflex import learn
+from neo2.core import logger, runtime
+from neo2.core.reflex import learn
 
-log = logging.getLogger(__name__)
+log = logger(__name__)
 
 SETTLE_S = 20.0  # an episode nothing followed up on for this long is final
 WINDOW_S = 20.0  # a correction has to come this soon after the request it corrects
@@ -117,7 +116,7 @@ class Episode:
     corrected: bool = False  # the user said it was wrong
     awaiting: bool = False  # a confirmation is pending
     confirm: bool | None = None
-    kind: str = ""  # neo/decide's task kind…
+    kind: str = ""  # neo2/core/decide's task kind…
     kind_ok: bool = False  # …and whether carrying it out worked
     brain: str = ""  # the provider that read it (chat / agent routes): the teacher's only allowed one
     fix: Episode | None = None  # the next request, which corrected or rephrased this one
@@ -129,7 +128,7 @@ class Episode:
 def _safe(fn: Callable) -> Callable:
     """Learning is best effort: a bug here must never break a request. It is NEO.app's alone: the
     ledger, its counters and what it trains are process-wide, so an embedded agent's requests
-    (neo.runtime) never reach it."""
+    (neo2.core.runtime) never reach it."""
 
     @functools.wraps(fn)
     def wrap(*a, **kw):
@@ -150,7 +149,7 @@ def _tokens(text: str) -> set[str]:
 
 def _answers(text: str) -> bool:
     """Just a yes or a no to a question NEO asked ("no, I meant the other file" is more)."""
-    from neo.agent.session import _NO, _YES
+    from neo2.core.agent.session import _NO, _YES
 
     return bool(_YES.match(text)) or (bool(_NO.search(text)) and len(text.split()) <= 3)
 
@@ -160,7 +159,7 @@ def _fast(tool: str) -> bool:
     if tool == "agent_task":
         return False
     try:
-        from neo.agent.registry import registry
+        from neo2.core.agent.registry import registry
 
         t = registry().get(tool)
     except Exception:  # noqa: BLE001
@@ -171,7 +170,7 @@ def _fast(tool: str) -> bool:
 def _covered(text: str) -> set[str]:
     """The tools NEO's fast paths run for this whole sentence without any model (empty: none)."""
     try:
-        from neo.agent import fastpath
+        from neo2.core.agent import fastpath
 
         return {t for t, _ in fastpath.plan(text) or []}
     except Exception:  # noqa: BLE001
@@ -459,7 +458,7 @@ class Ledger:
             return ""
 
     def decided(self, utt_or_text: str, kind: str, app_key: str = "", ok: bool = True) -> bool:
-        """neo/decide carried out a task kind for this request (by episode key, the bound
+        """neo2/core/decide carried out a task kind for this request (by episode key, the bound
         episode, or its words). A kind is only learned when it worked and nothing corrected it."""
         with self._lock:
             ep = self._eps.get(utt_or_text) or self._eps.get(_bound.get())
@@ -495,7 +494,7 @@ class Ledger:
         """The words are final: a bare stop or a yes/no/thanks isn't a request of its own."""
         prev = self._neighbour(ep, -1)
         prev = prev if prev is not None and not prev.settled else None
-        from neo.reflex import is_bare_stop
+        from neo2.core.reflex import is_bare_stop
 
         if is_bare_stop(ep.text):
             if prev is not None:
@@ -633,7 +632,7 @@ class Ledger:
             brain=ep.brain,
         )
         if ok and wrong:
-            from neo.reflex import memory
+            from neo2.core.reflex import memory
 
             memory.memory().learned(ep.text, *label)
         return bool(ok)
@@ -678,7 +677,7 @@ count = _safe(learn.count)
 
 @_safe
 def decided(utt_or_text: str, kind: str, app_key: str = "", ok: bool = True) -> bool:
-    """For neo/decide: the task kind it chose for this request (an episode key or the request's
+    """For neo2/core/decide: the task kind it chose for this request (an episode key or the request's
     words) and whether carrying it out worked. A (text, kind) row is learned only when it worked
     and nothing corrected the request."""
     return bool(_ledger.decided(utt_or_text, kind, app_key, ok))

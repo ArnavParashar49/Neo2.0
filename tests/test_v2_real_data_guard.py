@@ -7,7 +7,7 @@ import pytest
 
 
 def test_settings_refuse_the_real_data_dir_under_pytest(monkeypatch):
-    from neo import config
+    from neo2.core import config
 
     monkeypatch.setattr(config, "_settings", None)
     monkeypatch.setenv("NEO_DATA_DIR", str(Path.home() / ".neo"))
@@ -20,7 +20,7 @@ def test_settings_refuse_the_real_data_dir_under_pytest(monkeypatch):
 
 
 def test_an_isolated_dir_is_fine(tmp_path, monkeypatch):
-    from neo import config
+    from neo2.core import config
 
     monkeypatch.setattr(config, "_settings", None)
     monkeypatch.setenv("NEO_DATA_DIR", str(tmp_path / "d"))

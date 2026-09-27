@@ -1,4 +1,4 @@
-"""neo.decide.kinds.launch: open_app by evidence. Apps are fixtures, `open` and bringing an app to
+"""neo2.core.decide.kinds.launch: open_app by evidence. Apps are fixtures, `open` and bringing an app to
 the front are fakes that only record, the browser tab's address comes from a fake Accessibility
 layer and the site search is a fake: nothing is launched, no URL is opened, no network is used."""
 
@@ -8,11 +8,11 @@ import asyncio
 
 import pytest
 
-from neo.decide import axkit, engine, inventory, learned, sites, workspace
-from neo.decide.inventory import App
-from neo.decide.kinds import launch
-from neo.decide.kinds import site as web
-from neo.tools.computer import apps as apps_mod
+from neo2.core.decide import axkit, engine, inventory, learned, sites, workspace
+from neo2.core.decide.inventory import App
+from neo2.core.decide.kinds import launch
+from neo2.core.decide.kinds import site as web
+from neo2.core.tools.computer import apps as apps_mod
 
 NOTEBOOK = App(bundle_id="test.notebook", name="Notebook", path="/Applications/Notebook.app", running=True)
 CHAT = App(bundle_id="test.chatio", name="Chat.io", path="/Applications/Chat.io.app")
@@ -281,7 +281,7 @@ def test_shadow_opens_nothing_and_compares_with_legacy(monkeypatch):
 
 
 def test_an_erase_mid_request_learns_nothing(monkeypatch):
-    from neo import privacy
+    from neo2.core import privacy
 
     Mac(monkeypatch)
     monkeypatch.setattr(sites, "_search", FakeSearch(["https://www.shopkart.in/"]))

@@ -1,14 +1,14 @@
 """Real human phrasings for the reflex, from open datasets mapped onto NEO's labels.
 
 Our own training data is templates plus LLM-generated sentences — clean, but nobody talks like
-that. Public intent, dialogue, function-calling and computer-use sets (neo/reflex/sources.py has
+that. Public intent, dialogue, function-calling and computer-use sets (neo2/core/reflex/sources.py has
 each one's pin, licence and mapping) supply how people actually phrase NEO's routes (chat /
 quick_action / agent_task / stop), tools, task kinds, "is it destructive", "does it need the
 screen" and "does it want an answer" — in English, Devanagari Hindi and romanised Hinglish.
 
-    python -m neo.reflex.hf_data                  # → <data_dir>/reflex_hf.jsonl + reflex_eval.jsonl
-    python -m neo.reflex.hf_data --with leyzer    # also the opt-in sources
-    python -m neo.reflex.hf_data --only clinc,massive --scale 0.5
+    python -m neo2.core.reflex.hf_data                  # → <data_dir>/reflex_hf.jsonl + reflex_eval.jsonl
+    python -m neo2.core.reflex.hf_data --with leyzer    # also the opt-in sources
+    python -m neo2.core.reflex.hf_data --only clinc,massive --scale 0.5
 
 Rows: {text, intent, tool, source, hf_intent, lang, split, group} plus, when the source says,
 kind / destructive / screen / reply (left out when unknown, which is not the same as False).
@@ -30,8 +30,8 @@ import time
 from collections import Counter
 from pathlib import Path
 
-from neo.config import settings
-from neo.reflex.sources import (  # noqa: F401 — CLINC/MASSIVE/_clean are imported from here by older scripts
+from neo2.core.config import settings
+from neo2.core.reflex.sources import (  # noqa: F401 — CLINC/MASSIVE/_clean are imported from here by older scripts
     BENCHMARK,
     BY_NAME,
     CLINC,
@@ -251,7 +251,7 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    from neo import log_to_stdout
+    from neo2.core import log_to_stdout
 
     log_to_stdout()  # the providers' status lines, as this command always printed them
     main()

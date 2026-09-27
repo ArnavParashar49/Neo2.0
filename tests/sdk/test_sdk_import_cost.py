@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from neo import effects
+from neo2.core import effects
 
 pytestmark = pytest.mark.portable  # Linux or macOS, any install (what needs an extra skips): CI's sdk-core job
 
@@ -31,9 +31,9 @@ HEAVY = (
     "objc",
     "laya",
     "mlx",
-    "neo.decide",
-    "neo.tools.computer",
-    "neo.voice",
+    "neo2.core.decide",
+    "neo2.core.tools.computer",
+    "neo2.core.voice",
 )
 
 

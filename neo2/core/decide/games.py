@@ -49,10 +49,10 @@ import functools
 import re
 from typing import TYPE_CHECKING
 
-from neo.decide import inventory
+from neo2.core.decide import inventory
 
 if TYPE_CHECKING:
-    from neo.decide.inventory import App
+    from neo2.core.decide.inventory import App
 
 __all__ = ["is_game", "games", "game_at_head", "to_play", "in_play", "hint", "refusal"]
 
@@ -286,7 +286,7 @@ def _elsewhere(dest: list[str], game: App, apps: list[App]) -> bool:
     others = [a for a in apps if a.bundle_id != game.bundle_id]
     if inventory.named_in(" ".join(d), others) is not None:  # another app on this Mac
         return True
-    from neo.decide import sites
+    from neo2.core.decide import sites
 
     plain = [w for w in d if not w.isdigit()]
     if not plain:

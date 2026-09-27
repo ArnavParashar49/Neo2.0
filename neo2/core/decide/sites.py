@@ -144,7 +144,7 @@ def _key(word: str, cc: str) -> str:
 
 
 def _learned_site(word: str, cc: str) -> dict | None:
-    from neo.decide import learned
+    from neo2.core.decide import learned
 
     k = _key(word, cc)
     return learned.get("sites", k) if k else None
@@ -215,7 +215,7 @@ def _webapp(word: str, apps: list) -> tuple[str, str] | None:
 
 def site_like(word: str) -> bool | None:
     """Is ``word`` a website? From cached evidence only (see the module docstring)."""
-    from neo.decide import inventory, when
+    from neo2.core.decide import inventory, when
 
     w = " ".join((word or "").split())
     if not w:
@@ -255,7 +255,7 @@ async def resolve(word: str) -> SiteRes | None:
     here, an installed web-app wrapper's site, then a web search (cached 10 min). The search asks
     for the word's website in this country: a bare name mostly finds pages about the site (an
     encyclopedia, its blog) rather than the site, and a store has one site per country."""
-    from neo.decide import inventory
+    from neo2.core.decide import inventory
 
     cc = _country()
     if host := _domain(word):
@@ -291,8 +291,8 @@ async def _fetch(url: str, limit: int = MAX_PAGE, *, partial: bool = False) -> _
     ``limit`` rather than refused (a results page lists its first items early)."""
     import httpx
 
-    from neo.tools.computer import policy
-    from neo.tools.web import _UA
+    from neo2.core.tools.computer import policy
+    from neo2.core.tools.web import _UA
 
     async def each_hop(request: httpx.Request) -> None:
         if why := await asyncio.to_thread(policy.private_host, str(request.url)):
@@ -413,7 +413,7 @@ def _visible_text_inputs(form: Any) -> list[Any]:
 def _search_form(page: _Page, doc: Any, host: str) -> str | None:
     """A GET form that is a search by its structure: a search role or element around it, or one
     visible text input that is a search input or labelled with the OS's word for "Search"."""
-    from neo.decide import axkit
+    from neo2.core.decide import axkit
 
     words = [w.casefold() for w in axkit.lexicon().get("search", ()) if w]
     for form in doc.iter("form"):
@@ -447,7 +447,7 @@ def _search_form(page: _Page, doc: Any, host: str) -> str | None:
 
 def learned_template(host: str, prefix: str = "") -> Template | None:
     """The search template a landing on this site (or its section) confirmed; no network."""
-    from neo.decide import learned
+    from neo2.core.decide import learned
 
     hit = learned.get("templates", f"{host}{prefix}")
     url = str((hit or {}).get("url", ""))
@@ -559,7 +559,7 @@ _lower_lock = threading.Lock()
 def everyday(words: str) -> bool:
     """Is every word of ``words`` an everyday word: in the system word list in lower case (plurals
     included)? A name the list has only capitalised is none, and without the list nothing is."""
-    from neo.decide import inventory
+    from neo2.core.decide import inventory
 
     ws = set(_words(words))
     with _lower_lock:
@@ -599,7 +599,7 @@ def learn_landing(word: str, host: str, template: str | None, prefix: str = "", 
     """A page landed where it should: remember the site for this word here, how it got there
     (``via`` 'search', or 'open' for the site's page alone, which a search later outranks), and
     the site's (or section's) template."""
-    from neo.decide import learned
+    from neo2.core.decide import learned
 
     cc = _country()
     if k := _key(word, cc):
@@ -613,7 +613,7 @@ def learn_landing(word: str, host: str, template: str | None, prefix: str = "", 
 
 def template_failed(host: str, prefix: str = "") -> None:
     """A learned template's search didn't land (the site changed): dropped after DROP_AFTER."""
-    from neo.decide import learned
+    from neo2.core.decide import learned
 
     key = f"{host}{prefix}"
     hit = learned.get("templates", key)

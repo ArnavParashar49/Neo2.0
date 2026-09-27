@@ -6,19 +6,19 @@ import asyncio
 
 import pytest
 
-from neo.agent.loop import AgentResult, Step
-from neo.agent.registry import registry
-from neo.agent.session import Session, _quietly
-from neo.events import EventBus
-from neo.providers.base import ToolCall, Turn
-from neo.reflex import _with_reply
-from neo.reflex.schema import Decision, wants_reply
+from neo2.core.agent.loop import AgentResult, Step
+from neo2.core.agent.registry import registry
+from neo2.core.agent.session import Session, _quietly
+from neo2.core.events import EventBus
+from neo2.core.providers.base import ToolCall, Turn
+from neo2.core.reflex import _with_reply
+from neo2.core.reflex.schema import Decision, wants_reply
 
 
 @pytest.fixture(autouse=True)
 def _env(tmp_path, monkeypatch):
-    from neo import config, events
-    from neo.tools import load_all
+    from neo2.core import config, events
+    from neo2.core.tools import load_all
 
     monkeypatch.setattr(config, "_settings", None)
     monkeypatch.setenv("NEO_DATA_DIR", str(tmp_path))
@@ -67,7 +67,7 @@ def _reflex(intent, reply, tool="", tool_p=0.0):
 
 
 def _events():
-    from neo.events import bus
+    from neo2.core.events import bus
 
     seen = []
     bus().subscribe(lambda e: seen.append((e.type, e.data.get("text", ""), e.data.get("role", ""))))
@@ -101,7 +101,7 @@ def test_information_tool_is_spoken_even_when_phrased_as_a_command(monkeypatch):
 
 
 def test_failed_quiet_action_hands_the_request_to_the_agent(monkeypatch):
-    import neo.agent.session as sess_mod
+    import neo2.core.agent.session as sess_mod
 
     async def fake_open(a, c):
         return "Error: no such app"
@@ -125,7 +125,7 @@ def test_failed_quiet_action_hands_the_request_to_the_agent(monkeypatch):
 
 
 def _agent_session(monkeypatch, reply, text_out="Done."):
-    import neo.agent.session as sess_mod
+    import neo2.core.agent.session as sess_mod
 
     class B:
         name = "fake"
@@ -174,8 +174,8 @@ def test_quietly_rules():
 
 
 def test_app_does_not_speak_silent_replies(monkeypatch):
-    from neo.agent.session import Reply
-    from neo.app import App
+    from neo2.core.agent.session import Reply
+    from neo2.core.app import App
 
     spoken = []
 
@@ -194,7 +194,7 @@ def test_app_does_not_speak_silent_replies(monkeypatch):
             return Reply("Opened notes", "quick", silent=text.startswith("open"))
 
     app.session = S()
-    import neo.app as app_mod
+    import neo2.core.app as app_mod
 
     class Store:
         def prompt_context(self, t):

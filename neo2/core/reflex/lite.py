@@ -8,8 +8,8 @@ import time
 from google import genai
 from google.genai import types as gt
 
-from neo.config import settings
-from neo.reflex.schema import INTENT_CRITERIA, Decision
+from neo2.core.config import settings
+from neo2.core.reflex.schema import INTENT_CRITERIA, Decision
 
 _SCHEMA = {
     "type": "object",

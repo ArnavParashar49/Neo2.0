@@ -7,8 +7,8 @@ import re
 
 import pytest
 
-from neo.providers.base import Turn
-from neo.reflex import generate as g
+from neo2.core.providers.base import Turn
+from neo2.core.reflex import generate as g
 
 
 class Model:
@@ -270,8 +270,8 @@ def test_labels_stay_aligned_with_their_utterances():
 
 
 async def test_cli_focus_run_writes_tagged_rows_and_keeps_user_words_private(monkeypatch):
-    from neo.config import settings
-    from neo.reflex import learn
+    from neo2.core.config import settings
+    from neo2.core.reflex import learn
 
     public = [{"text": t, "intent": "chat", "source": "reflex_hf.jsonl"} for t in (
         "what did you say about it", "what did the plan say", "did you say that", "what about it",
@@ -293,7 +293,7 @@ async def test_cli_focus_run_writes_tagged_rows_and_keeps_user_words_private(mon
 
 
 async def test_with_only_neos_templates_no_word_of_a_correction_reaches_a_model(monkeypatch):
-    from neo.reflex import learn
+    from neo2.core.reflex import learn
 
     learn._path(learn.EXTRA).write_text(
         json.dumps({"text": "remind me to call alex at 7", "intent": "agent_task", "wrong": ["quick_action"], "ts": 9e9}) + "\n"
@@ -307,8 +307,8 @@ async def test_with_only_neos_templates_no_word_of_a_correction_reaches_a_model(
 
 
 async def test_benchmark_and_held_out_sentences_never_shape_a_prompt_or_become_rows(monkeypatch):
-    from neo.config import settings
-    from neo.reflex.finetune import _held_out
+    from neo2.core.config import settings
+    from neo2.core.reflex.finetune import _held_out
 
     words = ("mute", "pause", "dim", "hide", "zip", "sort", "copy", "move", "lock", "fold", "tag", "pin")
     held = next(f"please {w} it now" for w in words if _held_out(f"please {w} it now"))
@@ -341,7 +341,7 @@ async def test_benchmark_and_held_out_sentences_never_shape_a_prompt_or_become_r
 
 
 async def test_a_broad_run_never_writes_a_benchmark_sentence(monkeypatch):
-    from neo.config import settings
+    from neo2.core.config import settings
 
     bench = "could you mute everything for a bit"
     d = settings().data_dir
@@ -362,7 +362,7 @@ async def test_a_broad_run_never_writes_a_benchmark_sentence(monkeypatch):
 
 
 def test_errors_never_show_an_api_key(monkeypatch):
-    from neo import config
+    from neo2.core import config
 
     monkeypatch.setenv("GROQ_API_KEY", "gsk_live_secret_123")
     monkeypatch.setattr(config, "_settings", None)

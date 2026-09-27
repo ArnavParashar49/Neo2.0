@@ -66,7 +66,7 @@ class ToolSpec:
     name: str
     description: str
     parameters: dict[str, Any]  # JSON schema (object)
-    # Never dropped when a request is fitted into a small brain (neo.providers.fit): `more_tools`,
+    # Never dropped when a request is fitted into a small brain (neo2.core.providers.fit): `more_tools`,
     # which gets any other tool back, and every tool of a run fenced to its tools (nothing could).
     essential: bool = False
 

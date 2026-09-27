@@ -1,13 +1,13 @@
 """Calendar and reminders: add an event, add a reminder, say what's on the calendar.
 
-Where an item goes is the engine's choice among the Mac's shared stores (:mod:`neo.decide.routes`,
+Where an item goes is the engine's choice among the Mac's shared stores (:mod:`neo2.core.decide.routes`,
 written and read through EventKit) and the apps whose own dictionary can make or list events and
-reminders (:mod:`neo.decide.aescript`, the way in when the store is closed to NEO); a new event
+reminders (:mod:`neo2.core.decide.aescript`, the way in when the store is closed to NEO); a new event
 can also be handed to the app that opens calendar files (``ics``). Every add is read back before
 NEO calls it done, and one that may have happened but couldn't be checked is never made twice.
 
 Times come as ISO from a model, or in the user's own words from a fast path (English, Hinglish,
-Hindi: :mod:`neo.decide.when`); a time NEO had to infer is said back.
+Hindi: :mod:`neo2.core.decide.when`); a time NEO had to infer is said back.
 
 * :func:`carry_out` - do the request (a kind the user switched on);
 * :func:`would_choose` - only say what would be done (a kind in shadow): nothing is asked of
@@ -30,12 +30,12 @@ from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from neo.decide import aescript, eventkit, routes, when
-from neo.decide.run import Effect, Outcome, Req, Result
+from neo2.core.decide import aescript, eventkit, routes, when
+from neo2.core.decide.run import Effect, Outcome, Req, Result
 
 if TYPE_CHECKING:
-    from neo.decide.engine import Candidate
-    from neo.decide.inventory import App
+    from neo2.core.decide.engine import Candidate
+    from neo2.core.decide.inventory import App
 
 __all__ = [
     "KINDS",
@@ -303,7 +303,7 @@ async def _request(spec: Spec, text: str) -> Req:
         if spec.app.casefold() not in said.casefold():
             said = f"{said} in {spec.app}"
     else:
-        from neo.decide import engine, inventory
+        from neo2.core.decide import engine, inventory
 
         try:
             said = engine.mask_apps(said, await asyncio.to_thread(inventory.inventory))
@@ -362,7 +362,7 @@ def _missed(one: str, named: str, tied: bool, where: str) -> str:
 
 
 async def _laya_pick(named: str, pool: list[tuple[str, str]], text: str) -> tuple[str, str] | None:
-    from neo.decide import engine
+    from neo2.core.decide import engine
 
     if not engine._zero_shot_can_answer():
         return None
@@ -440,7 +440,7 @@ def methods_for(app: App, kind: str | None = None) -> tuple[str, ...]:
     d = getattr(app, "script", None)
     if d is None:
         return ()
-    from neo.decide import sdef
+    from neo2.core.decide import sdef
 
     tags = sdef.caps(d) | sdef.read_caps(d)
     out = []
@@ -465,7 +465,7 @@ def describe(app: App) -> str:
 
 
 class _Driver:
-    """One schedule kind as :func:`neo.decide.run.run_best` drives it."""
+    """One schedule kind as :func:`neo2.core.decide.run.run_best` drives it."""
 
     def __init__(self, kind: str) -> None:
         self.KIND, self.OVERALL_S, self.BUDGET_S = kind, OVERALL_S[kind], BUDGET_S
@@ -579,7 +579,7 @@ def _route(entity: eventkit.Entity) -> str:
 
 async def _commit_thread(fn: Any, arg: Any) -> Any:
     """The one call that saves: past it the item may exist (see run.commit)."""
-    from neo.decide import run
+    from neo2.core.decide import run
 
     return await run.commit(asyncio.to_thread(fn, arg))
 
@@ -726,13 +726,13 @@ _ASKED: dict[str, float] = {}
 
 def _answering(key: str) -> bool:
     """This request names a calendar or list soon after NEO asked which one to use there."""
-    from neo.decide import run
+    from neo2.core.decide import run
 
     return time.monotonic() - _ASKED.get(key, float("-inf")) <= run.RECENT_S
 
 
 async def _script_make(spec: Spec, req: Req, app: App) -> Outcome:
-    from neo.decide import learned, run
+    from neo2.core.decide import learned, run
 
     item = _ITEM[spec.kind]
     one = _NOUN[item][0]
@@ -768,7 +768,7 @@ async def _script_make(spec: Spec, req: Req, app: App) -> Outcome:
             if not open_:
                 return Outcome(False, f"{app.name} has no {one} NEO could add to", reason="not_found")
             if len(open_) > 1:
-                from neo.agent import confirm
+                from neo2.core.agent import confirm
 
                 names = [n for _i, n in open_][:6]
                 ask = f"Which {one} should I use for new {_NOUN[item][2]} in {app.name}: {_one_of(names)}?"
@@ -830,7 +830,7 @@ async def _script_make(spec: Spec, req: Req, app: App) -> Outcome:
 async def _note_store_view(spec: Spec, app: App, since: datetime) -> None:
     """An app whose item showed up in the store writes into it: from now on the store is the way
     there (the engine drops the app while the store can be used)."""
-    from neo.decide import learned
+    from neo2.core.decide import learned
 
     entity = _ENTITY[spec.kind]
     if eventkit.status(entity) != "full" or spec.start is None and entity == "event":
@@ -912,7 +912,7 @@ def _occurrences(cols: tuple[str, ...], rows: list[list[str]], t0: datetime, t1:
 
 
 async def _script_read(spec: Spec, app: App) -> Outcome:
-    from neo.decide import engine
+    from neo2.core.decide import engine
 
     lr = aescript.list_route(app.script)
     r = aescript.create_route(app.script, "event", ())
@@ -1011,7 +1011,7 @@ def _tzid() -> str:
 
 
 def _tmp() -> Path:
-    from neo.config import settings
+    from neo2.core.config import settings
 
     return settings().data_dir / "tmp"
 
@@ -1073,7 +1073,7 @@ async def fallback(req: Req, key: str) -> Outcome | None:
     there. Only while the store is closed to NEO (it would take the event from NEO itself)."""
     if key != "ics" or req.kind != "add_event" or eventkit.status("event") in ("full", "write_only"):
         return None
-    from neo.decide import inventory, run, workspace
+    from neo2.core.decide import inventory, run, workspace
 
     spec = _spec(req)
     bid = await asyncio.to_thread(workspace.default_for_extension, "ics")
@@ -1100,7 +1100,7 @@ async def _ask_store(entity: eventkit.Entity) -> None:
     done, _ = await asyncio.wait({task}, timeout=ASK_NOTE_S)
     if not done:
         try:
-            from neo.events import bus
+            from neo2.core.events import bus
 
             await bus().note(f"macOS is asking whether NEO can use your {_STORE[entity]}. Click Allow.")
         except Exception:  # noqa: BLE001 - a note is a nicety
@@ -1113,8 +1113,8 @@ async def carry_out(kind: str, args: dict, text: str = "", *, ask_access: bool =
     asked, once, for the store - only when no app was named for it (the tool's `app`); never in
     shadow or tests. When nothing worked, a store NEO couldn't use says why (the setting the user
     turned off, or the app NEO runs in not declaring it)."""
-    from neo.agent.confirm import Halt
-    from neo.decide import run
+    from neo2.core.agent.confirm import Halt
+    from neo2.core.decide import run
 
     spec = parse_args(kind, args)
     if isinstance(spec, str):
@@ -1156,7 +1156,7 @@ async def would_choose(kind: str, args: dict, text: str = "") -> dict[str, str |
             facts["all_day"] = spec.date_only
         elif kind == "add_reminder":
             facts["alarm"] = spec.start is not None and not spec.date_only
-        from neo.decide import engine
+        from neo2.core.decide import engine
 
         # its own task: whatever the engine notes for this request stays out of the caller's
         cands = await asyncio.create_task(engine.choose(kind, (await _request(spec, text)).text))
@@ -1203,11 +1203,11 @@ def _cut_title(phrase: str) -> bool:
 
 def check(kind: str, filled: dict) -> bool:
     """A fast path's test, on cached data only: a title that isn't a pronoun, a time
-    :mod:`neo.decide.when` reads (an event needs a clock time) that doesn't begin with the title's
+    :mod:`neo2.core.decide.when` reads (an event needs a clock time) that doesn't begin with the title's
     own last word, and a named list NEO has already seen in the store. Captured words count only
     for a kind the user switched on: legacy and shadow run today's scripts, which take ISO times.
     False hands the words to the model."""
-    from neo.config import settings
+    from neo2.core.config import settings
 
     if any(_text(filled, k) for k in filled) and settings().decide_modes.get(kind) != "on":
         return False

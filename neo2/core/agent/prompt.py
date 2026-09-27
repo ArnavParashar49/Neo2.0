@@ -26,7 +26,7 @@ notes and reminders. Prefer the fewest actions that fully achieve the goal.
 
 _ANY_TOOL = frozenset({"*"})  # a line for an agent with any tools at all
 # The tools that see or act in other apps' windows: they take the Accessibility permission, and
-# say so when it is off (neo.tools.computer).
+# say so when it is off (neo2.core.tools.computer).
 _NEEDS_AX = frozenset({
     "ax_tree", "ax_find", "ax_press", "ax_set_value", "click", "click_text", "drag", "scroll", "type_text",
     "dictate", "hotkey", "applescript",
@@ -125,7 +125,7 @@ def _applies(about: frozenset[str] | None, tools: Collection[str] | None) -> boo
 def persona(tools: Collection[str] | None = None) -> str:
     """Who NEO is and how it works. `tools`: the agent's tool names (None = all of them, as in
     NEO.app): guidance about tools it doesn't have is left out, the safety rules never are."""
-    from neo.config import decide_mode, settings
+    from neo2.core.config import decide_mode, settings
 
     own = (settings().persona or "").strip()
     head = own + "\n" if own else IDENTITY
@@ -136,15 +136,15 @@ def persona(tools: Collection[str] | None = None) -> str:
 
 
 def _agent_tools() -> list[str] | None:
-    """An embedded agent's tools (neo.runtime); None for NEO.app (all of them)."""
-    from neo import runtime
+    """An embedded agent's tools (neo2.core.runtime); None for NEO.app (all of them)."""
+    from neo2.core import runtime
 
     rt = runtime.current_runtime()
     return None if rt is None else [t.name for t in rt.registry.all()]
 
 
 def system_context() -> str:
-    from neo.config import settings
+    from neo2.core.config import settings
 
     now = _dt.datetime.now()
     if platform.system() == "Darwin":
@@ -156,7 +156,7 @@ def system_context() -> str:
 
 
 def build(memory_context: str = "", extra: str = "") -> str:
-    from neo.config import settings
+    from neo2.core.config import settings
 
     parts = [persona(_agent_tools())]
     if instructions := settings().instructions.strip():
@@ -172,7 +172,7 @@ def build(memory_context: str = "", extra: str = "") -> str:
     return "\n".join(parts)
 
 
-# The prompt of a `browse` run (neo/tools/browse.py): one job on the web, in NEO's own browser.
+# The prompt of a `browse` run (neo2/core/tools/browse.py): one job on the web, in NEO's own browser.
 BROWSE = """You are NEO, doing one job for the user on the web in your own browser: {where}. Do the
 job, then report.
 
@@ -213,7 +213,7 @@ _BROWSER_WHERE = {
 
 
 def browse_prompt(steps: int) -> str:
-    from neo.config import settings
+    from neo2.core.config import settings
 
     where = _BROWSER_WHERE.get(settings().browser_view, _BROWSER_WHERE["chat"])
     return BROWSE.replace("{steps}", str(steps)).replace("{where}", where) + "\n" + system_context()

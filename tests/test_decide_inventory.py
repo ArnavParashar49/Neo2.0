@@ -1,4 +1,4 @@
-"""neo.decide.inventory + neo.decide.sdef: finding the apps on a Mac, what their scripting
+"""neo2.core.decide.inventory + neo2.core.decide.sdef: finding the apps on a Mac, what their scripting
 dictionaries let NEO do, which app the user named, and how much the user uses each one.
 
 Everything runs on fixtures: fake app bundles in a temp dir (copied from tests/fixtures/decide),
@@ -20,8 +20,8 @@ from pathlib import Path
 
 import pytest
 
-from neo.decide import inventory as inv
-from neo.decide import sdef
+from neo2.core.decide import inventory as inv
+from neo2.core.decide import sdef
 
 FIX = Path(__file__).parent / "fixtures" / "decide"
 DAY = 86400.0
@@ -702,7 +702,7 @@ def test_includes_and_plists_that_are_not_regular_files_never_hang(tmp_path):
 
 
 def test_cocoa_entry_points_drain_an_autorelease_pool(monkeypatch):
-    from neo.decide import _objc, inventory, media
+    from neo2.core.decide import _objc, inventory, media
 
     entered = []
 
@@ -723,7 +723,7 @@ def test_cocoa_entry_points_drain_an_autorelease_pool(monkeypatch):
 def test_only_the_declared_main_executable_counts_as_the_app_running(tmp_path):
     import plistlib
 
-    from neo.decide import inventory
+    from neo2.core.decide import inventory
 
     app = tmp_path / "Player.app"
     (app / "Contents" / "MacOS").mkdir(parents=True)

@@ -31,15 +31,15 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar
 
 if TYPE_CHECKING:
-    from neo.agent.confirm import Gate
-    from neo.agent.early import EarlyActor
-    from neo.agent.registry import Registry
-    from neo.agent.session import Session
-    from neo.agent.toolselect import ToolSelector
-    from neo.config import Settings
-    from neo.events import EventBus
-    from neo.memory.store import Store
-    from neo.providers import BrainPool
+    from neo2.core.agent.confirm import Gate
+    from neo2.core.agent.early import EarlyActor
+    from neo2.core.agent.registry import Registry
+    from neo2.core.agent.session import Session
+    from neo2.core.agent.toolselect import ToolSelector
+    from neo2.core.config import Settings
+    from neo2.core.events import EventBus
+    from neo2.core.memory.store import Store
+    from neo2.core.providers import BrainPool
 
 T = TypeVar("T")
 
@@ -59,15 +59,15 @@ class Runtime:
     name: str
     settings: Settings
     registry: Registry
-    brains: BrainPool | None = None  # created on first use (neo.providers)
-    early: EarlyActor | None = None  # created on first use (neo.agent.early)
+    brains: BrainPool | None = None  # created on first use (neo2.core.providers)
+    early: EarlyActor | None = None  # created on first use (neo2.core.agent.early)
     selector: ToolSelector | None = None  # created on first use, over `registry`
     store: Store | None = None  # created on first use, only with memory on
-    browser: Any = None  # NEO's own browser for this agent (neo.tools.browser), on first use
+    browser: Any = None  # NEO's own browser for this agent (neo2.core.tools.browser), on first use
     audit_sink: Callable[[dict[str, Any]], None] | None = None  # audit records, as dicts
     audit_file: bool = True  # also append them to settings.audit_log
     secret_paths: tuple[Path, ...] = ()  # never read or written by NEO's tools
-    generation: int = 0  # bumped when this agent's memory is erased (neo.privacy)
+    generation: int = 0  # bumped when this agent's memory is erased (neo2.core.privacy)
     library: bool = True
     temporary: bool = False  # its data dir is a temp dir its owner removes when it closes
     closing: bool = False  # its owner is closing it: nothing of it is (re)built any more
@@ -77,7 +77,7 @@ class Runtime:
 
     def __post_init__(self) -> None:
         if self.library:
-            from neo.config import LibrarySettings
+            from neo2.core.config import LibrarySettings
 
             if not isinstance(self.settings, LibrarySettings):
                 raise TypeError(
@@ -139,8 +139,8 @@ class Scope:
 
     runtime: Runtime
     conversation: str = "default"
-    gate: Gate | None = None  # created on first use (neo.agent.confirm)
-    bus: EventBus | None = None  # created on first use (neo.events)
+    gate: Gate | None = None  # created on first use (neo2.core.agent.confirm)
+    bus: EventBus | None = None  # created on first use (neo2.core.events)
     session: Session | None = None
 
     def get_or_create(self, attr: str, make: Callable[[], T]) -> T:
@@ -219,7 +219,7 @@ def _refuse_shared_data_dir(rt: Runtime) -> None:
 def _shared_with(rt: Runtime) -> str:
     """Why `rt` can't live next to a live agent ("" = it can). Only a string leaves: the error's
     traceback must not keep the other agent alive (a notebook keeps the last one)."""
-    from neo.config import overlaps
+    from neo2.core.config import overlaps
 
     mine = Path(rt.settings.data_dir)
     live = [o for o in _live if o.library and not o.closed]
@@ -266,7 +266,7 @@ def secret_roots() -> list[Path]:
         roots.extend(Path(p) for p in getattr(s, "extra_secret_paths", None) or ())
         roots.extend(_memory_files(s))
         roots.extend(Path(p) for p in rt.secret_paths)
-    from neo import config
+    from neo2.core import config
 
     app = config._settings
     if app is not None:

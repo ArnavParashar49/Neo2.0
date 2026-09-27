@@ -8,16 +8,16 @@ import json
 import numpy as np
 import pytest
 
-from neo.agent.session import Session
-from neo.events import EventBus
-from neo.providers.base import ToolCall, Turn
-from neo.reflex.schema import Decision
+from neo2.core.agent.session import Session
+from neo2.core.events import EventBus
+from neo2.core.providers.base import ToolCall, Turn
+from neo2.core.reflex.schema import Decision
 
 
 @pytest.fixture(autouse=True)
 def _env(tmp_path, monkeypatch):
-    from neo import config, events
-    from neo.tools import load_all
+    from neo2.core import config, events
+    from neo2.core.tools import load_all
 
     monkeypatch.setattr(config, "_settings", None)
     monkeypatch.setenv("NEO_DATA_DIR", str(tmp_path))
@@ -26,7 +26,7 @@ def _env(tmp_path, monkeypatch):
 
 
 def test_v2_head_decides_from_the_embedding_alone(tmp_path, monkeypatch):
-    from neo.reflex import laya_reflex as lr
+    from neo2.core.reflex import laya_reflex as lr
 
     d = 8
     intents = ["chat", "quick_action", "agent_task", "stop"]
@@ -80,8 +80,8 @@ def _reflex(intent, tool="", tool_p=0.0):
 
 
 def test_laya_tool_without_arguments_runs_with_no_model(monkeypatch):
-    import neo.agent.session as sess_mod
-    from neo.agent.registry import registry
+    import neo2.core.agent.session as sess_mod
+    from neo2.core.agent.registry import registry
 
     monkeypatch.setattr(sess_mod, "brain", lambda purpose="agent": pytest.fail("no model needed"))
 
@@ -94,7 +94,7 @@ def test_laya_tool_without_arguments_runs_with_no_model(monkeypatch):
 
 
 def test_laya_tool_with_arguments_gets_a_single_tool_light_call(monkeypatch):
-    import neo.agent.session as sess_mod
+    import neo2.core.agent.session as sess_mod
 
     seen = {}
 
@@ -118,7 +118,7 @@ def test_laya_tool_with_arguments_gets_a_single_tool_light_call(monkeypatch):
         return B()
 
     monkeypatch.setattr(sess_mod, "brain", fake_brain)
-    from neo.agent.registry import registry
+    from neo2.core.agent.registry import registry
 
     async def fake_search(a, c):
         return "28°C and sunny"
@@ -131,7 +131,7 @@ def test_laya_tool_with_arguments_gets_a_single_tool_light_call(monkeypatch):
 
 def test_the_single_tool_lane_never_takes_the_vision_brain_for_the_screen_signal(monkeypatch):
     """"dim my screen": one tool, no screenshot — the screen signal must not buy the vision chain."""
-    import neo.agent.session as sess_mod
+    import neo2.core.agent.session as sess_mod
 
     class B:
         name = "fake"
@@ -147,7 +147,7 @@ def test_the_single_tool_lane_never_takes_the_vision_brain_for_the_screen_signal
 
     purposes = []
     monkeypatch.setattr(sess_mod, "brain", lambda purpose="agent": purposes.append(purpose) or B())
-    from neo.agent.registry import registry
+    from neo2.core.agent.registry import registry
 
     async def fake_search(a, c):
         return "28°C and sunny"
@@ -163,7 +163,7 @@ def test_the_single_tool_lane_never_takes_the_vision_brain_for_the_screen_signal
 
 
 def test_low_tool_confidence_falls_back_to_the_normal_route(monkeypatch):
-    import neo.agent.session as sess_mod
+    import neo2.core.agent.session as sess_mod
 
     class B:
         name = "fake"
@@ -183,7 +183,7 @@ def test_low_tool_confidence_falls_back_to_the_normal_route(monkeypatch):
 
 
 def test_dataset_tool_labels():
-    from neo.reflex.dataset import tool_for
+    from neo2.core.reflex.dataset import tool_for
 
     assert tool_for("open Safari") == "open_app"
     assert tool_for("is it going to rain today") == "weather"

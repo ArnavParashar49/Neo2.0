@@ -7,9 +7,9 @@ import time
 
 import pytest
 
-from neo import config
-from neo.providers.base import Turn
-from neo.reflex import learn, teacher
+from neo2.core import config
+from neo2.core.providers.base import Turn
+from neo2.core.reflex import learn, teacher
 
 
 @pytest.fixture

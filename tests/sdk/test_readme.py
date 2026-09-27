@@ -65,9 +65,9 @@ class UI:
 @pytest.fixture(autouse=True)
 def hermetic(monkeypatch):
     """No fast path, NEO's web tools answer from here, and no socket may connect."""
-    from neo.agent import fastpath
-    from neo.agent.registry import catalog
-    from neo.tools import load
+    from neo2.core.agent import fastpath
+    from neo2.core.agent.registry import catalog
+    from neo2.core.tools import load
 
     monkeypatch.setattr(fastpath, "plan", lambda text, **kw: None)
     load(list(WEB_TOOLS))

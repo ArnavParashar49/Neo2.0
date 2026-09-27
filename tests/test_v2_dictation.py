@@ -6,19 +6,19 @@ import asyncio
 
 import pytest
 
-from neo.agent import early as early_mod
-from neo.agent.early import EarlyActor
-from neo.agent.registry import ToolContext, registry
-from neo.agent.session import Session, _match_fast_path
-from neo.events import EventBus
-from neo.providers.base import Turn
-from neo.reflex.schema import Decision
+from neo2.core.agent import early as early_mod
+from neo2.core.agent.early import EarlyActor
+from neo2.core.agent.registry import ToolContext, registry
+from neo2.core.agent.session import Session, _match_fast_path
+from neo2.core.events import EventBus
+from neo2.core.providers.base import Turn
+from neo2.core.reflex.schema import Decision
 
 
 @pytest.fixture(autouse=True)
 def _env(tmp_path, monkeypatch):
-    from neo import config, events
-    from neo.tools import load_all
+    from neo2.core import config, events
+    from neo2.core.tools import load_all
 
     monkeypatch.setattr(config, "_settings", None)
     monkeypatch.setenv("NEO_DATA_DIR", str(tmp_path))
@@ -65,7 +65,7 @@ def test_dictation_fast_paths(text, expected):
 
 
 def _stub_typing(monkeypatch):
-    from neo.tools import computer as comp
+    from neo2.core.tools import computer as comp
 
     typed: list[str] = []
 
@@ -88,7 +88,7 @@ front, role = ["Notes"], ["AXTextArea"]  # what the stubbed Mac reports; tests m
 
 def test_type_text_presses_return_between_lines(monkeypatch):
     typed = _stub_typing(monkeypatch)
-    from neo.agent.registry import ToolContext
+    from neo2.core.agent.registry import ToolContext
 
     out = asyncio.run(registry().invoke("type_text", {"text": "a\nb\n"}, ToolContext(user_text="")))
     assert out.ok and typed == ["a", "<return>", "b"]  # a trailing newline is never a Return
@@ -115,7 +115,7 @@ def test_line_breaks_never_send(monkeypatch, app, focus, expected):
 
 
 def test_never_types_into_a_password_field(monkeypatch):
-    from neo.tools import computer as comp
+    from neo2.core.tools import computer as comp
 
     typed = []
     monkeypatch.setattr(comp.apps, "_target", None)
@@ -128,8 +128,8 @@ def test_never_types_into_a_password_field(monkeypatch):
 
 def test_dictate_composes_with_the_fast_brain_then_types(monkeypatch):
     typed = _stub_typing(monkeypatch)
-    import neo.providers as prov
-    from neo.agent.registry import ToolContext
+    import neo2.core.providers as prov
+    from neo2.core.agent.registry import ToolContext
 
     class B:
         name = "fake"
@@ -190,7 +190,7 @@ def test_open_app_fires_early_but_dictation_waits_and_keeps_its_and(monkeypatch)
 
 def test_session_takes_the_fast_path_even_when_the_reflex_says_agent_task(monkeypatch):
     typed = _stub_typing(monkeypatch)
-    import neo.agent.session as sess_mod
+    import neo2.core.agent.session as sess_mod
 
     monkeypatch.setattr(sess_mod, "brain", lambda purpose="agent": pytest.fail("no model needed"))
 
@@ -210,7 +210,7 @@ def test_agent_prompt_lists_what_already_ran_once(monkeypatch):
         return "Opened"
 
     monkeypatch.setattr(registry().get("open_app"), "handler", fake_open)
-    from neo.agent.session import _already_done_note
+    from neo2.core.agent.session import _already_done_note
 
     assert _already_done_note() == ""
     ea = early_mod.early()
@@ -230,7 +230,7 @@ def test_agent_prompt_lists_what_already_ran_once(monkeypatch):
 
 
 def _guard_env(monkeypatch, *, front_app, target, can_raise):
-    from neo.tools import computer as comp
+    from neo2.core.tools import computer as comp
 
     typed: list[str] = []
     state = {"front": front_app}
@@ -286,7 +286,7 @@ def test_never_types_into_neos_own_overlay(monkeypatch):
 
 
 def test_needs_user_is_spoken_not_handed_to_the_agent(monkeypatch):
-    import neo.agent.session as sess_mod
+    import neo2.core.agent.session as sess_mod
 
     typed, _ = _guard_env(monkeypatch, front_app="Claude", target="Notes", can_raise=False)
     monkeypatch.setattr(sess_mod, "brain", lambda purpose="agent": pytest.fail("no model: tell the user"))
@@ -300,7 +300,7 @@ def test_needs_user_is_spoken_not_handed_to_the_agent(monkeypatch):
 
 
 def test_live_multi_step_commands_are_not_silent():
-    from neo.voice.live import _multi_step
+    from neo2.core.voice.live import _multi_step
 
     assert _multi_step("type github.com and press enter")
     assert not _multi_step("type salt and pepper")
@@ -308,13 +308,13 @@ def test_live_multi_step_commands_are_not_silent():
 
 
 def test_live_agent_task_uses_the_users_words_when_fast_paths_cover_them(monkeypatch):
-    import neo.voice.live as live_mod
+    import neo2.core.voice.live as live_mod
 
     seen = []
 
     class S:
         async def handle(self, text, **kw):
-            from neo.agent.session import Reply
+            from neo2.core.agent.session import Reply
 
             seen.append(text)
             return Reply("ok", "quick", silent=True)

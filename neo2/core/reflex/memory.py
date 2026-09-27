@@ -30,8 +30,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from neo.reflex import learn
-from neo.reflex.schema import Decision
+from neo2.core.reflex import learn
+from neo2.core.reflex.schema import Decision
 
 TAU = 0.9  # centred cosine for "the same request again"
 HEAD_SURE = 0.9  # a head this sure of something else keeps its pick
@@ -236,7 +236,7 @@ def recall(d: Decision, text: str, emb, center, kind: tuple[str, float] | None =
 def rebuild_soon(is_idle: Callable[[], bool]) -> bool:
     """Start a background rebuild when the memory is behind the stored corrections, Laya is
     already loaded (never load it just for this) and NEO is idle."""
-    from neo import reflex
+    from neo2.core import reflex
 
     laya = reflex._laya
     if laya is None or not _memory.stale or _memory._rebuilding or not learn.enabled():

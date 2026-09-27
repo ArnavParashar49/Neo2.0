@@ -29,12 +29,12 @@ Nothing here mutates the caller's messages (they are the session's history).
 from __future__ import annotations
 
 import json
-import logging
 import re
 from dataclasses import dataclass, field, replace
 
-from neo.providers.base import Message, RequestTooLarge, ToolCall, ToolResult, ToolSpec
-from neo.providers.history import OBSERVATIONS, halted, normalize, request_start
+from neo2.core import logger
+from neo2.core.providers.base import Message, RequestTooLarge, ToolCall, ToolResult, ToolSpec
+from neo2.core.providers.history import OBSERVATIONS, halted, normalize, request_start
 
 _BYTES_PER_TOKEN = 3.4  # UTF-8 bytes: ~4 per token for English, less for code, UI trees and JSON
 _IMAGE_TOKENS = 1300  # a screenshot as a vision brain bills it (roughly; tiles vary)
@@ -48,7 +48,7 @@ _PER_MINUTE_SHARE = 0.5  # a per-minute budget: tools come back while the prompt
 _PER_MINUTE_TOOLS = 0.1  # …or while they add no more than this to it
 _ENABLED = re.compile(r"^Enabled: (.*?)\. They are available", re.S)
 
-log = logging.getLogger(__name__)
+log = logger(__name__)
 
 
 @dataclass

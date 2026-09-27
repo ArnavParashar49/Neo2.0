@@ -23,11 +23,11 @@ import asyncio
 import json
 import time
 
-from neo.config import settings
-from neo.providers.base import ProviderError
-from neo.reflex import learn
-from neo.reflex.generate import _LABEL_SYS, _ask, _parse_list, label_prompt, safe_error
-from neo.reflex.schema import INTENT_CRITERIA
+from neo2.core.config import settings
+from neo2.core.providers.base import ProviderError
+from neo2.core.reflex import learn
+from neo2.core.reflex.generate import _LABEL_SYS, _ask, _parse_list, label_prompt, safe_error
+from neo2.core.reflex.schema import INTENT_CRITERIA
 
 STATE = "reflex_teacher.json"  # {"day", "sent"}: counts only, never text
 DAILY_MAX = 50
@@ -95,16 +95,16 @@ def _spend(n: int) -> None:
 async def _provider(name: str):
     """Gemini on the primary key only (the one Live uses); the local model only if it's serving."""
     if name == "gemini":
-        from neo.providers.gemini import GeminiProvider
+        from neo2.core.providers.gemini import GeminiProvider
 
         s = settings()
         return GeminiProvider(s.gemini_model, s.gemini_api_key or None, fallback_models=s.gemini_fallback_models)
     if name == "local":
-        from neo.providers.local_server import is_up
+        from neo2.core.providers.local_server import is_up
 
         if not await is_up():
             raise ProviderError("the local model server isn't running")
-    from neo.providers import make
+    from neo2.core.providers import make
 
     return make(name)
 

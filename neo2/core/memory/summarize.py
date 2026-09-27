@@ -6,14 +6,14 @@ Lets the next session answer "what did we do yesterday" and carry over unfinishe
 from __future__ import annotations
 
 import asyncio
-import logging
 import time
 
-from neo.memory.store import store
-from neo.providers import brain
-from neo.providers.base import Message
+from neo2.core import logger
+from neo2.core.memory.store import store
+from neo2.core.providers import brain
+from neo2.core.providers.base import Message
 
-log = logging.getLogger(__name__)
+log = logger(__name__)
 
 _PROMPT = (
     "Summarise this conversation between a user and their Mac assistant NEO in 2-4 short lines: "
@@ -38,7 +38,7 @@ def _transcript(history: list[Message], max_chars: int = 12000) -> str:
 async def summarize_session(history: list[Message], started: float, *, budget_s: float = 5.0) -> str:
     """Write a summary for this session into the store; returns it (empty if nothing to say).
     The model gets `budget_s`; slower than that (shutdown can't wait) → the crude summary."""
-    from neo import privacy
+    from neo2.core import privacy
 
     gen = privacy.generation()
     text = _transcript(history)

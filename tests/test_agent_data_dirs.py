@@ -12,8 +12,8 @@ import pytest
 from neo_lib import make_runtime
 from pydantic import ValidationError
 
-from neo import config
-from neo.config import LibrarySettings
+from neo2.core import config
+from neo2.core.config import LibrarySettings
 
 _DATA = Path("/System/Volumes/Data")
 NEVER = "never uses NEO.app's own data"

@@ -1,4 +1,4 @@
-"""neo.decide.kinds: the tables every kind driver shares (tools per kind, nouns, correction cues)
+"""neo2.core.decide.kinds: the tables every kind driver shares (tools per kind, nouns, correction cues)
 and the driver lookup, which finds nothing until a kind's driver exists."""
 
 from __future__ import annotations
@@ -8,7 +8,7 @@ import types
 
 import pytest
 
-from neo.decide import engine, kinds
+from neo2.core.decide import engine, kinds
 
 
 def test_every_kind_with_tools_is_an_engine_kind():
@@ -52,6 +52,6 @@ def test_driver_lookup(monkeypatch):
     monkeypatch.setitem(sys.modules, "fake_note_driver", mod)
     monkeypatch.setitem(engine.DRIVERS, "write_note", "fake_note_driver")
     assert kinds.driver("write_note") is mod
-    monkeypatch.setitem(engine.DRIVERS, "write_note", "neo.decide.kinds.not_written_yet")
+    monkeypatch.setitem(engine.DRIVERS, "write_note", "neo2.core.decide.kinds.not_written_yet")
     assert kinds.driver("write_note") is None
-    assert kinds.driver("play_media").__name__ == "neo.decide.media"
+    assert kinds.driver("play_media").__name__ == "neo2.core.decide.media"

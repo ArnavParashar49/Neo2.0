@@ -12,7 +12,7 @@ full command / script / path on the overlay's card. Only the user can approve:
   detail built from the screen at that moment. A call that differs in any of them — a longer
   command, another mail body, an element id that now points at a different button — asks again;
 * every staging gets a fresh random action id, so a stale card can't approve a later one;
-* a yes "for this task" (neo.agent.grants) lets later calls of the same tool on the same app in
+* a yes "for this task" (neo2.core.agent.grants) lets later calls of the same tool on the same app in
   the same task through without a card — never a dangerous one, and never once the request has
   read something new and untrusted. The card says when it can be answered that way (`scopes`).
 
@@ -21,7 +21,7 @@ Only NEO's own code can halt a run with a question: :func:`stage` and :func:`ask
 never is.
 
 The pending question lives in a :class:`Gate`. NEO.app has one; an agent embedded in another app
-(neo.runtime) has one per conversation, so one user's "yes" can never approve another's card
+(neo2.core.runtime) has one per conversation, so one user's "yes" can never approve another's card
 and two threads of one user never supersede each other's. An approval belongs to the gate that
 issued it: inside another conversation it releases nothing.
 """
@@ -42,9 +42,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from neo import runtime
-from neo.agent import grants
-from neo.config import settings
+from neo2.core import runtime
+from neo2.core.agent import grants
+from neo2.core.config import settings
 
 NEEDS_CONFIRM = "NEEDS_CONFIRM"
 NEEDS_USER = "NEEDS_USER"
@@ -101,7 +101,7 @@ class Gate:
         self.audit_sink = audit_sink
         self.agent = agent
         self.app = app
-        # This conversation's tasks, their notes and untrusted-read counts (neo.agent.grants).
+        # This conversation's tasks, their notes and untrusted-read counts (neo2.core.agent.grants).
         # Only NEO.app's own gate gives a yes "for this task": an embedded agent's stay one-off.
         self.grants = grants.Book(grants_on=app)
 
@@ -126,7 +126,7 @@ class _Approval:
 
 _default_gate = Gate(app=True)  # NEO.app's
 _approved: ContextVar[_Approval | None] = ContextVar("neo_approved_action", default=None)
-# The action ids staged while handling one request (neo.runtime's hosts ask "did *this* request
+# The action ids staged while handling one request (neo2.core.runtime's hosts ask "did *this* request
 # stage the pending card?"). A list shared by reference, so ids staged in asyncio.gather children
 # (read-only tools run in parallel) reach the request that created it.
 _stage_sink: ContextVar[list[str] | None] = ContextVar("neo_stage_sink", default=None)
@@ -135,7 +135,7 @@ _TTL_S = 120.0  # a question nobody answered: forget it rather than hijack the n
 
 
 def _gate() -> Gate:
-    """The bound conversation's gate (neo.runtime), else NEO.app's. In library mode with nothing
+    """The bound conversation's gate (neo2.core.runtime), else NEO.app's. In library mode with nothing
     bound this fails closed: never a shared slot another agent could approve."""
     sc = runtime.current_scope()
     if sc is not None:
@@ -316,7 +316,7 @@ def as_bool(value: Any, default: bool = False) -> bool:
 def _announce(kind: str, **data: Any) -> None:
     """Tell the overlay (fire-and-forget; stage() is sync and may run outside the loop)."""
     try:
-        from neo.events import bus
+        from neo2.core.events import bus
 
         loop = asyncio.get_running_loop()
         loop.create_task(bus().publish(kind, **data))
@@ -493,7 +493,7 @@ def gated(
     confirmation is turned off), otherwise the ``NEEDS_CONFIRM`` string for the model.
     `always`: ask even with confirmation turned off — for what reaches another person (a send).
     `target`: what the call acts on, from a tool whose calls a yes "for this task" may cover
-    (neo.agent.grants); without one, every call asks.
+    (neo2.core.agent.grants); without one, every call asks.
     """
     params = clean(params)
     # An embedded agent always asks: its confirmation is pinned on (config.LibrarySettings).

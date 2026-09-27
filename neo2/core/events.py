@@ -9,7 +9,6 @@ state falls back to whatever else is active instead of flickering through idle.
 from __future__ import annotations
 
 import asyncio
-import logging
 import time
 from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
@@ -17,9 +16,9 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
 
-from neo import runtime
+from neo2.core import logger, runtime
 
-log = logging.getLogger(__name__)
+log = logger(__name__)
 
 
 class NeoState(StrEnum):
@@ -166,7 +165,7 @@ _bus: EventBus | None = None
 
 
 def bus() -> EventBus:
-    """The bound conversation's own bus (neo.runtime), else NEO.app's."""
+    """The bound conversation's own bus (neo2.core.runtime), else NEO.app's."""
     sc = runtime.current_scope()
     if sc is not None:
         return sc.get_or_create("bus", EventBus)

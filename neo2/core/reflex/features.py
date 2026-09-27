@@ -16,7 +16,7 @@ from typing import Any
 
 import numpy as np
 
-from neo.reflex.schema import INTENT_CRITERIA
+from neo2.core.reflex.schema import INTENT_CRITERIA
 
 HEADS = ("intent", "destructive", "needs_screen", "reply", "tool", "kind")
 _CLASSES = {"intent": list(INTENT_CRITERIA), "destructive": ["no", "yes"], "needs_screen": ["no", "yes"], "reply": ["do it", "answer"]}
@@ -30,7 +30,7 @@ def load_encoder(encoder: str, device: str):
     """The pinned Laya checkpoint for `encoder` ("multilingual" | "english")."""
     import laya
 
-    from neo import effects, models
+    from neo2.core import effects, models
 
     effects.guard("model", f"load Laya's {encoder} checkpoint into memory", via=laya.load)
     # fp16 autocast never beat fp32 on the M3 Pro at any row count (neither did compile or fast=True,
@@ -74,7 +74,7 @@ def embed_only(agent, texts: list[str], batch: int = 64, progress: bool = False)
 def encoder_of(h: dict) -> tuple[str, str]:
     """(revision, subfolder) a head file was trained on; heads from before the subfolder was
     recorded were all trained on the English root."""
-    from neo import models
+    from neo2.core import models
 
     return h.get("encoder") or models.LAYA_REVISION, h.get("subfolder", "")
 
@@ -82,7 +82,7 @@ def encoder_of(h: dict) -> tuple[str, str]:
 def parse_head(h: dict, encoder: str | None = None, dim: int | None = None) -> dict[str, Any] | None:
     """A head file's JSON as numpy ensembles, or None when it can't be used with this encoder: its
     outputs would be meaningless on other features (and the confirm gate reads "destructive")."""
-    from neo import models
+    from neo2.core import models
 
     if h.get("version") != 2:
         return None

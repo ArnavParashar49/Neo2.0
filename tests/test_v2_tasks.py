@@ -13,9 +13,9 @@ from pathlib import Path
 
 import pytest
 
-from neo.agent import confirm
-from neo.agent.registry import ToolContext, registry
-from neo.events import EventBus
+from neo2.core.agent import confirm
+from neo2.core.agent.registry import ToolContext, registry
+from neo2.core.events import EventBus
 
 ROOT = Path(__file__).resolve().parent.parent
 _PIM = ("notes_create", "reminder_add", "calendar_add", "calendar_today", "mail_send", "mail_unread")
@@ -23,8 +23,8 @@ _PIM = ("notes_create", "reminder_add", "calendar_add", "calendar_today", "mail_
 
 @pytest.fixture(autouse=True)
 def _env(tmp_path, monkeypatch):
-    from neo import config, events
-    from neo.tools import load_all
+    from neo2.core import config, events
+    from neo2.core.tools import load_all
 
     monkeypatch.setattr(config, "_settings", None)
     monkeypatch.setenv("NEO_DATA_DIR", str(tmp_path))
@@ -38,8 +38,8 @@ def _env(tmp_path, monkeypatch):
 @pytest.fixture
 def calls(monkeypatch):
     """Every legacy script call, with its arguments (nothing reaches an app)."""
-    from neo.tools import tasks
-    from neo.tools.computer import legacy
+    from neo2.core.tools import tasks
+    from neo2.core.tools.computer import legacy
 
     for name in _PIM:  # other suites swap handlers on the shared registry
         monkeypatch.setattr(registry().get(name), "handler", getattr(tasks, name))
@@ -58,8 +58,8 @@ def _run(name, args, ctx=None):
 
 
 def test_the_task_tools_are_registered_from_tasks_with_their_flags():
-    import neo.tools.computer as comp
-    from neo.tools import tasks
+    import neo2.core.tools.computer as comp
+    from neo2.core.tools import tasks
 
     for name in _PIM:
         assert registry().get(name) is not None and callable(getattr(tasks, name)), name
@@ -117,13 +117,13 @@ def test_sending_mail_still_asks_first(calls):
 
 
 def test_the_web_tools_still_use_the_moved_site_table():
-    from neo.tools import web
-    from neo.tools.computer import legacy
+    from neo2.core.tools import web
+    from neo2.core.tools.computer import legacy
 
     assert web.site_search_url is legacy.site_search_url
-    src = (ROOT / "neo/tools/web.py").read_text()
+    src = (ROOT / "neo2/core/tools/web.py").read_text()
     assert not re.search(r"^(?:_SITES|_AMAZON|SITE_NAMES|_GENERIC_SITES)\s*[:=]|^def site_search_url", src, re.M)
-    apps = (ROOT / "neo/tools/computer/apps.py").read_text()
+    apps = (ROOT / "neo2/core/tools/computer/apps.py").read_text()
     assert not re.search(r"^async def (?:safari_page_text|mail_send|calendar_add|notes_create)\b", apps, re.M)
 
 
@@ -134,8 +134,8 @@ _DRIVEN = ("write_note", "add_reminder", "add_event", "read_calendar", "read_mai
 
 
 def test_the_kinds_with_drivers_ship_in_shadow_and_the_user_switches_them(monkeypatch):
-    from neo import config
-    from neo.tools import tasks
+    from neo2.core import config
+    from neo2.core.tools import tasks
 
     assert {k: tasks.mode(k) for k in _DRIVEN} == dict.fromkeys(_DRIVEN, "shadow")
     assert (tasks.mode("send_message"), tasks.mode("send_email")) == ("legacy", "legacy")  # R4/R5
@@ -151,7 +151,7 @@ def test_the_kinds_with_drivers_ship_in_shadow_and_the_user_switches_them(monkey
 @pytest.fixture
 def dry_runs(monkeypatch, shadow_runs):
     """Each kind's dry run faked: what it was asked, and the facts it reports."""
-    from neo.decide.kinds import mail, note, schedule
+    from neo2.core.decide.kinds import mail, note, schedule
 
     asked: list = []
 
@@ -175,7 +175,7 @@ def dry_runs(monkeypatch, shadow_runs):
 
 def _settled(name, args, ctx=None):
     """Invoke, then let the background dry runs finish (the loop they started on ends here)."""
-    from neo.decide import shadow
+    from neo2.core.decide import shadow
 
     async def go():
         out = await registry().invoke(name, args, ctx or ToolContext(user_text="the words"))
@@ -188,14 +188,14 @@ def _settled(name, args, ctx=None):
 def _log() -> list[dict]:
     import json
 
-    from neo.decide import shadow
+    from neo2.core.decide import shadow
 
     p = shadow.path()
     return [json.loads(x) for x in p.read_text().splitlines()] if p.exists() else []
 
 
 def test_in_shadow_legacy_answers_and_the_dry_run_is_logged(calls, dry_runs, monkeypatch):
-    from neo.tools.computer import legacy
+    from neo2.core.tools.computer import legacy
 
     async def today():
         calls.append(("calendar_today", (), {}))
@@ -218,7 +218,7 @@ def test_in_shadow_legacy_answers_and_the_dry_run_is_logged(calls, dry_runs, mon
 
 
 def test_legacy_runs_no_dry_run_and_a_failed_one_is_logged_by_name(calls, dry_runs, decide_modes, monkeypatch):
-    from neo.decide.kinds import schedule
+    from neo2.core.decide.kinds import schedule
 
     decide_modes(add_event="legacy")
     _settled("calendar_add", {"title": "x", "start": "2026-09-27T10:00", "end": "2026-09-27T10:15"})
@@ -236,8 +236,8 @@ def test_legacy_runs_no_dry_run_and_a_failed_one_is_logged_by_name(calls, dry_ru
 
 
 def test_on_hands_each_kind_to_its_driver(calls, decide_modes, monkeypatch):
-    from neo.decide import run
-    from neo.decide.kinds import mail, note, schedule
+    from neo2.core.decide import run
+    from neo2.core.decide.kinds import mail, note, schedule
 
     decide_modes(**dict.fromkeys(_DRIVEN, "on"))
     seen: list = []
@@ -299,7 +299,7 @@ def test_a_kind_shows_its_new_surface_only_while_on(decide_modes):
     [('{"send_message": "OFF"}', {"send_message": "off"}), ("{broken", {}), ("", {}), ("=on", {})],
 )
 def test_decide_modes_never_stop_neo_from_starting(monkeypatch, raw, want):
-    from neo import config
+    from neo2.core import config
 
     monkeypatch.setenv("NEO_DECIDE_MODES", raw)
     monkeypatch.delenv("NEO_NOTES_DIR", raising=False)  # the release default, not the test's own folder
@@ -316,7 +316,7 @@ _FORBIDDEN = re.compile(
     r"outlook|facetime|amazon|flipkart|ebay|google|obsidian|notion|fantastical)\b"
     r"|org\.whispersystems|signal-desktop|com\.apple\.|tell application \"|\bwww\.[a-z]"
 )
-_GUARDED = ["neo/tools/tasks.py"]
+_GUARDED = ["neo2/core/tools/tasks.py"]
 
 
 @pytest.mark.parametrize("path", _GUARDED)
@@ -329,8 +329,8 @@ def test_new_modules_name_no_app_or_site(path):
 
 
 def test_open_app_in_shadow_answers_with_legacy_and_logs_the_dry_run(monkeypatch, shadow_runs, real_handlers):
-    from neo.decide.kinds import launch
-    from neo.tools.computer import apps
+    from neo2.core.decide.kinds import launch
+    from neo2.core.tools.computer import apps
 
     async def opened(target):
         return f"Opened {target}"
@@ -349,8 +349,8 @@ def test_open_app_in_shadow_answers_with_legacy_and_logs_the_dry_run(monkeypatch
 def test_page_read_reads_the_browser_in_front_in_every_mode(decide_modes, monkeypatch, real_handlers, mode):
     """A model's call gets the page itself; the user's own words (a fast path) get NEO's answer from
     it. safari_read is the old name, hidden."""
-    from neo.decide import run
-    from neo.decide.kinds import site
+    from neo2.core.decide import run
+    from neo2.core.decide.kinds import site
 
     decide_modes(web_search=mode)
     asked: list = []
@@ -372,8 +372,8 @@ def test_page_read_reads_the_browser_in_front_in_every_mode(decide_modes, monkey
 
 
 def test_with_web_search_on_a_search_carrying_data_asks(decide_modes, monkeypatch, real_handlers):
-    from neo.decide import run
-    from neo.decide.kinds import site
+    from neo2.core.decide import run
+    from neo2.core.decide.kinds import site
 
     decide_modes(web_search="on")
     searched: list = []
@@ -391,10 +391,10 @@ def test_with_web_search_on_a_search_carrying_data_asks(decide_modes, monkeypatc
 
 
 def test_a_new_document_goes_by_legacys_names_until_write_note_is_on(decide_modes, monkeypatch):
-    from neo.decide import inventory
-    from neo.decide.inventory import App
-    from neo.decide.kinds import note
-    from neo.tools import computer
+    from neo2.core.decide import inventory
+    from neo2.core.decide.inventory import App
+    from neo2.core.decide.kinds import note
+    from neo2.core.tools import computer
 
     editor = App(bundle_id="test.pad", name="Padwise", path="/Applications/Padwise.app", editor_types=("public.rtf",))
     monkeypatch.setattr(inventory, "app_for_pid", lambda pid: editor if pid == 7 else None)
@@ -406,7 +406,7 @@ def test_a_new_document_goes_by_legacys_names_until_write_note_is_on(decide_mode
 def test_the_users_notes_app_takes_new_note_only_while_write_note_is_on(decide_modes, monkeypatch, real_handlers):
     """A call naming "note" in any other mode, or with other keys (a model's, a playbook saved
     before a rollback), goes the legacy way: no Accessibility press, no launch."""
-    from neo.tools import computer
+    from neo2.core.tools import computer
 
     went: list[str] = []
 
@@ -430,8 +430,8 @@ def test_the_users_notes_app_takes_new_note_only_while_write_note_is_on(decide_m
 
 
 def test_live_and_the_prompts_change_only_for_kinds_switched_on(decide_modes):
-    from neo.agent import prompt
-    from neo.voice import live
+    from neo2.core.agent import prompt
+    from neo2.core.voice import live
 
     assert live._direct_tools() == live._DIRECT_TOOLS and "calendar_add" not in live._DIRECT_TOOLS
     extra = live._live_extra()

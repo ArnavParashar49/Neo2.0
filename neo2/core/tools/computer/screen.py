@@ -11,8 +11,8 @@ from pathlib import Path
 import Quartz as Q
 from PIL import Image
 
-from neo import effects
-from neo.providers.base import ImagePart
+from neo2.core import effects
+from neo2.core.providers.base import ImagePart
 
 _MAX_W = 1600  # keep token cost sane; 14"/16" MBP logical widths are 1512/1728
 

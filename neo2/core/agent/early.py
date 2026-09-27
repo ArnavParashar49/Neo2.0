@@ -9,7 +9,7 @@ The voice layer feeds the running transcript of the current utterance in here as
   is over. Keystrokes, clicks and anything with a free-text payload never run mid-sentence:
   "select all" might be the start of "select all the photos from June".
 * At the end (`tick(final=True)`, local cascade): the whole rest of the utterance is planned
-  with the fast paths (`neo.agent.fastpath.plan`) and run if it can be covered completely;
+  with the fast paths (`neo2.core.agent.fastpath.plan`) and run if it can be covered completely;
   otherwise nothing more runs and `remaining()` hands the utterance to the pipeline.
 
 Everything that ran early leaves a one-shot *claim*: when the language model then asks for the
@@ -24,10 +24,10 @@ import json
 import time
 from dataclasses import dataclass
 
-from neo import runtime
-from neo.agent import fastpath
-from neo.agent.registry import ToolContext, registry
-from neo.events import bus
+from neo2.core import runtime
+from neo2.core.agent import fastpath
+from neo2.core.agent.registry import ToolContext, registry
+from neo2.core.events import bus
 
 _STABLE_S = 0.35  # a clause must sit unchanged this long before it counts as "said"
 _CLAIM_S = 15.0  # how long an early run can stand in for the model's own call for it
@@ -205,7 +205,7 @@ _actor: EarlyActor | None = None
 
 
 def early() -> EarlyActor:
-    """The bound agent's early actor (neo.runtime), else NEO.app's."""
+    """The bound agent's early actor (neo2.core.runtime), else NEO.app's."""
     rt = runtime.current_runtime()
     if rt is not None:
         return rt.get_or_create("early", EarlyActor)

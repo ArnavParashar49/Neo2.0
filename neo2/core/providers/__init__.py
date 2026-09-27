@@ -5,21 +5,20 @@ chat-only turns. A chain tries providers in order and moves on when one is rate-
 unreachable, so a free-tier 429 degrades gracefully instead of failing the turn.
 
 The brains made so far, and which of them failed lately, live in a :class:`BrainPool`: NEO.app's
-(the module's `_cache` and `_demoted`), or an embedded agent's own (neo.runtime) — built from
+(the module's `_cache` and `_demoted`), or an embedded agent's own (neo2.core.runtime) — built from
 that agent's keys, and with the host's own providers for any purpose it supplied them for.
 """
 
 from __future__ import annotations
 
 import asyncio
-import logging
 import time as _time
 from collections.abc import AsyncIterator, Mapping, Sequence
 from typing import Literal
 
-from neo import runtime
-from neo.config import BrainName, settings
-from neo.providers.base import (
+from neo2.core import logger, runtime
+from neo2.core.config import BrainName, settings
+from neo2.core.providers.base import (
     AllBrainsFailed,
     Message,
     Provider,
@@ -32,7 +31,7 @@ from neo.providers.base import (
 
 __all__ = ["AllBrainsFailed", "BrainPool", "Chain", "ProviderError", "RateLimited", "brain", "make", "pool"]
 
-log = logging.getLogger(__name__)
+log = logger(__name__)
 
 Purpose = Literal["agent", "fast", "vision", "offline", "light"]
 
@@ -81,7 +80,7 @@ _app_pool = _AppPool()
 
 
 def pool() -> BrainPool:
-    """The bound agent's brains (neo.runtime), else NEO.app's."""
+    """The bound agent's brains (neo2.core.runtime), else NEO.app's."""
     rt = runtime.current_runtime()
     if rt is not None:
         return rt.get_or_create("brains", BrainPool)
@@ -95,23 +94,23 @@ def make(name: BrainName) -> Provider:
 
 def _build(name: BrainName) -> Provider:
     if name == "gemini":
-        from neo.providers.gemini import GeminiProvider
+        from neo2.core.providers.gemini import GeminiProvider
 
         p: Provider = GeminiProvider()
     elif name == "groq":
-        from neo.providers.openai_compat import groq
+        from neo2.core.providers.openai_compat import groq
 
         p = groq()
     elif name == "gemini_lite":
-        from neo.providers.gemini import GeminiProvider
+        from neo2.core.providers.gemini import GeminiProvider
 
         p = GeminiProvider(model=settings().gemini_lite_model, name="gemini_lite")  # its own brain
     elif name == "local":
-        from neo.providers.openai_compat import local
+        from neo2.core.providers.openai_compat import local
 
         p = local()
     elif name == "claude":
-        from neo.providers.claude import ClaudeProvider
+        from neo2.core.providers.claude import ClaudeProvider
 
         p = ClaudeProvider()
     else:
@@ -234,7 +233,7 @@ class Chain:
             self._demote(p.name, e)
         if self._alone():
             return  # no conversation to tell (and never NEO.app's)
-        from neo.events import bus
+        from neo2.core.events import bus
 
         who = spoken_name(p.name)  # "Gemini Lite", "the local model"
         await bus().note(f"{who[:1].upper()}{who[1:]} unavailable, switching brain")
@@ -276,7 +275,7 @@ class Chain:
             secs, name = wait
             p = next(p for p in providers if p.name == name)
             log.warning(f"[brain] every brain failed; waiting {secs:.0f}s for {name}")
-            from neo.events import bus
+            from neo2.core.events import bus
 
             await bus().note(f"Waiting {secs:.0f}s for {spoken_name(name)}'s rate limit")
             await asyncio.sleep(secs + 0.5)

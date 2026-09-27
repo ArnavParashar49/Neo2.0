@@ -9,7 +9,7 @@ destructive, needs the screen, and whether the user wants an answer.
 Stop gets its own phrase set (there is no public Hinglish stop data at all): "bas karo",
 "ruk jao", "rehne do", "chup ho jao", "bolna band karo" … with the fillers people wrap them in.
 A bare "band karo" is not one: it usually means "turn it off" (the music, the alarm), as
-neo/reflex/__init__.py's stop rule also decides.
+neo2/core/reflex/__init__.py's stop rule also decides.
 """
 
 from __future__ import annotations

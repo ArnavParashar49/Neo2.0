@@ -1,8 +1,8 @@
 [project]
-name = "neo"
+name = "neo2"
 version = "2.1.0"
 description = "NEO — a free, local-first AI agent for your Mac"
-requires-python = ">=3.12,<3.13"  # neo/decide uses 3.12 syntax (PEP 695)
+requires-python = ">=3.12,<3.13"  # neo2/core/decide uses 3.12 syntax (PEP 695)
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "Arnav Parashar" }]
@@ -25,12 +25,12 @@ LinkedIn = "https://www.linkedin.com/in/arnavparashar49/"
 
 [project.optional-dependencies]
 dev = ["pytest", "pytest-asyncio", "ruff", "mypy"]
-train = ["datasets"]  # python -m neo.reflex.hf_data (Laya's Hugging Face training rows)
+train = ["datasets"]  # python -m neo2.core.reflex.hf_data (Laya's Hugging Face training rows)
 # brains: a vendor SDK is imported only when its provider is built
 gemini = ["google-genai>=2.20"]
 openai = ["openai>=2"]  # OpenAI, Groq, and any OpenAI-compatible or local server
 claude = ["anthropic>=1"]
-brains = ["neo[gemini,openai,claude]"]
+brains = ["neo2[gemini,openai,claude]"]
 # tools
 web = ["ddgs", "trafilatura", "pypdf"]  # web_search, web_fetch (pages and PDFs)
 browser = ["playwright"]  # NEO's own browser tool; then: playwright install chromium
@@ -42,7 +42,7 @@ mac = [  # the macOS tools: see, click, type, apps, files, shell, mail, calendar
     "pyobjc-framework-EventKit>=12.2,<13; sys_platform == 'darwin'",
     "pyobjc-framework-Contacts>=12.2,<13; sys_platform == 'darwin'",
     "pillow",
-    "tld",  # a site's registrable domain (neo.decide.sites)
+    "tld",  # a site's registrable domain (neo2.core.decide.sites)
     "lxml",  # a site's own search form / OpenSearch description
     "python-dateutil",  # recurring events (RRULE) when a calendar is read by script
     "pypdf",  # read_file on a PDF
@@ -58,16 +58,16 @@ voice = [  # local voice (Apple Silicon)
     "silero-vad",  # speech detection (5 s listening window)
     "torch",  # silero
 ]
-local = ["mlx-lm; sys_platform == 'darwin'"]  # python -m neo --local: the offline brain
+local = ["mlx-lm; sys_platform == 'darwin'"]  # python -m neo2 --local: the offline brain
 server = ["websockets>=13"]  # the overlay's websocket
 mcp = ["mcp>=2.2,<3"]  # python -m neo2.mcp (neo2-mcp)
 langchain = ["langchain-core>=1,<2"]  # neo2.adapters.langchain
 # NEO.app: exactly the dependencies it has always had
-app = ["neo[brains,web,embeddings,reflex,mac,browser,voice,local,server]"]
-all = ["neo[app,mcp,langchain]"]
+app = ["neo2[brains,web,embeddings,reflex,mac,browser,voice,local,server]"]
+all = ["neo2[app,mcp,langchain]"]
 
 [project.scripts]
-neo = "neo.main:main"
+neo2 = "neo2.core.main:main"  # NEO in a terminal, as `python -m neo2` (--text, --doctor, --local)
 neo2-mcp = "neo2.mcp:main"
 
 [build-system]
@@ -75,11 +75,11 @@ requires = ["setuptools>=77"]  # SPDX license expression (PEP 639)
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-include = ["neo*"]
+include = ["neo2*"]  # neo2, its core (neo2.core: NEO.app's own package, `neo` before 2.1) and the SDK
+exclude = ["neo", "neo.*"]  # the repo-only compatibility shim: never in the wheel
 
 [tool.setuptools.package-data]
 neo2 = ["py.typed"]
-neo = ["py.typed"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

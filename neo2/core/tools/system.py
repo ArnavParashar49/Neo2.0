@@ -11,7 +11,7 @@ import threading
 import time
 import uuid
 
-from neo.agent.registry import ToolContext, tool
+from neo2.core.agent.registry import ToolContext, tool
 
 _MAC = frozenset({"macos"})
 
@@ -19,13 +19,13 @@ _MAC = frozenset({"macos"})
 # The Mac's own scripting, loaded on first use: `clock` needs none of it, so importing this module
 # never loads the Mac tools (or AppKit) — the web preset uses the clock off macOS too.
 async def osascript(script: str, timeout: float = 30) -> str:
-    from neo.tools.computer.apps import osascript as run
+    from neo2.core.tools.computer.apps import osascript as run
 
     return await run(script, timeout)
 
 
 def _q(s: str) -> str:
-    from neo.tools.computer.apps import _q as quote
+    from neo2.core.tools.computer.apps import _q as quote
 
     return quote(s)
 
@@ -210,7 +210,7 @@ _timer_tasks: dict[str, asyncio.Task] = {}
 
 
 def _timers_path():
-    from neo.config import settings
+    from neo2.core.config import settings
 
     return settings().data_dir / "timers.json"
 
@@ -244,7 +244,7 @@ async def _run_timer(t: dict) -> None:
             _save_timers([x for x in _load_timers() if x["id"] != t["id"]])
         note = f"{t['label']} is done" + (" (late — your Mac was asleep)" if late else "")
         await osascript(f'display notification {_q(note)} with title "NEO" sound name "Glass"')
-        from neo.events import bus
+        from neo2.core.events import bus
 
         await bus().say(f"{t['label']}: time's up." + (" (A bit late — your Mac was asleep.)" if late else ""))
     finally:

@@ -8,7 +8,7 @@ import time
 
 import pytest
 
-from neo.reflex import learn, outcomes
+from neo2.core.reflex import learn, outcomes
 
 
 def _rows():
@@ -60,8 +60,8 @@ def test_due_needs_enough_new_examples_and_time(monkeypatch):
 
 
 def test_retrain_swaps_the_head_only_when_saved(monkeypatch):
-    import neo.reflex as reflex_mod
-    from neo.reflex import finetune
+    import neo2.core.reflex as reflex_mod
+    from neo2.core.reflex import finetune
 
     swapped = []
 
@@ -100,7 +100,7 @@ def test_learn_loop_trains_only_after_neo_has_been_idle(monkeypatch):
 
 
 def _live():
-    import neo.voice.live as live_mod
+    import neo2.core.voice.live as live_mod
 
     v = live_mod.LiveVoice.__new__(live_mod.LiveVoice)
 
@@ -125,7 +125,7 @@ _PARIS = "what's it like in Paris tomorrow"
     ],
 )
 def test_live_labels_each_sentence_by_what_the_model_did(text, tools, spoke, expected):
-    from neo.tools import load_all
+    from neo2.core.tools import load_all
 
     load_all()
     v = _live()
@@ -147,7 +147,7 @@ def test_a_partial_transcript_at_tool_time_and_the_final_one_make_one_label():
     replace it on the same label — not open a second, tool-less one that files as chat."""
     import asyncio
 
-    import neo.voice.live as live_mod
+    import neo2.core.voice.live as live_mod
 
     v = live_mod.LiveVoice.__new__(live_mod.LiveVoice)
 
@@ -206,7 +206,7 @@ def test_private_content_is_never_stored(monkeypatch):
     assert not learn.record("call me on 050 123 4567", "chat")
     assert learn.record("what's the weather in Dubai", "quick_action", "weather")
     monkeypatch.setenv("NEO_LEARN", "off")
-    from neo import config
+    from neo2.core import config
 
     monkeypatch.setattr(config, "_settings", None)
     assert not learn.record("what time is it in Tokyo", "quick_action", "clock")
@@ -226,10 +226,10 @@ def test_retention_and_forget(monkeypatch):
 
 
 def test_agent_outcome_corrects_the_reflex(monkeypatch):
-    from neo.agent.loop import AgentResult, Step
-    from neo.agent.session import _learn_from
-    from neo.reflex.schema import Decision
-    from neo.tools import load_all
+    from neo2.core.agent.loop import AgentResult, Step
+    from neo2.core.agent.session import _learn_from
+    from neo2.core.reflex.schema import Decision
+    from neo2.core.tools import load_all
 
     load_all()
     d = Decision("agent_task", 0.7, False, 0, False, 0, "laya+head")

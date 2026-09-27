@@ -1,7 +1,7 @@
 """An app's UI through Accessibility: the reads and writes every kind's window routes share.
 
 The primitives (attribute reads, sets, actions, the search-field finder, the web-tree switch)
-are :mod:`neo.decide.media`'s own, looked up on each call: until they move here, media and its
+are :mod:`neo2.core.decide.media`'s own, looked up on each call: until they move here, media and its
 tests keep working unchanged, and a patch of ``media._attr`` applies here too. The helpers below
 find things by role, keyboard shortcut and the OS's own localized words, never by an app's name
 or a label written in English only.
@@ -18,8 +18,8 @@ import unicodedata
 from functools import lru_cache
 from typing import Any
 
-from neo import effects
-from neo.decide._objc import pooled
+from neo2.core import effects
+from neo2.core.decide._objc import pooled
 
 __all__ = [
     "attr",
@@ -55,7 +55,7 @@ __all__ = [
 
 
 def _media():
-    from neo.decide import media
+    from neo2.core.decide import media
 
     return media
 
@@ -440,7 +440,7 @@ def _dock_pid() -> int | None:
     try:
         from AppKit import NSRunningApplication
 
-        from neo.decide.inventory import _DOCK_DOMAIN
+        from neo2.core.decide.inventory import _DOCK_DOMAIN
 
         apps = NSRunningApplication.runningApplicationsWithBundleIdentifier_(_DOCK_DOMAIN) or []
         return int(apps[0].processIdentifier()) if apps else None
@@ -465,7 +465,7 @@ def dock_badge(app_name: str) -> str | None:
 __all__ += ["enable_web_reading", "web_title", "page_text", "web_page", "web_view"]
 
 # Controls say what can be done on a page, not what it says: their words are skipped. An image's
-# words are left to a screenshot (see neo.decide.kinds.site).
+# words are left to a screenshot (see neo2.core.decide.kinds.site).
 _NOT_CONTENT = frozenset({
     "AXButton", "AXPopUpButton", "AXMenuButton", "AXMenu", "AXMenuBar", "AXMenuItem", "AXToolbar", "AXTextField",
     "AXSecureTextField", "AXSearchField", "AXComboBox", "AXCheckBox", "AXRadioButton", "AXSlider", "AXIncrementor",

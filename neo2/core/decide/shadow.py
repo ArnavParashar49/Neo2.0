@@ -1,6 +1,6 @@
 """The shadow log: what a task kind's new path would have done while its legacy code ran.
 
-A kind in "shadow" mode (neo.config ``decide_modes``) answers with legacy, then its driver's dry
+A kind in "shadow" mode (neo2.core.config ``decide_modes``) answers with legacy, then its driver's dry
 run works out in the background what the new path would have chosen. One JSON line per request
 goes to ``data_dir/decide_shadow.log`` (0600): the kind and facts that are app keys, hosts, method
 names, ids, counts and booleans. Never a title, a name, a query or a message: the drivers' dry runs
@@ -15,14 +15,15 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
-import logging
 import os
 import time
 from collections.abc import Awaitable, Iterator, Mapping
 from pathlib import Path
 from typing import Any
 
-log = logging.getLogger(__name__)
+from neo2.core import logger
+
+log = logger(__name__)
 
 __all__ = ["KEEP_S", "TIMEOUT_S", "path", "record", "later", "starting", "forget"]
 
@@ -32,7 +33,7 @@ _tasks: set[asyncio.Task] = set()  # the loop keeps only weak references to task
 
 
 def path() -> Path:
-    from neo.config import settings
+    from neo2.core.config import settings
 
     return settings().data_dir / "decide_shadow.log"
 
@@ -71,13 +72,13 @@ def later(kind: str, facts: Awaitable[Mapping[str, Any]], **extra: Any) -> None:
     """Run a dry run in the background, after the legacy answer went out, and log its facts
     plus ``extra`` (about legacy's own result). It never raises into the request: a failure is
     logged as its exception's name."""
-    from neo import privacy
-    from neo.decide import run
+    from neo2.core import privacy
+    from neo2.core.decide import run
 
     started = privacy.generation()
 
     async def go() -> None:
-        from neo.decide import engine
+        from neo2.core.decide import engine
 
         run.begin_request()  # anything the dry run would learn is dropped after an erase, too
         went_without: dict[str, bool] = {}

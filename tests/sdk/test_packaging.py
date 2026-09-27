@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[2]
 PYPROJECT = tomllib.loads((ROOT / "pyproject.toml").read_text())
 PROJECT = PYPROJECT["project"]
 EXTRAS: dict[str, list[str]] = PROJECT["optional-dependencies"]
-SELF = re.compile(r"^neo\[([a-z0-9_,-]+)\]$")
+SELF = re.compile(r"^neo2\[([a-z0-9_,-]+)\]$")
 
 # NEO.app's dependencies before they were split into core + extras (pyproject.toml at 4764b73).
 APP_BEFORE = {
@@ -57,7 +57,7 @@ HEAVY = ("torch", "laya", "mlx", "pyobjc", "playwright", "sentence-transformers"
 
 
 def _flat(extra: str, seen: tuple[str, ...] = ()) -> set[str]:
-    """An extra's requirements, with NEO's own extras (neo[a,b]) expanded."""
+    """An extra's requirements, with NEO's own extras (neo2[a,b]) expanded."""
     assert extra in EXTRAS, f"no extra named {extra!r}"
     assert extra not in seen, f"extras include each other in a loop: {seen + (extra,)}"
     out: set[str] = set()
@@ -96,7 +96,7 @@ def test_the_extras():
     for extra in ("web", "brains", "mcp", "langchain"):
         heavy = [r for r in _flat(extra) if _name(r).startswith(("torch", "laya", "mlx", "pyobjc", "playwright"))]
         assert heavy == [], (extra, heavy)
-    for extra in EXTRAS:  # every neo[...] names real extras
+    for extra in EXTRAS:  # every neo2[...] names real extras
         _flat(extra)
     assert set(EXTRAS["dev"]) == {"pytest", "pytest-asyncio", "ruff", "mypy"}
     assert EXTRAS["train"] == ["datasets"]
@@ -119,7 +119,7 @@ def test_licence_author_and_links_are_the_owners():
 
 
 def test_python_version():
-    # neo/decide uses Python 3.12 syntax (PEP 695); 3.13 waits for the owner's decision.
+    # neo2/core/decide uses Python 3.12 syntax (PEP 695); 3.13 waits for the owner's decision.
     assert PROJECT["requires-python"] == ">=3.12,<3.13"
 
 
@@ -127,12 +127,29 @@ def test_console_scripts_and_typing_marker():
     import neo2
     import neo2.mcp
 
-    assert PROJECT["scripts"] == {"neo": "neo.main:main", "neo2-mcp": "neo2.mcp:main"}
+    assert PROJECT["scripts"] == {"neo2": "neo2.core.main:main", "neo2-mcp": "neo2.mcp:main"}
     assert callable(neo2.mcp.main)
-    for pkg in ("neo2", "neo"):  # neo too: neo2 re-exports ToolContext, SAFETY_RULES, ToolOutput…
-        assert (ROOT / pkg / "py.typed").is_file()
-        assert PYPROJECT["tool"]["setuptools"]["package-data"][pkg] == ["py.typed"]
+    # One marker for the whole package, neo2.core too (neo2 re-exports ToolContext, SAFETY_RULES…).
+    assert (ROOT / "neo2" / "py.typed").is_file()
+    assert PYPROJECT["tool"]["setuptools"]["package-data"] == {"neo2": ["py.typed"]}
     assert neo2.__version__ == PROJECT["version"]
+
+
+def test_the_distribution_is_neo2_and_ships_no_top_level_neo():
+    """`neo2` on PyPI (`neo` is NeuralEnsemble's, which installs a top-level package of that name).
+    The wheel has neo2 with NEO's own package inside it (neo2.core, `neo` before 2.1); the
+    checkout's compatibility shim (a top-level `neo` package) stays out of it."""
+    assert PROJECT["name"] == "neo2"
+    find = PYPROJECT["tool"]["setuptools"]["packages"]["find"]
+    assert find["include"] == ["neo2*"] and set(find["exclude"]) == {"neo", "neo.*"}
+    assert (ROOT / "neo" / "__init__.py").is_file()  # the shim is in the repo…  neo2-codemod: keep
+    setuptools = pytest.importorskip("setuptools")
+    pkgs = set(setuptools.find_packages(str(ROOT), include=find["include"], exclude=find["exclude"]))
+    assert {"neo2", "neo2.core", "neo2.core.tools.computer", "neo2.core.decide.kinds", "neo2.sdk", "neo2.mcp"} <= pkgs
+    assert not [p for p in pkgs if p == "neo" or p.startswith(("neo.", "tests"))]  # …never in the wheel  neo2-codemod: keep
+    # every package NEO has is in the wheel: a folder of neo2/ with an __init__.py
+    folders = {".".join(d.relative_to(ROOT).parts) for d in (ROOT / "neo2").rglob("*") if (d / "__init__.py").is_file()}
+    assert folders | {"neo2"} == pkgs
 
 
 def test_model_field_defaults_are_keywords():
@@ -142,7 +159,7 @@ def test_model_field_defaults_are_keywords():
     import ast
 
     bad = []
-    for pkg in ("neo2", "neo"):
+    for pkg in ("neo2",):  # neo2.core too
         for f in sorted((ROOT / pkg).rglob("*.py")):
             for node in ast.walk(ast.parse(f.read_text(), str(f))):
                 call = node.value if isinstance(node, ast.AnnAssign) else None

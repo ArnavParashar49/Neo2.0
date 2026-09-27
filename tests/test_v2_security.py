@@ -7,23 +7,23 @@ import asyncio
 
 import pytest
 
-from neo.agent import confirm
-from neo.agent.loop import run_agent
-from neo.agent.registry import RegisteredTool, Registry, ToolContext, registry
-from neo.events import EventBus
-from neo.providers.base import ToolCall, Turn
-from neo.tools.computer import policy
+from neo2.core.agent import confirm
+from neo2.core.agent.loop import run_agent
+from neo2.core.agent.registry import RegisteredTool, Registry, ToolContext, registry
+from neo2.core.events import EventBus
+from neo2.core.providers.base import ToolCall, Turn
+from neo2.core.tools.computer import policy
 
 
 @pytest.fixture(autouse=True)
 def _isolate(tmp_path, monkeypatch):
-    from neo import config, events
+    from neo2.core import config, events
 
     monkeypatch.setattr(config, "_settings", None)
     monkeypatch.setenv("NEO_DATA_DIR", str(tmp_path / "neo"))
     monkeypatch.setattr(events, "_bus", EventBus())
     confirm.cancel("test")
-    from neo.tools import load_all
+    from neo2.core.tools import load_all
 
     load_all()
     yield
@@ -91,7 +91,7 @@ def test_everything_else_asks_first(cmd):
 
 
 def test_shell_asks_with_the_full_command_and_keeps_secrets_out_of_its_environment(monkeypatch):
-    from neo.tools.computer import shell
+    from neo2.core.tools.computer import shell
 
     long_cmd = "rm -rf ~/Downloads/old " + "x" * 300
     out = asyncio.run(shell.run(long_cmd, args={"command": long_cmd}))
@@ -162,7 +162,7 @@ def test_new_files_in_the_users_folders_need_no_ok_but_everything_risky_does(hom
 
 
 def test_write_edit_and_read_follow_the_rules(home):
-    from neo.tools.computer import shell
+    from neo2.core.tools.computer import shell
 
     target = str(home / "Desktop/notes.txt")
     assert shell.write_file(target, "hi", {"path": target, "content": "hi"}).startswith("Wrote")
@@ -263,8 +263,8 @@ def test_an_approval_covers_exactly_the_staged_parameters_and_only_its_own_task(
 
 
 def test_session_takes_yes_only_from_the_user(monkeypatch):
-    from neo.agent import session as sess_mod
-    from neo.reflex.schema import Decision
+    from neo2.core.agent import session as sess_mod
+    from neo2.core.reflex.schema import Decision
 
     executed = []
 
@@ -294,7 +294,7 @@ def test_session_takes_yes_only_from_the_user(monkeypatch):
 
 
 def test_the_card_must_name_the_action(monkeypatch):
-    from neo import app as app_mod
+    from neo2.core import app as app_mod
 
     a = app_mod.App()
     calls = []
@@ -345,7 +345,7 @@ def test_after_reading_untrusted_content_memory_writes_ask():
 
 
 def test_return_in_a_terminal_and_committing_clicks_ask(monkeypatch):
-    import neo.tools.computer as comp
+    import neo2.core.tools.computer as comp
 
     monkeypatch.setattr(comp.ax, "focused_element_text", lambda: "user@mac ~ % rm -rf ~/Documents")
     gate = asyncio.run(comp._ask_before_keys({"keys": "return"}, "return", "Terminal", ToolContext()))
@@ -365,7 +365,7 @@ def test_return_in_a_terminal_and_committing_clicks_ask(monkeypatch):
 def test_live_takes_yes_from_the_users_words_not_the_models(monkeypatch):
     import time
 
-    import neo.voice.live as live_mod
+    import neo2.core.voice.live as live_mod
 
     answered = []
 
@@ -373,12 +373,12 @@ def test_live_takes_yes_from_the_users_words_not_the_models(monkeypatch):
         async def answer(self, yes, **kw):
             answered.append(yes)
             confirm.cancel("t")
-            from neo.agent.session import Reply
+            from neo2.core.agent.session import Reply
 
             return Reply("trashed", "confirm")
 
         async def handle(self, text, **kw):
-            from neo.agent.session import Reply
+            from neo2.core.agent.session import Reply
 
             return Reply("new request", "agent")
 
@@ -413,7 +413,7 @@ def test_live_takes_yes_from_the_users_words_not_the_models(monkeypatch):
 def test_a_spoken_yes_needs_the_question_that_was_voiced_not_a_lookalike():
     import time
 
-    import neo.voice.live as live_mod
+    import neo2.core.voice.live as live_mod
 
     v = live_mod.LiveVoice.__new__(live_mod.LiveVoice)
     confirm.stage("click_text", {"label": "OK"}, "click “OK” in Finder")
@@ -481,7 +481,7 @@ def test_every_staging_gets_a_fresh_id_so_old_cards_expire():
 
 
 def test_git_in_every_shell_command_ignores_a_repositorys_program_settings():
-    from neo.tools.computer import shell
+    from neo2.core.tools.computer import shell
 
     env = shell._env()
     keys = {env[f"GIT_CONFIG_KEY_{i}"]: env[f"GIT_CONFIG_VALUE_{i}"] for i in range(int(env["GIT_CONFIG_COUNT"]))}

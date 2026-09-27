@@ -13,17 +13,17 @@ asked.
 from __future__ import annotations
 
 import asyncio
-import logging
 import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from neo.decide._objc import pooled
+from neo2.core import logger
+from neo2.core.decide._objc import pooled
 
 if TYPE_CHECKING:
-    from neo.decide.inventory import App
+    from neo2.core.decide.inventory import App
 
-log = logging.getLogger(__name__)
+log = logger(__name__)
 
 # Words that say what kind of thing it is, not which: "close the youtube tab" closes "youtube".
 _FILLER = re.compile(r"\b(?:the|a|an|my|this|that|all|every|of|tabs?|windows?|apps?|application|page|site|website)\b", re.I)
@@ -56,7 +56,7 @@ def _tab_codes(app: App) -> _TabCodes | None:
     url = props.get("url", "")
     title = props.get("title") or props.get("name", "")
     close = getattr(d.commands.get("close"), "code", "") or ""
-    from neo.decide.media import _ok4, _ok8  # a code goes into script source: exactly a code
+    from neo2.core.decide.media import _ok4, _ok8  # a code goes into script source: exactly a code
 
     if not (all(_ok4(c) for c in (window, tab, url, title)) and _ok8(close)):
         return None
@@ -82,7 +82,7 @@ def _close_tabs_script(c: _TabCodes) -> str:
 
 @pooled
 def _running_apps() -> list[App]:
-    from neo.decide import inventory
+    from neo2.core.decide import inventory
 
     return [a for a in inventory.inventory() if a.running]
 
@@ -93,8 +93,8 @@ def _is_browser(app: App) -> bool:
 
 async def close_target(target: str) -> str:
     """Close what `target` names. Returns what was closed, or an 'Error: …' saying what isn't open."""
-    from neo.decide import inventory, media
-    from neo.tools.computer import apps as mac
+    from neo2.core.decide import inventory, media
+    from neo2.core.tools.computer import apps as mac
 
     what = words(target)
     if not what:

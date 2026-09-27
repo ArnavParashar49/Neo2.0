@@ -1,6 +1,6 @@
-"""Zero-shot Laya on its own checkpoint: loaded when neo/decide asks, let go when idle.
+"""Zero-shot Laya on its own checkpoint: loaded when neo2/core/decide asks, let go when idle.
 
-neo/decide asks Laya choices no head was trained for ("which of these apps should do the
+neo2/core/decide asks Laya choices no head was trained for ("which of these apps should do the
 request?", and "what kind of task is this?" while the reflex has no kind head). The reflex's
 encoder is picked for its trained heads, and the multilingual one it moves to is the weakest of
 the pinned repo's three at zero-shot, so these run on ``typed-decisions``. Measured on decide's
@@ -20,7 +20,7 @@ Sharing the GPU with the reflex:
 * Loaded on the first question, in a worker thread; a caller waits for it at most ``wait_s``,
   then gets None (its own fallback decides). The weights are read once with no lock held, so the
   load itself holds the shared Laya lock ~0.2-0.3 s.
-* Every forward pass holds :func:`neo.reflex.laya_lock` (PyTorch on MPS is not thread-safe).
+* Every forward pass holds :func:`neo2.core.reflex.laya_lock` (PyTorch on MPS is not thread-safe).
 * :data:`IDLE_S` after the last question the model is dropped, giving its ~1.7 GB back. The first
   question after that pays the reload (see :data:`IDLE_S`).
 """
@@ -34,8 +34,8 @@ import threading
 import time
 from typing import Any
 
-from neo import effects
-from neo.config import settings
+from neo2.core import effects
+from neo2.core.config import settings
 
 SUBFOLDER = "typed-decisions"
 # This checkpoint's files only (the repo root and its siblings are other checkpoints).
@@ -64,7 +64,7 @@ def checkpoint_dir(download: bool = True) -> str:
     ``download=False`` only looks in the cache, whose folder may lack this checkpoint's files."""
     from huggingface_hub import snapshot_download
 
-    from neo import models
+    from neo2.core import models
 
     snap = snapshot_download(
         models.LAYA, revision=models.LAYA_REVISION, allow_patterns=FILES, local_files_only=not download
@@ -114,7 +114,7 @@ def _close(agent: Any) -> None:
 
 
 def _lock() -> threading.Lock:
-    from neo.reflex import laya_lock
+    from neo2.core.reflex import laya_lock
 
     return laya_lock()
 

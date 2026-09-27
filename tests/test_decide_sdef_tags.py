@@ -1,11 +1,11 @@
-"""neo.decide.sdef: the read tags and property metadata, from small dictionaries written here
+"""neo2.core.decide.sdef: the read tags and property metadata, from small dictionaries written here
 (the shapes the survey found in every local dictionary). Nothing is launched or scripted."""
 
 from __future__ import annotations
 
 import xml.etree.ElementTree as ET
 
-from neo.decide import sdef
+from neo2.core.decide import sdef
 
 
 def parse(body: str) -> sdef.Dictionary:

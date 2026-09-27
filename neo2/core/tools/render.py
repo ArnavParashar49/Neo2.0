@@ -38,7 +38,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
-from neo import effects
+from neo2.core import effects
 
 IDLE_S = 120.0  # the headless browser closes after this long without a page to read
 TIMEOUT_S = 12.0  # loading and settling one page, at most
@@ -305,7 +305,7 @@ def _not_to_open(method: str, url: str) -> str:
     if (method or "GET").upper() not in ("GET", "HEAD"):
         return "the page tried to send a form"
     if urlsplit(url).scheme.lower() in ("http", "https"):
-        from neo.security.policy import url_carries_data
+        from neo2.core.security.policy import url_carries_data
 
         if url_carries_data(url):
             return "that link carries data (a token, say), which a script there could act on"
@@ -616,7 +616,7 @@ async def render(
     `guard(url)` says why a URL must not be loaded ("" = fine); web_fetch's own rule by default.
     Raises RenderError."""
     if guard is None:
-        from neo.security.policy import private_host as guard
+        from neo2.core.security.policy import private_host as guard
     return await _renderer.render(url, guard, timeout_s=timeout_s, max_bytes=max_bytes)
 
 

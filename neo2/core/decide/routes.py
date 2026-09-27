@@ -11,10 +11,10 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from neo.decide import eventkit
+from neo2.core.decide import eventkit
 
 if TYPE_CHECKING:
-    from neo.decide.inventory import App
+    from neo2.core.decide.inventory import App
 
 __all__ = ["ROUTES", "route_app", "pending"]
 
@@ -25,7 +25,7 @@ _ITEMS = {"event": ("calendar", "calendars", "events"), "reminder": ("list", "li
 
 def route_app(kind: str, route: str) -> App | None:
     """``route`` as a candidate for ``kind``, or None when its store can't be used."""
-    from neo.decide.inventory import App
+    from neo2.core.decide.inventory import App
 
     entity = ROUTES.get(route)
     if entity is None or eventkit.available(entity):

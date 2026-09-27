@@ -1,7 +1,7 @@
 """Laya-backed reflex: local typed decisions on Apple Silicon.
 
 One encoder pass (the multilingual checkpoint by default: it also reads Hindi and Hinglish, and
-embeds in ~13 ms on an M3 Pro) feeds the heads trained by ``neo/reflex/finetune.py`` — intent,
+embeds in ~13 ms on an M3 Pro) feeds the heads trained by ``neo2/core/reflex/finetune.py`` — intent,
 destructive, needs_screen, reply, tool and task kind, each a small MLP ensemble. Rules back up the
 two signals that must not miss: the words of an action that is hard to undo, and a request about
 what is on the screen. Without a head for this encoder, Laya answers zero-shot.
@@ -15,10 +15,10 @@ from typing import Any
 
 import numpy as np
 
-from neo.config import settings
-from neo.reflex import features
-from neo.reflex.features import head_probs, load_encoder
-from neo.reflex.schema import INTENT_CRITERIA, QUESTIONS, Decision, refers_to_screen, sounds_destructive
+from neo2.core.config import settings
+from neo2.core.reflex import features
+from neo2.core.reflex.features import head_probs, load_encoder
+from neo2.core.reflex.schema import INTENT_CRITERIA, QUESTIONS, Decision, refers_to_screen, sounds_destructive
 
 _INTENTS = list(INTENT_CRITERIA)
 _ACTIONS = ("quick_action", "agent_task")
@@ -72,7 +72,7 @@ class LayaReflex:
         """A head for this encoder is loaded (after an erase, the one it put back). Asked from the
         learn loop, which mustn't wait on the Laya lock: a busy reflex answers as of its last read."""
         if self._epoch is not None and self._epoch != _head_epoch:
-            from neo.reflex import laya_lock
+            from neo2.core.reflex import laya_lock
 
             lock = laya_lock()
             if lock.acquire(blocking=False):
@@ -85,7 +85,7 @@ class LayaReflex:
     def decide(self, text: str) -> Decision:
         """The decision for `text`. With a head it also leaves ``last_embedding`` (the text's
         L2-normalised embedding) and ``center`` (the head's mean embedding) for the correction
-        memory (neo/reflex/memory.py); otherwise both are None."""
+        memory (neo2/core/reflex/memory.py); otherwise both are None."""
         if self._epoch is not None and self._epoch != _head_epoch:
             self.reload_head()  # the erase put the head without your requests back
         if self._head is None:
@@ -99,7 +99,7 @@ class LayaReflex:
         top = np.sort(probs)
         # Not sure: the head's pick still stands. Blending in zero-shot intent was measured worse
         # (0.80 vs 0.81 on real phrasings; zero-shot alone 0.37) and cost ~230 ms each time. What
-        # actually runs for an unsure request becomes its training label (neo/reflex/learn.py).
+        # actually runs for an unsure request becomes its training label (neo2/core/reflex/learn.py).
         source = "laya+unsure" if float(probs.max()) < h["zs_below"] else "laya+head"
         intent = _INTENTS[int(probs.argmax())]
         d_p = max(_yes(h["destructive"], xs), float(sounds_destructive(text)))

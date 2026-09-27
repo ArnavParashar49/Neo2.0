@@ -5,7 +5,7 @@ Every property and class is addressed by the four-char code the app's own dictio
 in argv: nothing the user said is ever part of a script.
 
 Until the helpers move here for good, running a script and asking macOS's Automation question go
-through :mod:`neo.decide.media`'s own functions, looked up on each call (so its tests' patches
+through :mod:`neo2.core.decide.media`'s own functions, looked up on each call (so its tests' patches
 keep applying and media behaves exactly as before).
 """
 
@@ -17,11 +17,11 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Literal
 
-from neo.decide.run import Effect, Outcome
+from neo2.core.decide.run import Effect, Outcome
 
 if TYPE_CHECKING:
-    from neo.decide.inventory import App
-    from neo.decide.sdef import Dictionary
+    from neo2.core.decide.inventory import App
+    from neo2.core.decide.sdef import Dictionary
 
 __all__ = [
     "Slot",
@@ -54,7 +54,7 @@ STATUS = ("OK", "EMPTY", "NO_CONTAINER", "NO_PARTY")  # first field of every ans
 
 
 def _media():
-    from neo.decide import media
+    from neo2.core.decide import media
 
     return media
 

@@ -1,6 +1,6 @@
 """Synthetic labelled utterances for the reflex head — templates × slots, no API needed.
 
-Run ``python -m neo.reflex.finetune`` to build + train. Add real misroutes to
+Run ``python -m neo2.core.reflex.finetune`` to build + train. Add real misroutes to
 ``~/.neo/reflex_extra.jsonl`` (``{"text": ..., "intent": ...}``) and retrain any time.
 """
 
@@ -10,8 +10,8 @@ import json
 import random
 from pathlib import Path
 
-from neo.config import settings
-from neo.reflex.schema import INTENT_CRITERIA
+from neo2.core.config import settings
+from neo2.core.reflex.schema import INTENT_CRITERIA
 
 APPS = [
     "Safari",
@@ -398,8 +398,8 @@ def tool_for(text: str) -> str:
     import re
 
     try:
-        from neo.agent.session import _match_fast_path
-        from neo.tools import load_all
+        from neo2.core.agent.session import _match_fast_path
+        from neo2.core.tools import load_all
 
         load_all()
         hit = _match_fast_path(text)
@@ -478,7 +478,7 @@ def build(n_per_class: int = 320, seed: int = 7, *, override: bool = True, own: 
     for r in rows:
         r.setdefault("tool", tool_for(r["text"]) if r["intent"] == "quick_action" else "")
     # Romanised-Hindi templates for every class, with explicit labels (templates_hi.py).
-    from neo.reflex.templates_hi import rows as hinglish_rows
+    from neo2.core.reflex.templates_hi import rows as hinglish_rows
 
     rows += [r for r in hinglish_rows() if r["text"].lower() not in seen]
     # LLM-generated + real-world extras + mapped Hugging Face rows live outside the repo
@@ -489,7 +489,7 @@ def build(n_per_class: int = 320, seed: int = 7, *, override: bool = True, own: 
         extra = settings().data_dir / name
         if extra.exists():
             if name == "reflex_extra.jsonl":  # the user's own requests: deduped, within retention
-                from neo.reflex.learn import _read as read_examples
+                from neo2.core.reflex.learn import _read as read_examples
 
                 src = read_examples(extra)
             else:
@@ -540,8 +540,8 @@ def _own_outcomes_win(rows: list[dict], override: bool = True) -> list[dict]:
     extra = settings().data_dir / "reflex_extra.jsonl"
     if not extra.exists():
         return rows
-    from neo.reflex.learn import _read as read_examples
-    from neo.reflex.learn import norm
+    from neo2.core.reflex.learn import _read as read_examples
+    from neo2.core.reflex.learn import norm
 
     own = {norm(r["text"]): r for r in read_examples(extra)}
     verified = {k for k, r in own.items() if r.get("verified")}
@@ -565,7 +565,7 @@ def benchmark(rows: list[dict] | None = None, path: Path | None = None) -> tuple
     and your own examples — are made without looking at it ("next song", "ruk jao" are in both), so
     whoever evaluates drops the overlap here. `rows`: what the head was trained on (default: build()).
     `path`: another benchmark file. Returns (benchmark rows, how many were dropped)."""
-    from neo.reflex.sources import text_key
+    from neo2.core.reflex.sources import text_key
 
     path = path or settings().data_dir / "reflex_eval.jsonl"
     if not path.exists():
@@ -584,7 +584,7 @@ def benchmark(rows: list[dict] | None = None, path: Path | None = None) -> tuple
 
 
 if __name__ == "__main__":
-    from neo import log_to_stdout
+    from neo2.core import log_to_stdout
 
     log_to_stdout()  # the providers' status lines, as this command always printed them
     rows = build()

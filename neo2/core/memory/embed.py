@@ -9,14 +9,14 @@ callers fall back to keyword search.
 
 from __future__ import annotations
 
-import logging
 import threading
 
 import numpy as np
 
-from neo.config import settings
+from neo2.core import logger
+from neo2.core.config import settings
 
-log = logging.getLogger(__name__)
+log = logger(__name__)
 
 MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 DIM = 384
@@ -35,7 +35,7 @@ def _get():
             try:
                 from sentence_transformers import SentenceTransformer
 
-                from neo import effects, models
+                from neo2.core import effects, models
 
                 effects.guard("model", "load the memory's embedding model", via=SentenceTransformer)
                 _model = SentenceTransformer(

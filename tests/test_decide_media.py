@@ -1,4 +1,4 @@
-"""neo.decide.media: the generic play-something driver, fully faked.
+"""neo2.core.decide.media: the generic play-something driver, fully faked.
 
 Nothing here launches an app, sends an Apple event, performs an AX action, plays audio or opens a
 URL: osascript, the AX tree, CoreAudio, the video search, open_app, the engine and the inventory
@@ -14,11 +14,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from neo.decide import media
-from neo.decide.engine import Candidate
-from neo.decide.inventory import App
-from neo.decide.sdef import Command, Dictionary
-from neo.tools.computer import apps as apps_mod
+from neo2.core.decide import media
+from neo2.core.decide.engine import Candidate
+from neo2.core.decide.inventory import App
+from neo2.core.decide.sdef import Command, Dictionary
+from neo2.core.tools.computer import apps as apps_mod
 
 BID = "com.fixture.player"
 APP_PID = 500
@@ -234,7 +234,7 @@ def _fast_and_hermetic(monkeypatch):
     )
     monkeypatch.setattr(media, "_last_open", None)
     # These tests drive the choice among apps; the web-first default has its own tests below.
-    from neo import config
+    from neo2.core import config
 
     monkeypatch.setenv("NEO_PLAY_DEFAULT", "apps")
     monkeypatch.setenv("NEO_PLAY_SITE", "")
@@ -249,7 +249,7 @@ def _fast_and_hermetic(monkeypatch):
         raise AssertionError("no web search in this test")
 
     monkeypatch.setattr(media, "_text_search", no_text_search)
-    from neo.decide import sites
+    from neo2.core.decide import sites
 
     async def no_discovery(host, prefix=""):
         return []
@@ -587,8 +587,8 @@ async def test_play_best_moves_to_the_next_source_when_the_library_has_nothing(m
 
 
 async def test_only_the_users_own_words_go_on_as_theirs(monkeypatch):
-    from neo.agent.registry import ToolContext, registry
-    from neo.tools import media as _tool  # noqa: F401 - registers play_music
+    from neo2.core.agent.registry import ToolContext, registry
+    from neo2.core.tools import media as _tool  # noqa: F401 - registers play_music
 
     got = []
 
@@ -922,7 +922,7 @@ async def test_now_playing_never_makes_macos_ask(monkeypatch, osa):
 
 
 async def test_the_erase_forgets_learned_items_and_a_request_in_flight_learns_nothing(monkeypatch, engine):
-    from neo import privacy
+    from neo2.core import privacy
 
     media._uri_store(BID, "505", "fixtureplayer:track:1", "505")
     assert media._uri_lookup(BID, "505") is not None
@@ -938,7 +938,7 @@ async def test_the_erase_forgets_learned_items_and_a_request_in_flight_learns_no
 # ---------------------------------------------------------------- web first (the default)
 @pytest.fixture
 def web_first(monkeypatch, audio):
-    from neo import config
+    from neo2.core import config
 
     monkeypatch.setenv("NEO_PLAY_DEFAULT", "web")
     monkeypatch.setenv("NEO_PLAY_SITE", "vidzone")
@@ -992,7 +992,7 @@ async def test_a_refused_video_search_falls_back_to_a_site_search(monkeypatch, e
         return [{"href": "https://vidzone.example/", "title": "home"}, {"href": "https://vidzone.example/watch?v=xyz", "title": "505"}]
 
     monkeypatch.setattr(media, "_text_search", text)
-    from neo.decide import sites
+    from neo2.core.decide import sites
 
     async def no_templates(host, prefix=""):
         return []
@@ -1004,7 +1004,7 @@ async def test_a_refused_video_search_falls_back_to_a_site_search(monkeypatch, e
 
 
 async def test_with_both_searches_down_the_sites_own_search_page_finds_it(monkeypatch, engine, web_first):
-    from neo.decide import sites
+    from neo2.core.decide import sites
 
     engine.cands = [Candidate(None, 0.5, 0.0, "fallback: web", ("web",))]
 

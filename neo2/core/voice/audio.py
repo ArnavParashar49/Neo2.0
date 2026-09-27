@@ -11,7 +11,7 @@ import weakref
 import numpy as np
 import sounddevice as sd
 
-from neo import effects
+from neo2.core import effects
 
 MIC_RATE = 16000
 OUT_RATE = 24000
@@ -264,7 +264,7 @@ def reopen_all(reason: str) -> bool:
 
 
 def _watch() -> None:
-    from neo.voice import devices
+    from neo2.core.voice import devices
 
     last = (devices.default_input(), devices.default_output())
     last_stall_fix = 0.0

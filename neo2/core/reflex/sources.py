@@ -1,6 +1,6 @@
 """Public datasets for the reflex: where each comes from, its licence, and how it maps onto NEO.
 
-Every source is pinned to a revision (like neo/models.py pins models), and only what a loader
+Every source is pinned to a revision (like neo2/core/models.py pins models), and only what a loader
 reads is fetched: parquet columns by projection, the head of a 185 MB CSV and the task texts
 inside a 259 MB zip by HTTP range requests. Downloads go to the Hugging Face cache or to
 ``<data_dir>/hf_cache``. The mapping is the point: we don't learn *their* labels, we learn how
@@ -60,10 +60,10 @@ from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
-from neo.reflex.schema import asks_something
+from neo2.core.reflex.schema import asks_something
 
 INTENTS = ("chat", "quick_action", "agent_task", "stop")
-# neo/decide TASKS (engine.py), mirrored so building data never imports the decide engine.
+# neo2/core/decide TASKS (engine.py), mirrored so building data never imports the decide engine.
 KINDS = ("play_media", "send_message", "send_email", "write_note", "add_reminder", "add_event", "open_app",
          "web_search", "other")
 LANGS = ("en", "hi", "hinglish")  # hi = Devanagari, hinglish = romanised Hindi
@@ -171,7 +171,7 @@ _KIND_BY_TOOL = {"play_music": "play_media", "mail_send": "send_email", "calenda
 
 def kind_for(intent: str, tool: str, override: str | None = None) -> str | None:
     if intent not in ("quick_action", "agent_task"):
-        return None  # only actions reach neo/decide
+        return None  # only actions reach neo2/core/decide
     return override or _KIND_BY_TOOL.get(tool, "other")
 
 
@@ -235,7 +235,7 @@ def removes(text: str) -> bool:
 
 # A stop said to a ringing alarm or a call, naming nothing ("be quiet", "stop now", "चुप रहो",
 # "बंद हो जाओ") is NEO's stop. A bare "turn it off" / "band karo" is not: it usually means the
-# thing that's on (neo/reflex/__init__.py makes the same call).
+# thing that's on (neo2/core/reflex/__init__.py makes the same call).
 _STOP_WORD = (
     r"stop(?:\s+(?:it|that|now|talking|ringing|making\s+(?:noise|sounds?)))?|cancel(?:\s+(?:it|that))?|"
     r"never\s*mind|quiet|be\s+(?:quiet|silent)|silence|shut\s+(?:up|off|down)|hush|sh+|enough|"

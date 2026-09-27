@@ -2,7 +2,7 @@
 (send_email) joins it later.
 
 The engine picks the app (``choose("read_mail")``: one whose dictionary reads an inbox, or the
-default mail handler when it is no browser) and :func:`neo.decide.run.run_best` tries them in
+default mail handler when it is no browser) and :func:`neo2.core.decide.run.run_best` tries them in
 order. Per app, best first:
 
 * ``script_read`` - its dictionary: the inbox's unread count, then the newest messages by index,
@@ -22,12 +22,12 @@ import re
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from neo.decide import aescript, axkit, engine, run
-from neo.decide.run import Effect, Outcome, Req, Result
+from neo2.core.decide import aescript, axkit, engine, run
+from neo2.core.decide.run import Effect, Outcome, Req, Result
 
 if TYPE_CHECKING:
-    from neo.decide.engine import Candidate
-    from neo.decide.inventory import App
+    from neo2.core.decide.engine import Candidate
+    from neo2.core.decide.inventory import App
 
 __all__ = ["READ", "unread", "preview", "methods_for"]
 
@@ -100,7 +100,7 @@ async def _badge(app: App) -> Outcome | None:
 
 
 class _Read:
-    """The read_mail driver (see :class:`neo.decide.run.Driver`)."""
+    """The read_mail driver (see :class:`neo2.core.decide.run.Driver`)."""
 
     KIND = "read_mail"
     OVERALL_S = 45.0

@@ -6,7 +6,7 @@ features, which apps worked for what (and the songs/videos, sites, lists and con
 learned), the audit trail, the core's logs, and NEO's own browser profile (its cookies and logins). What stays: settings and keys (~/.neo/.env), timers that are still running, and
 downloaded models — none of them is about the user.
 
-Reached only from the overlay (after its own confirmation) or `python -m neo --forget-all`: never
+Reached only from the overlay (after its own confirmation) or `python -m neo2 --forget-all`: never
 a tool a model can call, so a web page or an email can't wipe anything.
 """
 
@@ -15,14 +15,14 @@ from __future__ import annotations
 import asyncio
 import shutil
 
-from neo import runtime
-from neo.config import settings
+from neo2.core import runtime
+from neo2.core.config import settings
 
 _generation = 0  # bumped by every erase: work that started before it must not write afterwards
 
 
 def generation() -> int:
-    """The erase generation of the bound agent (neo.runtime), else NEO.app's."""
+    """The erase generation of the bound agent (neo2.core.runtime), else NEO.app's."""
     rt = runtime.current_runtime()
     if rt is not None:
         return rt.generation
@@ -37,8 +37,8 @@ async def forget_everything() -> dict[str, int]:
     if runtime.current_runtime() is not None:
         raise RuntimeError("forget_everything is NEO.app's erase; an embedded agent erases its own data dir")
     runtime.check_unbound("forget_everything()")  # embedded, with no agent bound: before anything changes
-    from neo.memory.store import store
-    from neo.reflex import finetune, learn, memory, outcomes
+    from neo2.core.memory.store import store
+    from neo2.core.reflex import finetune, learn, memory, outcomes
 
     _generation += 1
     s = settings()
@@ -49,8 +49,8 @@ async def forget_everything() -> dict[str, int]:
     finetune.feature_cache().unlink(missing_ok=True)  # rebuilt from the public datasets on the next retrain
     finetune.reset_to_base()  # the heads fit on your requests go; the one trained without them stays (never raises)
     finetune.sweep_temporaries()  # and what a cut-off write of either left behind
-    from neo.decide import engine as decide
-    from neo.decide import eventkit, learned, media, run, shadow, sites
+    from neo2.core.decide import engine as decide
+    from neo2.core.decide import eventkit, learned, media, run, shadow, sites
 
     counts["app choices"] = decide.forget()
     counts["learned media"] = media.forget()
@@ -59,7 +59,7 @@ async def forget_everything() -> dict[str, int]:
     run.forget()  # receipts and last actions (memory only)
     eventkit.forget()
     sites.forget()  # site words searched for lately (memory only)
-    from neo.decide.kinds import schedule
+    from neo2.core.decide.kinds import schedule
 
     schedule.forget()  # calendar files handed to a calendar app (an event's title and notes)
     for p in (s.audit_log, s.audit_log.with_name(s.audit_log.name + ".1")):
@@ -71,7 +71,7 @@ async def forget_everything() -> dict[str, int]:
         else:
             f.unlink(missing_ok=True)
     try:
-        from neo.tools.browser import shutdown as close_browser
+        from neo2.core.tools.browser import shutdown as close_browser
 
         await close_browser("erased")  # the card, its steps, thumbnails and poster go too
     except Exception:  # noqa: BLE001 — not open
@@ -86,7 +86,7 @@ async def forget_everything() -> dict[str, int]:
 
 
 async def _unlink_cache_after_retrain(limit_s: float = 1800.0) -> None:
-    from neo.reflex import finetune, learn
+    from neo2.core.reflex import finetune, learn
 
     waited = 0.0
     while learn._training and waited < limit_s:

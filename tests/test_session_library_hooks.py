@@ -10,12 +10,12 @@ from pathlib import Path
 import pytest
 from neo_lib import make_runtime, scripted
 
-from neo import runtime
-from neo.agent import confirm, prompt
-from neo.agent.registry import RegisteredTool
-from neo.agent.session import Session
-from neo.memory.embed import embed_texts as _REAL_EMBED_TEXTS  # before conftest swaps it out
-from neo.providers.base import Message, ToolCall, Turn
+from neo2.core import runtime
+from neo2.core.agent import confirm, prompt
+from neo2.core.agent.registry import RegisteredTool
+from neo2.core.agent.session import Session
+from neo2.core.memory.embed import embed_texts as _REAL_EMBED_TEXTS  # before conftest swaps it out
+from neo2.core.providers.base import Message, ToolCall, Turn
 
 _OBJ = {"type": "object", "properties": {}}
 GOLDEN = json.loads((Path(__file__).parent / "fixtures" / "prompt_golden.json").read_text())
@@ -309,7 +309,7 @@ def test_an_agent_without_tools_still_gets_every_rule(tmp_path):
 
 
 def test_embeddings_off_never_load_the_model(tmp_path, monkeypatch):
-    from neo.memory import embed
+    from neo2.core.memory import embed
 
     def boom():
         raise AssertionError("the embedding model must not load")

@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import asyncio
 
-from neo.agent.registry import ToolContext, tool
-from neo.memory.store import store
+from neo2.core.agent.registry import ToolContext, tool
+from neo2.core.memory.store import store
 
 
 @tool(
@@ -51,7 +51,7 @@ async def memory(a: dict, c: ToolContext) -> str:
     if act in ("remember", "forget") and c.tainted():
         # What NEO remembers shapes every later answer. After reading a page, an email or the
         # screen, a memory could be planted by that content rather than the user — so they OK it.
-        from neo.agent import confirm
+        from neo2.core.agent import confirm
 
         what = f"remember “{str(a.get('text', ''))[:80]}”" if act == "remember" else f"forget memory #{a.get('id')}"
         gate = confirm.gated("memory", a, f"{what} (after reading {c.tainted()})", detail=str(a.get("text", "")))
@@ -64,7 +64,7 @@ async def memory(a: dict, c: ToolContext) -> str:
         mid = await asyncio.to_thread(st.remember, a["text"], a.get("kind", "note"), a.get("key", ""))
         return f"Remembered (#{mid})."
     if act == "recall":
-        from neo.config import settings
+        from neo2.core.config import settings
 
         level = settings().cloud_memory  # recall results go straight to a cloud model
         if level == "off":

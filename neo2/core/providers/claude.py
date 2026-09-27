@@ -12,8 +12,8 @@ from typing import Any, Literal
 
 import anthropic
 
-from neo.config import Settings, settings
-from neo.providers.base import (
+from neo2.core.config import Settings, settings
+from neo2.core.providers.base import (
     BadRequest,
     Message,
     Overloaded,
@@ -26,8 +26,8 @@ from neo.providers.base import (
     Unavailable,
     Usage,
 )
-from neo.providers.fit import fit
-from neo.providers.history import normalize
+from neo2.core.providers.fit import fit
+from neo2.core.providers.history import normalize
 
 _EFFORT = {"low": "low", "medium": "medium", "high": "xhigh"}
 _TOKEN_BUDGET = 200_000  # context window
@@ -41,7 +41,7 @@ def _img(im) -> dict[str, Any]:
 
 
 def _to_messages(messages: list[Message]) -> list[dict[str, Any]]:
-    # Opens with a user turn, every tool_use answered at once (neo.providers.history).
+    # Opens with a user turn, every tool_use answered at once (neo2.core.providers.history).
     out: list[dict[str, Any]] = []
     for m in normalize(messages):
         if m.role == "user":

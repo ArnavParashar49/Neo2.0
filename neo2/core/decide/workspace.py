@@ -3,7 +3,7 @@ extension. Read-only: nothing here opens an app, a URL or a file."""
 
 from __future__ import annotations
 
-from neo.decide._objc import pooled
+from neo2.core.decide._objc import pooled
 
 __all__ = ["default_handler", "handlers", "default_for_extension"]
 
@@ -39,7 +39,7 @@ def _scheme(s: str) -> str:
 
 def default_handler(scheme: str) -> str | None:
     """The bundle id of the app that opens ``scheme:`` links ('mailto', 'sms', 'https')."""
-    from neo.decide import inventory
+    from neo2.core.decide import inventory
 
     s = _scheme(scheme)
     path = inventory._ls_default_path(f"{s}:") if s else None
@@ -55,7 +55,7 @@ def handlers(scheme: str) -> list[str]:
 
 def default_for_extension(ext: str) -> str | None:
     """The bundle id of the app that opens files with this extension ('ics', 'md')."""
-    from neo.decide import inventory
+    from neo2.core.decide import inventory
 
     e = (ext or "").strip().lstrip(".").lower()
     path = inventory._ls_default_path(e) if e and "." not in e and "/" not in e else None

@@ -7,9 +7,9 @@ import asyncio
 
 import pytest
 
-from neo.agent import confirm
-from neo.agent.registry import ToolContext, registry
-from neo.events import EventBus
+from neo2.core.agent import confirm
+from neo2.core.agent.registry import ToolContext, registry
+from neo2.core.events import EventBus
 
 # Screen layout of the fake desktop: x < 100 is NEO's overlay, 100 <= x < 200 the host's approval
 # dialog, anything else Finder.
@@ -22,10 +22,10 @@ def _owner_at(x: float, y: float) -> str:
 
 @pytest.fixture
 def desk(monkeypatch):
-    from neo import events
-    from neo.tools import computer as comp
-    from neo.tools import load_all
-    from neo.tools.computer import ax
+    from neo2.core import events
+    from neo2.core.tools import computer as comp
+    from neo2.core.tools import load_all
+    from neo2.core.tools.computer import ax
 
     monkeypatch.setattr(events, "_bus", EventBus())
     load_all()
@@ -95,7 +95,7 @@ def test_nothing_touches_neos_overlay(desk, tool, args):
 
 def test_click_text_refuses_neos_window(desk):
     did, mp = desk
-    from neo.tools.computer import ax
+    from neo2.core.tools.computer import ax
 
     els = [ax.Element("e1", "AXButton", "Yes, do it", "", 10, 10, 40, 20, actions=["AXPress"])]
     mp.setattr(ax, "window_elements", lambda app=None: ("NEO", (0, 0, 400, 300), els))
@@ -115,7 +115,7 @@ def test_click_text_refuses_neos_window(desk):
 )
 def test_protected_apps_from_the_environment(desk, tool, args):
     did, mp = desk
-    from neo import config
+    from neo2.core import config
 
     mp.setenv("NEO_PROTECTED_APPS", '["myapprover"]')  # case doesn't matter
     mp.setattr(config, "_settings", None)
@@ -126,9 +126,9 @@ def test_protected_apps_from_the_environment(desk, tool, args):
 
 def test_protected_apps_also_block_keystrokes_and_click_text(desk):
     did, mp = desk
-    from neo import config
-    from neo.tools import computer as comp
-    from neo.tools.computer import ax
+    from neo2.core import config
+    from neo2.core.tools import computer as comp
+    from neo2.core.tools.computer import ax
 
     mp.setenv("NEO_PROTECTED_APPS", '["MyApprover"]')
     mp.setattr(config, "_settings", None)
@@ -154,7 +154,7 @@ def test_without_the_setting_the_host_app_is_an_ordinary_app(desk):
 
 def test_finder_targets_behave_as_before(desk):
     did, mp = desk
-    from neo.tools.computer import ax
+    from neo2.core.tools.computer import ax
 
     assert _run("ax_press", {"id": "e4"}).ok
     assert _run("click", {"id": "e4"}).ok
@@ -172,7 +172,7 @@ def test_finder_targets_behave_as_before(desk):
 def test_a_committing_button_in_an_ordinary_app_still_asks(desk):
     """The protection sits in front of the gate: an ordinary app's "Delete" still goes to the user."""
     did, mp = desk
-    from neo.tools.computer import ax
+    from neo2.core.tools.computer import ax
 
     mp.setattr(ax, "get", lambda eid: ax.Element(eid, "AXButton", "Delete", "", 300, 10, 40, 20, ref="ref-finder"))
     out = _run("ax_press", {"id": "e9"})
@@ -196,7 +196,7 @@ def test_a_committing_button_in_an_ordinary_app_still_asks(desk):
 )
 def test_an_owner_ax_cant_name_is_asked_of_the_window_server(desk, tool, args):
     did, mp = desk
-    from neo.tools.computer import ax
+    from neo2.core.tools.computer import ax
 
     mp.setattr(ax, "app_at", lambda x, y: "")  # AX couldn't resolve who owns the point
     out = _run(tool, args)
@@ -206,7 +206,7 @@ def test_an_owner_ax_cant_name_is_asked_of_the_window_server(desk, tool, args):
 
 def test_when_nobody_can_say_whose_it_is_nothing_is_touched(desk):
     did, mp = desk
-    from neo.tools.computer import ax
+    from neo2.core.tools.computer import ax
 
     mp.setattr(ax, "app_at", lambda x, y: "")
     mp.setattr(ax, "window_owner_at", lambda x, y: None)  # the window server couldn't say either
@@ -215,7 +215,7 @@ def test_when_nobody_can_say_whose_it_is_nothing_is_touched(desk):
 
 def test_an_unnamed_owner_elsewhere_is_clicked_as_before(desk):
     did, mp = desk
-    from neo.tools.computer import ax
+    from neo2.core.tools.computer import ax
 
     mp.setattr(ax, "app_at", lambda x, y: "")
     assert _run("click", {"x": 320, "y": 20}).ok  # the window server says Finder
@@ -226,8 +226,8 @@ def test_an_unnamed_owner_elsewhere_is_clicked_as_before(desk):
 
 def test_protected_apps_match_a_bundle_id_or_executable_too(desk):
     did, mp = desk
-    from neo import config
-    from neo.tools.computer import ax
+    from neo2.core import config
+    from neo2.core.tools.computer import ax
 
     mp.setenv("NEO_PROTECTED_APPS", '["com.example.approver", "neo-approverd"]')
     mp.setattr(config, "_settings", None)
@@ -252,8 +252,8 @@ def test_a_protected_app_is_never_brought_forward_first(desk):
     """hotkey(app=...) used to activate the app it names and only then refuse: NEO's own overlay
     or the host's approval dialog took focus, though no key was pressed."""
     did, mp = desk
-    from neo import config
-    from neo.tools import computer as comp
+    from neo2.core import config
+    from neo2.core.tools import computer as comp
 
     fronted: list[str] = []
 

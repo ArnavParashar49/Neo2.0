@@ -11,20 +11,20 @@ from __future__ import annotations
 
 import fnmatch
 import importlib
-import logging
 import sys
 from collections.abc import Iterable, Sequence
 
-from neo.runtime import UnsupportedPlatform
+from neo2.core import logger
+from neo2.core.runtime import UnsupportedPlatform
 
-log = logging.getLogger(__name__)
+log = logger(__name__)
 
 _MODULES = [
-    "neo.tools.system", "neo.tools.web", "neo.tools.weather", "neo.tools.memory_tool", "neo.tools.browser",
-    "neo.tools.browse",
+    "neo2.core.tools.system", "neo2.core.tools.web", "neo2.core.tools.weather", "neo2.core.tools.memory_tool", "neo2.core.tools.browser",
+    "neo2.core.tools.browse",
 ]  # fmt: skip
-_MAC_ONLY = ["neo.tools.media"]
-_MAC_MODULES = ["neo.tools.computer"]
+_MAC_ONLY = ["neo2.core.tools.media"]
+_MAC_MODULES = ["neo2.core.tools.computer"]
 
 
 def load_all() -> list[str]:
@@ -38,9 +38,9 @@ def load_all() -> list[str]:
             loaded.append(m)
         except Exception as e:  # noqa: BLE001 — one broken tool module must not stop startup
             log.warning(f"[tools] failed to load {m}: {e}")
-    if "neo.tools.tasks" in sys.modules:  # each task kind's tools as its mode shows them
+    if "neo2.core.tools.tasks" in sys.modules:  # each task kind's tools as its mode shows them
         try:
-            sys.modules["neo.tools.tasks"].apply_modes()
+            sys.modules["neo2.core.tools.tasks"].apply_modes()
         except Exception as e:  # noqa: BLE001 — the tools keep the surface they were registered with
             log.warning(f"[tools] task modes not applied: {e}")
     return loaded
@@ -71,21 +71,21 @@ PRESETS: dict[str, tuple[str, ...]] = {
 PRESETS["all"] = tuple(dict.fromkeys(n for p in ("web", "browser", "mac_read", "mac", "memory") for n in PRESETS[p]))
 
 # Which module registers each tool. The task tools load with the computer tools (computer/__init__
-# imports neo.tools.tasks at the place they have in the catalog).
+# imports neo2.core.tools.tasks at the place they have in the catalog).
 MODULES_FOR: dict[str, str] = {
-    **dict.fromkeys(("web_search", "web_fetch", "search_site"), "neo.tools.web"),
-    "weather": "neo.tools.weather",
-    **dict.fromkeys(("clock", "volume", "brightness", "sleep_display", "timer"), "neo.tools.system"),
-    "memory": "neo.tools.memory_tool",
-    **dict.fromkeys(_BROWSER, "neo.tools.browser"),
-    **dict.fromkeys(_COMPUTER + _TASKS, "neo.tools.computer"),
+    **dict.fromkeys(("web_search", "web_fetch", "search_site"), "neo2.core.tools.web"),
+    "weather": "neo2.core.tools.weather",
+    **dict.fromkeys(("clock", "volume", "brightness", "sleep_display", "timer"), "neo2.core.tools.system"),
+    "memory": "neo2.core.tools.memory_tool",
+    **dict.fromkeys(_BROWSER, "neo2.core.tools.browser"),
+    **dict.fromkeys(_COMPUTER + _TASKS, "neo2.core.tools.computer"),
 }
 
 # Tools that only work on macOS (their `requires` tag says "macos").
 MACOS_ONLY: frozenset[str] = frozenset(PRESETS["mac"]) | frozenset(PRESETS["mac_read"])
 
 # Never given to an embedded agent in this version, whatever the selection says: play_music is
-# always decided by neo.decide, whose choices, learning and duplicate-request memory are
+# always decided by neo2.core.decide, whose choices, learning and duplicate-request memory are
 # process-wide (NEO.app's), not kept per agent yet; browse keeps the job it runs, and the one it
 # may pick up again, process-wide too (and drives NEO.app's own browser and chat card).
 REFUSED: dict[str, str] = {

@@ -7,7 +7,7 @@ import time
 
 import Quartz as Q
 
-from neo import effects
+from neo2.core import effects
 
 _KEYCODES = {
     "a": 0,

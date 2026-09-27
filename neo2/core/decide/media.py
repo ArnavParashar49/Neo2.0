@@ -1,6 +1,6 @@
 """The driver for "play something": any app on this Mac, no app names or websites in the code.
 
-:func:`play_best` asks :func:`neo.decide.engine.choose` which apps to try (Laya + what this user
+:func:`play_best` asks :func:`neo2.core.decide.engine.choose` which apps to try (Laya + what this user
 uses + what worked before), then drives each one with the most direct generic method it exposes
 and moves on when that doesn't work:
 
@@ -51,13 +51,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
-from neo import effects
-from neo.config import settings
-from neo.decide._objc import pooled
+from neo2.core import effects
+from neo2.core.config import settings
+from neo2.core.decide._objc import pooled
 
 if TYPE_CHECKING:
-    from neo.decide.inventory import App
-    from neo.decide.sdef import Dictionary
+    from neo2.core.decide.inventory import App
+    from neo2.core.decide.sdef import Dictionary
 
 __all__ = ["Outcome", "methods_for", "play", "play_best", "AudioWatcher", "lexicon", "TIMEOUTS"]
 
@@ -96,13 +96,13 @@ def _fail(text: str, reason: str = "") -> Outcome:
 
 
 def _engine():
-    from neo.decide import engine
+    from neo2.core.decide import engine
 
     return engine
 
 
 def _inventory():
-    from neo.decide import inventory
+    from neo2.core.decide import inventory
 
     return inventory
 
@@ -112,7 +112,7 @@ _gen: ContextVar[int | None] = ContextVar("neo_media_generation", default=None)
 
 def _erased() -> bool:
     """The user erased NEO's memory after this request started: learn nothing from it."""
-    from neo import privacy
+    from neo2.core import privacy
 
     started = _gen.get()
     return started is not None and started != privacy.generation()
@@ -333,7 +333,7 @@ def _tags(d: Dictionary | None) -> frozenset[str]:
     if d is None:
         return frozenset()
     try:
-        from neo.decide.sdef import caps
+        from neo2.core.decide.sdef import caps
 
         return frozenset(caps(d))
     except Exception:  # noqa: BLE001 - the same inference, from this module's own finders
@@ -401,7 +401,7 @@ async def _osascript(script: str, args: list[str], timeout: float) -> tuple[int,
 
 
 async def _open(args: list[str], timeout: float) -> tuple[int, str, str]:
-    from neo.tools.computer import apps
+    from neo2.core.tools.computer import apps
 
     return await apps._run(["open", *args], timeout)
 
@@ -791,7 +791,7 @@ class _Watch:
 
 # ================================================================ the app's UI (Accessibility)
 def _ax_mod():
-    from neo.tools.computer import ax
+    from neo2.core.tools.computer import ax
 
     return ax
 
@@ -1181,7 +1181,7 @@ async def _launch(app: App, ready_s: float) -> int | None:
     pid = await asyncio.to_thread(_pid_of, app.bundle_id)
     has_window = bool(pid) and await asyncio.to_thread(lambda: _window(_ax_app(pid)) is not None)
     if not has_window:
-        from neo.tools.computer import apps
+        from neo2.core.tools.computer import apps
 
         out = await apps.open_app(app.path)
         if out.startswith("Error"):
@@ -1491,7 +1491,7 @@ async def _play_ax(q: str, app: App) -> Outcome:
 
 async def _local_media(q: str) -> list[str]:
     """The user's own audio/video files whose title, artist or name has every word of the query."""
-    from neo.tools.computer import apps
+    from neo2.core.tools.computer import apps
 
     words = [w for w in re.findall(r"[\w'-]+", q) if w.strip("'-")][:6]
     if not words:
@@ -1619,10 +1619,10 @@ def _text_search(query: str, n: int = 10) -> list[dict]:
 
 
 async def _resolve_site(word: str) -> str:
-    """The host a site word names ('youtube' -> its real host), by evidence (neo.decide.sites);
+    """The host a site word names ('youtube' -> its real host), by evidence (neo2.core.decide.sites);
     '' when it can't be told (offline): results are then matched by the word itself."""
     try:
-        from neo.decide import sites
+        from neo2.core.decide import sites
 
         res = await sites.resolve(word)
         return res.host if res else ""
@@ -1658,7 +1658,7 @@ async def _find_videos(what: str, site: str, budget: float) -> tuple[list[dict],
     fault, the site's host). Three independent ways, first that finds something wins — one search
     service refusing a request (they rate-limit) doesn't fail the request:
 
-    1. the site's own search results page (its published search: :mod:`neo.decide.sites`,
+    1. the site's own search results page (its published search: :mod:`neo2.core.decide.sites`,
        learned after the first time), first item links on it — no third party to refuse;
     2. an ordinary web search limited to the site (``site:<host>``);
     3. a video search (retried once), which also knows each video's length.
@@ -1704,7 +1704,7 @@ async def _find_videos(what: str, site: str, budget: float) -> tuple[list[dict],
 
     async def site_page() -> list[dict]:
         try:
-            from neo.decide import sites
+            from neo2.core.decide import sites
 
             t = sites.learned_template(host)
             if t is None:
@@ -1757,7 +1757,7 @@ async def _play_web(q: str, site: str = "", browser: Any | None = None) -> Outco
                 code, _out, err = await _open(["-b", named, url], action)
                 out = f"Error: {_one_line(err, 60)}" if code != 0 else "opened"
             else:
-                from neo.tools.computer import apps
+                from neo2.core.tools.computer import apps
 
                 out = await asyncio.wait_for(apps.open_app(url), action)
             if out.startswith(("Error", "NEEDS_")):
@@ -1776,7 +1776,7 @@ async def _play_web(q: str, site: str = "", browser: Any | None = None) -> Outco
         return _fail(f"opened {title} in {name} but couldn't tell whether it started", "unconfirmed")
     if site and site_host and not _erased():
         with contextlib.suppress(Exception):  # it played there: next time the word needs no search
-            from neo.decide import sites
+            from neo2.core.decide import sites
 
             sites.learn_landing(site, site_host, None)
     return Outcome(True, f"Playing {title} in {name}")
@@ -1865,8 +1865,8 @@ async def play_best(query: str, text: str = "") -> Any:
     """'Neo, play <query>': try the chosen apps in order (overall ~25 s), learn from each attempt,
     and say what happened. ``text`` is the user's own words when known (never the query or tool
     arguments): the decision reads them, and only they are reported for the reflex's learning."""
-    from neo import privacy
-    from neo.agent.confirm import ask_user
+    from neo2.core import privacy
+    from neo2.core.agent.confirm import ask_user
 
     _gen.set(privacy.generation())
     t0 = time.monotonic()
@@ -1941,7 +1941,7 @@ async def play_best(query: str, text: str = "") -> Any:
             if res.ok:
                 if named_failed and key not in named_keys:
                     # They asked for an app and got another source: say so, and why.
-                    from neo.agent.registry import ToolOutput
+                    from neo2.core.agent.registry import ToolOutput
 
                     return ToolOutput(f"{res.text} ({'; '.join(named_failed)})", ok=True, say=True)
                 return res.text

@@ -7,13 +7,13 @@ import time
 
 import pytest
 
-from neo.agent import early as early_mod
-from neo.agent.early import EarlyActor
-from neo.agent.registry import registry
-from neo.agent.session import Session
-from neo.events import EventBus, NeoState
-from neo.providers.base import ToolCall, Turn
-from neo.reflex.schema import Decision
+from neo2.core.agent import early as early_mod
+from neo2.core.agent.early import EarlyActor
+from neo2.core.agent.registry import registry
+from neo2.core.agent.session import Session
+from neo2.core.events import EventBus, NeoState
+from neo2.core.providers.base import ToolCall, Turn
+from neo2.core.reflex.schema import Decision
 
 # ---- event bus aggregation ------------------------------------------------------------------
 
@@ -47,8 +47,8 @@ def test_job_states_aggregate_by_priority_and_fall_back():
 
 @pytest.fixture(autouse=True)
 def _tools(tmp_path, monkeypatch):
-    from neo import config, events
-    from neo.tools import load_all
+    from neo2.core import config, events
+    from neo2.core.tools import load_all
 
     monkeypatch.setattr(config, "_settings", None)
     monkeypatch.setenv("NEO_DATA_DIR", str(tmp_path))
@@ -160,7 +160,7 @@ class SlowBrain:
 
 
 def test_two_jobs_run_concurrently_and_history_stays_clean(monkeypatch):
-    import neo.agent.session as sess_mod
+    import neo2.core.agent.session as sess_mod
 
     brains = iter([SlowBrain(0.4, "mail done"), SlowBrain(0.05, "it is noon")])
     monkeypatch.setattr(sess_mod, "brain", lambda purpose="agent": next(brains))
@@ -187,7 +187,7 @@ def test_two_jobs_run_concurrently_and_history_stays_clean(monkeypatch):
 
 
 def test_stop_cancels_running_jobs(monkeypatch):
-    import neo.agent.session as sess_mod
+    import neo2.core.agent.session as sess_mod
 
     monkeypatch.setattr(sess_mod, "brain", lambda purpose="agent": SlowBrain(5.0, "never"))
     decisions = iter(
@@ -216,7 +216,7 @@ def test_stop_cancels_running_jobs(monkeypatch):
 
 
 def test_quick_route_uses_early_result_when_already_done(monkeypatch, _tools):
-    import neo.agent.session as sess_mod
+    import neo2.core.agent.session as sess_mod
 
     monkeypatch.setattr(sess_mod, "brain", lambda purpose="agent": SlowBrain(0.0, "x"))
 
@@ -239,8 +239,8 @@ def test_quick_route_uses_early_result_when_already_done(monkeypatch, _tools):
 
 
 def test_loop_events_carry_job_ids():
-    from neo.agent.loop import run_agent
-    from neo.agent.registry import RegisteredTool, Registry
+    from neo2.core.agent.loop import run_agent
+    from neo2.core.agent.registry import RegisteredTool, Registry
 
     reg = Registry()
     reg.register(RegisteredTool("t", "t", {"type": "object", "properties": {}}, lambda a, c: "ok"))

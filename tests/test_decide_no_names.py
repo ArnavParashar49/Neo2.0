@@ -18,9 +18,9 @@ _DECIDE = (
     "shadow", "games",
 )  # fmt: skip
 SCOPE = sorted(
-    {ROOT / "neo" / "decide" / f"{m}.py" for m in _DECIDE}
-    | set((ROOT / "neo" / "decide" / "kinds").glob("*.py"))
-    | ({ROOT / "neo" / "tools" / "tasks.py"} if (ROOT / "neo" / "tools" / "tasks.py").exists() else set())
+    {ROOT / "neo2" / "core" / "decide" / f"{m}.py" for m in _DECIDE}
+    | set((ROOT / "neo2" / "core" / "decide" / "kinds").glob("*.py"))
+    | ({ROOT / "neo2" / "core" / "tools" / "tasks.py"} if (ROOT / "neo2" / "core" / "tools" / "tasks.py").exists() else set())
 )
 FORBIDDEN = [
     re.compile(
@@ -33,7 +33,7 @@ FORBIDDEN = [
     re.compile(r'tell application "'),
     re.compile(r"\bwww\.[a-z]"),
 ]
-ALLOW: dict[str, frozenset[str]] = {}  # "neo/tools/web.py": frozenset({exact stripped line, ...}) from R6
+ALLOW: dict[str, frozenset[str]] = {}  # "neo2/core/tools/web.py": frozenset({exact stripped line, ...}) from R6
 
 
 def _hits(path: Path, root: Path = ROOT) -> list[str]:

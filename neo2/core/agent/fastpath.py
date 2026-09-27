@@ -21,7 +21,7 @@ from __future__ import annotations
 import re
 from contextvars import ContextVar
 
-from neo.agent.registry import RegisteredTool, registry
+from neo2.core.agent.registry import RegisteredTool, registry
 
 Step = tuple[str, dict]
 

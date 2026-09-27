@@ -32,8 +32,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from functools import cached_property, lru_cache
 
-from neo.decide import evidence, sdef
-from neo.decide._objc import pooled
+from neo2.core.decide import evidence, sdef
+from neo2.core.decide._objc import pooled
 
 __all__ = [
     "App",
@@ -115,7 +115,7 @@ class App:
     running: bool = False
     in_dock: bool = False
     aliases: tuple[str, ...] = ()  # extra: other names it goes by (bundle name, Finder name)
-    # declared by the bundle beyond its dictionary (see neo.decide.evidence)
+    # declared by the bundle beyond its dictionary (see neo2.core.decide.evidence)
     intents: tuple[str, ...] = ()  # SiriKit intents its extensions handle
     ai_schemas: tuple[str, ...] = ()  # App Intents: 'schema:<domain>.<Name>', 'protocol:<Name>'
     share_text: bool = False  # a share extension that accepts text
@@ -961,7 +961,7 @@ def app_for_bundle(bundle_id: str) -> App | None:
 
 def app_for_pid(pid: int) -> App | None:
     """The scanned app a process belongs to (the app macOS holds responsible for it)."""
-    from neo.decide import media
+    from neo2.core.decide import media
 
     try:
         return app_for_bundle(media._bundle_id_of_pid(media.responsible_pid(pid)) or media._bundle_id_of_pid(pid))

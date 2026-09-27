@@ -13,7 +13,7 @@ from typing import Any
 import ApplicationServices as AS
 from AppKit import NSWorkspace
 
-from neo import effects
+from neo2.core import effects
 
 # Roles worth showing to the model. Containers are walked but not listed unless titled.
 _INTERACTIVE = {
@@ -138,7 +138,7 @@ def frontmost_app() -> tuple[str, int]:
     """The app the user is working in. A passing notification that happens to be frontmost is
     skipped for the menu-bar app — but a system dialog the user is actually in (it has a
     focused window) is kept."""
-    from neo.tools.computer.focus import front_app
+    from neo2.core.tools.computer.focus import front_app
 
     name, pid = front_app()  # always current, unlike NSWorkspace.frontmostApplication
     if name in _TRANSIENT or not pid:
@@ -152,7 +152,7 @@ def frontmost_app() -> tuple[str, int]:
 
 def running_apps() -> list[str]:
     """Normal windowed apps, asked fresh from LaunchServices."""
-    from neo.tools.computer.focus import running
+    from neo2.core.tools.computer.focus import running
 
     names = sorted({n for n, _, t in running() if t == "Foreground" and n})
     if names:
@@ -171,7 +171,7 @@ def pid_for_app(name: str) -> int | None:
     started are found too."""
     from AppKit import NSRunningApplication
 
-    from neo.tools.computer.focus import pid_running
+    from neo2.core.tools.computer.focus import pid_running
 
     name_l = name.lower()
     best: tuple[int, int] | None = None  # (rank, pid) — lower rank is better
@@ -229,7 +229,7 @@ def snapshot(app: str | None = None, *, max_lines: int = 250) -> str:
     """Return a compact text tree of the frontmost (or named) app's UI."""
     global _last_tree, _last_tree_ts, _last_tree_app
     if not is_trusted():
-        from neo.agent.confirm import ask_user
+        from neo2.core.agent.confirm import ask_user
 
         return ask_user(
             "Accessibility permission is off. Allow NEO in System Settings → Privacy & Security → "

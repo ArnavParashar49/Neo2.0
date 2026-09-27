@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from neo.reflex.learn import EXTRA
+from neo2.core.reflex.learn import EXTRA
 
 K = 20
 WEIGHT = 2.0

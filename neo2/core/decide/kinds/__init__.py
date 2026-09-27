@@ -72,7 +72,7 @@ def is_correction(text: str, app: tuple[int, int] | None = None) -> bool:
 
 def driver(kind: str) -> ModuleType | None:
     """The kind's driver module (engine.DRIVERS), None until that kind has one."""
-    from neo.decide.engine import DRIVERS
+    from neo2.core.decide.engine import DRIVERS
 
     name = DRIVERS.get(kind)
     if not name:

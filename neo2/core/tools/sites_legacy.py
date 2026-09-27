@@ -1,8 +1,8 @@
 """web_search's legacy: the table of known sites and their search pages ("search X on amazon").
 
-Moved verbatim from neo/tools/computer/legacy.py, which re-exports it: plain Python, so the web
+Moved verbatim from neo2/core/tools/computer/legacy.py, which re-exports it: plain Python, so the web
 tools import it without loading the Mac tools (or any macOS framework). It runs only while the
-web_search kind is `legacy`/`shadow` (neo.config `decide_modes`) and goes away with the rest of
+web_search kind is `legacy`/`shadow` (neo2.core.config `decide_modes`) and goes away with the rest of
 legacy.py once that kind's evidence-chosen driver is on everywhere.
 """
 
@@ -52,7 +52,7 @@ _ENGINE_RE = "|".join(n.replace(" ", r"\s+") for n in SITE_NAMES if n not in _GE
 def site_search_url(site: str, query: str) -> str:
     from urllib.parse import quote_plus
 
-    from neo.tools.web import _country  # web.py imports this module: read at call time
+    from neo2.core.tools.web import _country  # web.py imports this module: read at call time
 
     key = " ".join(site.lower().replace("www.", "").replace(".com", "").split())
     q = quote_plus(query.strip())

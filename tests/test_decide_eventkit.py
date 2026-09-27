@@ -1,4 +1,4 @@
-"""neo.decide.eventkit + routes: the Mac's calendar and reminder stores, on a fake EventKit
+"""neo2.core.decide.eventkit + routes: the Mac's calendar and reminder stores, on a fake EventKit
 installed as sys.modules["EventKit"]. No store is opened for real, and macOS is never asked for
 access: every request method of the fake fails the test unless a test lets the fake answer it."""
 
@@ -13,7 +13,7 @@ from datetime import datetime, timedelta
 import pytest
 from Foundation import NSDate
 
-from neo.decide import eventkit, evidence, routes
+from neo2.core.decide import eventkit, evidence, routes
 
 FULL, NOT_ASKED, RESTRICTED, DENIED, WRITE_ONLY = 3, 0, 1, 2, 4
 _ids = itertools.count(1)

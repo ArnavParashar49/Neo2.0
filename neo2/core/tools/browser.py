@@ -17,7 +17,7 @@ user's: NEO never types a password, it hands the window over (NEEDS_USER) and th
 submits, buys, sends, posts or deletes, and — after reading untrusted content — before a link
 that carries data or reaches this Mac's own network.
 
-An agent embedded in another app (neo.runtime) has a browser of its own, in its own data dir: no
+An agent embedded in another app (neo2.core.runtime) has a browser of its own, in its own data dir: no
 chat card (settings().browser_view is pinned to "window"), headless unless its host asked for a
 window, and web-only — nothing it loads may reach the machine it runs on or its network.
 """
@@ -37,14 +37,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import quote, quote_plus, urljoin, urlsplit
 
-from neo import effects, runtime
-from neo.agent import confirm
-from neo.agent.registry import ToolContext, ToolOutput
-from neo.agent.registry import tool as _register
-from neo.config import settings
-from neo.events import current_job
-from neo.providers.base import ImagePart
-from neo.tools.browser_live import live, quoted
+from neo2.core import effects, runtime
+from neo2.core.agent import confirm
+from neo2.core.agent.registry import ToolContext, ToolOutput
+from neo2.core.agent.registry import tool as _register
+from neo2.core.config import settings
+from neo2.core.events import current_job
+from neo2.core.providers.base import ImagePart
+from neo2.core.tools.browser_live import live, quoted
 
 _TIMEOUT_MS = 8000  # any one step on a page
 _NAV_MS = 20000  # a page load
@@ -516,7 +516,7 @@ _b = _Browser()  # NEO.app's
 
 
 def _browser() -> _Browser:
-    """The bound agent's own browser (neo.runtime), else NEO.app's."""
+    """The bound agent's own browser (neo2.core.runtime), else NEO.app's."""
     rt = runtime.current_runtime()
     if rt is not None:
         return rt.get_or_create("browser", lambda: _Browser(web_only=rt.library))
@@ -529,7 +529,7 @@ async def _only_the_web(route) -> None:
     to the public internet only, never to the machine it runs on (a server's cloud metadata,
     localhost) or its network. A redirect's next hop isn't routed: where it lands is checked by
     _local_page before anything of the page is read."""
-    from neo.security import policy
+    from neo2.core.security import policy
 
     url = route.request.url
     if url.startswith(("http:", "https:")) and await asyncio.to_thread(policy.private_host, url):
@@ -554,7 +554,7 @@ async def _local_tab(page) -> str:
     on this machine or its network. The tab itself is left as it is."""
     if not runtime.library_bound():
         return ""
-    from neo.security import policy
+    from neo2.core.security import policy
 
     url = str(getattr(page, "url", "") or "")
     if not url.startswith(("http:", "https:")):
@@ -969,7 +969,7 @@ async def _read(
 async def _open_risk(url: str, c: ToolContext) -> str:
     """After reading untrusted content: why opening `url` is the user's call ("" = it isn't) — a
     link that smuggles data out, or one that reaches this Mac's own services."""
-    from neo.security import policy
+    from neo2.core.security import policy
 
     if not c.tainted():
         return ""
@@ -993,7 +993,7 @@ async def _stray(page, c: ToolContext, start: str) -> str:
     """Why NEO must not show `page` now ("" = it may): after reading untrusted content it ended up
     on this Mac or the local network — a redirect, a script, a tab a page opened — having started
     on a public page. (Where NEO is sent is checked before it goes; this is where it arrived.)"""
-    from neo.security import policy
+    from neo2.core.security import policy
 
     url = str(page.url)
     if not c.tainted() or not url.lower().startswith(("http://", "https://")):
@@ -1229,7 +1229,7 @@ async def _link_risk(href: str) -> str:
     """After reading untrusted content: why following this link needs the user's OK ("" = none).
     Only where it goes: the page wrote the link, so it can't carry anything of the user's out (what
     NEO types into a page is gated where it's typed)."""
-    from neo.security import policy
+    from neo2.core.security import policy
 
     if not href.lower().startswith(("http://", "https://")):
         return ""
@@ -1348,7 +1348,7 @@ def _gate_card(gate: confirm.Halt | str, step: str) -> None:
 )
 @_card("open")
 async def browser_open(a: dict, c: ToolContext) -> str | ToolOutput:
-    from neo.security import policy
+    from neo2.core.security import policy
 
     url = _norm_url(str(a["url"]))
     scheme = url.split(":", 1)[0].lower()
@@ -1459,7 +1459,7 @@ async def browser_click(a: dict, c: ToolContext) -> str | ToolOutput:
         return (
             "Error: say what to click — its number from browser_read, its name, or x and y on a screenshot."
         )
-    from neo.security import policy
+    from neo2.core.security import policy
 
     own = str(info.get("label") or "").strip()
     words = own or (el.name if el else "") or target
@@ -1512,7 +1512,7 @@ async def browser_click(a: dict, c: ToolContext) -> str | ToolOutput:
 )
 @_card("type")
 async def browser_type(a: dict, c: ToolContext) -> str | ToolOutput:
-    from neo.security import policy
+    from neo2.core.security import policy
 
     page = await _browser().page()
     loc, el, err = await _resolve(page, str(a["target"]))
@@ -1622,7 +1622,7 @@ def _editable(info: dict) -> bool:
 )
 @_card("press")
 async def browser_press(a: dict, c: ToolContext) -> str | ToolOutput:
-    from neo.security import policy
+    from neo2.core.security import policy
 
     key = str(a["key"])
     mods, last = _combo(key)

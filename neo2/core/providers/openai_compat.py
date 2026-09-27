@@ -5,7 +5,7 @@ protocol with tool calling; Groq also honours ``reasoning_effort`` for gpt-oss m
 
 Both have little room per request (Groq's free tier: ~8K tokens a minute, prompt and answer
 together; the local server: its context), so every request is fitted to ``token_budget`` first
-(neo.providers.fit) — Groq's as the per-minute rate it is, which every step pays back before the
+(neo2.core.providers.fit) — Groq's as the per-minute rate it is, which every step pays back before the
 next one goes. When the server still says it's too large, it also says how large it
 really was: the estimate is corrected from that and the request fitted again. The correction is
 capped, and every request that goes through reports its real size, so one odd refusal (a prompt of
@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import base64
 import json
-import logging
 import re
 import time
 import uuid
@@ -25,8 +24,9 @@ from typing import Any, Literal
 
 from openai import APIConnectionError, APIStatusError, AsyncOpenAI, RateLimitError
 
-from neo.config import settings
-from neo.providers.base import (
+from neo2.core import logger
+from neo2.core.config import settings
+from neo2.core.providers.base import (
     BadRequest,
     Message,
     ProviderError,
@@ -38,8 +38,8 @@ from neo.providers.base import (
     Unavailable,
     Usage,
 )
-from neo.providers.fit import Fitted, fit
-from neo.providers.history import normalize
+from neo2.core.providers.fit import Fitted, fit
+from neo2.core.providers.history import normalize
 
 # Tokens one request may carry (prompt + max answer) on Groq's free tier, per model: its
 # tokens-per-minute limit. Groq's 413 names the real number, which then replaces this.
@@ -56,7 +56,7 @@ _DRIFT = 0.1  # …or, when the server didn't say, this far back toward none
 _LIMIT_REQUESTED = re.compile(r"Limit\s+(\d+),\s*Requested\s+(\d+)", re.I)
 _TRY_AGAIN = re.compile(r"try again in\s+(?:(\d+)h)?(?:(\d+)m(?!s))?(?:([\d.]+)s)?", re.I)
 
-log = logging.getLogger(__name__)
+log = logger(__name__)
 
 
 def _to_messages(messages: list[Message], system: str, vision: bool) -> list[dict[str, Any]]:
@@ -180,11 +180,11 @@ class OpenAICompatProvider:
     async def _preflight(self) -> None:
         """Fail fast when the local server isn't up instead of hanging on connect/retry."""
         if self._is_local:
-            from neo.providers.local_server import is_up
+            from neo2.core.providers.local_server import is_up
 
             port = int(self._base_url.rsplit(":", 1)[1].split("/")[0])
             if not await is_up(port):
-                raise Unavailable("local model server not running (start it with `python -m neo --local`)")
+                raise Unavailable("local model server not running (start it with `python -m neo2 --local`)")
 
     def _fit(self, messages, system, tools, max_tokens) -> Fitted:
         return fit(
@@ -333,7 +333,7 @@ def groq(model: str | None = None) -> OpenAICompatProvider:
 
 
 def local(model: str | None = None, port: int = 8080) -> OpenAICompatProvider:
-    """Local mlx-lm server (see neo.providers.local_server to launch it)."""
+    """Local mlx-lm server (see neo2.core.providers.local_server to launch it)."""
     return OpenAICompatProvider(
         name="local",
         base_url=f"http://127.0.0.1:{port}/v1",

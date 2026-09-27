@@ -9,14 +9,14 @@ import sys
 import time
 from pathlib import Path
 
-from neo import runtime
-from neo.agent import confirm, grants
-from neo.agent.registry import ToolContext, ToolOutput
-from neo.agent.registry import tool as _register
-from neo.config import decide_mode, settings
-from neo.security import policy
-from neo.tools.computer import apps, ax, screen, shell
-from neo.tools.computer import input as inp
+from neo2.core import runtime
+from neo2.core.agent import confirm, grants
+from neo2.core.agent.registry import ToolContext, ToolOutput
+from neo2.core.agent.registry import tool as _register
+from neo2.core.config import decide_mode, settings
+from neo2.core.security import policy
+from neo2.core.tools.computer import apps, ax, screen, shell
+from neo2.core.tools.computer import input as inp
 
 # Every tool here drives this Mac.
 tool = functools.partial(_register, requires=frozenset({"macos"}))
@@ -451,7 +451,7 @@ def _browser_names() -> set[str]:
     opening web pages (by evidence, not by name)."""
     names: set[str] = set()
     try:
-        from neo.decide.inventory import inventory
+        from neo2.core.decide.inventory import inventory
 
         names = {a.name.lower() for a in inventory() if "https" in a.handles or a.media_evidence[:1] == ("web browser",)}
     except Exception:  # noqa: BLE001
@@ -575,11 +575,11 @@ _DOC_APPS = {"notes", "textedit", "pages", "stickies", "numbers", "keynote", "fr
 
 def _doc_like(name: str, pid: int | None) -> bool:
     """The front app makes a fresh note or document with ⌘N: by evidence while write_note is on
-    (neo.decide.kinds.note.doc_like), else by legacy's list of names."""
+    (neo2.core.decide.kinds.note.doc_like), else by legacy's list of names."""
     if decide_mode("write_note") != "on":
         return name.lower() in _DOC_APPS
-    from neo.decide import inventory
-    from neo.decide.kinds import note
+    from neo2.core.decide import inventory
+    from neo2.core.decide.kinds import note
 
     app = inventory.app_for_pid(pid) if pid else None
     return app is not None and note.doc_like(app)
@@ -736,8 +736,8 @@ async def type_text(a: dict, c: ToolContext) -> str:
     payload=True,
 )
 async def dictate(a: dict, c: ToolContext) -> str:
-    from neo.providers import brain
-    from neo.providers.base import Message
+    from neo2.core.providers import brain
+    from neo2.core.providers.base import Message
 
     if ax_err := _needs_ax():
         return ax_err
@@ -779,7 +779,7 @@ async def hotkey(a: dict, c: ToolContext) -> str:
         return err
     keys, want = str(a["keys"]), str(a.get("app") or "")
     if a.get("after") == "input":
-        from neo.agent.registry import registry as _reg
+        from neo2.core.agent.registry import registry as _reg
 
         last = _reg().last
         if not last or last[0] not in _INPUT_TOOLS or time.time() - last[1] > _UNDO_WINDOW_S:
@@ -814,8 +814,8 @@ async def hotkey(a: dict, c: ToolContext) -> str:
 async def _new_note(c: ToolContext) -> str:
     """"new note" (write_note on): the New command of the notes app this user uses, found by its
     ⌘N shortcut in the app's own menus; the chord itself when the menu doesn't show one."""
-    from neo.decide import axkit
-    from neo.decide.kinds import note
+    from neo2.core.decide import axkit
+    from neo2.core.decide.kinds import note
 
     app = await note.top_app(c.user_text)
     if app is None:
@@ -960,16 +960,16 @@ async def open_app(a: dict, c: ToolContext):
             return gate
     m = decide_mode("open_app")
     if m == "on":
-        from neo.decide import run
-        from neo.decide.kinds import launch
+        from neo2.core.decide import run
+        from neo2.core.decide.kinds import launch
 
         return run.to_output(await launch.open_target(target))
     out = await apps.open_app(target)
     if m == "shadow":
-        from neo.decide import shadow
+        from neo2.core.decide import shadow
 
         with shadow.starting("open_app"):
-            from neo.decide.kinds import launch
+            from neo2.core.decide.kinds import launch
 
             ok = not out.startswith(("Error", "NEEDS_"))
             shadow.later("open_app", launch.shadow(target, out), legacy_ok=ok)
@@ -1020,7 +1020,7 @@ async def quit_app(a: dict, c: ToolContext) -> str:
     ],
 )
 async def close(a: dict, c: ToolContext) -> str:
-    from neo.decide.close import close_target
+    from neo2.core.decide.close import close_target
 
     return await close_target(str(a.get("target") or ""))
 
@@ -1074,7 +1074,7 @@ def _named_browser(name: str):
     """The installed browser the user named ("chrome", "the arc browser"), by the inventory's
     evidence (it opens web pages); None for anything else ("google", "the internet")."""
     try:
-        from neo.decide.inventory import inventory, named_in
+        from neo2.core.decide.inventory import inventory, named_in
 
         app = named_in(name, inventory())
     except Exception:  # noqa: BLE001
@@ -1200,8 +1200,8 @@ _PAGE_PATHS = [
     read_only=True,
 )
 async def page_read(a: dict, c: ToolContext):
-    from neo.decide import run
-    from neo.decide.kinds import site
+    from neo2.core.decide import run
+    from neo2.core.decide.kinds import site
 
     # The user's own words chose it (a fast path, or Laya's pick): no model is waiting to read the
     # page, so NEO answers them from it. A model's call gets the page itself.
@@ -1223,10 +1223,10 @@ async def safari_read(a: dict, c: ToolContext):
     return await page_read(a, c)
 
 
-# The task tools (neo/tools/tasks.py) were registered right here before they moved: loading them
+# The task tools (neo2/core/tools/tasks.py) were registered right here before they moved: loading them
 # at this point keeps the registry's order, which the tool picker's keyword fallback breaks ties
 # by and Live declares its tools in.
-from neo.tools import tasks  # noqa: E402, F401
+from neo2.core.tools import tasks  # noqa: E402, F401
 
 
 @tool(

@@ -21,7 +21,7 @@ primitive) keeps working, while a path nobody faked is refused instead of acting
   ``killall``, a shell, git, uv... Only read-only probes still run, checked with their arguments where
   the same program can also act (``lsappinfo info`` but not ``lsappinfo launch``, ``defaults read``,
   ``sysctl`` without ``-w``, ``osacompile`` of a script that runs nothing as it compiles), and a
-  child pytest. Any other Python child is refused: it never imports neo, so it has no switch.
+  child pytest. Any other Python child is refused: it never imports neo2.core, so it has no switch.
   C functions that start programs looked up through ctypes (``system``, ``posix_spawn``, ``exec*``...)
   are refused too, and a signal to anything but this process's own children.
 * the network: a connection to anything but a server this process itself listens on, where the socket
@@ -64,7 +64,7 @@ class EffectRefused(BaseException):
     def __init__(self, kind: str, what: str, why: str) -> None:
         super().__init__(
             f"refused to {what}: real effects are off ({why}). Fake this step - or, when the real "
-            f"thing is meant, run it inside `with neo.effects.allow({kind!r}):`."
+            f"thing is meant, run it inside `with neo2.core.effects.allow({kind!r}):`."
         )
         self.kind, self.what = kind, what
 
@@ -72,7 +72,7 @@ class EffectRefused(BaseException):
 def _source_tree() -> bool:
     """NEO runs from its own source tree (its tests beside it), not from a copy installed into
     another app's environment."""
-    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # neo2/core/effects.py
     return os.path.isfile(os.path.join(root, "tests", "conftest.py")) and os.path.isfile(
         os.path.join(root, "pyproject.toml")
     )
@@ -232,7 +232,7 @@ def _program(path: Any, argv: Any) -> tuple[str, str] | None:
         return None
     what = "run `" + " ".join(args or [exe])[:200] + "`"
     if name.startswith("python"):
-        what += " (a Python child never imports neo: it has no switch of its own)"
+        what += " (a Python child never imports neo2.core: it has no switch of its own)"
     return ("browser" if "playwright" in exe else "process"), what
 
 
@@ -471,5 +471,5 @@ def _install() -> None:
         _hooked = True
 
 
-if why_off():  # decided when neo is first imported (neo/__init__.py imports this module)
+if why_off():  # decided when neo2.core is first imported (neo2/core/__init__.py imports this module)
     _install()

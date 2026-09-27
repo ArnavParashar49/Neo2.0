@@ -7,23 +7,23 @@ import re
 
 import pytest
 
-from neo.agent import confirm
-from neo.agent.loop import run_agent
-from neo.agent.registry import RegisteredTool, Registry, ToolContext, registry
-from neo.agent.session import _NO, _YES, Session, _match_fast_path
-from neo.events import EventBus
-from neo.providers.base import Message, ToolCall, Turn
+from neo2.core.agent import confirm
+from neo2.core.agent.loop import run_agent
+from neo2.core.agent.registry import RegisteredTool, Registry, ToolContext, registry
+from neo2.core.agent.session import _NO, _YES, Session, _match_fast_path
+from neo2.core.events import EventBus
+from neo2.core.providers.base import Message, ToolCall, Turn
 
 
 @pytest.fixture(autouse=True)
 def _isolate(tmp_path, monkeypatch):
-    from neo import config, events
+    from neo2.core import config, events
 
     monkeypatch.setattr(config, "_settings", None)
     monkeypatch.setenv("NEO_DATA_DIR", str(tmp_path))
     monkeypatch.setattr(events, "_bus", EventBus())
     confirm.cancel("test")
-    from neo.tools import load_all
+    from neo2.core.tools import load_all
 
     load_all()
 
@@ -209,7 +209,7 @@ def test_fast_path_negative(text):
 
 
 def test_volume_zero_is_not_fifty():
-    import neo.tools.system as sysmod
+    import neo2.core.tools.system as sysmod
 
     calls = []
 
@@ -227,7 +227,7 @@ def test_volume_zero_is_not_fifty():
 
 
 def test_shell_gate_catches_bypasses_and_allows_dev_null():
-    from neo.tools.computer.shell import looks_destructive as d
+    from neo2.core.tools.computer.shell import looks_destructive as d
 
     assert (
         d("rm -fr ~/Library") and d("rm -r -f x") and d("rm notes.txt") and d("find . -name '*.log' -delete")
@@ -237,7 +237,7 @@ def test_shell_gate_catches_bypasses_and_allows_dev_null():
 
 
 def test_applescript_risky_scripts_are_gated():
-    from neo.tools.computer.policy import script_is_read_only as ro
+    from neo2.core.tools.computer.policy import script_is_read_only as ro
 
     assert not ro('tell application "Finder" to delete file "x"')
     assert not ro('do shell script "rm -rf ~"')
@@ -246,8 +246,8 @@ def test_applescript_risky_scripts_are_gated():
 
 
 def test_memory_recall_survives_apostrophes(tmp_path, monkeypatch):
-    from neo.memory import embed
-    from neo.memory.store import Store
+    from neo2.core.memory import embed
+    from neo2.core.memory.store import Store
 
     monkeypatch.setattr(embed, "embed_texts", lambda texts: None)  # keyword path only; no model download
     st = Store(tmp_path / "m.sqlite3")
@@ -257,7 +257,7 @@ def test_memory_recall_survives_apostrophes(tmp_path, monkeypatch):
 
 
 def test_read_file_start_zero(tmp_path_factory):
-    from neo.tools.computer.shell import read_file
+    from neo2.core.tools.computer.shell import read_file
 
     f = tmp_path_factory.mktemp("docs") / "a.txt"  # not in NEO's data dir (tmp_path here): that's secret
     f.write_text("one\ntwo\n")
@@ -265,7 +265,7 @@ def test_read_file_start_zero(tmp_path_factory):
 
 
 def test_data_dir_expands_tilde(monkeypatch):
-    from neo import config
+    from neo2.core import config
 
     monkeypatch.setattr(config, "_settings", None)
     monkeypatch.setenv("NEO_DATA_DIR", "~/.neo-test-dir")
@@ -275,8 +275,8 @@ def test_data_dir_expands_tilde(monkeypatch):
 
 
 def test_openai_skips_empty_assistant_and_claude_starts_with_user():
-    from neo.providers.claude import _to_messages as claude_msgs
-    from neo.providers.openai_compat import _to_messages as oai_msgs
+    from neo2.core.providers.claude import _to_messages as claude_msgs
+    from neo2.core.providers.openai_compat import _to_messages as oai_msgs
 
     hist = [Message.assistant(""), Message.user("hi"), Message.assistant("")]
     assert [m["role"] for m in oai_msgs(hist, "", False)] == ["user"]
@@ -285,11 +285,11 @@ def test_openai_skips_empty_assistant_and_claude_starts_with_user():
 
 
 def test_session_stale_confirmation_is_refused(monkeypatch):
-    import neo.agent.session as sess_mod
+    import neo2.core.agent.session as sess_mod
 
     class R:
         async def decide(self, t):
-            from neo.reflex.schema import Decision
+            from neo2.core.reflex.schema import Decision
 
             return Decision("agent_task", 0.9, True, 0.9, False, 0.0, "fake")
 
@@ -307,7 +307,7 @@ _ = re
 
 
 def test_open_app_unknown_name_checks_dns(monkeypatch):
-    from neo.tools.computer import apps
+    from neo2.core.tools.computer import apps
 
     async def no_app(cmd, timeout=30):
         return (1, "", "Unable to find application named 'x'") if cmd[:2] == ["open", "-a"] else (0, "", "")
@@ -330,9 +330,9 @@ def test_open_app_unknown_name_checks_dns(monkeypatch):
 def test_open_url_uses_the_default_browser_or_the_one_named(monkeypatch):
     from types import SimpleNamespace
 
-    import neo.tools.computer as comp
-    from neo.agent.registry import ToolContext
-    from neo.tools.computer import apps
+    import neo2.core.tools.computer as comp
+    from neo2.core.agent.registry import ToolContext
+    from neo2.core.tools.computer import apps
 
     ran = []
 
@@ -357,9 +357,9 @@ def test_open_url_uses_the_default_browser_or_the_one_named(monkeypatch):
 
 
 def test_a_new_tab_from_an_app_without_tabs_goes_to_the_default_browser(monkeypatch):
-    import neo.tools.computer as comp
-    from neo.agent.registry import ToolContext
-    from neo.tools.computer import apps
+    import neo2.core.tools.computer as comp
+    from neo2.core.agent.registry import ToolContext
+    from neo2.core.tools.computer import apps
 
     fronted = []
 

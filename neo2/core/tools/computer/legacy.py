@@ -1,13 +1,13 @@
 """Today's app- and site-specific code, moved verbatim from apps.py and web.py.
 
-It runs only while a task kind's mode is `legacy` (neo.config `decide_modes`) and goes away
-once every kind has its evidence-chosen driver (neo/decide). Nothing new belongs here: this is
+It runs only while a task kind's mode is `legacy` (neo2.core.config `decide_modes`) and goes away
+once every kind has its evidence-chosen driver (neo2/core/decide). Nothing new belongs here: this is
 the one place the names of particular apps and websites may still appear.
 """
 
 from __future__ import annotations
 
-from neo.tools.computer.apps import _q, osascript
+from neo2.core.tools.computer.apps import _q, osascript
 
 # ---- AppleScripts (from apps.py) ------------------------------------------------------------
 
@@ -126,8 +126,8 @@ end parseISO"""
 
 
 # ---- website search pages (from web.py) -----------------------------------------------------
-# The table lives in neo.tools.sites_legacy (plain Python: the web tools load it without macOS).
-from neo.tools.sites_legacy import (  # noqa: E402, F401
+# The table lives in neo2.core.tools.sites_legacy (plain Python: the web tools load it without macOS).
+from neo2.core.tools.sites_legacy import (  # noqa: E402, F401
     _AMAZON,
     _ENGINE_RE,
     _GENERIC_SITES,

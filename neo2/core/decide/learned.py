@@ -26,7 +26,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from neo.config import settings
+from neo2.core.config import settings
 
 __all__ = ["NAMESPACES", "get", "put", "drop", "forget"]
 
@@ -98,7 +98,7 @@ def get(ns: str, key: str) -> dict | None:
 
 def put(ns: str, key: str, value: dict[str, Any], *, cap: int = CAP) -> None:
     """Learn ``key`` -> ``value``; the least recently learned entries go past ``cap``."""
-    from neo.decide import run
+    from neo2.core.decide import run
 
     if run.erased():
         return

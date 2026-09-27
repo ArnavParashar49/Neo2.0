@@ -76,9 +76,9 @@ def _under(p: Path, root: Path) -> bool:
 
 def _extra_roots() -> list[Path]:
     """NEO's data wherever else it lives: every embedded agent's data dir and extra secret paths,
-    and NEO.app's own data dir when NEO_DATA_DIR moved it (neo.runtime.secret_roots — which
+    and NEO.app's own data dir when NEO_DATA_DIR moved it (neo2.core.runtime.secret_roots — which
     never builds settings to find out)."""
-    from neo.runtime import secret_roots
+    from neo2.core.runtime import secret_roots
 
     out: list[Path] = []
     for r in secret_roots():
@@ -105,13 +105,13 @@ def _resolved(p: Path) -> Path:
 
 
 def _in_agent_folder(p: Path) -> bool:
-    """Embedded (neo.runtime): `p` lies in a folder NEO made an agent's own (its marker) — a live
+    """Embedded (neo2.core.runtime): `p` lies in a folder NEO made an agent's own (its marker) — a live
     agent's, a closed one's, or one from another process. NEO.app's own tools: unchanged."""
-    from neo import runtime
+    from neo2.core import runtime
 
     if not runtime.library_mode():
         return False
-    from neo.config import AGENT_MARKER
+    from neo2.core.config import AGENT_MARKER
 
     return any(os.path.isfile(d / AGENT_MARKER) for d in (p, *p.parents))
 
@@ -1150,7 +1150,7 @@ def _as_lines(toks: list[_Tok]) -> list[list[_Tok]]:
     return [ln for ln in lines if ln]
 
 
-# Why a task-wide "yes" can never cover a script (see neo/agent/grants.py), before the allowlist
+# Why a task-wide "yes" can never cover a script (see neo2/core/agent/grants.py), before the allowlist
 # (_ScriptReader with `grant`) is even asked. Over the whole text, strings included: a button
 # called "Send" is clicked with a string.
 _SCRIPT_RUNS_CODE = re.compile(

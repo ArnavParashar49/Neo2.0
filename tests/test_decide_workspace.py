@@ -1,8 +1,8 @@
-"""neo.decide.workspace: LaunchServices' default handlers, read only, on faked lookups."""
+"""neo2.core.decide.workspace: LaunchServices' default handlers, read only, on faked lookups."""
 
 from __future__ import annotations
 
-from neo.decide import inventory, workspace
+from neo2.core.decide import inventory, workspace
 
 PATHS = {"/Applications/Postbox.app": "test.postbox", "/Applications/Browsa.app": "test.browsa",
          "/Applications/Datebook.app": "test.datebook"}

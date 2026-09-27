@@ -11,10 +11,10 @@ For a request NEO works out, from evidence only (no app names anywhere in this f
    * an app the user named ("on <app>", "in <app>") that fits, or the website they named
      ("on <site>", :func:`site_hint`);
    * the apps this user actually uses, ordered by Laya ("which app should do this?", each option
-     described by its evidence, on the zero-shot checkpoint of :mod:`neo.reflex.zeroshot`)
+     described by its evidence, on the zero-shot checkpoint of :mod:`neo2.core.reflex.zeroshot`)
      combined with the bandit prior (``score = laya_p**LAYA_EXP * prior**PRIOR_EXP``); when Laya
      is unsure or unavailable, by the prior alone. A destination that is no app (the Mac's shared
-     calendar or reminders store, :mod:`neo.decide.routes`) is weighed like one, and for kinds
+     calendar or reminders store, :mod:`neo2.core.decide.routes`) is weighed like one, and for kinds
      with preferences the user's corrections and per-person choices scale the prior;
    * the task's fallback (the web, through the default browser; a local last resort such as a
      file for some kinds);
@@ -29,7 +29,7 @@ For a request NEO works out, from evidence only (no app names anywhere in this f
    its kind head.
 
 The prior of a candidate = best method's posterior mean x how much this user uses the app
-(:func:`neo.decide.inventory.affinity`). The fall-through to the next candidate on failure *is*
+(:func:`neo2.core.decide.inventory.affinity`). The fall-through to the next candidate on failure *is*
 the exploration, so the voice path needs no randomness.
 """
 
@@ -51,10 +51,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
 
-from neo.config import settings
+from neo2.core.config import settings
 
 if TYPE_CHECKING:
-    from neo.decide.inventory import App
+    from neo2.core.decide.inventory import App
 
 
 # ---- task kinds -------------------------------------------------------------------------------
@@ -65,8 +65,8 @@ class Task:
     """One kind of request.
 
     ``description`` is what Laya reads (it shares a ~190-token budget with the other kinds, so
-    keep it short and contrastive). ``wants`` are capability tags (:func:`neo.decide.sdef.caps`,
-    :func:`neo.decide.sdef.read_caps`) that make an app a candidate; ``signals`` are other generic
+    keep it short and contrastive). ``wants`` are capability tags (:func:`neo2.core.decide.sdef.caps`,
+    :func:`neo2.core.decide.sdef.read_caps`) that make an app a candidate; ``signals`` are other generic
     evidence that does too:
 
     * ``media`` - the inventory found media evidence for the app;
@@ -106,7 +106,7 @@ class Task:
 
 
 # The kinds and their evidence. Sends (send_message, send_email) have no driver yet (R4/R5); every
-# other kind is driven by its module in DRIVERS once the user switched it on (neo.config
+# other kind is driven by its module in DRIVERS once the user switched it on (neo2.core.config
 # decide_modes).
 TASKS: dict[str, Task] = {
     "play_media": Task(
@@ -181,14 +181,14 @@ TASKS: dict[str, Task] = {
 # kind -> module exposing ``methods_for(app[, kind]) -> tuple[str, ...]`` (the kind's driver). A
 # kind without one gets the generic Task.methods, filtered by what the app exposes.
 DRIVERS: dict[str, str] = {
-    "play_media": "neo.decide.media",
-    "write_note": "neo.decide.kinds.note",
-    "add_event": "neo.decide.kinds.schedule",
-    "add_reminder": "neo.decide.kinds.schedule",
-    "read_calendar": "neo.decide.kinds.schedule",
-    "read_mail": "neo.decide.kinds.mail",
-    "open_app": "neo.decide.kinds.launch",
-    "web_search": "neo.decide.kinds.site",
+    "play_media": "neo2.core.decide.media",
+    "write_note": "neo2.core.decide.kinds.note",
+    "add_event": "neo2.core.decide.kinds.schedule",
+    "add_reminder": "neo2.core.decide.kinds.schedule",
+    "read_calendar": "neo2.core.decide.kinds.schedule",
+    "read_mail": "neo2.core.decide.kinds.mail",
+    "open_app": "neo2.core.decide.kinds.launch",
+    "web_search": "neo2.core.decide.kinds.site",
 }
 
 WEB = "web"  # app key (and method) of the web fallback candidate
@@ -304,7 +304,7 @@ class Kind(NamedTuple):
 _OTHER = Kind("other", 0.0)
 _NO_KIND_HEAD = object()  # _reflex_call: the reflex has no kind head (zero-shot may guess)
 
-# Set while a shadow dry run (neo.decide.shadow) decides. Nobody waits for its answer, so it asks
+# Set while a shadow dry run (neo2.core.decide.shadow) decides. Nobody waits for its answer, so it asks
 # Laya only while the zero-shot model is loaded: it never starts the ~1.7 GB load, nor holds the
 # shared Laya lock through one while the user may be saying the next thing. The dict notes for the
 # shadow log that it went without ("laya": False, the prior decided).
@@ -317,7 +317,7 @@ def _dry_without_laya() -> bool:
     if note is None:
         return False
     try:
-        from neo.reflex import zeroshot
+        from neo2.core.reflex import zeroshot
 
         if zeroshot.loaded():
             return False
@@ -328,9 +328,9 @@ def _dry_without_laya() -> bool:
 
 
 def _laya_call(state: Any, questions: dict, stale: threading.Event) -> dict | None:
-    """One zero-shot pass on :mod:`neo.reflex.zeroshot` (in a worker thread); None if it can't answer."""
+    """One zero-shot pass on :mod:`neo2.core.reflex.zeroshot` (in a worker thread); None if it can't answer."""
     try:
-        from neo.reflex import zeroshot
+        from neo2.core.reflex import zeroshot
 
         return zeroshot.ask(state, questions, LAYA_LOCK_S, stale)
     except Exception as e:  # noqa: BLE001 - Laya must never break a decision
@@ -351,7 +351,7 @@ def _reflex_call(text: str, known: Any, stale: threading.Event) -> Any:
     """In a worker thread: the reflex's Decision for ``text`` (``known`` when the caller has it)
     if the reflex has a kind head; _NO_KIND_HEAD if it has none; None if it is busy or broken."""
     try:
-        from neo.reflex import get_laya, laya_lock
+        from neo2.core.reflex import get_laya, laya_lock
 
         lock = laya_lock()
         # get_laya() takes this same (non-reentrant) lock with no timeout, so only call it once the
@@ -400,7 +400,7 @@ def _zero_shot_can_answer() -> bool:
     if _dry_without_laya():
         return False
     try:
-        from neo.reflex import zeroshot
+        from neo2.core.reflex import zeroshot
 
         return zeroshot.available()
     except Exception:  # noqa: BLE001
@@ -439,7 +439,7 @@ def mask_apps(text: str, apps: list[App]) -> str:
     """``text`` with every installed app's name the user said replaced by "an app", so the kind
     is read from what they asked, not from which app they named ("message john on an app")."""
     try:
-        from neo.decide.inventory import named_span
+        from neo2.core.decide.inventory import named_span
     except ImportError:
         return text
     for _ in range(4):  # a request names an app or two, not more
@@ -693,7 +693,7 @@ def _tell_ledger(kind: str, key: str, ok: bool) -> None:
         return
     a.told.add((key, ok))
     try:
-        from neo.reflex import outcomes
+        from neo2.core.reflex import outcomes
 
         decided = getattr(outcomes, "decided", None)
         if callable(decided):
@@ -782,7 +782,7 @@ def record_pref(kind: str, key: str, liked: bool, *, about: str = "") -> None:
     """The user chose (``liked``) or turned down this app for this kind, for one person when
     ``about`` (a hashed contact id) is given. Nothing is kept once the user erased NEO's memory
     since the request began."""
-    from neo.decide import run
+    from neo2.core.decide import run
 
     if run.erased():
         return
@@ -819,7 +819,7 @@ def _pref_words(data: dict, kind: str, key: str, about: str) -> str:
 
 
 def _inventory() -> list[App]:
-    from neo.decide.inventory import inventory
+    from neo2.core.decide.inventory import inventory
 
     return inventory()
 
@@ -832,7 +832,7 @@ def warm() -> None:
         try:
             _inventory()
         finally:
-            from neo.reflex import zeroshot
+            from neo2.core.reflex import zeroshot
 
             zeroshot.prefetch()
 
@@ -844,7 +844,7 @@ def _self_ids() -> frozenset[str]:
     if os.environ.get("NEO_LAUNCHED_BY_APP") != "1":
         return frozenset()
     try:
-        from neo.decide.media import _bundle_id_of_pid, responsible_pid
+        from neo2.core.decide.media import _bundle_id_of_pid, responsible_pid
 
         ppid = os.getppid()
         return frozenset(b.lower() for b in {_bundle_id_of_pid(ppid), _bundle_id_of_pid(responsible_pid(ppid))} if b)
@@ -854,7 +854,7 @@ def _self_ids() -> frozenset[str]:
 
 def _affinity(app: App, now: float) -> float:
     try:
-        from neo.decide.inventory import affinity
+        from neo2.core.decide.inventory import affinity
 
         return max(0.0, min(1.0, float(affinity(app, now))))
     except Exception:  # noqa: BLE001
@@ -863,7 +863,7 @@ def _affinity(app: App, now: float) -> float:
 
 def _named(text: str, apps: list[App]) -> App | None:
     try:
-        from neo.decide.inventory import named_in
+        from neo2.core.decide.inventory import named_in
 
         return named_in(text, apps)
     except Exception:  # noqa: BLE001
@@ -874,7 +874,7 @@ def _app_caps(app: App) -> frozenset[str]:
     if getattr(app, "script", None) is None:
         return frozenset()
     try:
-        from neo.decide.sdef import caps, read_caps
+        from neo2.core.decide.sdef import caps, read_caps
 
         out = frozenset(caps(app.script) | read_caps(app.script))
     except Exception:  # noqa: BLE001
@@ -997,7 +997,7 @@ def site_hint(text: str, apps: list[App] | None = None) -> str:
     if "." not in site:
         words = set(site.split())
         try:
-            from neo.decide.inventory import _common_words
+            from neo2.core.decide.inventory import _common_words
 
             common = _common_words(words)
         except Exception:  # noqa: BLE001
@@ -1195,7 +1195,7 @@ def _labels(infos: list[_Info]) -> None:
 def _embedder_ready() -> bool:
     """NEO's memory embedder is loaded: a decision never starts (or waits for) its load."""
     try:
-        from neo.memory import embed
+        from neo2.core.memory import embed
 
         return embed.ready()
     except Exception:  # noqa: BLE001
@@ -1209,7 +1209,7 @@ def _shortlist(task: Task, text: str, infos: list[_Info], now: float, stale: thr
     Over 24 used apps (32 requests) the right one was among the 6 kept for 0.84 of requests;
     Laya's own mean-pooled encoder (laya.shortlist.embed_fn_from_agent) managed 0.31, about
     chance, in 150 ms of GPU time."""
-    from neo.memory import embed
+    from neo2.core.memory import embed
 
     if stale.is_set():
         return []
@@ -1267,8 +1267,8 @@ async def _laya_order(
 
 def _routes(kind: str, task: Task, exclude: frozenset[str]) -> list[tuple[App, bool]]:
     """(route candidate, whether its use is still unknown) for each usable route of the kind
-    (see neo.decide.routes; counting a store's items can take a moment: called off the loop)."""
-    from neo.decide import routes
+    (see neo2.core.decide.routes; counting a store's items can take a moment: called off the loop)."""
+    from neo2.core.decide import routes
 
     out = []
     for route in task.routes:
@@ -1284,7 +1284,7 @@ def _routes(kind: str, task: Task, exclude: frozenset[str]) -> list[tuple[App, b
 def _store_view(kind: str, key: str) -> bool:
     """The app is known to write into a route's store (its items showed up there)."""
     try:
-        from neo.decide import learned
+        from neo2.core.decide import learned
 
         return learned.get("store_views", f"{kind}:{key}") is not None
     except Exception:  # noqa: BLE001

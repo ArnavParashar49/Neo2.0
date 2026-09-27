@@ -2,7 +2,7 @@
 
 import pytest
 
-from neo.reflex import is_bare_stop
+from neo2.core.reflex import is_bare_stop
 
 
 @pytest.mark.parametrize(

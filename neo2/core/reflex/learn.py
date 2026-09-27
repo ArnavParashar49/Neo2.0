@@ -1,7 +1,7 @@
 """Laya learns from use.
 
 Every request the user makes ends up handled somehow, and *how it went* is a label for what they
-said. The outcome ledger (``neo/reflex/outcomes.py``) watches each request in RAM — what ran,
+said. The outcome ledger (``neo2/core/reflex/outcomes.py``) watches each request in RAM — what ran,
 whether each step worked, whether the user stopped it or said "no, I meant…" — and only once it
 has settled hands a row to :func:`record`:
 
@@ -35,7 +35,7 @@ import threading
 import time
 from pathlib import Path
 
-from neo.config import settings
+from neo2.core.config import settings
 
 EXTRA = "reflex_extra.jsonl"
 STATE = "reflex_learn.json"
@@ -132,10 +132,10 @@ def record(
 ) -> bool:
     """Remember what this request turned out to be. Returns whether it was kept.
 
-    ``wrong`` holds labels ("intent" or "intent:tool") it was *not*; ``kind`` is neo/decide's task
+    ``wrong`` holds labels ("intent" or "intent:tool") it was *not*; ``kind`` is neo2/core/decide's task
     kind, only ever given for a request that decide carried out successfully. ``brain``: the
-    provider that already read this request (neo/providers name) — the only one the teacher may
-    ever show it to again (neo/reflex/teacher.py)."""
+    provider that already read this request (neo2/core/providers name) — the only one the teacher may
+    ever show it to again (neo2/core/reflex/teacher.py)."""
     if not enabled() or intent not in ("chat", "quick_action", "agent_task"):
         return False
     if _CONTENT_TOOLS & ({tool} | set(tools) | {str(x).partition(":")[2] for x in wrong}):
@@ -242,13 +242,13 @@ def forget_examples() -> int:
             _path(name).unlink(missing_ok=True)
         _counts.clear()
     try:
-        from neo.reflex import memory
+        from neo2.core.reflex import memory
 
         memory.forget()
     except Exception as e:  # noqa: BLE001
         print(f"[reflex] couldn't clear the correction memory: {str(e)[:80]}")
     try:
-        from neo.reflex.finetune import drop_from_cache
+        from neo2.core.reflex.finetune import drop_from_cache
 
         drop_from_cache({r["text"] for r in rows})
     except Exception as e:  # noqa: BLE001
@@ -329,7 +329,7 @@ def _headless() -> str | None:
     encoder), else None. Only a reflex that is already loaded counts: never load Laya just to ask.
     The retrain for it is tried once per encoder (retrain() records it, and an erase clears it):
     a rejected or failed one isn't retried in a loop, new requests and fixes still retrain."""
-    from neo import models, reflex
+    from neo2.core import models, reflex
 
     laya = reflex._laya
     if laya is None or getattr(laya, "has_head", True):
@@ -342,7 +342,7 @@ def _stands_in() -> bool:
     laya_reflex._load) while the head on disk is the configured encoder's. A retrain here would
     overwrite that head and its base head with ones for the stand-in; the configured encoder's
     come back with its files, so nothing retrains until then."""
-    from neo import reflex
+    from neo2.core import reflex
 
     laya = reflex._laya
     want = settings().reflex_encoder
@@ -353,8 +353,8 @@ _head_for: dict[tuple, bool] = {}  # (file identity, encoder) -> whether the hea
 
 
 def _head_is_for(encoder: str) -> bool:
-    from neo import models
-    from neo.reflex.features import encoder_of
+    from neo2.core import models
+    from neo2.core.reflex.features import encoder_of
 
     path = _path("reflex_head.json")
     try:
@@ -373,7 +373,7 @@ def retrain() -> dict | None:
     """Retrain the heads in this process on the already-loaded Laya, then hot-swap them. With
     learning off, on the public data alone (only a reflex without a head is retrained then)."""
     global _training
-    from neo.reflex import finetune, get_laya, laya_lock
+    from neo2.core.reflex import finetune, get_laya, laya_lock
 
     laya = get_laya()
     if laya is None or _training or _stands_in():
@@ -507,7 +507,7 @@ async def learn_loop(is_idle) -> None:
     except Exception as e:  # noqa: BLE001
         print(f"[reflex] couldn't tidy the learning file: {str(e)[:80]}")
     try:
-        from neo.reflex.finetune import sweep_temporaries
+        from neo2.core.reflex.finetune import sweep_temporaries
 
         sweep_temporaries(max_age_s=600)  # what a quit mid-retrain cut off (never a write going on)
     except Exception as e:  # noqa: BLE001
@@ -518,7 +518,7 @@ async def learn_loop(is_idle) -> None:
     while True:
         await asyncio.sleep(60)
         try:
-            from neo.reflex import memory, outcomes
+            from neo2.core.reflex import memory, outcomes
 
             outcomes.tick()  # requests nothing followed up on settle by time, not only by the next one
             flush_counts()

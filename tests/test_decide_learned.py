@@ -1,4 +1,4 @@
-"""neo.decide.learned and the privacy erase of everything the decision layer learned: the
+"""neo2.core.decide.learned and the privacy erase of everything the decision layer learned: the
 namespaced stores (private files, atomic, capped), the preferences in decide.json, the in-memory
 receipts, and a write that started before an erase being dropped. Test data dir only."""
 
@@ -10,9 +10,9 @@ import stat
 
 import pytest
 
-from neo import privacy
-from neo.config import settings
-from neo.decide import engine, learned, run, sites
+from neo2.core import privacy
+from neo2.core.config import settings
+from neo2.core.decide import engine, learned, run, sites
 
 
 @pytest.fixture(autouse=True)

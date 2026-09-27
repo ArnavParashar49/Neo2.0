@@ -25,9 +25,9 @@ from typing import Any, Literal
 
 import numpy as np
 
-from neo import runtime
-from neo.config import settings
-from neo.memory import embed as _emb
+from neo2.core import runtime
+from neo2.core.config import settings
+from neo2.core.memory import embed as _emb
 
 Kind = Literal["profile", "lesson", "note"]
 
@@ -130,7 +130,7 @@ class Store:
 
     def __init__(self, path: Path | None = None, *, agent: bool = False) -> None:
         """`agent`: an embedded agent's memory — a database it creates is marked as NEO's own
-        (neo.config.AGENT_DB_ID), so it's never mistaken for a host's, nor a host's for it."""
+        (neo2.core.config.AGENT_DB_ID), so it's never mistaken for a host's, nor a host's for it."""
         self.path = path or settings().memory_db
         fresh = not os.path.exists(self.path) or os.path.getsize(self.path) == 0
         if not os.path.exists(self.path):  # private from the start, whatever the process umask
@@ -139,7 +139,7 @@ class Store:
         self._db = sqlite3.connect(self.path, check_same_thread=False, timeout=5)
         with self._lock:
             if agent and fresh:  # before WAL: the mark goes into the file's own header at once
-                from neo.config import AGENT_DB_ID
+                from neo2.core.config import AGENT_DB_ID
 
                 self._db.execute(f"PRAGMA application_id = {int(AGENT_DB_ID)}")
             self._db.execute("PRAGMA journal_mode=WAL")
@@ -424,7 +424,7 @@ _store: Store | None = None
 
 
 def store() -> Store:
-    """The bound agent's memory (neo.runtime), else NEO.app's. An agent without memory has none:
+    """The bound agent's memory (neo2.core.runtime), else NEO.app's. An agent without memory has none:
     MemoryDisabled."""
     rt = runtime.current_runtime()
     if rt is not None:

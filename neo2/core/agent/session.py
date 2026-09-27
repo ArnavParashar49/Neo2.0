@@ -11,7 +11,6 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import itertools
-import logging
 import re
 import time
 import types
@@ -19,16 +18,16 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from typing import Any, Literal
 
-from neo import runtime
-from neo.agent import confirm, fastpath, grants
-from neo.agent.loop import AgentResult, _supersede_observations, run_agent
-from neo.agent.prompt import build as build_prompt
-from neo.agent.registry import Origin, ToolContext, ToolOutput, fence, registry, voiced
-from neo.config import settings
-from neo.events import NeoState, bus
-from neo.providers import brain
-from neo.providers.base import ImagePart, Message, ToolResult
-from neo.providers.history import (
+from neo2.core import logger, runtime
+from neo2.core.agent import confirm, fastpath, grants
+from neo2.core.agent.loop import AgentResult, _supersede_observations, run_agent
+from neo2.core.agent.prompt import build as build_prompt
+from neo2.core.agent.registry import Origin, ToolContext, ToolOutput, fence, registry, voiced
+from neo2.core.config import settings
+from neo2.core.events import NeoState, bus
+from neo2.core.providers import brain
+from neo2.core.providers.base import ImagePart, Message, ToolResult
+from neo2.core.providers.history import (
     OBSERVATIONS,
     continues_request,
     halted,
@@ -37,10 +36,10 @@ from neo.providers.history import (
     request_start,
     request_turns,
 )
-from neo.reflex import Reflex, is_bare_stop, outcomes
-from neo.reflex.schema import Decision
+from neo2.core.reflex import Reflex, is_bare_stop, outcomes
+from neo2.core.reflex.schema import Decision
 
-log = logging.getLogger(__name__)
+log = logger(__name__)
 
 # A confirmation must be a short, pure affirmative; any retraction anywhere wins over a leading "ok"
 # ("haan, mat bhejo" is a no). English, Hinglish and Hindi. "ji" / "जी" alone is also "I'm
@@ -61,7 +60,7 @@ _NO = re.compile(
     r"|(?<![\w\u0900-\u0963\u0971-\u097F])(?:नहीं|नही|मत|रुको|रहने\s+दो)(?![\w\u0900-\u0963\u0971-\u097F])",
     re.I,
 )
-# A yes for the rest of the task (neo.agent.grants): "yes for this task", "yes to all", "haan sab
+# A yes for the rest of the task (neo2.core.agent.grants): "yes for this task", "yes to all", "haan sab
 # allow karo", "is task ke liye haan". It answers the question like any yes; the calls of the same
 # kind on the same app that follow in this task then run without asking (never a risky one).
 _YES_WORD = r"(?:yes|yeah|yep|yup|sure|ok(?:ay)?|go ahead|allow(?:\s+it)?|haan|haan?\s+ji|ji\s+haan?|th(?:ee|i)k\s+hai|हाँ|हां|जी\s+(?:हाँ|हां))"
@@ -104,7 +103,7 @@ _QUALIFIER = re.compile(
     r"year|weekend|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b|\d",
     re.I,
 )
-# A game to play (neo.decide.games): the run can open the app or bring it forward, whatever the
+# A game to play (neo2.core.decide.games): the run can open the app or bring it forward, whatever the
 # tool selector makes of "play chess as white".
 _GAME_TOOLS = ("open_app", "activate_app")
 _job_ids = itertools.count(1)
@@ -114,7 +113,7 @@ _conversation: contextvars.ContextVar[str] = contextvars.ContextVar("conversatio
 # Untrusted sources the caller already read for this request (Gemini Live fetched a page, then
 # handed the task over): the agent run starts from there instead of from a clean slate.
 _request_taint: contextvars.ContextVar[tuple[str, ...]] = contextvars.ContextVar("request_taint", default=())
-# The erase generation a request started in (neo.privacy): one that began before "Erase NEO's
+# The erase generation a request started in (neo2.core.privacy): one that began before "Erase NEO's
 # Memory" must not put its conversation back into the cleared history.
 _job_generation: contextvars.ContextVar[int | None] = contextvars.ContextVar("job_generation", default=None)
 # What the caller handed the tools for this request (an embedding host's tenant, user id…):
@@ -124,7 +123,7 @@ _request_extras: contextvars.ContextVar[Mapping[str, Any]] = contextvars.Context
 
 
 def _mark_job() -> None:
-    from neo import privacy
+    from neo2.core import privacy
 
     _job_generation.set(privacy.generation())
 
@@ -177,7 +176,7 @@ class Session:
     # The request (the user's words) the pending question belongs to: the follow-up after a yes
     # names it, so whatever else was asked in the meantime can't pass for it.
     _pending_request: str = ""
-    _pending_task: str = ""  # the task (neo.agent.grants) the pending question belongs to
+    _pending_task: str = ""  # the task (neo2.core.agent.grants) the pending question belongs to
     _answer_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     _summarized: int = 0  # history[:_summarized] is already in a session summary
     _chunk_started: float = field(default_factory=time.time)
@@ -331,7 +330,7 @@ class Session:
     ) -> Reply:
         """A game installed on this Mac, to play: an agent task in that app, with the screen (its
         board is looked at and clicked) and the tools to open it or bring it forward."""
-        from neo.decide import games
+        from neo2.core.decide import games
 
         log.info(f"  ~ {game.name} is a game on this Mac: the agent plays it there")
         d = replace(d, intent="agent_task", needs_screen=True, tool="", tool_p=0.0)
@@ -392,7 +391,7 @@ class Session:
     async def _quick_steps(
         self, text: str, d: Decision, steps: list[tuple[str, dict]], *, job: str, t0: float, origin: Origin
     ) -> Reply:
-        from neo.agent.early import _APP_TOOLS, _SETTLE_AFTER_APP_S, early
+        from neo2.core.agent.early import _APP_TOOLS, _SETTLE_AFTER_APP_S, early
 
         outs: list[tuple[str, str, bool]] = []  # (tool, its text, read from an untrusted source)
         spoken: list[int] = []  # the steps whose text is said
@@ -478,7 +477,7 @@ class Session:
         hint: str = "",
         also: tuple[str, ...] = (),
     ) -> Reply:
-        """An agent run as one task (neo.agent.grants): from here until the job is done, across
+        """An agent run as one task (neo2.core.agent.grants): from here until the job is done, across
         every card the user answers on the way. It's what a yes "for this task" covers and what
         the once-per-task notes count; a run that ends without a question to answer ends it.
         `hint`: more for the system prompt; `also`: tools the run gets whatever the request says."""
@@ -524,7 +523,7 @@ class Session:
             async with self._agent_slots:
                 playbook_ctx = await asyncio.to_thread(self._playbooks_for, text) if _playbooks_on() else ""
                 if only:  # the reflex chose: that tool's schema and nothing else to get lost in
-                    from neo.agent.toolselect import MORE_TOOLS
+                    from neo2.core.agent.toolselect import MORE_TOOLS
 
                     tools = [registry().get(n).spec() for n in only if registry().get(n)] + [MORE_TOOLS]
                 else:
@@ -581,8 +580,8 @@ class Session:
 
     # ---- tool selection ---------------------------------------------------------------
     def _tools_for(self, text: str, needs_screen: bool, playbook_ctx: str, also: tuple[str, ...] = ()):
-        """Only the tools this request plausibly needs (see neo.agent.toolselect), and `also`."""
-        from neo.agent.toolselect import selector
+        """Only the tools this request plausibly needs (see neo2.core.agent.toolselect), and `also`."""
+        from neo2.core.agent.toolselect import selector
 
         recent = [c.name for m in self.history[-8:] if m.role == "assistant" for c in m.tool_calls]
         pb_tools = re.findall(r"\b([a-z_]+)\(", playbook_ctx) if playbook_ctx else []
@@ -595,7 +594,7 @@ class Session:
     @staticmethod
     def _playbooks_for(goal: str) -> str:
         try:
-            from neo.memory.store import store
+            from neo2.core.memory.store import store
 
             return store().playbook_context(goal)
         except Exception as e:  # noqa: BLE001
@@ -609,14 +608,14 @@ class Session:
         if len(ok_steps) < 2:
             return
         try:
-            from neo.agent.registry import registry as _reg
-            from neo.memory.store import store
+            from neo2.core.agent.registry import registry as _reg
+            from neo2.core.memory.store import store
 
             if not any((t := _reg().get(s.tool)) and not t.parallel_safe for s in ok_steps):
                 return
             # The path, not the content: no message bodies, typed text, commands or queries (they
             # would be sent back to the cloud model on some unrelated later day).
-            from neo.memory.store import path_only
+            from neo2.core.memory.store import path_only
 
             store().save_playbook(goal, path_only([{"tool": s.tool, "args": s.args} for s in ok_steps]), "")
         except Exception as e:  # noqa: BLE001
@@ -705,7 +704,7 @@ class Session:
         overlay's button for `action_id`. Runs the staged action exactly as it was shown.
         `scope` "task" (the card's "for this task" button, or words like "yes for this task" —
         read from `text` when not given): the same tool on the same app runs without asking for
-        the rest of this task (neo.agent.grants). Returns None when there is nothing (any more)
+        the rest of this task (neo2.core.agent.grants). Returns None when there is nothing (any more)
         to answer. `via`: who answered, through which channel (an embedding host's approval
         route) — audited with the decision."""
         async with self._answer_lock:  # a spoken "yes" and a click on the card can't both run it
@@ -842,7 +841,7 @@ class Session:
         return build_prompt(self.memory_context, extra)
 
     async def _remember(self, *msgs: Message) -> None:
-        from neo import privacy
+        from neo2.core import privacy
 
         gen = _job_generation.get()
         if gen is not None and gen != privacy.generation():
@@ -886,7 +885,7 @@ class Session:
 
     @staticmethod
     async def _summarize(msgs: list[Message], started: float, budget_s: float = 8.0) -> str:
-        from neo.memory.summarize import summarize_session
+        from neo2.core.memory.summarize import summarize_session
 
         try:
             return await summarize_session(msgs, started, budget_s=budget_s)
@@ -954,7 +953,7 @@ class Session:
 
 def _last_request_index(h: list[Message], n: int) -> int:
     """Index of the n-th most recent request's turn in the user's words (0 if fewer), counting
-    from the one being worked on (see neo.providers.history.request_start)."""
+    from the one being worked on (see neo2.core.providers.history.request_start)."""
     if not any(m.role == "user" and not continues_request(m) for m in h):
         return 0
     i = request_start(h)
@@ -1041,7 +1040,7 @@ def _with_conversation(text: str) -> str:
 def _learn_from(job: str, res: AgentResult) -> None:
     """Tell the outcome ledger what the agent run did — every tool and whether it worked, and how
     the run ended — so Laya learns from what actually happened, not from what was guessed
-    (neo/reflex/outcomes.py). A request relayed by Gemini Live counts for the user's own words
+    (neo2/core/reflex/outcomes.py). A request relayed by Gemini Live counts for the user's own words
     there. The question a halted run asks isn't a step: the user's answer decides that one."""
     steps = [(st.tool, st.ok) for st in res.steps if not st.result.startswith(("NEEDS_CONFIRM", "NEEDS_USER"))]
     outcomes.agent_done(job, steps, stopped=res.stopped, answer=res.text, question=bool(res.question))
@@ -1071,7 +1070,7 @@ def _quietly(d: Decision | None, res: AgentResult) -> bool:
 
 
 def _game_to_play(text: str):
-    """The game installed on this Mac that the request asks to play (neo.decide.games), or None.
+    """The game installed on this Mac that the request asks to play (neo2.core.decide.games), or None.
     From the apps of the last scan only: nothing waits for one. Called in a thread: a word new to
     it ("play <game> on <word>") is looked up in the system word list, a read of the disk. Only
     for an agent that can open an app or bring it forward (its own tools): one that can't, a
@@ -1079,7 +1078,7 @@ def _game_to_play(text: str):
     reg = registry()
     if not any(n in reg for n in _GAME_TOOLS):
         return None
-    from neo.decide import games
+    from neo2.core.decide import games
 
     return games.to_play(text)
 
@@ -1091,7 +1090,7 @@ _match_fast_path = fastpath.match
 def _already_done_note() -> str:
     """What the early actor did while the user was still talking and nobody has accounted for
     yet — i.e. for *this* request — so the model doesn't redo it. Consumes those records."""
-    from neo.agent.early import early
+    from neo2.core.agent.early import early
 
     done = [r for r in early().unclaimed() if r.ok]
     if not done:

@@ -28,17 +28,17 @@ import numpy as np
 from google import genai
 from google.genai import types as gt
 
-from neo.agent import confirm
-from neo.agent.early import early
-from neo.agent.prompt import build as build_prompt
-from neo.agent.registry import ToolContext, fence, registry, voiced
-from neo.agent.session import answer_of
-from neo.config import decide_mode, settings
-from neo.events import NeoState, bus
-from neo.reflex import outcomes
-from neo.reflex.schema import asks_something
-from neo.voice.audio import Mic, Speaker, rms
-from neo.voice.wake import WakeSpotter
+from neo2.core.agent import confirm
+from neo2.core.agent.early import early
+from neo2.core.agent.prompt import build as build_prompt
+from neo2.core.agent.registry import ToolContext, fence, registry, voiced
+from neo2.core.agent.session import answer_of
+from neo2.core.config import decide_mode, settings
+from neo2.core.events import NeoState, bus
+from neo2.core.reflex import outcomes
+from neo2.core.reflex.schema import asks_something
+from neo2.core.voice.audio import Mic, Speaker, rms
+from neo2.core.voice.wake import WakeSpotter
 
 TextHandler = Callable[[str], Awaitable[None]]
 
@@ -158,7 +158,7 @@ def _shown(name: str) -> bool:
 
 
 def _live_extra() -> str:
-    """Live's instructions. A task kind the user switched on (neo.config decide_modes) words its
+    """Live's instructions. A task kind the user switched on (neo2.core.config decide_modes) words its
     lines for the new path: sites found by evidence, apps chosen by NEO. A tool that isn't there
     (browse) isn't mentioned."""
     opened, examples = _SITE_WORDS[decide_mode("web_search") == "on"]
@@ -271,7 +271,7 @@ def _plan(text: str) -> list[tuple[str, dict]] | None:
     a song, a search) is never cut short — "play Pray for Me" is left to the model, not run as "Pray".
     "Can you …?" runs here only when it names what to act on: "can you open YouTube?" asks for
     YouTube, "can you open files?" may be a question about NEO — the model decides that one."""
-    from neo.agent import fastpath
+    from neo2.core.agent import fastpath
 
     head, lead = _head(text)
     core = _core(text)[0]
@@ -303,7 +303,7 @@ def _command_steps(text: str, *, settled: bool = False) -> list[tuple[str, dict]
     * typing aimed at a place the plan can't click first ("type hello in the search bar");
     * `settled`: the transcript was never marked finished, so a payload may still be growing
       and a sentence ending in "and" isn't over."""
-    from neo.agent import fastpath
+    from neo2.core.agent import fastpath
 
     text = " ".join(text.split())
     if not text or _TRAILING_JOIN.search(text):
@@ -353,7 +353,7 @@ def _answers(name: str, p) -> bool:
     if name in (p.tool, "agent_task"):
         return True
     if name == "browse":
-        from neo.tools import browse
+        from neo2.core.tools import browse
 
         return browse.asks(p)
     return False
@@ -396,7 +396,7 @@ def _vague(value) -> bool:
 
 def _multi_step(text: str) -> bool:
     """Does the utterance ask for more than one thing?"""
-    from neo.agent import fastpath
+    from neo2.core.agent import fastpath
 
     core = _core(text)[0]  # "Neo, open YouTube, please" is one thing, whatever its commas
     steps = fastpath.plan(core)
@@ -676,7 +676,7 @@ class LiveVoice:
                     asyncio.create_task(self.on_down(kind, why))
                 return
             if self._connect_failures:
-                from neo import health
+                from neo2.core import health
 
                 health.report("voice", None)  # it works again
             self._connect_failures = 0
@@ -1003,7 +1003,7 @@ class LiveVoice:
         steps = _command_steps(text, settled=settled)
         if not steps:
             return  # a question, or something only the model can work out
-        from neo.agent.early import key as early_key
+        from neo2.core.agent.early import key as early_key
 
         # The early actor must not run any of these again from the same transcript.
         early()._ran_keys.update(early_key(t, a) for t, a in steps)
@@ -1174,7 +1174,7 @@ class LiveVoice:
                     # The model often wraps a plain command ("new note") in agent_task. If the
                     # user's own words are fully covered by fast paths, run those (≈1 s) instead
                     # of the model's paraphrase through the agent loop (seconds to a minute).
-                    from neo.agent import fastpath
+                    from neo2.core.agent import fastpath
 
                     steps = fastpath.plan(asked) if asked else None
                     own = bool(steps) and not any(_vague(v) for _, a in steps for v in a.values())
@@ -1303,7 +1303,7 @@ class LiveVoice:
 
     def _new_label(self, text: str = "", *, open_: bool = False) -> dict:
         """A new sentence: what the model does with it, and how that goes, becomes a label for
-        Laya once it settles (neo/reflex/outcomes.py)."""
+        Laya once it settles (neo2/core/reflex/outcomes.py)."""
         eid = outcomes.begin("", text, source="live", final=False, bind=False)
         return {"text": " ".join(text.split()), "tools": [], "spoke": False, "open": open_, "id": eid or ""}
 
@@ -1363,7 +1363,7 @@ class LiveVoice:
         t = registry().get(name)
         if name == "agent_task":
             return None
-        from neo.agent.early import key as action_key
+        from neo2.core.agent.early import key as action_key
 
         k = action_key(name, args)
         if t is not None and t.quiet:
@@ -1374,7 +1374,7 @@ class LiveVoice:
         return self._seen_calls.get(k)
 
     def _register_call(self, name: str, args: dict, key: str) -> None:
-        from neo.agent.early import key as action_key
+        from neo2.core.agent.early import key as action_key
 
         k = action_key(name, args)
         self._seen_calls.setdefault(k, key)
@@ -1385,7 +1385,7 @@ class LiveVoice:
             self._recent_idem[k] = (now, key)
 
     def _forget_call(self, name: str, args: dict) -> None:
-        from neo.agent.early import key as action_key
+        from neo2.core.agent.early import key as action_key
 
         k = action_key(name, args)
         self._seen_calls.pop(k, None)

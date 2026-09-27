@@ -15,10 +15,10 @@ import json
 import pytest
 
 import neo2
-from neo.providers.base import ImagePart
 from neo2.adapters import anthropic, gemini, openai, outcome_text, result_text
 from neo2.adapters import langchain as lc
 from neo2.adapters._common import agent_parameters, usage_text
+from neo2.core.providers.base import ImagePart
 from neo2.sdk.approval import ApprovalRequest
 from neo2.sdk.results import Result, ToolOutcome
 from neo2.testing import ScriptedBrain, ToolCall, Turn

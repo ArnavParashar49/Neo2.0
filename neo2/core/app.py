@@ -1,4 +1,4 @@
-"""Wires everything together: tools, session, voice, UI server. `python -m neo` lands here."""
+"""Wires everything together: tools, session, voice, UI server. `python -m neo2` lands here."""
 
 from __future__ import annotations
 
@@ -10,15 +10,15 @@ import sys
 import time
 from typing import Any
 
-from neo import health
-from neo.agent import confirm, grants
-from neo.agent.session import Session, answer_of
-from neo.config import settings
-from neo.events import NeoState, bus
-from neo.memory.store import store
-from neo.reflex import warmup
-from neo.server.ws import UIServer
-from neo.tools import load_all
+from neo2.core import health
+from neo2.core.agent import confirm, grants
+from neo2.core.agent.session import Session, answer_of
+from neo2.core.config import settings
+from neo2.core.events import NeoState, bus
+from neo2.core.memory.store import store
+from neo2.core.reflex import warmup
+from neo2.core.server.ws import UIServer
+from neo2.core.tools import load_all
 
 
 class App:
@@ -50,8 +50,8 @@ class App:
         """Erase everything NEO kept about the user. Everything that could write a piece of the
         conversation back afterwards is stopped first: requests in flight, summaries being
         written, the open voice session and what it keeps for context and for Laya."""
-        from neo.agent.early import early
-        from neo.privacy import forget_everything
+        from neo2.core.agent.early import early
+        from neo2.core.privacy import forget_everything
 
         self.cancel_current()
         await self.session.cancel_all()
@@ -123,7 +123,7 @@ class App:
                 await bus().say(text, role="user")
                 await self.answer(ans, said=text)  # typed straight to the question, in any voice mode
             elif self.voice and getattr(self.voice, "handles_text", False):
-                from neo.tools.browser_live import live
+                from neo2.core.tools.browser_live import live
 
                 live.user_said()  # the user's own words (a typed request has its job only in Live's calls)
                 await self.voice.send_text(text)  # Live answers aloud + in the transcript
@@ -138,19 +138,19 @@ class App:
                 return
             await self.answer(bool(cmd.get("yes")), action_id=action_id, scope=str(cmd.get("scope") or ""))
         elif kind == "forget_all":
-            # From the overlay's own "Erase everything?" confirmation, or `neo --forget-all`
+            # From the overlay's own "Erase everything?" confirmation, or `neo2 --forget-all`
             # while NEO runs — never a model's tool.
             counts = await self.erase()
             await bus().publish("erased", counts=counts)
             await bus().note("Erased: " + ", ".join(f"{n} {k}" for k, n in counts.items()))
         elif kind == "stop":
-            from neo.tools.browser_live import live
+            from neo2.core.tools.browser_live import live
 
             live.user_stopped()  # the page NEO was on stays, and it's the user's now
             if self.voice:
                 await self.voice.interrupt()  # tells Laya's outcome ledger, knowing how long NEO spoke
             else:
-                from neo.reflex import outcomes
+                from neo2.core.reflex import outcomes
 
                 outcomes.stop()  # right after NEO answered, a stop says the answer was wrong
             if not self.cancel_current():
@@ -229,11 +229,11 @@ async def _cocoa_pump() -> None:
 
 
 async def run() -> None:
-    from neo import log_to_stdout
+    from neo2.core import log_to_stdout
 
     log_to_stdout()
     s = settings()
-    from neo.permissions import request_missing
+    from neo2.core.permissions import request_missing
 
     # Signals first: quitting NEO during a first-run download must still shut down cleanly.
     stop = asyncio.Event()
@@ -247,19 +247,19 @@ async def run() -> None:
         print(f"[neo] missing: {', '.join(missing)} — allow NEO in System Settings → Privacy & Security (NEO's menu has shortcuts)")
     load_all()
     app = App()
-    from neo.tools.browser_live import live
+    from neo2.core.tools.browser_live import live
 
     live.hooks.resume = app.resume_browsing
     live.hooks.decline = app.decline
     ui = UIServer(app.on_command)
     await ui.start()
     warmup(app.session.reflex)  # Laya, then the memory embedder, sequentially
-    from neo.tools.system import restore_timers
+    from neo2.core.tools.system import restore_timers
 
     restore_timers()  # timers set before a restart still go off
     if sys.platform == "darwin":
-        from neo.decide import engine as decide
-        from neo.decide.kinds import schedule
+        from neo2.core.decide import engine as decide
+        from neo2.core.decide.kinds import schedule
 
         decide.warm()  # scan the apps now, so "play …" doesn't wait for it the first time
         schedule.prune()  # calendar files an earlier run handed to a calendar app
@@ -271,11 +271,11 @@ async def run() -> None:
     asyncio.create_task(health.watch())
     if s.voice != "off":
         asyncio.create_task(_voice_supervisor(app, stop))
-    from neo.reflex.learn import learn_loop
-    from neo.reflex.teacher import teacher_loop
+    from neo2.core.reflex.learn import learn_loop
+    from neo2.core.reflex.teacher import teacher_loop
 
     def _idle() -> bool:
-        from neo.events import bus
+        from neo2.core.events import bus
 
         voice_busy = bool(app.voice and getattr(app.voice, "_live", None))
         return not voice_busy and not bus().active_jobs and not app._tasks
@@ -293,8 +293,8 @@ async def run() -> None:
         except Exception:  # noqa: BLE001
             pass
     try:
-        from neo.tools import render
-        from neo.tools.browser import shutdown as close_browser
+        from neo2.core.tools import render
+        from neo2.core.tools.browser import shutdown as close_browser
 
         await asyncio.wait_for(close_browser(), 2)
         with contextlib.suppress(Exception):  # the invisible page renderer (atexit would also do it)
@@ -340,9 +340,9 @@ async def _voice_supervisor(app: App, stop: asyncio.Event) -> None:
     """Bring voice up, and keep it up: retry if it can't start, and when Gemini Live keeps
     failing (quota used up, network down) say so and switch to the on-device voice until Live
     works again."""
-    from neo import health
-    from neo.voice import devices
-    from neo.voice.pipeline import local_ready, make_local, make_voice
+    from neo2.core import health
+    from neo2.core.voice import devices
+    from neo2.core.voice.pipeline import local_ready, make_local, make_voice
 
     if devices.mic_status() in (devices.DENIED, devices.RESTRICTED):
         print("[voice] microphone access is off for NEO")
@@ -412,7 +412,7 @@ async def _wait_idle(app: App, voice, *, limit_s: float) -> bool:
 
 async def _back_to_live(app: App, stop: asyncio.Event, kind: str, on_down) -> None:
     """While on the on-device voice, check now and then whether Gemini Live works again."""
-    from neo.voice.live import LiveVoice
+    from neo2.core.voice.live import LiveVoice
 
     while not stop.is_set():
         await asyncio.sleep(_LIVE_RETRY_S.get(kind, 600.0))

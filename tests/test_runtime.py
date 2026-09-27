@@ -9,8 +9,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from neo import runtime
-from neo.agent.registry import Registry
+from neo2.core import runtime
+from neo2.core.agent.registry import Registry
 
 
 def _rt(name: str, data_dir: str = "/tmp/x", **kw) -> runtime.Runtime:
@@ -103,7 +103,7 @@ def test_library_mode_fails_closed_only_when_unbound(monkeypatch):
 
 
 def test_live_runtimes_and_their_secret_roots(tmp_path, monkeypatch):
-    from neo import config
+    from neo2.core import config
 
     monkeypatch.setattr(config, "_settings", None)
     a = _rt("a", str(tmp_path / "a"), secret_paths=(tmp_path / "keys",))
@@ -119,7 +119,7 @@ def test_live_runtimes_and_their_secret_roots(tmp_path, monkeypatch):
 
 
 def test_the_apps_data_dir_is_a_root_once_built(tmp_path, monkeypatch):
-    from neo import config
+    from neo2.core import config
 
     monkeypatch.setenv("NEO_DATA_DIR", str(tmp_path / "custom"))
     monkeypatch.setattr(config, "_settings", None)

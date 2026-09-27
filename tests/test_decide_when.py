@@ -1,4 +1,4 @@
-"""neo.decide.when: time phrases in English, Hinglish and Hindi against a fixed "now"
+"""neo2.core.decide.when: time phrases in English, Hinglish and Hindi against a fixed "now"
 (Saturday 26 September 2026, 2 PM). A phrase the grammar doesn't cover is None, never a guess."""
 
 from __future__ import annotations
@@ -7,7 +7,7 @@ from datetime import datetime
 
 import pytest
 
-from neo.decide.when import When, parse
+from neo2.core.decide.when import When, parse
 
 NOW = datetime(2026, 9, 26, 14, 0)  # a Saturday afternoon
 

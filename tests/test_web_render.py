@@ -1,4 +1,4 @@
-"""web_fetch reads pages their scripts build: a headless Chromium renders them (neo/tools/render.py).
+"""web_fetch reads pages their scripts build: a headless Chromium renders them (neo2/core/tools/render.py).
 
 The browser is faked throughout; the proxy that keeps a page off this Mac and the local network
 runs for real on loopback sockets. One optional check drives a real headless Chromium against a
@@ -18,10 +18,10 @@ from contextlib import suppress
 import httpx
 import pytest
 
-from neo import effects
-from neo.agent.registry import ToolContext
-from neo.tools import render, web
-from neo.tools.computer import policy
+from neo2.core import effects
+from neo2.core.agent.registry import ToolContext
+from neo2.core.tools import render, web
+from neo2.core.tools.computer import policy
 
 WORDS = "The quiet river bends past the old mill, where herons wait for the morning light. "
 

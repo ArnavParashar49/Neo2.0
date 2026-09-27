@@ -1,5 +1,5 @@
 """AsyncAgent: one embedded NEO agent — its own settings, tools, brains, memory and, per
-conversation, its own confirmation gate, event bus and session (neo.runtime).
+conversation, its own confirmation gate, event bus and session (neo2.core.runtime).
 
 Requests always reach NEO as a model's words (``Session.handle(from_user=False)``): a "yes" in
 ``ask()`` never answers a pending card. Only :meth:`AsyncAgent.approve` (host code, with an
@@ -31,17 +31,17 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Literal
 
-from neo import runtime
-from neo.agent import confirm
-from neo.agent.registry import ToolContext, ToolOutput, catalog, fence
-from neo.agent.session import Reply, Session
-from neo.events import Event as CoreEvent
-from neo.events import EventBus
-from neo.providers import BrainPool
-from neo.providers.base import ImagePart
-from neo.reflex import Reflex
-from neo.runtime import UnsupportedPlatform
 from neo2 import events as ev
+from neo2.core import runtime
+from neo2.core.agent import confirm
+from neo2.core.agent.registry import ToolContext, ToolOutput, catalog, fence
+from neo2.core.agent.session import Reply, Session
+from neo2.core.events import Event as CoreEvent
+from neo2.core.events import EventBus
+from neo2.core.providers import BrainPool
+from neo2.core.providers.base import ImagePart
+from neo2.core.reflex import Reflex
+from neo2.core.runtime import UnsupportedPlatform
 from neo2.sdk.approval import Approval, ApprovalReentryError, ApprovalRequest, _approving, guard_reentry
 from neo2.sdk.config import AgentConfig
 from neo2.sdk.hosttools import HostTool, check_name, host_tool
@@ -256,7 +256,7 @@ class AsyncAgent:
             )
             settings.ensure_dirs()
             if settings.memory_path is not None:
-                from neo.config import _mkdirs_private
+                from neo2.core.config import _mkdirs_private
 
                 _mkdirs_private(Path(settings.memory_path).parent)
         except BaseException:
@@ -920,7 +920,7 @@ class AsyncAgent:
         elif not out.ok:
             req.outcome = ToolOutcome("error", text, tuple(out.images), None, untrusted)
         else:
-            from neo.agent.loop import _truncate
+            from neo2.core.agent.loop import _truncate
 
             body = _truncate(text, self._rt.settings.max_tool_result_chars)
             req.outcome = ToolOutcome("ok", fence(name, body) if untrusted else body, tuple(out.images), None, untrusted)
@@ -988,7 +988,7 @@ class AsyncAgent:
                     await rt.browser.close()
                 rt.browser = None
             if rt.store is None and rt.settings.memory_enabled and Path(rt.settings.memory_db).exists():
-                from neo.memory.store import store
+                from neo2.core.memory.store import store
 
                 with contextlib.suppress(Exception):
                     store()  # a database from before: its rows go even when its file must stay
@@ -1118,7 +1118,7 @@ def _require_keys(cfg: AgentConfig) -> None:
 def _tools_for(cfg: AgentConfig) -> list[str]:
     """The catalog tools this agent gets: its selection (the memory tool only with memory on),
     their modules loaded, and only what can run here."""
-    from neo.tools import load, resolve
+    from neo2.core.tools import load, resolve
 
     plat = _platform()
     items = [cfg.tools] if isinstance(cfg.tools, str) else list(cfg.tools)
@@ -1131,7 +1131,7 @@ def _tools_for(cfg: AgentConfig) -> list[str]:
     elif "memory" not in names and resolve("memory", cfg.exclude_tools, platform=plat):
         names.append("memory")  # memory on: its tool comes with it (unless excluded)
     if plat == "darwin" and importlib.util.find_spec("AppKit") is None:  # installed without [mac]
-        from neo.tools import MACOS_ONLY
+        from neo2.core.tools import MACOS_ONLY
 
         asked = [n for n in names if n in MACOS_ONLY and n in explicit]
         if asked:
@@ -1190,7 +1190,7 @@ def _image(i: bytes | tuple[bytes, str]) -> ImagePart:
 
 
 def _memory_context(text: str) -> str:
-    from neo.memory.store import store
+    from neo2.core.memory.store import store
 
     try:
         return store().prompt_context(text)
@@ -1211,7 +1211,7 @@ _QUOTE_TAG = re.compile(r"<\s*(/?)\s*(recent_conversation)", re.IGNORECASE)
 
 def _quoted(context: str) -> str:
     """The host's context, never able to close (or reopen) the quote NEO puts it in
-    (neo.agent.session._with_conversation), however the tag is spelled — as fence() does."""
+    (neo2.core.agent.session._with_conversation), however the tag is spelled — as fence() does."""
     return _QUOTE_TAG.sub(lambda m: f"<{m.group(1)} {m.group(2)}", context)
 
 
@@ -1258,7 +1258,7 @@ _OWN_DIRS = ("browser", "decide_learned", "tmp")
 
 
 def _erase_files(s: Any) -> int:
-    from neo.config import AGENT_MARKER, agent_memory_db
+    from neo2.core.config import AGENT_MARKER, agent_memory_db
 
     d = Path(s.data_dir)
     n = 0

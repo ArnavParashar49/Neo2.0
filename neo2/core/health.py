@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 
-from neo.config import settings
+from neo2.core.config import settings
 
 _live: dict[str, str] = {}  # problems reported while running (voice down, …)
 
@@ -22,7 +22,7 @@ def problems() -> list[str]:
             "Settings & API Keys…, paste the key, save, then choose Restart NEO."
         )
     try:
-        from neo.voice import devices
+        from neo2.core.voice import devices
 
         if devices.mic_status() in (devices.DENIED, devices.RESTRICTED):
             out.append(
@@ -32,7 +32,7 @@ def problems() -> list[str]:
     except Exception:  # noqa: BLE001
         pass
     try:
-        from neo.permissions import missing
+        from neo2.core.permissions import missing
 
         if "Accessibility" in missing():
             out.append("NEO can't click or type in other apps until you allow Accessibility (menu-bar icon → Allow Accessibility…).")
@@ -52,7 +52,7 @@ def report(key: str, message: str | None) -> None:
     else:
         _live[key] = message
     try:
-        from neo.events import bus
+        from neo2.core.events import bus
 
         asyncio.get_running_loop().create_task(bus().publish("problems", items=problems()))
     except RuntimeError:
@@ -62,7 +62,7 @@ def report(key: str, message: str | None) -> None:
 async def watch(every_s: float = 10.0) -> None:
     """Re-check now and then: permissions granted in System Settings, a key added to the settings
     file — the overlay's problem list follows without a restart."""
-    from neo.events import bus
+    from neo2.core.events import bus
 
     last: list[str] | None = None
     while True:

@@ -11,8 +11,8 @@ import time
 import pytest
 
 import neo2
-from neo.agent import confirm
-from neo.agent.registry import ToolContext
+from neo2.core.agent import confirm
+from neo2.core.agent.registry import ToolContext
 from neo2.testing import ScriptedBrain, ToolCall, Turn
 
 pytestmark = pytest.mark.portable  # Linux or macOS, any install (what needs an extra skips): CI's sdk-core job

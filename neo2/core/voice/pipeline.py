@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 
-from neo.config import settings
+from neo2.core.config import settings
 
 TextHandler = Callable[[str], Awaitable[None]]
 _PROBE_TIMEOUT_S = 15.0
@@ -36,7 +36,7 @@ def local_ready() -> bool:
 
 
 async def make_local(on_text: TextHandler):
-    from neo.voice.local import LocalVoice
+    from neo2.core.voice.local import LocalVoice
 
     s = settings()
     v = LocalVoice(on_text)
@@ -49,7 +49,7 @@ async def make_voice(on_text: TextHandler, agent_session=None):
     s = settings()
     mode = s.voice
     if mode in ("auto", "live") and s.gemini_api_key:
-        from neo.voice.live import LiveVoice
+        from neo2.core.voice.live import LiveVoice
 
         v = LiveVoice(on_text, agent_session)
         try:

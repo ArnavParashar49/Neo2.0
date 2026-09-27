@@ -1,7 +1,7 @@
 """write_note: what the user said, saved as a note in the notes app this user uses.
 
 The engine picks where (``choose("write_note")``: the app the user named, else the apps they use
-that can make notes, else a file) and :func:`neo.decide.run.run_best` tries them in order. Per
+that can make notes, else a file) and :func:`neo2.core.decide.run.run_best` tries them in order. Per
 app, best first:
 
 * ``script_make`` - its own dictionary makes the note (in the folder the user named, else the
@@ -28,14 +28,14 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from neo import effects
-from neo.config import NOTES_DIR, settings
-from neo.decide import aescript, axkit, engine, run
-from neo.decide.run import Effect, Outcome, Req, Result
+from neo2.core import effects
+from neo2.core.config import NOTES_DIR, settings
+from neo2.core.decide import aescript, axkit, engine, run
+from neo2.core.decide.run import Effect, Outcome, Req, Result
 
 if TYPE_CHECKING:
-    from neo.decide.engine import Candidate
-    from neo.decide.inventory import App
+    from neo2.core.decide.engine import Candidate
+    from neo2.core.decide.inventory import App
 
 __all__ = [
     "KIND",
@@ -366,7 +366,7 @@ def _shown(folder: Path) -> str:
 def _free_path(folder: Path, stem: str) -> Path | Outcome:
     """The first name no file has yet ("-2", "-3", ... after the first), when NEO may write there
     (its folder made when missing); else why not."""
-    from neo.tools.computer import policy
+    from neo2.core.tools.computer import policy
 
     for n in range(1, 100):
         p = folder / (f"{stem}.md" if n == 1 else f"{stem}-{n}.md")
@@ -421,7 +421,7 @@ def _unsure_file(folder: Path) -> Outcome:
 def _elsewhere(named: str) -> str:
     """Why a note the user asked for in the app they named went to another place ('' when it
     went there, or before the first app scan)."""
-    from neo.decide import inventory
+    from neo2.core.decide import inventory
 
     apps = inventory.snapshot()
     if apps is None:

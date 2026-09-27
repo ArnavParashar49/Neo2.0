@@ -14,12 +14,12 @@ import zipfile
 
 import pytest
 
-from neo.events import EventBus
+from neo2.core.events import EventBus
 
 
 @pytest.fixture(autouse=True)
 def _bus(monkeypatch):
-    from neo import events
+    from neo2.core import events
 
     monkeypatch.setattr(events, "_bus", EventBus())
 
@@ -51,7 +51,7 @@ class _FakeStream:
 
 
 def test_audio_reopens_on_the_current_devices(monkeypatch):
-    from neo.voice import audio
+    from neo2.core.voice import audio
 
     _FakeStream.opened = []
     calls = []
@@ -85,7 +85,7 @@ def test_audio_reopens_on_the_current_devices(monkeypatch):
 
 
 def _model_zip(complete: bool = True) -> bytes:
-    from neo.voice import wake
+    from neo2.core.voice import wake
 
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as z:
@@ -115,8 +115,8 @@ class _Resp:
 def test_wake_model_download_is_checked_and_atomic(tmp_path, monkeypatch):
     import httpx
 
-    from neo.config import settings
-    from neo.voice import wake
+    from neo2.core.config import settings
+    from neo2.core.voice import wake
 
     good = _model_zip()
     monkeypatch.setattr(wake, "_SHA256", hashlib.sha256(good).hexdigest())
@@ -140,8 +140,8 @@ def test_wake_model_download_is_checked_and_atomic(tmp_path, monkeypatch):
 
 
 def test_timers_use_the_wall_clock_and_survive_a_restart(monkeypatch):
-    from neo.agent.registry import ToolContext, registry
-    from neo.tools import load_all, system
+    from neo2.core.agent.registry import ToolContext, registry
+    from neo2.core.tools import load_all, system
 
     load_all()
     notes = []
@@ -178,7 +178,7 @@ def test_timers_use_the_wall_clock_and_survive_a_restart(monkeypatch):
 
 
 def test_memory_store_survives_concurrent_use(tmp_path):
-    from neo.memory.store import Store
+    from neo2.core.memory.store import Store
 
     st = Store(tmp_path / "m.sqlite3")
     errors = []
@@ -207,8 +207,8 @@ def test_memory_store_survives_concurrent_use(tmp_path):
 
 
 def test_history_is_bounded_and_drops_old_screenshots(monkeypatch):
-    from neo.agent import session as sess_mod
-    from neo.providers.base import ImagePart, Message, ToolResult
+    from neo2.core.agent import session as sess_mod
+    from neo2.core.providers.base import ImagePart, Message, ToolResult
 
     summarised = []
 
@@ -238,7 +238,7 @@ def test_history_is_bounded_and_drops_old_screenshots(monkeypatch):
 
 
 def test_learning_counts_new_examples_by_time_and_backs_off_after_a_failure(monkeypatch):
-    from neo.reflex import learn
+    from neo2.core.reflex import learn
 
     for i in range(40):
         learn.record(f"open the thing number {i} please", "quick_action", "open_app")
@@ -254,8 +254,8 @@ def test_learning_counts_new_examples_by_time_and_backs_off_after_a_failure(monk
         def reload_head(self):
             pass
 
-    import neo.reflex as reflex_mod
-    from neo.reflex import finetune
+    import neo2.core.reflex as reflex_mod
+    from neo2.core.reflex import finetune
 
     monkeypatch.setattr(reflex_mod, "get_laya", lambda: Laya())
     monkeypatch.setattr(finetune, "train", lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("MPS out of memory")))
@@ -267,7 +267,7 @@ def test_learning_counts_new_examples_by_time_and_backs_off_after_a_failure(monk
 def test_forget_also_clears_cached_features(monkeypatch):
     import numpy as np
 
-    from neo.reflex import finetune, learn
+    from neo2.core.reflex import finetune, learn
 
     learn.record("how windy is it in Paris", "quick_action", "weather")
     finetune.save_cache(
@@ -284,8 +284,8 @@ def test_forget_also_clears_cached_features(monkeypatch):
 
 
 def test_voice_failures_are_classified():
-    from neo.voice.live import _failure_kind
-    from neo.voice.pipeline import live_refused
+    from neo2.core.voice.live import _failure_kind
+    from neo2.core.voice.pipeline import live_refused
 
     assert _failure_kind(RuntimeError("429 RESOURCE_EXHAUSTED: quota")) == "quota"
     assert _failure_kind(TimeoutError()) == "network"
@@ -295,9 +295,9 @@ def test_voice_failures_are_classified():
 
 
 def test_a_network_blip_at_startup_keeps_live_on(monkeypatch):
-    from neo import config
-    from neo.voice import live as live_mod
-    from neo.voice import pipeline
+    from neo2.core import config
+    from neo2.core.voice import live as live_mod
+    from neo2.core.voice import pipeline
 
     monkeypatch.setenv("GEMINI_API_KEY", "test-key")
     monkeypatch.setenv("NEO_VOICE", "auto")
@@ -325,7 +325,7 @@ def test_a_network_blip_at_startup_keeps_live_on(monkeypatch):
 
 
 def test_the_wake_word_is_a_leading_neo(monkeypatch):
-    from neo.voice import wake
+    from neo2.core.voice import wake
 
     class Rec:
         def Reset(self):

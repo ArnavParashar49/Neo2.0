@@ -1,4 +1,4 @@
-"""neo.decide.people: resolving who the user means, on a fake Contacts framework installed as
+"""neo2.core.decide.people: resolving who the user means, on a fake Contacts framework installed as
 sys.modules["Contacts"] (the OS's own Devanagari romanisation is used as is). Nothing asks for
 access, and a learned binding never holds a number or an address."""
 
@@ -11,8 +11,8 @@ import types
 
 import pytest
 
-from neo.decide import learned, people
-from neo.decide.inventory import App
+from neo2.core.decide import learned, people
+from neo2.core.decide.inventory import App
 
 AUTHORIZED, NOT_ASKED, DENIED = 3, 0, 2
 MOBILE, HOME, WORK = "_$!<Mobile>!$_", "_$!<Home>!$_", "_$!<Work>!$_"
@@ -304,7 +304,7 @@ def test_a_binding_remembers_the_contact_and_label_never_the_handle(cn):
     rao = resolve("Priya Rao").person
     people.bind("priya", rao, people.pick_handle(rao, "message"))
     assert learned.get("bindings", people.phrase_key("priya")) == {"contact_id": "c-rao", "label": "mobile"}
-    from neo.config import settings
+    from neo2.core.config import settings
 
     on_disk = (settings().data_dir / "decide_learned" / "bindings.json").read_text()
     assert "90000" not in on_disk and "Priya" not in on_disk  # no number, no name: an id and a label

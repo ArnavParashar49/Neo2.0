@@ -10,18 +10,18 @@ import time
 
 from AppKit import NSWorkspace
 
-from neo import effects
-from neo.agent.confirm import ask_user
+from neo2.core import effects
+from neo2.core.agent.confirm import ask_user
 
 
 def _env() -> dict[str, str] | None:
     """An embedded agent's osascript (and whatever its `do shell script` runs) gets the shell
     tool's basic environment, never the host process's; NEO.app's inherits its own, as always."""
-    from neo import runtime
+    from neo2.core import runtime
 
     if not runtime.library_bound():
         return None
-    from neo.tools.computer.shell import _env as basic
+    from neo2.core.tools.computer.shell import _env as basic
 
     return basic()
 
@@ -78,7 +78,7 @@ def target() -> str | None:
 
 
 def front_name() -> str:
-    from neo.tools.computer.focus import front_app
+    from neo2.core.tools.computer.focus import front_app
 
     return front_app()[0]
 
@@ -88,7 +88,7 @@ def _running(name: str):
     launched after NEO started unless the Cocoa run loop is pumped)."""
     from AppKit import NSRunningApplication
 
-    from neo.tools.computer.focus import pid_running
+    from neo2.core.tools.computer.focus import pid_running
 
     want = name.lower().removesuffix(".app")
     for real, pid in pid_running(want):
@@ -99,7 +99,7 @@ def _running(name: str):
 
 
 async def _wait_front(pid: int, seconds: float) -> bool:
-    from neo.tools.computer.focus import front_app
+    from neo2.core.tools.computer.focus import front_app
 
     for _ in range(max(1, int(seconds / 0.05))):
         if await asyncio.to_thread(lambda: front_app()[1]) == pid:
@@ -112,7 +112,7 @@ async def bring_front(name: str, *, wait: float = 1.5) -> tuple[bool, str]:
     """Make the app frontmost and confirm it. First the WindowServer switch window managers
     use (works from a background process while the user is busy elsewhere), then the public
     APIs. Returns (is_front, the app's real name)."""
-    from neo.tools.computer.focus import force_front
+    from neo2.core.tools.computer.focus import force_front
 
     a = None
     for _ in range(max(1, int(wait / 0.1))):  # a just-launched app takes a moment to register

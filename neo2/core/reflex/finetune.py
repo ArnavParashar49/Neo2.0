@@ -1,15 +1,15 @@
 """Train the reflex heads: small MLP ensembles over one Laya encoder embedding.
 
 One encoder pass feeds six heads: intent, destructive, needs_screen, reply (wants an answer?),
-tool (the one NEO tool a quick action needs) and kind (neo/decide's task kind). Each head is three
+tool (the one NEO tool a quick action needs) and kind (neo2/core/decide's task kind). Each head is three
 seeds averaged; its loss (cross-entropy, or spherical — which holds up under noisy labels) and its
 temperature are chosen on rows it never trained on, and a new head replaces the current one only if
 it passes the gate (`_gate`). Every run also fits a head without any of your own rows (nor their
 labels on anyone else's rows), which the privacy erase falls back to (`reset_to_base`).
 
-    python -m neo.reflex.finetune             # extract (or reuse cache), train, gate, save
-    python -m neo.reflex.finetune --refresh   # ignore the feature cache
-    python -m neo.reflex.finetune --teacher 3000   # public rows that may get zero-shot labels
+    python -m neo2.core.reflex.finetune             # extract (or reuse cache), train, gate, save
+    python -m neo2.core.reflex.finetune --refresh   # ignore the feature cache
+    python -m neo2.core.reflex.finetune --teacher 3000   # public rows that may get zero-shot labels
 
 Data: templates (dataset.py) + reflex_generated.jsonl (generate.py) + reflex_hf.jsonl (hf_data.py)
 + reflex_extra.jsonl (your own requests). A row's own kind/destructive/screen/reply labels win over
@@ -33,10 +33,18 @@ from pathlib import Path
 
 import numpy as np
 
-from neo.config import settings
-from neo.reflex.dataset import build
-from neo.reflex.features import embed_only, forward, head_probs, load_encoder, load_head, parse_head, softmax
-from neo.reflex.schema import (
+from neo2.core.config import settings
+from neo2.core.reflex.dataset import build
+from neo2.core.reflex.features import (
+    embed_only,
+    forward,
+    head_probs,
+    load_encoder,
+    load_head,
+    parse_head,
+    softmax,
+)
+from neo2.core.reflex.schema import (
     INTENT_CRITERIA,
     QUESTIONS,
     refers_to_screen,
@@ -214,7 +222,7 @@ def _given(r: dict, key: str) -> int:
     return int(bool(v))
 
 
-# NEO tool -> the neo/decide task kind it carries out; a row with any other tool is "other".
+# NEO tool -> the neo2/core/decide task kind it carries out; a row with any other tool is "other".
 _TOOL_KIND = {
     "play_music": "play_media", "open_app": "open_app", "reminder_add": "add_reminder",
     "calendar_add": "add_event", "mail_send": "send_email", "notes_create": "write_note",
@@ -284,7 +292,7 @@ def _weight(r: dict) -> float:
 def labels(rows: list[dict]) -> dict[str, np.ndarray]:
     """Every head's label per row, without the zero-shot teacher: -1 / "" = none. `*_trusted`
     marks a label the row carries or NEO derives (never the teacher's)."""
-    from neo.decide.engine import TASKS
+    from neo2.core.decide.engine import TASKS
 
     kinds = set(TASKS)
     n = len(rows)
@@ -451,7 +459,7 @@ def _fit_heads(rows, X, lab, sl, keep) -> dict:
     """All six heads on the rows in `keep`, each with the loss that does better on held-out rows in
     `keep` (nothing outside `keep` reaches the result: the base head must be exactly the head a run
     without your requests would fit)."""
-    from neo.decide.engine import TASKS
+    from neo2.core.decide.engine import TASKS
 
     mu, sd = standardise(X[keep])
     Xs = (X - mu) / sd
@@ -569,7 +577,7 @@ def _rate(m: dict, name: str, fired: np.ndarray, rows: np.ndarray) -> None:
 def rule_signals(rows: list[dict]) -> dict[str, np.ndarray]:
     """What the rules behind the heads say for each row: a bare stop, destructive words, the screen
     (and whether it is short enough for the session to cancel on the head's "stop")."""
-    from neo.reflex import is_bare_stop
+    from neo2.core.reflex import is_bare_stop
 
     return {
         "stop": np.array([is_bare_stop(r["text"]) for r in rows], dtype=bool),
@@ -756,7 +764,7 @@ def train(args: argparse.Namespace, *, agent=None, lock=None, cancelled=None, ow
     loading a second copy; every call into it holds `lock` (MPS is not thread-safe). The heads are
     for that agent's encoder (the running reflex is on the English one while the multilingual one
     isn't downloaded)."""
-    from neo import models
+    from neo2.core import models
 
     lock = lock or contextlib.nullcontext()
     quiet = agent is not None  # inside the core: no progress bars in the log
@@ -886,7 +894,7 @@ def _features(rows, lab, own, args, encoder, *, agent, lock, quiet, cancelled):
 
 
 def _head_json(fitted: dict, args, encoder: str, dim: int, n_rows: int) -> dict:
-    from neo import models
+    from neo2.core import models
 
     return {
         "version": 2,
@@ -1032,7 +1040,7 @@ def reset_to_base() -> bool:
     re-reads it before its next decision (one still loading too). With no base head (heads from
     before it existed) the head goes too: Laya answers zero-shot until it is retrained. Returns
     whether a base head was put back. Never raises: the rest of the erase must still run."""
-    from neo.reflex import laya_reflex
+    from neo2.core.reflex import laya_reflex
 
     head = settings().data_dir / "reflex_head.json"
     base = base_head_path()
@@ -1084,7 +1092,7 @@ def feature_cache() -> Path:
 
 
 def _cache_key(encoder: str) -> str:
-    from neo import models
+    from neo2.core import models
 
     return f"{models.LAYA_REVISION}:{encoder}"
 
@@ -1155,7 +1163,7 @@ def drop_from_cache(texts: set[str]) -> int:
 
 
 if __name__ == "__main__":
-    from neo import log_to_stdout
+    from neo2.core import log_to_stdout
 
     log_to_stdout()  # the providers' status lines, as this command always printed them
     main()

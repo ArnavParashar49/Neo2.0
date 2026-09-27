@@ -1,4 +1,4 @@
-"""neo.decide.sites: a site word resolved by evidence and its search found in what the site itself
+"""neo2.core.decide.sites: a site word resolved by evidence and its search found in what the site itself
 publishes. The web search is a fake, pages come from an httpx.MockTransport, and the private-host
 check is a fake too: no network is used. Site names here are fixtures."""
 
@@ -9,9 +9,9 @@ import asyncio
 import httpx
 import pytest
 
-from neo.decide import inventory, learned, sites
-from neo.decide.inventory import App
-from neo.tools.computer import policy
+from neo2.core.decide import inventory, learned, sites
+from neo2.core.decide.inventory import App
+from neo2.core.tools.computer import policy
 
 NOTEBOOK = App(bundle_id="test.notebook", name="Notebook", path="/Applications/Notebook.app")
 WRAPPER = App(bundle_id="test.vidzone", name="Vidzone", path="/Applications/Vidzone.app", web_start_url="https://www.vidzone.tv/")

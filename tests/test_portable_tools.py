@@ -11,8 +11,8 @@ from pathlib import Path
 
 import pytest
 
-from neo import effects, runtime
-from neo.tools import MACOS_ONLY, MODULES_FOR, PRESETS, REFUSED, load, modules_for, resolve
+from neo2.core import effects, runtime
+from neo2.core.tools import MACOS_ONLY, MODULES_FOR, PRESETS, REFUSED, load, modules_for, resolve
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -52,17 +52,17 @@ def test_the_portable_tools_work_without_any_macos_framework(tmp_path):
     got = _run(
         """
         import asyncio, json, sys
-        import neo.tools.web, neo.tools.weather, neo.tools.memory_tool, neo.tools.system
-        from neo.agent.registry import ToolContext, catalog
-        from neo.agent import fastpath
+        import neo2.core.tools.web, neo2.core.tools.weather, neo2.core.tools.memory_tool, neo2.core.tools.system
+        from neo2.core.agent.registry import ToolContext, catalog
+        from neo2.core.agent import fastpath
         reg = catalog()
         fetch = asyncio.run(reg.invoke("web_fetch", {"url": "http://127.0.0.1:9/admin"}, ToolContext()))
         clock = asyncio.run(reg.invoke("clock", {}, ToolContext()))
-        match = fastpath.match("search for cats in notes")  # the web_search check that consults neo.decide
+        match = fastpath.match("search for cats in notes")  # the web_search check that consults neo2.core.decide
         print(json.dumps({
             "tools": [t.name for t in reg.all()],
             "fetch": fetch.text, "clock": clock.text, "match": match,
-            "loaded": sorted(m for m in ("neo.tools.computer", "neo.decide", "AppKit", "objc") if m in sys.modules),
+            "loaded": sorted(m for m in ("neo2.core.tools.computer", "neo2.core.decide", "AppKit", "objc") if m in sys.modules),
         }))
         """,
         tmp_path,
@@ -78,13 +78,13 @@ def test_load_imports_only_what_a_preset_needs(tmp_path):
     got = _run(
         """
         import json, sys
-        from neo.tools import load
-        from neo.agent.registry import catalog
+        from neo2.core.tools import load
+        from neo2.core.agent.registry import catalog
         web = load("web")
         after_web = sorted(t.name for t in catalog().all())
         mac = load("mac", platform="darwin")  # the Mac tools can't load here: reported, not raised
         print(json.dumps({"web": web, "after_web": after_web, "mac": mac,
-                          "computer": "neo.tools.computer" in sys.modules and hasattr(sys.modules["neo.tools.computer"], "shell_tool")}))
+                          "computer": "neo2.core.tools.computer" in sys.modules and hasattr(sys.modules["neo2.core.tools.computer"], "shell_tool")}))
         """,
         tmp_path,
     )
@@ -92,7 +92,7 @@ def test_load_imports_only_what_a_preset_needs(tmp_path):
     assert got["after_web"] == sorted(
         ["web_search", "web_fetch", "search_site", "weather", "clock", "volume", "brightness", "sleep_display", "timer"]
     )
-    assert list(got["mac"]) == ["neo.tools.computer"] and "no macOS here" in got["mac"]["neo.tools.computer"]
+    assert list(got["mac"]) == ["neo2.core.tools.computer"] and "no macOS here" in got["mac"]["neo2.core.tools.computer"]
     assert not got["computer"]
 
 
@@ -100,9 +100,9 @@ def test_importing_the_web_tools_stays_small(tmp_path):
     got = _run(
         """
         import json, sys
-        import neo.tools.web
-        from neo.agent.registry import catalog
-        print(json.dumps({"n": len(catalog().all()), "mods": [m for m in sys.modules if m.startswith(("neo.tools.computer", "neo.decide"))]}))
+        import neo2.core.tools.web
+        from neo2.core.agent.registry import catalog
+        print(json.dumps({"n": len(catalog().all()), "mods": [m for m in sys.modules if m.startswith(("neo2.core.tools.computer", "neo2.core.decide"))]}))
         """,
         tmp_path,
     )
@@ -110,17 +110,17 @@ def test_importing_the_web_tools_stays_small(tmp_path):
 
 
 def test_the_old_policy_path_is_the_same_module():
-    import neo.security.policy as new
-    import neo.tools.computer.policy as old
-    from neo.tools.computer import policy as via_package
+    import neo2.core.security.policy as new
+    import neo2.core.tools.computer.policy as old
+    from neo2.core.tools.computer import policy as via_package
 
     assert old is new is via_package
     assert old._GENERIC_OK is new._GENERIC_OK and old.is_secret is new.is_secret
 
 
 def test_a_monkeypatch_through_either_name_is_seen_by_both(monkeypatch):
-    import neo.security.policy as new
-    from neo.tools.computer import policy as old
+    import neo2.core.security.policy as new
+    from neo2.core.tools.computer import policy as old
 
     monkeypatch.setattr(old, "commits", lambda label, context="": True)
     assert new.commits("anything")
@@ -160,8 +160,8 @@ def test_unknown_names_and_play_music_are_refused():
 
 
 def test_every_catalog_tool_is_in_a_preset_with_its_module():
-    from neo.agent.registry import catalog
-    from neo.tools import load_all
+    from neo2.core.agent.registry import catalog
+    from neo2.core.tools import load_all
 
     load_all()
     names = {t.name for t in catalog().all()} - {"zz_declared_while_bound"}
@@ -172,8 +172,8 @@ def test_every_catalog_tool_is_in_a_preset_with_its_module():
 
 
 def test_requires_tags_match_the_presets():
-    from neo.agent.registry import catalog
-    from neo.tools import load_all
+    from neo2.core.agent.registry import catalog
+    from neo2.core.tools import load_all
 
     load_all()
     mac = {t.name for t in catalog().all() if "macos" in t.requires}
@@ -192,8 +192,8 @@ def test_neo_apps_catalog_order_is_unchanged(tmp_path):
     names = _run(
         """
         import json
-        from neo.agent.registry import catalog
-        from neo.tools import load_all
+        from neo2.core.agent.registry import catalog
+        from neo2.core.tools import load_all
         load_all()
         print(json.dumps([t.name for t in catalog().all()]))
         """,
@@ -205,12 +205,12 @@ def test_neo_apps_catalog_order_is_unchanged(tmp_path):
 
 def test_modules_for_load_the_task_tools_with_the_computer_tools():
     assert modules_for(["mail_send", "clock", "web_search", "memory"]) == [
-        "neo.tools.computer", "neo.tools.system", "neo.tools.web", "neo.tools.memory_tool",
+        "neo2.core.tools.computer", "neo2.core.tools.system", "neo2.core.tools.web", "neo2.core.tools.memory_tool",
     ]
 
 
 def test_load_never_switches_task_modes(monkeypatch):
-    from neo.tools import tasks
+    from neo2.core.tools import tasks
 
     calls = []
     monkeypatch.setattr(tasks, "apply_modes", lambda: calls.append(1))
@@ -221,8 +221,8 @@ def test_load_never_switches_task_modes(monkeypatch):
 def test_the_clock_module_loads_mac_scripting_only_when_used(monkeypatch):
     import asyncio
 
-    from neo.tools import system
-    from neo.tools.computer import apps
+    from neo2.core.tools import system
+    from neo2.core.tools.computer import apps
 
     ran = []
 

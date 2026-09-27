@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from neo import effects
+from neo2.core import effects
 
 pytestmark = pytest.mark.portable  # Linux or macOS, any install (what needs an extra skips): CI's sdk-core job
 

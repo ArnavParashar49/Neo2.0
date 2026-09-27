@@ -18,8 +18,8 @@ import itertools
 import re
 import time
 
-from neo.agent import confirm
-from neo.agent.registry import ToolContext, ToolOutput, registry, tool
+from neo2.core.agent import confirm
+from neo2.core.agent.registry import ToolContext, ToolOutput, registry, tool
 
 # What a browse run can use: NEO's browser and the fast web tools. Not the user's own browser or
 # screen, not the Mac, not memory (a page must never get to write NEO's memory). The loop runs
@@ -71,7 +71,7 @@ def _pick_up(goal: str) -> tuple[str, str]:
     count as read already: its page and its question come along (words a site chose), so the new
     run starts as tainted as the old one ended — though "continue" is a new request."""
     last = _last
-    from neo.tools.browser_live import live
+    from neo2.core.tools.browser_live import live
 
     # The user just handed the browser back after doing their part (a login, a code): however long
     # that took, this is the job it was for.
@@ -152,7 +152,7 @@ async def browse(a: dict, c: ToolContext) -> str | ToolOutput:
 async def _within(coro, budget: float):
     """`coro` within `budget` seconds of its own: while NEO's browser waits for the user to hand it
     back, the clock stops."""
-    from neo.agent.loop import paused
+    from neo2.core.agent.loop import paused
 
     loop = asyncio.get_running_loop()
     p0, t0 = paused(), loop.time()
@@ -176,12 +176,12 @@ async def _within(coro, budget: float):
 
 async def _run(goal: str, start: str, c: ToolContext) -> str | ToolOutput:
     global _last
-    from neo import providers
-    from neo.agent.loop import run_agent
-    from neo.agent.prompt import browse_prompt
-    from neo.events import bus
-    from neo.providers.base import Message
-    from neo.tools.browser import _b
+    from neo2.core import providers
+    from neo2.core.agent.loop import run_agent
+    from neo2.core.agent.prompt import browse_prompt
+    from neo2.core.events import bus
+    from neo2.core.providers.base import Message
+    from neo2.core.tools.browser import _b
 
     reg = registry()
     specs = [t.spec() for n in TOOLS if (t := reg.get(n)) is not None and not t.hidden]
@@ -195,8 +195,8 @@ async def _run(goal: str, start: str, c: ToolContext) -> str | ToolOutput:
     system = browse_prompt(STEPS)
     chain = providers.brain("vision")  # a page that is mostly pixels comes with a screenshot
     job = f"browse{next(_ids)}"
-    from neo.events import current_job
-    from neo.tools.browser_live import live
+    from neo2.core.events import current_job
+    from neo2.core.tools.browser_live import live
 
     live.job_for(job, current_job.get())  # the run is its request's: the user's, when they asked
     try:

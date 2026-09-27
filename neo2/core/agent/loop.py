@@ -14,14 +14,14 @@ from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from typing import Literal
 
-from neo.agent.confirm import NEEDS_CONFIRM, NEEDS_USER
-from neo.agent.registry import Registry, ToolContext, ToolOutput, fence
-from neo.agent.registry import registry as default_registry
-from neo.config import settings
-from neo.events import EventBus, NeoState
-from neo.events import bus as default_bus
-from neo.providers.base import AllBrainsFailed, Message, Provider, ToolCall, ToolResult, ToolSpec, Turn
-from neo.providers.history import OBSERVATIONS
+from neo2.core.agent.confirm import NEEDS_CONFIRM, NEEDS_USER
+from neo2.core.agent.registry import Registry, ToolContext, ToolOutput, fence
+from neo2.core.agent.registry import registry as default_registry
+from neo2.core.config import settings
+from neo2.core.events import EventBus, NeoState
+from neo2.core.events import bus as default_bus
+from neo2.core.providers.base import AllBrainsFailed, Message, Provider, ToolCall, ToolResult, ToolSpec, Turn
+from neo2.core.providers.history import OBSERVATIONS
 
 Stopped = Literal["done", "max_steps", "needs_confirm", "needs_user", "thrash", "error"]
 
@@ -80,9 +80,9 @@ def _truncate(text: str, limit: int) -> str:
 
 def all_tools(reg: Registry) -> list[ToolSpec]:
     """Every tool, the ones that look at and act on the screen first. A brain too small to be
-    shown them all gets back as many as fit in the order given (neo.providers.fit), and the order
+    shown them all gets back as many as fit in the order given (neo2.core.providers.fit), and the order
     tools were registered in is only the order their modules happened to be imported in."""
-    from neo.agent.toolselect import SCREEN
+    from neo2.core.agent.toolselect import SCREEN
 
     return sorted(reg.specs(), key=lambda t: t.name not in SCREEN)
 
@@ -251,7 +251,7 @@ async def run_agent(
     """`strict`: only the `tools` given ever run — whatever else the model names gets an error,
     and `more_tools` isn't answered (a run fenced off from the rest of NEO, like `browse`).
 
-    A brain with little room may be shown only some of the tools (neo.providers.fit). A strict
+    A brain with little room may be shown only some of the tools (neo2.core.providers.fit). A strict
     run's tools are all essential — nothing could get one back. Any other run always offers
     `more_tools`, which hands back what that brain wasn't shown."""
     s = settings()
@@ -269,7 +269,7 @@ async def run_agent(
         messages.append(Message.user(goal, images=images or []))
     steps: list[Step] = []
     last_key, repeats = "", 0
-    from neo.agent.toolselect import MORE_TOOLS
+    from neo2.core.agent.toolselect import MORE_TOOLS
 
     tools = list(tools) if tools is not None else all_tools(reg)
     if strict:
@@ -346,7 +346,7 @@ async def run_agent(
         # tool it wasn't shown is one it can ask for — named here, the next fitted request keeps it.
         shown = set(turn.offered) if turn.offered is not None else enabled
         for c in meta:
-            from neo.agent.toolselect import selector
+            from neo2.core.agent.toolselect import selector
 
             found = selector().search(str(c.args.get("query", "")), exclude=shown)
             for t in found:
@@ -377,7 +377,7 @@ async def run_agent(
             if kind:
                 question = r.content.split(":", 1)[-1].strip()
                 await ev.set_state(NeoState.CONFIRMING if kind == "needs_confirm" else NeoState.IDLE, job=job)
-                from neo.agent.confirm import peek
+                from neo2.core.agent.confirm import peek
 
                 p = peek()
                 if kind == "needs_confirm" and p is not None:

@@ -4,15 +4,15 @@ Gemini and Groq are both free. One model generates candidates for a class in a g
 other labels each candidate blind. Only agreed labels are kept. Output: ``~/.neo/reflex_generated.jsonl``
 which ``dataset.build()`` merges into training.
 
-    python -m neo.reflex.generate               # ~3k items, ~10 min with free-tier pacing
-    python -m neo.reflex.generate --per-style 40 --styles 3
+    python -m neo2.core.reflex.generate               # ~3k items, ~10 min with free-tier pacing
+    python -m neo2.core.reflex.generate --per-style 40 --styles 3
 
 Targeted runs write at most 300 rows at one boundary the heads get wrong, both sides of it:
 
-    python -m neo.reflex.generate --focus chat:quick_action          # two intents
-    python -m neo.reflex.generate --focus tool:open_app:play_music   # tools; also kind:…, destructive:yes:no
-    python -m neo.reflex.generate --from-confusion confusion.json    # the most confused pairs
-    python -m neo.reflex.generate --lang hinglish                    # Hinglish stop, chat, destructive tasks
+    python -m neo2.core.reflex.generate --focus chat:quick_action          # two intents
+    python -m neo2.core.reflex.generate --focus tool:open_app:play_music   # tools; also kind:…, destructive:yes:no
+    python -m neo2.core.reflex.generate --from-confusion confusion.json    # the most confused pairs
+    python -m neo2.core.reflex.generate --lang hinglish                    # Hinglish stop, chat, destructive tasks
 
 The generators see the two classes and the *shape* of utterances that fell between them (every
 word that isn't common in the public data replaced by a placeholder), never a request as said.
@@ -34,11 +34,11 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from neo.config import settings
-from neo.providers.base import Message
-from neo.reflex.dataset import build as build_templates
-from neo.reflex.learn import EXTRA
-from neo.reflex.schema import INTENT_CRITERIA
+from neo2.core.config import settings
+from neo2.core.providers.base import Message
+from neo2.core.reflex.dataset import build as build_templates
+from neo2.core.reflex.learn import EXTRA
+from neo2.core.reflex.schema import INTENT_CRITERIA
 
 _INTENTS = list(INTENT_CRITERIA)
 
@@ -149,8 +149,8 @@ class Pair:
 
 
 def _tool_description(name: str) -> str:
-    from neo.agent.registry import registry
-    from neo.tools import load_all
+    from neo2.core.agent.registry import registry
+    from neo2.core.tools import load_all
 
     load_all()
     t = registry().get(name)
@@ -160,7 +160,7 @@ def _tool_description(name: str) -> str:
 
 
 def _kind_description(name: str) -> str:
-    from neo.decide.engine import TASKS
+    from neo2.core.decide.engine import TASKS
 
     if name not in TASKS:
         raise ValueError(f"unknown task kind {name!r}")
@@ -341,7 +341,7 @@ def benchmark() -> set[str]:
 def drop_judged(pairs: list[Pair], bench: set[str]) -> None:
     """Keep only examples training sees. Rows written at a benchmark sentence's boundary in its
     shape, or at one finetune holds out to judge a retrain, would flatter that judge."""
-    from neo.reflex.finetune import _held_out
+    from neo2.core.reflex.finetune import _held_out
 
     def seen_in_training(t: str) -> bool:
         return _norm(t) not in bench and not _held_out(t)
@@ -502,7 +502,7 @@ class _GeminiPool:
     """Free-tier quotas are per model: rotate 3.8 → 3.5 → 3.5-Lite on 429 instead of stalling."""
 
     def __init__(self) -> None:
-        from neo.providers.gemini import GeminiProvider
+        from neo2.core.providers.gemini import GeminiProvider
 
         self.models = [GeminiProvider(m) for m in ("gemini-3.8-flash", "gemini-3.5-flash", "gemini-3.5-flash-lite")]
         self.i = 0
@@ -520,7 +520,7 @@ class _GeminiPool:
 
 def _models() -> list[tuple[str, object, float]]:
     """The two free models, each with the wait its free tier needs after a call (10 / 30 RPM)."""
-    from neo.providers.openai_compat import groq
+    from neo2.core.providers.openai_compat import groq
 
     return [("gemini", _GeminiPool(), 6.0), ("groq", groq(), 2.0)]
 
@@ -547,7 +547,7 @@ async def main() -> None:
 
 
 async def _focused(args: argparse.Namespace) -> None:
-    from neo.reflex.learn import _path, _read
+    from neo2.core.reflex.learn import _path, _read
 
     if args.focus:
         pairs = [parse_focus(args.focus)]
@@ -644,7 +644,7 @@ async def _broad(args: argparse.Namespace) -> None:
 
 
 if __name__ == "__main__":
-    from neo import log_to_stdout
+    from neo2.core import log_to_stdout
 
     log_to_stdout()  # the providers' status lines, as this command always printed them
     asyncio.run(main())
