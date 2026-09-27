@@ -217,3 +217,10 @@ def test_signatures_are_capped_and_ignored_without_an_episode(clock):
     for _ in range(20):
         outcomes.signature(k, NEW_GAME[0])
     assert len(outcomes.ledger()._eps[k].sigs) == 12
+
+
+def test_rebuild_soon_waits_for_a_loaded_laya(clock, monkeypatch):
+    from neo import reflex
+
+    monkeypatch.setattr(reflex, "_laya", None)
+    assert uimemory.rebuild_soon(lambda: True) is False  # never loads Laya for this

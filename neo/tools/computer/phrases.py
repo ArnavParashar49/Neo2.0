@@ -96,11 +96,21 @@ _KEY = (
 )
 _KEY_NAME = re.compile(rf"^(?:the\s+)?{_KEY}(?:\s+(?:key|button))?(?:\s*(?:\+|and)\s*{_KEY})*$", re.I)
 _VAGUE = frozenset(
-    ["it", "this", "that", "these", "those", "them", "here", "there", "on", "in", "the", "a", "an", "one", "none", "me", "us", "you", "him", "her", "something", "anything", "everything", "nothing", "again", "away", "around", "through", "twice", "once", "text", "all", "yes", "no", "ok", "okay"]
+    ["it", "this", "that", "these", "those", "them", "here", "there", "on", "in", "the", "a", "an", "one", "none", "me", "us", "you", "him", "her", "something", "anything", "everything", "nothing", "again", "away", "around", "through", "twice", "once", "text", "all", "yes", "no", "ok", "okay",
+     # Hinglish and Hindi deictics: "is button pe click karo" names no control
+     "is", "ye", "yeh", "isko", "ise", "wo", "woh", "usko", "yahan", "wahan", "idhar", "udhar",
+     "इस", "यह", "ये", "इसे", "इसको", "वह", "वो", "उस", "यहाँ", "यहां", "वहाँ", "वहां"]
 )
-_QUESTION = re.compile(
-    r"\?\s*$|^\s*(?:what|what's|whats|which|where|why|how|who|when|is|are|does|do|did|can|could|should|will|would)\b"
-    r"(?!\s+you\s+(?:please\s+)?" + _POINT_VERB + r")|\b(?:kya|kaun|kahan|kyun|kaise|क्या|कौन|कहाँ|कहां|क्यों|कैसे)\b",
+# A question about a control is conversation. English questions start with a wh-word or an
+# auxiliary ("can you click …" is a request); Hinglish and Hindi ones carry kya / kaun / क्या …
+# anywhere ("is button pe click karo" is a request: "is" is Hindi's "this").
+_EN_QUESTION = re.compile(
+    r"^\s*(?:what|what's|whats|which|where|why|how|who|when|is|are|does|do|did|can|could|should|will|would)\b"
+    r"(?!\s+you\s+(?:please\s+)?" + _POINT_VERB + r")",
+    re.I,
+)
+_HI_QUESTION = re.compile(
+    r"(?<![\w\u0900-\u097f])(?:kya|kaun|kahan|kidhar|kyun|kaise|क्या|कौन|कहाँ|कहां|किधर|क्यों|कैसे)(?![\w\u0900-\u097f])",
     re.I,
 )
 _CLAUSES = re.compile(r"\s*(?:,|;|\band\s+then\b|\bthen\b|\band\b|\bafter\s+that\b|\bphir\b|\baur\b|और|फिर)\s+", re.I)
@@ -170,10 +180,11 @@ def pointing(text: str) -> str | None:
     button", Hindi "… पर क्लिक करो" / "… दबाओ" / "… चुनो"), one clause, not a question, and not a
     key ("press enter")."""
     raw = " ".join(unicodedata.normalize("NFC", str(text or "")).split())
-    if not raw or _QUESTION.search(raw):
+    if not raw or raw.rstrip().endswith("?") or _HI_QUESTION.search(raw):
         return None
-    framed = bool(_LEAD_EN.match(raw) or _HING_POINT.search(raw) or _HI_POINT.search(raw))
-    if not framed:
+    lead = _LEAD_EN.match(raw)
+    tail = _HING_POINT.search(raw) or _HI_POINT.search(raw)
+    if not (lead or tail) or (not tail and _EN_QUESTION.match(raw)):
         return None
     core = strip_frame(raw)
     if _CLAUSES.search(core) or not _nameable(core):

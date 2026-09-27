@@ -64,7 +64,9 @@ __all__ = [
     "memory",
     "recall",
     "remember",
+    "rebuild_soon",
     "replay",
+    "settled",
 ]
 
 TAU = 0.9  # centred cosine for "the same request again" (memory.py's measured bar)
@@ -475,6 +477,37 @@ def settled(text: str, sigs: list[dict[str, Any]]) -> Recipe | None:
 
 
 _memory = UIMemory()
+_rebuilding = False
+
+
+def rebuild_soon(is_idle: Callable[[], bool]) -> bool:
+    """Start a background re-embedding of the stored recipes' skeletons (after a restart) when NEO is
+    idle and Laya is already loaded (never loaded for this), as neo.reflex.memory.rebuild_soon does."""
+    global _rebuilding
+    from neo import reflex
+
+    laya = reflex._laya
+    if laya is None or _rebuilding or not _active() or getattr(laya, "center", None) is None or not _memory.stale():
+        return False
+
+    def embed(text: str) -> np.ndarray | None:
+        with reflex.laya_lock():
+            laya.decide(text)
+            e = getattr(laya, "last_embedding", None)
+            return None if e is None else np.array(e, dtype=np.float32).reshape(-1)
+
+    def run() -> None:
+        global _rebuilding
+        try:
+            _memory.rebuild(embed, is_idle)
+        except Exception as e:  # noqa: BLE001
+            log.info(f"[uimemory] rebuild failed: {str(e)[:80]}")
+        finally:
+            _rebuilding = False
+
+    _rebuilding = True
+    threading.Thread(target=run, daemon=True, name="laya-uimemory").start()
+    return True
 
 
 def memory() -> UIMemory:

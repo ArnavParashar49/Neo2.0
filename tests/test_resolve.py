@@ -120,6 +120,9 @@ def test_the_frame_stripper_finds_the_name_in_three_languages(text, core):
         ("select all", None),
         ("what does the share button do?", None),
         ("kya ye button kaam karta hai", None),
+        ("ये बटन क्या करता है", None),
+        ("is button pe click karo", None),  # "this button": no name (and not a question: "is" is Hindi's "this")
+        ("is mail ko forward karo", None),
         ("click reply and send", None),
         ("save karo", None),
         ("pizza order karo", None),
