@@ -12,6 +12,59 @@
   --ok: #86d99a;
   --bad: #ef8a80;
   --radius: 22px;
+
+  /* status */
+  --warn: #ffb347;
+  --warn-bg: rgba(255, 179, 71, 0.12);
+  --warn-edge: rgba(255, 179, 71, 0.45);
+  --bad-bg: rgba(239, 138, 128, 0.10);
+  --bad-edge: rgba(239, 138, 128, 0.28);
+  --accent-edge: rgba(158, 203, 255, 0.30);
+  --on-accent: #0b1422;
+  --on-warn: #1d1200;
+  --focus-ring: #9ecbff;
+  --solid-bg: var(--fg);
+  --solid-fg: #111;
+  --solid-hover: #fff;
+  --br-hover: rgba(255, 255, 255, 0.12);
+
+  /* NEO glow (NEO in control) */
+  --glow-1: #9ecbff;
+  --glow-2: #b9a8ff;
+  --glow-3: #8fe3d4;
+  --glow-halo: rgba(158, 203, 255, 0.38);
+  --glow-halo-2: rgba(185, 168, 255, 0.30);
+
+  /* browser card */
+  --br-r: 16px;
+  --br-r-sm: 10px;
+  --br-card-bg: rgba(12, 12, 15, 0.55);
+  --br-chrome-bg: rgba(255, 255, 255, 0.035);
+  --br-canvas: #0b0b0e;
+  --br-view-edge: rgba(255, 255, 255, 0.06);
+  --br-user-edge: rgba(255, 255, 255, 0.22);
+  --br-scrim: rgba(8, 8, 10, 0.32);
+  --br-glass: rgba(20, 20, 24, 0.78);
+  --br-glass-muted: rgba(236, 236, 238, 0.74);
+  --br-glass-strong: rgba(18, 18, 22, 0.90);
+  --br-glass-edge: rgba(255, 255, 255, 0.10);
+  --br-hl: var(--accent);
+  --br-hl-fill: rgba(158, 203, 255, 0.10);
+  --br-hl-glow: rgba(158, 203, 255, 0.24);
+  --br-cursor: #ffffff;
+  --br-cursor-stroke: rgba(0, 0, 0, 0.72);
+  --br-ring-bg: #151518;
+  --br-shadow-float: 0 8px 28px rgba(0, 0, 0, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+
+  /* motion */
+  --ease-out: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --ease-in-out: cubic-bezier(0.45, 0, 0.2, 1);
+  --ease-spring: cubic-bezier(0.34, 1.4, 0.64, 1);
+  --t-fast: 120ms;
+  --t-base: 180ms;
+  --t-slow: 280ms;
+
+  --mono: "SF Mono", ui-monospace, Menlo, monospace;
   font-family: -apple-system, "SF Pro Text", Inter, system-ui, sans-serif;
   font-size: 13px;
   line-height: 1.45;
@@ -19,19 +72,43 @@
   -webkit-font-smoothing: antialiased;
 }
 
+/* A light theme drops in with tokens only (the overlay ships dark today). */
+[data-theme="light"] {
+  --bg: rgba(248, 248, 250, 0.86); --bg-2: rgba(0, 0, 0, 0.035); --bg-3: rgba(0, 0, 0, 0.06);
+  --edge: rgba(0, 0, 0, 0.08); --edge-2: rgba(0, 0, 0, 0.14);
+  --fg: #1c1c1f; --muted: #5f5f68; --dim: #9a9aa2;
+  --accent: #1f6fd1; --accent-bg: rgba(31, 111, 209, 0.12); --accent-edge: rgba(31, 111, 209, 0.30); --on-accent: #fff;
+  --ok: #1f8a4c; --bad: #c4453a; --warn: #b86a00; --on-warn: #fff;
+  --warn-bg: rgba(184, 106, 0, 0.10); --warn-edge: rgba(184, 106, 0, 0.40);
+  --bad-bg: rgba(196, 69, 58, 0.08); --bad-edge: rgba(196, 69, 58, 0.28);
+  --glow-1: #4a90ff; --glow-2: #8b6cff; --glow-3: #22b8a0;
+  --glow-halo: rgba(74, 144, 255, 0.30); --glow-halo-2: rgba(139, 108, 255, 0.24);
+  --br-card-bg: rgba(255, 255, 255, 0.55); --br-chrome-bg: rgba(0, 0, 0, 0.03); --br-canvas: #f2f2f4;
+  --br-view-edge: rgba(0, 0, 0, 0.08); --br-user-edge: rgba(0, 0, 0, 0.20);
+  --br-glass: rgba(255, 255, 255, 0.84); --br-glass-muted: rgba(28, 28, 31, 0.72); --br-glass-strong: rgba(250, 250, 252, 0.94);
+  --br-glass-edge: rgba(0, 0, 0, 0.08); --br-cursor: #111; --br-cursor-stroke: rgba(255, 255, 255, 0.9); --br-ring-bg: #f4f4f6;
+  --br-hl-fill: rgba(31, 111, 209, 0.08); --br-hl-glow: rgba(31, 111, 209, 0.20);
+  --br-shadow-float: 0 8px 28px rgba(0, 0, 0, 0.16), inset 0 1px 0 rgba(255, 255, 255, 0.6);
+  --solid-fg: #fff; --solid-hover: #000; --br-hover: rgba(0, 0, 0, 0.08);
+}
+
 html, body, #root { height: 100%; margin: 0; background: transparent; overflow: hidden; }
+#root { position: relative; }
 * { box-sizing: border-box; }
 button { font: inherit; color: inherit; cursor: pointer; background: none; border: none; padding: 0; }
 kbd { font: 11px/1 -apple-system, system-ui; opacity: 0.7; margin-left: 6px; }
 
 /* ---- card ---------------------------------------------------------------------------- */
 .card {
-  height: 100vh; display: flex; flex-direction: column;
+  position: absolute; right: 0; bottom: 0; display: flex; flex-direction: column;
+  transition: width var(--t-slow) var(--ease-out), height var(--t-slow) var(--ease-out);
   background: var(--bg); backdrop-filter: blur(30px) saturate(150%); -webkit-backdrop-filter: blur(30px) saturate(150%);
   border: 1px solid var(--edge); border-radius: var(--radius);
   box-shadow: 0 20px 70px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.06);
   overflow: hidden; animation: rise 180ms ease-out;
 }
+.card.snap { transition: none; }
+@media (prefers-reduced-motion: reduce) { .card { transition: none; animation: none; } }
 @keyframes rise { from { opacity: 0; transform: translateY(6px) scale(0.985); } to { opacity: 1; transform: none; } }
 
 .head { display: flex; align-items: center; gap: 12px; padding: 14px 12px 8px 14px; cursor: default; }
@@ -124,7 +201,7 @@ kbd { font: 11px/1 -apple-system, system-ui; opacity: 0.7; margin-left: 6px; }
 .confirm-q { color: var(--fg); margin-bottom: 10px; }
 .confirm-btns .primary.danger-fill { background: #ff6b6b; color: #1a0606; }
 .confirm-btns .primary.danger-fill:hover { background: #ff8787; }
-.msg.system.problem { align-self: stretch; color: var(--fg); text-align: left; border-left: 2px solid #ffb347; padding-left: 10px; line-height: 1.4; }
+.msg.system.problem { align-self: stretch; color: var(--fg); text-align: left; border-left: 2px solid var(--warn); padding-left: 10px; line-height: 1.4; }
 .confirm-detail {
   margin: 0 0 10px; padding: 8px 10px; max-height: 150px; overflow: auto;
   background: rgba(0, 0, 0, 0.28); border: 1px solid var(--edge); border-radius: 8px;
@@ -143,7 +220,7 @@ kbd { font: 11px/1 -apple-system, system-ui; opacity: 0.7; margin-left: 6px; }
 
 /* ---- floating orb (collapsed) ------------------------------------------------------ */
 .pill {
-  height: 100vh; width: 100vw; display: grid; place-items: center; position: relative;
+  height: 100%; width: 100%; display: grid; place-items: center; position: relative;
   background: transparent; cursor: grab; -webkit-user-select: none; user-select: none;
   animation: rise 160ms ease-out;
 }
@@ -158,4 +235,16 @@ kbd { font: 11px/1 -apple-system, system-ui; opacity: 0.7; margin-left: 6px; }
 .hide-btn-hint { display: none; }
 
 /* keyboard focus is always visible (mouse clicks don't draw it) */
-.pill:focus-visible, button:focus-visible, input:focus-visible { outline: 2px solid #9ecbff; outline-offset: 2px; }
+.pill:focus-visible, button:focus-visible, input:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+
+/* In a plain browser tab (npm run dev), #root stands in for the overlay window: parked
+   bottom-right of a simulated desktop at the window's true size. */
+html[data-sim] body {
+  background:
+    radial-gradient(1100px 760px at 18% 12%, rgba(92, 124, 214, 0.55), transparent 62%),
+    radial-gradient(900px 700px at 88% 92%, rgba(196, 96, 150, 0.45), transparent 58%),
+    radial-gradient(700px 500px at 60% 40%, rgba(64, 170, 160, 0.25), transparent 60%),
+    linear-gradient(135deg, #1a2238, #2a1c33);
+}
+html[data-sim] #root { position: fixed; right: 20px; bottom: 20px; width: 84px; height: 84px; overflow: visible; }
+html[data-sim][data-surface="window"] #root { inset: 0; width: auto !important; height: auto !important; }
