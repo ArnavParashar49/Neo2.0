@@ -299,6 +299,23 @@ def test_a_sync_agent_works_through_the_same_handlers():
     assert len(ran) == 2
 
 
+@pytest.mark.parametrize("kind", KINDS)
+async def test_a_null_or_structured_context_reads_the_same_in_every_framework(kind):
+    """Models often send "context": null for an optional field, or an object: every adapter
+    takes both (null as none, an object as its JSON), never the usage error."""
+    brain = ScriptedBrain(["Sunny.", "Sunny in Lisbon."])
+    async with neo2.AsyncAgent(neo2.AgentConfig(tools="none", fast_paths=False), provider=brain) as agent:
+        _, call = _make(kind, agent)
+        assert await call({"task": "weather?", "context": None}) == "Sunny."
+        assert await call({"task": "weather?", "context": {"city": "Lisbon"}}) == "Sunny in Lisbon."
+    assert '"city": "Lisbon"' in "\n".join(brain.systems + brain.inputs)
+    assert _text_of(await call({"task": None})) == usage_text("neo")  # (a closed agent: never reached)
+
+
+def _text_of(out) -> str:
+    return out if isinstance(out, str) else out.content
+
+
 async def test_langchain_tool_is_coroutine_only_for_an_async_agent():
     pytest.importorskip("langchain_core")
     async with _agent([]) as agent:

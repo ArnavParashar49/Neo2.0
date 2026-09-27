@@ -21,7 +21,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from neo2.adapters import _common as c
 
@@ -45,6 +45,14 @@ class NeoTask(BaseModel):
 
     task: str = Field(description=c.TASK_DESCRIPTION)
     context: str = Field(default="", description=c.CONTEXT_DESCRIPTION)
+
+    @field_validator("context", mode="before")
+    @classmethod
+    def _context(cls, v: Any) -> Any:
+        """As the other adapters read it (_common.parse_args): null is none, anything else not a
+        string is its JSON."""
+        parsed = c.parse_args({"task": "-", "context": v})
+        return parsed[1] if isinstance(parsed, tuple) else v
 
 
 def agent_tool(
