@@ -22,7 +22,7 @@ import sys
 import tempfile
 import time
 import weakref
-from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Coroutine, Mapping, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
@@ -69,7 +69,10 @@ class _Req:
     and — when streamed — its events."""
 
     def __init__(self, agent: AsyncAgent, conversation: str, source: str, queue: asyncio.Queue | None) -> None:
-        self.agent = agent
+        # Never the agent itself: a task the request spawned (a card's timer) carries it in its
+        # context, and must not keep an agent its host let go of alive.
+        self.owner = weakref.ref(agent)
+        self.rt = agent._rt
         self.conversation = conversation
         self.id = "r_" + secrets.token_hex(6)
         self.queue = queue
@@ -88,7 +91,7 @@ class _Req:
 
     def step(self, name: str, args: Mapping[str, Any], ok: bool, summary: str) -> StepRecord:
         halted = summary.lstrip().startswith(("NEEDS_CONFIRM", "NEEDS_USER"))
-        t = self.agent._rt.registry.get(name)
+        t = self.rt.registry.get(name)
         untrusted = bool(t and t.untrusted)
         rec = StepRecord(name, MappingProxyType(dict(args)), ok and not halted, summary[:300])
         self.steps.append(rec)
@@ -134,7 +137,7 @@ class _Req:
             i = next((i for i, (n, _) in enumerate(self._open) if n == name), None)
             args = self._open.pop(i)[1] if i is not None else {}
             rec = self.step(name, args, bool(d.get("ok")), str(d.get("summary", "")))
-            t = self.agent._rt.registry.get(name)
+            t = self.rt.registry.get(name)
             self.emit(ev.ToolFinished, name=name, ok=rec.ok, summary=rec.summary, untrusted=bool(t and t.untrusted))
         elif e.type == "note":
             self.emit(ev.Note, text=str(d.get("text", "")))
@@ -200,6 +203,9 @@ class AsyncAgent:
         self._closed = False
         self._cards: dict[str, _Card] = {}
         self._stopping: weakref.WeakSet[asyncio.Task[Any]] = weakref.WeakSet()
+        # The agent's own request tasks (ask, stream, approve, deny, call_tool), by conversation:
+        # what cancel() and aclose() stop — never a task of the host's.
+        self._tasks: dict[asyncio.Task[Any], str] = {}
         self._prefixes: set[str] = set()
 
         runtime.set_library_mode()  # from here on, NEO code that lost its agent fails closed
@@ -238,8 +244,10 @@ class AsyncAgent:
         self._rt = rt
         self._data_dir = data_dir
         self._own_tmp = own_tmp
-        # removed even if the host never closes the agent
-        self._cleanup = weakref.finalize(self, _remove_tmp, data_dir if own_tmp else None)
+        # Dropped without aclose(): its cards are closed (audited), its folder given back and its
+        # temp dir removed all the same. Only a weak reference to the runtime: a host tool that
+        # closes over the agent must not keep both alive forever.
+        self._cleanup = weakref.finalize(self, _finalize, weakref.ref(rt), data_dir if own_tmp else None)
         try:
             for t in host_tools:
                 self.add_tool(t)
@@ -291,8 +299,11 @@ class AsyncAgent:
         untrusted ("caller"). Neither ever grants anything."""
         guard_reentry()
         self._check_open()
-        return await self._ask(
-            text, images=images, context=context, tool_context=tool_context, conversation=conversation, source=source
+        return await self._own(
+            self._ask(
+                text, images=images, context=context, tool_context=tool_context, conversation=conversation, source=source
+            ),
+            conversation,
         )
 
     def stream(self, text: str, **ask_kwargs: Any) -> AsyncIterator[ev.Event]:
@@ -304,7 +315,7 @@ class AsyncAgent:
     async def _stream(self, text: str, kw: dict[str, Any]) -> AsyncIterator[ev.Event]:
         queue: asyncio.Queue[Any] = asyncio.Queue()
         end = object()
-        task = asyncio.ensure_future(self._ask(text, queue=queue, **kw))
+        task = self._start(self._ask(text, queue=queue, **kw), kw.get("conversation", "default"))
         task.add_done_callback(lambda _t: queue.put_nowait(end))
         try:
             while True:
@@ -366,11 +377,8 @@ class AsyncAgent:
                         result = self._from_reply(req, sc, reply, sink)
                     result = await self._settle(req, result)
                 except asyncio.CancelledError:
-                    task = asyncio.current_task()
-                    if task is None or task not in self._stopping:
+                    if not self._stopped_by_us():
                         raise
-                    self._stopping.discard(task)
-                    task.uncancel()  # our own cancel(): the request ends as stopped
                     result = self._result(req, "stopped", "Stopped.", "stop")
                 return self._complete(req, result)
         finally:
@@ -402,15 +410,22 @@ class AsyncAgent:
     async def _answer(self, action_id: str, *, yes: bool, via: dict[str, Any] | None) -> Result:
         self._check_open()
         card = self._cards.get(action_id) if isinstance(action_id, str) else None
-        conversation = card.conversation if card else ""
-        req = _Req(self, conversation, "user", None)
+        return await self._own(self._answering(card, action_id, yes=yes, via=via), card.conversation if card else "")
+
+    async def _answering(self, card: _Card | None, action_id: str, *, yes: bool, via: dict[str, Any] | None) -> Result:
+        req = _Req(self, card.conversation if card else "", "user", None)
         if card is not None:  # the request it continues had read these: so has its result
             req.untrusted.extend(dict.fromkeys(card.request.after_reading))
         token = _req_var.set(req)
         try:
-            result = await self._resolve(req, action_id, yes=yes, via=via)
-            if yes:
-                result = await self._settle(req, result)
+            try:
+                result = await self._resolve(req, action_id, yes=yes, via=via)
+                if yes:
+                    result = await self._settle(req, result)
+            except asyncio.CancelledError:
+                if not self._stopped_by_us():
+                    raise
+                result = self._result(req, "stopped", "Stopped.", "stop")
             return result
         finally:
             req.done = True
@@ -435,24 +450,59 @@ class AsyncAgent:
         return req
 
     async def cancel(self, conversation: str | None = None) -> int:
-        """Stop the running requests (of one conversation, or all) and close their cards.
-        Returns how many runs were stopped; each ends with status "stopped"."""
+        """Stop the running requests (of one conversation, or all) — asks, streams, approvals and
+        the runs they continue, call_tool calls, approver waits — and close their cards. Returns
+        how many were stopped; each ends with status "stopped". (A host function already running
+        on a thread finishes there; its result is dropped.)"""
+        n = self._stop(conversation)
         if conversation is None:
             scopes = list(self._rt.scopes.values())
         else:
             scopes = [s] if (s := self._rt.scopes.get(conversation)) is not None else []
-        n = 0
         for sc in scopes:
             sess = sc.session
             if sess is None:
                 continue
-            for t in sess.jobs.values():
-                if not t.done():
-                    self._stopping.add(t)
             with runtime.bind(sc):
-                n += await sess.cancel_all()
+                await sess.cancel_all()  # its agent runs are among ours; this closes the card
             self._forget_cards(sc.conversation)
         return n
+
+    def _stop(self, conversation: str | None) -> int:
+        """Cancel this agent's own request tasks (of one conversation, or all): each ends as
+        "stopped". Never the task calling this."""
+        me = asyncio.current_task()
+        n = 0
+        for t, conv in list(self._tasks.items()):
+            if t is not me and not t.done() and (conversation is None or conv == conversation):
+                self._stopping.add(t)
+                t.cancel()
+                n += 1
+        return n
+
+    def _stopped_by_us(self) -> bool:
+        """In a request task's CancelledError: was it our cancel() or aclose()? Then the request
+        ends as stopped (the cancellation is consumed); otherwise it's the host's, and propagates."""
+        task = asyncio.current_task()
+        if task is None or task not in self._stopping:
+            return False
+        self._stopping.discard(task)
+        task.uncancel()
+        return True
+
+    def _start(self, coro: Coroutine[Any, Any, Any], conversation: str) -> asyncio.Task[Any]:
+        task = asyncio.ensure_future(coro)
+        self._tasks[task] = conversation if isinstance(conversation, str) else ""
+        task.add_done_callback(self._tasks_done)
+        return task
+
+    def _tasks_done(self, task: asyncio.Task[Any]) -> None:
+        self._tasks.pop(task, None)
+
+    async def _own(self, coro: Coroutine[Any, Any, Any], conversation: str) -> Any:
+        """Run one request as a task of the agent's own, awaited by the host's: cancel() and
+        aclose() stop it (it returns "stopped"); the host cancelling its task cancels it too."""
+        return await self._start(coro, conversation)
 
     async def _settle(self, req: _Req, result: Result) -> Result:
         """Hand a needs_approval to the approver (unless deferred), as often as the continuation
@@ -769,14 +819,17 @@ class AsyncAgent:
         t = self._rt.registry.get(real) if real else None
         if t is None or t.hidden:
             return ToolOutcome("error", f"Unknown tool: {name}", (), None, False)
+        return await self._own(self._calling(real, dict(args or {}), turn, bool(t.untrusted)), turn.conversation)
+
+    async def _calling(self, real: str, args: dict[str, Any], turn: ToolTurn, untrusted: bool) -> ToolOutcome:
         sc = self._scope(turn.conversation)
         req = _Req(self, turn.conversation, turn.source, None)
         token = _req_var.set(req)
         try:
             with runtime.bind(sc):
                 with confirm.collecting() as sink:
-                    out = await self._rt.registry.invoke(real, dict(args or {}), turn.context)
-                    outcome = self._tool_outcome(req, sc, real, dict(args or {}), out, turn.context, sink)
+                    out = await self._rt.registry.invoke(real, args, turn.context)
+                    outcome = self._tool_outcome(req, sc, real, args, out, turn.context, sink)
                 if outcome.status == "needs_approval" and self._approver != "defer":
                     res = await self._settle(
                         req, self._result(req, "needs_approval", outcome.text, "tool", approval=outcome.approval)
@@ -786,6 +839,10 @@ class AsyncAgent:
                     else:
                         outcome = req.outcome or outcome
             return outcome
+        except asyncio.CancelledError:
+            if not self._stopped_by_us():
+                raise
+            return ToolOutcome("stopped", "Stopped.", (), None, untrusted)
         finally:
             req.done = True
             _req_var.reset(token)
@@ -855,7 +912,9 @@ class AsyncAgent:
         if sc is None:
             return
         sess = sc.session
-        if sess is not None and any(not t.done() for t in sess.jobs.values()):
+        if any(c == conversation and not t.done() for t, c in self._tasks.items()) or (
+            sess is not None and any(not t.done() for t in sess.jobs.values())
+        ):
             raise RuntimeError("a request is still running in this conversation: cancel() it first")
         if sc.gate is not None and sc.gate.pending is not None:
             with runtime.bind(sc):
@@ -903,25 +962,30 @@ class AsyncAgent:
         return counts
 
     async def aclose(self) -> None:
-        """Stop what's running, close the cards (audited), the browser and the memory database;
-        remove the temp folder when the config gave no data_dir. Idempotent."""
+        """Stop every request of this agent still running (each ends as "stopped" for whoever
+        awaits it: never a task of the host's), close the cards (audited), the browser and the
+        memory database; remove the temp folder when the config gave no data_dir. Final: nothing
+        of this agent runs or reopens afterwards. Idempotent."""
         if self._closed:
             return
         self._closed = True
         rt = self._rt
+        rt.closing = True  # from now on nothing reopens its memory or browser
         me = asyncio.current_task()
-        tasks: list[asyncio.Task[Any]] = []
+        mine = [t for t in self._tasks if t is not me and not t.done()]
+        self._stop(None)
+        timers: list[asyncio.Task[Any]] = []
         for sc in list(rt.scopes.values()):
             sess = sc.session
-            if sess is not None:
-                tasks += [t for t in (*sess.jobs.values(), *sess._expiries, *sess._bg) if t is not me and not t.done()]
+            if sess is not None:  # a card's timer, a summary: the session's own, never the host's
+                timers += [t for t in (*sess._expiries, *sess._bg) if t is not me and not t.done()]
             if sc.gate is not None and sc.gate.pending is not None:
                 with runtime.bind(sc):
                     confirm.cancel("closed")
-        for t in tasks:
+        for t in timers:
             t.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+        if mine or timers:
+            await asyncio.gather(*mine, *timers, return_exceptions=True)
         self._cards.clear()
         with runtime.bind(runtime.Scope(rt, "")):
             if rt.browser is not None:
@@ -955,14 +1019,21 @@ class AsyncAgent:
             with rt.lock:
                 if sc.session is None:
                     bus = sc.get_or_create("bus", EventBus)
-                    bus.subscribe(lambda e, sc=sc: self._on_event(e, sc))
+                    me = weakref.ref(self)  # the bus lives in the runtime: it never keeps the agent alive
+                    bus.subscribe(lambda e, sc=sc, me=me: _deliver(me, e, sc))
                     sc.session = Session(reflex=Reflex(), max_agent_jobs=self._cfg.max_concurrent_tasks)
         return sc
 
     def _on_event(self, e: CoreEvent, sc: runtime.Scope) -> None:
         req = _req_var.get()
-        if req is not None and req.agent is self and not req.done:
+        if req is not None and req.owner() is self and not req.done:
             req.feed(e, sc)
+
+
+def _deliver(agent: weakref.ReferenceType[AsyncAgent], e: CoreEvent, sc: runtime.Scope) -> None:
+    a = agent()
+    if a is not None:
+        a._on_event(e, sc)
 
 
 # ---- construction helpers -----------------------------------------------------------------------
@@ -1084,6 +1155,25 @@ def _unprefixed(text: str, prefix: str) -> str:
 def _remove_tmp(path: Path | None) -> None:
     if path is not None:
         shutil.rmtree(path, ignore_errors=True)
+
+
+def _finalize(rt_ref: weakref.ReferenceType[runtime.Runtime], tmp: Path | None) -> None:
+    """An agent its host let go of without aclose() (or its constructor failing): close its cards
+    (audited), stop their timers, give its folder back, remove its temp dir. Runs wherever the
+    last reference went — maybe another thread: the timers are cancelled through their loop."""
+    rt = rt_ref()
+    if rt is not None and not rt.closed:
+        rt.closing = True
+        for sc in list(rt.scopes.values()):
+            with contextlib.suppress(Exception), runtime.bind(sc):
+                if sc.gate is not None and sc.gate.pending is not None:
+                    confirm.cancel("closed")
+            sess = sc.session
+            for t in (*sess._expiries, *sess._bg) if sess is not None else ():
+                with contextlib.suppress(Exception):
+                    t.get_loop().call_soon_threadsafe(t.cancel)
+        rt.release()  # never a lock here: the GC may run this while this thread holds one
+    _remove_tmp(tmp)
 
 
 # What NEO itself writes into an agent's folder (never another file there): the memory database,

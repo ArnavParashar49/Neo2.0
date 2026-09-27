@@ -156,3 +156,92 @@ def test_a_dropped_agent_stops_its_thread():
     gc.collect()
     thread.join(5)
     assert not thread.is_alive() and not dd.exists()
+
+
+def test_close_while_other_threads_wait_answers_them():
+    """close() from one thread while another waits on ask() or on a blocking approver: that
+    thread gets its request's end (stopped), never a bare CancelledError."""
+    started = threading.Event()
+
+    class Slow(ScriptedBrain):
+        async def complete(self, messages, **kw):
+            started.set()
+            await asyncio.sleep(5)
+            return await super().complete(messages, **kw)
+
+    a = neo2.Agent(neo2.AgentConfig(tools="none"), provider=Slow(["x"]))
+    out: dict = {}
+
+    def worker():
+        try:
+            out["r"] = a.ask("long")
+        except BaseException as e:  # noqa: BLE001
+            out["err"] = e
+
+    t = threading.Thread(target=worker)
+    t.start()
+    assert started.wait(5)
+    a.close()
+    t.join(5)
+    assert "err" not in out, out.get("err")
+    assert out["r"].status == "stopped"
+
+
+def test_close_while_a_blocking_approver_waits_answers_the_asker():
+    release = threading.Event()
+    entered = threading.Event()
+
+    def approver(req):
+        entered.set()
+        release.wait(3)
+
+    @neo2.host_tool(risk="destructive")
+    def wire(to: str) -> str:
+        """Wire."""
+        return "ok"
+
+    brain = ScriptedBrain([Turn(tool_calls=[ToolCall("1", "wire", {"to": "x"})])])
+    a = neo2.Agent(neo2.AgentConfig(tools="none"), provider=brain, approver=approver, host_tools=[wire])
+    out: dict = {}
+
+    def worker():
+        try:
+            out["r"] = a.ask("pay")
+        except BaseException as e:  # noqa: BLE001
+            out["err"] = e
+
+    t = threading.Thread(target=worker)
+    t.start()
+    assert entered.wait(5)
+    a.close()
+    t.join(5)
+    release.set()
+    assert "err" not in out, out.get("err")
+    assert out["r"].status == "stopped"
+    with pytest.raises(RuntimeError, match="closed"):
+        a.ask("again")
+
+
+def test_any_call_close_cuts_short_says_the_agent_is_closed():
+    """Whatever else was in flight when close() drained the loop (a forget_all(), say) ends with
+    RuntimeError("this agent is closed") in its thread, never concurrent.futures' CancelledError."""
+    a = neo2.Agent(neo2.AgentConfig(tools="none"), provider=ScriptedBrain())
+    out: dict = {}
+    entered = threading.Event()
+
+    async def in_flight():
+        entered.set()
+        await asyncio.sleep(5)
+
+    def worker():
+        try:
+            a._run(in_flight())
+        except BaseException as e:  # noqa: BLE001
+            out["err"] = e
+
+    t = threading.Thread(target=worker)
+    t.start()
+    assert entered.wait(5)
+    a.close()
+    t.join(5)
+    assert isinstance(out["err"], RuntimeError) and "closed" in str(out["err"])

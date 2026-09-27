@@ -70,7 +70,8 @@ class Runtime:
     generation: int = 0  # bumped when this agent's memory is erased (neo.privacy)
     library: bool = True
     temporary: bool = False  # its data dir is a temp dir its owner removes when it closes
-    closed: bool = False
+    closing: bool = False  # its owner is closing it: nothing of it is (re)built any more
+    closed: bool = False  # no longer live: its folder is free, what it kept stays secret
     scopes: dict[str, Scope] = field(default_factory=dict, repr=False)
     lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
 
@@ -102,12 +103,15 @@ class Runtime:
             return sc
 
     def get_or_create(self, attr: str, make: Callable[[], T]) -> T:
-        """`getattr(self, attr)`, built by `make()` the first time (once, even across threads)."""
+        """`getattr(self, attr)`, built by `make()` the first time (once, even across threads).
+        Never after the agent closed: late work can't reopen its database or its browser."""
         v = getattr(self, attr)
         if v is None:
             with self.lock:
                 v = getattr(self, attr)
                 if v is None:
+                    if self.closing or self.closed:
+                        raise RuntimeError(f"the agent {self.name!r} is closed")
                     v = make()
                     setattr(self, attr, v)
         return v
@@ -116,10 +120,15 @@ class Runtime:
         """No longer live: its data dir is free for another agent. What it kept (its data dir,
         unless a temp dir its owner removes; its memory file; its secret paths) stays secret to
         every other agent for the rest of the process."""
+        self.release()
         with _live_lock:
             _live.discard(self)
-        if self.library and not self.closed:
-            self._retire.detach()
+
+    def release(self) -> None:
+        """close() without taking any lock — for a finalizer, which may run inside the GC while
+        this very thread holds _live_lock: closed (a closed runtime counts as live nowhere) and
+        what it kept retired, once."""
+        if self.library and self._retire.detach() is not None:
             _retire(tuple(_kept(self)))
         self.closed = True
 
@@ -203,27 +212,34 @@ def library_bound() -> bool:
 def _refuse_shared_data_dir(rt: Runtime) -> None:
     """One live agent per data dir: two would share a memory, an audit log and a browser profile
     (its logins), and one nested in another's would be the other's secret. Under _live_lock."""
+    if clash := _shared_with(rt):
+        raise ValueError(clash)
+
+
+def _shared_with(rt: Runtime) -> str:
+    """Why `rt` can't live next to a live agent ("" = it can). Only a string leaves: the error's
+    traceback must not keep the other agent alive (a notebook keeps the last one)."""
     from neo.config import overlaps
 
     mine = Path(rt.settings.data_dir)
-    for other in _live:
-        if other.library and overlaps(mine, other.settings.data_dir):
-            raise ValueError(
+    live = [o for o in _live if o.library and not o.closed]
+    for other in live:
+        if overlaps(mine, other.settings.data_dir):
+            return (
                 f"data_dir {mine} is another agent's ({other.name!r} uses {other.settings.data_dir}): "
                 "give each agent its own folder, or close the other first"
             )
     # A memory database kept outside the data dir (memory_path) is one agent's too: never another
     # agent's file, in another's folder, or holding another's.
     own_db = _memory_db(rt.settings)
-    for other in _live:
-        if not other.library:
-            continue
+    for other in live:
         their_db = _memory_db(other.settings)
         pairs = [(mine, their_db)] if their_db is not None else []
         if own_db is not None:
             pairs += [(own_db, Path(other.settings.data_dir))] + ([(own_db, their_db)] if their_db is not None else [])
         if any(overlaps(a, b) for a, b in pairs):
-            raise ValueError(f"that memory database is another agent's ({other.name!r}): give each agent its own")
+            return f"that memory database is another agent's ({other.name!r}): give each agent its own"
+    return ""
 
 
 def _memory_db(s: Settings) -> Path | None:
@@ -233,7 +249,7 @@ def _memory_db(s: Settings) -> Path | None:
 
 def live_runtimes() -> list[Runtime]:
     with _live_lock:
-        return list(_live)
+        return [r for r in _live if not r.closed]
 
 
 def secret_roots() -> list[Path]:

@@ -69,7 +69,7 @@ class Result:
 class ToolOutcome:
     """One NEO tool called by the host's own model loop (AsyncAgent.call_tool)."""
 
-    status: Literal["ok", "error", "needs_approval", "needs_user", "denied"]
+    status: Literal["ok", "error", "needs_approval", "needs_user", "denied", "stopped"]
     text: str  # already wrapped in <untrusted source=...> for untrusted tools
     images: tuple[ImagePart, ...]
     approval: ApprovalRequest | None

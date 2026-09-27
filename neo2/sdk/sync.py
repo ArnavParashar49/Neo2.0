@@ -8,6 +8,7 @@ and the browser all belong to one loop) and calls into it. Inside a running even
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import contextlib
 import queue
 import threading
@@ -40,6 +41,7 @@ class Agent:
     def __init__(self, config: AgentConfig | None = None, /, **kwargs: Any) -> None:
         _not_in_a_loop()
         self._closed = False
+        self._closing = False
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(target=self._loop.run_forever, name="neo2-agent", daemon=True)
         self._thread.start()
@@ -65,7 +67,12 @@ class Agent:
         if self._closed:
             coro.close()
             raise RuntimeError("this agent is closed")
-        return asyncio.run_coroutine_threadsafe(coro, self._loop).result()
+        try:
+            return asyncio.run_coroutine_threadsafe(coro, self._loop).result()
+        except (concurrent.futures.CancelledError, asyncio.CancelledError):
+            if self._closing:  # close() cut it short (a request itself ends as "stopped")
+                raise RuntimeError("this agent is closed") from None
+            raise
 
     def _stop(self) -> None:
         async def drain() -> None:
@@ -128,6 +135,8 @@ class Agent:
                 if item is _END:
                     return
                 if isinstance(item, _Failed):
+                    if self._closing and isinstance(item.error, (asyncio.CancelledError, concurrent.futures.CancelledError)):
+                        raise RuntimeError("this agent is closed") from None
                     raise item.error
                 yield item
         finally:
@@ -204,6 +213,7 @@ class Agent:
             return
         if threading.current_thread() is self._thread:
             raise RuntimeError("close() from inside the agent's own loop would never return")
+        self._closing = True
         try:
             if self._loop.is_running():
                 asyncio.run_coroutine_threadsafe(self._agent.aclose(), self._loop).result(timeout=30)

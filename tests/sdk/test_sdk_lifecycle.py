@@ -5,8 +5,11 @@ it closes (cards closed and audited, temp folder gone)."""
 from __future__ import annotations
 
 import asyncio
+import gc
 import sys
 import threading
+import time
+import weakref
 
 import pytest
 
@@ -126,6 +129,202 @@ async def test_cancel_stops_a_running_request():
         r = await asyncio.wait_for(task, 5)
         assert r.status == "stopped" and r.route == "stop"
         assert await agent.cancel("nobody") == 0
+
+
+def _in_flight_agent(tmp_path, ran: list, entered: dict):
+    """An agent whose call_tool, approval continuation and fast path all hang until stopped."""
+
+    @neo2.host_tool(untrusted=False)
+    async def slow(x: str) -> str:
+        """Slow."""
+        entered["tool"].set()
+        await asyncio.sleep(5)
+        ran.append("slow")
+        return "ok"
+
+    @neo2.host_tool(risk="destructive", untrusted=False)
+    def wire_money(to: str) -> str:
+        """Send money."""
+        return "wired"
+
+    @neo2.host_tool(untrusted=False)
+    def ping() -> str:
+        """Ping."""
+        ran.append("ping")
+        return "pong"
+
+    class Brain(ScriptedBrain):
+        async def complete(self, messages, **kw):
+            if self.calls == 1:  # the run that continues after the approval
+                entered["continuation"].set()
+                await asyncio.sleep(5)
+            return await super().complete(messages, **kw)
+
+    brain = Brain(
+        [
+            Turn(tool_calls=[ToolCall("1", "wire_money", {"to": "x"})]),
+            Turn(tool_calls=[ToolCall("2", "ping", {}), ToolCall("3", "memory", {"action": "remember", "text": "paid x"})]),
+            "done",
+        ]
+    )
+    cfg = neo2.AgentConfig(tools="web", data_dir=tmp_path / "agent", memory=True)
+    agent = neo2.AsyncAgent(cfg, provider=brain, host_tools=[slow, wire_money, ping])
+
+    async def slow_weather(args, ctx):
+        entered["quick"].set()
+        await asyncio.sleep(5)
+        ran.append("weather")
+        return "Oslo: 3C"
+
+    agent._rt.registry.get("weather").handler = slow_weather
+    return agent
+
+
+async def _start_in_flight(agent, entered: dict) -> dict:
+    r = await agent.ask("pay x")
+    assert r.status == "needs_approval"
+    tasks = {
+        "call_tool": asyncio.create_task(agent.call_tool("slow", {"x": "1"})),
+        "approve": asyncio.create_task(agent.approve(r.approval.action_id, via=neo2.Approval("t", "u"))),
+        "quick": asyncio.create_task(agent.ask("weather in Oslo", conversation="q")),
+    }
+    for e in ("tool", "continuation", "quick"):
+        await asyncio.wait_for(entered[e].wait(), 5)
+    return tasks
+
+
+async def test_cancel_stops_every_kind_of_request(tmp_path):
+    """A fast path, a call_tool, the run an approval continues: each ends as "stopped"."""
+    ran: list = []
+    entered = {k: asyncio.Event() for k in ("tool", "continuation", "quick")}
+    async with _in_flight_agent(tmp_path, ran, entered) as agent:
+        tasks = await _start_in_flight(agent, entered)
+        assert await agent.cancel("q") == 1  # that conversation's only
+        quick = await asyncio.wait_for(tasks.pop("quick"), 2)
+        assert quick.status == "stopped" and not any(t.done() for t in tasks.values())
+        assert await agent.cancel() == 2
+        out = {k: await asyncio.wait_for(t, 2) for k, t in tasks.items()}
+        assert out["call_tool"].status == "stopped" and out["approve"].status == "stopped"
+        assert await agent.cancel() == 0
+        await asyncio.sleep(0.05)
+        assert ran == []
+        r = await agent.ask("what time is it")  # the agent goes on
+        assert r.status == "done"
+
+
+async def test_aclose_stops_every_request_in_flight_and_nothing_reopens(tmp_path):
+    from neo import runtime
+    from neo.memory.store import store
+    from neo.tools.browser import _browser
+
+    ran: list = []
+    entered = {k: asyncio.Event() for k in ("tool", "continuation", "quick")}
+    agent = _in_flight_agent(tmp_path, ran, entered)
+    tasks = await _start_in_flight(agent, entered)
+    t0 = time.monotonic()
+    await agent.aclose()
+    assert time.monotonic() - t0 < 2 and all(t.done() for t in tasks.values())
+    assert {k: t.result().status for k, t in tasks.items()} == dict.fromkeys(tasks, "stopped")
+    await asyncio.sleep(0.05)
+    assert ran == [] and agent._rt.store is None and agent._rt.browser is None
+    with runtime.bind(agent._rt.scope()):  # late work: never a new database or browser
+        with pytest.raises(RuntimeError, match="closed"):
+            store()
+        with pytest.raises(RuntimeError, match="closed"):
+            _browser()
+
+
+async def test_aclose_never_cancels_or_waits_for_the_hosts_own_task():
+    started = asyncio.Event()
+
+    class Hanging(ScriptedBrain):
+        async def complete(self, messages, **kw):
+            started.set()
+            await asyncio.sleep(60)
+            return await super().complete(messages, **kw)
+
+    agent = neo2.AsyncAgent(neo2.AgentConfig(tools="none"), provider=Hanging(["x"]))
+    seen: dict = {}
+
+    async def host_worker():
+        seen["result"] = await agent.ask("a long job")
+        await asyncio.sleep(0.5)  # the host's own next piece of work
+        seen["went_on"] = True
+
+    worker = asyncio.create_task(host_worker())
+    await asyncio.wait_for(started.wait(), 5)
+    t0 = time.monotonic()
+    await agent.aclose()
+    assert time.monotonic() - t0 < 0.4 and not worker.done()
+    await asyncio.wait_for(worker, 3)
+    assert seen["result"].status == "stopped" and seen["went_on"]
+
+
+async def test_a_dropped_agent_frees_its_folder_and_closes_its_card(tmp_path):
+    """Nothing holds an agent the host let go of: its folder is free at once, its card closed."""
+    calls: list = []
+    audit: list = []
+    dd = tmp_path / "a"
+    gc.disable()  # no cycle collector: freed by its last reference going, or not at all
+    try:
+        a = neo2.AsyncAgent(
+            neo2.AgentConfig(tools="none", data_dir=dd),
+            provider=ScriptedBrain([Turn(tool_calls=[ToolCall("1", "wire_money", {"to": "x"})])]),
+            host_tools=[_wire(calls)],
+            on_audit=audit.append,
+        )
+        r = await a.ask("pay x")
+        assert r.status == "needs_approval"
+        ref = weakref.ref(a)
+        del a
+        assert ref() is None
+        assert [x["status"] for x in audit] == ["staged", "cancelled: closed"]
+        async with neo2.AsyncAgent(neo2.AgentConfig(tools="none", data_dir=dd), provider=ScriptedBrain()):
+            pass
+    finally:
+        gc.enable()
+    assert calls == []
+
+
+async def test_an_agents_finalizer_takes_no_lock(tmp_path, monkeypatch):
+    """The GC can run a dropped agent's finalizer while this very thread holds the live-agents
+    lock (any allocation in there may trigger it): the finalizer must never wait for that lock."""
+    from neo import runtime
+
+    class NoReentry:
+        def __init__(self):
+            self._lock = threading.Lock()
+
+        def __enter__(self):
+            if not self._lock.acquire(timeout=1):
+                raise AssertionError("the live-agents lock was taken again by the thread holding it")
+
+        def __exit__(self, *exc):
+            self._lock.release()
+
+    agent = neo2.AsyncAgent(neo2.AgentConfig(tools="none", data_dir=tmp_path / "a"), provider=ScriptedBrain())
+    await agent.ask("hi")
+    monkeypatch.setattr(runtime, "_live_lock", NoReentry())
+    with runtime._live_lock:
+        agent._cleanup()  # the finalizer, run where the GC could run it
+    assert agent._rt not in runtime.live_runtimes()  # released: its folder is free
+    await agent.aclose()
+
+
+async def test_a_refused_agents_error_keeps_no_other_agent_alive(tmp_path):
+    dd = tmp_path / "a"
+    gc.disable()
+    try:
+        a = neo2.AsyncAgent(neo2.AgentConfig(tools="none", data_dir=dd), provider=ScriptedBrain())
+        rt = weakref.ref(a._rt)
+        with pytest.raises(ValueError, match="another agent's") as err:
+            neo2.AsyncAgent(neo2.AgentConfig(tools="none", data_dir=dd), provider=ScriptedBrain())
+        del a
+        assert rt() is None and err.value.__traceback__ is not None  # the traceback holds none of it
+        async with neo2.AsyncAgent(neo2.AgentConfig(tools="none", data_dir=dd), provider=ScriptedBrain()):
+            pass
+    finally:
+        gc.enable()
 
 
 async def test_cancel_closes_a_pending_card():
