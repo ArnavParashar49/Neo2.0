@@ -7,7 +7,8 @@ alone, never from the user's data: "भेजें" is the OS's "Send", "नय
 * **Built once per OS build**, at idle and off the event loop (:func:`idle_loop`, started by NEO.app),
   cached as derived OS data under the data dir, keyed by the OS build so an update rebuilds it. A
   table is read lazily - only its English and Hindi parts are decoded, never its other forty
-  languages - so a full scan takes a few seconds of CPU, not the ~47 s a plain plist load needs.
+  languages - so a full scan of the OS's ~5,000 tables takes about 3 s of CPU (a plain plist load
+  of each takes about 11 s; loading every table twice through the frameworks' links, ~47 s).
   Library mode (NEO embedded in another app) never scans.
 * **An app's own tables** (its ``.loctable`` and ``.lproj/*.strings``) are read on first contact
   (:func:`for_pid`, a few ms) and kept in RAM only: they aren't the OS's, so never written down.
