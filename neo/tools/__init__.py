@@ -10,7 +10,7 @@ _MODULES = [
     "neo.tools.browse",
 ]  # fmt: skip
 _MAC_ONLY = ["neo.tools.media"]
-_MAC_MODULES = ["neo.tools.computer"]
+_MAC_MODULES = ["neo.tools.computer", "neo.tools.selftest"]
 
 
 def load_all() -> list[str]:

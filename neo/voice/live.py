@@ -130,7 +130,9 @@ it needs them. Don't narrate tool use. When the user is working in
 an app that is already open (a note, a document, a message) and asks you to type or add something,
 continue in that same place — type_text for literal words, dictate when NEO should come up with
 the words, hotkey for keys like return or cmd+s — and don't create a new note or file elsewhere.
-agent_task is for things that need looking at the screen or several steps.{task_apps}"""
+agent_task is for things that need looking at the screen or several steps.{task_apps}
+When the user asks you to check or test your computer controls, call agent_task with their own words:
+NEO runs its controls check itself (a test window, about half a minute) and reports what worked."""
 
 
 def _direct_tools() -> set[str]:

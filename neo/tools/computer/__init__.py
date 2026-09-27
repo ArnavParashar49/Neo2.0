@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import re
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 
 from neo.agent import confirm, grants
 from neo.agent.registry import ToolContext, ToolOutput, tool
@@ -527,6 +529,30 @@ _UNDO_WINDOW_S = 120.0
 
 
 _NEVER_TYPE_INTO = {"neo-ui", "neo"}  # NEO's own overlay
+# The controls self-test's own test window (neo.selftest.controls), by its pid, while that test
+# runs: a separate app NEO started, never NEO's overlay. It is the one exception to the rule above,
+# should that ever see it as NEO's — by pid, so nothing else that shares a name gets through.
+_test_window_pid = 0
+
+
+@contextmanager
+def allow_test_window(pid: int) -> Iterator[None]:
+    """For the length of a controls self-test: its test window (this pid, and only it) may be typed
+    into even if a protection of NEO's own windows would take it for one of them."""
+    global _test_window_pid
+    _test_window_pid = int(pid)
+    try:
+        yield
+    finally:
+        _test_window_pid = 0
+
+
+def _test_window_front() -> bool:
+    if not _test_window_pid:
+        return False
+    from neo.tools.computer.focus import front_app
+
+    return front_app()[1] == _test_window_pid
 
 
 async def _guard_front(want: str = "") -> str | None:
@@ -545,7 +571,7 @@ async def _guard_front(want: str = "") -> str | None:
                 f"so I didn't type or press anything — click {real} and say it again."
             )
         front = real
-    if front.lower() in _NEVER_TYPE_INTO:
+    if front.lower() in _NEVER_TYPE_INTO and not _test_window_front():
         return confirm.ask_user("click where you want me to type first.")
     return None
 
