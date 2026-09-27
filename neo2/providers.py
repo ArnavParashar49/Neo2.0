@@ -71,11 +71,18 @@ def OpenAICompatible(
     name: str = "openai",
 ) -> Provider:
     """Any chat-completions server: OpenAI, Groq, Together, vLLM, Ollama, LM Studio… Pass your own
-    configured `client`, or `base_url` and `api_key` (unset: the openai SDK's own defaults)."""
+    configured `client`, or `base_url` and `api_key` (unset: the openai SDK's own defaults — its
+    OPENAI_API_KEY — and, for a `base_url` server that takes no key, none)."""
     mod = _need("neo.providers.openai_compat", "openai")
     if client is None:
         openai_mod = _need("openai", "openai")
-        client = openai_mod.AsyncOpenAI(base_url=base_url, api_key=api_key)
+        try:
+            client = openai_mod.AsyncOpenAI(base_url=base_url, api_key=api_key)
+        except openai_mod.OpenAIError as e:
+            if base_url is None or api_key is not None:
+                raise ProviderError(f"OpenAICompatible needs an API key: pass api_key= ({e})") from None
+            # the host's own server (Ollama, LM Studio, a local vLLM…): it takes no key
+            client = openai_mod.AsyncOpenAI(base_url=base_url, api_key="none")
     return mod.OpenAICompatProvider(
         name=name, model=model, supports_vision=vision, reasoning_effort=reasoning_effort, client=client
     )

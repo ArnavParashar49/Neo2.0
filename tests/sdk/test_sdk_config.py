@@ -244,6 +244,20 @@ def test_a_missing_vendor_sdk_names_the_extra(monkeypatch):
         providers.Groq("k")
 
 
+def test_an_openai_compatible_server_needs_no_key(monkeypatch):
+    """Ollama, LM Studio, a local vLLM: no key, and no OPENAI_API_KEY in the environment."""
+    pytest.importorskip("openai")
+    from neo2 import providers
+
+    p = providers.OpenAICompatible(model="llama3", base_url="http://localhost:11434/v1")
+    assert p.model == "llama3" and p._client.api_key == "none" and str(p._client.base_url).startswith("http://localhost:11434")
+    with pytest.raises(providers.ProviderError, match="API key"):
+        providers.OpenAICompatible(model="gpt-5")  # OpenAI itself does need one
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-from-env")
+    assert providers.OpenAICompatible(model="gpt-5")._client.api_key == "sk-from-env"  # the SDK's own default
+    assert providers.OpenAICompatible(model="m", base_url="http://localhost:1/v1", api_key="k")._client.api_key == "k"
+
+
 def test_small_helpers():
     assert neo2.parse_yes_no("yes please") is True and neo2.parse_yes_no("no, wait") is False
     assert neo2.parse_yes_no("what's the weather") is None
@@ -254,14 +268,23 @@ def test_small_helpers():
         neo2.nope  # noqa: B018
 
 def test_macos_helpers_never_prompt(monkeypatch):
-    from neo import permissions
+    """permission_status() runs NEO's real check, which only ever asks the non-prompting APIs
+    (faked here: the test reads no real permission and shows no prompt)."""
     from neo2 import macos
 
-    monkeypatch.setattr(permissions, "missing", lambda: ["Screen Recording"])
-    if sys.platform == "darwin":
-        assert macos.permission_status() == {"accessibility": True, "screen_recording": False}
-    else:
+    if sys.platform != "darwin":
         assert not macos.available() and macos.permission_status() == {"accessibility": False, "screen_recording": False}
+        return
+    AS = pytest.importorskip("ApplicationServices")
+    Q = pytest.importorskip("Quartz")
+    prompted: list[str] = []
+    monkeypatch.setattr(AS, "AXIsProcessTrustedWithOptions", lambda *a, **k: prompted.append("accessibility") or True)
+    monkeypatch.setattr(Q, "CGRequestScreenCaptureAccess", lambda *a, **k: prompted.append("screen") or True)
+    monkeypatch.setattr(AS, "AXIsProcessTrusted", lambda: True)
+    monkeypatch.setattr(Q, "CGPreflightScreenCaptureAccess", lambda: False)
+    assert macos.permission_status() == {"accessibility": True, "screen_recording": False}
+    assert prompted == []
+    assert macos.request_permissions() == ["Screen Recording"] and prompted == ["screen"]  # asked for: only the gap
 
 
 def test_request_permissions_asks_only_for_whats_missing(monkeypatch):
