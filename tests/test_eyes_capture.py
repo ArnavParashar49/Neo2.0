@@ -297,6 +297,27 @@ def test_an_after_look_and_its_change_samples_come_from_one_capture(cli):
     assert screen.last_frame() is look.frame
 
 
+def test_a_sample_before_and_an_after_look_after_agree_on_an_unchanged_screen(cli):
+    """The pair a pointer action compares: sample_points before, after_look after. Cut the same way,
+    so an unchanged screen is no change and a moved piece is one."""
+    screen_now = {"img": synthetic_screen("board")}
+
+    def region(extra):
+        x, y, w, h = (int(v) for v in extra[1].split(","))
+        return screen_now["img"].crop((2 * x, 2 * y, 2 * (x + w), 2 * (y + h)))
+
+    cli.picture = region
+    pts = [(403.7, 301.2), (651.5, 455.9)]  # (fractional points: a shot's pixels mapped to the screen)
+    before = _REAL_SAMPLE(pts)
+    _, after = screen.after_look((300.0, 200.0, 500.0, 400.0), pts, like=before)
+    assert [np.asarray(a).tolist() for a in after] == [np.asarray(b).tolist() for b in before]
+    moved = screen_now["img"].copy()
+    ImageDraw.Draw(moved).ellipse((2 * 630, 2 * 435, 2 * 675, 2 * 480), fill=(20, 20, 20))
+    screen_now["img"] = moved
+    _, after = screen.after_look((300.0, 200.0, 500.0, 400.0), pts, like=before)
+    assert [screen.differs(b, a) for b, a in zip(before, after, strict=True)] == [False, True]
+
+
 def test_change_samples_are_cut_from_a_fresh_frame_without_capturing(cli):
     frame = screen.Frame(synthetic_screen("ui"), 0.0, 0.0, 0.5)
     got = _REAL_SAMPLE([(300.0, 300.0), (700.0, 500.0)], frame=frame)
@@ -570,7 +591,7 @@ def test_screen_uses_screencapturekit_when_on_and_the_cli_when_it_fails(fake_sck
     assert fake_sck.shots[-1][1]["SourceRect"] == ((0, 0), (1512, 982))
     z = screen.zoom(700, 500)
     assert z.frame.backend == "sck" and (z.w, z.h) == (768, 480)
-    assert len(_REAL_SAMPLE([(700.0, 500.0)])) == 1 and fake_sck.shots[-1][1]["Width"] == 120  # points
+    assert len(_REAL_SAMPLE([(700.0, 500.0)])) == 1 and fake_sck.shots[-1][1]["Width"] == 240  # one rect, Retina
     fake_sck.error = "stopped"
     c = screen.shot()
     assert c.frame.backend == "cli" and cli.runs == [[]]  # the CLI took over, same picture for the model
@@ -705,7 +726,7 @@ def _bench_cli_file() -> None:  # pragma: no cover
         row = []
         for fmt, uti in (("png", "public.png"), ("tiff", "public.tiff")):
             path = os.path.join(tmp, f"shot.{fmt}")
-            enc = _med(lambda uti=uti, path=path: _imageio_write(cg, uti, path), 5)
+            enc = _med(lambda cg=cg, uti=uti, path=path: _imageio_write(cg, uti, path), 5)
             dec = _med(lambda path=path: Image.open(path).convert("RGB"), 5)
             row.append(f"-t {fmt}: {enc:5.1f} + {dec:5.1f} = {enc + dec:6.1f} ms ({os.path.getsize(path) / 1e6:5.2f} MB)")
         print(f"  {kind:6} " + " | ".join(row))

@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import io
 import logging
+import math
 import subprocess
 import tempfile
 import threading
@@ -310,11 +311,10 @@ def _grab(cmd_extra: list[str]) -> Image.Image:
     return _grab(cmd_extra)
 
 
-def _grab_rect(x: int, y: int, w: int, h: int, *, native: bool = True, fallback: bool = True) -> tuple[Image.Image, str]:
-    """The pixels of a rectangle in global points (on one display). ``native`` False: points are
-    enough (a change sample), which ScreenCaptureKit can scale for free. ``fallback`` False: when the
-    in-process capture is on and fails, no picture (sck.Failed) rather than the CLI's — a before/after
-    pair of change samples must come from the same capture path to be compared."""
+def _grab_rect(x: int, y: int, w: int, h: int, *, fallback: bool = True) -> tuple[Image.Image, str]:
+    """The pixels of a rectangle in global points (on one display), at the display's resolution.
+    ``fallback`` False: when the in-process capture is on and fails, no picture (sck.Failed) rather
+    than the CLI's — a before/after pair of change samples must come one way to be compared."""
     if _sck_on():
         from neo.tools.computer import sck
 
@@ -322,7 +322,7 @@ def _grab_rect(x: int, y: int, w: int, h: int, *, native: bool = True, fallback:
         try:
             if d is None:
                 raise sck.Failed("that rectangle isn't on a display")
-            return sck.capture_rect(x, y, w, h, d, scale=None if native else 1.0), "sck"
+            return sck.capture_rect(x, y, w, h, d), "sck"
         except sck.Failed as e:
             if not fallback:
                 raise
@@ -492,6 +492,12 @@ def zoom(
     return shot((round(left), round(top), round(w), round(h)), kind="zoom", detail=detail)
 
 
+def _whole(left: float, top: float, right: float, bottom: float) -> tuple[int, int, int, int]:
+    """The rectangle of whole points (x, y, width, height) that covers these edges."""
+    x, y = math.floor(left), math.floor(top)
+    return x, y, max(1, math.ceil(right) - x), max(1, math.ceil(bottom) - y)
+
+
 def after_look(
     rect: tuple[float, float, float, float],
     points: list[tuple[float, float]] | None = None,
@@ -501,8 +507,10 @@ def after_look(
     like: list[Image.Image] | None = None,
 ) -> tuple[Capture, list[Image.Image] | None]:
     """One capture for a look after an action: the picture of ``rect`` (medium detail) and the change
-    samples around ``points`` (see sample_points), all cut from the same frame. ``like``: the samples
-    taken before — no samples come back when this frame was taken another way (can't compare)."""
+    samples around ``points`` (see sample_points), all cut from the same frame, the way sample_points
+    cuts them (a sample of an unchanged screen is the same either way). ``like``: the samples taken
+    before — no samples come back when this frame was taken another way (can't compare). A ``rect``
+    off the points' display: ValueError."""
     _need_permission()
     x, y, w, h = rect
     pts = list(points or [])
@@ -514,12 +522,11 @@ def after_look(
         bottom = max([y + h] + [p[1] + rr for p in pts])
     else:
         left, top, right, bottom = x, y, x + w, y + h
-    home = display_at(x + w / 2, y + h / 2) or display_at(x, y)
-    if home is not None:  # (only what is on that screen is in the picture)
+    home = display_at(*pts[0]) if pts else display_at(x + w / 2, y + h / 2) or display_at(x, y)
+    if home is not None:  # (only what is on that screen is in the picture: the one sample_points uses)
         left, top = max(left, home.x), max(top, home.y)
         right, bottom = min(right, home.x + home.w), min(bottom, home.y + home.h)
-    region = (int(left), int(top), max(1, int(right - left)), max(1, int(bottom - top)))
-    frame = grab(region)
+    frame = grab(_whole(left, top, right, bottom))
     _keep(frame)
     cap = render(frame, "after", rect=rect, fmt=fmt)
     if not pts or _via(like) not in ("", frame.backend):
@@ -643,14 +650,14 @@ def sample_points(
             right, bottom = min(right, home.x + home.w), min(bottom, home.y + home.h)
         if right - left < 2 or bottom - top < 2:
             return None
-        x, y, w, h = int(left), int(top), int(right - left), int(bottom - top)
+        x, y, w, h = _whole(left, top, right, bottom)
         if via == "cli":
             img, backend = _grab(["-R", f"{x},{y},{w},{h}"]), "cli"
         else:  # (the in-process path when it's on, with no CLI fallback: a pair never mixes the two)
-            img, backend = _grab_rect(x, y, w, h, native=False, fallback=False)
+            img, backend = _grab_rect(x, y, w, h, fallback=False)
             if via and backend != via:
                 return None
-        return samples_from(Frame(img, left, top, (right - left) / max(1, img.width), backend=backend), points, r)
+        return samples_from(Frame(img, float(x), float(y), w / max(1, img.width), backend=backend), points, r)
     except Exception:  # noqa: BLE001 - no picture: unknown, not "unchanged"
         return None
 
