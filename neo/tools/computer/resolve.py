@@ -312,7 +312,7 @@ def _secure(e: Any) -> bool:
     if "secure" in f"{role} {getattr(e, 'subrole', '')}".lower():
         return True
     ref = getattr(e, "ref", None)
-    if ref is None or role not in FIELD_ROLES:
+    if ref is None or role != "AXTextField":  # (a secure field's role, native or web)
         return False
     try:
         from neo.tools.computer import ax
@@ -842,7 +842,12 @@ def _meaning_in_time(
         if late and log_late and m is not None:
             _log_late(late_run, m)
 
-    threading.Thread(target=work, name="neo-resolve-meaning", daemon=True).start()
+    try:
+        threading.Thread(target=work, name="neo-resolve-meaning", daemon=True).start()
+    except RuntimeError:  # no thread to be had: hand off without the stage
+        _meaning_busy.release()
+        run.notes["meaning"] = "skipped"
+        return None
     job.done.wait(max(0.0, left))
     with job.mu:
         if not job.done.is_set():
@@ -886,7 +891,8 @@ def resolve(
     cands = _as_candidates(items, want)
     user = origin == "user"
     levels = _levels(utterance, user)
-    phrase = levels[-1][0] if levels else ""
+    # the later stages read the bare name (the user's) or the label as given (anyone else's)
+    phrase = phrases.norm(phrases.strip_frame(utterance)) if user else (levels[0][0] if levels else "")
     run = _Run(secrets.token_hex(4), utterance, phrase, want, origin, cands, time.perf_counter())
     acting = frozenset(stages) if stages is not None else live_stages()
     library = _library()
