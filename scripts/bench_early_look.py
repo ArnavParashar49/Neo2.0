@@ -14,7 +14,8 @@ agent loop and the real zeroshot state machine:
    one-time 400 ms settle, ax._WEB_SETTLE_S, when first switched on);
 3. the resolver's first question after the user speaks, cold and prewarmed on the wake word;
 4. with another app's floating window over part of the pictured window: how many of the picture's
-   pixels show what a click at them hits (a synthetic screen and a fake hit test).
+   pixels are that other app's (none: the window's own pixels only), and how many clicks through the
+   picture would land in it (none: those parts are refused).
 """
 
 from __future__ import annotations
@@ -67,7 +68,7 @@ def tok(s: str) -> float:
 
 # ---- the made-up Mac ----------------------------------------------------------------------------
 
-W = types.SimpleNamespace(walk_s=0.15, shot_s=0.25, front=("Tablero", 104), web=False)
+W = types.SimpleNamespace(walk_s=0.15, shot_s=0.25, front=("Tablero", 104), web=False, above=[])
 _PIDS = {"Quillpad": 101, "Tablero": 104}
 
 
@@ -87,7 +88,7 @@ PNG = _window_png()
 LABELS = ["New Page", "Share", "Title", "Body", "Bold", "Italic", "Search", "Sidebar", "Settings", "Help"]
 
 
-def _snapshot(app=None, *, max_lines=250):
+def _snapshot(app=None, *, max_lines=250, deadline_s=None):
     pid = _PIDS.get(app) if app else W.front[1]
     if W.web and pid not in ax._web_held:  # a Chromium/Electron app: its web tree switched on, then held
         ax._web_held[pid] = (None, [], None)
@@ -101,9 +102,9 @@ def _snapshot(app=None, *, max_lines=250):
     return "\n".join([f'App: {app} — window "Draft"'] + ["  " + e.line() for e in els])
 
 
-def _capture(wid, region=None):
+def _grab_window(wid):
     time.sleep(W.shot_s)
-    return ImagePart(PNG, "image/png")
+    return Image.open(io.BytesIO(PNG)).convert("RGB"), "cli"
 
 
 INSTALLED = [inv.App("test.quillpad", "Quillpad", "/A/Quillpad.app"), inv.App("test.tablero", "Tablero", "/A/Tablero.app")]
@@ -116,10 +117,14 @@ ax.snapshot = _snapshot
 inv.snapshot = lambda: list(INSTALLED)
 inv.app_for_pid = lambda pid: next((a for a in INSTALLED if _PIDS[a.name] == pid), None)
 screen.can_capture = lambda: True
-screen.capture_window = _capture
+screen.shot_format = lambda: "png"
+screen._brains_limit = lambda: None  # (no brain declares a picture limit)
 focus.front_window_id = lambda pid: 7000 + pid
-prefetch._window_bounds = lambda wid: (100.0, 50.0, 800.0, 500.0)
-prefetch._windows_above = lambda wid: []  # nothing in front of the pictured window (section 4 puts one there)
+# The window server, as screen.window_shot asks it: the window's frame, its own pixels, and the windows
+# in front of it (none; section 4 puts one there).
+screen._window_bounds = lambda wid: (100.0, 50.0, 800.0, 500.0)
+screen._grab_window = _grab_window
+screen._window_stack = lambda wid: (wid - 7000, [tuple(float(v) for v in r) for r in W.above])
 screen.displays = lambda: [screen.Display(1, 0.0, 0.0, 1512.0, 982.0)]
 ax._web_held = {}
 apps.set_target("")
@@ -234,6 +239,8 @@ def prewarm_bench(load_s: float, pass_s: float, speak_s: float) -> dict:
     from neo2.core.reflex import zeroshot
 
     os.environ["NEO_REFLEX"] = "laya"
+    # (the Laya is prewarmed only for a resolver stage that acts on it: the meaning stage, promoted and live)
+    os.environ["NEO_RESOLVER"], os.environ["NEO_RESOLVER_PROMOTED"] = "live", "meaning"
     config._settings = None
 
     class Fake:
@@ -261,6 +268,7 @@ def prewarm_bench(load_s: float, pass_s: float, speak_s: float) -> dict:
             zeroshot._timer.cancel()
     threading.Event().wait(0.01)
     os.environ["NEO_REFLEX"] = "off"
+    del os.environ["NEO_RESOLVER"], os.environ["NEO_RESOLVER_PROMOTED"]
     config._settings = None
     return {"load_ms": load_s * 1000, "speech_ms": speak_s * 1000, **{f"resolver_first_question_ms[{k}]": v for k, v in out.items()}}
 
@@ -270,32 +278,16 @@ def prewarm_bench(load_s: float, pass_s: float, speak_s: float) -> dict:
 
 async def covered_window() -> dict:
     """Another app's floating window (a picture-in-picture video, a meeting toolbar) over part of the
-    pictured one. The window's own pixels (screencapture -l) include what it covers; a click at such a
-    pixel lands in the floating window. Every 10th pixel of the attached picture is checked."""
+    pictured one. The first look sends the window's own pixels only — never the floating window's —
+    and a click through the picture at a part the floating window covered is refused (it would land
+    there). Every 10th pixel of the attached picture is checked."""
     from PIL import Image as Img
 
-    floaty = (500, 300, 320, 180)  # the pictured window: (100, 50), 800×500 pt (_window_bounds)
-    screen_img = Img.new("RGB", (1512, 982), (30, 30, 30))
-    screen_img.paste((200, 200, 200), (100, 50, 900, 550))
-    screen_img.paste((220, 0, 0), (floaty[0], floaty[1], floaty[0] + floaty[2], floaty[1] + floaty[3]))
-    own = Img.new("RGB", (800, 500), (200, 200, 200))  # the window's own pixels: nothing in front of it
-
-    def png(img):
-        buf = io.BytesIO()
-        img.save(buf, format="PNG")
-        return buf.getvalue()
-
-    def capture(region=None, display=None):
-        x, y, w, h = region
-        return ImagePart(png(screen_img.crop((x, y, x + w, y + h)))), 1.0
-
-    saved = screen.capture_window, getattr(prefetch, "_windows_above", None), screen.capture
-    screen.capture_window = lambda wid, region=None: ImagePart(png(own))
-    screen.capture = capture
-    prefetch._windows_above = lambda wid: [{
-        "kCGWindowNumber": 9, "kCGWindowOwnerPID": 555, "kCGWindowOwnerName": "Floaty", "kCGWindowAlpha": 1.0,
-        "kCGWindowLayer": 3, "kCGWindowBounds": {"X": floaty[0], "Y": floaty[1], "Width": floaty[2], "Height": floaty[3]},
-    }]  # fmt: skip
+    floaty = (500, 300, 320, 180)  # the pictured window: (100, 50), 800×500 pt (screen._window_bounds)
+    own = Img.new("RGB", (800, 500), (200, 200, 200))  # the window's own pixels (what is under Floaty too)
+    saved = screen._grab_window
+    screen._grab_window = lambda wid: (own.copy(), "cli")
+    W.above = [floaty]
     W.front, W.walk_s, W.shot_s = ("Tablero", 104), 0.0, 0.0
     prefetch._slow_until.clear()
     try:
@@ -303,20 +295,23 @@ async def covered_window() -> dict:
         look = await prefetch.collect(prefetch.start("make the first move in tablero", d, sees=True), TOOLS)
         pic = Img.open(io.BytesIO(look.picture.image.data)).convert("RGB")
         shot = pointer.get_shot(look.picture.shot)
-        n = right = into_unseen = 0
+        ctx = ToolContext(user_text="make the first move in tablero")
+        n = others = into_unseen = 0
         for px in range(0, pic.width, 10):
             for py in range(0, pic.height, 10):
                 sx, sy = shot.to_screen(px, py)
                 hits_floaty = floaty[0] <= sx < floaty[0] + floaty[2] and floaty[1] <= sy < floaty[1] + floaty[3]
-                shows_floaty = pic.getpixel((px, py)) == (220, 0, 0)
                 n += 1
-                right += hits_floaty == shows_floaty
-                into_unseen += hits_floaty and not shows_floaty
-        return {"sampled_pixels": n, "picture_shows_what_a_click_hits": f"{right / n:.1%}",
+                others += pic.getpixel((px, py)) == (220, 0, 0)
+                try:
+                    pointer.points({"x": px, "y": py, "shot": shot.id}, ("x", "y"), ctx)
+                    into_unseen += hits_floaty
+                except pointer.Refused:
+                    pass
+        return {"sampled_pixels": n, "pixels_of_another_app": f"{others / n:.1%}",
                 "clicks_into_an_app_the_picture_doesnt_show": f"{into_unseen / n:.1%}"}  # fmt: skip
     finally:
-        screen.capture_window, screen.capture = saved[0], saved[2]
-        prefetch._windows_above = saved[1] if saved[1] is not None else (lambda wid: [])
+        screen._grab_window, W.above = saved, []
 
 
 async def main() -> None:
@@ -349,7 +344,7 @@ async def main() -> None:
               f"prewarmed {r['resolver_first_question_ms[prewarmed on wake]']} ms")  # fmt: skip
     print("\n4. another app's window over part of the pictured one (every 10th pixel of the picture)")
     cov = await covered_window()
-    print(f"   {cov['sampled_pixels']} pixels: the picture shows what a click hits at {cov['picture_shows_what_a_click_hits']}; "
+    print(f"   {cov['sampled_pixels']} pixels: another app's pixels in the picture {cov['pixels_of_another_app']}; "
           f"a click lands in an app the picture doesn't show at {cov['clicks_into_an_app_the_picture_doesnt_show']}")  # fmt: skip
     print("\n" + json.dumps({"round_trips": rows, "added_latency": lat, "prewarm": pw, "covered_window": cov}, indent=1))
 

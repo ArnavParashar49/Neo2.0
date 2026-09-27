@@ -137,3 +137,54 @@ def test_an_embedding_hosts_requests_keep_the_regex_paths_only(reg, monkeypatch)
 
     monkeypatch.setattr(runtime, "library_bound", lambda: True)
     assert fastpath.by_utterance("new game pe click karo", origin="user", decision=D()) is None
+
+
+# ---- the reflex's confident pick of another tool: its one-tool lane, not a press -------------------------
+@pytest.mark.parametrize(
+    "text, tool",
+    [
+        ("press cmd space", "hotkey"),
+        ("press pause", "play_music"),
+        ("press next track", "play_music"),
+        ("select dark mode", "applescript"),
+    ],
+)
+def test_words_the_reflex_gives_another_tool_are_left_to_that_tool(reg, text, tool):
+    """"press pause" reads as a press, but the reflex is sure it's play_music's: the session's one-tool
+    lane (one small model call that sees only that tool) takes it — never an AX walk, a menu-bar scan
+    and a read of the screen for a control named "pause", then a full agent run."""
+    reg.register(_tool("play_music", False, props=("query",)))
+    reg.register(_tool("applescript", False, props=("script",)))
+    assert fastpath.by_utterance(text, origin="user", decision=D("quick_action", tool, 0.97)) is None
+    assert fastpath.by_utterance(text, origin="user", decision=D("agent_task", tool, 0.97)) is None
+
+
+def test_an_unsure_or_unknown_pick_leaves_the_pointing_words_to_the_click_tool(reg):
+    reg.register(_tool("play_music", False, props=("query",)))
+    hidden = _tool("secret", False, props=("x",))
+    hidden.hidden = True
+    reg.register(hidden)
+    want = ("click_text", {"utterance": "press start", "label": "start"})
+    assert fastpath.by_utterance("press start", origin="user", decision=D("quick_action", "play_music", 0.5)) == want
+    assert fastpath.by_utterance("press start", origin="user", decision=D("quick_action", "no_such_tool", 0.99)) == want
+    assert fastpath.by_utterance("press start", origin="user", decision=D("quick_action", "secret", 0.99)) == want
+
+
+@pytest.mark.parametrize(
+    "keys", ["cmd space", "command space", "option space", "ctrl shift tab", "cmd + space", "command space bar", "control option delete"]
+)
+def test_a_chord_said_with_spaces_is_a_key_not_a_control(reg, keys):
+    from neo2.core.tools.computer import phrases
+
+    assert phrases.is_key_name(keys)
+    assert fastpath.by_utterance(f"press {keys}", origin="user", decision=D()) is None
+
+
+@pytest.mark.parametrize("label", ["space invaders", "command center", "control panel", "option menu", "shift report"])
+def test_a_label_that_starts_like_a_key_is_still_a_label(reg, label):
+    from neo2.core.tools.computer import phrases
+
+    assert not phrases.is_key_name(label)
+    assert fastpath.by_utterance(f"click {label}", origin="user", decision=D()) == (
+        "click_text", {"utterance": f"click {label}", "label": label},
+    )  # fmt: skip

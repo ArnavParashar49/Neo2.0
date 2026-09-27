@@ -518,14 +518,8 @@ def _fit(img: Image.Image, fmt: str | None, budget: int = _MAX_BYTES) -> tuple[I
 
 
 def _part(data: bytes, mime: str, detail: str) -> ImagePart:
-    """An ImagePart asking for ``detail`` (ImagePart.detail: Step 0 adds the field; until then it
-    rides along as an attribute, which providers read with getattr)."""
-    try:
-        return ImagePart(data, mime, detail=detail)  # type: ignore[call-arg]
-    except TypeError:
-        part = ImagePart(data, mime)
-        part.detail = detail  # type: ignore[attr-defined]
-        return part
+    """An ImagePart asking for ``detail`` (ImagePart.detail)."""
+    return ImagePart(data, mime, detail=detail)  # type: ignore[arg-type]
 
 
 def _size(frame: Frame, kind: str, limit: tuple[int, int] | None) -> tuple[int, int]:

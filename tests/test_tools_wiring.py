@@ -136,7 +136,7 @@ def test_click_text_reads_the_screen_when_accessibility_names_nothing(monkeypatc
     monkeypatch.setattr(ax, "window_elements", lambda app=None: ("Game", (0.0, 0.0, 800.0, 600.0), []))
     asked = []
 
-    async def fallback(a, c, *, app, window, els=None, pid=0):
+    async def fallback(a, c, *, app, window, els=None, pid=0, behind=False):
         asked.append((a["label"], app, window))
         return ToolOutput("Clicked the words 'Hint'")
 
