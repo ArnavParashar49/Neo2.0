@@ -639,16 +639,37 @@ def _tones(rgb: np.ndarray, H: np.ndarray, squares: np.ndarray) -> Tones:
     return Tones(np.median(cols[even].reshape(-1, 3), axis=0), np.median(cols[~even].reshape(-1, 3), axis=0))
 
 
-def _agree(rgb: np.ndarray, H: np.ndarray, squares: np.ndarray, t: Tones) -> np.ndarray:
-    """Per square: does its rim show its own tone (the one its parity says), not the other?"""
+def _own_tone(rgb: np.ndarray, H: np.ndarray, squares: np.ndarray, t: Tones) -> np.ndarray:
+    """Per square and rim sample: does the sample show the square's own tone (the one its parity
+    says), not the other? (squares, samples)"""
     cols = _rim_colours(rgb, H, squares)
     even = ((squares[:, 0] + squares[:, 1]) % 2 == 0)[:, None]
     own = np.where(even[..., None], t.even, t.odd)
     other = np.where(even[..., None], t.odd, t.even)
     d_own = np.linalg.norm(cols - own, axis=2)
     d_other = np.linalg.norm(cols - other, axis=2)
-    near = (d_own < d_other) & (d_own < max(28.0, 0.55 * t.gap))
-    return near.mean(axis=1) >= 0.34
+    return (d_own < d_other) & (d_own < max(28.0, 0.55 * t.gap))
+
+
+def _agree(rgb: np.ndarray, H: np.ndarray, squares: np.ndarray, t: Tones) -> np.ndarray:
+    """Per square: does its rim show its own tone? (A piece may hide much of it.)"""
+    return _own_tone(rgb, H, squares, t).mean(axis=1) >= 0.34
+
+
+def _alternates(rgb: np.ndarray, H: np.ndarray, strip: np.ndarray, t: Tones) -> bool:
+    """Is this row (or column) of squares part of the board? Most of its squares show their own
+    tone, and they alternate *in the same places*: where the light squares show light, the dark
+    ones show dark. The ring round a board may pass the first test — its frame near one tone, the
+    window behind near the other — but a frame shows in the same part of every ring square, so
+    there one parity agrees and the other never does."""
+    near = _own_tone(rgb, H, strip, t)
+    if (near.mean(axis=1) >= 0.34).mean() < 0.7:
+        return False
+    even = (strip[:, 0] + strip[:, 1]) % 2 == 0
+    if even.all() or not even.any():
+        return False
+    both = (near[even].mean(axis=0) >= 0.5) & (near[~even].mean(axis=0) >= 0.5)
+    return float(both.mean()) >= 0.25  # (board rows ≥ 0.42 even under a row of pieces; rings ≤ 0.08)
 
 
 def _block(c0: int, r0: int, c1: int, r1: int) -> np.ndarray:
@@ -682,7 +703,7 @@ def _extent(rgb: np.ndarray, H: np.ndarray, c0: int, r0: int, c1: int, r1: int) 
             seen = _inside(rgb.shape, H, strip)
             if seen.sum() < max(2, 0.6 * len(strip)):
                 continue
-            if _agree(rgb, H, strip[seen], t).mean() >= 0.7:
+            if _alternates(rgb, H, strip[seen], t):
                 c0, r0, c1, r1 = (c0 - (side == "left"), r0 - (side == "top"), c1 + (side == "right"), r1 + (side == "bottom"))
                 grew = True
         if not grew:
