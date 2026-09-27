@@ -18,6 +18,7 @@ from typing import Any
 import ApplicationServices as AS
 from AppKit import NSWorkspace
 
+from neo import effects
 from neo.decide._objc import pooled
 
 # Roles worth showing to the model. Containers are walked but not listed unless titled.
@@ -554,6 +555,7 @@ def press_el(e: Element) -> str:
     if not action:
         offers = ", ".join(a for a in e.actions) or "none"
         return f"Error: {e.id} can't be pressed (its actions: {offers}) — click it by id instead."
+    effects.guard("accessibility", f"press {action} in another app's UI", via=AS.AXUIElementPerformAction)
     err = AS.AXUIElementPerformAction(e.ref, action)
     if err == 0:
         return f"Pressed {what}"
@@ -743,6 +745,7 @@ def visible_frame(el) -> tuple[float, float, float, float] | None:
 
 def focus_el(el) -> bool:
     """Give the element the keyboard focus through AX (no click), and say whether it took it."""
+    effects.guard("accessibility", "focus a text area in another app's UI", via=AS.AXUIElementSetAttributeValue)
     try:
         if AS.AXUIElementSetAttributeValue(el, AS.kAXFocusedAttribute, True) != 0:
             return False
@@ -757,6 +760,7 @@ def press_element(e: Element) -> str:
     action = "AXPress" if "AXPress" in e.actions else ""
     if not action:
         return "Error: no press action"
+    effects.guard("accessibility", f"press {action} in another app's UI", via=AS.AXUIElementPerformAction)
     err = AS.AXUIElementPerformAction(e.ref, action)
     return "Pressed" if err == 0 else f"Error: AX action failed ({err})"
 
@@ -956,6 +960,7 @@ def raise_window(h: Hit) -> bool:
     focused = _attr(_app_el(h.pid), AS.kAXFocusedWindowAttribute)
     if focused is None or _same(focused, h.window) or _attr(focused, "AXModal") is True:
         return False  # (a modal window stays on top: never raise another over it)
+    effects.guard("focus", f"raise {h.app or 'an app'}'s window under the pointer", via=AS.AXUIElementPerformAction)
     try:
         AS.AXUIElementPerformAction(h.window, "AXRaise")
         AS.AXUIElementSetAttributeValue(h.window, "AXMain", True)

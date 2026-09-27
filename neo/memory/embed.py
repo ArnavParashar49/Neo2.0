@@ -30,8 +30,9 @@ def _get():
             try:
                 from sentence_transformers import SentenceTransformer
 
-                from neo import models
+                from neo import effects, models
 
+                effects.guard("model", "load the memory's embedding model", via=SentenceTransformer)
                 _model = SentenceTransformer(
                     MODEL, device="cpu", cache_folder=str(settings().models_dir), revision=models.EMBEDDER_REVISION
                 )

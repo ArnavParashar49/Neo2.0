@@ -7,18 +7,19 @@ environment or a ``.env`` file in the project root; nothing is written to Git.
 from __future__ import annotations
 
 import json
-import os
-import sys
 from pathlib import Path
 from typing import Annotated, Literal, get_args
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
+from neo import effects
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 # Keys and settings: ~/.neo/.env (where NEO.app's installed runtime looks), and a checkout's own
 # .env on top when running from source.
 USER_ENV = Path.home() / ".neo" / ".env"
+NOTES_DIR = Path.home() / "Documents" / "NEO Notes"  # where a note goes that no notes app could take
 
 BrainName = Literal["gemini", "gemini_lite", "groq", "local", "claude"]
 VoiceBackend = Literal["auto", "live", "local", "off"]
@@ -32,6 +33,16 @@ class Settings(BaseSettings):
         env_prefix="NEO_",
         extra="ignore",
     )
+
+    @classmethod
+    def settings_customise_sources(
+        cls, settings_cls, init_settings, env_settings, dotenv_settings, file_secret_settings
+    ):  # pydantic-settings calls it with these, by name
+        """With effects off (a test, a scratch script run with NEO_NO_EFFECTS=1), never the .env
+        files: ~/.neo/.env holds the user's real API keys."""
+        if effects.why_off():
+            return init_settings, env_settings, file_secret_settings
+        return init_settings, env_settings, dotenv_settings, file_secret_settings
 
     # ---- keys (no prefix — read the conventional names) -------------------------------
     gemini_api_key: str = Field(default="", validation_alias="GEMINI_API_KEY")
@@ -119,7 +130,7 @@ class Settings(BaseSettings):
     # NEO_DECIDE_MODES="add_event=on,read_calendar=shadow"
     decide_modes: Annotated[dict[str, DecideMode], NoDecode] = {}
     decide_kind_routing: bool = False  # Laya may name a task kind no fast path covered (after its eval)
-    notes_dir: Path = Path.home() / "Documents" / "NEO Notes"  # a note no notes app could take
+    notes_dir: Path = NOTES_DIR
     # "play …": "web" plays it in the browser (on play_site) unless the user names an app ("on
     # Spotify"); "apps" lets NEO pick among the players on this Mac first. The user's choice.
     play_default: Literal["web", "apps"] = "web"
@@ -205,7 +216,7 @@ def settings() -> Settings:
     global _settings
     if _settings is None:
         s = Settings()
-        _refuse_real_data_under_tests(s.data_dir)
+        _refuse_real_data_without_effects(s.data_dir)
         s.ensure_dirs()
         _settings = s
     return _settings
@@ -225,12 +236,14 @@ def decide_mode(kind: str) -> DecideMode:
     return settings().decide_modes.get(kind, DECIDE_DEFAULTS.get(kind, "legacy"))
 
 
-def _refuse_real_data_under_tests(data_dir: Path) -> None:
-    """A test (or a scratch harness borrowing the suite's fixtures) that isn't isolated must fail
-    loudly, never read, train on or erase the user's real memory. This happened once: a scratch
-    conftest skipped the isolation fixture and an erase test wiped the real ~/.neo."""
-    if "pytest" not in sys.modules and "PYTEST_CURRENT_TEST" not in os.environ:
+def _refuse_real_data_without_effects(data_dir: Path) -> None:
+    """A test (or a scratch harness borrowing the suite's fixtures, or a scratch script run with
+    NEO_NO_EFFECTS=1) that isn't isolated must fail loudly, never read, train on or erase the user's
+    real memory. This happened once: a scratch conftest skipped the isolation fixture and an erase
+    test wiped the real ~/.neo."""
+    why = effects.why_off()
+    if not why:
         return
     real = (Path.home() / ".neo").resolve()
     if data_dir.resolve() == real or real in data_dir.resolve().parents:
-        raise RuntimeError(f"refusing to use the real {real} under pytest: set NEO_DATA_DIR to a temporary directory")
+        raise RuntimeError(f"refusing to use the real {real} ({why}): set NEO_DATA_DIR to a temporary directory")

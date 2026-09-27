@@ -10,6 +10,8 @@ import time
 
 import Quartz as Q
 
+from neo import effects
+
 _KEYCODES = {
     "a": 0,
     "s": 1,
@@ -113,6 +115,7 @@ _SHIFTED = {
 
 
 def _post(ev) -> None:
+    effects.guard("input", "post a keyboard or mouse event", via=Q.CGEventPost)
     Q.CGEventPost(Q.kCGHIDEventTap, ev)
 
 

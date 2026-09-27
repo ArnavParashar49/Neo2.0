@@ -5,7 +5,6 @@ window off-limits. Hermetic: ApplicationServices is a fake tree of elements."""
 from __future__ import annotations
 
 import asyncio
-import subprocess
 import types
 
 import pytest
@@ -17,6 +16,7 @@ from neo.tools.computer import apps, ax, focus, pointer
 
 OK, NO_VALUE, UNSUPPORTED, CANNOT_COMPLETE = 0, -25212, -25205, -25204
 _REAL_HIT = ax.hit  # (the suite's conftest swaps it for "nothing there" in every test)
+_REAL_HOSTS_SHELL = focus.hosts_shell  # (and this for "no shell")
 
 
 class El:
@@ -427,15 +427,13 @@ def test_with_neo_in_front_a_look_is_at_the_app_behind_it(monkeypatch):
 
 
 def test_an_app_running_a_shell_is_told_by_its_processes(monkeypatch):
-    ps = "\n".join([
-        "  100     1 ??       /Applications/WezTerm.app/Contents/MacOS/wezterm-gui",
-        "  101   100 ttys003  -zsh",
-        "  200     1 ??       /Applications/Notes.app/Contents/MacOS/Notes",
-        "  201   200 ??       /bin/zsh",  # a script it runs, on no terminal: not a shell the user types into
-    ])  # fmt: skip
-    monkeypatch.setattr(subprocess, "run", lambda *a, **k: types.SimpleNamespace(stdout=ps, returncode=0))
+    kids = {100: [101], 101: [102], 200: [201], 1: [100, 200]}
+    procs = {101: ("login", True), 102: ("zsh", True), 201: ("zsh", False)}  # 201: a script, on no terminal
+    monkeypatch.setattr(focus, "_children", lambda pid: kids.get(pid, []))
+    monkeypatch.setattr(focus, "_proc", lambda pid: procs.get(pid, ("", False)))
     monkeypatch.setattr(focus, "_shells", lambda: frozenset({"zsh", "bash"}))
-    assert focus.hosts_shell(100) and not focus.hosts_shell(200) and not focus.hosts_shell(1)
+    real = _REAL_HOSTS_SHELL
+    assert real(100) and not real(200) and not real(1)  # (never launchd, the parent of everything)
 
 
 def test_a_chromium_or_electron_apps_web_tree_is_switched_on_while_its_ids_are_used(monkeypatch):

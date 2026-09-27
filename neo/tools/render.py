@@ -38,6 +38,8 @@ from contextlib import suppress
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
+from neo import effects
+
 IDLE_S = 120.0  # the headless browser closes after this long without a page to read
 TIMEOUT_S = 12.0  # loading and settling one page, at most
 MAX_BYTES = 25_000_000  # everything one page may download
@@ -313,6 +315,7 @@ def _not_to_open(method: str, url: str) -> str:
 async def _start_playwright():
     from playwright.async_api import async_playwright
 
+    effects.guard("browser", "start Playwright's headless Chromium")
     return await async_playwright().start()
 
 

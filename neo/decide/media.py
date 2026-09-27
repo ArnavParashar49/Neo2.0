@@ -51,6 +51,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
+from neo import effects
 from neo.config import settings
 from neo.decide._objc import pooled
 
@@ -439,6 +440,9 @@ def automation(bundle_id: str, ask: bool = False) -> int | None:
     lib = _ae()
     if lib is None or not bundle_id:
         return None
+    if ask:
+        prompt = lib.AEDeterminePermissionToAutomateTarget
+        effects.guard("permission", f"ask macOS whether NEO may control {bundle_id}", via=prompt)
     data = bundle_id.encode()
     desc = _AEDesc()
     if lib.AECreateDesc(_fcc("bund"), data, len(data), ctypes.byref(desc)) != 0:
@@ -801,6 +805,7 @@ def _attr(el, name: str, default=None):
 def _set(el, name: str, value) -> bool:
     import ApplicationServices as AS
 
+    effects.guard("accessibility", f"set {name} in another app's UI", via=AS.AXUIElementSetAttributeValue)
     try:
         return AS.AXUIElementSetAttributeValue(el, name, value) == 0
     except Exception:  # noqa: BLE001
@@ -810,6 +815,7 @@ def _set(el, name: str, value) -> bool:
 def _perform(el, action: str) -> bool:
     import ApplicationServices as AS
 
+    effects.guard("accessibility", f"press {action} in another app's UI", via=AS.AXUIElementPerformAction)
     try:
         return AS.AXUIElementPerformAction(el, action) == 0
     except Exception:  # noqa: BLE001
@@ -846,6 +852,7 @@ def _post_return(pid: int) -> None:
     """A Return keystroke to that app only (not to whatever is frontmost)."""
     import Quartz as Q
 
+    effects.guard("input", "press Return in another app", via=Q.CGEventPostToPid)
     for down in (True, False):
         Q.CGEventPostToPid(pid, Q.CGEventCreateKeyboardEvent(None, 36, down))
 

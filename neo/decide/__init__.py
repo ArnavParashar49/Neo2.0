@@ -7,6 +7,7 @@ what apps declare about themselves, how this user actually uses them and what wo
 * ``engine``    - Laya picks the task kind and orders the candidate apps; outcomes are learned.
 * ``run``       - the loop every kind's driver shares: budgets, commit points, what is learned.
 * ``media``     - the driver for the generic "play something" task.
+* ``games``     - "play <game>": a game installed here (its category says so) is opened and played.
 * ``aescript`` / ``axkit`` - scripting through an app's own dictionary / its UI (Accessibility).
 * ``eventkit`` / ``routes`` / ``people`` / ``workspace`` - the OS's calendar and reminder stores,
   Contacts and default handlers.

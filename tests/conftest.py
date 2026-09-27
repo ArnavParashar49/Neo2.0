@@ -1,14 +1,18 @@
-"""Test-wide defaults: no model downloads, no GPU, no network."""
+"""Test-wide defaults: no model downloads, no GPU, no network, no real effects on the Mac (neo/effects.py
+refuses every one under pytest: a test fakes the step it needs instead)."""
 
 import os
 
-os.environ.setdefault("NEO_REFLEX", "off")  # never load Laya (1.7 GB) inside the test suite
-os.environ.setdefault("NEO_VOICE", "off")
+# Never Laya (1.7 GB) or the on-device voice inside the suite, whatever the environment says: a test
+# that wants one sets it for itself (monkeypatch.setenv) and fakes the load.
+os.environ["NEO_REFLEX"] = "off"
+os.environ["NEO_VOICE"] = "off"
 
 from pathlib import Path
 
 import pytest
 
+from neo import effects
 from neo.config import Settings
 
 # A scratch conftest doing `from tests.conftest import *` must get the underscore fixtures too —
@@ -19,7 +23,6 @@ __all__ = [
     "_no_real_embeddings",
     "_fresh_learning_state",
     "_no_shadow_dry_runs",
-    "_no_real_browser",
     "_accessibility_on",
     "_no_real_screen",
     "_no_task_grants",
@@ -37,11 +40,12 @@ _REAL_LATER = _shadow.later
 
 @pytest.fixture(autouse=True)
 def _isolated_data_dir(tmp_path, monkeypatch):
-    """Every test gets its own ~/.neo: nothing a test does may touch the user's real data
-    (memory, audit log, Laya's training examples, cooldowns)."""
+    """Every test gets its own ~/.neo (and notes folder): nothing a test does may touch the user's real
+    data (memory, audit log, Laya's training examples, cooldowns, notes)."""
     from neo import config
 
     monkeypatch.setenv("NEO_DATA_DIR", str(tmp_path / "neo_data"))
+    monkeypatch.setenv("NEO_NOTES_DIR", str(tmp_path / "notes"))  # never the user's ~/Documents
     monkeypatch.setattr(config, "_settings", None)
     yield
     monkeypatch.setattr(config, "_settings", None)
@@ -93,18 +97,12 @@ def _no_shadow_dry_runs(monkeypatch):
     monkeypatch.setattr(_shadow, "later", drop)
 
 
-@pytest.fixture(autouse=True)
-def _no_real_browser(monkeypatch):
-    """web_fetch renders a page its scripts build in a headless Chromium: never inside the suite
-    (the one real check runs with NEO_TEST_RENDER=1). Tests fake the browser instead."""
-    if os.environ.get("NEO_TEST_RENDER") == "1":
-        return
-    from neo.tools import render
-
-    async def refuse():
-        raise render.RenderError("no real browser in the test suite")
-
-    monkeypatch.setattr(render, "_start_playwright", refuse)
+@pytest.fixture
+def real_browser():
+    """The one real check (NEO_TEST_RENDER=1, which skips the tests asking for this otherwise): a
+    headless Chromium and the public page it reads, for that test only."""
+    with effects.allow("browser", "network"):
+        yield
 
 
 @pytest.fixture(autouse=True)
@@ -135,15 +133,12 @@ def _no_real_screen(monkeypatch):
     monkeypatch.setattr(pointer, "LOOK_S", 0.0)
     monkeypatch.setattr(pointer, "LOOK_AGAIN_S", 0.0)
     monkeypatch.setattr(pointer, "SETTLE_S", 0.0)
-    # The app NEO works in is per test, and no test brings a real app to the front.
+    # The app NEO works in is per test (bringing a real one forward is refused: neo/effects.py), and
+    # no app runs a shell unless a test says so.
     from neo.tools.computer import apps, focus
 
-    def no_switching(*a, **k):
-        raise AssertionError("a test tried to bring a real app to the front")
-
     monkeypatch.setattr(apps, "_target", None)
-    monkeypatch.setattr(focus, "force_front", no_switching)
-    monkeypatch.setattr(apps, "bring_pid_front", no_switching)
+    monkeypatch.setattr(focus, "hosts_shell", lambda pid, depth=3: False)
 
 
 @pytest.fixture(autouse=True)

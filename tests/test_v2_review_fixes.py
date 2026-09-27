@@ -319,11 +319,10 @@ def test_open_app_unknown_name_checks_dns(monkeypatch):
 
     monkeypatch.setattr(apps, "_resolves", resolves)
 
-    async def front(name, wait=1.5):  # (never the real browser: this test used to bring it forward)
-        return True, name
+    async def front(name, wait=1.5):
+        return True, name  # never the real browser brought to the front
 
     monkeypatch.setattr(apps, "bring_front", front)
-    monkeypatch.setattr(apps, "default_browser", lambda: "Browser")
     assert "opened https://www.github.com" in asyncio.run(apps.open_app("github"))
     assert "doesn't exist" in asyncio.run(apps.open_app("nosuchthingzz"))
 

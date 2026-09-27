@@ -14,6 +14,8 @@ import ctypes
 import ctypes.util
 import subprocess
 
+from neo import effects
+
 _SKYLIGHT = "/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight"
 _HISERVICES = "/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices"
 _USER_GENERATED = 0x200  # kCPSUserGenerated: the switch counts as the user's own
@@ -66,6 +68,7 @@ def force_front(pid: int) -> bool:
     if hi.GetProcessForPID(pid, ctypes.byref(psn)) != 0:
         return False
     wid = front_window_id(pid)
+    effects.guard("focus", f"bring process {pid} to the front", via=sl._SLPSSetFrontProcessWithOptions)
     if sl._SLPSSetFrontProcessWithOptions(ctypes.byref(psn), wid, _USER_GENERATED) != 0:
         return False
     if wid:
@@ -84,6 +87,7 @@ def force_front(pid: int) -> bool:
         app = AS.AXUIElementCreateApplication(pid)
         err, win = AS.AXUIElementCopyAttributeValue(app, "AXFocusedWindow", None)
         if err == 0 and win is not None:
+            effects.guard("focus", f"raise process {pid}'s window", via=AS.AXUIElementPerformAction)
             AS.AXUIElementPerformAction(win, "AXRaise")
     except Exception:  # noqa: BLE001
         pass
@@ -168,31 +172,76 @@ def _shells() -> frozenset[str]:
         return _DEFAULT_SHELLS
 
 
+class _BSDInfo(ctypes.Structure):
+    """struct proc_bsdinfo (sys/proc_info.h): a process's name and its controlling terminal."""
+
+    _fields_ = [
+        ("pbi_flags", ctypes.c_uint32), ("pbi_status", ctypes.c_uint32), ("pbi_xstatus", ctypes.c_uint32),
+        ("pbi_pid", ctypes.c_uint32), ("pbi_ppid", ctypes.c_uint32), ("pbi_uid", ctypes.c_uint32),
+        ("pbi_gid", ctypes.c_uint32), ("pbi_ruid", ctypes.c_uint32), ("pbi_rgid", ctypes.c_uint32),
+        ("pbi_svuid", ctypes.c_uint32), ("pbi_svgid", ctypes.c_uint32), ("rfu_1", ctypes.c_uint32),
+        ("pbi_comm", ctypes.c_char * 16), ("pbi_name", ctypes.c_char * 32), ("pbi_nfiles", ctypes.c_uint32),
+        ("pbi_pgid", ctypes.c_uint32), ("pbi_pjobc", ctypes.c_uint32), ("e_tdev", ctypes.c_uint32),
+        ("e_tpgid", ctypes.c_uint32), ("pbi_nice", ctypes.c_int32), ("pbi_start_tvsec", ctypes.c_uint64),
+        ("pbi_start_tvusec", ctypes.c_uint64),
+    ]  # fmt: skip
+
+
+_PROC_PIDTBSDINFO = 3
+_NO_TTY = 0xFFFFFFFF
+_libproc: ctypes.CDLL | bool | None = None
+
+
+def _proclib():
+    global _libproc
+    if _libproc is None:
+        try:
+            lib = ctypes.CDLL("/usr/lib/libproc.dylib")
+            lib.proc_listchildpids.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_int]
+            lib.proc_listchildpids.restype = ctypes.c_int
+            lib.proc_pidinfo.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_uint64, ctypes.c_void_p, ctypes.c_int]
+            lib.proc_pidinfo.restype = ctypes.c_int
+            _libproc = lib
+        except (OSError, AttributeError):
+            _libproc = False
+    return _libproc or None
+
+
+def _children(pid: int) -> list[int]:
+    lib = _proclib()
+    if lib is None:
+        return []
+    buf = (ctypes.c_int * 512)()
+    n = lib.proc_listchildpids(int(pid), buf, ctypes.sizeof(buf))
+    return [int(buf[i]) for i in range(max(0, min(n, 512))) if buf[i] > 0]
+
+
+def _proc(pid: int) -> tuple[str, bool]:
+    """(program name, whether it runs on a terminal device) of a process; ("", False) if unknown."""
+    lib = _proclib()
+    if lib is None:
+        return "", False
+    info = _BSDInfo()
+    if lib.proc_pidinfo(int(pid), _PROC_PIDTBSDINFO, 0, ctypes.byref(info), ctypes.sizeof(info)) != ctypes.sizeof(info):
+        return "", False
+    return info.pbi_comm.decode(errors="replace"), info.e_tdev != _NO_TTY
+
+
 def hosts_shell(pid: int, depth: int = 3) -> bool:
     """Does this app run an interactive shell — a terminal, an editor's terminal pane? Its own
     processes say so: a shell this Mac lists in /etc/shells, on a terminal device, among the app's
     children (or theirs). There, a Return runs whatever is on the command line."""
     if not pid or pid <= 1:
         return False
-    try:
-        out = subprocess.run(["ps", "-axo", "pid=,ppid=,tty=,comm="], capture_output=True, text=True, timeout=2).stdout
-    except (OSError, subprocess.SubprocessError):
-        return False
-    kids: dict[int, list[tuple[int, str, str]]] = {}
-    for line in out.splitlines():
-        parts = line.split(None, 3)
-        if len(parts) < 4 or not parts[0].isdigit() or not parts[1].isdigit():
-            continue
-        kids.setdefault(int(parts[1]), []).append((int(parts[0]), parts[2], parts[3].strip()))
     shells = _shells()
     level = [pid]
     for _ in range(depth):
-        nxt = []
+        nxt: list[int] = []
         for p in level:
-            for child, tty, comm in kids.get(p, []):
-                name = comm.rsplit("/", 1)[-1].lstrip("-")
-                if name in shells and tty not in ("??", "-", ""):
+            for child in _children(p):
+                name, tty = _proc(child)
+                if tty and name.lstrip("-") in shells:
                     return True
                 nxt.append(child)
-        level = nxt
+        level = nxt[:256]
     return False

@@ -98,6 +98,9 @@ _QUALIFIER = re.compile(
     r"year|weekend|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b|\d",
     re.I,
 )
+# A game to play (neo.decide.games): the run can open the app or bring it forward, whatever the
+# tool selector makes of "play chess as white".
+_GAME_TOOLS = ("open_app", "activate_app")
 _job_ids = itertools.count(1)
 # The recent voice conversation, when a request comes from Gemini Live: the agent can't hear
 # it, so "open it on Amazon" needs it to know what "it" is. Per task (jobs run concurrently).
@@ -222,6 +225,11 @@ class Session:
         if from_user:  # the user's own words: learn from how this goes (a Live relay is Live's)
             outcomes.begin(job, text, decision=d)
 
+        # "play chess as white" with a chess game on this Mac: the agent opens it and plays, whatever
+        # the reflex made of it (music, a chat, the one-tool lane) and whatever a fast path would run.
+        if (game := await asyncio.to_thread(_game_to_play, text)) is not None:
+            return await self._play_game(text, d, images, job, game)
+
         # Regex fast paths are precise; trust them unless the reflex says this is conversation.
         # ("type Laptops in the heading" reads as an agent task to the reflex, but the words are
         # the whole job — no model needed.) A plan covers the whole utterance or nothing.
@@ -261,6 +269,9 @@ class Session:
         # A command, by construction: if the agent has to rescue it and succeeds, there's still
         # nothing to say.
         d = Decision("agent_task", 1.0, False, 0.0, False, 0.0, source="lane", reply=False, reply_p=0.0)
+        # "open chess and play as white": not music, whatever the plan says
+        if (game := await asyncio.to_thread(_game_to_play, text)) is not None:
+            return await self._play_game(text, d, None, job, game)
         return await self._quick(text, d, steps, job=job, origin="user")
 
     async def cancel_all(self) -> int:
@@ -279,6 +290,17 @@ class Session:
         return n
 
     # ---- routes ----------------------------------------------------------------------
+    async def _play_game(
+        self, text: str, d: Decision, images: list[ImagePart] | None, job: str, game
+    ) -> Reply:
+        """A game installed on this Mac, to play: an agent task in that app, with the screen (its
+        board is looked at and clicked) and the tools to open it or bring it forward."""
+        from neo.decide import games
+
+        print(f"  ~ {game.name} is a game on this Mac: the agent plays it there")
+        d = replace(d, intent="agent_task", needs_screen=True, tool="", tool_p=0.0)
+        return await self._agent(text, d, images, job, hint=games.hint(game), also=_GAME_TOOLS)
+
     async def _chat(self, text: str, d: Decision, job: str) -> Reply:
         outcomes.route(job, "chat")
         await bus().set_state(NeoState.THINKING, job=job)
@@ -417,15 +439,20 @@ class Session:
         *,
         only: list[str] | None = None,
         done_note: str = "",
+        hint: str = "",
+        also: tuple[str, ...] = (),
     ) -> Reply:
         """An agent run as one task (neo.agent.grants): from here until the job is done, across
         every card the user answers on the way. It's what a yes "for this task" covers and what
-        the once-per-task notes count; a run that ends without a question to answer ends it."""
+        the once-per-task notes count; a run that ends without a question to answer ends it.
+        `hint`: more for the system prompt; `also`: tools the run gets whatever the request says."""
         task = grants.new_task()
         reply: Reply | None = None
         try:
             with grants.task(task):
-                reply = await self._agent_task(text, d, images, job, only=only, done_note=done_note)
+                reply = await self._agent_task(
+                    text, d, images, job, only=only, done_note=done_note, hint=hint, also=also
+                )
             return reply
         finally:
             if reply is None or reply.route != "confirm":
@@ -440,6 +467,8 @@ class Session:
         *,
         only: list[str] | None = None,
         done_note: str = "",
+        hint: str = "",
+        also: tuple[str, ...] = (),
     ) -> Reply:
         # The single-tool lane ("dim my screen", "click Send") runs one tool, which looks for itself
         # if it must: the reflex's screen signal alone doesn't buy it the vision chain.
@@ -463,13 +492,13 @@ class Session:
 
                     tools = [registry().get(n).spec() for n in only if registry().get(n)] + [MORE_TOOLS]
                 else:
-                    tools = await asyncio.to_thread(self._tools_for, text, needs_screen, playbook_ctx)
+                    tools = await asyncio.to_thread(self._tools_for, text, needs_screen, playbook_ctx, also)
                 snapshot = self._trimmed()
                 ctx = ToolContext(user_text=text, taint=list(_request_taint.get()))
                 res = await run_agent(
                     _with_conversation(text),
                     provider=chain,
-                    system=self._system(playbook_ctx + _already_done_note() + done_note),
+                    system=self._system(playbook_ctx + hint + _already_done_note() + done_note),
                     tools=tools,
                     history=snapshot,
                     ctx=ctx,
@@ -512,14 +541,14 @@ class Session:
         return Reply(res.text, "agent", d, res, job=job, silent=silent, taint=tuple(ctx.taint))
 
     # ---- tool selection ---------------------------------------------------------------
-    def _tools_for(self, text: str, needs_screen: bool, playbook_ctx: str):
-        """Only the tools this request plausibly needs (see neo.agent.toolselect)."""
+    def _tools_for(self, text: str, needs_screen: bool, playbook_ctx: str, also: tuple[str, ...] = ()):
+        """Only the tools this request plausibly needs (see neo.agent.toolselect), and `also`."""
         from neo.agent.toolselect import selector
 
         recent = [c.name for m in self.history[-8:] if m.role == "assistant" for c in m.tool_calls]
         pb_tools = re.findall(r"\b([a-z_]+)\(", playbook_ctx) if playbook_ctx else []
         sel = selector().select(
-            text, needs_screen=needs_screen, playbook_tools=pb_tools, history_tools=recent
+            text, needs_screen=needs_screen, playbook_tools=pb_tools, history_tools=recent, required=also
         )
         return sel.specs(registry())
 
@@ -976,6 +1005,15 @@ def _quietly(d: Decision | None, res: AgentResult) -> bool:
         return False  # worked from the screen (a board, a canvas): the user hears how it went
     low = res.text.lower()
     return not any(w in low for w in ("?", "couldn't", "could not", "can't", "cannot", "unable", "error", "failed"))
+
+
+def _game_to_play(text: str):
+    """The game installed on this Mac that the request asks to play (neo.decide.games), or None.
+    From the apps of the last scan only: nothing waits for one. Called in a thread: a word new to
+    it ("play <game> on <word>") is looked up in the system word list, a read of the disk."""
+    from neo.decide import games
+
+    return games.to_play(text)
 
 
 _strip_quotes = fastpath.strip_quotes

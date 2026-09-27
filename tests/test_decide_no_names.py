@@ -15,7 +15,7 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 _DECIDE = (
     "evidence", "run", "aescript", "axkit", "eventkit", "routes", "people", "workspace", "when", "learned", "sites",
-    "shadow",
+    "shadow", "games",
 )  # fmt: skip
 SCOPE = sorted(
     {ROOT / "neo" / "decide" / f"{m}.py" for m in _DECIDE}
