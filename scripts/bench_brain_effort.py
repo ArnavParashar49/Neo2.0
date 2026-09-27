@@ -30,7 +30,7 @@ for _k in ("GEMINI_API_KEY", "GEMINI_API_KEYS", "GROQ_API_KEY", "ANTHROPIC_API_K
     os.environ.pop(_k, None)
 
 import neo.providers as prov  # noqa: E402
-from neo.agent.registry import Registry, RegisteredTool, ToolOutput  # noqa: E402
+from neo.agent.registry import RegisteredTool, Registry, ToolOutput  # noqa: E402
 from neo.events import EventBus  # noqa: E402
 from neo.providers.base import ImagePart, Overloaded, ProviderError, RateLimited, ToolCall, Turn  # noqa: E402
 
@@ -300,6 +300,25 @@ def budget_overrun(wait: float) -> dict:
     return out
 
 
+class _FakeMac:
+    """An app that is in front from `up_at` s, with a text field focused from `field_at` s."""
+
+    def __init__(self, up_at: float, field_at: float) -> None:
+        self.t, self.up_at, self.field_at = 0.0, up_at, field_at
+
+    def now(self) -> float:
+        return self.t
+
+    async def sleep(self, s: float) -> None:
+        self.t += s
+
+    def probe(self, app, typing):
+        from neo.agent.settle import Ready
+
+        self.t += 0.002  # a look: ~2 ms of Accessibility reads
+        return Ready(self.t >= self.up_at, self.t >= self.up_at, self.t >= self.field_at)
+
+
 def settle() -> dict:
     """The wait before the next step after opening an app (fixed 0.8 s before)."""
     if not NEW:
@@ -310,17 +329,9 @@ def settle() -> dict:
     out = {}
     for label, up_at, field_at in (("already running", 0.0, 0.0), ("warm 0.15 s", 0.15, 0.2),
                                    ("cold launch 1.3 s", 1.3, 1.35)):  # fmt: skip
-        t = [0.0]
-
-        def probe(app, typing, up_at=up_at, field_at=field_at):
-            t[0] += 0.002
-            return st.Ready(t[0] >= up_at, t[0] >= up_at, t[0] >= field_at)
-
-        async def sleep(s):
-            t[0] += s
-
-        st.probe = probe
-        waited = asyncio.run(st.app_ready(typing=True, clock=lambda: t[0], sleep=sleep))
+        mac = _FakeMac(up_at, field_at)
+        st.probe = mac.probe
+        waited = asyncio.run(st.app_ready(typing=True, clock=mac.now, sleep=mac.sleep))
         out[label] = {"waited_s": round(waited, 3), "keys_lost": waited < field_at}
     return out
 
