@@ -196,6 +196,8 @@ def failure_words(name: str, e: ProviderError) -> str:
     """One brain's failure as a short spoken clause: "Gemini is out of free quota until 9:00"."""
     import time as _time
 
+    if isinstance(w := getattr(e, "words", None), str) and w:
+        return w  # the error's own reason (Cerebras: its budget spent, its key refused)
     who = spoken_name(name)
     kind = getattr(e, "kind", "error")
     if kind == "quota":
@@ -224,6 +226,8 @@ _SPOKEN_NAME = {
     "groq": "Groq",
     "local": "the local model",
     "claude": "Claude",
+    "cerebras": "Cerebras",
+    "cerebras_vision": "Cerebras vision",
 }
 
 
@@ -243,7 +247,8 @@ class AllBrainsFailed(ProviderError):
 
     def spoken(self) -> str:
         """Why the task stopped, for the user: which brain, and quota vs error."""
-        parts = [failure_words(n, e) for n, e in self.failures]
+        # (each reason once: two brains on one account refused for one reason say it once)
+        parts = list(dict.fromkeys(failure_words(n, e) for n, e in self.failures))
         if not parts:
             return "I couldn't reach any model, so I stopped."
         said = parts[0] if len(parts) == 1 else ", ".join(parts[:-1]) + " and " + parts[-1]
