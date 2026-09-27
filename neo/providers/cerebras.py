@@ -111,10 +111,13 @@ _BILLING = re.compile(
     r"|billing|payment[_ ]required|top[- ]?up|add (?:a )?payment",
     re.I,
 )
-_BAD_KEY = re.compile(r"invalid[_ ]api[_ ]key|incorrect api key|wrong api key|api key (?:is )?(?:invalid|revoked)", re.I)
+_BAD_KEY = re.compile(
+    r"invalid[_ ]api[_ ]key|incorrect api key|wrong api key|api key (?:is )?(?:invalid|revoked)", re.I
+)
 
-# Tests hand in an httpx.MockTransport here: nothing leaves the process.
+# Tests hand in an httpx.MockTransport here (nothing leaves the process), and a fake sleep.
 _transport: httpx.AsyncBaseTransport | None = None
+_sleep = asyncio.sleep
 
 
 class Refused(QuotaExhausted):
@@ -283,7 +286,9 @@ class Account:
                 self._loop = weakref.ref(loop)
             if self._transport is None:
                 self._transport = _transport or httpx.AsyncHTTPTransport(
-                    limits=httpx.Limits(max_connections=32, max_keepalive_connections=8, keepalive_expiry=KEEPALIVE_S)
+                    limits=httpx.Limits(
+                        max_connections=32, max_keepalive_connections=8, keepalive_expiry=KEEPALIVE_S
+                    )
                 )
             c = self._clients.get(model)
             if c is None:
@@ -332,7 +337,9 @@ class Account:
                 raise Refused(f"{name}: {r[0]}", until=r[1], words=r[0])
         if self.ledger.over():
             b = self.ledger.daily_budget
-            words = f"Cerebras' daily budget of ${b:.2f} is used up" if b > 0 else "Cerebras' daily budget is $0"
+            words = (
+                f"Cerebras' daily budget of {_usd(b)} is used up" if b > 0 else "Cerebras' daily budget is $0"
+            )
             self.say_once("spent", f"{words}; skipping it until tomorrow")
             raise Refused(f"{name}: {words}", until=self.ledger.midnight(), words=words)
         now = time.time()
@@ -342,7 +349,7 @@ class Account:
             secs, which = w
             if secs <= SLEEP_MAX_S:
                 log.info(f"[brain] {name}: waiting {secs:.1f}s for its {which} limit")
-                await asyncio.sleep(secs)
+                await _sleep(secs)
                 return
             if secs > DAILY_S:
                 words = f"Cerebras' {which} limit is used up"
@@ -381,7 +388,9 @@ class Account:
     def _refuse(self, scope: str, words: str, name: str, e: Exception) -> Refused:
         until = self.ledger.refuse(scope, words)
         self.say_once(f"refused:{scope}", f"{words}; skipping it for today")
-        log.warning(f"[brain] {name}: {words} (HTTP {getattr(e, 'status_code', '?')}); refused until midnight")
+        log.warning(
+            f"[brain] {name}: {words} (HTTP {getattr(e, 'status_code', '?')}); refused until midnight"
+        )
         return Refused(f"{name}: {words}", until=until, words=words)
 
     # money ------------------------------------------------------------------------------------
@@ -389,9 +398,11 @@ class Account:
         crossed = self.ledger.add(model, tokens_in, tokens_out)
         b = self.ledger.daily_budget
         if "warn" in crossed and "spent" not in crossed:
-            self._pending.append(f"Cerebras has used ${self.ledger.today():.2f} of today's ${b:.2f} budget")
+            self._pending.append(f"Cerebras has used {_usd(self.ledger.today())} of today's {_usd(b)} budget")
         if "spent" in crossed:
-            self._pending.append(f"Cerebras' daily budget of ${b:.2f} is used up; I'll skip it until tomorrow")
+            self._pending.append(
+                f"Cerebras' daily budget of {_usd(b)} is used up; I'll skip it until tomorrow"
+            )
 
     # what the user hears ----------------------------------------------------------------------
     def say_once(self, tag: str, text: str) -> None:
@@ -436,6 +447,11 @@ class Account:
         if ids:
             self.offered, self.offered_at = ids, time.time()
         return True
+
+
+def _usd(x: float) -> str:
+    """Dollars as said: "$0.42" (a budget under a cent keeps its digits: "$0.0010")."""
+    return f"${x:.2f}" if x == 0 or x >= 0.01 else f"${x:.4f}"
 
 
 def _error_text(e: APIStatusError) -> str:
@@ -500,7 +516,10 @@ class CerebrasProvider(OpenAICompatProvider):
         return t if t > now else 0.0
 
     def _error(self, e: Exception) -> ProviderError:
-        if isinstance(e, APIStatusError) and (mine := self.account.classify(e, self.model, self.name)) is not None:
+        if (
+            isinstance(e, APIStatusError)
+            and (mine := self.account.classify(e, self.model, self.name)) is not None
+        ):
             if isinstance(mine, RateLimited) and mine.retry_after:
                 self._cool_until = time.time() + mine.retry_after
             return mine
@@ -535,7 +554,9 @@ class CerebrasProvider(OpenAICompatProvider):
     ) -> Turn:
         try:
             messages = self._prepare(messages, system, tools)
-            await self.account.admit(self.model, estimate(messages, system, tools, vision=self.supports_vision), self.name)
+            await self.account.admit(
+                self.model, estimate(messages, system, tools, vision=self.supports_vision), self.name
+            )
             room = max(max_tokens, ROOM.get(effort, ROOM["medium"]))
             retried: set[str] = set()
             while True:
@@ -548,26 +569,39 @@ class CerebrasProvider(OpenAICompatProvider):
                         raise
                     retried.add("room")
                     effort, room = "low", min(max(room * 2, ROOM["high"]), MAX_ROOM)
-                    log.info(f"[brain] {self.name}: no room left for the answer; again with {room} tokens, low effort")
+                    log.info(
+                        f"[brain] {self.name}: no room left for the answer; again with {room} tokens, low effort"
+                    )
                 except Unavailable as e:
                     if "connection" in retried or not _stale(e):
                         raise
                     retried.add("connection")  # a kept-alive connection the server had closed
                 except RateLimited as e:
                     wait = e.retry_after
-                    if "rate" in retried or isinstance(e, QuotaExhausted) or wait is None or wait > SLEEP_MAX_S:
+                    if (
+                        "rate" in retried
+                        or isinstance(e, QuotaExhausted)
+                        or wait is None
+                        or wait > SLEEP_MAX_S
+                    ):
                         raise
                     retried.add("rate")
-                    await asyncio.sleep(wait)
+                    await _sleep(wait)
         finally:
             await self.account.announce()
 
-    async def stream(self, messages: list[Message], *, system: str = "", max_tokens: int = 2048) -> AsyncIterator[str]:
+    async def stream(
+        self, messages: list[Message], *, system: str = "", max_tokens: int = 2048
+    ) -> AsyncIterator[str]:
         try:
             messages = self._prepare(messages, system, None)
-            await self.account.admit(self.model, estimate(messages, system, None, vision=self.supports_vision), self.name)
+            await self.account.admit(
+                self.model, estimate(messages, system, None, vision=self.supports_vision), self.name
+            )
             produced = False
-            async for chunk in super().stream(messages, system=system, max_tokens=max(max_tokens, ROOM["low"])):
+            async for chunk in super().stream(
+                messages, system=system, max_tokens=max(max_tokens, ROOM["low"])
+            ):
                 produced = True
                 yield chunk
             if not produced:  # its thinking used all the room: nothing was said, another brain may say it
@@ -598,7 +632,9 @@ def _b64(n: int) -> int:
     return 4 * math.ceil(n / 3)
 
 
-def cap_pictures(messages: list[Message], *, most: int, max_bytes: int, name: str = VISION_BRAIN) -> list[Message]:
+def cap_pictures(
+    messages: list[Message], *, most: int, max_bytes: int, name: str = VISION_BRAIN
+) -> list[Message]:
     """`messages` with at most `most` pictures, newest first, whose base64 fits in `max_bytes`; the
     older ones are left out with a note. RequestTooLarge when even the newest can't go: a brain
     that sees must not answer about a picture it never got. Never mutates `messages`."""
@@ -617,7 +653,9 @@ def cap_pictures(messages: list[Message], *, most: int, max_bytes: int, name: st
                 kept += 1
                 size += b
             elif first:
-                raise RequestTooLarge(f"{name}: the picture is too large to send ({b / 1048576:.1f} MiB as base64)")
+                raise RequestTooLarge(
+                    f"{name}: the picture is too large to send ({b / 1048576:.1f} MiB as base64)"
+                )
             first = False
         return list(reversed(keep))
 
@@ -630,7 +668,9 @@ def cap_pictures(messages: list[Message], *, most: int, max_bytes: int, name: st
                     results.append(r)
                     continue
                 ims = take(r.images)
-                results.append(r if len(ims) == len(r.images) else replace(r, content=r.content + note, images=ims))
+                results.append(
+                    r if len(ims) == len(r.images) else replace(r, content=r.content + note, images=ims)
+                )
             results.reverse()
             if any(a is not b for a, b in zip(results, m.tool_results, strict=True)):
                 out[i] = replace(m, tool_results=results)
@@ -669,7 +709,9 @@ def hosted(
     object, in memory only (never a file, a global or ~/.neo)."""
     if not api_key:
         raise ProviderError("Cerebras needs an API key")
-    c = Conf(api_key=api_key, daily_budget=spend.budget(daily_budget, DEFAULT_BUDGET), prices=spend.prices(prices))
+    c = Conf(
+        api_key=api_key, daily_budget=spend.budget(daily_budget, DEFAULT_BUDGET), prices=spend.prices(prices)
+    )
     return CerebrasProvider(
         Account(c),
         model=model or (VISION_MODEL if vision else TEXT_MODEL),

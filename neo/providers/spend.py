@@ -130,7 +130,9 @@ class Ledger:
             except FileNotFoundError:
                 pass
             except (OSError, ValueError) as e:
-                log.warning(f"[spend] {self.path.name} unreadable ({type(e).__name__}): today's total starts over")
+                log.warning(
+                    f"[spend] {self.path.name} unreadable ({type(e).__name__}): today's total starts over"
+                )
         if st.get("day") != self.day():
             st = self._fresh()
         try:

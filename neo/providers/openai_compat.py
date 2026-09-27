@@ -311,7 +311,7 @@ class OpenAICompatProvider:
         self._learn_real(f, resp.usage)
         self._spent(resp.usage, f)
         if self.raise_truncated and _ran_out(resp.choices[0]):
-            raise Truncated(f"{self.name}: no room left for the answer (reasoning used all {f.max_tokens} tokens)")
+            raise Truncated(f"{self.name}: no room for the answer (reasoning used all {f.max_tokens} tokens)")
         choice = resp.choices[0].message
         turn = Turn(text=choice.content or "")
         for tc in choice.tool_calls or []:
