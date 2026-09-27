@@ -100,6 +100,7 @@ scripts/install-app.sh      # build NEO.app, install it to /Applications and sta
 
 - `GEMINI_API_KEY` — [aistudio.google.com/apikey](https://aistudio.google.com/apikey). Add more in `GEMINI_API_KEYS=key2,key3` for more free quota.
 - `GROQ_API_KEY` — [console.groq.com/keys](https://console.groq.com/keys) (optional; instant chat replies).
+- `CEREBRAS_API_KEY` — [cloud.cerebras.ai](https://cloud.cerebras.ai) (optional, **paid**: a very fast brain for quick answers and text-only steps, tried ahead of Groq, and a seeing fallback when Gemini is overloaded). NEO spends at most `NEO_CEREBRAS_DAILY_BUDGET` a day on it.
 
 The browser tools need Chromium once: `.venv/bin/python -m playwright install chromium`.
 
@@ -172,6 +173,12 @@ Everything is an environment variable with the `NEO_` prefix (or a line in `.env
 |---|---|---|
 | `NEO_BRAIN` | `gemini` | primary agentic brain: `gemini` · `groq` · `local` · `claude` |
 | `NEO_FAST_BRAIN` | `groq` | brain for chat-only turns |
+| `NEO_GROQ_VISION_MODEL` | `qwen/qwen3.8-27b` | Groq's model that sees: with a Groq key, the last model a screenshot goes to when Gemini (and Flash-Lite, Claude) can't answer; empty turns it off |
+| `NEO_CLOUD_EYES` | `auto` | with `NEO_BRAIN=local` and no cloud brain that sees named, pictures never go to a cloud fallback (the step stops and says so); `on` lets them |
+| `CEREBRAS_API_KEY` | — | a paid [Cerebras](https://cloud.cerebras.ai) key: `gpt-oss-120b` takes chat and text-only steps wherever Groq would (tried just ahead of it); `qwen-3.8-27b` sees the screen when Gemini is overloaded (ahead of Groq). No key: nothing changes |
+| `NEO_CEREBRAS_DAILY_BUDGET` | `0.50` | dollars a day NEO may spend on Cerebras (usage × price, counted per answer). At 80% it says so; once spent it skips Cerebras until midnight and says why. `0` turns Cerebras off (no chain names it) |
+| `NEO_CEREBRAS_MODEL` / `NEO_CEREBRAS_VISION_MODEL` | `gpt-oss-120b` / `qwen-3.8-27b` | the text and seeing models (one that `/v1/models` doesn't list for your key is skipped) |
+| `NEO_CEREBRAS_PRICES` | published prices | JSON, $ per million tokens: `{"gpt-oss-120b": [0.35, 0.75], "qwen-3.8-27b": [0.99, 1.49]}` (entries override or add models; an unknown model counts at the dearest price) |
 | `NEO_VOICE` | `auto` | `auto` (Live if the key allows it, else local) · `live` · `local` · `off` |
 | `NEO_REFLEX` | `laya` | `laya` · `lite` (Gemini Flash-Lite) · `off` |
 | `NEO_LISTEN_TIMEOUT_S` | `5` | stop listening after this many seconds without speech from you (silero VAD; noise doesn't count) |
@@ -192,7 +199,8 @@ NEO keeps its data on this Mac, in `~/.neo` (readable only by you). What leaves 
 | Goes to | What | When |
 |---|---|---|
 | **Google** (Gemini API, Gemini Live) | what you say and type, the recent conversation, NEO's memory about you (see `NEO_CLOUD_MEMORY`), tool results, and screenshots when a task needs to see the screen | every request that needs a model; voice sessions stream your microphone audio while listening |
-| **Groq** (optional key) | chat turns, and the conversation text when NEO writes a session summary | quick answers and summaries |
+| **Groq** (optional key) | chat turns, and the conversation text when NEO writes a session summary; a screenshot only when no other model that sees can answer (its vision model, `NEO_GROQ_VISION_MODEL`) | quick answers and summaries; a screen step while Gemini is overloaded or out of quota |
+| **Cerebras** (optional paid key) | the same as a Gemini request (what you say and type, the conversation, NEO's memory per `NEO_CLOUD_MEMORY`, tool results); screenshots only to its seeing model, at most two per request | steps and chat turns it answers (ahead of Groq), and screen steps when Gemini is overloaded |
 | **DuckDuckGo, Brave, Bing** | your search queries (raced for speed) | web searches |
 | **Open-Meteo**, and **ipinfo.io** if NEO doesn't know your city | the place, or your IP address to guess it | weather |
 | any website NEO opens or fetches for you | normal web requests | browsing tasks |
@@ -293,7 +301,7 @@ The snippets below use top-level `await`: run them inside an `async def`, or in 
 import neo2
 from neo2.providers import OpenAICompatible
 
-brain = OpenAICompatible(model="gpt-5.1", api_key="sk-...")  # or Gemini(key), Claude(key), Groq(key), your own
+brain = OpenAICompatible(model="gpt-5.1", api_key="sk-...")  # or Gemini(key), Claude(key), Groq(key), Cerebras(key), your own
 async with neo2.AsyncAgent(neo2.AgentConfig(tools="web"), provider=brain) as neo:
     r = await neo.ask("What's the weather in Lisbon this afternoon?")
     print(r.status, r.text)  # done, and the answer
@@ -508,7 +516,7 @@ An agent with the Mac tools (`tools="mac"`) clicks and types on the real desktop
 neo2/           the package: `python -m neo2` is NEO.app's core
   core/         NEO itself (the top-level `neo` before 2.1)
     agent/      loop.py (the one agent loop) · session.py (routing) · confirm.py · registry.py · prompt.py
-    providers/  gemini.py · openai_compat.py (Groq, local) · claude.py · base.py (neutral message format)
+    providers/  gemini.py · openai_compat.py (Groq, local) · cerebras.py + spend.py (paid, budgeted) · claude.py · base.py (neutral message format)
     reflex/     laya_reflex.py · features.py · finetune.py · generate.py · dataset.py · schema.py · templates_hi.py · hf_data.py + sources.py (public data)
     tools/      computer/ (gates: every check, frozen · tools_ax/pointer/keys/label/apps · ax, input, pointer, screen, apps, shell) · browser.py · browser_live.py (the chat's live card) · system.py · web.py · memory_tool.py
     voice/      wake.py · local.py · live.py · audio.py · pipeline.py

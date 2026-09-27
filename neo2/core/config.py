@@ -37,7 +37,7 @@ def _env_files(root: Path) -> tuple[Path, ...]:
 
 _ENV_FILES = _env_files(PROJECT_ROOT)
 
-BrainName = Literal["gemini", "gemini_lite", "groq", "local", "claude"]
+BrainName = Literal["gemini", "gemini_lite", "groq", "local", "claude", "groq_vision", "cerebras", "cerebras_vision"]
 VoiceBackend = Literal["auto", "live", "local", "off"]
 DecideMode = Literal["legacy", "shadow", "on", "off"]
 
@@ -69,6 +69,9 @@ class Settings(BaseSettings):
     )  # extra keys, comma-separated
     groq_api_key: str = Field(default="", validation_alias="GROQ_API_KEY", repr=False)
     anthropic_api_key: str = Field(default="", validation_alias="ANTHROPIC_API_KEY", repr=False)
+    # A paid Cerebras key (the user adds it themselves): its brains join the chains only with it
+    # set and a daily budget above 0 (neo2.core.providers.cerebras_hooks.enabled).
+    cerebras_api_key: str = Field(default="", validation_alias="CEREBRAS_API_KEY", repr=False)
 
     # ---- brains ----------------------------------------------------------------------
     brain: BrainName = "gemini"  # primary agentic brain
@@ -79,8 +82,34 @@ class Settings(BaseSettings):
     gemini_lite_model: str = "gemini-3.5-flash-lite"
     gemini_live_model: str = "gemini-3.8-live"
     groq_model: str = "openai/gpt-oss-120b"
+    # Groq's model that sees pictures: the last seeing fallback (neo2.core.providers.EYES), on GROQ_API_KEY.
+    # It is sent a screenshot only when no other brain that sees can answer. "" = none.
+    groq_vision_model: str = "qwen/qwen3.8-27b"
+    # The seeing fallbacks (Flash-Lite, Claude, Groq's vision model) for a picture the chain's own
+    # brains can't answer. "auto": they join — except for a user who put the local brain first and
+    # named no cloud brain that sees (their pictures stayed on the Mac: a fallback doesn't change
+    # that on its own). "on": they join for that user too.
+    cloud_eyes: Literal["auto", "on"] = "auto"
     local_model: str = "mlx-community/gemma-4-12B-it-4bit"
     claude_model: str = "claude-opus-5"
+    # Cerebras (neo2.core.providers.cerebras): the fast text brain ahead of Groq, and a seeing one
+    # ahead of Groq's vision model. Spend is usage × price per model ($ per million tokens in / out;
+    # JSON entries override or add), against a daily budget: 80% is said, then it is skipped until
+    # midnight. 0 turns Cerebras off.
+    cerebras_model: str = "gpt-oss-120b"
+    cerebras_vision_model: str = "qwen-3.8-27b"
+    cerebras_daily_budget: float = 0.50
+    cerebras_prices: Annotated[dict[str, Any] | str, NoDecode] = ""
+
+    @field_validator("cerebras_daily_budget", mode="before")
+    @classmethod
+    def _cerebras_budget(cls, v):
+        """A typo (or "$1") must not stop NEO from starting: an unreadable budget is the default."""
+        try:
+            f = float(str(v).strip().lstrip("$"))
+        except (TypeError, ValueError):
+            return 0.50
+        return f if f == f and 0 <= f < float("inf") else 0.50
 
     # ---- reflex ----------------------------------------------------------------------
     reflex: Literal["laya", "lite", "off"] = "laya"
@@ -148,13 +177,25 @@ class Settings(BaseSettings):
     fast_paths: bool = True  # zero-LLM regex commands (neo2.core.agent.fastpath)
 
     # ---- computer controls (neo2/core/tools/computer) -----------------------------------------
-    # The thinking level a step on the screen starts at. Today's is the agent's own ("high"); it
-    # changes only after a measured A/B on the controls self-test's window.
+    # The thinking level a step on the screen starts at (then one up after a miss, back down after
+    # a success — neo2.core.providers.effort). Today's is the agent's own ("high"); "low" answers in
+    # ~1–2 s instead of ~10–24 s. It changes only after a measured A/B on the controls self-test's
+    # window (≥10 runs per arm).
     screen_effort: Literal["minimal", "low", "medium", "high"] = "high"
+    # Several actions per reply, and a run that ends on `finish` once NEO verified its last actions
+    # (neo2.core.agent.batch): off until the user's A/B on the self-test window (DECISIONS 47).
+    batch_actions: bool = False
+    # The replay lane (neo2.core.agent.replay): a request a model did the same way twice in the same
+    # app is done the third time with no model call. None: on in NEO.app, off where effects are off.
+    replay_flows: bool | None = None
     # A first look at the requested app, taken before the first model call — only when that app
     # is already in front (or none is named and the front one is where NEO last worked), never a
     # protected app's, with a picture only when the screen is needed. Off: the model looks itself.
     prefetch_look: bool = True
+    prefetch_look_s: float = 0.5  # the most that first look may add before the first model call
+    # Laya's resolver is loaded at the wake word (the start of speech), not when the words are in:
+    # its first answer drops from ~0.5 s to ~45 ms once the user has spoken for about a second.
+    prewarm_resolver: bool = True
     shot_format: Literal["jpeg", "png"] = "jpeg"  # screenshots for a model: JPEG q85, or PNG
     # Laya's UI resolver ("click the start button", "start wala button dabao"): "shadow" logs
     # what it would press and acts only on an exact label; "live" lets every stage that passed
@@ -182,6 +223,13 @@ class Settings(BaseSettings):
         default = {"screen_effort": "high", "shot_format": "jpeg", "resolver": "shadow"}[info.field_name]
         s = {"jpg": "jpeg"}.get(s, s)
         return s if s in allowed else default
+
+    @field_validator("cloud_eyes", mode="before")
+    @classmethod
+    def _cloud_eyes(cls, v):
+        """Only a clear yes sends a local-first user's pictures to a cloud fallback: anything else
+        (a typo too) is auto."""
+        return "on" if str(v or "").strip().lower() in ("on", "true", "yes", "1", "always") else "auto"
 
     # ---- memory & prompt ---------------------------------------------------------------
     embeddings: Literal["local", "off"] = "local"  # off: keyword-only recall, no local model
@@ -317,6 +365,9 @@ class LibrarySettings(Settings):
     # No brain but the ones the host gave: the local model server is one only when named here.
     # (Whatever answers on 127.0.0.1:8080 of a server is some other service.)
     offline_brain: BrainName | None = None
+    # Nor a model the host didn't name: its Groq key sends no picture to Groq's vision model unless
+    # it names one (a seeing fallback: neo2.core.providers.EYES).
+    groq_vision_model: str = ""
     embeddings: Literal["local", "off"] = "off"
     memory_enabled: bool = False
     learn: bool = False
@@ -324,6 +375,8 @@ class LibrarySettings(Settings):
     browser_headless: bool = True
     browser_view: Literal["chat", "window"] = "window"  # no chat card: that's NEO.app's overlay
     include_username: bool = False
+    # No early first look at the host's screen unless the host asks for it (neo2.core.agent.prefetch).
+    prefetch_look: bool = False
 
     def __init__(self, **values: Any) -> None:
         try:

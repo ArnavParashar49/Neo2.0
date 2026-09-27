@@ -551,6 +551,7 @@ class LiveVoice:
 
     # ---- controls ----------------------------------------------------------------------
     async def wake(self, source: str = "ui") -> None:
+        early().listening("wake")  # warm what the request will need while the user speaks (never waits)
         await self._ensure_session()
 
     async def push_to_talk(self, on: bool) -> None:

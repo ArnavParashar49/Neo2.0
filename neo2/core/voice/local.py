@@ -180,6 +180,7 @@ class LocalVoice:
             if not armed:
                 continue
             self._armed.clear()
+            early().listening("wake")  # warm what the request will need while the user speaks (never waits)
             self.mic.drain()
             text = await self._capture_utterance()
             early().feed(text)
@@ -240,6 +241,8 @@ class LocalVoice:
 
                         ev = self._vad(torch.from_numpy(chunk.copy()), return_seconds=False)
                         if ev and "start" in ev:
+                            if not started:
+                                early().listening("speech")
                             started = True
                             last_voice = time.time()
                         elif ev and "end" in ev and started and not self._ptt:
@@ -252,6 +255,8 @@ class LocalVoice:
                     if not started:
                         noise = 0.9 * noise + 0.1 * level
                     if level > max(0.012, noise * 3.5):
+                        if not started:
+                            early().listening("speech")
                         started = True
                         last_voice = time.time()
                     if started:

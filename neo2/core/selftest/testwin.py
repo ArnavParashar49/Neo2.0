@@ -5,12 +5,14 @@ neo2.core.selftest.controls runs it as a child process of NEO's core, from NEO's
     python -m neo2.core.selftest.testwin --log FILE --tag TAG --parent PID
 
 It is a separate app with an identity of its own (its own process and the name "NEO Self-Test
-TAG", never NEO's), with a known layout: two buttons (Alpha, Bravo), a box that wants a double
-click, a text field, a multi-line text area, a list to scroll, a tile to drag onto a well (real
-drag and drop), a magenta marker for screenshots, a Test menu with a ⌘J shortcut, and a
-Chess-like 8×8 board drawn in one view with nothing in it for Accessibility, whose first click on
-an inactive window only activates the window (like Chess's board). With a second display, a
-small second window goes there.
+TAG", never NEO's), with a known layout: two buttons (Alpha, Bravo) and one titled in Hindi, a box
+that wants a double click, a 12-pt button, a text field, a multi-line text area, a list to scroll, a
+tile to drag onto a well (real drag and drop), a magenta marker for screenshots, a Test menu with a
+⌘J shortcut and a New Round… (⌘K) that opens a "Start a new round?" sheet, a Chess-like 8×8 board
+with its pieces drawn in one view with nothing in it for Accessibility, whose first click on an
+inactive window only activates the window (like Chess's board), and a second board tilted back and
+textured the way a 3D board looks at an angle. With a second display, a small second window goes
+there.
 
 Everything it receives is appended to FILE as JSON lines (``{"t": …, "ev": …}``): each click
 with its screen position and click count, drags and drops, typed text, scroll offsets, keys, the
@@ -32,6 +34,7 @@ import threading
 import time
 from typing import Any
 
+from neo2.core.selftest import geometry as G
 from neo2.core.selftest import layout as L
 
 _LIFETIME_S = 120.0
@@ -62,6 +65,19 @@ def cell_at(x: float, y: float, n: int = L.BOARD_N, cell: float = L.CELL) -> lis
         return None
     col, row = int(x // cell), int(y // cell)
     return [col, row] if col < n and row < n else None
+
+
+def start_pieces() -> dict[tuple[int, int], str]:
+    """The pieces as a game starts: (col, row) → letter (upper case white, at the bottom)."""
+    return {(c, r): p for r, line in L.START_ROWS.items() for c, p in enumerate(line)}
+
+
+def move_piece(pieces: dict[tuple[int, int], str], start: list[int] | None, end: list[int] | None) -> bool:
+    """Move whatever stands on ``start`` to ``end`` (taking what was there). False: nothing moved."""
+    if start is None or end is None or start == end or tuple(start) not in pieces:
+        return False
+    pieces[tuple(end)] = pieces.pop(tuple(start))
+    return True
 
 
 def place(visible: tuple[float, float, float, float], frame_w: float, frame_h: float) -> tuple[float, float]:
@@ -115,6 +131,10 @@ class _Ctx:
     primary_h: float = 0.0
     board: Any = None
     tick: Any = None  # the app's tick (a plain function; the timer calls the controller)
+    win: Any = None  # the main window (the sheet opens on it)
+    sheet: Any = None  # the open "Start a new round?" alert, while it is open
+    round: int = 1
+    round_label: Any = None
 
 
 _ctx = _Ctx()
@@ -134,6 +154,7 @@ def classes() -> dict[str, Any]:
         return _classes
     import objc
     from AppKit import (
+        NSAlert,
         NSBezierPath,
         NSColor,
         NSDraggingItem,
@@ -172,7 +193,8 @@ def classes() -> dict[str, Any]:
             self = objc.super(NEOSelfTestBoard, self).initWithFrame_(frame)
             if self is None:
                 return None
-            self.piece = [1, 6]
+            self.piece = list(L.PIECE)  # the drag check's own piece, followed wherever it goes
+            self.pieces = start_pieces()
             self.grab = None
             self.drags = 0
             return self
@@ -190,16 +212,22 @@ def classes() -> dict[str, Any]:
                 for r in range(L.BOARD_N):
                     (light if (c + r) % 2 == 0 else dark).set()
                     NSBezierPath.fillRect_(NSMakeRect(c * L.CELL, r * L.CELL, L.CELL, L.CELL))
-            c, r = self.piece
-            NSColor.blackColor().set()
-            NSBezierPath.bezierPathWithOvalInRect_(NSMakeRect(c * L.CELL + 6, r * L.CELL + 6, L.CELL - 12, L.CELL - 12)).fill()
+            for (c, r), p in self.pieces.items():
+                mine = [c, r] == self.piece
+                (NSColor.blackColor() if mine or p.islower() else NSColor.whiteColor()).set()
+                oval = NSBezierPath.bezierPathWithOvalInRect_(NSMakeRect(c * L.CELL + 6, r * L.CELL + 6, L.CELL - 12, L.CELL - 12))
+                oval.fill()
+                NSColor.darkGrayColor().set()
+                oval.stroke()
+                if not mine:
+                    text(p.upper(), c * L.CELL + 11, r * L.CELL + 7, 10.0, NSColor.whiteColor() if p.islower() else NSColor.blackColor())
 
         @objc.python_method
         def _down(self, event, button: str) -> None:
             x, y = local(self, event)
             cell = cell_at(x, y)
             self.drags = 0
-            self.grab = cell if (button == "left" and cell == self.piece) else None
+            self.grab = cell if (button == "left" and cell is not None and tuple(cell) in self.pieces) else None
             _ctx.log.write("board_down", button=button, cell=cell, at=gpoint(self, event), clicks=int(event.clickCount()))
 
         def mouseDown_(self, event):
@@ -219,9 +247,88 @@ def classes() -> dict[str, Any]:
             cell = cell_at(x, y)
             _ctx.log.write("board_up", cell=cell, at=gpoint(self, event), drags=self.drags)
             if self.grab is not None and cell is not None and cell != self.grab and self.drags:
-                _ctx.log.write("piece_moved", start=self.grab, end=cell)
-                self.piece = cell
-                self.setNeedsDisplay_(True)
+                start = self.grab
+                if move_piece(self.pieces, start, cell):
+                    _ctx.log.write("piece_moved", start=start, end=cell, squares=[G.square(*start), G.square(*cell)])
+                    if start == self.piece:
+                        self.piece = cell
+                    self.setNeedsDisplay_(True)
+            self.grab = None
+
+    class NEOSelfTestTilt(NSView):
+        """The flat board's twin, tilted back in perspective on a wood-like texture: the squares are
+        only in its pixels (no Accessibility children), and like the flat one the first click on an
+        inactive window only activates it. Pieces move by dragging."""
+
+        def initWithFrame_(self, frame):
+            self = objc.super(NEOSelfTestTilt, self).initWithFrame_(frame)
+            if self is None:
+                return None
+            self.pieces = start_pieces()
+            self.grab = None
+            self.drags = 0
+            return self
+
+        def isFlipped(self):
+            return True
+
+        def acceptsFirstMouse_(self, event):
+            return False
+
+        @objc.python_method
+        def quad(self):
+            b = self.bounds().size
+            return G.tilt_quad(float(b.width), float(b.height))
+
+        def drawRect_(self, rect):
+            b = self.bounds().size
+            for i in range(0, int(b.height), 3):  # wood: bands of browns
+                shade = 0.35 + 0.08 * ((i * 7919) % 13) / 13
+                NSColor.colorWithSRGBRed_green_blue_alpha_(shade + 0.18, shade + 0.05, shade * 0.5, 1.0).set()
+                NSBezierPath.fillRect_(NSMakeRect(0, i, b.width, 3))
+            q = self.quad()
+            for c in range(L.BOARD_N):
+                for r in range(L.BOARD_N):
+                    poly = G.cell_polygon(q, c, r)
+                    path = NSBezierPath.bezierPath()
+                    path.moveToPoint_(poly[0])
+                    for pt in poly[1:]:
+                        path.lineToPoint_(pt)
+                    path.closePath()
+                    light = (c + r) % 2 == 0
+                    grain = 0.04 * ((c * 31 + r * 17) % 5) / 5
+                    color = (0.86 - grain, 0.74 - grain, 0.55 - grain) if light else (0.45 - grain, 0.27 - grain, 0.14)
+                    NSColor.colorWithSRGBRed_green_blue_alpha_(*color, 1.0).set()
+                    path.fill()
+            for (c, r), p in self.pieces.items():
+                cx, cy = G.cell_center(q, c, r)
+                poly = G.cell_polygon(q, c, r)
+                h = abs(poly[2][1] - poly[0][1])
+                rad = max(3.0, h * 0.34)
+                (NSColor.whiteColor() if p.isupper() else NSColor.blackColor()).set()
+                NSBezierPath.bezierPathWithOvalInRect_(NSMakeRect(cx - rad, cy - rad * 1.6, rad * 2, rad * 2)).fill()
+
+        @objc.python_method
+        def _cell(self, event):
+            x, y = local(self, event)
+            return G.cell_at(self.quad(), x, y)
+
+        def mouseDown_(self, event):
+            cell = self._cell(event)
+            self.drags = 0
+            self.grab = cell if cell is not None and tuple(cell) in self.pieces else None
+            _ctx.log.write("tilt_down", cell=cell, square=G.square(*cell) if cell else None, at=gpoint(self, event))
+
+        def mouseDragged_(self, event):
+            self.drags += 1
+
+        def mouseUp_(self, event):
+            cell = self._cell(event)
+            if self.grab is not None and cell is not None and cell != self.grab and self.drags:
+                start = self.grab
+                if move_piece(self.pieces, start, cell):
+                    _ctx.log.write("tilt_moved", start=start, end=cell, squares=[G.square(*start), G.square(*cell)])
+                    self.setNeedsDisplay_(True)
             self.grab = None
 
     class NEOSelfTestBox(NSView):
@@ -380,6 +487,32 @@ def classes() -> dict[str, Any]:
         def buttonB_(self, sender):
             _ctx.log.write("button", name=L.BUTTON_B)
 
+        def buttonHindi_(self, sender):
+            _ctx.log.write("button", name=L.HINDI_BUTTON)
+
+        def newRound_(self, sender):
+            if _ctx.sheet is not None or _ctx.win is None:
+                return
+            alert = NSAlert.alloc().init()
+            alert.setMessageText_(L.SHEET_TITLE)
+            alert.setInformativeText_("The boards stay as they are.")
+            alert.addButtonWithTitle_(L.SHEET_START)
+            alert.addButtonWithTitle_(L.SHEET_CANCEL)
+            _ctx.sheet = alert
+            _ctx.log.write("sheet_open", title=L.SHEET_TITLE)
+
+            def answered(code):
+                button = L.SHEET_START if int(code) == 1000 else L.SHEET_CANCEL  # NSAlertFirstButtonReturn
+                _ctx.sheet = None
+                _ctx.log.write("sheet_answer", button=button)
+                if button == L.SHEET_START:
+                    _ctx.round += 1
+                    _ctx.log.write("round", n=_ctx.round)
+                    if _ctx.round_label is not None:
+                        _ctx.round_label.setStringValue_(f"Round {_ctx.round}")
+
+            alert.beginSheetModalForWindow_completionHandler_(_ctx.win, answered)
+
         def fieldReturn_(self, sender):
             _ctx.log.write("field_return", value=str(sender.stringValue()))
 
@@ -421,6 +554,7 @@ def classes() -> dict[str, Any]:
 
     _classes = {
         "Board": NEOSelfTestBoard,
+        "Tilt": NEOSelfTestTilt,
         "Box": NEOSelfTestBox,
         "List": NEOSelfTestList,
         "Tile": NEOSelfTestTile,
@@ -446,6 +580,7 @@ def _run(args: argparse.Namespace) -> int:  # pragma: no cover - needs a real wi
         NSApplicationDidBecomeActiveNotification,
         NSApplicationDidResignActiveNotification,
         NSButton,
+        NSColor,
         NSEvent,
         NSMenu,
         NSMenuItem,
@@ -500,6 +635,9 @@ def _run(args: argparse.Namespace) -> int:  # pragma: no cover - needs a real wi
     action = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(L.MENU_TITLE, "menuAction:", L.MENU_KEYS.split("+")[-1])
     action.setTarget_(ctl)
     test_menu.addItem_(action)
+    new_round = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(L.ROUND_MENU, "newRound:", L.ROUND_KEYS.split("+")[-1])
+    new_round.setTarget_(ctl)
+    test_menu.addItem_(new_round)
     test_item.setSubmenu_(test_menu)
     app.setMainMenu_(bar)
 
@@ -527,6 +665,7 @@ def _run(args: argparse.Namespace) -> int:  # pragma: no cover - needs a real wi
         return b
 
     win = window(L.WIDTH, L.HEIGHT, screens[0], f"{L.TITLE} ({args.tag})")
+    _ctx.win = win
     cv = win.contentView()
     add(cv, NSTextField.labelWithString_(f"{L.TITLE}."), 20, 12, 680, 18)
     board = add(cv, k["Board"].alloc().initWithFrame_(NSMakeRect(0, 0, 10, 10)), 20, 40, L.BOARD_N * L.CELL, L.BOARD_N * L.CELL)
@@ -576,7 +715,20 @@ def _run(args: argparse.Namespace) -> int:  # pragma: no cover - needs a real wi
     marker = add(cv, box("marker", "", tuple(c / 255 for c in L.MARKER_RGB)), 280, 244, L.MARKER_PT, L.MARKER_PT)
     tile = add(cv, k["Tile"].alloc().initWithFrame_(NSMakeRect(0, 0, 10, 10)), 340, 244, 80, 36)
     well = add(cv, k["Well"].alloc().initWithFrame_(NSMakeRect(0, 0, 10, 10)), 440, 244, 100, 36)
-    add(cv, NSTextField.labelWithString_(f"Test window {args.tag} - it closes by itself."), 20, 300, 680, 18)
+    tx, ty, tw, th = L.TILT
+    tilt = add(cv, k["Tilt"].alloc().initWithFrame_(NSMakeRect(0, 0, 10, 10)), tx, ty, tw, th)
+    hindi = add(cv, NSButton.alloc().initWithFrame_(NSMakeRect(0, 0, 10, 10)), 280, 300, 110, 30)
+    hindi.setTitle_(L.HINDI_BUTTON)
+    hindi.setBezelStyle_(1)
+    hindi.setTarget_(ctl)
+    hindi.setAction_("buttonHindi:")
+    try:
+        hindi.setBezelColor_(NSColor.systemPinkColor())
+    except Exception:  # noqa: BLE001 - only the colour
+        pass
+    tiny = add(cv, box("tiny", "", tuple(c / 255 for c in L.TINY_RGB), True), 410, 309, L.TINY_PT, L.TINY_PT)
+    _ctx.round_label = add(cv, NSTextField.labelWithString_("Round 1"), 440, 306, 200, 18)
+    add(cv, NSTextField.labelWithString_(f"Test window {args.tag} - it closes by itself."), 20, 350, 680, 18)
 
     second_win = second = None
     if len(screens) > 1:
@@ -631,6 +783,11 @@ def _run(args: argparse.Namespace) -> int:  # pragma: no cover - needs a real wi
         r = view.window().convertRectToScreen_(view.convertRect_toView_(view.bounds(), None))
         return to_global(r.origin.x, r.origin.y, r.size.width, r.size.height, _ctx.primary_h)
 
+    def tilt_quad() -> list[list[float]]:
+        """The tilted board's corners on screen (top-left, top-right, bottom-right, bottom-left)."""
+        x, y, _w, _h = frame_of(tilt)
+        return [[round(x + qx, 1), round(y + qy, 1)] for qx, qy in tilt.quad()]
+
     last_state: dict[str, Any] = {}
     readied = [False]
 
@@ -656,10 +813,15 @@ def _run(args: argparse.Namespace) -> int:  # pragma: no cover - needs a real wi
                     "marker": frame_of(marker),
                     "tile": frame_of(tile),
                     "well": frame_of(well),
+                    "hindi": frame_of(hindi),
+                    "tiny": frame_of(tiny),
+                    "tilt": frame_of(tilt),
                 },
+                tilt_quad=tilt_quad(),
                 cell=L.CELL,
                 board_n=L.BOARD_N,
                 piece=list(board.piece),
+                round=_ctx.round,
                 screens=[
                     to_global(s.frame().origin.x, s.frame().origin.y, s.frame().size.width, s.frame().size.height, _ctx.primary_h)
                     for s in screens
@@ -678,6 +840,8 @@ def _run(args: argparse.Namespace) -> int:  # pragma: no cover - needs a real wi
             "piece": list(board.piece),
             "active": bool(app.isActive()),
             "key": bool(win.isKeyWindow()),
+            "round": _ctx.round,
+            "sheet": _ctx.sheet is not None,
         }
         if state != last_state:
             last_state.clear()

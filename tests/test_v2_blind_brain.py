@@ -16,7 +16,16 @@ import pytest
 from neo2.core.agent.loop import run_agent
 from neo2.core.agent.registry import ToolContext, ToolOutput, registry
 from neo2.core.events import EventBus
-from neo2.core.providers.base import BLIND_PICTURE, ImagePart, Message, Overloaded, ToolCall, ToolResult, Turn
+from neo2.core.providers.base import (
+    BLIND_PICTURE,
+    ImagePart,
+    Message,
+    NoEyes,
+    Overloaded,
+    ToolCall,
+    ToolResult,
+    Turn,
+)
 from neo2.core.tools.computer import input as inp
 from neo2.core.tools.computer import pointer, screen
 
@@ -93,8 +102,10 @@ def test_a_request_working_from_a_picture_goes_to_a_brain_that_can_see_it_first(
     assert asyncio.run(chain.complete([Message.user("hi")])).text == "blind"  # no picture: demotion holds
     assert asyncio.run(chain.complete(_shot_history())).text == "seen"  # a board in view: eyes first
     gemini.error = Overloaded("busy")
-    turn = asyncio.run(chain.complete(_shot_history()))
-    assert turn.text == "blind" and turn.sees is False  # every brain that sees is busy: the reply says so
+    # Every brain that sees is busy: the run stops and says so rather than act blind (DECISIONS 39).
+    with pytest.raises(NoEyes) as stop:
+        asyncio.run(chain.complete(_shot_history()))
+    assert groq.asked == 1 and "can see the screen is busy" in stop.value.spoken()
 
 
 def test_a_picture_never_jumps_a_local_brain_the_user_put_first(monkeypatch):

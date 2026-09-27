@@ -110,7 +110,8 @@ def test_image_limit_covers_a_hosts_own_brains(monkeypatch):
 
     assert providers.image_limit("vision") is None  # NEO.app with no keys: nothing declared
     monkeypatch.setattr(providers, "_hosts", lambda purpose: [_Brain("host", limit=(1024, 800_000))])
-    assert providers.image_limit("vision") == (1024, 800_000)
+    # (brain-effort: the limit is an ImageLimit — edge, pixels and bytes; a declared pair still counts)
+    assert providers.image_limit("vision") == providers.ImageLimit(1024, 800_000)
 
 
 # ---- wait.until on a fake clock ------------------------------------------------------------------
@@ -143,8 +144,11 @@ def test_until_gives_up_at_its_timeout_and_takes_async_checks(fake_clock):
 def test_the_controls_settings_and_their_defaults(monkeypatch):
     from neo2.core import config
 
+    monkeypatch.delenv("NEO_PREFETCH_LOOK", raising=False)  # (the suite turns the first look off: tests/conftest.py)
+    monkeypatch.setattr(config, "_settings", None)
     s = config.settings()
     assert (s.screen_effort, s.prefetch_look, s.shot_format, s.resolver) == ("high", True, "jpeg", "shadow")
+    assert (s.prefetch_look_s, s.prewarm_resolver) == (0.5, True)
     assert (s.resolver_laya_p, s.local_grounder, s.ground_port, s.sck_capture, s.sck_stream) == (0.9, "", 8081, False, False)
     assert s.resolver_promoted == ""  # (no shadow stage acts until promoted)
     for key, typo, default in (("resolver", "livee", "shadow"), ("shot_format", "gif", "jpeg"), ("screen_effort", "max", "high")):

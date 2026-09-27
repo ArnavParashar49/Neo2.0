@@ -19,7 +19,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any, Literal
 
 from neo2.core import logger, runtime
-from neo2.core.agent import confirm, fastpath, grants
+from neo2.core.agent import batch, confirm, fastpath, grants, prefetch, replay
 from neo2.core.agent.loop import AgentResult, _supersede_observations, run_agent
 from neo2.core.agent.prompt import build as build_prompt
 from neo2.core.agent.registry import USERS_WORDS, Origin, ToolContext, ToolOutput, fence, registry, voiced
@@ -104,7 +104,7 @@ _QUALIFIER = re.compile(
     re.I,
 )
 # A game to play (neo2.core.decide.games): the run can open the app or bring it forward, whatever the
-# tool selector makes of "play chess as white".
+# tool selector makes of "play <game> as <side>".
 _GAME_TOOLS = ("open_app", "activate_app")
 _job_ids = itertools.count(1)
 # The recent voice conversation, when a request comes from Gemini Live: the agent can't hear
@@ -120,6 +120,9 @@ _job_generation: contextvars.ContextVar[int | None] = contextvars.ContextVar("jo
 # ToolContext.extras of every tool call it makes.
 _NO_EXTRAS: Mapping[str, Any] = types.MappingProxyType({})
 _request_extras: contextvars.ContextVar[Mapping[str, Any]] = contextvars.ContextVar("request_extras", default=_NO_EXTRAS)
+# Whose words the request is (Session.handle's origin): only the user's own start or teach a replay.
+_request_origin: contextvars.ContextVar[str] = contextvars.ContextVar("request_origin", default="")
+_SCREEN_CATEGORY = "computer"  # the tools that read and work the screen
 
 
 def _mark_job() -> None:
@@ -221,13 +224,19 @@ class Session:
         reset: list[tuple[contextvars.ContextVar[Any], contextvars.Token[Any]]] = [
             (_request_taint, _request_taint.set(tuple(taint))),
             (_request_extras, _request_extras.set(request_extras)),
+            (_request_origin, _request_origin.set(origin)),
         ]
         if conversation or own:
             token = _conversation.set(conversation)
             if own:
                 reset.append((_conversation, token))
         try:
-            return await self._handle(text, images=images, from_user=from_user, origin=origin)
+            reply = await self._handle(text, images=images, from_user=from_user, origin=origin)
+            # What a paid brain has to say (Cerebras: 80% of the day's budget used, skipped until
+            # midnight, a refused key) is heard with the reply — each once a day, this agent's only.
+            from neo2.core.providers.cerebras_hooks import add_spoken_notes
+
+            return add_spoken_notes(reply)
         finally:
             for var, tok in reversed(reset):
                 var.reset(tok)
@@ -266,8 +275,9 @@ class Session:
         if from_user:  # the user's own words: learn from how this goes (a Live relay is Live's)
             outcomes.begin(job, text, decision=d)
 
-        # "play chess as white" with a chess game on this Mac: the agent opens it and plays, whatever
-        # the reflex made of it (music, a chat, the one-tool lane) and whatever a fast path would run.
+        # "play <game> as <side>" with that game installed on this Mac: the agent opens it and plays,
+        # whatever the reflex made of it (music, a chat, the one-tool lane) and whatever a fast path
+        # would run.
         if (game := await asyncio.to_thread(_game_to_play, text)) is not None:
             return await self._play_game(text, d, images, job, game)
 
@@ -284,6 +294,14 @@ class Session:
 
         if d.intent == "chat" and not images and not d.needs_screen:
             return await self._chat(text, d, job)
+
+        # The user asked for this before, in this app, and a model twice did it the same way: NEO
+        # does it itself (neo2.core.agent.replay). Only the user's own words, never a model's; only a
+        # command — words Laya reads as wanting an answer get a model, never a silent "Done.".
+        if origin == "user" and not images and not d.reply and replay.enabled() and replay.candidate(text):
+            flow = replay.recall(text, await asyncio.to_thread(replay.working_app))
+            if flow is not None:
+                return await self._replay(text, d, flow, job)
 
         # Laya named the tool itself: skip the agent loop. A read-only tool without arguments
         # runs straight away (unless the request carries a qualifier it can't take); anything
@@ -315,7 +333,7 @@ class Session:
         # A command, by construction: if the agent has to rescue it and succeeds, there's still
         # nothing to say.
         d = Decision("agent_task", 1.0, False, 0.0, False, 0.0, source="lane", reply=False, reply_p=0.0)
-        # "open chess and play as white": not music, whatever the plan says
+        # "open <game> and play as <side>": not music, whatever the plan says
         if (game := await asyncio.to_thread(_game_to_play, text)) is not None:
             return await self._play_game(text, d, None, job, game)
         return await self._quick(text, d, steps, job=job, origin="user")
@@ -323,6 +341,7 @@ class Session:
     async def cancel_all(self) -> int:
         """Stop every running job (the user said stop) and drop any unanswered question."""
         outcomes.stop()  # right after NEO answered, a stop says the answer was wrong
+        replay.forget_last()  # …and a flow it just learned or replayed isn't one to repeat
         n = 0
         for t in list(self.jobs.values()):
             if not t.done():
@@ -345,7 +364,7 @@ class Session:
 
         log.info(f"  ~ {game.name} is a game on this Mac: the agent plays it there")
         d = replace(d, intent="agent_task", needs_screen=True, tool="", tool_p=0.0)
-        return await self._agent(text, d, images, job, hint=games.hint(game), also=_GAME_TOOLS)
+        return await self._agent(text, d, images, job, hint=games.hint(game), also=_GAME_TOOLS, game=game)
 
     async def _chat(self, text: str, d: Decision, job: str) -> Reply:
         outcomes.route(job, "chat")
@@ -402,7 +421,8 @@ class Session:
     async def _quick_steps(
         self, text: str, d: Decision, steps: list[tuple[str, dict]], *, job: str, t0: float, origin: Origin
     ) -> Reply:
-        from neo2.core.agent.early import _APP_TOOLS, _SETTLE_AFTER_APP_S, early
+        from neo2.core.agent import settle
+        from neo2.core.agent.early import _APP_TOOLS, early
 
         outs: list[tuple[str, str, bool]] = []  # (tool, its text, read from an untrusted source)
         spoken: list[int] = []  # the steps whose text is said
@@ -420,7 +440,7 @@ class Session:
                 outcomes.step(job, tool, True)
             else:
                 if prev in _APP_TOOLS and tool not in _APP_TOOLS:
-                    await asyncio.sleep(_SETTLE_AFTER_APP_S)
+                    await settle.app_ready(typing=tool in settle.TYPING)  # (the app just opened: ready, not 0.8 s)
                 await bus().tool_start(tool, args, job=job)
                 ctx = ToolContext(user_text=text, taint=taint, origin=origin, extras=dict(_request_extras.get()))
                 out = await registry().invoke(tool, args, ctx)
@@ -483,6 +503,66 @@ class Session:
             reply_text, "quick", d, job=job, silent=silent, tools=tuple(t for t, _ in steps), taint=tuple(taint)
         )
 
+    async def _replay(self, text: str, d: Decision, flow: replay.Flow, job: str) -> Reply:
+        """Do again what worked for this request before (neo2.core.agent.replay), with no model: each
+        action through the registry as a model's call would go (every gate in the tools), each
+        checked for its effect. One that doesn't work as before hands the request to the agent,
+        told what already ran; one that asks the user asks it, and the agent finishes after a yes."""
+        outcomes.route(job, "quick")
+        await bus().set_state(NeoState.WORKING, job=job)
+        t0 = time.time()
+        taint = list(_request_taint.get())
+        extras = dict(_request_extras.get())
+        log.info(f"  ~ replaying what worked for this before ({len(flow.steps)} steps, no model)")
+
+        async def invoke(tool: str, args: dict) -> ToolOutput:
+            await bus().tool_start(tool, args, job=job)
+            # The calls were a model's choice when they were learned: they run as a model's would.
+            ctx = ToolContext(user_text=text, taint=taint, origin="agent", extras=dict(extras))
+            out = await registry().invoke(tool, args, ctx)
+            await bus().tool_end(tool, out.ok, out.text, job=job)
+            outcomes.step(job, tool, out.ok, halt=out.halt)
+            return out
+
+        try:
+            got = await replay.replay(flow, invoke)
+        except asyncio.CancelledError:
+            outcomes.cancelled(job)
+            raise
+        tool, args, out = got.ran[-1]
+        before = replay.describe(got.ran[:-1])
+        if got.how == "halt" and (p := confirm.peek()) is not None and out.staged and p.action_id == out.staged:
+            # Its question is the user's to answer; after a yes the agent finishes the request.
+            q = f"{p.summary} — Should I go ahead?"
+            did = f"Did: {before}. " if before else ""
+            await self._remember(Message.user(text), Message.assistant(f"{did}Asked: {q}"))
+            self._adopt(p, taint, "agent", text)
+            q = self._with_scope_hint(q)
+            await bus().set_state(NeoState.CONFIRMING, job=job)
+            await bus().say(q, final=True, job=job)
+            return Reply(q, "confirm", d, job=job, taint=tuple(taint))
+        if got.how != "done":
+            # Not as before (or a question that isn't a card): the agent looks and finds a way. The
+            # note is NEO's words only — each step's tool and arguments (the user's own words, by
+            # what a flow may hold) — never the step's output, which can quote the screen: that has
+            # no place in a system prompt. The agent looks for itself.
+            ran = f" These steps of the request already ran — don't repeat them: {before}." if before else ""
+            how = "it failed" if not out.ok else "NEO saw no change"
+            note = (
+                f"\n[ALREADY DONE]{ran} Then {replay.describe([(tool, args, out)])} didn't work as before "
+                f"({how}): look at the screen before you go on."
+            )
+            _request_taint.set(tuple(taint))
+            return await self._agent(text, d, None, job, done_note=note)
+        await self._remember(Message.user(text), Message.assistant("Done."))
+        await bus().note("Done.")
+        await bus().publish(
+            "turn", job=job, route="quick", brain="", model="", ms=int((time.time() - t0) * 1000), tools=len(got.ran)
+        )
+        outcomes.end(job)
+        await bus().end_job(job)
+        return Reply("Done.", "quick", d, job=job, silent=True, tools=tuple(t for t, _a, _o in got.ran), taint=tuple(taint))
+
     async def _agent(
         self,
         text: str,
@@ -494,6 +574,7 @@ class Session:
         done_note: str = "",
         hint: str = "",
         also: tuple[str, ...] = (),
+        game: Any = None,
     ) -> Reply:
         """An agent run as one task (neo2.core.agent.grants): from here until the job is done, across
         every card the user answers on the way. It's what a yes "for this task" covers and what
@@ -504,7 +585,7 @@ class Session:
         try:
             with grants.task(task):
                 reply = await self._agent_task(
-                    text, d, images, job, only=only, done_note=done_note, hint=hint, also=also
+                    text, d, images, job, only=only, done_note=done_note, hint=hint, also=also, game=game
                 )
             return reply
         finally:
@@ -522,23 +603,45 @@ class Session:
         done_note: str = "",
         hint: str = "",
         also: tuple[str, ...] = (),
+        game: Any = None,
     ) -> Reply:
         # The single-tool lane ("dim my screen", "click Send") runs one tool, which looks for itself
         # if it must: the reflex's screen signal alone doesn't buy it the vision chain.
         needs_screen = bool(images or (d and d.needs_screen and not only))
         if needs_screen:
+            # A screen task: a paid Cerebras key's connection opens now, while the task is set up
+            # (a cold round trip is ~0.9 s). Nothing without a key; never waits, never raises.
+            from neo2.core.providers.cerebras_hooks import prewarm_soon
+
+            prewarm_soon()
             purpose = "vision"
         elif only or (d and d.intent == "quick_action"):
             purpose = "light"  # one simple action the regex fast path didn't cover
         else:
             purpose = "agent"
-        effort = "high" if (d and d.intent == "agent_task") else "medium"
         outcomes.route(job, "agent")
         t0 = time.time()
         chain = brain(purpose)
+        # A command from the user's own words, done quietly, may become a flow NEO replays itself
+        # next time (neo2.core.agent.replay): which app it was worked out in is read as the run starts.
+        # Never a run that took over from a replay or a fast path (a done note): its steps are only
+        # the tail of the request, and a replay's misses must count until the flow is dropped.
+        learnable = (
+            _request_origin.get() == "user"
+            and d is not None
+            and not d.reply
+            and not only
+            and not done_note
+            and replay.enabled()
+        )
+        app_at = asyncio.create_task(asyncio.to_thread(replay.working_app)) if learnable else None
         self.jobs[job] = asyncio.current_task()  # type: ignore[assignment]
         try:
             async with self._agent_slots:
+                # NEO's first look at the screen (neo2.core.agent.prefetch), read while this request is routed
+                first_look = prefetch.start(
+                    text, d, only=only, game=game, images=images, sees=prefetch.sees(chain)
+                )
                 playbook_ctx = await asyncio.to_thread(self._playbooks_for, text) if _playbooks_on() else ""
                 if only:  # the reflex chose: that tool's schema and nothing else to get lost in
                     from neo2.core.agent.toolselect import MORE_TOOLS
@@ -546,27 +649,51 @@ class Session:
                     tools = [registry().get(n).spec() for n in only if registry().get(n)] + [MORE_TOOLS]
                 else:
                     tools = await asyncio.to_thread(self._tools_for, text, needs_screen, playbook_ctx, also)
+                # A run on the screen gets the lean screen prompt: guidance for its own tools only.
+                screen = needs_screen or any(
+                    (t := registry().get(sp.name)) is not None and t.category == _SCREEN_CATEGORY for sp in tools
+                )
+                # How hard each step thinks (neo2.core.providers.effort): where the run starts — today's
+                # level unless settings.screen_effort says otherwise for a screen task — then one up
+                # after a miss, back down after an action that worked.
+                from neo2.core.agent.toolselect import SCREEN
+                from neo2.core.providers.effort import Effort, start_level
+
+                on_screen = screen or purpose == "vision" or any(t.name in SCREEN for t in tools)
+                chain.effort = Effort(start_level(d, screen=on_screen, light=purpose == "light"))
                 snapshot = self._trimmed()
                 ctx = ToolContext(user_text=text, taint=list(_request_taint.get()), extras=dict(_request_extras.get()))
+                goal, goal_images = _with_conversation(text), images
+                if (look := await prefetch.collect(first_look, tools)) is not None:
+                    goal, goal_images = look.attach(goal, goal_images, ctx)  # fenced, and tainting as ax_tree would
                 res = await run_agent(
-                    _with_conversation(text),
+                    goal,
                     provider=chain,
-                    system=self._system(playbook_ctx + hint + _already_done_note() + done_note),
+                    system=self._system(
+                        playbook_ctx + hint + _already_done_note() + done_note,
+                        screen_tools=[sp.name for sp in tools] if screen else None,
+                    ),
                     tools=tools,
                     history=snapshot,
                     ctx=ctx,
-                    effort=effort,
-                    images=images,
+                    effort=chain.effort.start,
+                    images=goal_images,
                     job=job,
+                    # a command nobody waits to hear about may end on the model's own words once NEO
+                    # verified its last actions (only when several actions per reply are invited)
+                    finish_verified=batch.enabled() and d is not None and not d.reply and d.intent != "chat",
                 )
                 outcomes.brain(job, getattr(chain, "last_used", ""))
         except asyncio.CancelledError:
+            if app_at is not None:
+                app_at.cancel()
             outcomes.cancelled(job)
             await bus().say("Stopped.", final=True, job=job)
             await bus().end_job(job)
             raise
         finally:
             self.jobs.pop(job, None)
+        prefetch.forget(res.messages[len(snapshot) :])  # the first look was for this run only
         await self._remember(*res.messages[len(snapshot) :])  # only this job's new turns
         _learn_from(job, res)
         if res.stopped == "needs_confirm" and self._stage_pending(res, ctx.taint, text):
@@ -577,6 +704,13 @@ class Session:
             # A path learned while reading a page or an email could have been steered by it.
             await asyncio.to_thread(self._save_playbook, text, res)
         silent = _quietly(d, res)
+        if app_at is not None:
+            try:
+                app = await asyncio.wait_for(app_at, 1.0)
+            except Exception:  # noqa: BLE001 - no app known: nothing to learn
+                app = ""
+            if silent:
+                replay.learn(text, app, res, reg=registry(), tainted=bool(ctx.taint))
         if silent:
             await bus().note(res.text[:160])
         else:
@@ -830,7 +964,7 @@ class Session:
         # Shown in the overlay either way; spoken only if it didn't go as approved.
         await bus().say(res.text, final=True, job=job)
         await bus().end_job(job)
-        done = res.stopped == "done" and not res.question and all(st.ok for st in res.steps)
+        done = res.stopped == "done" and not res.question and _worked(res)
         failed_words = ("couldn't", "could not", "can't", "cannot", "unable", "error", "failed", "didn't")
         silent = out.ok and done and not any(w in res.text.lower() for w in failed_words)
         return Reply(
@@ -855,8 +989,8 @@ class Session:
                 await bus().end_job(j)
 
     # ---- helpers ---------------------------------------------------------------------
-    def _system(self, extra: str = "") -> str:
-        return build_prompt(self.memory_context, extra)
+    def _system(self, extra: str = "", *, screen_tools: list[str] | None = None) -> str:
+        return build_prompt(self.memory_context, extra, screen_tools=screen_tools)
 
     async def _remember(self, *msgs: Message) -> None:
         from neo2.core import privacy
@@ -1060,7 +1194,11 @@ def _learn_from(job: str, res: AgentResult) -> None:
     the run ended — so Laya learns from what actually happened, not from what was guessed
     (neo2/core/reflex/outcomes.py). A request relayed by Gemini Live counts for the user's own words
     there. The question a halted run asks isn't a step: the user's answer decides that one."""
-    steps = [(st.tool, st.ok) for st in res.steps if not st.result.startswith(("NEEDS_CONFIRM", "NEEDS_USER"))]
+    steps = [
+        (st.tool, st.ok and not batch.missed(st))
+        for st in res.steps
+        if not st.result.startswith(("NEEDS_CONFIRM", "NEEDS_USER", "skipped: "))
+    ]
     outcomes.agent_done(job, steps, stopped=res.stopped, answer=res.text, question=bool(res.question))
 
 
@@ -1080,14 +1218,22 @@ def _on_screen(st) -> bool:
     return st.tool in ("click", "drag", "scroll") and any(k in st.args for k in ("x", "x1", "shot"))
 
 
+def _worked(res: AgentResult) -> bool:
+    """Every step of the run worked: none failed, and none that NEO saw miss (neo2.core.agent.batch.missed:
+    a click, drag or scroll that changed nothing where it acted, or an Effect that says it missed —
+    a command that rightly changes nothing anyone sees, like a menu's Copy, is no miss). A call
+    skipped after an earlier one in its turn never ran: it doesn't count."""
+    return all(st.ok and not batch.missed(st) for st in res.steps if not st.result.startswith("skipped: "))
+
+
 def _quietly(d: Decision | None, res: AgentResult) -> bool:
     """Was this a command that simply got done? Then there's nothing to say.
 
-    Questions, information requests, failures, budget stops and anything the model asks back
-    are always spoken."""
+    Questions, information requests, failures, budget stops, an action NEO saw miss, and
+    anything the model asks back are always spoken."""
     if d is None or d.reply or res.stopped != "done" or res.question:
         return False
-    if not res.steps or not all(st.ok for st in res.steps):
+    if not res.steps or not _worked(res):
         return False
     if any(st.tool in _INFO_TOOLS or (st.tool == "memory" and st.args.get("action") == "recall") for st in res.steps):
         return False

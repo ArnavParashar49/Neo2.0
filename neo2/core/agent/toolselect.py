@@ -12,6 +12,13 @@ gets a short list instead:
 4. playbooks — tools a similar past task used are included,
 5. `more_tools(query)` — a meta-tool the model can call mid-run to pull in anything else.
 
+A run that works on the screen gets a lean list: the tools to look, act by id or label, type and
+move (SCREEN_CORE), not the whole computer family; never NEO's own browser when the request names an
+app installed on this Mac (the app is the target, not NEO's Chromium: evidence from the installed
+apps' own names, never a list here); never shell, trash or dictate unless the request itself asks
+for them. Fewer schemas on every call, and no wrong tool at the top (browser_scroll for "scroll
+down in <app>").
+
 Without an embedder (tests, or before the model has loaded) it falls back to keyword overlap.
 """
 
@@ -39,11 +46,26 @@ SCREEN = {
     "screenshot",
     "apps_running",
 }
+# A run that works on the screen gets these, the ones registered, in this order (the lean screen
+# mode): look, act by id or label, type, press keys, scroll and drag. The first few come before the
+# request's own best matches, the rest after them.
+SCREEN_CORE = (
+    "look", "ax_tree", "screenshot", "click", "ax_press", "type_text",
+    "click_text", "ax_set_value", "hotkey", "scroll", "drag", "menu_command", "ax_find",
+)  # fmt: skip
+_SCREEN_FIRST = 6  # SCREEN_CORE[:6]: to look, click, press and type — whatever the request matched
+# NEO's own tools a screen run never gets unless the request itself asks for them.
+_SCREEN_UNLESS_ASKED = frozenset({"shell", "trash", "dictate"})
+_SCREEN_CATEGORY = "computer"
+_BROWSER_CATEGORY = "browser"  # NEO's own Chromium
+_ASKED_TOP = 2  # "asks for it": among the request's best matches…
+_ASKED_SIM = 0.35  # …and a close one
 # Categories that only make sense as a set.
 FAMILIES = {"browser", "computer"}
 _TOP_K = 6
 _MIN_SIM = 0.25
 _MAX_TOOLS = 18
+_MAX_SCREEN_TOOLS = 16
 
 MORE_TOOLS = ToolSpec(
     "more_tools",
@@ -136,42 +158,63 @@ class ToolSelector:
                 return Selection(list(why), why)
         scores = self._scores(text)
         ranked = sorted(scores.items(), key=lambda kv: -kv[1])
+        top = [n for n, s in ranked[:_TOP_K] if s >= _MIN_SIM] or [n for n, _ in ranked[:3]]
+        screen = needs_screen or any((t := self.reg.get(n)) is not None and t.category == _SCREEN_CATEGORY for n in top)
+        asked = {n for n, s in ranked[:_ASKED_TOP] if s >= _ASKED_SIM}
+        # A request that names an app on this Mac works in that app, never in NEO's own browser.
+        in_an_app = screen and _names_an_app(text)
+        pinned = set(required) | set(playbook_tools or [])
+
+        def left_out(n: str) -> bool:
+            if not screen or n in pinned:
+                return False
+            t = self.reg.get(n)
+            if t is None:
+                return True
+            if n in _SCREEN_UNLESS_ASKED and n not in asked:
+                return True
+            return in_an_app and t.category == _BROWSER_CATEGORY
+
         chosen: dict[str, str] = {}
+
+        def add(n: str, why: str) -> None:
+            if n in self.reg and not left_out(n):
+                chosen.setdefault(n, why)
+
         # Priority order matters: the list is capped, so guaranteed tools go in first and the
         # (large) families fill whatever room is left.
         for n in ALWAYS:
-            if n in self.reg:
-                chosen[n] = "always"
+            add(n, "always")
         for n in required:
-            if n in self.reg:
-                chosen.setdefault(n, "required")
-        if needs_screen:
-            for n in SCREEN:
-                if n in self.reg:
-                    chosen.setdefault(n, "screen")
-        top = [n for n, s in ranked[:_TOP_K] if s >= _MIN_SIM] or [n for n, _ in ranked[:3]]
+            add(n, "required")
+        if screen:
+            for n in SCREEN_CORE[:_SCREEN_FIRST]:
+                add(n, "screen")
         for n in top:
-            chosen.setdefault(n, "match")
+            add(n, "match")
+        if screen:
+            for n in SCREEN_CORE[_SCREEN_FIRST:]:
+                add(n, "screen")
         for n in playbook_tools or []:
-            if n in self.reg:
-                chosen.setdefault(n, "playbook")
+            add(n, "playbook")
         for n in history_tools or []:
-            if n in self.reg:
-                chosen.setdefault(n, "history")
+            add(n, "history")
         for n in list(top):
             t = self.reg.get(n)
-            if not t:
+            if not t or left_out(n):
                 continue
             # Tools sharing a name prefix (mail_*, ax_*, calendar_*, safari_*) work as a set.
             if "_" in n:
                 prefix = n.split("_", 1)[0] + "_"
                 for sib in self.reg.all():
                     if sib.name.startswith(prefix) and not sib.hidden:
-                        chosen.setdefault(sib.name, f"prefix:{prefix}")
-            if t.category in FAMILIES:
+                        add(sib.name, f"prefix:{prefix}")
+            # The screen's family is its core, above: a screen run doesn't get the rest of it.
+            if t.category in FAMILIES and not (screen and t.category == _SCREEN_CATEGORY):
                 for sib in self.reg.all(category=t.category):
-                    chosen.setdefault(sib.name, f"family:{t.category}")
-        names = list(chosen)[:_MAX_TOOLS]
+                    if not sib.hidden:
+                        add(sib.name, f"family:{t.category}")
+        names = list(chosen)[: _MAX_SCREEN_TOOLS if screen else _MAX_TOOLS]
         return Selection(names, {n: chosen[n] for n in names})
 
     def search(self, query: str, exclude: set[str] | None = None, k: int = 6) -> list[RegisteredTool]:
@@ -188,6 +231,23 @@ class ToolSelector:
             if len(out) >= k:
                 break
         return out
+
+
+def _names_an_app(text: str) -> bool:
+    """Does the request name an app installed on this Mac (the installed apps' own names, from the
+    last completed scan — never starting one)? NEO.app only: an embedded agent has no inventory."""
+    if runtime.library_bound():
+        return False
+    try:
+        from neo2.core.decide import inventory
+        from neo2.core.tools.computer import ax
+
+        apps = inventory.snapshot()
+        hit = inventory.named_span(text, apps) if apps else None
+        # "…in NEO's browser": NEO itself is no app the request is about
+        return hit is not None and not ax.is_neo(0, str(getattr(hit[0], "name", "")))
+    except Exception:  # noqa: BLE001 - can't tell: nothing is left out
+        return False
 
 
 _selector: ToolSelector | None = None

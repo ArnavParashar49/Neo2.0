@@ -34,7 +34,7 @@ __all__ = [
 
 # Hermetic: no test may read the developer's real keys or settings (~/.neo/.env, ./.env).
 Settings.model_config["env_file"] = None
-for _k in ("GEMINI_API_KEY", "GEMINI_API_KEYS", "GROQ_API_KEY", "ANTHROPIC_API_KEY", "NEO_DECIDE_MODES"):
+for _k in ("GEMINI_API_KEY", "GEMINI_API_KEYS", "GROQ_API_KEY", "ANTHROPIC_API_KEY", "CEREBRAS_API_KEY", "NEO_DECIDE_MODES"):
     os.environ.pop(_k, None)
 
 from neo2.core.decide import shadow as _shadow  # noqa: E402
@@ -167,6 +167,13 @@ def _no_real_screen(monkeypatch):
 
     monkeypatch.setattr(apps, "_target", None)
     monkeypatch.setattr(focus, "hosts_shell", lambda pid, depth=3: False)
+    # The wait after an app opens reads the front app and its focus: in the suite, it is ready at once.
+    from neo2.core.agent import settle
+
+    monkeypatch.setattr(settle, "probe", lambda app, typing: settle.Ready(True, True, True))
+    # NEO's early first look (neo2.core.agent.prefetch) reads the front app and its window on its own: off,
+    # so no test that reaches Session._agent reads this Mac's screen. tests/test_early_look.py opts in.
+    monkeypatch.setenv("NEO_PREFETCH_LOOK", "0")
 
 
 @pytest.fixture(autouse=True)

@@ -800,3 +800,483 @@ def test_the_self_test_never_touches_the_real_mac_under_tests(tmp_path):
     ):
         with pytest.raises(EffectRefused):
             call()
+
+
+# ---- the boards' geometry, the new window parts ---------------------------------------------------
+
+
+def test_square_names_and_the_tilted_boards_perspective():
+    from neo2.core.selftest import geometry as G
+
+    assert G.square(0, 0) == "a8" and G.square(4, 6) == "e2" and G.cell_of("e2") == [4, 6] and G.cell_of("H1") == [7, 7]
+    for bad in ("i2", "e9", "e", "e0"):
+        with pytest.raises(ValueError):
+            G.cell_of(bad)
+    quad = G.tilt_quad(240, 240)
+    assert quad[0][0] > quad[3][0] and quad[1][0] < quad[2][0]  # the far edge is narrower
+    m = G.board_map(quad)
+    for (gx, gy), corner in zip(G.GRID, quad, strict=True):
+        assert G.apply(m, gx, gy) == pytest.approx(corner)
+    inv = G.invert(m)
+    assert G.apply(inv, *G.apply(m, 3.3, 5.7)) == pytest.approx((3.3, 5.7))
+    for c in range(8):
+        for r in range(8):
+            assert G.cell_at(quad, *G.cell_center(quad, c, r)) == [c, r]
+    assert G.cell_at(quad, 1, 1) is None  # (above the far edge: off the board)
+    near, far = G.cell_polygon(quad, 0, 7), G.cell_polygon(quad, 0, 0)
+    assert abs(near[2][1] - near[0][1]) > abs(far[2][1] - far[0][1])  # nearer squares look bigger
+
+
+def test_the_new_labels_never_read_as_commitments():
+    from neo2.core.tools.computer import policy
+
+    for label in (L.HINDI_BUTTON, L.ROUND_MENU, L.SHEET_TITLE, L.SHEET_START, L.SHEET_CANCEL, *L.HINDI_PHRASES.values()):
+        assert not policy.commits(label, L.SHEET_TITLE), label
+
+
+def test_the_boards_pieces_and_moves():
+    pieces = testwin.start_pieces()
+    assert len(pieces) == 32 and pieces[(1, 6)] == "P" and pieces[(4, 0)] == "k" and tuple(L.PIECE) in pieces
+    assert testwin.move_piece(pieces, [2, 6], [2, 4]) and pieces[(2, 4)] == "P" and (2, 6) not in pieces
+    assert not testwin.move_piece(pieces, [2, 6], [2, 5])  # nothing there any more
+    assert not testwin.move_piece(pieces, [0, 0], [0, 0]) and not testwin.move_piece(pieces, None, [1, 1])
+
+
+def test_the_new_views_have_the_signatures_appkit_calls():
+    k = testwin.classes()
+    assert k["Tilt"].acceptsFirstMouse_.signature == b"B@:@" and k["Tilt"].isFlipped.signature == b"B@:"
+    for sel in ("newRound_", "buttonHindi_"):
+        assert getattr(k["Controller"], sel).signature == b"v@:@", sel
+
+
+# ---- timings and scores ------------------------------------------------------------------------------
+
+
+def test_timings_are_summarized_against_the_targets():
+    from neo2.core.selftest import bench
+
+    t = [("click", 300.0, {}), ("click", 700.0, {}), ("click", 500.0, {}), ("type_text", 50.0, {"text": "x" * 20}),
+         ("ax_set_value", 5.0, {})]  # fmt: skip
+    s = bench.summarize(t)
+    assert s["click"]["n"] == 3 and s["click"]["p50_ms"] == 500.0 and s["click"]["p90_ms"] == 700.0
+    assert s["click"]["met_p0"] is True and s["click"]["met_p1"] is False
+    assert s["type_text"]["p50_ms"] == 100.0  # per 40 characters
+    assert s["ax_set_value"]["met_p0"] is None  # no target: not in the latency score
+    sc = bench.scores(["pass", "pass", "fail", "skip"], s)
+    assert sc["success"] == pytest.approx(0.667, abs=1e-3) and sc["skipped"] == 1
+    assert sc["latency"] == 1.0 and sc["timed"] == 2
+    assert bench.words(sc).startswith("Success 67% (2 of 3); speed targets met by 100% of 2 tools")
+    assert bench.scores([], {})["success"] is None and bench.words(bench.scores([], {})) == ""
+
+
+def test_the_report_carries_scores_and_timings():
+    r = _fake_report(ok=True)
+    r.timings = [("click", 200.0, {}), ("click", 400.0, {})]
+    r.repeats = [controls.Check("click_point", "Click at a point", "pass", rep=1)]
+    j = r.to_json()
+    assert j["scores"]["success"] == 1.0 and j["scores"]["passed"] == 2 and j["timings"]["click"]["n"] == 2
+    assert j["repeats"][0]["rep"] == 1
+    assert "scores: success 1.0" in r.text() and "tool timings" in r.text() and "click: 300.0 / 400.0 of 2" in r.text()
+    assert "Success 100% (2 of 2)" in r.reply()
+
+
+def test_the_ax_timing_walk_is_refused_under_tests():
+    from neo2.core.effects import EffectRefused
+    from neo2.core.selftest import bench
+
+    with pytest.raises(EffectRefused):
+        bench.ax_walk()
+
+
+def test_the_ax_timing_walk_keeps_numbers_only(monkeypatch):
+    import ApplicationServices as AS
+
+    from neo2.core import effects
+    from neo2.core.selftest import bench
+    from neo2.core.tools import computer
+    from neo2.core.tools.computer import ax
+
+    kids = {"root": ["a", "b"], "a": ["c"], "b": [], "c": []}
+
+    def get(el, attr, _):
+        if attr == "AXChildren":
+            return (0, kids[el]) if kids[el] else (-25212, None)
+        return (0, f"secret {attr} of {el}")
+
+    monkeypatch.setattr(AS, "AXUIElementCreateApplication", lambda pid: "root")
+    monkeypatch.setattr(AS, "AXUIElementCopyAttributeValue", get)
+    monkeypatch.setattr(AS, "AXUIElementCopyMultipleAttributeValues", lambda el, names, o, _: (0, []))
+    monkeypatch.setattr(AS, "AXUIElementSetMessagingTimeout", lambda el, t: 0)
+    monkeypatch.setattr(ax, "working_app", lambda: ("Notes", 77))
+    monkeypatch.setattr(ax, "is_neo", lambda pid, name="": False)
+    monkeypatch.setattr(computer, "_protected", lambda name, pid=0: False)
+    with effects.allow("selftest"):
+        out = bench.ax_walk()
+        assert out["nodes"] == 4 and out["calls"] == 20 and out["complete"] and out["errors"] == {-25212: 2}
+        assert "secret" not in json.dumps(out)  # timings, never what the app said
+        monkeypatch.setattr(computer, "_protected", lambda name, pid=0: True)
+        assert "never touches" in bench.ax_walk()["error"]
+        monkeypatch.setattr(ax, "is_neo", lambda pid, name="": True)
+        assert "NEO's own" in bench.ax_walk()["error"]
+
+
+# ---- Accessibility actions go through the watch ----------------------------------------------------------
+
+
+class _AxMac:
+    def __init__(self, owners):
+        self.owners = owners
+        self.posted = []
+
+    def element_pid(self, ref):
+        return self.owners.get(ref, 0)
+
+    def post(self, ev):
+        self.posted.append(ev)
+
+
+def test_accessibility_actions_are_shown_to_the_watch(monkeypatch):
+    from neo2.core.tools.computer import ax
+    from neo2.core.tools.computer import input as inp
+
+    w = watch_mod.Watch(_AxMac({"mine": 4242, "theirs": 111}), 4242, {1: (0, 0, 100, 100)})
+    pressed = []
+    monkeypatch.setattr(ax, "press_el", lambda e: pressed.append(e.ref) or "Pressed")
+    monkeypatch.setattr(ax, "_watch", None)
+    monkeypatch.setattr(inp, "_watch", w)
+    w._install_ax()
+    try:
+        assert ax._watch == w._door  # NEO's one AX door calls the watch
+        assert ax.press_el(types.SimpleNamespace(ref="mine")) == "Pressed"
+        with pytest.raises(watch_mod.Stop, match="another app"):
+            ax.press_el(types.SimpleNamespace(ref="theirs"))
+        assert pressed == ["mine"] and w.refused
+        assert [e["pid"] for e in w.ax_seen] == [4242]
+    finally:
+        w._uninstall_ax()
+    assert ax._watch is None and not hasattr(ax.press_el, "__wrapped__")
+
+
+def test_a_watch_that_isnt_armed_checks_nothing(monkeypatch):
+    from neo2.core.tools.computer import input as inp
+
+    w = watch_mod.Watch(_AxMac({}), 4242, {})
+    monkeypatch.setattr(inp, "_watch", None)
+    w.ax_hook("anything", "press")  # (a watch left over from a run that ended: no one's)
+    assert w.ax_seen == [] and not w.refused
+
+
+def test_bringing_another_app_forward_is_refused_before_it_happens(monkeypatch):
+    """Bringing an app forward (the WindowServer switch, activation) posts no event and isn't an AX
+    press, so the watch is shown each way NEO does it before it happens: only the test window's app
+    comes forward while a run is armed."""
+    from neo2.core.tools.computer import apps, focus
+    from neo2.core.tools.computer import input as inp
+
+    brought = []
+
+    async def bring_pid_front(pid):
+        brought.append(("pid", pid))
+        return True, "x"
+
+    async def bring_front(name, *, wait=1.5):
+        brought.append(("name", name))
+        return True, name
+
+    async def raise_app(a):
+        brought.append(("raise", a.processIdentifier()))
+        return True, "x"
+
+    def force_front(pid):
+        brought.append(("force", pid))
+        return True
+
+    def app(pid):
+        return types.SimpleNamespace(processIdentifier=lambda: pid)
+
+    running = {"NEO Self-Test AB12": 4242, "Safari": 111}
+    monkeypatch.setattr(apps, "bring_pid_front", bring_pid_front)
+    monkeypatch.setattr(apps, "bring_front", bring_front)
+    monkeypatch.setattr(apps, "_raise", raise_app)
+    monkeypatch.setattr(focus, "force_front", force_front)
+    monkeypatch.setattr(apps, "_running", lambda name: app(running[name]) if name in running else None)
+    w = watch_mod.Watch(_AxMac({}), 4242, {1: (0, 0, 100, 100)})
+    monkeypatch.setattr(inp, "_watch", w)
+    w._install_ax()
+    try:
+        asyncio.run(apps.bring_pid_front(4242))
+        focus.force_front(4242)
+        asyncio.run(apps.bring_front("NEO Self-Test AB12"))
+        asyncio.run(apps._raise(app(4242)))
+        asyncio.run(apps.bring_front("Nothing Running"))  # (nothing to bring: _raise is watched if it ever is)
+        mine = list(brought)
+        assert mine == [("pid", 4242), ("force", 4242), ("name", "NEO Self-Test AB12"), ("raise", 4242), ("name", "Nothing Running")]
+        for bring in (lambda: asyncio.run(apps.bring_pid_front(111)), lambda: focus.force_front(111),
+                      lambda: asyncio.run(apps.bring_front("Safari")), lambda: asyncio.run(apps._raise(app(111)))):  # fmt: skip
+            w.refused = ""  # (a refusal stops the run: each is checked on its own here)
+            with pytest.raises(watch_mod.Stop, match="brought another app forward"):
+                bring()
+        assert brought == mine  # none of them happened
+        assert w.ax_seen == []  # (brings aren't Accessibility presses: the ax_watched check counts those)
+        assert [b["pid"] for b in w.brought] == [4242, 4242, 4242, 4242]
+    finally:
+        w._uninstall_ax()
+    assert apps.bring_pid_front is bring_pid_front and apps.bring_front is bring_front
+    assert apps._raise is raise_app and focus.force_front is force_front
+
+
+def test_every_function_the_watch_guards_still_exists():
+    """The watch wraps these by name and skips a name it can't find — so a rename (the computer
+    module's split) must fail here, not quietly leave an Accessibility action or an app switch
+    unwatched in the live self-test."""
+    import importlib
+
+    for table in (watch_mod.AX_ACTIONS, watch_mod.BRINGS):
+        for mod_name, fns in table.items():
+            mod = importlib.import_module(mod_name)
+            for name in fns:
+                assert callable(getattr(mod, name, None)), f"{mod_name}.{name}"
+
+
+# ---- a local grounder, scored on a saved picture ------------------------------------------------------------
+
+
+def test_a_grounder_is_scored_on_the_windows_own_targets(tmp_path):
+    from neo2.core.selftest import geometry as G
+    from neo2.core.selftest import grounding
+
+    png = _png((500, 400), lambda d: None)
+    quad = [[300, 100], [400, 100], [420, 200], [280, 200]]
+    meta = {"region": [100, 50, 500, 400], "scale": 1.0,
+            "targets": {"button_a": [120, 60, 50, 20], "marker": [300, 300, 36, 36]}, "tilt_quad": quad}  # fmt: skip
+
+    def good(img, ask):
+        if ask.startswith("square"):
+            x, y = G.cell_center([tuple(p) for p in quad], *G.cell_of(ask.split()[1]))
+        else:
+            f = meta["targets"]["button_a" if "Alpha" in ask else "marker"]
+            x, y = f[0] + f[2] / 2, f[1] + f[3] / 2
+        return x - 100, y - 50
+
+    out = grounding.evaluate(good, png, meta)
+    assert out["targets"] == 5 and out["hit_rate"] == 1.0 and out["p50_s"] is not None
+    bad = grounding.evaluate(lambda img, ask: (0, 0), png, meta)
+    assert bad["hit_rate"] == 0.0
+    broken = grounding.evaluate(lambda img, ask: 1 / 0, png, meta)
+    assert broken["hit_rate"] == 0.0 and {r["error"] for r in broken["rows"]} == {"ZeroDivisionError"}
+    shot = tmp_path / "window-1.png"
+    shot.write_bytes(png)
+    shot.with_suffix(".json").write_text(json.dumps(meta))
+    assert grounding.latest_shot(tmp_path) == shot
+    with pytest.raises(ValueError):
+        grounding.load("no-function-here")
+
+
+# ---- the agent section and the A/B verdict -------------------------------------------------------------------
+
+
+def test_the_agent_section_never_presses_chords_the_whole_mac_acts_on():
+    from neo2.core.selftest import agent
+
+    sent = []
+
+    async def real(a, c):
+        sent.append(a["keys"])
+        return "Pressed"
+
+    hk = agent._safe_hotkey(real)
+    for keys in ("cmd+tab", "cmd+space", "cmd+q", "cmd+h", "cmd+m", "ctrl+left", "cmd+alt+esc", "cmd+shift+3", "fn+f"):
+        assert asyncio.run(hk({"keys": keys}, None)).startswith("Error"), keys
+    assert asyncio.run(hk({"keys": "cmd+k", "app": "Safari"}, None)).startswith("Error")  # never another app
+    for keys in ("cmd+k", "return", "escape", "cmd+j", "tab"):
+        assert asyncio.run(hk({"keys": keys}, None)) == "Pressed", keys
+    assert sent == ["cmd+k", "return", "escape", "cmd+j", "tab"]
+    chosen = []
+
+    async def menu(a, c):
+        chosen.append(a)
+        return "Chose it."
+
+    mc = agent._safe_menu(menu)
+    for words in ("Restart…", "shut down the mac", "Log Out Arnav…", "Force Quit…", "System Settings…", "Services",
+                  "Services › Make New Sticky Note", "Hide Others", "Show All"):  # fmt: skip
+        assert asyncio.run(mc({"command": words}, None)).startswith("Error"), words
+    assert asyncio.run(mc({"command": "New Round", "app": "Finder"}, None)).startswith("Error")
+    assert asyncio.run(mc({"command": "start a new round"}, None)) == "Chose it." and chosen == [{"command": "start a new round"}]
+
+
+@pytest.mark.parametrize("keys", [
+    "super+space", "win+tab", "meta+q", "control+up", "ctl+left", "⌃+down", "cmd+#", "cmd+$", "⌘+⌥+escape",
+    "command+option+d", "cmd+f5", "ctrl+f2", "f3", "f11", "capslock", "cmd+shift+q", "ctrl+cmd+q", "cmd+opt+h",
+    "cmd+`", "cmd+shift+tab", "cmd+ctrl+f", "cmd+v", "cmd+w", "opt+left", "⌘⇧5", "cmd+nope",
+])  # fmt: skip
+def test_the_agent_section_refuses_every_spelling_of_a_whole_mac_chord(keys):
+    """Judged on the chord the hotkey tool would press (its own parser: super/win/meta are ⌘, ⌃ and
+    control are ctrl, "#" is shift+3), never on the text: anything with ctrl, option or fn, the F keys,
+    ⌘ with shift, and ⌘+letter unless the test window's own menus define it."""
+    from neo2.core.selftest import agent
+
+    sent = []
+
+    async def real(a, c):
+        sent.append(a["keys"])
+        return "Pressed"
+
+    assert asyncio.run(agent._safe_hotkey(real)({"keys": keys}, None)).startswith("Error"), keys
+    assert sent == []
+
+
+@pytest.mark.parametrize("keys", ["return", "escape", "tab", "shift+tab", "left", "down", "delete", "a", "shift+a",
+                                  "space", "cmd+a", "cmd+j", "⌘K", "COMMAND+J"])  # fmt: skip
+def test_the_agent_section_lets_keys_for_the_test_window_through(keys):
+    from neo2.core.selftest import agent
+
+    async def real(a, c):
+        return "Pressed"
+
+    assert asyncio.run(agent._safe_hotkey(real)({"keys": keys}, None)) == "Pressed", keys
+
+
+def test_the_ab_runs_alternate_arms_so_drift_reaches_both():
+    """Each request runs on every arm back to back, the arms' order flipping each time (ABBA…): an hour
+    of provider load drifting biases neither arm."""
+    from neo2.core.selftest import agent
+
+    arms = [agent.Arm("low", effort="low"), agent.Arm("high", effort="high")]
+    got = [(req.key, arm.name) for req, arm in agent.plan(arms, 4)]
+    assert got == [("bravo", "low"), ("bravo", "high"), ("move", "high"), ("move", "low"),
+                   ("round", "low"), ("round", "high"), ("bravo", "high"), ("bravo", "low")]  # fmt: skip
+    assert [a.name for _, a in agent.plan([agent.Arm("as built")], 2)] == ["as built", "as built"]
+
+
+class _AgentRun:
+    """What an agent-section check uses of a run: the test window's pid, name, bounds; the log."""
+
+    pid = 4242
+    bounds = (40.0, 64.0, 1000.0, 408.0)
+    ready = {"name": "NEO Self-Test AB12"}
+
+    def __init__(self):
+        self.taint = ["ax_tree"]  # (the controls checks' own: tainted already)
+        self.front = 4242
+
+    def front_pid(self):
+        return self.front
+
+    async def tool(self, name, **a):
+        raise AssertionError(f"{name}: the test window is in front already")
+
+    def mark(self):
+        return 0
+
+    async def wait(self, mark, pred, timeout=None):
+        return None
+
+    def since(self, mark, name=None, **match):
+        return []
+
+    def state(self):
+        return {}
+
+
+def test_each_agent_run_starts_untainted_and_reads_only_the_test_window(monkeypatch):
+    import neo2.core.agent.loop as loop
+    import neo2.core.agent.prompt as prompt
+    import neo2.core.providers as providers
+    from neo2.core.selftest import agent
+
+    shots, trees = [], []
+
+    async def screenshot(a, c):
+        shots.append(dict(a))
+        return ToolOutput("a picture")
+
+    async def ax_tree(a, c):
+        trees.append(dict(a))
+        return "a tree"
+
+    monkeypatch.setattr(registry().get("screenshot"), "handler", screenshot)
+    monkeypatch.setattr(registry().get("ax_tree"), "handler", ax_tree)
+    monkeypatch.setattr(registry().get("ax_find"), "handler", ax_tree)
+    r = _AgentRun()
+    seen = []
+
+    async def run_agent(words, *, reg, ctx, **kw):
+        seen.append(list(ctx.taint))
+        ctx.taint.append("screenshot")  # (what reading the screen does to the run's taint)
+        out = {}
+        for key, name, a in [
+            ("whole", "screenshot", {}),
+            ("display", "screenshot", {"display": 1}),
+            ("big", "screenshot", {"x": 0, "y": 0, "w": 3000, "h": 2000}),
+            ("inside", "screenshot", {"x": 100, "y": 100, "w": 50, "h": 50}),
+            ("outside", "screenshot", {"x": 1200, "y": 800, "w": 50, "h": 50}),
+            ("other_app", "ax_tree", {"app": "Safari"}),
+            ("own_app", "ax_find", {"query": "Bravo", "app": "NEO Self-Test AB12"}),
+            ("front", "ax_tree", {}),
+        ]:
+            got = await reg.get(name).handler(a, ctx)
+            out[key] = got.text if isinstance(got, ToolOutput) else str(got)
+        r.front = 111  # the user's app came forward
+        got = await reg.get("ax_tree").handler({}, ctx)
+        out["not_front"] = str(got)
+        r.front = 4242
+        seen.append(out)
+        return types.SimpleNamespace(stopped="done", steps=[])
+
+    monkeypatch.setattr(loop, "run_agent", run_agent)
+    monkeypatch.setattr(prompt, "build", lambda *a, **k: "")
+    monkeypatch.setattr(providers, "brain", lambda purpose="agent": types.SimpleNamespace(name="fake", complete=None))
+    results = []
+    check = agent._check(agent.REQUESTS[0], agent.Arm("as built"), results)
+    asyncio.run(check(r))
+    asyncio.run(check(r))
+    taints, out = seen[0::2], seen[1]
+    assert taints == [[], []] and r.taint == ["ax_tree"]  # each run its own, fresh; never the controls checks'
+    win = {"x": 40, "y": 64, "w": 1000, "h": 408}
+    assert shots[:4] == [win, win, win, {"x": 100, "y": 100, "w": 50, "h": 50}]  # the test window, or less
+    assert out["outside"].startswith("Error") and len(shots) == 8  # (4 per run: never the one outside)
+    assert out["other_app"].startswith("Error") and out["not_front"].startswith("Error")
+    assert trees[:2] == [{"query": "Bravo", "app": "NEO Self-Test AB12"}, {}]
+    assert len(results) == 2
+
+
+def test_the_ab_verdict_needs_enough_runs_and_success_before_speed():
+    from neo2.core.selftest import agent
+
+    def arm(runs, success, secs, calls=3):
+        return {"runs": runs, "success": success, "seconds_p50": secs, "model_calls_p50": calls}
+
+    s = {"low": arm(10, 0.9, 8.0, 3), "high": arm(10, 0.9, 30.0, 5)}
+    assert "low can be the default" in agent.verdict(s, "low", "high")
+    assert "keep high" in agent.verdict({**s, "low": arm(10, 0.7, 8.0)}, "low", "high")
+    assert "wasn't faster" in agent.verdict({**s, "low": arm(10, 0.9, 40.0)}, "low", "high")
+    assert "too few runs" in agent.verdict({**s, "low": arm(4, 0.9, 8.0)}, "low", "high")
+    assert "not measured" in agent.verdict(s, "batch on", "batch off")
+    rows = [{"arm": "low", "success": True, "model_calls": 2, "seconds": 5.0, "failover_calls": 1, "failover_s": 1.5},
+            {"arm": "low", "success": False, "model_calls": 4, "seconds": 9.0, "failover_calls": 0, "failover_s": 0.0}]  # fmt: skip
+    got = agent.summarize(rows)["low"]
+    assert got["runs"] == 2 and got["success"] == 0.5 and got["model_calls_p50"] == 3 and got["failover_share"] == pytest.approx(1 / 6, abs=1e-3)
+
+
+def test_an_arm_sets_only_switches_the_build_has_and_puts_them_back(monkeypatch):
+    from neo2.core import config
+    from neo2.core.selftest import agent
+
+    s = types.SimpleNamespace(screen_effort="medium")
+    monkeypatch.setattr(config, "settings", lambda: s)
+    with agent._settings_for(agent.Arm("low", effort="low", batch=True)) as have:
+        assert s.screen_effort == "low" and have == {"screen_effort": True, "batch_actions": False}
+        assert not hasattr(s, "batch_actions")
+    assert s.screen_effort == "medium"
+
+
+def test_the_cli_runs_grounding_only_with_a_grounder(monkeypatch, capsys):
+    from neo2.core.selftest import __main__ as cli
+
+    monkeypatch.setattr(cli, "neo_app_ancestor", lambda *a, **k: "")
+    monkeypatch.setattr(cli, "_interactive", lambda: True)
+    assert cli.main(["grounding"]) == 2 and "--grounder" in capsys.readouterr().err
+    monkeypatch.setattr(cli, "neo_app_ancestor", lambda *a, **k: "/Applications/NEO.app/Contents/MacOS/neo")
+    for test in ("ab", "agent", "grounding"):
+        assert cli.main([test]) == 2  # inside NEO: never, whatever the test
