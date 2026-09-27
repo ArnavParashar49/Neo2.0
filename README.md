@@ -29,7 +29,7 @@ The router is **Laya**, a 421M-parameter local decision model. One encoder pass 
 | **Apps** | `open_app`, `activate_app`, `quit_app`, `apps_running`, `applescript`, `finder_reveal` |
 | **Mail · Calendar · Notes** | `mail_unread`, `mail_send`, `calendar_today`, `calendar_add`, `notes_create`, `reminder_add` |
 | **Web** | `web_search`, `web_fetch` (renders JavaScript-built pages invisibly), `open_url` (default or named browser), `page_read` (the tab you are looking at) |
-| **Browser** | `browser_open`, `browser_read` (ARIA snapshot + text), `browser_click`, `browser_type`, `browser_press`, `browser_scroll`, `browser_back`, `browser_screenshot` — NEO's own Chromium with a persistent profile, so logins stick |
+| **Browser** | `browser_open`, `browser_read` (ARIA snapshot + text), `browser_click`, `browser_type`, `browser_press`, `browser_scroll`, `browser_back`, `browser_screenshot` — NEO's own Chromium with a persistent profile, so logins stick. It runs headless and shows live in the chat's browser card, where you can take it over, hand it back or pop it out (`NEO_BROWSER_VIEW=window` gives it a separate window instead) |
 | **Files & shell** | `shell`, `read_file`, `write_file`, `edit_file`, `trash` |
 | **System** | `volume`, `brightness`, `timer`, `clock`, `sleep_display` |
 | **Memory** | `memory` — profile facts, lessons, notes; hybrid keyword + embedding recall into every prompt |
@@ -231,7 +231,7 @@ neo/
   agent/      loop.py (the one agent loop) · session.py (routing) · confirm.py · registry.py · prompt.py
   providers/  gemini.py · openai_compat.py (Groq, local) · claude.py · base.py (neutral message format)
   reflex/     laya_reflex.py · features.py · finetune.py · generate.py · dataset.py · schema.py · templates_hi.py · hf_data.py + sources.py (public data)
-  tools/      computer/ (ax, input, screen, apps, shell) · browser.py · system.py · web.py · memory_tool.py
+  tools/      computer/ (ax, input, screen, apps, shell) · browser.py · browser_live.py (the chat's live card) · system.py · web.py · memory_tool.py
   voice/      wake.py · local.py · live.py · audio.py · pipeline.py
   memory/     store.py (SQLite + FTS5 + vectors, playbooks, sessions) · embed.py · summarize.py
   server/     ws.py (websocket to the overlay)
