@@ -349,3 +349,65 @@ def test_no_web_tree_switch_or_timer_thread_in_library_mode(monkeypatch):
     assert ax._expose_web(4242, object()) is False and asked == [] and ax._web_held == {}
     monkeypatch.setattr(runtime, "_library", False)
     assert ax._expose_web(4242, object()) is False and asked == [4242]  # NEO.app: it looks (no bundle here)
+
+
+try:  # (the suite fakes it: nothing has the keyboard focus)
+    from neo.tools.computer.ax import focused_element_text as _REAL_FOCUSED_TEXT
+except ImportError:  # no macOS frameworks
+    _REAL_FOCUSED_TEXT = None
+
+
+def _ax_timeouts(monkeypatch):
+    """ApplicationServices faked for the system-wide lookups: every messaging timeout NEO sets, by
+    element, and the focused element and the element at any point."""
+    import ApplicationServices as AS
+
+    system, focused, at_point = object(), object(), object()
+    set_on: list[tuple[object, float]] = []
+
+    def copy(el, name, _):
+        if el is system and name == "AXFocusedUIElement":
+            return 0, focused
+        return -25212, None
+
+    monkeypatch.setattr(AS, "AXUIElementCreateSystemWide", lambda: system)
+    monkeypatch.setattr(AS, "AXUIElementSetMessagingTimeout", lambda el, t: set_on.append((el, t)) or 0)
+    monkeypatch.setattr(AS, "AXUIElementCopyAttributeValue", copy)
+    monkeypatch.setattr(AS, "AXUIElementCopyElementAtPosition", lambda el, x, y, _: (0, at_point))
+    return system, focused, at_point, set_on
+
+
+def test_no_process_wide_ax_timeout_in_library_mode(monkeypatch):
+    """A timeout on the system-wide element is the whole process's default: as NEO.app only. In a
+    host's process the elements NEO reads through it get their own timeout instead."""
+    from neo.tools.computer import ax
+
+    system, focused, at_point, set_on = _ax_timeouts(monkeypatch)
+    monkeypatch.setattr(runtime, "_library", True)
+    for call in (ax.focused_role, ax.focused_editable, _REAL_FOCUSED_TEXT, ax.focused_terminal,
+                 lambda: ax._element_at(10, 10), lambda: ax.label_at(10, 10)):  # fmt: skip
+        set_on.clear()
+        call()
+        assert all(el is not system for el, _ in set_on), call  # the host's default is left as it is
+        assert set_on and all(t == ax._AX_TIMEOUT_S for _, t in set_on)  # what was read answers briefly
+    assert (focused, ax._AX_TIMEOUT_S) in set_on or (at_point, ax._AX_TIMEOUT_S) in set_on
+    set_on.clear()
+    ax.focused_role()
+    assert (focused, ax._AX_TIMEOUT_S) in set_on
+    monkeypatch.setattr(runtime, "_library", False)  # NEO.app: its own process's default, 2 s
+    set_on.clear()
+    ax.focused_role()
+    assert (system, ax._AX_TIMEOUT_S) in set_on
+
+
+def test_the_self_tests_hit_test_never_leaves_its_own_process_wide_timeout(monkeypatch):
+    """The controls self-test's watcher asks Accessibility what is under each point: through NEO's
+    one system-wide helper, so NEO.app's default stays 2 s after a test (never 0.5 s)."""
+    from neo.selftest import mac as smac
+    from neo.tools.computer import ax
+
+    system, _focused, _at, set_on = _ax_timeouts(monkeypatch)
+    m = smac.Mac.__new__(smac.Mac)
+    with effects.allow("selftest"):
+        m.hit_pid(1, 1)
+    assert [t for el, t in set_on if el is system] == [ax._AX_TIMEOUT_S]

@@ -199,10 +199,12 @@ class Mac:
         _no_effects_here()
         import ApplicationServices as AS
 
+        from neo.tools.computer import ax
+
         try:
-            sys_el = AS.AXUIElementCreateSystemWide()
-            AS.AXUIElementSetMessagingTimeout(sys_el, 0.5)
-            err, el = AS.AXUIElementCopyElementAtPosition(sys_el, float(x), float(y), None)
+            # NEO's one system-wide element: its timeout is the process's default (2 s as NEO.app),
+            # which a test must leave as it found it.
+            err, el = AS.AXUIElementCopyElementAtPosition(ax._system_wide(), float(x), float(y), None)
             if err or el is None:
                 return 0
             return self.element_pid(el)

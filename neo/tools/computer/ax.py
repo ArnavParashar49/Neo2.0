@@ -159,26 +159,36 @@ def _attr(el, name: str, default=None):
     return val if err == 0 else default
 
 
-def _system_wide():
-    """The system-wide AX element (whatever has the keyboard focus, whatever is under a point),
-    answering within _AX_TIMEOUT_S like every app element NEO makes. (macOS takes a timeout set on
-    the system-wide element as this process's default for every element.)"""
-    el = AS.AXUIElementCreateSystemWide()
+def _bounded(el):
+    """The element, answering each AX call within _AX_TIMEOUT_S even when its app hangs."""
     try:
         AS.AXUIElementSetMessagingTimeout(el, _AX_TIMEOUT_S)
     except Exception:  # noqa: BLE001
         pass
     return el
+
+
+def _system_wide():
+    """The system-wide AX element (whatever has the keyboard focus, whatever is under a point).
+    macOS takes a timeout set on it as this process's default for every element: as NEO.app that
+    is _AX_TIMEOUT_S, like every app element NEO makes. Embedded in another app's process
+    (runtime.process_wide_ok) the default stays the host's: what NEO reads through this element
+    gets its own timeout instead (_focused, _element_at)."""
+    from neo import runtime
+
+    el = AS.AXUIElementCreateSystemWide()
+    return _bounded(el) if runtime.process_wide_ok() else el
+
+
+def _focused():
+    """The element with the keyboard focus (None), answering within _AX_TIMEOUT_S."""
+    el = _attr(_system_wide(), AS.kAXFocusedUIElementAttribute)
+    return None if el is None else _bounded(el)
 
 
 def _app_el(pid: int):
     """The app's AX element, answering each call within _AX_TIMEOUT_S even when the app hangs."""
-    el = AS.AXUIElementCreateApplication(pid)
-    try:
-        AS.AXUIElementSetMessagingTimeout(el, _AX_TIMEOUT_S)
-    except Exception:  # noqa: BLE001
-        pass
-    return el
+    return _bounded(AS.AXUIElementCreateApplication(pid))
 
 
 def _pair(v, point: bool) -> tuple[float, float] | None:
@@ -665,7 +675,7 @@ def set_value(eid: str, value: str) -> str:
 
 def focused_role() -> tuple[str, str]:
     """(role, subrole) of whatever has the keyboard focus, or ("", "")."""
-    el = _attr(_system_wide(), AS.kAXFocusedUIElementAttribute)
+    el = _focused()
     if el is None:
         return "", ""
     return _str(_attr(el, AS.kAXRoleAttribute)), _str(_attr(el, AS.kAXSubroleAttribute))
@@ -679,7 +689,7 @@ def focused_is_secure() -> bool:
 
 def focused_editable() -> bool:
     """Is the keyboard focus in something you can type into (never a password field)?"""
-    el = _attr(_system_wide(), AS.kAXFocusedUIElementAttribute)
+    el = _focused()
     if el is None:
         return False
     role = _str(_attr(el, AS.kAXRoleAttribute))
@@ -820,7 +830,7 @@ def press_element(e: Element) -> str:
 
 
 def focused_element_text() -> str:
-    el = _attr(_system_wide(), AS.kAXFocusedUIElementAttribute)
+    el = _focused()
     if el is None:
         return ""
     return _str(_attr(el, AS.kAXValueAttribute)) or _str(_attr(el, "AXSelectedText"))
@@ -840,7 +850,7 @@ def focused_terminal(pid: int = 0) -> bool:
     editor's terminal pane is a web view: without it, nothing in it can be seen)."""
     if pid and _expose_web(pid, _app_el(pid)):
         time.sleep(_WEB_SETTLE_S)
-    el = _attr(_system_wide(), AS.kAXFocusedUIElementAttribute)
+    el = _focused()
     for _ in range(2):
         if el is None:
             return False
@@ -848,6 +858,7 @@ def focused_terminal(pid: int = 0) -> bool:
         if _TERMINAL.search(said):
             return True
         el = _attr(el, "AXParent")
+        el = None if el is None else _bounded(el)
     return False
 
 
@@ -858,11 +869,7 @@ def _element_at(x: float, y: float):
         return None
     if err or el is None:
         return None
-    try:  # its app answers the questions that follow briefly, even when hung
-        AS.AXUIElementSetMessagingTimeout(el, _AX_TIMEOUT_S)
-    except Exception:  # noqa: BLE001
-        pass
-    return el
+    return _bounded(el)  # its app answers the questions that follow briefly, even when hung
 
 
 def _label_of(el) -> str:
