@@ -228,8 +228,8 @@ def test_a_blind_brain_may_use_a_square_neo_found(world, new_tools, monkeypatch)
     assert not out.ok and "no board" in out.text and world.events() == []
     asked = []
 
-    def board(cell, shot):
-        asked.append((cell, shot))
+    def board(cell, shot, *, blind=False):  # (a board NEO found itself: a blind brain may use its squares)
+        asked.append((cell, shot, blind))
         if cell == "z9":
             raise ValueError("there's no square z9 on the 8×8 board")
         return (612.0, 540.0)
@@ -237,7 +237,7 @@ def test_a_blind_brain_may_use_a_square_neo_found(world, new_tools, monkeypatch)
     pointer.set_cell_resolver(board)
     try:
         out = run("click", {"cell": "e4"}, _ctx(blind=True))
-        assert out.ok and _moved(world) == (612.0, 540.0) and "square e4" in out.text and asked[-1] == ("e4", None)
+        assert out.ok and _moved(world) == (612.0, 540.0) and "square e4" in out.text and asked[-1] == ("e4", None, True)
         out = run("click", {"cell": "z9"}, _ctx(blind=True))
         assert not out.ok and "no square z9" in out.text
         out = run("drag", {"from": "e2", "to": "e4"}, _ctx(blind=True))
@@ -550,7 +550,7 @@ def test_a_sheet_that_opens_at_60ms_ends_the_wait_before_the_first_picture(monke
     before = _outcome_world(monkeypatch, clock, sheet_at=0.06)
     out = _run_outcome(before)
     assert out.changed is True and out.scene_changed and "sheet" in out.said
-    assert clock["now"] <= 0.081 and clock["samples"] == 0  # seen at the 2nd look at the scene; no picture needed
+    assert clock["now"] <= 0.081 and clock["samples"] == 1  # seen at the 2nd look at the scene, confirmed by one picture
 
 
 def test_a_board_that_redraws_at_once_is_seen_at_the_first_picture(monkeypatch, clock):
@@ -568,7 +568,7 @@ def test_nothing_changed_is_said_by_one_second_with_two_pictures(monkeypatch, cl
 def test_a_late_sheet_is_caught_between_the_two_pictures(monkeypatch, clock):
     before = _outcome_world(monkeypatch, clock, sheet_at=0.4)
     out = _run_outcome(before)
-    assert out.changed is True and clock["now"] == pytest.approx(0.43) and clock["samples"] == 1  # (was 1.0 s, 2 pictures)
+    assert out.changed is True and clock["now"] == pytest.approx(0.43) and clock["samples"] == 2  # (was 1.0 s; the 2nd picture confirms it)
 
 
 def test_a_slow_app_cannot_stretch_the_wait(monkeypatch, clock):
@@ -580,7 +580,9 @@ def test_a_slow_app_cannot_stretch_the_wait(monkeypatch, clock):
 
     monkeypatch.setattr(ax, "scene", scene)
     _run_outcome(before)
-    assert clock["now"] < 1.0 + 2 * 0.3 + 0.61  # the clock bounds the watching, not only the sleeps
+    # the clock bounds the watching, not only the sleeps: no later than before the scene was watched
+    # (LOOK_S + LOOK_AGAIN_S and two looks: 1.6 s)
+    assert clock["now"] <= 1.0 + 2 * 0.3 + 1e-6
 
 
 def test_no_picture_is_taken_over_a_protected_apps_window(world, new_tools, captures, monkeypatch):

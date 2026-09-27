@@ -79,7 +79,7 @@ class Collected:
     blocker: str = ""  # "sheet" / "dialog" when one is open
     marks: list[Mark] = field(default_factory=list)
     more: int = 0  # elements left off the list
-    refused: str = ""  # why nothing was looked at (NEO's own window, a protected app)
+    refused: str = ""  # why nothing is listed: "protected", "Accessibility is off", "slow" (not in time)
 
 
 # Ids issued for marks lately (an input "by mark" gets the picture after it).
@@ -254,34 +254,93 @@ def _register(els: list[ax.Element]) -> None:
             ax._issued.pop(next(iter(ax._issued)))
 
 
+class _Late(Exception):
+    """The walk's deadline passed before it got to the window's elements."""
+
+
+def _answers(root) -> bool:
+    """Does the app answer Accessibility at all? A busy or hung app says kAXErrorCannotComplete to
+    its first question — then nothing more is asked of it (each would wait out the timeout)."""
+    try:
+        err, _role = ax.AS.AXUIElementCopyAttributeValue(root, "AXRole", None)
+    except Exception:  # noqa: BLE001 - can't tell: go on, the deadline still holds
+        return True
+    return err != ax._CANNOT_COMPLETE
+
+
 def walk_window(pid: int, deadline: float) -> tuple[str, tuple | None, list[ax.Element], dict[str, str]]:
     """(window title, window frame, elements, blocked ids) of an app's focused window: an open
-    sheet walked first (its elements are "sheet"), a dialog window's all "dialog"."""
+    sheet walked first (its elements are "sheet"), a dialog window's all "dialog". The deadline is
+    looked at before every question about the window, and per element in the walk: a hung app
+    costs at most the one answer being waited on (ax-core's walk, once merged, also stops at an app
+    that stopped answering)."""
     from neo import runtime
 
+    title, frame = "", None
+
+    def on_time() -> None:
+        if time.monotonic() > deadline:
+            raise _Late
+
     root = ax._app_el(pid)
-    win = ax._attr(root, "AXFocusedWindow") or ax._attr(root, "AXMainWindow")
-    if win is None:
-        return "", None, [], {}
-    if not runtime.library_bound() and ax._expose_web(int(pid), root):
-        # (a Chromium app's web content was just switched on for Accessibility: a moment to fill in)
-        time.sleep(min(ax._WEB_SETTLE_S, max(0.0, deadline - time.monotonic() - 0.2)))
-    frame = ax._point_size(win)
-    title = ax._str(ax._attr(win, "AXTitle"))
+    try:
+        on_time()
+        if not _answers(root):
+            return "", None, [], {}
+        on_time()
+        win = ax._attr(root, "AXFocusedWindow")
+        if win is None:
+            on_time()
+            win = ax._attr(root, "AXMainWindow")
+        if win is None:
+            return "", None, [], {}
+        on_time()
+        if not runtime.library_bound() and ax._expose_web(int(pid), root):
+            # (a Chromium app's web content was just switched on for Accessibility: a moment to fill in)
+            time.sleep(min(ax._WEB_SETTLE_S, max(0.0, deadline - time.monotonic() - 0.2)))
+        on_time()
+        f = ax._point_size(win)
+        frame = f if f[2] > 0 and f[3] > 0 else None
+        on_time()
+        title = ax._str(ax._attr(win, "AXTitle"))
+        on_time()
+        sheet = ax._sheet_of(win)
+        dialog = False
+        if sheet is None:
+            on_time()
+            dialog = ax._str(ax._attr(win, "AXSubrole")) in ax._DIALOG_SUBROLES
+            if not dialog:
+                on_time()
+                dialog = ax._attr(win, "AXModal") is True
+        on_time()
+    except _Late:
+        return title, frame, [], {}
     budget = _Budget(ax._MAX_NODES, deadline)
+    walk_kw = _walk_limits(deadline)
     blocked: dict[str, str] = {}
     first: list[ax.Element] = []
-    sheet = ax._sheet_of(win)
     if sheet is not None:
-        ax._walk(sheet, 1, first, ax._new_id, budget=budget)
+        ax._walk(sheet, 1, first, ax._new_id, budget=budget, **walk_kw)
         blocked = {e.id: "sheet" for e in first}
     rest: list[ax.Element] = []
-    ax._walk(win, 1, rest, ax._new_id, budget=budget, skip=sheet)
+    ax._walk(win, 1, rest, ax._new_id, budget=budget, skip=sheet, **walk_kw)
     els = first + rest
-    if sheet is None and (ax._str(ax._attr(win, "AXSubrole")) in ax._DIALOG_SUBROLES or ax._attr(win, "AXModal") is True):
+    if dialog:
         blocked = {e.id: "dialog" for e in els}
     _register(els)
-    return title, (frame if frame[2] > 0 and frame[3] > 0 else None), els, blocked
+    return title, frame, els, blocked
+
+
+def _walk_limits(deadline: float) -> dict:
+    """ax._walk's own limits when it has them (ax-core's ``_Walk``: a deadline, and an end at an app
+    that stopped answering), else none beyond the budget's deadline."""
+    make = getattr(ax, "_Walk", None)
+    if make is None:
+        return {}
+    try:
+        return {"w": make(deadline_s=max(0.01, deadline - time.monotonic()))}
+    except Exception:  # noqa: BLE001 - (another shape of it: the budget's deadline still holds)
+        return {}
 
 
 def _target(area: tuple[float, float, float, float] | None, pid: int) -> tuple[str, int]:
@@ -315,6 +374,7 @@ def collect_sync(
 ) -> Collected:
     """The marks for a picture of ``area`` (None: the whole window). Never raises: a look that
     can't list elements lists none."""
+    deadline = time.monotonic() + deadline_s
     try:
         if not ax.is_trusted():
             return Collected(refused="Accessibility is off")
@@ -324,7 +384,9 @@ def collect_sync(
             name = _target(None, pid)[0]
         if _off_limits(name, pid):  # NEO's own window, a protected app: never read, never listed
             return Collected(app=name, pid=pid, refused="protected")
-        title, window, els, blocked = walk_window(pid, time.monotonic() + deadline_s)
+        title, window, els, blocked = walk_window(pid, deadline)
+        if not els and time.monotonic() > deadline:
+            return Collected(name, pid, title, window, refused="slow")  # (it didn't get to the elements in time)
         chosen, more = pick(els, area, window=window, blocked=blocked, limit=limit)
         _remember([m.id for m in chosen])  # (an input by one of these gets the picture after it)
         kind = next(iter(set(blocked.values())), "")
@@ -333,13 +395,30 @@ def collect_sync(
         return Collected()
 
 
+GRACE_S = 0.1  # past its deadline, a walk's result is waited for this much longer at most
+
+
 async def collect(
     area: tuple[float, float, float, float] | None, ctx: ToolContext | None = None, *, pid: int = 0, deadline_s: float = 0.8
 ) -> Collected:
-    """:func:`collect_sync` off the event loop (start it alongside the capture: it costs no wait)."""
+    """:func:`collect_sync` off the event loop — start it alongside the capture: it costs no wait,
+    and never holds the picture past ``deadline_s`` (+ GRACE_S): a walk not done by then (an app
+    stuck on one answer) is left to finish on its own, and the picture goes without marks
+    (``refused="slow"``)."""
     import asyncio
 
-    return await asyncio.to_thread(collect_sync, area, pid=pid, deadline_s=deadline_s)
+    task = asyncio.ensure_future(asyncio.to_thread(collect_sync, area, pid=pid, deadline_s=deadline_s))
+    task.add_done_callback(_quiet)
+    done, _ = await asyncio.wait({task}, timeout=deadline_s + GRACE_S)  # (cancelled with the picture: the walk ends on its own)
+    if task in done and not task.cancelled() and task.exception() is None:
+        return task.result()
+    return Collected(pid=pid, refused="slow")
+
+
+def _quiet(task) -> None:
+    """(A walk left to finish on its own: its end, or its error, is nobody's to hear.)"""
+    if not task.cancelled():
+        task.exception()
 
 
 def area_of(s: Shot) -> tuple[float, float, float, float]:

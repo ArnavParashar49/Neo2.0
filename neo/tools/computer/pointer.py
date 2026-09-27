@@ -33,9 +33,10 @@ import asyncio
 import itertools
 import re
 import secrets
+import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from neo.agent.registry import ToolContext, fence
@@ -81,6 +82,7 @@ class Shot:
 
 
 _shots: dict[str, Shot] = {}
+_shots_lock = threading.Lock()
 _shot_ids = itertools.count(1)
 _KEEP_SHOTS = 12
 # Ids carry this run's mark: an id a model reads in a conversation from before NEO restarted can
@@ -90,14 +92,22 @@ _RUN = secrets.token_hex(2)
 
 def remember(x0: float, y0: float, ppp: float, w: int, h: int) -> Shot:
     s = Shot(f"s{next(_shot_ids)}-{_RUN}", float(x0), float(y0), float(ppp), int(w), int(h))
-    _shots[s.id] = s
-    while len(_shots) > _KEEP_SHOTS:
-        _shots.pop(next(iter(_shots)))
+    with _shots_lock:
+        _shots[s.id] = s
+        while len(_shots) > _KEEP_SHOTS:
+            _shots.pop(next(iter(_shots)))
     return s
 
 
 def get_shot(sid: str) -> Shot | None:
-    return _shots.get(str(sid).strip())
+    """The screenshot with this id — and, being in use, the last one to be let go: the after-looks
+    of the inputs a model makes from one screenshot never push that screenshot out."""
+    key = str(sid).strip()
+    with _shots_lock:
+        s = _shots.pop(key, None)
+        if s is not None:
+            _shots[key] = s
+    return s
 
 
 def note(s: Shot, what: str, others: list[screen.Display]) -> str:
@@ -282,50 +292,85 @@ SCROLL_PARAMETERS = {
 # A board's squares (neo.tools.computer.board registers the resolver): ``cell`` for a click or a
 # scroll, ``from`` / ``to`` for a drag's two ends.
 _CELL_KEYS = {"": "cell", "1": "from", "2": "to"}
-CellResolver = Callable[[str, "Shot | None"], tuple[float, float]]
+# fn(cell, shot, *, blind) → (x, y): see set_cell_resolver.
+CellResolver = Callable[..., tuple[float, float]]
 _cell_resolver: CellResolver | None = None
 # Is there a board (a grid NEO found) at this screen point? Nothing snaps inside one.
 GridCheck = Callable[[float, float], bool]
 _grid_check: GridCheck | None = None
 
 
+def _hears(fn: Callable, name: str) -> bool:
+    """Does ``fn`` take the keyword argument ``name`` (by name, or in a **kwargs)?"""
+    import inspect
+
+    try:
+        params = inspect.signature(fn).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    return any(
+        p.kind is p.VAR_KEYWORD or (p.name == name and p.kind in (p.KEYWORD_ONLY, p.POSITIONAL_OR_KEYWORD)) for p in params
+    )
+
+
 def set_cell_resolver(fn: CellResolver | None) -> None:
-    """The board helper's seam: ``fn(cell, shot)`` → the screen point of that square, mapped through
-    the latest capture NEO grounded itself (so a brain that can't see may use it), or raises
-    :class:`Refused` / ``ValueError`` (unknown square, no board, a stale grid)."""
+    """The board helper's seam: ``fn(cell, shot, *, blind)`` → the screen point of that square, or
+    raises (unknown square, no board, a stale grid — any exception: nothing is done, its words are
+    the refusal, so they name no point). ``blind``: the brain acting can't see — the helper gives
+    it squares only on a board NEO found itself from its own capture (never one mapped from a
+    seeing model's corners). A resolver that can't be told ``blind`` is not taken (TypeError)."""
     global _cell_resolver
+    if fn is not None and not _hears(fn, "blind"):
+        raise TypeError("a cell resolver takes blind= (whether the brain acting can see): fn(cell, shot, *, blind)")
     _cell_resolver = fn
 
 
 # Other ids NEO grounds itself, by their prefix (OCR's text marks "t1"…: neo.tools.computer.ocr
-# registers "t"): ``fn(id)`` → the screen point of that mark, or raises Refused / ValueError / KeyError.
+# registers "t"): ``fn(id)`` → the screen point of that mark, or raises (any exception: nothing is
+# done); ``labels(id)`` → the mark's words, which the click gate judges beside what's under the point.
 IdResolver = Callable[[str], tuple[float, float]]
+IdLabels = Callable[[str], list[str]]
 _id_resolvers: dict[str, IdResolver] = {}
+_id_labels: dict[str, IdLabels] = {}
 
 
-def set_id_resolver(prefix: str, fn: IdResolver | None) -> None:
+def set_id_resolver(prefix: str, fn: IdResolver | None, *, labels: IdLabels | None = None) -> None:
     """A helper's seam for its own marks (ids with ``prefix`` and a number: "t3"). Their points were
-    read off NEO's own capture, so a brain that can't see may use them, like Accessibility's ids."""
+    read off NEO's own capture, so a brain that can't see may use them, like Accessibility's ids.
+    ``labels``: the mark's own words (a text mark's text) — the click gate asks the user before a
+    click on words that send, delete or buy, whatever is under the point."""
     if not re.fullmatch(r"[a-z]{1,3}", prefix) or prefix in ("e", "w"):
         raise ValueError(f"{prefix!r}: a mark prefix is 1–3 lowercase letters, never Accessibility's own (e, w)")
     if fn is None:
         _id_resolvers.pop(prefix, None)
+        _id_labels.pop(prefix, None)
+        return
+    _id_resolvers[prefix] = fn
+    if labels is None:
+        _id_labels.pop(prefix, None)
     else:
-        _id_resolvers[prefix] = fn
+        _id_labels[prefix] = labels
 
 
-def _own_mark(eid: str) -> Aim | None:
+def _helper_error(e: Exception) -> Refused:
+    """A helper's own error (a board's, a mark's) as the refusal: its words, once "Error:"."""
+    msg = " ".join(str(e).split()) or type(e).__name__
+    return Refused(msg if msg.startswith("Error") else f"Error: {msg}")
+
+
+def _own_mark(eid: str, blind: bool = False) -> Aim | None:
     for prefix, fn in _id_resolvers.items():
         if re.fullmatch(rf"{re.escape(prefix)}\d+", eid):
             try:
                 pt = fn(eid)
+                x, y = float(pt[0]), float(pt[1])
+                words = [str(w) for w in (_id_labels[prefix](eid) if prefix in _id_labels else []) if w]
             except Refused:
                 raise
-            except (ValueError, KeyError, LookupError) as e:
-                raise Refused(f"Error: {e}") from None
-            x, y = float(pt[0]), float(pt[1])
-            _on_screen([(x, y)])
-            return Aim((x, y), "mark", None, f"mark {eid}")
+            except Exception as e:  # noqa: BLE001 - a helper's refusal (or its failure): nothing is done
+                raise _helper_error(e) from None
+            _on_screen([(x, y)], blind=blind, what=f"mark {eid}")
+            return Aim((x, y), "mark", None, f"mark {eid}", labels=words)
     return None
 
 
@@ -340,12 +385,13 @@ class Aim:
     """Where one end of an input goes (screen points) and how the call said it."""
 
     point: tuple[float, float]
-    form: str  # "points" | "pixels" | "normalized" | "box" | "id" | "cell"
+    form: str  # "points" | "pixels" | "normalized" | "box" | "id" | "cell" | "mark"
     shot: Shot | None = None
     said: str = ""  # NEO's own words for how it was named: "pixel (612, 540) of s3"
     element: Any = None  # the ax.Element (form "id")
     pid: int = 0  # its app's process (form "id")
     owner: str = ""  # its app's name (form "id")
+    labels: list[str] = field(default_factory=list)  # a helper's mark's own words (form "mark"): for the gate
 
     @property
     def numbers(self) -> bool:
@@ -404,10 +450,16 @@ def _norm_to_screen(s: Shot, nx: float, ny: float) -> tuple[float, float]:
     return s.to_screen(max(ix, 0.0), max(iy, 0.0))
 
 
-def _on_screen(pts: list[tuple[float, float]]) -> None:
+def _on_screen(pts: list[tuple[float, float]], *, blind: bool = False, what: str = "") -> None:
+    """Every point on some display, else refused — naming the point and the displays, except to a
+    brain that can't see (no coordinates reach it in any form: the square or mark by its name)."""
     shown = screen.displays()
     for x, y in pts:
         if not any(d.contains(x, y) for d in shown):
+            if blind:
+                raise Refused(
+                    f"Error: {what or 'that spot'} is off every screen now — look again (a look or ax_tree) before acting."
+                )
             raise Refused(
                 f"Error: ({x:g}, {y:g}) is off every screen ({'; '.join(d.words() for d in shown)}). "
                 "Screen points are what click takes; for a spot in a screenshot, pass its pixel position with shot."
@@ -419,7 +471,8 @@ def numeric(a: dict, ctx: ToolContext, tool: str = "click", end: str = "") -> Ai
     x,y · nx,ny · box_2d, and a board cell. None: no such form for that end (an id, the pointer).
 
     - a brain that can't see is refused every numeric form (only x,y the user's own words gave pass,
-      as before); a cell passes (NEO found the square itself, from its own capture);
+      as before); a cell goes to the board helper with ``blind`` (it gives such a brain squares only
+      on a board NEO found itself, from its own capture);
     - nx,ny and box_2d need a shot, and are 0–1000 of it; x,y with a shot are its pixels; out of
       range is refused with a hint; every point must be on a display.
     """
@@ -431,7 +484,7 @@ def numeric(a: dict, ctx: ToolContext, tool: str = "click", end: str = "") -> Ai
     form = forms[0]
     blind_ctx = bool(ctx.get("blind"))
     if form == _CELL_KEYS.get(end):
-        return _cell(a, form, tool)
+        return _cell(a, form, blind_ctx)
     shot = None
     if form == "x,y":
         vals = _numbers(a, (f"x{end}", f"y{end}"))
@@ -480,23 +533,26 @@ def numeric(a: dict, ctx: ToolContext, tool: str = "click", end: str = "") -> Ai
                 )
             pt = _norm_to_screen(shot, (xmin + xmax) / 2, (ymin + ymax) / 2)
             aimed = Aim(pt, "box", shot, f"the middle of box_2d [{ymin:g}, {xmin:g}, {ymax:g}, {xmax:g}] of {shot.id}")
-    _on_screen([aimed.point])
+    _on_screen([aimed.point], blind=blind_ctx)
     return aimed
 
 
-def _cell(a: dict, key: str, tool: str) -> Aim:
+def _cell(a: dict, key: str, blind: bool) -> Aim:
+    """A board's square, from the board helper — told whether the brain acting can see (it refuses
+    such a brain a board NEO didn't find itself). Any error of the helper's refuses: nothing is done."""
     name = str(a.get(key)).strip()[:12]
-    if _cell_resolver is None:
+    resolve = _cell_resolver
+    if resolve is None:
         raise Refused(f"Error: there's no board to name squares on — take a screenshot of it first ({key}={name!r}).")
     shot = _shot_of(a)
     try:
-        pt = _cell_resolver(name, shot)
+        pt = resolve(name, shot, blind=blind)
+        x, y = float(pt[0]), float(pt[1])
     except Refused:
         raise
-    except (ValueError, KeyError, LookupError) as e:
-        raise Refused(f"Error: {e}") from None
-    x, y = float(pt[0]), float(pt[1])
-    _on_screen([(x, y)])
+    except Exception as e:  # noqa: BLE001 - the helper's refusal (a BoardError…) or its failure: nothing is done
+        raise _helper_error(e) from None
+    _on_screen([(x, y)], blind=blind, what=f"square {name}")
     return Aim((x, y), "cell", shot, f"square {name}")
 
 
@@ -504,7 +560,7 @@ async def aim(a: dict, ctx: ToolContext, tool: str = "click", end: str = "") -> 
     """Where one end of an input goes, from whichever form the call used: an element id first (as
     before: exact, the element's live frame), else :func:`numeric`. None: nothing for this end."""
     eid = a.get(f"id{end}")
-    if _present(eid) and (own := _own_mark(str(eid).strip())) is not None:
+    if _present(eid) and (own := _own_mark(str(eid).strip(), bool(ctx.get("blind")))) is not None:
         return own
     if _present(eid):
         got = await _gates()._element_spot(str(eid), tool)
@@ -612,12 +668,13 @@ async def probe(pts: list[tuple[float, float]]) -> Target:
     return Target(hits)
 
 
-async def bring(t: Target, pts: list[tuple[float, float]], *, want_pid: int = 0) -> None:
+async def bring(t: Target, pts: list[tuple[float, float]], *, want_pid: int = 0, blind: bool = False) -> None:
     """Bring the app acted on — the owner of the first point, or ``want_pid`` (an element's app) —
     to the front and make its window key, then look at every point again: an input whose target
     changed on the way (another window came over a point, the drop spot is now something else) isn't
     made, and the hits are the new ones. With ``want_pid`` the point must be that app's once it is in
-    front (not covered by another window)."""
+    front (not covered by another window). ``blind``: the brain acting can't see — a refusal names
+    no point."""
     first = here = t.hits[0]
     pid = want_pid or first.pid
     if pid and (first.regular if pid == first.pid else await asyncio.to_thread(ax.regular, pid)):
@@ -648,7 +705,7 @@ async def bring(t: Target, pts: list[tuple[float, float]], *, want_pid: int = 0)
         if here.app and here.pid == pid:
             apps.set_target(here.app)  # "click the field, then type": the typing goes here too
     if t.brought or t.raised:
-        await _look_again(t, pts, pid, want_pid)
+        await _look_again(t, pts, pid, want_pid, blind)
     final = t.hits[0]
     if want_pid and final.pid and final.pid != want_pid:
         raise Refused(
@@ -668,7 +725,7 @@ def _check_first(again: ax.Hit, pid: int, want_pid: int, name: str) -> None:
         raise _sheet_refusal(again)
 
 
-async def _look_again(t: Target, pts: list[tuple[float, float]], pid: int, want_pid: int) -> None:
+async def _look_again(t: Target, pts: list[tuple[float, float]], pid: int, want_pid: int, blind: bool = False) -> None:
     """After an app came forward or a window rose: what is under every point now, against what the
     probe saw there (``t.hits``). A point whose owner or label changed is refused — the gate and the
     model judged what was there before."""
@@ -685,9 +742,10 @@ async def _look_again(t: Target, pts: list[tuple[float, float]], pid: int, want_
             t.relabeled = True  # (an element's own app came over it: expected, but its label is judged again)
         elif now.pid != was.pid or _label(now) != _label(was):
             what = "the drop spot" if i == len(pts) - 1 and len(pts) > 1 else "that spot"
+            if not blind:  # (a brain that can't see is never told a point)
+                what += f" {tuple(int(round(v)) for v in p)}"
             raise Refused(
-                f"Error: bringing {t.brought or was.app or 'the app'} forward changed what's at {what} "
-                f"{tuple(int(round(v)) for v in p)} — it's now "
+                f"Error: bringing {t.brought or was.app or 'the app'} forward changed what's at {what} — it's now "
                 + fence("screen", f"{now.app}: {words(now) or 'something else'}")
                 + "\nso I didn't do it. Look again (screenshot) before trying again.",
                 screen=True,
@@ -702,12 +760,15 @@ async def _look_again(t: Target, pts: list[tuple[float, float]], pid: int, want_
 class Look:
     scene: ax.Scene
     pixels: list | None
+    cost: float = 0.0  # how long the look at the scene took (a busy app answers slowly)
 
 
 async def look(pid: int, pts: list[tuple[float, float]]) -> Look:
+    t0 = time.monotonic()
     sc = await asyncio.to_thread(ax.scene, pid)
+    cost = time.monotonic() - t0
     px = await asyncio.to_thread(screen.sample_points, pts) if pts else None
-    return Look(sc, px)
+    return Look(sc, px, cost)
 
 
 async def before(pid: int, pts: list[tuple[float, float]], hover: tuple[float, float] | None = None) -> Look:
@@ -722,57 +783,106 @@ async def before(pid: int, pts: list[tuple[float, float]], hover: tuple[float, f
     return await look(pid, pts)
 
 
-async def _scene_meanwhile(before: Look, pid: int, wait: float, only_at_points: bool) -> Outcome | None:
-    """Wait ``wait`` seconds, looking at the scene (the front app, the window, a sheet, the focus:
-    a few quick Accessibility questions) every SCENE_POLL_S: the outcome as soon as it shows a change
-    — no picture needed to know something happened — else None. Never longer than ``wait`` by the
-    sleeps asked for, nor by the clock (a slow app's answers count against it)."""
-    if wait <= 0:
-        return None
+class _Clock:
+    """The time since an input, for the waits after it: by the clock and by the sleeps asked for,
+    whichever says more has passed — a slow app's answers count against a wait, and a wait never
+    outlasts the sleeps it was given."""
+
+    def __init__(self) -> None:
+        self.t0 = time.monotonic()
+        self.slept = 0.0
+
+    def left(self, at: float) -> float:
+        """Seconds left until ``at`` seconds after the input."""
+        return min(at - (time.monotonic() - self.t0), at - self.slept)
+
+    async def sleep(self, s: float) -> None:
+        if s > 0:
+            await asyncio.sleep(s)
+            self.slept += s
+
+
+def _gap(poll: float, cost: float) -> float:
+    """The pause before the next look at the scene: every ``poll`` seconds, but never looking more
+    than half the time (a look that takes long is spaced out, not repeated back to back)."""
+    return max(poll - cost, cost)
+
+
+async def _scene_meanwhile(
+    before: Look, pid: int, clock: _Clock, at: float, only_at_points: bool, cost: float
+) -> tuple[Outcome | None, float]:
+    """Until ``at`` seconds after the input, look at the scene (the front app, the window, a sheet,
+    the focus: a few quick Accessibility questions) every SCENE_POLL_S: (the outcome at the first
+    change — no picture needed to know something happened — else None, the last look's cost). A
+    look that couldn't end by ``at`` (by the last one's cost) isn't started: the wait ends on time."""
     if not before.scene.known:
-        await asyncio.sleep(wait)
-        return None
-    waited, start = 0.0, time.monotonic()
-    while waited + 1e-9 < wait and time.monotonic() - start < wait:
-        step = min(SCENE_POLL_S, wait - waited)
-        await asyncio.sleep(step)
-        waited += step
-        now = Look(await asyncio.to_thread(ax.scene, pid), None)
-        out = compare(Look(before.scene, None), now, [], only_at_points)
+        await clock.sleep(clock.left(at))
+        return None, cost
+    while True:
+        gap, left = _gap(SCENE_POLL_S, cost), clock.left(at)
+        if left < gap + cost:
+            await clock.sleep(left)
+            return None, cost
+        await clock.sleep(gap)
+        t0 = time.monotonic()
+        sc = await asyncio.to_thread(ax.scene, pid)
+        cost = time.monotonic() - t0
+        out = compare(Look(before.scene, None), Look(sc, None), [], only_at_points)
         if out.changed:
-            return out
-    return None
+            return out, cost
 
 
 async def outcome(
-    before: Look, pid: int, pts: list[tuple[float, float]], where: list[str], only_at_points: bool = False
+    before: Look,
+    pid: int,
+    pts: list[tuple[float, float]],
+    where: list[str],
+    only_at_points: bool = False,
+    *,
+    settle: bool = False,
 ) -> Outcome:
     """What the input changed: the scene watched meanwhile (a sheet that opens, an app that comes
-    forward, the focus that moves: done at once), the picture looked at after LOOK_S, and both again
-    until LOOK_AGAIN_S later if nothing had changed yet (a page that loads, a slow redraw)."""
+    forward, the focus that moves), the picture looked at LOOK_S after the input, and both again
+    until LOOK_S + LOOK_AGAIN_S after it if nothing had changed yet (a page that loads, a slow
+    redraw) — never later than that and one look, however slowly the app answers. A change seen in
+    the scene ends the wait, confirmed by one look at the picture (the result names both) — taken
+    LOOK_S after the change when ``settle`` (a picture of the result follows: the redraw, a sheet
+    sliding in, has had its moment)."""
     if before.pixels is None and not before.scene.known:
         return compare(before, None, where)
-    if (early := await _scene_meanwhile(before, pid, LOOK_S, only_at_points)) is not None:
-        return early
-    out = compare(before, await look(pid, pts), where, only_at_points)
-    if out.changed is False:
-        if (early := await _scene_meanwhile(before, pid, LOOK_AGAIN_S, only_at_points)) is not None:
-            return early
-        out = compare(before, await look(pid, pts), where, only_at_points)
-    return out
+    clock = _Clock()
+    early, _cost = await _scene_meanwhile(before, pid, clock, LOOK_S, only_at_points, before.cost)
+    if early is None:
+        first = await look(pid, pts)
+        out = compare(before, first, where, only_at_points)
+        if out.changed is not False:
+            return out
+        early, _cost = await _scene_meanwhile(before, pid, clock, LOOK_S + LOOK_AGAIN_S, only_at_points, first.cost)
+        if early is None:
+            return compare(before, await look(pid, pts), where, only_at_points)
+    if settle:
+        await clock.sleep(LOOK_S)
+    seen = compare(before, await look(pid, pts), where, only_at_points)
+    return seen if seen.changed else early  # (a change that went back by now still happened)
 
 
 async def scene_change(before: Look, pid: int) -> Outcome:
     """What a key or an AX press changed in the scene (the front app, the window, a sheet, the
-    focus): looked at every POLL_S for at most SCENE_WAIT_S, done at the first change."""
+    focus): looked at every POLL_S (spaced out when a look takes long), done at the first change,
+    and by SCENE_WAIT_S after the input — by the clock: a look that couldn't end by then isn't
+    started (the first always is)."""
     if not before.scene.known:
         return compare(before, None, [])
     out = compare(before, before, [])
-    waited = 0.0
-    while waited + 1e-9 < SCENE_WAIT_S:
-        await asyncio.sleep(POLL_S)
-        waited += POLL_S
-        out = compare(before, await look(pid, []), [])
+    clock, cost, looked = _Clock(), 0.0, False
+    while True:
+        gap = _gap(POLL_S, cost) if looked else POLL_S
+        if looked and clock.left(SCENE_WAIT_S) < gap + cost:
+            break
+        await clock.sleep(gap)
+        now = await look(pid, [])
+        cost, looked = now.cost, True
+        out = compare(before, now, [])
         if out.changed:
             break
     return out
@@ -1022,16 +1132,23 @@ def protected_in(area: tuple[float, float, float, float]) -> bool:
     return False
 
 
-async def after_look(ctx: ToolContext, where: list[Aim], pts: list[tuple[float, float]], hit: ax.Hit):
-    """The picture after an input, for a brain that can see, when it aimed at a picture or a mark:
-    (image, its Shot, NEO's note) — registered as a new shot the next input may use — or None (a
-    brain that can't see, the user's own command, an input by an element's id from ax_tree, no
-    Screen Recording). It replaces the separate "take a screenshot to check" turn."""
-    if ctx.get("blind") or ctx.origin != "agent" or not pts:
-        return None
+def wants_after_look(ctx: ToolContext, where: list[Aim]) -> bool:
+    """Will the result carry the picture after the input? For a brain that can see, the model's own
+    input (not the user's command), aimed at a picture, a board's square or a mark — not an element
+    id from ax_tree, whose text outcome is enough."""
+    if ctx.get("blind") or ctx.origin != "agent":
+        return False
     from neo.tools.computer import marks
 
-    if not any(w.pictured or w.numbers or (w.form == "id" and marks.is_mark(getattr(w.element, "id", ""))) for w in where):
+    return any(w.pictured or w.numbers or (w.form == "id" and marks.is_mark(getattr(w.element, "id", ""))) for w in where)
+
+
+async def after_look(ctx: ToolContext, where: list[Aim], pts: list[tuple[float, float]], hit: ax.Hit):
+    """The picture after an input (see :func:`wants_after_look`): (image, its Shot, NEO's note) —
+    registered as a new shot the next input may use — or None (no Screen Recording, a protected
+    app's window over the area before or once it was taken). It replaces the separate "take a
+    screenshot to check" turn."""
+    if not pts or not wants_after_look(ctx, where):
         return None
     if not await asyncio.to_thread(screen.can_capture):
         return None  # (never asks for Screen Recording: that question is the screenshot tool's)
@@ -1044,6 +1161,8 @@ async def after_look(ctx: ToolContext, where: list[Aim], pts: list[tuple[float, 
         img, x0, y0, scale, w, h = await asyncio.to_thread(capture_area, area, "after")
     except Exception:  # noqa: BLE001 - no Screen Recording, a failed capture: the text outcome stands
         return None
+    if await asyncio.to_thread(protected_in, area):
+        return None  # (a protected app's window came up over it while it was taken: dropped unseen)
     s = remember(x0, y0, scale, w, h)
     said = (
         f"After-look {s.id} attached ({area[2]}×{area[3]} pt at screen ({area[0]},{area[1]})); the image is {w}×{h} px. "
@@ -1065,6 +1184,18 @@ _SNAP_ROLES = frozenset(
 )
 _SNAP_UP = 3  # the control is the element under the point or one of its parents this far up
 _STOP_ROLES = frozenset({"AXWindow", "AXSheet", "AXApplication", "AXScrollArea", "AXWebArea"})
+# An input of its own, where the place of a click matters (a caret's, a thumb's, a cell's) or which
+# holds controls of its own: a point in one is never moved out of it onto a control around it.
+_OWN_ROLES = frozenset(
+    {
+        "AXTextField", "AXTextArea", "AXSearchField", "AXSecureTextField", "AXComboBox", "AXSlider",
+        "AXIncrementor", "AXMenuButton", "AXColorWell", "AXCell", "AXRow", "AXList", "AXOutline",
+        "AXTable", "AXTabGroup", "AXToolbar", "AXScrollBar", "AXSplitter", "AXValueIndicator",
+    }
+)
+# What makes an element pressable by itself (an icon with its own click, a web span with a handler):
+# a click aimed at it stays there. (Not AXShowMenu: nearly every element offers a context menu.)
+_OWN_ACTIONS = frozenset({"AXPress", "AXPick", "AXOpen"})
 
 
 @dataclass
@@ -1082,16 +1213,29 @@ class Control:
         return round((x + w / 2) * 2) / 2, round((y + h / 2) * 2) / 2
 
 
+def _actions(el) -> list[str] | None:
+    """The actions an element offers by itself; None when its app can't say (then nothing snaps)."""
+    try:
+        err, names = ax.AS.AXUIElementCopyActionNames(el, None)
+    except Exception:  # noqa: BLE001
+        return None
+    if err == ax._CANNOT_COMPLETE:
+        return None
+    return [str(n) for n in (names or [])] if err == 0 else []
+
+
 @pooled
 def control_of(h: ax.Hit) -> Control | None:
     """The control the element under a point is, or is inside (a button's own text): None for a
-    surface (a canvas, a board, a picture), a text or anything else a click position matters in."""
+    surface (a canvas, a board, a picture), a field or anything else a click position matters in —
+    and None when the element aimed at, or one passed on the way up, is pressable by itself (an
+    icon inside a link, a web span with its own click): the click stays where the model aimed."""
     el = h.el
     for _ in range(_SNAP_UP):
         if el is None:
             return None
         role = ax._str(ax._attr(el, "AXRole"))
-        if role in _STOP_ROLES:
+        if role in _STOP_ROLES or role in _OWN_ROLES:
             return None
         if role in _SNAP_ROLES:
             frame = ax.visible_frame(el)
@@ -1099,6 +1243,9 @@ def control_of(h: ax.Hit) -> Control | None:
                 return None
             label = ax._str(ax._attr(el, "AXTitle")) or ax._str(ax._attr(el, "AXDescription"))
             return Control(role, " ".join(label.split())[:60], frame, el)
+        acts = _actions(el)
+        if acts is None or _OWN_ACTIONS.intersection(acts):
+            return None
         el = ax._attr(el, "AXParent")
     return None
 
@@ -1109,7 +1256,10 @@ def _inside(p: tuple[float, float], frame: tuple[float, float, float, float]) ->
 
 
 def may_snap(where: Aim, ctx: ToolContext) -> bool:
-    return where.numbers and ctx.origin == "agent" and not ctx.get("blind")
+    """A model's own numbers (never a brain's that saw nothing, never the user's own command) — and
+    the same again when the user's yes re-runs the model's click: the approved click is the one the
+    gate judged, at the control's middle."""
+    return where.numbers and ctx.origin in ("agent", "approval") and not ctx.get("blind")
 
 
 @dataclass
@@ -1151,6 +1301,14 @@ def _at(x: float, y: float) -> str:
     return f"({int(round(x))}, {int(round(y))})"
 
 
+def _spot(where: Aim | None, p: tuple[float, float], blind: bool) -> str:
+    """How a result names where an input went: its point — or, to a brain that can't see, only the
+    square, mark or element it named (no coordinates reach such a brain in any form)."""
+    if not blind:
+        return _at(*p)
+    return (where.said if where is not None and where.said else "") or "the point the user gave"
+
+
 def where_needed(tool: str) -> str:
     ends = "x1,y1 and x2,y2 (or id1/id2, nx1,ny1…, box_2d1/box_2d2)" if tool == "drag" else "x,y (or id, nx,ny, box_2d)"
     return f"Error: say where to {tool}: {ends} — pixels and 0–1000 forms with a screenshot's shot id."
@@ -1175,6 +1333,7 @@ async def click_tool(a: dict, c: ToolContext):
     except ValueError as e:
         return f"Error: {e}"
     snapped: Snap | None = None
+    blind_ctx = bool(c.get("blind"))
     try:
         where = await aim(a, c, "click")
         if where is None:
@@ -1184,12 +1343,18 @@ async def click_tool(a: dict, c: ToolContext):
         if where.form == "id":
             e = where.element
             labels = [(e.title or e.value, where.owner), (t.hits[0].label, t.hits[0].app or where.owner)]
-            head = f"{click_word(button, count)} {e.id} ({e.role.removeprefix('AX')}) at {_at(*pts[0])}"
+            head = f"{click_word(button, count)} {e.id} ({e.role.removeprefix('AX')})"
+            if not blind_ctx:
+                head += f" at {_at(*pts[0])}"
         else:
-            labels = [(t.hits[0].label, t.hits[0].app)]
-            head = f"{click_word(button, count)} at {_at(*pts[0])}"
-            if where.said:
-                head += f" ({where.said})"
+            # A helper's mark's own words (a text mark's text) are judged with what's under the point.
+            labels = [(w, t.hits[0].app) for w in where.labels] + [(t.hits[0].label, t.hits[0].app)]
+            if blind_ctx:
+                head = f"{click_word(button, count)} {_spot(where, pts[0], True)}"
+            else:
+                head = f"{click_word(button, count)} at {_at(*pts[0])}"
+                if where.said:
+                    head += f" ({where.said})"
         if may_snap(where, c) and (snapped := await snap(pts[0], t.hits[0])) is not None:
             # The control's middle: looked at again (NEO's window, a protected app, a sheet in the
             # way), and everything there judged by the gate like the spot the model picked.
@@ -1199,7 +1364,7 @@ async def click_tool(a: dict, c: ToolContext):
             head = f"{click_word(button, count)} at {_at(*pts[0])} ({where.said + '; ' if where.said else ''}moved from {_at(*snapped.raw)} to the middle of the control there)"
         if gate := await g._gate_click(a, labels):
             return gate
-        await bring(t, pts, want_pid=where.pid)
+        await bring(t, pts, want_pid=where.pid, blind=blind_ctx)
         # A point nothing could be told about before now shows something: judged like the rest.
         if t.relabeled and (gate := await g._gate_click(a, [(t.hits[0].label, t.hits[0].app)])):
             return gate
@@ -1216,9 +1381,10 @@ async def click_tool(a: dict, c: ToolContext):
     await asyncio.to_thread(inp.click, *pts[0], button=button, count=count, mods=mods)
     if before is None:
         return with_effect(ToolOutput(head + g._input_doubt()), effect_of(None))
-    out = await outcome(before, pid, pts, [_at(*pts[0])])
+    spot = _spot(where, pts[0], blind_ctx)
+    out = await outcome(before, pid, pts, [spot], settle=wants_after_look(c, [where]))
     if not at_the_point(h, where.pictured):
-        out = maybe_elsewhere(out, _at(*pts[0]))
+        out = maybe_elsewhere(out, spot)
     under = [words(h)] if where.form != "id" else []
     if snapped is not None:
         under.append(snapped.words())
@@ -1237,6 +1403,7 @@ async def drag_tool(a: dict, c: ToolContext):
     g = _gates()
     if err := g._needs_input():
         return err
+    blind_ctx = bool(c.get("blind"))
     try:
         ends: list[Aim] = []
         for n in ("1", "2"):
@@ -1251,7 +1418,7 @@ async def drag_tool(a: dict, c: ToolContext):
         src, dst = t.hits
         between_apps = bool(src.pid and dst.pid and src.pid != dst.pid)
         if not between_apps:
-            await bring(t, pts)
+            await bring(t, pts, blind=blind_ctx)
             if t.relabeled and (gate := await g._gate_drop(a, t)):
                 return gate
     except Refused as r:
@@ -1260,9 +1427,10 @@ async def drag_tool(a: dict, c: ToolContext):
     pid = src.pid
     before = await g._watch(c, pid, pts, hover=pts[1])  # the drop leaves the pointer at the end
     await asyncio.to_thread(inp.drag, *pts[0], *pts[1])
-    head = f"Dragged {_at(*pts[0])} → {_at(*pts[1])}"
+    starts, stops = _spot(ends[0], pts[0], blind_ctx), _spot(ends[1], pts[1], blind_ctx)
+    head = f"Dragged {starts} → {stops}"
     said = [e.said for e in ends if e.said]
-    if said:
+    if said and not blind_ctx:  # (a brain that can't see was told the names instead of the points)
         head += f" ({' → '.join(said)})"
     if src.app:
         head += f" in {src.app}" + (f" onto {dst.app}" if dst.app and dst.pid != src.pid else "")
@@ -1271,7 +1439,9 @@ async def drag_tool(a: dict, c: ToolContext):
     head += "."
     if before is None:
         return with_effect(ToolOutput(head + g._input_doubt()), effect_of(None))
-    out = await outcome(before, pid, pts, [f"the start {_at(*pts[0])}", f"the end {_at(*pts[1])}"], between_apps)
+    out = await outcome(
+        before, pid, pts, [f"the start {starts}", f"the end {stops}"], between_apps, settle=wants_after_look(c, ends)
+    )
     if between_apps and out.changed is False:
         out.said += (
             f" (Neither app was brought forward for a drag between two apps; if {src.app or 'the app it starts in'} "
@@ -1318,12 +1488,18 @@ async def scroll_tool(a: dict, c: ToolContext):
     except Refused as r:
         return g._refused(c, r)
     pid = t.hits[0].pid
+    blind_ctx = bool(c.get("blind"))
     before = await g._watch(c, pid, pts, hover=pts[0])
-    text = await asyncio.to_thread(inp.scroll, pts[0][0], pts[0][1], dy, dx)
+    text = str(await asyncio.to_thread(inp.scroll, pts[0][0], pts[0][1], dy, dx))
+    spot = _spot(where[0] if where else None, pts[0], blind_ctx)
+    if blind_ctx:  # (its words name the point: a brain that can't see gets the square, mark or id)
+        text = re.sub(r"\s+at\s*\(\s*-?[\d.]+\s*,\s*-?[\d.]+\s*\)", "", text)
+        if where and where[0].said:
+            text += f" at {where[0].said}"
     if before is None:
-        return with_effect(ToolOutput(str(text) + g._input_doubt()), effect_of(None))
-    out = await outcome(before, pid, pts, [_at(*pts[0])])
-    text, ok = report(str(text) + (f" in {t.hits[0].app}." if t.hits[0].app else "."), out, [], g._input_doubt())
+        return with_effect(ToolOutput(text + g._input_doubt()), effect_of(None))
+    out = await outcome(before, pid, pts, [spot if where or not blind_ctx else "the pointer"], settle=wants_after_look(c, where))
+    text, ok = report(text + (f" in {t.hits[0].app}." if t.hits[0].app else "."), out, [], g._input_doubt())
     return await _finish(c, ToolOutput(text, ok=ok), out, where, pts, t.hits[0])
 
 

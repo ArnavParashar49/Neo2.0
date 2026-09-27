@@ -11,6 +11,7 @@ listed as far as the walk got.
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import Callable
 
 from neo.agent.registry import ToolContext, ToolOutput, fence
@@ -89,11 +90,25 @@ async def _picture(frame: tuple[float, float, float, float] | None, what: str):
     return img, s, pointer.note(s, f"{what}: {area[2]}×{area[3]} pt at screen ({area[0]},{area[1]})", [])
 
 
+def _started(coro) -> asyncio.Task:
+    """A task whose end (or error) nobody may wait for: never reported as unheard."""
+    task = asyncio.ensure_future(coro)
+    task.add_done_callback(lambda t: t.cancelled() or t.exception())
+    return task
+
+
+async def _by(task: asyncio.Task, end: float) -> bool:
+    """Did ``task`` finish well by ``end`` (the clock's)? It is never waited for past it."""
+    if not task.done():
+        await asyncio.wait({task}, timeout=max(0.0, end - time.monotonic()))
+    return task.done() and not task.cancelled() and task.exception() is None
+
+
 async def observe(
     app: str | None = None, *, image: bool = False, deadline_s: float = 1.5, ctx: ToolContext | None = None
 ) -> ToolOutput:
-    """The look (see the module's docstring). ``deadline_s`` bounds the element walk; the picture
-    is taken alongside it."""
+    """The look (see the module's docstring). ``deadline_s`` bounds the whole look (the element
+    walk, the window's place, the scene; the picture is taken alongside the walk)."""
     from neo.tools import computer as _c  # (the gate helpers, looked up at call time)
 
     ctx = ctx or ToolContext()
@@ -112,20 +127,23 @@ async def observe(
         )
     blind = bool(ctx.get("blind"))
     want_picture = image and not blind
-    title, frame = await asyncio.to_thread(_window, pid)
-    walk = asyncio.create_task(asyncio.to_thread(marks.collect_sync, None, pid=pid, name=name, deadline_s=deadline_s, limit=LOOK_MARKS))
-    scene = asyncio.create_task(asyncio.to_thread(ax.scene, pid))
+    # Everything at once, and nothing waited for past the deadline (+ marks.GRACE_S): a busy app's
+    # questions are left to finish on their own threads, and the look says what it has.
+    end = time.monotonic() + deadline_s + marks.GRACE_S
+    walk = _started(asyncio.to_thread(marks.collect_sync, None, pid=pid, name=name, deadline_s=deadline_s, limit=LOOK_MARKS))
+    scene = _started(asyncio.to_thread(ax.scene, pid))
     img, shot, said = (None, None, "")
+    title, frame = "", None
     if want_picture:
-        img, shot, said = await _picture(frame, "its window")
-    try:
-        got = await asyncio.wait_for(walk, deadline_s + 1.0)
-    except TimeoutError:
-        got = marks.Collected(app=name, pid=pid)
-    try:
-        sc = await asyncio.wait_for(scene, 0.5)
-    except TimeoutError:
-        sc = ax.Scene()
+        win = _started(asyncio.to_thread(_window, pid))
+        if await _by(win, end):
+            title, frame = win.result()
+            img, shot, said = await _picture(frame, "its window")
+        else:
+            said = "(No picture: the app didn't say where its window is in time — it may be busy; try again in a moment.)"
+    got = walk.result() if await _by(walk, end) else marks.Collected(app=name, pid=pid, refused="slow")
+    sc = scene.result() if await _by(scene, end) else ax.Scene()
+    title = title or got.title
     in_front = sc.known and sc.front_pid == pid
     head = ["Look (read-only) at " + ("the app in front" if in_front else "an app that isn't in front") + ", as named below:"]
     # Names and titles are the apps' own words (any app may call itself anything): fenced with the rest.
@@ -151,6 +169,8 @@ async def observe(
     listed = marks.block(got, shot, blind=blind)
     if listed:
         text += listed
+    elif got.refused == "slow":
+        text += "\n(The app didn't list its controls in time — it may be busy; try again in a moment, or ax_tree.)"
     elif not got.refused:
         text += "\n(Accessibility shows no controls here — " + (
             "the picture is the way in: act at its pixels with its shot id.)" if shot is not None else "a picture (image=true) or ax_tree may show more.)"

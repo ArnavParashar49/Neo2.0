@@ -151,7 +151,7 @@ def fake_ax(monkeypatch):
     win, sheet, root = object(), object(), object()
     walked = []
 
-    def walk(el, depth, out, new_id, *, budget=None, skip=None, clip=True):
+    def walk(el, depth, out, new_id, *, budget=None, skip=None, clip=True, **limits):  # (ax-core's walk also takes w=)
         walked.append((el, skip))
         if el is sheet:
             out += [_el(new_id(), "AXSheet", "", 300, 200, 400, 150), _el(new_id(), "AXButton", "Start", 320, 300), _el(new_id(), "AXButton", "Cancel", 420, 300)]
