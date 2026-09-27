@@ -10,6 +10,7 @@ scaling up and flipping are what is tested. Nothing is captured, clicked or load
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 import types
 
@@ -42,11 +43,15 @@ class FakeVision:
     finds each block in the picture it is handed (after NEO's crop and scaling) and reports it as Vision
     does — a box normalised to that picture with the origin at the bottom left. Like Vision, a fast read
     of words fewer than ``fast_min_px`` pixels tall garbles them, and words in a script none of the
-    languages asked for is written in come back as nothing."""
+    languages asked for is written in come back as nothing; with ``fast_drop_px``, a fast read drops
+    words fewer pixels tall than that altogether."""
 
-    def __init__(self, words: dict[int, str], *, fast_min_px: int = 16, acc=VISION_ACCURATE, fast=VISION_FAST, drop=None):
+    def __init__(
+        self, words: dict[int, str], *, fast_min_px: int = 16, fast_drop_px: int = 0, acc=VISION_ACCURATE, fast=VISION_FAST, drop=None
+    ):
         self.words = words
         self.fast_min_px = fast_min_px
+        self.fast_drop_px = fast_drop_px  # a fast read drops words fewer pixels tall than this (Vision does)
         self.drop = drop  # drop(words, fast, n-th call) → True: this read misses them (Vision does, now and then)
         self.acc, self.fst = list(acc), list(fast)
         self.calls: list[dict] = []
@@ -77,6 +82,8 @@ class FakeVision:
             if not ocr.scripts(text) <= readable | {"LATIN"} or "DEVANAGARI" in ocr.scripts(text):
                 continue  # (Vision returns nothing for a script it can't read)
             if self.drop and self.drop(text, fast, len(self.calls)):
+                continue
+            if fast and y1 - y0 < self.fast_drop_px:
                 continue
             said = text
             if fast and y1 - y0 < self.fast_min_px:
@@ -114,6 +121,25 @@ def _fresh_ocr(monkeypatch):
 def use(engine):
     ocr.set_engine(engine)
     return engine
+
+
+BOARD_WIN = ocr.Win((0.0, 0.0, 400.0, 300.0), PID, APP)
+
+
+def windows(monkeypatch, *wins):
+    """The window server's windows over any area, front to back (Board's window alone by default)."""
+    listed = ocr.Windows(tuple(wins) or (BOARD_WIN,))
+    monkeypatch.setattr(ocr, "windows_over", lambda area: listed)
+    return listed
+
+
+def world(monkeypatch, items, *wins, **kw):
+    """A screen showing ``items`` (see :func:`scene`) that NEO may capture and read, on these windows."""
+    frame, eng = scene(items, **kw)
+    use(eng)
+    monkeypatch.setattr(ocr, "grab", lambda area: frame)
+    windows(monkeypatch, *wins)
+    return frame, eng
 
 
 def near(a, b, tol=1.5):
@@ -407,10 +433,13 @@ def test_accessibilitys_own_elements_and_marks_both_cover_words():
 
 
 def test_marks_get_fresh_ids_and_resolve_to_the_middle_of_their_words(monkeypatch):
-    a = ocr.remember_marks([("Hint", (100.0, 100.0, 40.0, 14.0), "")])
-    b = ocr.remember_marks([("Hint", (300.0, 100.0, 40.0, 14.0), "")])
+    world(monkeypatch, [("Hint", (100.0, 100.0, 40.0, 14.0)), ("Hint", (300.0, 100.0, 40.0, 14.0))])
+    a = ocr.remember_marks([("Hint", (100.0, 100.0, 40.0, 14.0), "")], app=APP, pid=PID)
+    b = ocr.remember_marks([("Hint", (300.0, 100.0, 40.0, 14.0), "")], app=APP, pid=PID)
     assert a[0].id != b[0].id  # never reused: an old id can't name newer words
-    assert ocr.resolve_mark(a[0].id) == (120.0, 107.0) and ocr.mark_labels(b[0].id) == ["Hint"]
+    got = ocr.resolve_mark(a[0].id)
+    assert got == (120.0, 107.0) and (got.pid, got.app) == (PID, APP) and ocr.mark_labels(b[0].id) == ["Hint"]
+    assert ocr.MARK_TTL_S <= 30  # about one look
     monkeypatch.setattr(ocr, "MARK_TTL_S", 0.0)
     with pytest.raises(LookupError, match="no text mark"):
         ocr.resolve_mark(a[0].id)
@@ -427,9 +456,10 @@ def test_a_mark_whose_words_commit_is_never_clicked_by_id(words, context):
     assert "click_text" in str(e.value) and words not in str(e.value)  # NEO's words only, never the screen's
 
 
-def test_a_plain_ok_is_clicked_by_id():
-    m = ocr.remember_marks([("OK", (100.0, 100.0, 40.0, 14.0), "")], context="Game over · OK")[0]
-    assert ocr.resolve_mark(m.id) == (120.0, 107.0)
+def test_a_plain_ok_is_clicked_by_id(monkeypatch):
+    world(monkeypatch, [("Game over", (100.0, 40.0, 80.0, 14.0)), ("OK", (100.0, 100.0, 40.0, 14.0))])
+    m = ocr.remember_marks([("OK", (100.0, 100.0, 40.0, 14.0), "")], context="Game over · OK", app=APP, pid=PID)[0]
+    assert ocr.resolve_mark(m.id) == (120.0, 107.0) and ocr.mark_labels(m.id) == ["OK"]
 
 
 def test_a_blind_brain_gets_ids_and_words_never_numbers():
@@ -447,6 +477,12 @@ def test_install_registers_the_marks_with_the_pointers_id_seam(monkeypatch):
     got = {}
     monkeypatch.setattr(pointer, "set_id_resolver", lambda prefix, fn: got.update({prefix: fn}), raising=False)
     assert ocr.install() and got == {"t": ocr.resolve_mark}
+
+    def with_labels(prefix, fn, *, labels=None):  # (the Element marks' seam: the mark's words for its gate)
+        got[prefix] = (fn, labels)
+
+    monkeypatch.setattr(pointer, "set_id_resolver", with_labels, raising=False)
+    assert ocr.install() and got["t"] == (ocr.resolve_mark, ocr.mark_labels)
     monkeypatch.delattr(pointer, "set_id_resolver")
     assert not ocr.install()
 
@@ -454,18 +490,18 @@ def test_install_registers_the_marks_with_the_pointers_id_seam(monkeypatch):
 def test_text_marks_read_accurately_and_leave_out_protected_windows(monkeypatch):
     frame, eng = scene([("Score 12", (20.0, 20.0, 80.0, 14.0)), ("Approve", (250.0, 20.0, 60.0, 14.0)), ("Save", (20.0, 200.0, 40.0, 14.0))])
     use(eng)
-    monkeypatch.setattr(ocr, "protected_rects", lambda area: [(240.0, 0.0, 160.0, 100.0)])
+    windows(monkeypatch, ocr.Win((240.0, 0.0, 160.0, 100.0), 99, "Vault", True), BOARD_WIN)  # a protected app's, in front
     marks = ocr.text_marks(frame, covered=[((10.0, 190.0, 60.0, 30.0), "Save")], app=APP, pid=PID)
     assert [m.text for m in marks] == ["Score 12"] and [c["fast"] for c in eng.calls] == [False, True]
-    assert "Approve" not in marks[0].context
-    monkeypatch.setattr(ocr, "protected_rects", lambda area: None)  # the window server can't say: nothing read
+    assert "Approve" not in marks[0].context and (marks[0].app, marks[0].pid) == (APP, PID)
+    monkeypatch.setattr(ocr, "windows_over", lambda area: None)  # the window server can't say: nothing read
     assert ocr.text_marks(frame) == []
 
 
 def test_a_look_lists_text_marks_for_a_blind_brain_or_a_canvas_only(monkeypatch):
     frame, eng = scene([("Score 12", (20.0, 20.0, 80.0, 14.0)), ("Hint", (300.0, 200.0, 40.0, 14.0))])
     use(eng)
-    monkeypatch.setattr(ocr, "protected_rects", lambda area: [])
+    windows(monkeypatch)
     win = (0.0, 0.0, 400.0, 300.0)
     panes = [((0.0, 0.0, 200.0, 300.0), "Sidebar"), ((200.0, 0.0, 200.0, 300.0), "Editor")] + [((x, 0.0, 10.0, 10.0), f"B{x}") for x in (0.0, 20.0, 40.0)]
     assert asyncio.run(ocr.look_marks(frame, named=panes, window=win)) == [] and eng.calls == []
@@ -591,11 +627,19 @@ def desk(monkeypatch):
     d = Desk()
     monkeypatch.setattr(ax, "hit", d.hit)
     monkeypatch.setattr(ax, "is_neo", lambda pid, name="": pid == NEO)
+    monkeypatch.setattr(ax, "app_names", lambda pid: set())
     monkeypatch.setattr(focus, "front_app", lambda: (APP, PID))
-    monkeypatch.setattr(apps, "bring_pid_front", lambda pid: d.brought.append(pid) or (True, APP))
+    monkeypatch.setattr(ax, "frontmost_app", lambda: (APP, PID))
+
+    async def bring(pid):  # (async, like apps.bring_pid_front)
+        d.brought.append(pid)
+        return True, APP
+
+    monkeypatch.setattr(apps, "bring_pid_front", bring)
+    monkeypatch.setattr(ax, "regular", lambda pid: True)
     monkeypatch.setattr(inp, "click", lambda x, y, **k: d.clicks.append((round(x, 1), round(y, 1))))
     monkeypatch.setattr(inp, "move", lambda x, y: d.moves.append((x, y)))
-    monkeypatch.setattr(ocr, "protected_rects", lambda area: [])
+    windows(monkeypatch)
     monkeypatch.setattr(pointer, "HOVER_S", 0)
     monkeypatch.setattr(pointer, "LOOK_S", 0)
     monkeypatch.setattr(pointer, "LOOK_AGAIN_S", 0)
@@ -663,7 +707,7 @@ def test_another_apps_window_over_the_words_is_refused(desk, monkeypatch):
     _show(monkeypatch, [("Hint", (300.0, 40.0, 40.0, 16.0))])
     desk.regions.insert(0, (250.0, 0.0, 150.0, 150.0, OTHER, "Mail", "Inbox", "AXRow", ""))
     out, _ = _fallback("hint")
-    assert not out.ok and "another window" in out.text and desk.clicks == []
+    assert not out.ok and "another window" in out.text and desk.clicks == [] and desk.brought == []
 
 
 def test_a_window_a_sheet_blocks_is_refused_and_the_sheet_named(desk, monkeypatch):
@@ -697,7 +741,7 @@ def test_without_text_recognition_the_handlers_answer_stands(desk, monkeypatch):
     ocr.set_engine(None)
     assert _fallback("hint")[0] is None  # no engine at all
     use(FakeVision({}))
-    monkeypatch.setattr(ocr, "protected_rects", lambda area: None)  # the window server can't say
+    monkeypatch.setattr(ocr, "windows_over", lambda area: None)  # the window server can't say
     assert _fallback("hint")[0] is None
     assert _fallback("hint", window=None)[0] is None
 
@@ -723,3 +767,370 @@ def test_a_blind_brain_is_told_what_was_clicked_never_where(desk, monkeypatch):
 def test_the_gate_helpers_are_the_packages_own():
     # (looked up at call time: Step 0's frozen gates module, re-exported by the package, reaches this path)
     assert ocr._gates() is computer
+
+
+# ---- whose words: the window server's windows, front to back ---------------------------------------------
+
+
+def _cg(monkeypatch, listed):
+    import Quartz as Q
+
+    monkeypatch.setattr(Q, "CGWindowListCopyWindowInfo", lambda *a: listed)
+
+
+def cgwin(x, y, w, h, pid, name, alpha=1.0):
+    return {"kCGWindowBounds": {"X": x, "Y": y, "Width": w, "Height": h}, "kCGWindowOwnerPID": pid, "kCGWindowOwnerName": name, "kCGWindowAlpha": alpha}
+
+
+def _protect(monkeypatch, *names):
+    """settings.protected_apps, as the user sets it (the package's own _protected judges)."""
+    from neo import config
+
+    monkeypatch.setenv("NEO_PROTECTED_APPS", "[" + ", ".join(f'"{n.lower()}"' for n in names) + "]")
+    monkeypatch.setattr(config, "_settings", None)
+    monkeypatch.setattr(ax, "app_names", lambda pid: {n.lower() for n in names} if pid == 99 else set())
+
+
+def test_the_words_are_the_topmost_windows_there(monkeypatch):
+    # Front to back: a banner over Board's top right, NEO's own window, Board, a protected app's window
+    # behind Board, an invisible window, and one elsewhere.
+    monkeypatch.setattr(ax, "is_neo", lambda pid, name="": pid == NEO)
+    _protect(monkeypatch, "Vault")
+    _cg(monkeypatch, [
+        cgwin(250, 0, 150, 60, OTHER, "Banner"),
+        cgwin(0, 250, 60, 50, NEO, "NEO"),
+        cgwin(0, 0, 400, 300, PID, APP),
+        cgwin(0, 0, 800, 600, 99, "Vault"),
+        cgwin(0, 0, 400, 300, 77, "Ghost", alpha=0.0),
+        cgwin(900, 900, 50, 50, 78, "Far"),
+    ])  # fmt: skip
+    wins = ocr.windows_over((0.0, 0.0, 400.0, 300.0))
+    assert [(w.app, w.off_limits) for w in wins.wins] == [("Banner", False), ("NEO", True), (APP, False), ("Vault", True)]
+    r = _reading([
+        ("Score 12", 1.0, (20.0, 20.0, 80.0, 14.0)),
+        ("New mail", 1.0, (280.0, 20.0, 80.0, 14.0)),  # the banner's
+        ("Hint", 1.0, (300.0, 200.0, 40.0, 14.0)),
+        ("Orb", 1.0, (10.0, 260.0, 30.0, 14.0)),  # NEO's
+        ("Secret", 1.0, (500.0, 500.0, 60.0, 14.0)),  # the vault's, beside Board
+    ])  # fmt: skip
+    # Board's words only: the protected window behind it hides none of them, the banner's aren't Board's.
+    assert [ln.text for ln in ocr.owned(r, wins, PID).lines] == ["Score 12", "Hint"]
+    assert [ln.text for ln in ocr.owned(r, wins).lines] == ["Score 12", "New mail", "Hint"]  # (any app's but NEO's or a protected one's)
+
+
+def test_text_marks_are_tagged_with_the_app_whose_window_shows_them(monkeypatch):
+    frame, eng = scene([("Score 12", (20.0, 20.0, 80.0, 14.0)), ("New mail", (280.0, 20.0, 80.0, 14.0)), ("Hint", (300.0, 200.0, 40.0, 14.0))])
+    use(eng)
+    windows(monkeypatch, ocr.Win((250.0, 0.0, 150.0, 60.0), OTHER, "Banner"), BOARD_WIN)
+    got = ocr.text_marks(frame)  # (a look at the whole screen: no one app)
+    assert [(m.text, m.app, m.pid) for m in got] == [("Score 12", APP, PID), ("New mail", "Banner", OTHER), ("Hint", APP, PID)]
+    assert [m.text for m in ocr.text_marks(frame, app=APP, pid=PID)] == ["Score 12", "Hint"]  # a banner's words are never Board's
+
+
+def test_without_the_window_servers_answer_nothing_is_read(monkeypatch):
+    _cg(monkeypatch, None)
+    assert ocr.windows_over((0.0, 0.0, 400.0, 300.0)) is None
+
+    def broken(*a):
+        raise RuntimeError("no window server")
+
+    _cg(monkeypatch, [])
+    import Quartz as Q
+
+    monkeypatch.setattr(Q, "CGWindowListCopyWindowInfo", broken)
+    assert ocr.windows_over((0.0, 0.0, 400.0, 300.0)) is None
+
+
+def test_a_protected_window_behind_the_front_one_hides_none_of_its_words(desk, monkeypatch):
+    _show(monkeypatch, [("Hint", (300.0, 40.0, 40.0, 16.0))])
+    windows(monkeypatch, BOARD_WIN, ocr.Win((0.0, 0.0, 800.0, 600.0), 99, "Vault", True))
+    out, _ = _fallback("hint")
+    assert out.ok and len(desk.clicks) == 1
+
+
+def test_words_another_window_covers_are_never_the_targets(desk, monkeypatch):
+    # The window server: another app's window over Board's words — they aren't read as Board's at all.
+    _show(monkeypatch, [("Hint", (300.0, 40.0, 40.0, 16.0))])
+    windows(monkeypatch, ocr.Win((250.0, 0.0, 150.0, 150.0), OTHER, "Mail"), BOARD_WIN)
+    desk.regions.insert(0, (250.0, 0.0, 150.0, 150.0, OTHER, "Mail", "Inbox", "AXRow", ""))
+    out, _ = _fallback("hint")
+    assert not out.ok and "is called 'hint'" in out.text and desk.clicks == [] and desk.brought == []
+
+
+# ---- the app acted on: the one whose window was read, and only it --------------------------------------------
+
+
+def test_a_banner_in_front_doesnt_lose_the_app_whose_window_was_read(desk, monkeypatch):
+    # LaunchServices names the banner's app; ax.frontmost_app — what the handler's window_elements went
+    # by — names the app the user is in. Its pid is the one used, and only it is brought forward.
+    _show(monkeypatch, [("Hint", (300.0, 40.0, 40.0, 16.0))])
+    monkeypatch.setattr(focus, "front_app", lambda: ("NotificationCenter", 77))
+    out, _ = _fallback("hint")
+    assert out.ok and desk.brought == [PID] and len(desk.clicks) == 1 and f"brought {APP} to the front first" in out.text
+
+
+def test_an_app_that_isnt_the_one_read_is_never_guessed(desk, monkeypatch):
+    _show(monkeypatch, [("Hint", (300.0, 40.0, 40.0, 16.0))])
+    monkeypatch.setattr(ax, "frontmost_app", lambda: ("Board Helper", PID))  # (another name, or it changed since)
+    assert _fallback("hint")[0] is None and desk.clicks == [] and desk.brought == []
+    monkeypatch.setattr(ax, "frontmost_app", lambda: (APP, 0))
+    assert _fallback("hint")[0] is None
+    # The handler's own pid is taken as it is.
+    ctx = ToolContext(user_text="click hint", origin="user")
+    out = asyncio.run(ocr.click_text_fallback({"label": "hint"}, ctx, app=APP, window=(0.0, 0.0, 400.0, 300.0), pid=PID))
+    assert out.ok and len(desk.clicks) == 1
+
+
+def test_an_app_not_in_front_is_brought_forward_first(desk, monkeypatch):
+    _show(monkeypatch, [("Hint", (300.0, 40.0, 40.0, 16.0))])
+    monkeypatch.setattr(focus, "front_app", lambda: ("Finder", 11))
+    out, _ = _fallback("hint")
+    assert out.ok and desk.brought == [PID] and len(desk.clicks) == 1 and f"(brought {APP} to the front first)" in out.text
+
+
+def test_whats_there_once_the_app_is_in_front_is_gated_again(desk, monkeypatch):
+    _show(monkeypatch, [("Hint", (300.0, 40.0, 40.0, 16.0))])
+    monkeypatch.setattr(focus, "front_app", lambda: ("Finder", 11))
+    first = desk.hit
+
+    def hit(x, y):  # once Board is in front, its "Send" button is what's under the point
+        return ax.Hit(pid=PID, app=APP, label="Send", role="AXButton", regular=True) if desk.brought else first(x, y)
+
+    monkeypatch.setattr(ax, "hit", hit)
+    out, _ = _fallback("hint")
+    assert str(out).startswith(confirm.NEEDS_CONFIRM) and "Send" in str(out) and desk.brought == [PID] and desk.clicks == []
+    confirm.cancel("t")
+
+
+def test_a_protected_apps_window_over_the_words_is_refused_and_never_brought_forward(desk, monkeypatch):
+    _show(monkeypatch, [("Hint", (300.0, 40.0, 40.0, 16.0))])
+    _protect(monkeypatch, "MyApprover")
+    desk.regions.insert(0, (250.0, 0.0, 150.0, 150.0, 99, "MyApprover", "Approve", "AXButton", ""))
+    monkeypatch.setattr(focus, "front_app", lambda: ("Finder", 11))
+    out, _ = _fallback("hint")
+    assert not out.ok and desk.clicks == [] and desk.brought == []
+
+
+# ---- a brain that can't see: never a point, whatever refuses ---------------------------------------------------
+
+
+@pytest.mark.parametrize("case", ["spot changed", "covered", "stays behind", "another window", "sheet", "protected"])
+def test_a_blind_brain_is_never_told_a_point_when_a_click_is_refused(desk, monkeypatch, case):
+    _show(monkeypatch, [("Hint", (300.0, 40.0, 40.0, 16.0))])
+    monkeypatch.setattr(focus, "front_app", lambda: ("Finder", 11))  # (Board isn't in front: it is brought)
+    if case == "spot changed":  # (the pointer names the spot it looked at again)
+
+        async def bring(t, pts, **kw):
+            raise pointer.Refused(
+                "Error: bringing Board forward changed what's at that spot (320, 48) — it's now "
+                + '<untrusted source="screen">Board: Button “Other”</untrusted>',
+                screen=True,
+            )
+
+        monkeypatch.setattr(pointer, "bring", bring)
+    elif case == "covered":
+        first = desk.hit
+        monkeypatch.setattr(ax, "hit", lambda x, y: ax.Hit(pid=OTHER, app="Mail", label="Inbox", regular=True) if desk.brought else first(x, y))
+    elif case == "stays behind":
+
+        async def stays(pid):
+            desk.brought.append(pid)
+            return False, APP
+
+        monkeypatch.setattr(apps, "bring_pid_front", stays)
+    elif case == "another window":
+        desk.regions.insert(0, (250.0, 0.0, 150.0, 150.0, OTHER, "Mail", "Inbox", "AXRow", ""))
+    elif case == "sheet":
+        desk.regions[0] = (0.0, 0.0, 400.0, 300.0, PID, APP, "", "AXGroup", "“Save changes?” (buttons: Save, Cancel)")
+    else:
+        desk.regions.insert(0, (250.0, 0.0, 150.0, 150.0, NEO, "NEO", "Stop", "AXButton", ""))
+    ctx = ToolContext(user_text="play", origin="agent", extras={"blind": True})
+    out, _ = _fallback("hint", ctx=ctx)
+    assert not out.ok and desk.clicks == []
+    assert not re.search(r"\(\s*\d+\s*,\s*\d+\s*\)", out.text)  # no point in any form
+    assert not any(ch.isdigit() for ch in out.text.split("<untrusted")[0])  # (NEO's own words: no numbers at all)
+
+
+# ---- one read's misread never decides, and every version is judged ---------------------------------------------
+
+
+class Scripted(FakeVision):
+    """Reads as FakeVision does, except read number n (from 0) says other words: ``misread[n]``."""
+
+    def __init__(self, words, misread, **kw):
+        super().__init__(words, **kw)
+        self.misread = misread
+
+    def recognize(self, image, **kw):
+        swap = self.misread.get(len(self.calls), {})
+        return [ocr.Raw(swap.get(r.text, r.text), r.conf, r.box, r.parts) for r in super().recognize(image, **kw)]
+
+
+def test_one_reads_misread_never_outvotes_two_reads(desk, monkeypatch):
+    # The first fast read says "Details" where the button says "Delete"; the padded fast read and the
+    # accurate read both say "Delete": asked for "Details", there is none — and nothing is clicked.
+    frame, eng = scene([("Delete", (300.0, 40.0, 50.0, 16.0))])
+    eng = use(Scripted(eng.words, {0: {"Delete": "Details"}}))
+    got = ocr.find_in(frame, "Details")
+    assert isinstance(got, ocr.Missing) and "disagree" in got.why and [c["fast"] for c in eng.calls] == [True, True, False]
+    monkeypatch.setattr(ocr, "grab", lambda area: frame)
+    eng.calls.clear()
+    out, _ = _fallback("details")
+    assert not out.ok and desk.clicks == [] and not str(out).startswith(confirm.NEEDS_CONFIRM)
+
+
+def test_the_gate_judges_every_version_of_the_words_a_read_saw(desk, monkeypatch):
+    # One read each way ("Detail" elsewhere makes the first fast read unsure, so the accurate one
+    # decides): the find stands — and the gate asks, as it would before "Delete".
+    frame, eng = scene([("Delete", (300.0, 40.0, 50.0, 16.0)), ("Detail", (40.0, 200.0, 50.0, 16.0))])
+    eng = use(Scripted(eng.words, {0: {"Delete": "Details"}}))
+    got = ocr.find_in(frame, "Details")
+    assert isinstance(got, ocr.Found) and got.line == "Details" and got.variants == ("Delete",)
+    monkeypatch.setattr(ocr, "grab", lambda area: frame)
+    eng.calls.clear()
+    out, _ = _fallback("details")
+    assert str(out).startswith(confirm.NEEDS_CONFIRM) and "Delete" in str(out) and desk.clicks == []
+    confirm.cancel("t")
+
+
+def test_a_mark_two_reads_disagree_on_is_judged_as_both(monkeypatch):
+    # The accurate read says "Details", the fast one "Delete": the mark shows the first, and is judged as
+    # both — never clicked by id, and the pointer's gate gets both.
+    frame, eng = world(monkeypatch, [("Delete", (300.0, 40.0, 50.0, 16.0))])
+    use(Scripted(eng.words, {0: {"Delete": "Details"}}))
+    marks = ocr.text_marks(frame, app=APP, pid=PID)
+    assert [(m.text, m.also) for m in marks] == [("Details", ("Delete",))]
+    with pytest.raises(LookupError, match="commit"):
+        ocr.resolve_mark(marks[0].id)
+    assert ocr.mark_labels(marks[0].id) == ["Details", "Delete"]
+
+
+def test_an_ok_among_several_in_a_drawn_dialog_is_never_clicked_by_id(desk, monkeypatch):
+    _show(monkeypatch, [("Delete all files?", (100.0, 100.0, 180.0, 16.0)), ("OK", (150.0, 200.0, 30.0, 16.0)), ("OK", (250.0, 200.0, 30.0, 16.0))])
+    out, _ = _fallback("OK")
+    assert not out.ok and "which one" in out.text and desk.clicks == []
+    ids = list(ocr._marks)
+    assert len(ids) == 2 and all("Delete all files?" in ocr._marks[i].context for i in ids)  # the dialog's words go with each id
+    for i in ids:
+        with pytest.raises(LookupError, match="commit"):
+            ocr.resolve_mark(i)
+    # And the pointer's gate, handed the mark's words, asks — though Accessibility sees no dialog there.
+    monkeypatch.setattr(ax, "window_elements", lambda app=None: (APP, (0.0, 0.0, 400.0, 300.0), []))
+    labels = ocr.mark_labels(ids[0])
+    assert labels[0] == "OK" and len(labels) == 2
+    gate = asyncio.run(computer._gate_click({"id": ids[0]}, [(w, APP) for w in labels]))
+    assert str(gate).startswith(confirm.NEEDS_CONFIRM) and "Delete all files?" in str(gate)
+    confirm.cancel("t")
+
+
+# ---- a mark is clicked only while its words are still there ---------------------------------------------------
+
+
+def test_a_mark_is_clicked_only_while_its_words_are_still_there(monkeypatch):
+    hint = [("Hint", (300.0, 40.0, 40.0, 16.0))]
+    frame, eng = world(monkeypatch, hint)
+    m = ocr.text_marks(frame, app=APP, pid=PID)[0]
+    eng.calls.clear()
+    assert near(ocr.resolve_mark(m.id), (320.0, 48.0), 0.01)
+    # Checked with one fast read of the words' neighbourhood (about 144×96 px at Retina detail).
+    assert [c["fast"] for c in eng.calls] == [True] and near(eng.calls[0]["size"], (144, 96), 1)
+
+    def refused(match, *wins, items=hint, **kw):
+        world(monkeypatch, items, *wins, **kw)
+        with pytest.raises(LookupError, match=match) as e:
+            ocr.resolve_mark(m.id)
+        assert not any(ch.isdigit() for ch in str(e.value).replace(m.id, ""))  # NEO's words: no point, none of the screen's
+
+    refused("aren't where they were", items=[("Hint", (300.0, 140.0, 40.0, 16.0))])  # the window moved or scrolled
+    refused("aren't where they were", items=[("Resign", (300.0, 40.0, 50.0, 16.0))])  # other words there now
+    refused("commit", items=[("Hint: Delete save", (300.0, 40.0, 140.0, 16.0))])  # the words there now delete
+    refused("another window", ocr.Win((250.0, 0.0, 150.0, 150.0), OTHER, "Mail"), BOARD_WIN)  # another app's over it
+    refused("another window", ocr.Win((250.0, 0.0, 150.0, 150.0), 99, "Vault", True), BOARD_WIN)  # a protected one's
+    world(monkeypatch, hint)
+    monkeypatch.setattr(ocr, "windows_over", lambda area: None)
+    with pytest.raises(LookupError, match="can't check"):
+        ocr.resolve_mark(m.id)
+    world(monkeypatch, hint)
+    monkeypatch.setattr(ocr, "grab", lambda area: None)  # (no Screen Recording)
+    with pytest.raises(LookupError, match="can't check"):
+        ocr.resolve_mark(m.id)
+    world(monkeypatch, hint)
+    ocr.set_engine(None)
+    with pytest.raises(LookupError, match="can't check"):
+        ocr.resolve_mark(m.id)
+
+
+def test_a_read_that_drops_the_words_once_is_read_again_before_a_mark_is_called_gone(monkeypatch):
+    frame, eng = world(monkeypatch, [("Hint", (300.0, 40.0, 40.0, 16.0))])
+    m = ocr.remember_marks([("Hint", (300.0, 40.0, 40.0, 16.0), "")], app=APP, pid=PID)[0]
+    eng.drop = lambda text, fast, n: n == 1  # the first read of the check misses them
+    assert ocr.resolve_mark(m.id) == (320.0, 48.0) and len(eng.calls) == 2
+
+
+# ---- what Accessibility names --------------------------------------------------------------------------------
+
+
+def test_a_containers_title_names_none_of_the_words_drawn_in_it():
+    r = _reading([("Start", 1.0, (100.0, 100.0, 40.0, 14.0)), ("me", 1.0, (300.0, 100.0, 20.0, 14.0))])
+    web = ax.Element("e9", "AXWebArea", "Start a New Game - Home", "", 0.0, 0.0, 1000.0, 800.0)
+    assert [t for t, _, _ in ocr.pick_marks(r, covered=[web])] == ["Start", "me"]
+    tabs = [ax.Element(f"e{i}", "AXButton", f"Tab {i}", "", 10.0 * i, 0.0, 10.0, 10.0) for i in range(4)]
+    assert ocr.worth_reading((0.0, 0.0, 1000.0, 800.0), [web, *tabs], blind=False)  # a canvas game in a web area: read
+    # Whole words only: a "Home" button doesn't name "me".
+    home = ax.Element("e1", "AXButton", "Home", "", 290.0, 95.0, 40.0, 24.0)
+    assert [t for t, _, _ in ocr.pick_marks(r, covered=[home])] == ["Start", "me"]
+    # An element whose role isn't known names words only when it is about their size.
+    assert [t for t, _, _ in ocr.pick_marks(r, covered=[((0.0, 0.0, 1000.0, 800.0), "Start a New Game")])] == ["Start", "me"]
+    assert [t for t, _, _ in ocr.pick_marks(r, covered=[((90.0, 95.0, 60.0, 24.0), "Start a New Game")])] == ["me"]
+
+
+# ---- fast reads that disagree, and the known limit of a fast find ---------------------------------------------
+
+
+def test_fast_framings_that_read_different_lines_send_the_find_to_an_accurate_read():
+    # The padded fast read drops a line the first read had: fast is struggling with this picture, so an
+    # accurate read decides — and it sees the small second copy both fast reads dropped.
+    frame, eng = scene([("Start", (40.0, 40.0, 40.0, 16.0)), ("Start", (300.0, 200.0, 40.0, 7.0)), ("Score 3", (40.0, 250.0, 60.0, 16.0))])
+    eng.fast_drop_px, eng.fast_min_px = 15, 4
+    eng.drop = lambda text, fast, n: text == "Score 3" and n == 2
+    use(eng)
+    got = ocr.find_in(frame, "Start")
+    assert isinstance(got, ocr.Ambiguous) and len(got.options) == 2 and [c["fast"] for c in eng.calls] == [True, True, False]
+
+
+def test_a_copy_both_fast_framings_drop_is_a_fast_finds_known_limit():
+    # (The module's notes say so: fast mode drops, rather than garbles, words too small for it in both
+    # framings, and the find is taken from the copy both read. An accurate read would list two.)
+    frame, eng = scene([("Start", (40.0, 40.0, 40.0, 16.0)), ("Start", (300.0, 200.0, 40.0, 7.0))])
+    eng.fast_drop_px, eng.fast_min_px = 15, 4
+    use(eng)
+    got = ocr.find_in(frame, "Start")
+    assert isinstance(got, ocr.Found) and [c["fast"] for c in eng.calls] == [True, True]
+
+
+# ---- the capture ------------------------------------------------------------------------------------------------
+
+
+def test_grab_takes_the_displays_own_detail_and_never_asks_for_screen_recording(monkeypatch):
+    from neo.tools.computer import screen
+
+    monkeypatch.setattr(screen, "can_capture", lambda: False)
+    assert ocr.grab((0.0, 0.0, 100.0, 100.0)) is None  # no Screen Recording: nothing (and nothing asked)
+    monkeypatch.setattr(screen, "can_capture", lambda: True)
+    shots = []
+
+    def screencapture(args):
+        shots.append(args)
+        _, _, w, h = (int(v) for v in args[1].split(","))
+        return Image.new("RGB", (w * 2, h * 2))
+
+    monkeypatch.setattr(screen, "_grab", screencapture)
+    px = ocr.grab((1400.0, 900.0, 200.0, 100.0))  # it runs off the 1512×982 display: clipped to it
+    assert shots == [["-R", "1400,900,112,82"]] and (px.x0, px.y0) == (1400.0, 900.0) and px.ppp == pytest.approx(0.5)
+    assert ocr.grab((2000.0, 2000.0, 50.0, 50.0)) is None  # off every display
+    # The capture pipeline's fresh frame of the whole screen is taken as it is; a window's own isn't.
+    fresh = types.SimpleNamespace(image=Image.new("L", (3024, 1964)), x0=0.0, y0=0.0, ppp=0.5, t=time.monotonic(), window_id=0, covers=lambda *r: True)
+    monkeypatch.setattr(screen, "last_frame", lambda age: fresh, raising=False)
+    assert ocr.grab((10.0, 10.0, 100.0, 100.0)).image is fresh.image and len(shots) == 1
+    fresh.window_id = 7
+    assert ocr.grab((10.0, 10.0, 100.0, 100.0)).image is not fresh.image and len(shots) == 2

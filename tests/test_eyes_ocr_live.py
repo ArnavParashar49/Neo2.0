@@ -184,7 +184,7 @@ def test_word_boxes_by_range_and_the_dialog_crop(vision):
 def test_text_marks_and_word_changes_timing(vision, monkeypatch):
     before_img, truth = synthetic(sheet=True)
     after_img, _ = synthetic(sheet=False)
-    monkeypatch.setattr(ocr, "protected_rects", lambda area: [])
+    monkeypatch.setattr(ocr, "windows_over", lambda area: ocr.Windows((ocr.Win((0.0, 0.0, 1512.0, 982.0), 1, "Board"),)))
     window = (360.0, 90.0, 900.0, 800.0)
     with effects.allow("model"):
         ms, marks = _ms(lambda: ocr.text_marks(ocr.Pixels(before_img, 0.0, 0.0, 0.5), window), 3)

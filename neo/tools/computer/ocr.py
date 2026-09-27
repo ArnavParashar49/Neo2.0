@@ -5,11 +5,18 @@ dialog an app draws itself. There NEO reads the pixels it captured itself, three
 
 * **text targets** — :func:`find_text` (click_text's fallback): the words asked for, found in the
   front window at full Retina detail, an open sheet's words first. The point then goes through the
-  same probe → gate → click path as every other click (:func:`click_text_fallback`).
+  same probe → gate → click path as every other click (:func:`click_text_fallback`); the gate judges
+  every version of the words the reads saw there.
 * **text marks** — t1…tn for words Accessibility doesn't cover, listed with a picture
   (:func:`marks_block`): ids and words only for a brain that can't see (NEO read the pixels, so it may
   act on them by id), plus where they are for one that can. A mark whose words commit something is
-  never clicked by id: click_text asks the user first.
+  never clicked by id: click_text asks the user first. A mark is clicked only while its words are
+  still where they were read, on the same app's window with nothing over them (checked at click
+  time), and for about one look (MARK_TTL_S).
+
+Whose words: the window server's windows over the area, front to back — a line belongs to the topmost
+window at its middle. A protected app's or NEO's own words are never read, and another app's window
+over the target (a banner, a panel) is never read as the target's words.
 * **checking effects** — the words around a click before and after (:func:`sample_change`,
   :func:`words_changed`): “Start a New Game?” is gone, “Start” → “Stop”.
 
@@ -23,9 +30,13 @@ tests/test_eyes_ocr_live.py):
   display drops small stacked labels (2 of 6), so a big accurate read is cut into overlapping pieces
   (6 of 6, about 170 ms);
 * either mode now and then drops or garbles a word (2–3 in 30 framings of the same window), so a find
-  is never one read's word: a fast find is taken when a second, differently framed fast read agrees
-  (about 2 × 6–14 ms); otherwise an accurate read decides over the union of all three. On 150 finds
-  over 30 framings: one fast read, 140 right, 5 wrong, 5 missed; find_in, 150 right (median 22 ms);
+  is not one read's word: a fast find is taken when a second, differently framed fast read agrees on
+  the place and reads as many lines (about 2 × 6–14 ms); otherwise an accurate read decides over the
+  union of all of them — where the reads disagree about the words at a place, a place most of them
+  read otherwise is no find. On 150 finds over 30 framings: one fast read, 140 right, 5 wrong, 5
+  missed; find_in, 150 right (median 22 ms). Its limit: a second copy so small that fast mode drops
+  it in both framings (rather than garbling it) isn't seen by a fast find, which then takes the copy
+  both read;
 * change checks read fast; marks read accurately plus fast (the union); scripts fast can't read,
   accurately in their own languages;
 * the picture reaches Vision as raw grey pixels (about 1.5 ms for a Retina display), never through a
@@ -649,11 +660,88 @@ def read(
 
 
 def without(reading: Reading, rects: Iterable[Box]) -> Reading:
-    """The reading without lines whose middle is in any of ``rects`` (a protected app's windows)."""
+    """The reading without lines whose middle is in any of ``rects``."""
     rects = list(rects)
     if not rects:
         return reading
     keep = tuple(ln for ln in reading.lines if not any(_inside(ln.center, r) for r in rects))
+    return replace(reading, lines=keep)
+
+
+# ---- whose words: the windows over the screen ------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Win:
+    """One on-screen window as the window server lists it (``box``: screen points)."""
+
+    box: Box
+    pid: int
+    app: str
+    off_limits: bool = False  # NEO's own window or a protected app's: its words are never read
+
+
+@dataclass(frozen=True)
+class Windows:
+    """The on-screen windows over an area, front to back (the window server's order). The words at a
+    point belong to the topmost window there: a window behind another shows nothing at that point,
+    and one in front of the target (a banner, another app's panel) shows its own app's words."""
+
+    wins: tuple[Win, ...] = ()
+
+    def at(self, p: tuple[float, float]) -> Win | None:
+        for w in self.wins:
+            x, y, ww, hh = w.box
+            if x <= p[0] < x + ww and y <= p[1] < y + hh:
+                return w
+        return None
+
+
+def windows_over(area: Box) -> Windows | None:
+    """The on-screen windows over ``area``, front to back, each marked when it is NEO's own or a
+    protected app's. None when the window server can't say (fail closed: nothing is read)."""
+    from neo.decide._objc import pool
+
+    try:
+        import Quartz as Q
+
+        from neo.tools import computer as _c
+        from neo.tools.computer import ax
+
+        with pool():
+            return _windows(Q, _c, ax, area)
+    except Exception as ex:  # noqa: BLE001 - can't tell whose windows are there: nothing is read
+        log.info("the window server couldn't say what's on screen: %s", ex)
+        return None
+
+
+def _windows(Q: Any, _c: Any, ax: Any, area: Box) -> Windows | None:
+    listed = Q.CGWindowListCopyWindowInfo(Q.kCGWindowListOptionOnScreenOnly | Q.kCGWindowListExcludeDesktopElements, Q.kCGNullWindowID)
+    if listed is None:
+        return None
+    out: list[Win] = []
+    judged: dict[tuple[int, str], bool] = {}
+    for w in listed:  # front to back
+        b = w.get("kCGWindowBounds") or {}
+        r = tuple(float(b.get(k, 0) or 0) for k in ("X", "Y", "Width", "Height"))
+        if r[2] <= 0 or r[3] <= 0 or float(w.get("kCGWindowAlpha", 1) or 0) <= 0 or not _overlap(r, area):  # type: ignore[arg-type]
+            continue  # (an invisible window shows nothing: ax.window_owner_at skips it too)
+        pid, name = int(w.get("kCGWindowOwnerPID", 0) or 0), str(w.get("kCGWindowOwnerName", "") or "")
+        if (pid, name) not in judged:
+            judged[(pid, name)] = bool(pid and ax.is_neo(pid, name)) or bool(_c._protected(name, pid))
+        out.append(Win(r, pid, name, judged[(pid, name)]))  # type: ignore[arg-type]
+    return Windows(tuple(out))
+
+
+def _readable(w: Win | None, pid: int) -> bool:
+    return w is not None and not w.off_limits and (not pid or w.pid == pid)
+
+
+def owned(reading: Reading, wins: Windows, pid: int = 0) -> Reading:
+    """The reading with only the lines whose middle is on a window NEO may read: the topmost window
+    there is ``pid``'s — with 0, any app's but NEO's own or a protected one's. Words on no window
+    (the desktop) and words a window in front covers never count."""
+    keep = tuple(ln for ln in reading.lines if _readable(wins.at(ln.center), pid))
     return replace(reading, lines=keep)
 
 
@@ -748,6 +836,8 @@ class Found:
     where: str = ""
     level: str = ""
     context: str = ""  # the words read around them (the screen's): the gate's dialog text
+    variants: tuple[str, ...] = ()  # other words a read saw at the same place (the gate judges them too)
+    line_box: Box | None = None  # where the whole line is (``box`` is the words' part of it)
 
 
 @dataclass(frozen=True)
@@ -799,7 +889,7 @@ def match(reading: Reading, label: str, *, sheet: Box | None = None) -> Result:
             continue
         where = "sheet" if sheet is not None and _inside(ln.center, sheet) else ""
         if _same_words(ln.text, label):
-            f = Found(label, ln.text, ln.text, ln.center, ln.box, True, where, reading.level)
+            f = Found(label, ln.text, ln.text, ln.center, ln.box, True, where, reading.level, line_box=ln.box)
             cands.append(((0 if where or sheet is None else 1, 0), f))
             continue
         extra = max(0, len(key(ln.text).split()) - len(want.split()))
@@ -807,7 +897,7 @@ def match(reading: Reading, label: str, *, sheet: Box | None = None) -> Result:
             b = ln.part_box(start, end)
             p = (b[0] + b[2] / 2, b[1] + b[3] / 2)
             w = "sheet" if sheet is not None and _inside(p, sheet) else ""
-            f = Found(label, ln.text[start:end], ln.text, p, b, False, w, reading.level)
+            f = Found(label, ln.text[start:end], ln.text, p, b, False, w, reading.level, line_box=ln.box)
             cands.append(((0 if w or sheet is None else 1, 1 if extra <= 2 else 2), f))
     if not cands:
         return Missing(label, "no such words on the screen")
@@ -849,17 +939,71 @@ def _sure(got: Result, reading: Reading, label: str, sheet: Box | None) -> bool:
     )
 
 
+def _at_place(ln: Line, box: Box) -> bool:
+    """Is ``ln`` at the place ``box`` is (the one holds the other's middle)?"""
+    return _inside((box[0] + box[2] / 2, box[1] + box[3] / 2), ln.box) or _inside(ln.center, box)
+
+
+def _says(text: str, label: str) -> bool:
+    return _same_words(text, label) or bool(_spans(text, label))
+
+
+def _read_there(box: Box, readings: Sequence[Reading]) -> list[list[Line]]:
+    """For each reading, its lines at the place ``box`` is."""
+    return [[ln for ln in r.lines if ln.conf >= _MIN_CONF and _at_place(ln, box)] for r in readings]
+
+
+def _variants(words: str, box: Box, readings: Sequence[Reading]) -> tuple[str, ...]:
+    """Every other version of the words any read saw at ``box``'s place (the screen's words)."""
+    out: list[str] = []
+    for there in _read_there(box, readings):
+        for ln in there:
+            k = key(ln.text)
+            if k and k != key(words) and all(k != key(v) for v in out):
+                out.append(ln.text)
+    return tuple(out)
+
+
+def _checked(f: Found, readings: Sequence[Reading]) -> Found | None:
+    """``f`` with every other version of the words the reads saw at its place (``variants``: the gate
+    judges each) — or None when more reads saw other words there than saw the words asked for: one
+    read's misread that happens to be those words ("Details" where the others read "Delete")."""
+    agree = disagree = 0
+    for there in _read_there(f.box, readings):
+        if there:
+            if any(_says(ln.text, f.label) for ln in there):
+                agree += 1
+            else:
+                disagree += 1
+    if disagree > agree:
+        return None
+    return replace(f, variants=_variants(f.line, f.box, readings))
+
+
+def _count(r: Reading) -> int:
+    return sum(1 for ln in r.lines if ln.conf >= _MIN_CONF)
+
+
 def find_in(
-    frame: Any, label: str, *, area: Box | None = None, sheet: Box | None = None, hide: Iterable[Box] = ()
+    frame: Any,
+    label: str,
+    *,
+    area: Box | None = None,
+    sheet: Box | None = None,
+    hide: Iterable[Box] = (),
+    keep: Callable[[Reading], Reading] | None = None,
 ) -> Result:
     """Find ``label``'s words in a frame (sync; in a thread).
 
     Fast first: taken when two fast reads, framed differently, each find exactly the words in one and
     the same place (in the open sheet when there is one) with nothing that merely looks like them
-    elsewhere — about 2 × 6–25 ms. Otherwise, and for any script fast can't read, an accurate read
-    decides, over everything read so far (a second copy any read saw makes the find ambiguous: a read
-    now and then drops a word, and the copy it dropped may be the one meant). ``hide``: screen
-    rectangles whose words never count (a protected app's windows)."""
+    elsewhere, and read as many lines — about 2 × 6–25 ms. Otherwise, and for any script fast can't
+    read, an accurate read decides, over everything read so far (a second copy any read saw makes the
+    find ambiguous: a read now and then drops a word, and the copy it dropped may be the one meant) —
+    except a place more reads saw other words at than saw these (one read's misread). Every version
+    of the words read at the place found comes with it (``variants``), for the gate. Not seen: a
+    second copy so small that both fast reads drop it (see the module's notes). ``hide``: screen
+    rectangles whose words never count; ``keep``: what of each reading counts (:func:`owned`)."""
     if bad := unreadable(label):
         return Missing(label, f"this Mac's text recognition can't read {bad}")
     fast_plan = plan_for(label, want_fast=True)
@@ -871,6 +1015,8 @@ def find_in(
 
     def look(plan: Plan, pad: int = 0) -> Reading:
         r = without(read(frame, area, plan=plan, ranges=rng, pad=pad), hide)
+        if keep is not None:
+            r = keep(r)
         seen.append(r)
         return r
 
@@ -878,10 +1024,24 @@ def find_in(
         first = match(look(fast_plan), label, sheet=sheet)
         if _sure(first, seen[-1], label, sheet):
             again = match(look(fast_plan, _PAD_PX), label, sheet=sheet)
-            if _sure(again, seen[-1], label, sheet) and _overlap(first.box, again.box):  # type: ignore[union-attr]
-                return first
+            if (
+                _sure(again, seen[-1], label, sheet)
+                and _overlap(first.box, again.box)  # type: ignore[union-attr]
+                and _count(seen[0]) == _count(seen[1])  # (a line one framing dropped: fast is struggling here)
+                and (took := _checked(first, seen)) is not None  # type: ignore[arg-type]
+            ):
+                return took
     closer = look(plan_for(label, want_fast=False) or fast_plan)
-    return match(merge(closer, *seen[:-1], keep_all_words=True), label, sheet=sheet)
+    got = match(merge(closer, *seen[:-1], keep_all_words=True), label, sheet=sheet)
+    disputed = Missing(label, "the reads of the screen disagree about the words there")
+    if isinstance(got, Found):
+        return _checked(got, seen) or disputed
+    if isinstance(got, Ambiguous):
+        options = [f for f in (_checked(o, seen) for o in got.options) if f is not None]
+        if not options:
+            return disputed
+        return options[0] if len(options) == 1 else Ambiguous(label, tuple(options))
+    return got
 
 
 # ---- text marks: t1…tn ----------------------------------------------------------------------------------
@@ -889,8 +1049,10 @@ def find_in(
 
 @dataclass(frozen=True)
 class TextMark:
-    """Words NEO read off a capture that a model may act on by id: the middle of ``box`` (screen points).
-    ``context``: the other words read with it (what a dialog's "OK" does is in them)."""
+    """Words NEO read off a capture that a model may act on by id: the middle of ``box`` (screen points),
+    on ``app``'s window (``pid``). ``context``: the other words read with it (what a dialog's "OK" does
+    is in them); ``also``: other versions of its words a read saw there (each judged like its words);
+    ``line_box``: where the whole line was read (``box`` may be the words' part of it)."""
 
     id: str
     text: str
@@ -900,6 +1062,8 @@ class TextMark:
     pid: int = 0
     t: float = field(default_factory=time.monotonic)
     context: str = ""
+    also: tuple[str, ...] = ()
+    line_box: Box | None = None
 
     @property
     def center(self) -> tuple[float, float]:
@@ -908,33 +1072,50 @@ class TextMark:
 
 
 MAX_MARKS = 30
-MARK_TTL_S = 120.0  # a mark older than this is gone ("look again")
+MARK_TTL_S = 30.0  # about one look: a mark older than this is gone ("look again")
 _KEEP_MARKS = 300
+_RECHECK_PAD_PT = 12.0  # at click time, the words' neighbourhood read again: this much around their line
 _marks: dict[str, TextMark] = {}
 _mark_ids = itertools.count(1)
 _marks_lock = threading.Lock()
 
+# Accessibility roles that hold other things: their title names a page, a pane or a canvas — never the
+# words drawn inside them.
+_CONTAINERS = frozenset({
+    "AXApplication", "AXWindow", "AXSheet", "AXDialog", "AXDrawer", "AXPopover", "AXWebArea", "AXScrollArea",
+    "AXGroup", "AXSplitGroup", "AXSplitter", "AXLayoutArea", "AXLayoutItem", "AXUnknown", "AXList", "AXOutline",
+    "AXTable", "AXBrowser", "AXGrid", "AXTabGroup", "AXToolbar", "AXRadioGroup",
+})  # fmt: skip
 
-def _cover(o: Any) -> tuple[Box, str] | None:
-    """(frame, label) of what Accessibility already names: an element mark (frame, label), an
-    ax.Element (x, y, w, h, title/value) or a (frame, label) pair."""
-    if isinstance(o, tuple) and len(o) == 2:
-        return tuple(map(float, o[0])), str(o[1] or "")  # type: ignore[return-value]
+
+def _cover(o: Any) -> tuple[Box, str, str] | None:
+    """(frame, label, role) of what Accessibility already names: an element mark (frame, label, role),
+    an ax.Element (x, y, w, h, title/value, role) or a (frame, label[, role]) tuple. Role "": unknown."""
+    if isinstance(o, tuple) and len(o) in (2, 3):
+        return tuple(map(float, o[0])), str(o[1] or ""), str(o[2] or "") if len(o) == 3 else ""  # type: ignore[return-value]
     if hasattr(o, "frame") and hasattr(o, "label"):
-        return tuple(map(float, o.frame)), str(o.label or "")  # type: ignore[return-value]
+        return tuple(map(float, o.frame)), str(o.label or ""), str(getattr(o, "role", "") or "")  # type: ignore[return-value]
     if all(hasattr(o, k) for k in ("x", "y", "w", "h")):
-        return (float(o.x), float(o.y), float(o.w), float(o.h)), str(getattr(o, "title", "") or getattr(o, "value", "") or "")
+        label = str(getattr(o, "title", "") or getattr(o, "value", "") or "")
+        return (float(o.x), float(o.y), float(o.w), float(o.h)), label, str(getattr(o, "role", "") or "")
     return None
 
 
-def _named_by_ax(ln: Line, covered: list[tuple[Box, str]]) -> bool:
-    """Does Accessibility already name these words (an element there whose label is — or holds — them)?"""
-    k = key(ln.text)
-    for frame, label in covered:
-        if not _inside(ln.center, frame):
+def _snug(frame: Box, box: Box) -> bool:
+    """Is ``frame`` about the size of words ``box`` (a control holding them, not a pane)?"""
+    return frame[2] <= 3 * box[2] + 40 and frame[3] <= 3 * box[3] + 24
+
+
+def _named_by_ax(ln: Line, covered: list[tuple[Box, str, str]]) -> bool:
+    """Does Accessibility already name these words: an element there — not a container (a web area's or
+    a pane's title names the page, not what is drawn in it), and about the words' size when its role is
+    unknown — whose label is those words, or holds them as whole words, or they hold it?"""
+    for frame, label, role in covered:
+        if role in _CONTAINERS or not label.strip() or not _inside(ln.center, frame):
             continue
-        lk = key(label)
-        if lk and (lk == k or k in lk or lk in k):
+        if not role and not _snug(frame, ln.box):
+            continue
+        if _same_words(label, ln.text) or _spans(label, ln.text) or _spans(ln.text, label):
             return True
     return False
 
@@ -961,11 +1142,20 @@ def pick_marks(
 
 
 def remember_marks(
-    chosen: Iterable[tuple[str, Box, str]], *, app: str = "", pid: int = 0, context: str | None = None
+    chosen: Iterable[tuple[str, Box, str]],
+    *,
+    app: str = "",
+    pid: int = 0,
+    context: str | None = None,
+    owners: Sequence[tuple[str, int]] | None = None,
+    also: Sequence[Sequence[str]] | None = None,
+    line_boxes: Sequence[Box | None] | None = None,
 ) -> list[TextMark]:
     """Issue ids (t1, t2…: never reused while NEO runs, so an old id can't name newer words) for these
-    words, clickable by id until MARK_TTL_S passes. ``context``: all the words read with them (default:
-    theirs)."""
+    words, clickable by id until MARK_TTL_S passes while they are still there. ``context``: all the
+    words read with them (default: theirs); per mark (same order): ``owners`` (app, pid) whose window
+    they are on (default: ``app``, ``pid``), ``also`` other versions of its words a read saw there,
+    ``line_boxes`` where its whole line is."""
     chosen = list(chosen)
     if context is None:
         context = " · ".join(text for text, _, _ in chosen)
@@ -973,8 +1163,13 @@ def remember_marks(
     now = time.monotonic()
     out = []
     with _marks_lock:
-        for text, box, where in chosen:
-            m = TextMark(f"t{next(_mark_ids)}", text, tuple(map(float, box)), where, app, int(pid), now, context)  # type: ignore[arg-type]
+        for i, (text, box, where) in enumerate(chosen):
+            who, whose = owners[i] if owners else (app, pid)
+            lb = line_boxes[i] if line_boxes else None
+            m = TextMark(
+                f"t{next(_mark_ids)}", text, tuple(map(float, box)), where, who, int(whose), now, context,  # type: ignore[arg-type]
+                tuple(str(v) for v in (also[i] if also else ())), tuple(map(float, lb)) if lb else None,  # type: ignore[arg-type]
+            )  # fmt: skip
             _marks[m.id] = m
             out.append(m)
         while len(_marks) > _KEEP_MARKS:
@@ -1000,26 +1195,106 @@ def _commits(text: str, context: str = "") -> bool:
         return True
 
 
-def resolve_mark(eid: str) -> tuple[float, float]:
-    """The pointer's seam for text marks (``pointer.set_id_resolver("t", resolve_mark)``): the screen
-    point of a live mark. A mark whose words send, delete, buy… (or an "OK" in a dialog that says so) is
-    never clicked by id — click_text with its words asks the user first. Errors are LookupError with
-    NEO's own words (the screen's never go into them)."""
-    m = get_mark(eid)
-    if m is None:
-        raise LookupError(f"there's no text mark {str(eid)[:12]} any more — look again (screenshot) for fresh ones")
-    if _commits(m.text, m.context):
+class MarkPoint(tuple):
+    """A text mark's screen point (x, y) — a plain pair to the pointer's seam — with whose words they are
+    (``pid``, ``app``): the seam brings that app forward and refuses a point another window covers."""
+
+    pid: int
+    app: str
+
+    def __new__(cls, point: tuple[float, float], pid: int = 0, app: str = "") -> MarkPoint:
+        self = super().__new__(cls, (float(point[0]), float(point[1])))
+        self.pid, self.app = int(pid), str(app)
+        return self
+
+
+def _no_commit(m: TextMark, words: Iterable[str]) -> None:
+    if any(_commits(w, m.context) for w in words):
         raise LookupError(
             f"{m.id}'s words commit something (a send, a delete, a purchase…): use click_text with those words "
             "instead — it asks the user first"
         )
-    return m.center
+
+
+def _grow(b: Box, d: float) -> Box:
+    return b[0] - d, b[1] - d, b[2] + 2 * d, b[3] + 2 * d
+
+
+def _still_there(m: TextMark) -> list[str]:
+    """At click time: are ``m``'s words still where they were read, on the same app's window, with no
+    other window over them? The window server says whose window is on top there; a fresh capture of
+    the words' line and its neighbourhood is read again (fast, a small crop: a few ms; once more framed
+    differently, then accurately, before it is called gone). Returns the words read there now; raises
+    LookupError (NEO's own words) when they aren't there — or when that can't be told."""
+    unsure = f"I can't check that {m.id}'s words are still there — look again (screenshot) before clicking"
+    line = m.line_box or m.box
+    area = _grow(line, max(_RECHECK_PAD_PT, line[3]))
+    wins = windows_over(area)
+    if wins is None or not available():
+        raise LookupError(unsure)
+    top = wins.at(m.center)
+    if top is None or top.off_limits or (m.pid and top.pid != m.pid):
+        raise LookupError(f"another window is over {m.id}'s words now — look again (screenshot) for fresh ids")
+    px = grab(area)
+    plan = plan_for(m.text)
+    if px is None or plan is None:
+        raise LookupError(unsure)
+    tries = [(plan, 0), (plan, _PAD_PX)]
+    if plan.fast and (closer := plan_for(m.text, want_fast=False)) is not None:
+        tries.append((closer, 0))
+    names = (m.text, *m.also)
+    for p, pad in tries:
+        try:
+            r = owned(read(px, area, plan=p, pad=pad), wins, top.pid)
+        except (Failed, ValueError, effects.EffectRefused) as ex:
+            log.info("couldn't check a text mark: %s", ex)
+            raise LookupError(unsure) from None
+        there = [
+            ln.text for ln in r.lines
+            if ln.conf >= _MIN_CONF and _inside(m.center, _grow(ln.box, 3.0))
+            and any(_similar(ln.text, n) or _spans(ln.text, n) for n in names)
+        ]  # fmt: skip
+        if there:
+            return there
+    raise LookupError(f"{m.id}'s words aren't where they were any more — look again (screenshot) for fresh ids")
+
+
+def resolve_mark(eid: str) -> MarkPoint:
+    """The pointer's seam for text marks (``pointer.set_id_resolver("t", resolve_mark, labels=mark_labels)``):
+    the screen point of a live mark whose words are still there (:func:`_still_there`), with the app
+    whose window they are on. A mark whose words send, delete, buy… (or an "OK" in a dialog that says
+    so) — in any version a read saw, then or now — is never clicked by id: click_text with its words
+    asks the user first. Sync, and it captures and reads: call it off the event loop. Errors are
+    LookupError with NEO's own words (the screen's never go into them, nor any point)."""
+    m = get_mark(eid)
+    if m is None:
+        raise LookupError(f"there's no text mark {str(eid)[:12]} any more — look again (screenshot) for fresh ones")
+    _no_commit(m, (m.text, *m.also))
+    _no_commit(m, _still_there(m))
+    return MarkPoint(m.center, m.pid, m.app)
+
+
+def _verdict(m: TextMark) -> str:
+    """For a plain "OK" whose dialog says it deletes or sends: a label that says so itself — the click
+    gate beside the pointer reads a dialog's words through Accessibility, and a drawn one has none."""
+    from neo.security import policy
+
+    line = next((p for p in m.context.split(" · ") if policy._CONSEQUENCE.search(p)), "")
+    said = f"{m.text} — {line[:_LABEL_MAX]}" if line else ""
+    return said if said and policy.commits(said) else f"{m.text} — confirm"
 
 
 def mark_labels(eid: str) -> list[str]:
-    """The words of text mark ``eid`` ([] if gone), for the click gate alongside what's under the point."""
+    """The words of text mark ``eid`` ([] if gone) — every version a read saw, and for an "OK" in a
+    dialog that commits something, a label that says so — for the click gate beside what's under the
+    point."""
     m = get_mark(eid)
-    return [m.text] if m else []
+    if m is None:
+        return []
+    out = [m.text, *m.also]
+    if any(_commits(w, m.context) and not _commits(w) for w in out):
+        out.append(_verdict(m))
+    return out
 
 
 def text_marks(
@@ -1033,28 +1308,35 @@ def text_marks(
     limit: int = MAX_MARKS,
 ) -> list[TextMark]:
     """Text marks for a picture NEO took (sync: in a thread, beside the Accessibility walk): an accurate
-    read of ``area`` of ``frame`` (the capture pipeline's full-resolution frame), minus the words a
-    protected app's window shows and those Accessibility already names (``covered``: its marks or
-    elements), issued as t-ids. [] when nothing could be read."""
+    read of ``area`` of ``frame`` (the capture pipeline's full-resolution frame) and a fast one, only
+    the words on ``pid``'s windows where nothing covers them (with 0: any app's but NEO's own or a
+    protected one's, each mark its window's app's), minus those Accessibility already names
+    (``covered``: its marks or elements), issued as t-ids. [] when nothing could be read."""
     if not available():
         return []
     px = pixels(frame)
     where = area or (px.x0, px.y0, px.image.width * px.ppp, px.image.height * px.ppp)
-    hide = protected_rects(where)
+    wins = windows_over(where)
     plan = plan_for("", want_fast=False)
-    if hide is None or plan is None:
+    if wins is None or plan is None:
         return []
     try:
-        reading = read(px, area, plan=plan)
+        reads = [owned(read(px, area, plan=plan), wins, pid)]
         quick = plan_for("", want_fast=True)
         if quick is not None and quick.fast:  # (a second read catches most of the words one drops: +6–25 ms)
-            reading = merge(reading, read(px, area, plan=quick))
-        reading = without(reading, hide)
-    except (Failed, ValueError) as ex:
+            reads.append(owned(read(px, area, plan=quick), wins, pid))
+    except (Failed, ValueError, effects.EffectRefused) as ex:
         log.info("no text marks: %s", ex)
         return []
+    reading = merge(*reads)
     chosen = pick_marks(reading, covered=covered, sheet=sheet, limit=limit)
-    return remember_marks(chosen, app=app, pid=pid, context=reading.text())
+    owners: list[tuple[str, int]] = []
+    for _, box, _ in chosen:
+        w = wins.at((box[0] + box[2] / 2, box[1] + box[3] / 2))
+        whose = w.pid if w is not None else pid
+        owners.append((app if app and pid and whose == pid else (w.app if w is not None else app), whose))
+    also = [_variants(text, box, reads) for text, box, _ in chosen]
+    return remember_marks(chosen, context=reading.text(), owners=owners, also=also)
 
 
 async def look_marks(
@@ -1077,15 +1359,29 @@ async def look_marks(
     return await asyncio.to_thread(text_marks, frame, area, covered=named, sheet=sheet, app=app, pid=pid)
 
 
+def _takes(fn: Any, name: str) -> bool:
+    """Does ``fn`` take the keyword argument ``name``?"""
+    import inspect
+
+    try:
+        params = inspect.signature(fn).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    return any(p.kind is p.VAR_KEYWORD or (p.name == name and p.kind is not p.POSITIONAL_ONLY) for p in params)
+
+
 def install() -> bool:
-    """Register the text marks with the pointer's id seam (the Element marks' branch adds it). True
-    when registered."""
+    """Register the text marks with the pointer's id seam (the Element marks' branch adds it), with
+    their words for its click gate. True when registered."""
     from neo.tools.computer import pointer
 
     setter = getattr(pointer, "set_id_resolver", None)
     if setter is None:
         return False
-    setter("t", resolve_mark)
+    if _takes(setter, "labels"):
+        setter("t", resolve_mark, labels=mark_labels)
+    else:
+        setter("t", resolve_mark)
     return True
 
 
@@ -1132,10 +1428,11 @@ def marks_block(marks: list[TextMark], shot: Any = None, *, blind: bool) -> str:
 def worth_reading(window: Box | None, named: Iterable[Any], *, blind: bool, min_share: float = 0.35, min_named: int = 4) -> bool:
     """Should a look list text marks? For a brain that can't see: always (the words are all it gets).
     For one that can: when Accessibility names little of the window — fewer than ``min_named`` labelled
-    elements, or their frames cover under ``min_share`` of it (a canvas, a game, a drawn dialog)."""
+    elements, or their frames cover under ``min_share`` of it (a canvas, a game, a drawn dialog). A
+    container's title (a web area's, a pane's) names none of what is drawn inside it: it doesn't count."""
     if blind:
         return True
-    cov = [c for c in (_cover(o) for o in named) if c is not None and c[1].strip()]
+    cov = [c for c in (_cover(o) for o in named) if c is not None and c[1].strip() and c[2] not in _CONTAINERS]
     if len(cov) < min_named or window is None:
         return True
     wx, wy, ww, wh = window
@@ -1146,7 +1443,7 @@ def worth_reading(window: Box | None, named: Iterable[Any], *, blind: bool, min_
     for i in range(n):
         for j in range(n):
             p = (wx + (i + 0.5) * ww / n, wy + (j + 0.5) * wh / n)
-            if any(_inside(p, f) for f, _ in cov):
+            if any(_inside(p, f) for f, _, _ in cov):
                 hit += 1
     return hit / (n * n) < min_share
 
@@ -1260,34 +1557,7 @@ def compare_pictures(before: Any, after: Any, area: Box | None = None, *, plan: 
     return words_changed(rb, ra)
 
 
-# ---- the screen: capture, protected windows -------------------------------------------------------------
-
-
-def protected_rects(area: Box) -> list[Box] | None:
-    """The on-screen windows over ``area`` that belong to an app NEO never touches (a host's approval
-    dialog, a vault) — their words are never read. None when the window server can't say (fail
-    closed: nothing is read)."""
-    try:
-        import Quartz as Q
-
-        from neo.tools import computer as _c
-        from neo.tools.computer import ax
-
-        wins = Q.CGWindowListCopyWindowInfo(Q.kCGWindowListOptionOnScreenOnly | Q.kCGWindowListExcludeDesktopElements, Q.kCGNullWindowID)
-    except Exception:  # noqa: BLE001
-        return None
-    if wins is None:
-        return None
-    out = []
-    for w in wins:
-        b = w.get("kCGWindowBounds") or {}
-        r = tuple(float(b.get(k, 0) or 0) for k in ("X", "Y", "Width", "Height"))
-        if r[2] <= 0 or r[3] <= 0 or not _overlap(r, area):  # type: ignore[arg-type]
-            continue
-        pid, name = int(w.get("kCGWindowOwnerPID", 0) or 0), str(w.get("kCGWindowOwnerName", "") or "")
-        if (pid and ax.is_neo(pid, name)) or _c._protected(name, pid):
-            out.append(r)
-    return out  # type: ignore[return-value]
+# ---- the screen: capture ---------------------------------------------------------------------------------
 
 
 def _clip_to_display(area: Box) -> tuple[int, int, int, int] | None:
@@ -1327,14 +1597,15 @@ def grab(area: Box) -> Pixels | None:
     return Pixels(img, float(x), float(y), w / max(1, img.width))
 
 
-def read_area(area: Box, *, text: str = "", accurate: bool = False) -> Reading | None:
-    """Capture ``area`` and read its words (sync: in a thread) — without any a protected app shows.
-    ``text``: words that will be looked for (their script picks the languages). None when nothing
-    could be read (no engine, no Screen Recording, the window server can't say what's protected)."""
+def read_area(area: Box, *, text: str = "", accurate: bool = False, pid: int = 0) -> Reading | None:
+    """Capture ``area`` and read its words (sync: in a thread) — only those on ``pid``'s windows where
+    nothing covers them (0: any app's but NEO's own or a protected one's). ``text``: words that will be
+    looked for (their script picks the languages). None when nothing could be read (no engine, no
+    Screen Recording, the window server can't say whose windows are there)."""
     if not available():
         return None
-    hide = protected_rects(area)
-    if hide is None:
+    wins = windows_over(area)
+    if wins is None:
         return None
     px = grab(area)
     if px is None:
@@ -1343,39 +1614,41 @@ def read_area(area: Box, *, text: str = "", accurate: bool = False) -> Reading |
     if plan is None:
         return None
     try:
-        return without(read(px, area, plan=plan), hide)
-    except (Failed, ValueError) as ex:
+        return owned(read(px, area, plan=plan), wins, pid)
+    except (Failed, ValueError, effects.EffectRefused) as ex:
         log.info("couldn't read the screen: %s", ex)
         return None
 
 
-def find_text_sync(label: str, window: Box, *, sheet: Box | None = None) -> Result | None:
-    """:func:`find_in` on a fresh capture of ``window`` (screen points), without the words a protected
-    app's window shows. None when the screen couldn't be read (no engine, no Screen Recording, the
-    window server can't say what's protected) — not a "not found": the caller keeps its own answer."""
+def find_text_sync(label: str, window: Box, *, sheet: Box | None = None, pid: int = 0) -> Result | None:
+    """:func:`find_in` on a fresh capture of ``window`` (screen points), only the words on ``pid``'s
+    windows where no other window covers them (0: any app's but NEO's own or a protected one's). None
+    when the screen couldn't be read (no engine, no Screen Recording, the window server can't say whose
+    windows are there) — not a "not found": the caller keeps its own answer."""
     if not available():
         return None
     if bad := unreadable(label):
         return Missing(label, f"this Mac's text recognition can't read {bad}")
     if plan_for(label) is None:
         return None
-    hide = protected_rects(window)
-    if hide is None:
+    wins = windows_over(window)
+    if wins is None:
         return None
     px = grab(window)
     if px is None:
         return None
     try:
-        return find_in(px, label, area=window, sheet=sheet, hide=hide)
-    except (Failed, ValueError) as ex:
+        return find_in(px, label, area=window, sheet=sheet, keep=lambda r: owned(r, wins, pid))
+    except (Failed, ValueError, effects.EffectRefused) as ex:
         log.info("couldn't read the screen: %s", ex)
         return None
 
 
-async def find_text(label: str, window: Box, *, sheet: Box | None = None) -> Result | None:
-    """Where ``label``'s words are shown in ``window`` (the front window's frame, screen points): Found,
-    Ambiguous or Missing — or None when the screen couldn't be read. Off the event loop."""
-    return await asyncio.to_thread(find_text_sync, label, window, sheet=sheet)
+async def find_text(label: str, window: Box, *, sheet: Box | None = None, pid: int = 0) -> Result | None:
+    """Where ``label``'s words are shown in ``window`` (the front window's frame, screen points) on
+    ``pid``'s windows: Found, Ambiguous or Missing — or None when the screen couldn't be read. Off the
+    event loop."""
+    return await asyncio.to_thread(find_text_sync, label, window, sheet=sheet, pid=pid)
 
 
 def sheet_frame(els: Iterable[Any] | None) -> Box | None:
@@ -1410,29 +1683,71 @@ def _at(p: tuple[float, float]) -> str:
     return f"({int(round(p[0]))}, {int(round(p[1]))})"
 
 
+_POINT = re.compile(r"\s*\(\s*-?\d+(?:\.\d+)?\s*,\s*-?\d+(?:\.\d+)?\s*\)")
+
+
+def _front_pid(app: str) -> int:
+    """The pid of ``app`` while it is the app whose window was read: the one ax.frontmost_app names —
+    the answer ax.window_elements went by (a passing banner in front is skipped for the app the user
+    is in) — under that same name. 0 when it isn't (it changed since) or can't be told."""
+    from neo.decide._objc import pool
+    from neo.tools.computer import ax
+
+    try:
+        with pool():
+            name, pid = ax.frontmost_app()
+    except Exception:  # noqa: BLE001 - can't tell: 0 (the fallback steps aside)
+        return 0
+    same = bool(app) and " ".join(str(name or "").split()).lower() == " ".join(app.split()).lower()
+    return int(pid) if pid and same else 0
+
+
+def _refusal(g: Any, c: Any, r: Any) -> Any:
+    """The pointer's refusal as the tool's result — for a brain that can't see, without any point in
+    it (bringing an app forward names the spot that changed)."""
+    if c.get("blind") and not r.protected:
+        from neo.tools.computer import pointer
+
+        r = pointer.Refused(_POINT.sub("", str(r)), screen=r.screen, protected=r.protected)
+    return g._refused(c, r)
+
+
+async def _bring(t: Any, pts: list[tuple[float, float]], pid: int, blind: bool) -> None:
+    """pointer.bring for the app whose words they are — told the brain can't see when it takes that."""
+    from neo.tools.computer import pointer
+
+    if _takes(pointer.bring, "blind"):
+        await pointer.bring(t, pts, want_pid=pid, blind=blind)
+    else:
+        await pointer.bring(t, pts, want_pid=pid)
+
+
 async def click_text_fallback(
     a: dict, c: Any, *, app: str, window: Box | None, els: list | None = None, pid: int = 0
 ) -> Any | None:
     """click_text when Accessibility names nothing with the label: read the front window's words and
     click the place showing them — through the same checks as any click (NEO's own window and protected
-    apps refused, a window a sheet blocks refused, the owner app checked, the confirmation gate on the
-    words read AND on what is under the point, the words of the dialog as its context). Returns the
-    tool's result, or None when the screen couldn't be read (the handler keeps its own answer)."""
+    apps refused, a window a sheet blocks refused, the words only where ``app``'s own window shows them
+    with nothing over them, the confirmation gate on every version of the words the reads saw AND on
+    what is under the point, the words of the dialog as its context; only ``app`` ever brought forward).
+    ``pid``: ``app``'s process (the window's owner); when 0 it is asked (ax.frontmost_app, under the
+    same name). Returns the tool's result, or None when the screen couldn't be read or whose window it
+    is can't be told (the handler keeps its own answer)."""
     from neo.agent.registry import ToolOutput, fence
     from neo.tools.computer import input as inp
     from neo.tools.computer import pointer
 
     g = _gates()
     label = str(a.get("label") or "")
+    blind = bool(c.get("blind"))
     if window is None or not available():
         return None
     if not pid:
-        from neo.tools.computer.focus import front_app
-
-        front, front_pid = await asyncio.to_thread(front_app)
-        pid = front_pid if front and app and front.lower() == app.lower() else 0
+        pid = await asyncio.to_thread(_front_pid, app)
+    if not pid:
+        return None  # whose window was read can't be told: nothing is read, nothing brought forward
     sheet = sheet_frame(els)
-    got = await find_text(label, window, sheet=sheet)
+    got = await find_text(label, window, sheet=sheet, pid=pid)
     if got is None:
         return None
     if isinstance(got, Missing):
@@ -1442,7 +1757,17 @@ async def click_text_fallback(
             ok=False,
         )
     if isinstance(got, Ambiguous):
-        marks = remember_marks([(f.text if f.exact else f.line, f.box, f.where) for f in got.options], app=app, pid=pid)
+        # Each place's id carries the words around it (a drawn dialog's "OK" is judged by what the
+        # dialog says) and every version of its words the reads saw.
+        context = " · ".join(dict.fromkeys(f.context for f in got.options if f.context))
+        marks = remember_marks(
+            [(f.text if f.exact else f.line, f.box, f.where) for f in got.options],
+            app=app,
+            pid=pid,
+            context=context or None,
+            also=[tuple(v for v in (f.text, *f.variants) if key(v) != key(f.text if f.exact else f.line)) for f in got.options],
+            line_boxes=[f.line_box for f in got.options],
+        )
         g._taint(c, "screen")
         text = (
             f"Error: several places on the screen read '{label}' — which one? Click it by its id (click id=t…), "
@@ -1454,38 +1779,40 @@ async def click_text_fallback(
     try:
         t = await pointer.probe(pts)  # NEO's own window, a protected app, a window a sheet blocks: refused
         h = t.hits[0]
-        if h.pid and pid and h.pid != pid:
+        if h.pid != pid:  # (another app's window came over the words since they were read — or no one's)
             raise pointer.Refused(
                 f"Error: another window ({h.app or 'another app'}) is over the words '{label}' in {app or 'the front app'} "
                 "— look again (screenshot) before clicking.",
             )
         # The gate judges the whole line the words are in (a "Delete" inside "Delete All" is one card, not
-        # two), with the dialog's words as the context of a plain "OK"; then what is under the point.
+        # two) and every other version of it a read saw there, with the dialog's words as the context of
+        # a plain "OK"; then what is under the point.
         said = [_Said(found.context or found.line)] + list(els or [])
-        if gate := await g._ask_first("click_text", a, found.line, app, said):
-            return gate
+        for words in dict.fromkeys((found.line, *found.variants)):
+            if gate := await g._ask_first("click_text", a, words, app, said):
+                return gate
         if gate := await g._gate_click(a, [(h.label, h.app or app)]):
             return gate
-        await pointer.bring(t, pts, want_pid=pid)
+        await _bring(t, pts, pid, blind)
         if t.relabeled and (gate := await g._gate_click(a, [(t.hits[0].label, t.hits[0].app or app)])):
             return gate
     except pointer.Refused as r:
-        return g._refused(c, r)
+        return _refusal(g, c, r)
     h = t.hits[0]
     # (never a number for a brain that can't see: it would only copy it into a click)
-    spot = "the words" if c.get("blind") else _at(pts[0])
-    head = f"Clicked the words '{label}'" + ("" if c.get("blind") else f" at {spot}")
+    spot = "the words" if blind else _at(pts[0])
+    head = f"Clicked the words '{label}'" + ("" if blind else f" at {spot}")
     head += f" in {h.app or app}" if (h.app or app) else ""
     if t.brought:
         head += f" (brought {t.brought} to the front first)"
     head += " — found by reading the screen (Accessibility has no such label)."
-    before = await g._watch(c, pid or h.pid, pts, hover=pts[0])
+    before = await g._watch(c, pid, pts, hover=pts[0])
     await asyncio.to_thread(inp.click, *pts[0])
     g._taint(c, "screen")
     read_there = f"read there: {_q(found.line)}" + (" [in the open sheet]" if found.where else "")
     if before is None:
         return ToolOutput(head + g._input_doubt() + "\n" + fence("screen", read_there))
-    out = await pointer.outcome(before, pid or h.pid, pts, [spot])
+    out = await pointer.outcome(before, pid, pts, [spot])
     out = pointer.maybe_elsewhere(out, spot)
     text, ok = pointer.report(head, out, [pointer.words(h), read_there], g._input_doubt())
     return _with_effect(ToolOutput(text, ok=ok), out)
