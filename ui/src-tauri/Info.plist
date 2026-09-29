@@ -2,6 +2,8 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+  <key>NSCameraUsageDescription</key>
+  <string>NEO turns on the camera only when you ask it to look at something, and turns it off after answering.</string>
   <key>NSMicrophoneUsageDescription</key>
   <string>NEO listens for “Hey Neo” and to what you say to it.</string>
   <key>NSAppleEventsUsageDescription</key>
@@ -16,8 +18,6 @@
   <string>NEO adds the reminders you ask for.</string>
   <key>NSRemindersUsageDescription</key>
   <string>NEO adds the reminders you ask for.</string>
-  <key>NSCameraUsageDescription</key>
-  <string>NEO looks through the camera only when you ask it what you’re holding or showing.</string>
   <key>NSContactsUsageDescription</key>
   <string>NEO finds the person you ask it to message or email.</string>
   <key>LSUIElement</key>
