@@ -204,6 +204,26 @@ Apple Vision and the cloud brain. `NEO_VISION_DETECTOR` picks the detector: `aut
 `yoloe`, or a D-FINE repo id or folder. YOLOE's weights and the model made from them are AGPL-3.0:
 see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
+## Naming a song
+
+Ask NEO *"what song is this?"*, *"which song is playing?"* or *"ye kaunsa gaana hai"* and it listens
+for a few seconds and names it: *"That's Blinding Lights by The Weeknd, from After Hours, 2020."* It
+listens only when you ask it yourself. While it listens, the chat shows a card with a meter of how loud
+the sound is. Then the card shows the song, its cover, and links to it on Apple Music and Shazam.
+
+NEO listens to the room through the microphone. While your Mac is playing something, it also listens
+to the Mac's own sound, so it can name a song you hear in headphones. For that it uses the Screen
+Recording permission it already asks for; without it, only the microphone listens. It tries to match
+after about 3.5 seconds, again at 7 and 11, and stops at the first match. After 12 seconds
+(`NEO_SONG_LISTEN_S`) with no match it says it couldn't recognise the song. The stop button, saying
+"stop" or the card's own stop end it at once.
+
+What NEO hears stays in memory: it is never saved or logged. Only Shazam's fingerprint of it goes to
+Shazam, which is a summary of the sound's strongest frequencies that can't be played back. NEO fetches
+the cover art itself. `NEO_SONG_ID=false` turns this off. It uses
+[shazamio](https://github.com/dotX12/ShazamIO) (MIT), an unofficial client for Shazam: see
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
 ## Configuration
 
 Everything is an environment variable with the `NEO_` prefix (or a line in `.env`). The useful ones:
@@ -557,7 +577,7 @@ neo2/           the package: `python -m neo2` is NEO.app's core
     agent/      loop.py (the one agent loop) · session.py (routing) · confirm.py · registry.py · prompt.py
     providers/  gemini.py · openai_compat.py (Groq, local) · cerebras.py + spend.py (paid, budgeted) · claude.py · base.py (neutral message format)
     reflex/     laya_reflex.py · features.py · finetune.py · generate.py · dataset.py · schema.py · templates_hi.py · hf_data.py + sources.py (public data)
-    tools/      computer/ (gates: every check, frozen · tools_ax/pointer/keys/label/apps · ax, input, pointer, screen, apps, shell) · browser.py · browser_live.py (the chat's live card) · system.py · web.py · memory_tool.py
+    tools/      computer/ (gates: every check, frozen · tools_ax/pointer/keys/label/apps · ax, input, pointer, screen, apps, shell) · browser.py · browser_live.py (the chat's live card) · system.py · web.py · memory_tool.py · music/ (naming a song: capture, recognize, the song card)
     voice/      wake.py · local.py · live.py · audio.py · pipeline.py
     vision/     the camera's eyes: apple.py (Apple Vision) · yolo.py + detect.py (object boxes) · pipeline.py · answer.py
     memory/     store.py (SQLite + FTS5 + vectors, playbooks, sessions) · embed.py · summarize.py

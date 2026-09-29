@@ -37,5 +37,21 @@ and keep their own licences.
   - The code that runs the model, in `neo2/core/vision/yolo.py`.
   - Neither the weights nor the converted model are stored in this repository.
 
+## shazamio and shazamio-core (dotX12): MIT
+
+- **What they are:** [shazamio](https://github.com/dotX12/ShazamIO) 0.8.1, an unofficial Python client
+  for Shazam's song recognition, and shazamio-core 1.1.2, its Rust part, which computes Shazam's
+  fingerprint of a piece of audio. Neither is made by, or affiliated with, Shazam or Apple.
+- **Licence:** MIT, both. shazamio: Copyright (c) 2021 dotX12. shazamio-core: Copyright (c) 2024
+  dotX12. Each package ships its licence text (`LICENSE.txt`, `LICENSE`).
+- **How NEO uses them:** the `music` extra (in NEO.app's `app` extra) installs them, pinned in
+  `requirements.lock`. When the user asks what song is playing, `neo2/core/tools/music/recognize.py`
+  builds a WAV of the last seconds NEO heard, in memory, and shazamio-core turns it into Shazam's
+  fingerprint. shazamio then sends that fingerprint, its length and a timestamp to Shazam, in one
+  request through NEO's own HTTP client. The audio itself never leaves the Mac and is never written
+  to disk. Shazam's answer (the song's title, artist, album, year, genre, links and cover art) is
+  shown in the chat and said aloud.
+- **Source:** the packages above; NEO's code that uses them is in `neo2/core/tools/music/`.
+
 Other models NEO downloads (Laya, the on-device voice, D-FINE small for the camera if you allow that
 download) keep their own licences, as stated where each one is fetched.

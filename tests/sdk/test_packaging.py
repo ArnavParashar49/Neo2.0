@@ -68,6 +68,9 @@ CAMERA_ADDED = {
     "transformers",
     "torchvision",
 }
+# And naming songs (2026-09-29: "what song is this?"): Shazam's fingerprint and request (the user's
+# choice: shazamio, which pins shazamio-core; its small dependencies are in requirements.lock).
+SONG_ADDED = {"shazamio==0.8.1"}
 HEAVY = ("torch", "laya", "mlx", "pyobjc", "playwright", "sentence-transformers", "google-genai", "openai", "anthropic")
 
 
@@ -91,9 +94,10 @@ def _name(req: str) -> str:
 
 
 def test_neo_app_gets_exactly_the_dependencies_it_always_had():
-    assert set(PROJECT["dependencies"]) | _flat("app") == APP_BEFORE | APP_ADDED | CAMERA_ADDED
+    assert set(PROJECT["dependencies"]) | _flat("app") == APP_BEFORE | APP_ADDED | CAMERA_ADDED | SONG_ADDED
     assert set(EXTRAS["mac"]) >= APP_ADDED  # macOS frameworks: the mac extra, the camera's its own
     assert set(EXTRAS["vision"]) >= CAMERA_ADDED
+    assert EXTRAS["music"] == sorted(SONG_ADDED)
 
 
 def test_the_core_is_small_and_nothing_heavy():
@@ -226,3 +230,16 @@ def test_the_lock_pins_every_pyobjc_framework_the_app_installs():
     needed = mac | {f"pyobjc-{n}" for n in ("core", "framework-coremedia", "framework-coreml", "framework-coreaudio")}
     assert needed <= lock.keys(), sorted(needed - lock.keys())
     assert len({v for n, v in lock.items() if n.startswith("pyobjc")}) == 1
+
+
+def test_the_lock_pins_the_music_extra_and_what_it_needs():
+    """shazamio pins shazamio-core; its small dependencies are pinned beside it (the app installs from
+    requirements.lock alone), the shared ones (aiohttp, anyio, numpy, pydantic) at NEO's own versions."""
+    lock = {
+        name.lower(): version.strip()
+        for line in (ROOT / "requirements.lock").read_text().splitlines()
+        if "==" in line and not line.startswith("#")
+        for name, version in [line.split("==", 1)]
+    }
+    assert (lock["shazamio"], lock["shazamio-core"]) == ("0.8.1", "1.1.2")
+    assert {"aiofiles", "aiohttp-retry", "dataclass-factory", "pydub", "aiohttp", "anyio", "numpy", "pydantic"} <= lock.keys()

@@ -249,9 +249,7 @@ async def identify(pcm: np.ndarray) -> Song | None:
     shazamio = _shazamio()
     from shazamio_core import SearchParams
 
-    seconds = min(
-        MAX_SIGNATURE_S, math.ceil(pcm.size / RATE)
-    )  # (all of it: the latest audio is the song now)
+    seconds = min(MAX_SIGNATURE_S, math.ceil(pcm.size / RATE))  # all of it: the latest audio is the song now
     async with _client() as client:
         shazam = shazamio.Shazam(http_client=_OneShot(client), segment_duration_seconds=seconds)
         try:
@@ -265,6 +263,8 @@ async def identify(pcm: np.ndarray) -> Song | None:
             raise Failed("timed out") from None
         except Exception as e:  # noqa: BLE001 — the signature, or shazamio itself: never the user's problem to read
             raise Failed(type(e).__name__) from None
+    if not isinstance(resp.get("matches"), list):  # (no match is {"matches": [], "tagid", "retryms"})
+        raise Failed("an answer without matches")
     return parse(resp)
 
 

@@ -350,6 +350,7 @@ async def test_identify_uses_only_the_latest_12_seconds_and_never_under_one(monk
         lambda r: httpx.Response(503, text="busy"),
         lambda r: httpx.Response(429, json={}),
         lambda r: httpx.Response(200, text="<html>not json</html>"),
+        lambda r: httpx.Response(200, json={"error": "try later"}),  # an answer that isn't one
         lambda r: (_ for _ in ()).throw(httpx.ConnectError("offline")),
     ],
 )
