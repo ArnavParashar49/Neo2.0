@@ -62,11 +62,18 @@ voice = [  # local voice (Apple Silicon)
     "torch",  # silero
 ]
 local = ["mlx-lm; sys_platform == 'darwin'"]  # python -m neo2 --local: the offline brain
+vision = [  # the camera: capture (AVFoundation), Apple Vision's labels / words / hands, D-FINE's boxes
+    "pyobjc-framework-AVFoundation>=12.2,<13; sys_platform == 'darwin'",
+    "pyobjc-framework-Vision>=12.2,<13; sys_platform == 'darwin'",
+    "pillow",
+    "transformers",  # (already there for Laya)
+    "torch",
+]
 server = ["websockets>=13"]  # the overlay's websocket
 mcp = ["mcp>=2.2,<3"]  # python -m neo2.mcp (neo2-mcp)
 langchain = ["langchain-core>=1,<2"]  # neo2.adapters.langchain
 # NEO.app: exactly the dependencies it has always had
-app = ["neo2[brains,web,embeddings,reflex,mac,browser,voice,local,server]"]
+app = ["neo2[brains,web,embeddings,reflex,mac,browser,voice,local,server,vision]"]
 all = ["neo2[app,mcp,langchain]"]
 
 [project.scripts]
