@@ -133,6 +133,12 @@ _HOW_TO_WORK: tuple[tuple[str, frozenset[str] | None], ...] = (
     ),
     ("- {search_site}\n", frozenset({"search_site"})),
     (
+        "- camera_look is for what is in front of the user (\"what am I holding\", \"what is this?\", a label, a\n"
+        "  colour, fingers): NEO turns the camera on for it only when the user's own words asked, so never\n"
+        "  call it for the screen or on your own; if it says the user must ask, tell them to ask NEO directly.\n",
+        frozenset({"camera_look"}),
+    ),
+    (
         "- Memory: when the user states a preference, corrects you, or shares a personal fact, save it\n"
         "  silently with the memory tool. Recall memory before personal or recurring tasks.\n",
         frozenset({"memory"}),

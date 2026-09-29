@@ -250,3 +250,35 @@ def _split_trailing_commands(text: str, whole: Step, first_index: int) -> list[S
         if rest and not is_payload(rest[0][0]):  # the tail starts with a real command
             return [h, *rest]
     return [whole]
+
+
+# ---- the camera lane --------------------------------------------------------------------------
+# "what am I holding", "ye kya hai", "मेरे हाथ में क्या है": the user's own words ask NEO to look
+# through the camera (neo2.core.agent.camera_words decides by the words). The camera turns on only
+# for the user: never a model's words (the agent loop, Live relaying its own goal), never an approval
+# replay, never text NEO read somewhere, and never an embedding host's request unless the host gave
+# its agent the camera tool itself.
+
+CAMERA_TOOL = "camera_look"
+
+
+def camera(text: str, *, origin: str) -> Step | None:
+    """``("camera_look", {"question": <the user's words>})`` when the user's own words ask NEO to look
+    through the camera — or follow up on a look moments ago ("and now?") — else None. A sentence about
+    the screen ("what is on my screen") never is."""
+    if origin != "user":
+        return None
+    raw = " ".join((text or "").split())
+    if not raw:
+        return None
+    from neo2.core import runtime
+    from neo2.core.agent import camera_words
+
+    if runtime.library_mode() and not runtime.library_bound():
+        return None  # a library's process-wide catalog: no host chose the camera
+    t = registry().get(CAMERA_TOOL)
+    if t is None or t.hidden:
+        return None
+    if not (camera_words.wants_camera(raw) or camera_words.follow_up(raw)):
+        return None
+    return CAMERA_TOOL, {"question": raw}

@@ -19,7 +19,8 @@ it twice. A claim is consumed once, so a command the user repeats later still ru
 Before any of that, the moment the user starts talking to NEO (`listening()` on the wake word,
 push-to-talk or the start of speech, and the first words of each utterance `feed()` sees), what the
 request will need is warmed (neo2.core.agent.prefetch.prewarm): the resolver's Laya is loaded while the
-user speaks, not when the words are already in.
+user speaks, not when the words are already in. Words that ask for the camera ("what am I holding")
+warm its answer's cloud brains too (neo2.core.agent.camera_words.prewarm).
 """
 
 from __future__ import annotations
@@ -30,7 +31,7 @@ import time
 from dataclasses import dataclass
 
 from neo2.core import runtime
-from neo2.core.agent import fastpath
+from neo2.core.agent import camera_words, fastpath
 from neo2.core.agent.registry import ToolContext, registry
 from neo2.core.events import bus
 
@@ -90,6 +91,7 @@ class EarlyActor:
         self._claims: dict[str, tuple[float, Ran]] = {}  # early runs the model hasn't asked for yet
         self._lock = asyncio.Lock()
         self._warmed = -1  # the utterance whose words already started a prewarm
+        self._cam_warmed = -1  # the utterance whose words already warmed the camera answer's brains
         self.executed: list[Ran] = []  # this utterance, in order
 
     # ---- utterance lifecycle ----------------------------------------------------------------
@@ -117,6 +119,12 @@ class EarlyActor:
         text = text.strip()
         if text and self._warmed != self._utt:
             self.listening("speech")  # the first words of an utterance NEO wasn't told about
+        if text and self._cam_warmed != self._utt and camera_words.wants_camera(text):
+            # "what am I holding…": the camera answer's cloud brains (Gemini, then Cerebras) warm
+            # while the user is still speaking. Only a warm-up — the camera itself turns on when the
+            # session routes the finished sentence (fastpath.camera), never from a partial one.
+            self._cam_warmed = self._utt
+            camera_words.prewarm()
         if text != self._text:
             if not text.startswith(self._text[: self._consumed]):
                 self._consumed = 0  # the recogniser revised words we already acted on
