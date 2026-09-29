@@ -19,7 +19,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any, Literal
 
 from neo2.core import logger, runtime
-from neo2.core.agent import batch, confirm, fastpath, grants, prefetch, replay
+from neo2.core.agent import batch, camera_words, confirm, fastpath, grants, prefetch, replay
 from neo2.core.agent.loop import AgentResult, _supersede_observations, run_agent
 from neo2.core.agent.prompt import build as build_prompt
 from neo2.core.agent.registry import USERS_WORDS, Origin, ToolContext, ToolOutput, fence, registry, voiced
@@ -270,6 +270,11 @@ class Session:
             self._drop_pending()
             await self._clear_confirming()
 
+        # "what am I holding", "ye kya hai": the user's own words ask NEO to look through the camera
+        # (fastpath.camera: never a model's words). Its answer's cloud brains warm while Laya reads it.
+        look = fastpath.camera(text, origin=origin)
+        if look is not None:
+            camera_words.prewarm()
         d = await self.reflex.decide(text)
         await bus().publish("reflex", job=job, **d.__dict__)
 
@@ -280,6 +285,10 @@ class Session:
             return Reply("Okay.", "stop", d, job=job)
         if from_user:  # the user's own words: learn from how this goes (a Live relay is Live's)
             outcomes.begin(job, text, decision=d)
+        if look is not None:
+            # Whatever the reflex made of it (a question it may call chat): only the camera can answer.
+            camera_words.mark_look()
+            return await self._quick(text, d, [look], job=job, origin=origin)
 
         # "play <game> as <side>" with that game installed on this Mac: the agent opens it and plays,
         # whatever the reflex made of it (music, a chat, the one-tool lane) and whatever a fast path
@@ -347,6 +356,7 @@ class Session:
     async def cancel_all(self) -> int:
         """Stop every running job (the user said stop) and drop any unanswered question."""
         outcomes.stop()  # right after NEO answered, a stop says the answer was wrong
+        camera_words.forget()  # a stop ends the camera's follow-up window ("and now?" asks afresh)
         replay.forget_last()  # …and a flow it just learned or replayed isn't one to repeat
         n = 0
         for t in list(self.jobs.values()):
@@ -454,7 +464,8 @@ class Session:
                 outcomes.step(job, tool, out.ok, halt=out.halt)
                 # e.g. weather for "the forecast for Q3 sales": the agent can do better. Never NEO's
                 # own question to the user: that is the user's to answer, not a model's.
-                if not out.ok and not out.halt:
+                if not out.ok and not out.halt and tool != fastpath.CAMERA_TOOL:
+                    # (never the camera: no model may turn it on, so its failure is said as it is)
                     log.info(f"  ~ {tool} failed; handing to the agent")
                     ran = "; ".join(f"{tl}({', '.join(f'{k}={v!r}' for k, v in a.items())})" for tl, a in steps[:i])
                     note = f"\n[ALREADY DONE] These steps of the request already ran — don't repeat them: {ran}" if ran else ""
