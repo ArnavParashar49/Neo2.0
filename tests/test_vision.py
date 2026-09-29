@@ -371,7 +371,7 @@ async def test_look_runs_the_layers_then_the_answer(mac):
     assert {"label", "score", "x", "y", "w", "h"} <= out["boxes"][0].keys()
     assert shown and shown[0]["boxes"] == out["boxes"] and "answer" not in shown[0]  # boxes before the answer
     assert set(out["ms"]) == {"apple", "detect", "answer", "total"}
-    assert "likely objects: cup, person, laptop" in b["gemini"].sent[0]["messages"][0].text
+    assert "likely objects: cup;" in b["gemini"].sent[0]["messages"][0].text
 
 
 async def test_look_goes_on_without_a_slow_or_missing_layer(mac):

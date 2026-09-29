@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import re
 import time
 from collections.abc import Callable
 from typing import Any
@@ -28,6 +29,21 @@ log = logger(__name__)
 
 LOCAL_WAIT_S = 1.2  # the on-device layers' share of the ≤3 s answer
 _REACH = 0.5  # a hand's box grown by this much of its size on each side: what it's holding is in there
+
+
+_SURE = 0.8  # D-FINE on its own is trusted above this
+
+
+def _words(s: str) -> set[str]:
+    return {w for w in re.split(r"[^a-z]+", s.lower()) if len(w) > 2}
+
+
+def trusted(dets: list[detect.Det], labels: list[tuple[str, float]] | None) -> list[detect.Det]:
+    """D-FINE's boxes worth drawing and passing on: never the person in front of the camera, and
+    either very sure or named by Apple Vision too. Its 80 everyday classes put a wrong name on what
+    they don't know (a guitar as "scissors"), and a wrong box on the card misleads."""
+    seen: set[str] = set().union(*(_words(n) for n, _ in labels)) if labels else set()
+    return [d for d in dets if d["label"] != "person" and (d["score"] >= _SURE or _words(d["label"]) & seen)]
 
 
 def ui_boxes(dets: list[detect.Det]) -> list[dict[str, Any]]:
@@ -116,7 +132,7 @@ async def look(
     if not td.done():
         notes.append("the object detector is still loading")
     notes += [w for w in (why_a, why_d) if w]
-    dets = dets or []
+    dets = trusted(dets or [], seen.labels if seen else None)
     hands_found = seen.hands if seen else []
     found: dict[str, Any] = {
         "labels": [[n, c] for n, c in (seen.labels if seen else [])],
@@ -137,10 +153,10 @@ def preview(img: Image.Image) -> list[dict[str, Any]]:
     """The live card's boxes for one preview frame (D-FINE, on this Mac; [] when it can't run).
     Blocking: call it in a thread."""
     try:
-        return ui_boxes(detect.detect(img))
+        return ui_boxes(trusted(detect.detect(img), None))
     except (Exception, effects.EffectRefused) as e:  # noqa: BLE001 — no boxes is a fine preview
         log.debug(f"[vision] preview boxes: {type(e).__name__}")
         return []
 
 
-__all__ = ["LOCAL_WAIT_S", "holding", "look", "preview", "ui_boxes"]
+__all__ = ["LOCAL_WAIT_S", "holding", "look", "preview", "trusted", "ui_boxes"]

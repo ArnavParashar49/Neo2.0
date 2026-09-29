@@ -245,3 +245,18 @@ async def test_a_model_or_a_page_never_turns_it_on(neo):
     out = await registry().invoke("camera_look", {"question": "what is this"}, ToolContext(origin="agent"))
     assert not out.ok and not camera_live.on
     assert not any(t == "camera_open" for t, _ in neo.channel.sent)
+
+
+def test_only_boxes_apple_vision_agrees_with_or_d_fine_is_sure_of_are_drawn():
+    from neo2.core.vision.pipeline import trusted
+
+    box = {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}
+    dets = [
+        {"label": "scissors", "score": 0.57, "box": box},  # a guitar D-FINE can't name
+        {"label": "sports ball", "score": 0.6, "box": box},  # Apple Vision says "ball"
+        {"label": "cell phone", "score": 0.9, "box": box},  # sure on its own
+        {"label": "person", "score": 0.99, "box": box},  # the user, always there
+    ]
+    kept = [d["label"] for d in trusted(dets, [("ball", 0.79), ("sports_equipment", 0.79)])]
+    assert kept == ["sports ball", "cell phone"]
+    assert [d["label"] for d in trusted(dets, None)] == ["cell phone"]  # the live preview: sure ones only
