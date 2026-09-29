@@ -17,3 +17,17 @@ network. The panel top-left runs the full task or jumps to a state; `?mock=brows
 `dialog`, `select`, `error`, `offline`, `ended`) opens straight into one. Take control and the
 page responds to your clicks, scrolling and typing. None of this ships: it is gated on
 `import.meta.env.DEV` and stripped from `npm run build`.
+
+## NEO's song card — dev harness
+
+`npm run dev`, then open `http://localhost:1420/?mock=song`. A scripted in-page core
+(`src/song/mock/`) speaks the card's side of the protocol — `song_open`, `song_state` with a
+synthesised level ten times a second, `song_close`, `song_hello` after a reconnect — and loops
+found → no match → found → error. The panel picks a run (`?mock=song&state=found`, also
+`not_found`, `error`, `stopped`, `listening`, `matching`), changes speed and theme, drops the
+connection ("Reconnect": the card asks `song_hello` and carries on) or restarts the core (the card
+gets no answer and ends). No microphone and no network: covers are drawn on a canvas, links point
+at example.com and are never opened. Gated on `import.meta.env.DEV` like the browser mock.
+
+The card's logic is one pure reducer (`src/song/state.ts`); `npm test` runs its tests with Node's
+own test runner (`tests/*.test.ts`, no packages needed).

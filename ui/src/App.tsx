@@ -7,7 +7,7 @@ import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { MOCK, useNeo, type ConfirmScope, type Item, type NeoState, type OrbState, type ToolRun, type TurnMeta } from "./ws";
+import { MOCK, SONG_MOCK, useNeo, type ConfirmScope, type Item, type NeoState, type OrbState, type ToolRun, type TurnMeta } from "./ws";
 import { useBrowser, type BrowserSnap } from "./browser/hub";
 import { BrowserCard } from "./browser/BrowserCard";
 import { EndedRow, MiniRow, PoppedRow } from "./browser/BrowserRow";
@@ -20,12 +20,16 @@ import { inTauri, placeInitial, resizeAnchored, workArea, type Area, type Size }
 import { useCamera } from "./camera/hub";
 import { CameraCard, CameraEndedRow, CameraPoppedRow, camIcon } from "./camera/CameraCard";
 import { CAMERA_POPIN_EVENT, closeCameraWindow, openCameraWindow, showCameraWindow } from "./camera/popout";
+import { useSongShape } from "./song/hub";
+import { SongItem, noteIcon } from "./song/SongCard";
 import "./App.css";
 import "./browser/browser.css";
 
 // Dev only (`?mock=browser`): the scripted core's control panel and the simulated pop-out window.
 const MockHud = import.meta.env.DEV && MOCK ? lazy(() => import("./browser/mock/Hud")) : null;
 const SimPopout = import.meta.env.DEV ? lazy(() => import("./browser/mock/SimWindow")) : null;
+// Dev only (`?mock=song`): the scripted song core's control panel.
+const SongHud = import.meta.env.DEV && SONG_MOCK ? lazy(() => import("./song/mock/Hud")) : null;
 
 const LABEL: Record<NeoState, string> = {
   idle: "Ready",
@@ -125,6 +129,9 @@ export default function App() {
   const cam = neo.cam;
   const csnap = useCamera(cam);
   const camLive = csnap.live;
+  const song = neo.song;
+  const sshape = useSongShape(song); // which song card is live and its face — not its level
+  const songHearing = sshape.hearing;
   const reduced = useReducedMotion();
   const [expanded, setExpanded] = useState(false);
   const [pinned, setPinned] = useState(false);
@@ -300,6 +307,16 @@ export default function App() {
     if (!(await openCameraWindow())) cam.setPopped(false);
   }, [cam]);
   const camBringBack = useCallback(() => { cam.setPopped(false); void closeCameraWindow(); }, [cam]);
+
+  // ---- song: while NEO listens, its card is in sight ----------------------------------------------
+  // It listens only when the user asked; the card opens with it (without taking focus from other
+  // apps) and the overlay stays open until it has stopped listening.
+  const songSid = sshape.liveSid;
+  useEffect(() => {
+    if (!songSid) return;
+    if (inTauri) void invoke("show_quiet").catch(() => getCurrentWindow().show()).catch(() => {});
+    setExpanded(true);
+  }, [songSid]);
 
   // The pop-out window went away without "Bring back" (closed elsewhere): come home.
   const wasPopped = useRef(false);
@@ -497,19 +514,19 @@ export default function App() {
   // on stage, the user driving, or NEO waiting on them.
   const browsingHolds = !!live && (bmode === "docked" || bmode === "focus" || live.live!.controller === "user" || live.live!.status === "need_user");
   useEffect(() => {
-    if (!expanded || pinned || hover || neo.state !== "idle" || confirming || erasing || browsingHolds || camLive) return;
+    if (!expanded || pinned || hover || neo.state !== "idle" || confirming || erasing || browsingHolds || camLive || songHearing) return;
     const t = window.setTimeout(() => {
       if (document.activeElement === inputRef.current && text) return;
       setExpanded(false);
     }, IDLE_COLLAPSE_MS);
     return () => clearTimeout(t);
-  }, [expanded, pinned, hover, neo.state, neo.items, text, confirming, erasing, browsingHolds, camLive]);
+  }, [expanded, pinned, hover, neo.state, neo.items, text, confirming, erasing, browsingHolds, camLive, songHearing]);
 
   // Follow new content only when the user hasn't scrolled up.
   useEffect(() => {
     const el = logRef.current;
     if (el && stickToBottom.current) el.scrollTo({ top: el.scrollHeight, behavior: reduced ? "auto" : "smooth" });
-  }, [neo.items, neo.state, bsnap.ended, csnap.ended, reduced]);
+  }, [neo.items, neo.state, bsnap.ended, csnap.ended, sshape.liveView, sshape.ended, reduced]);
 
   // A (re)connect replays the transcript, and the log mounts afresh each time the orb opens: land on
   // the newest line at once. A layout change (the card docking, the strip appearing) jumps too — a
@@ -594,6 +611,8 @@ export default function App() {
   const liveHost = live?.live ? displayHost(live.live.url) : "";
   const orbBadge = camLive ? (
     <span className="orb-badge cam" aria-hidden>{camIcon(12)}<span className="orb-badge-dot" style={{ background: "var(--cam-rec)" }} /></span>
+  ) : songHearing ? (
+    <span className="orb-badge song" aria-hidden>{noteIcon(11)}</span>
   ) : live?.live ? (
     <span className={"orb-badge" + (live.live.status === "need_user" || live.live.status === "waiting" ? " need" : live.live.controller === "neo" && live.live.status === "working" ? " acting" : "")} aria-hidden>
       {I.globe(12)}{(live.live.status === "need_user" || live.live.status === "waiting") && <span className="orb-badge-dot" />}
@@ -604,12 +623,15 @@ export default function App() {
     <>
       {MockHud && <Suspense fallback={null}>{createPortal(<MockHud />, document.body)}</Suspense>}
       {SimPopout && simPopout && !inTauri && <Suspense fallback={null}>{createPortal(<SimPopout onClose={bringBack} />, document.body)}</Suspense>}
+      {SongHud && <Suspense fallback={null}>{createPortal(<SongHud />, document.body)}</Suspense>}
     </>
   );
 
   if (!expanded) {
     const openLabel = camLive
       ? "Open NEO — the camera is on"
+      : songHearing
+      ? "Open NEO — listening for a song"
       : live?.live
       ? live.live.status === "need_user" ? `Open NEO — your turn on ${liveHost}` : `Open NEO — browsing ${liveHost}`
       : neo.connected ? `Open NEO — ${LABEL[shown]}` : "NEO — core offline";
@@ -639,6 +661,9 @@ export default function App() {
       const e = csnap.ended[it.sid];
       return e ? <CameraEndedRow key={it.id} e={e} /> : null;
     }
+    if (it.kind === "song") {
+      return songSid === it.sid || sshape.ended[it.sid] ? <SongItem key={it.id} hub={song} sid={it.sid} mini={strip} /> : null;
+    }
     if (it.kind === "tools") {
       const tools = it.job && browserJobs.has(it.job) ? it.tools.filter((t) => !t.name.startsWith("browser")) : it.tools;
       return tools.length ? <Tools key={it.id} tools={tools} /> : null;
@@ -651,7 +676,7 @@ export default function App() {
       </div>
     );
   };
-  const visibleItems = neo.items.filter((i) => i.kind !== "browser" || bsnap.ended[i.sid]);
+  const visibleItems = neo.items.filter((i) => (i.kind !== "browser" || bsnap.ended[i.sid]) && (i.kind !== "song" || songSid === i.sid || sshape.ended[i.sid]));
 
   const header = layout === "docked" ? (
     <header className="head compact" data-tauri-drag-region>
@@ -817,6 +842,9 @@ export default function App() {
           </div>
         )}
         {layout !== "chat" && camLive && !csnap.popped && <CameraCard key={camLive.sid} hub={cam} live={camLive} stopping={csnap.stopping} surface="pip" onPopout={inTauri ? () => void camPopOut() : undefined} />}
+        {layout !== "chat" && !showStrip && songSid && (
+          <div className={"song-pip" + (camLive && !csnap.popped ? " below-cam" : "")}><SongItem hub={song} sid={songSid} mini floating /></div>
+        )}
         {composer}
         <div className="hide-btn-hint" aria-hidden />
       </div>
