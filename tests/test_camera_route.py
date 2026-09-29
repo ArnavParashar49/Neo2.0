@@ -415,3 +415,12 @@ def test_live_call_runs_only_when_the_users_words_asked(cam_tool, monkeypatch):
     assert args == {"question": "mere haath mein kya hai"}
     assert ctx.origin == "user" and ctx.get(USERS_WORDS) == "mere haath mein kya hai"
     assert v._own_utt == 2
+
+
+def test_neo_apps_prompt_has_the_camera_line_only_while_the_tool_is_there(cam_tool):
+    from neo2.core.agent import prompt
+
+    assert "camera_look" in prompt.persona()
+    catalog().remove(fastpath.CAMERA_TOOL)
+    assert "camera_look" not in prompt.persona()
+    assert "camera_look" not in prompt.PERSONA

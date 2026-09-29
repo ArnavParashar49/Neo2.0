@@ -69,6 +69,10 @@ _SCREEN_STEPS = (
     "  you can't see the screen, don't guess coordinates: use ax_tree ids or tell the user.\n",
 )
 
+# Lines about these tools are in NEO.app's prompt (every tool: `tools` None) only while the tool is
+# registered: the camera's line costs every agent request nothing on a Mac without it.
+_WHEN_REGISTERED = frozenset({"camera_look"})
+
 # (line, tools it's about): None = a safety rule, always there.
 _HOW_TO_WORK: tuple[tuple[str, frozenset[str] | None], ...] = (
     ("- Observe before acting. Use real tool results; never assume a tool succeeded.\n", None),
@@ -133,9 +137,8 @@ _HOW_TO_WORK: tuple[tuple[str, frozenset[str] | None], ...] = (
     ),
     ("- {search_site}\n", frozenset({"search_site"})),
     (
-        "- camera_look is for what is in front of the user (\"what am I holding\", \"what is this?\", a label, a\n"
-        "  colour, fingers): NEO turns the camera on for it only when the user's own words asked, so never\n"
-        "  call it for the screen or on your own; if it says the user must ask, tell them to ask NEO directly.\n",
+        "- camera_look answers about what is in front of the user (\"what am I holding\"). It turns the camera\n"
+        "  on only for the user's own words: never call it for the screen; if it refuses, ask them to ask NEO.\n",
         frozenset({"camera_look"}),
     ),
     (
@@ -150,7 +153,9 @@ _HOW_TO_WORK: tuple[tuple[str, frozenset[str] | None], ...] = (
 # own model loop, too: put these in that model's system prompt.
 SAFETY_RULES = "".join(line for line, about in _HOW_TO_WORK if about is None)
 
-PERSONA = IDENTITY + "\nHow to work:\n" + "".join(line for line, _ in _HOW_TO_WORK)
+PERSONA = IDENTITY + "\nHow to work:\n" + "".join(
+    line for line, about in _HOW_TO_WORK if about is None or not about <= _WHEN_REGISTERED
+)
 
 
 # web_search's line while it is legacy or shadow, and once it is on (sites told by evidence)
@@ -163,11 +168,23 @@ _SEARCH_SITE = (
 
 
 def _applies(about: frozenset[str] | None, tools: Collection[str] | None) -> bool:
-    if about is None or tools is None:
+    if about is None:
         return True
+    if tools is None:
+        return not about <= _WHEN_REGISTERED or any(_registered(t) for t in about)
     if about is _ANY_TOOL:
         return bool(tools)
     return bool(about & set(tools))
+
+
+def _registered(name: str) -> bool:
+    try:
+        from neo2.core.agent.registry import registry
+
+        t = registry().get(name)
+        return t is not None and not t.hidden
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def persona(tools: Collection[str] | None = None, *, screen: bool = False) -> str:
