@@ -83,7 +83,7 @@ function Preview({ hub, live, stopping }: { hub: CameraHub; live: CamLive; stopp
       {hasFrame && !stopping && (
         <div className="cam-boxes" aria-hidden>
           {live.boxes.map((b, i) => (
-            <div key={i} className={"cam-box" + (b.y < 0.08 ? " label-in" : "")} style={boxStyle(b, MIRROR)}>
+            <div key={b.id ?? `i${i}`} className={"cam-box" + (b.y < 0.08 ? " label-in" : "")} style={boxStyle(b, MIRROR)}>
               {b.label && <span className="cam-box-label">{b.label}{b.score > 0 ? ` ${Math.round(b.score * 100)}%` : ""}</span>}
             </div>
           ))}

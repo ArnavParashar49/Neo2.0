@@ -16,18 +16,30 @@ downloaded here: missing, :class:`~neo2.core.vision.Unavailable` says how to mak
 
 What it gives: final boxes (YOLO26 is end-to-end: no NMS), one word each, x1 y1 x2 y2 in the
 letterboxed input's pixels — :func:`letterbox` and :func:`decode` are Ultralytics' own pre- and
-post-processing (its predict gives the same boxes, checked by get_yoloe.py). Words that are never a
-thing in front of the camera are hidden in the model itself (its ``classes`` input, a weight per
-word), so such a box takes its best other word or drops out: the words it gives frames with nothing
-in them (``blank`` in its metadata: sky, darkness, still life), words whose first sense in the Mac's
-dictionary isn't a noun (``pos``: "squeeze", "lick", "underwater" — but not the objects among them,
+post-processing (its predict gives the same boxes, checked by get_yoloe.py).
+
+Which words a box may take is set in the model itself (its ``classes`` input, a weight per word): a
+hidden word never wins, so its box takes the best word allowed or drops out. The vocabulary is a
+photo-tagging one (RAM++'s: "fairy", "share", "anniversary", "jazz artist"...), and on camera frames
+its confident words were mostly wrong: on 55 sample frames (photos, a portrait with things pasted in,
+rendered emoji) it named a baseball "fairy", a guitar "type, dagger", a chalkboard "share, energy", a
+mouse "urinal" and a person "politician" or "jazz artist". So by default (the ``vision_words``
+setting) a box may only take a word of :data:`EVERYDAY` — ~230 things held up to a camera or kept on
+a desk, COCO's 80 among them, people as "person" — or of :data:`NOT_SHOWN`, body parts and clothes,
+so a hand's box is called a hand (and left off the card) rather than the nearest everyday thing. On
+the same frames most wrong words became no box, and every person "person". "all" is the whole
+vocabulary but the words that are never a thing in front of the camera: the ones it gives frames
+with nothing in them (``blank`` in its metadata: sky, darkness, still life), words whose first sense
+in the Mac's dictionary isn't a noun (``pos``: "squeeze", "lick" — but not the objects among them,
 :data:`OBJECTS_NOT_NOUNS`), and :data:`PHOTO_WORDS` about the picture rather than what's in it.
 Which boxes the card draws — people as "person", no body parts, no duplicates — is
 neo2.core.vision.pipeline's.
 
 Bounded: a frame is at most :data:`MAX_PIXELS`, scaled into the model's fixed 640x384 input, and
 never written anywhere; one frame at a time (a second waits :data:`_RUN_WAIT_S` at most, then is
-skipped). Loading it is a "model" effect (neo2.core.effects): refused in NEO's tests.
+skipped). A model that won't load (a copy cut short on its way into the models dir) is remembered:
+not compiled again every frame, until its files change (:func:`broken`; "auto" then uses D-FINE).
+Loading it is a "model" effect (neo2.core.effects): refused in NEO's tests.
 """
 
 from __future__ import annotations
@@ -80,6 +92,48 @@ PHOTO_WORDS = frozenset(
         "wedding photography", "close-up", "face close-up", "still life", "studio shot", "model",
     }
 )  # fmt: skip
+# The everyday vocabulary (the default): things held up to a camera or kept on a desk, COCO's 80
+# objects among them (NEO 1's YOLO words), and people as one word, "person".
+EVERYDAY = frozenset(
+    {
+        "person", "bicycle", "car", "motorbike", "motorcycle", "plane", "bus", "train", "truck", "boat", "bird",
+        "cat", "dog", "horse", "sheep", "cow", "elephant", "bear", "zebra", "giraffe", "parrot", "fish",
+        "goldfish", "hamster", "rabbit", "turtle", "backpack", "umbrella", "handbag", "tie", "luggage",
+        "frisbee", "sports ball", "baseball bat", "baseball glove", "skateboard", "tennis racket", "bottle",
+        "wine glass", "beer glass", "cup", "fork", "knife", "spoon", "bowl", "banana", "apple", "sandwich",
+        "orange", "broccoli", "carrot", "hot dog", "pizza", "donut", "cake", "chair", "couch", "plant", "bed",
+        "table", "television", "laptop", "mouse", "remote", "keyboard", "phone", "smartphone", "microwave",
+        "oven", "toaster", "sink", "fridge", "book", "clock", "vase", "scissors", "teddy", "stuffed toy",
+        "hair drier", "toothbrush", "pen", "pencil", "fountain pen", "crayon", "eraser", "ruler", "stapler",
+        "tape", "notebook", "notepad", "paper", "envelope", "card", "credit card", "business card", "ticket",
+        "receipt", "passport", "coin", "money", "calculator", "tablet", "tablet computer", "computer", "monitor",
+        "computer monitor", "computer screen", "speaker", "microphone", "earphone", "camera", "webcam",
+        "game controller", "joystick", "charger", "cable", "battery", "portable battery", "lamp", "candle", "mug",
+        "coffee cup", "teacup", "paper cup", "glass bottle", "beer bottle", "wine bottle", "baby bottle",
+        "thermos bottle", "jar", "can", "beer can", "box", "cardboard box", "gift box", "bag", "paper bag",
+        "shopping bag", "key", "keycard", "watch", "alarm clock", "glasses", "sunglasses", "ring", "necklace",
+        "bracelet", "earring", "hat", "cap", "baseball hat", "glove", "sock", "shoe", "toy", "doll", "figurine",
+        "puppet", "ball", "baseball", "basketball", "football", "rugby ball", "balloon", "guitar", "violin",
+        "ukulele", "flute", "drum", "magazine", "comic book", "document", "printed page", "blackboard", "chalk",
+        "whiteboard", "flower", "bouquet", "rose", "cactus", "succulent", "fruit", "lemon", "lime", "grape",
+        "strawberry", "pear", "peach", "avocado", "tomato", "potato", "onion", "egg", "bread", "chocolate",
+        "chocolate bar", "candy", "candy bar", "chocolate chip cookie", "biscuit", "snack", "potato chip",
+        "coffee", "tea", "juice", "drink", "soda", "beer", "wine", "toothpaste", "comb", "hairbrush", "brush",
+        "lipstick", "perfume", "cosmetic", "soap", "towel", "tissue", "napkin", "plate", "chopstick", "spatula",
+        "screwdriver", "hammer", "wrench", "drill", "tool", "medicine", "thermometer",
+    }
+)  # fmt: skip
+# Allowed beside them but never drawn (neo2.core.vision.pipeline leaves these out): a hand's box is
+# called a hand and a shirt's a shirt, instead of taking the nearest everyday word.
+NOT_SHOWN = frozenset(
+    {
+        "hand", "arm", "shoulder", "face", "eye", "nose", "mouth", "ear", "hair", "long hair", "short hair", "skin",
+        "beard", "head", "neck", "leg", "foot", "body", "forehead", "chest", "suit", "business suit", "shirt",
+        "dress shirt", "t-shirt", "jacket", "coat", "sweater", "hoodie", "dress", "uniform", "military uniform",
+        "blouse", "vest", "polo shirt", "cardigan", "sweatshirt", "sleeve", "neckband", "sports coat",
+    }
+)  # fmt: skip
+VOCABULARIES = ("everyday", "all")
 
 
 def _fit(frame_size: tuple[int, int], shape: tuple[int, int]) -> tuple[float, int, int, int, int]:
@@ -131,9 +185,14 @@ def decode(
     return sorted(dets, key=lambda d: -d[1])
 
 
-def weights(names: list[str], pos: list[str], blank: list[int]) -> np.ndarray:
-    """The ``classes`` input, (1, words) float32: 0 for a word that is never a thing in front of the
-    camera (see the module doc), 1 for the rest."""
+def weights(
+    names: list[str], pos: list[str], blank: list[int], *, words: frozenset[str] | None = None
+) -> np.ndarray:
+    """The ``classes`` input, (1, words) float32, 1 for a word a box may take and 0 for a hidden one:
+    with ``words``, those of the model's words only; else every word but those that are never a thing
+    in front of the camera (see the module doc)."""
+    if words is not None:
+        return np.array([[1.0 if n in words else 0.0 for n in names]], np.float32).reshape(1, len(names))
     w = np.ones((1, len(names)), np.float32)
     for i, n in enumerate(names):
         p = pos[i] if i < len(pos) else ""
@@ -141,6 +200,17 @@ def weights(names: list[str], pos: list[str], blank: list[int]) -> np.ndarray:
             w[0, i] = 0.0
     w[0, [i for i in blank if 0 <= i < len(names)]] = 0.0
     return w
+
+
+def vocabulary() -> str:
+    """The ``vision_words`` setting: "everyday" (the default, and for anything it doesn't know) or "all"."""
+    try:
+        from neo2.core.config import settings
+
+        v = str(getattr(settings(), "vision_words", "") or "").strip().lower()
+    except Exception:  # noqa: BLE001 — no agent bound (library mode)
+        v = ""
+    return v if v in VOCABULARIES else "everyday"
 
 
 def _models_dir() -> Path | None:
@@ -186,16 +256,36 @@ def missing_words() -> str:
 
 
 def available() -> tuple[bool, str]:
-    """(can it run here, why not). Looks for the files; loads nothing."""
+    """(can it run here, why not). Looks for the files and at an earlier failed load; loads nothing."""
     if why := runnable():
         return False, why
-    return (True, "") if package() is not None else (False, missing_words())
+    pkg = package()
+    if pkg is None:
+        return False, missing_words()
+    return (False, why) if (why := broken(pkg)) else (True, "")
 
 
 def _stamp(pkg: Path) -> str:
     """The package's files, by size and time: a rebuilt package is compiled afresh."""
     files = sorted(f for f in pkg.rglob("*") if f.is_file())
     return json.dumps([[str(f.relative_to(pkg)), f.stat().st_size, f.stat().st_mtime_ns] for f in files])
+
+
+_broken: dict[str, tuple[str, str]] = {}  # package path -> (its stamp, why it didn't load)
+
+
+def broken(pkg: Path | None = None) -> str:
+    """Why the package (the models dir's when None) failed to load, when it did and hasn't changed
+    since; "" otherwise. Such a package isn't tried again until its files change: a copy cut short
+    would otherwise be compiled afresh (~2.5 s of CPU) every preview frame."""
+    pkg = pkg if pkg is not None else package()
+    got = _broken.get(str(pkg)) if pkg is not None else None
+    if got is None:
+        return ""
+    try:
+        return got[1] if _stamp(pkg) == got[0] else ""
+    except OSError:
+        return got[1]
 
 
 def _metadata(model: Any, CoreML: Any) -> dict[str, str]:
@@ -230,8 +320,9 @@ class YOLOE:
     def __init__(self) -> None:
         self._model: Any = None
         self._names: list[str] = []
+        self._tags: tuple[list[str], list[int]] = ([], [])  # (pos, blank): the model's word tags
         self._shape = SHAPE
-        self._classes: Any = None  # the word weights as an MLMultiArray, made once
+        self._classes: dict[str, Any] = {}  # vocabulary -> its word weights as an MLMultiArray, made once
         self._load_lock = threading.Lock()
         self._run_lock = threading.Lock()
 
@@ -273,48 +364,70 @@ class YOLOE:
             pkg = package()
             if pkg is None:
                 raise Unavailable(missing_words())
+            if why := broken(pkg):
+                raise Unavailable(why)  # (the frames that waited on the failed load: at once)
             effects.guard("model", "load the YOLOE object detector (Core ML) into memory")
+            stamp = _stamp(pkg)
+            try:
+                self._open(pkg)
+            except Exception as e:  # noqa: BLE001 — Core ML's own errors too: remembered, not retried
+                why = str(e) if isinstance(e, Unavailable) else f"The object detector's model couldn't be loaded ({type(e).__name__})"
+                _broken[str(pkg)] = (stamp, why)
+                log.info(f"[vision] YOLOE not loaded: {why[:160]}")
+                raise Unavailable(why) from e
+            _broken.pop(str(pkg), None)
+
+    def _open(self, pkg: Path) -> None:
+        import CoreML
+        from Foundation import NSURL
+
+        from neo2.core.decide._objc import pool
+
+        t0 = time.perf_counter()
+        cfg = CoreML.MLModelConfiguration.alloc().init()
+        cfg.setComputeUnits_(CoreML.MLComputeUnitsCPUAndNeuralEngine)  # the GPU is Laya's
+
+        def load(path: Path) -> tuple[Any, Any]:
+            return CoreML.MLModel.modelWithContentsOfURL_configuration_error_(NSURL.fileURLWithPath_(str(path)), cfg, None)
+
+        with pool():
+            model, err = load(path := self._compiled(pkg, CoreML, NSURL))
+            if model is None and path == pkg.parent / COMPILED:  # a kept copy this macOS can't read
+                shutil.rmtree(path, ignore_errors=True)
+                model, err = load(self._compiled(pkg, CoreML, NSURL))
+            if model is None:
+                raise Unavailable(f"The object detector's model couldn't be loaded ({str(err)[:80]})")
+            meta = _metadata(model, CoreML)
+            try:
+                names = [str(n) for n in json.loads(meta["names"])]
+                h, w = (int(v) for v in json.loads(meta.get("imgsz") or json.dumps(SHAPE)))
+                pos = [str(p) for p in json.loads(meta.get("pos") or "[]")]
+                blank = [int(i) for i in json.loads(meta.get("blank") or "[]")]
+            except (KeyError, TypeError, ValueError) as e:
+                raise Unavailable("The object detector's model isn't the one scripts/get_yoloe.py makes") from e
+        self._names, self._tags, self._shape, self._classes = names, (pos, blank), (h, w), {}
+        self._model = model
+        shown = int(self._weights(vocabulary()).sum())
+        log.info(
+            f"[vision] YOLOE loaded (Core ML, Neural Engine) in {(time.perf_counter() - t0) * 1000:.0f} ms; "
+            f"{len(names)} words, {shown} of them allowed ({vocabulary()})"
+        )
+
+    def _weights(self, vocab: str) -> np.ndarray:
+        return weights(self._names, *self._tags, words=EVERYDAY | NOT_SHOWN if vocab == "everyday" else None)
+
+    def _classes_for(self, vocab: str) -> Any:
+        """The ``classes`` input for a vocabulary, as the MLMultiArray Core ML reads: made once each."""
+        if (arr := self._classes.get(vocab)) is None:
             import CoreML
-            from Foundation import NSURL
 
-            from neo2.core.decide._objc import pool
-
-            t0 = time.perf_counter()
-            cfg = CoreML.MLModelConfiguration.alloc().init()
-            cfg.setComputeUnits_(CoreML.MLComputeUnitsCPUAndNeuralEngine)  # the GPU is Laya's
-
-            def load(path: Path) -> tuple[Any, Any]:
-                return CoreML.MLModel.modelWithContentsOfURL_configuration_error_(
-                    NSURL.fileURLWithPath_(str(path)), cfg, None
-                )
-
-            with pool():
-                model, err = load(path := self._compiled(pkg, CoreML, NSURL))
-                if model is None and path == pkg.parent / COMPILED:  # a kept copy this macOS can't read
-                    shutil.rmtree(path, ignore_errors=True)
-                    model, err = load(self._compiled(pkg, CoreML, NSURL))
-                if model is None:
-                    raise Unavailable(f"The object detector's model couldn't be loaded ({str(err)[:80]})")
-                meta = _metadata(model, CoreML)
-                try:
-                    names = [str(n) for n in json.loads(meta["names"])]
-                    h, w = (int(v) for v in json.loads(meta.get("imgsz") or json.dumps(SHAPE)))
-                    pos = [str(p) for p in json.loads(meta.get("pos") or "[]")]
-                    blank = [int(i) for i in json.loads(meta.get("blank") or "[]")]
-                except (KeyError, TypeError, ValueError) as e:
-                    raise Unavailable("The object detector's model isn't the one scripts/get_yoloe.py makes") from e
-                arr, _ = CoreML.MLMultiArray.alloc().initWithShape_dataType_error_(
-                    [1, len(names)], CoreML.MLMultiArrayDataTypeFloat32, None
-                )
-                data = weights(names, pos, blank).tobytes()
-                arr.getMutableBytesWithHandler_(lambda ptr, size, strides: data)  # (the block's return: the contents)
-            self._names, self._shape, self._classes = names, (h, w), arr
-            self._model = model
-            hidden = len(names) - int(np.frombuffer(data, np.float32).sum())
-            log.info(
-                f"[vision] YOLOE loaded (Core ML, Neural Engine) in {(time.perf_counter() - t0) * 1000:.0f} ms; "
-                f"{len(names)} words, {hidden} never shown"
+            arr, _ = CoreML.MLMultiArray.alloc().initWithShape_dataType_error_(
+                [1, len(self._names)], CoreML.MLMultiArrayDataTypeFloat32, None
             )
+            data = self._weights(vocab).tobytes()
+            arr.getMutableBytesWithHandler_(lambda ptr, size, strides: data)  # (the block's return: the contents)
+            self._classes[vocab] = arr
+        return arr
 
     def _pixels(self, img: Image.Image) -> Any:
         """The letterboxed frame as the 32BGRA pixel buffer Core ML reads (it makes the model's RGB)."""
@@ -339,7 +452,7 @@ class YOLOE:
 
         feats = {
             "image": CoreML.MLFeatureValue.featureValueWithPixelBuffer_(self._pixels(letterbox(img, self._shape))),
-            "classes": CoreML.MLFeatureValue.featureValueWithMultiArray_(self._classes),
+            "classes": CoreML.MLFeatureValue.featureValueWithMultiArray_(self._classes_for(vocabulary())),
         }
         provider, err = CoreML.MLDictionaryFeatureProvider.alloc().initWithDictionary_error_(feats, None)
         if provider is None:
@@ -366,6 +479,6 @@ class YOLOE:
 
 
 __all__ = [
-    "COMPILED", "MAX_PIXELS", "OBJECTS_NOT_NOUNS", "PHOTO_WORDS", "PKG", "YOLOE", "available", "decode",
-    "letterbox", "missing_words", "package", "runnable", "weights",
+    "COMPILED", "EVERYDAY", "MAX_PIXELS", "NOT_SHOWN", "OBJECTS_NOT_NOUNS", "PHOTO_WORDS", "PKG", "VOCABULARIES", "YOLOE",
+    "available", "broken", "decode", "letterbox", "missing_words", "package", "runnable", "vocabulary", "weights",
 ]  # fmt: skip

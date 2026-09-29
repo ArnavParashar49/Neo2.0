@@ -38,7 +38,8 @@ One command makes a throwaway environment with the versions this was tested with
 
 (``--check some.jpg ...`` also compares its boxes with Ultralytics' own predict.) A minute or two and 1 GB
 of memory on an M3 Pro; the result is ``~/.neo/models/yoloe-26s-pf.mlpackage`` (23 MB), which NEO's
-camera uses the next time it turns on. The weights and the model are Ultralytics', AGPL-3.0
+camera uses the next time it turns on. ``scripts/install-app.sh`` runs this command once, when that
+model isn't there yet. The weights and the model are Ultralytics', AGPL-3.0
 (THIRD_PARTY_NOTICES.md).
 """
 

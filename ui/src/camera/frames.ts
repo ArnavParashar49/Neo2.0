@@ -46,7 +46,8 @@ export function normBoxes(raw: unknown[] | undefined, max = 12): CamBox[] {
     const bw = clamp01(Math.min(w, 1 - bx)), bh = clamp01(Math.min(h, 1 - by));
     if (bw <= 0.005 || bh <= 0.005) continue;
     const label = typeof o.label === "string" ? o.label.trim().slice(0, 32) : "";
-    out.push({ x: bx, y: by, w: bw, h: bh, label, score: num(o.score) ?? num(o.conf) ?? 0 });
+    const id = num(o.id);
+    out.push({ x: bx, y: by, w: bw, h: bh, label, score: num(o.score) ?? num(o.conf) ?? 0, ...(id !== null ? { id } : {}) });
     if (out.length >= max) break;
   }
   return out;

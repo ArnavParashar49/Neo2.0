@@ -3,8 +3,9 @@
 
 export type CamStatus = "starting" | "live" | "analysing" | "answered" | "off";
 
-/** One detection, in 0..1 coordinates of the (unmirrored) camera frame. */
-export interface CamBox { x: number; y: number; w: number; h: number; label: string; score: number }
+/** One detection, in 0..1 coordinates of the (unmirrored) camera frame. `id` stays the same while
+ *  that thing is in view: the card keys its box by it, so a box moves with its thing. */
+export interface CamBox { x: number; y: number; w: number; h: number; label: string; score: number; id?: number }
 
 /** `camera_open`: the camera is starting for this request. */
 export interface CamOpen { sid: string; reason?: string; job?: string }

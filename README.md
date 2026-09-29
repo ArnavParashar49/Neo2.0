@@ -171,16 +171,24 @@ Ask NEO *"what am I holding?"*, *"how many fingers?"* or *"what does this say?"*
 Mac's camera. It does this only when you ask it yourself. The camera shows live in the chat, and NEO
 answers from one still. On the Mac, Apple Vision reads the picture's labels, the words printed on
 things, and your hands and raised fingers. The object detector draws its boxes on the live card, the
-way NEO 1 did: everything it's sure of, people as "person", at most ten. The answer comes from Gemini,
+way NEO 1 did: everything it's sure of, people as "person", at most ten, each box following its thing.
+The answer comes from Gemini,
 or from Cerebras's vision model when Gemini is slow or down, with what the Mac found as hints.
 `NEO_VISION_CLOUD_OK=false` keeps the still on the Mac and answers from the on-device labels alone.
 The camera turns off 20 s after an answer (`NEO_CAMERA_FOLLOW_S`), on the stop button, or on the
 card's own stop.
 
-**The object detector** is YOLOE-26s prompt-free by Ultralytics, from NEO 1's YOLO family. It knows
-an open vocabulary of 4,585 words. NEO runs it through Core ML on the Neural Engine: about 9 ms a
-frame on an M3 Pro, with no GPU and no PyTorch. You make its model once, from Ultralytics' weights,
-in a throwaway environment. The weights are 40 MB and download only because you pass `--yes`:
+**The object detector** is YOLOE-26s prompt-free by Ultralytics, from NEO 1's YOLO family. Its
+vocabulary is open, 4,585 words, but most of them are photo tags rather than things ("fairy",
+"share", "jazz artist"), and on camera frames its confident answers in those words were mostly
+wrong. So by default it may name only everyday things: about 230 you hold up to a camera or keep on
+a desk, COCO's 80 among them, with people as "person". `NEO_VISION_WORDS=all` gives it the whole
+vocabulary. NEO runs it through Core ML on the Neural Engine: about 9 ms a frame on an M3 Pro, with
+no GPU and no PyTorch.
+
+`scripts/install-app.sh` makes its model the first time, from Ultralytics' weights (40 MB, checked by
+size and SHA-256), in a throwaway environment of its own: a minute or two and about 1 GB of memory.
+By hand:
 
 ```bash
 uv run --no-project --python 3.12 --with ultralytics==8.4.165 --with coremltools==9.0 \
@@ -189,8 +197,8 @@ uv run --no-project --python 3.12 --with ultralytics==8.4.165 --with coremltools
 ```
 
 That writes `~/.neo/models/yoloe-26s-pf.mlpackage` (23 MB). The first time the camera turns on, NEO
-compiles it for the Neural Engine (about 2 s, once). Without it, NEO uses D-FINE small instead,
-which knows COCO's 80 objects and runs on the CPU, if its weights are in
+compiles it for the Neural Engine (about 2 s, once). Without it, or if it won't load, NEO uses
+D-FINE small instead, which knows COCO's 80 objects and runs on the CPU, if its weights are in
 `~/.neo/models/dfine-small-coco`. Without either, the card shows no boxes and the answer comes from
 Apple Vision and the cloud brain. `NEO_VISION_DETECTOR` picks the detector: `auto` (the default),
 `yoloe`, or a D-FINE repo id or folder. YOLOE's weights and the model made from them are AGPL-3.0:

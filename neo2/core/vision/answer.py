@@ -206,9 +206,9 @@ def local_answer(question: str, hints: dict[str, Any] | str | None, why: str = "
     objs = [o for o in dict.fromkeys(str(o) for o in h.get("objects") or []) if o != "person"]
     labels = [str(x[0] if isinstance(x, list | tuple) else x) for x in h.get("labels") or []]
     if h.get("holding"):
-        what = f"it looks like you're holding a {h['holding']}."
+        what = f"it looks like you're holding {_a(str(h['holding']))}."
     elif objs:
-        what = "I can see " + _and([f"a {o}" for o in objs[:3]]) + "."
+        what = "I can see " + _and([_a(o) for o in objs[:3]]) + "."
     elif labels:
         what = "it looks like " + _and(labels[:3]) + "."
     elif isinstance(hints, str) and hints.strip():
@@ -222,6 +222,16 @@ def local_answer(question: str, hints: dict[str, Any] | str | None, why: str = "
     if (f := fingers_said(hands)) and _FINGERS_Q.search(question or ""):
         out += f" I count {f}."
     return out
+
+
+def _a(thing: str) -> str:
+    """"a cup", "an apple", "glasses" / "scissors" (a pair: no article). (English only, like the rest of
+    the on-device answer.)"""
+    t = thing.strip()
+    last = t.split()[-1].lower() if t else ""
+    if not t or (last.endswith("s") and not last.endswith(("ss", "us", "is"))):
+        return t
+    return f"{'an' if t[:1].lower() in 'aeiou' else 'a'} {t}"
 
 
 def _and(xs: list[str]) -> str:

@@ -292,6 +292,9 @@ class Settings(BaseSettings):
     # from Hugging Face only once the user says yes: vision_download_ok).
     vision_detector: str = "auto"
     vision_download_ok: bool = False
+    # The words YOLOE may give a box: "everyday" (~230 things held up to a camera or kept on a desk,
+    # people as "person": far fewer wrong words) or "all" (its whole open vocabulary, 4,585 words).
+    vision_words: str = "everyday"
 
     # ---- server / ui -----------------------------------------------------------------
     ws_host: str = "127.0.0.1"

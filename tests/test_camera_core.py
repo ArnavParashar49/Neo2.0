@@ -412,12 +412,35 @@ async def test_live_preview_gets_boxes(cam, monkeypatch):
             break
         await asyncio.sleep(0.02)
     box = next(d for d in cam.states() if d["boxes"])["boxes"][0]
-    assert box == {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4, "label": "cup", "score": 0.9}
+    assert box == {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4, "label": "cup", "score": 0.9, "id": box["id"]}
     camera_live.update("analysing")
     n = len(calls)
     await asyncio.sleep(0.1)
     assert len(calls) <= n + 1  # no preview detection while a still is analysed
     camera_live.close("done")
+
+
+def test_a_thing_keeps_its_box_from_frame_to_frame(cam):
+    """Each thing keeps its id and its place in the list while it stays in view: the card moves its box
+    with it, and never slides one thing's box over to another (the UI keys boxes by id)."""
+    camera_live.sid = "s1"
+
+    def b(label, x, score):
+        return {"x": x, "y": 0.3, "w": 0.2, "h": 0.3, "label": label, "score": score}
+
+    camera_live.update("live", boxes=[b("cup", 0.1, 0.9), b("glasses", 0.5, 0.8)])
+    first = {x["label"]: x["id"] for x in camera_live.boxes}
+    camera_live.update("live", boxes=[b("glasses", 0.51, 0.85), b("pen", 0.75, 0.84), b("cup", 0.12, 0.7)])  # a new order
+    assert [x["label"] for x in camera_live.boxes] == ["cup", "glasses", "pen"]  # first seen first
+    assert {x["label"]: x["id"] for x in camera_live.boxes if x["label"] != "pen"} == first
+    pen = next(x["id"] for x in camera_live.boxes if x["label"] == "pen")
+    assert pen not in first.values()
+    camera_live.update("live", boxes=[b("pen", 0.76, 0.8), b("cup", 0.4, 0.8)])  # the cup moved far: a new box
+    got = {x["label"]: x["id"] for x in camera_live.boxes}
+    assert got["pen"] == pen and got["cup"] not in (*first.values(), pen)
+    camera_live.update("live", boxes=[b("marker", 0.765, 0.7), b("cup", 0.4, 0.8)])  # the same box, another word
+    assert {x["label"]: x["id"] for x in camera_live.boxes} == {"marker": pen, "cup": got["cup"]}
+    assert cam.states()[-1]["boxes"] == camera_live.boxes
 
 
 async def test_a_page_never_reuses_the_camera_in_its_follow_up_window(cam, monkeypatch):
