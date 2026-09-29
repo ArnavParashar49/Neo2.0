@@ -804,7 +804,7 @@ def test_a_transparency_checkerboard_is_given_up_on_quickly():
     pic = B.Picture.of(a)
     assert B.survey(pic, canvas=True).board is None
     B.forget()
-    assert min(_timed(lambda: (B.forget(), B.survey(B.Picture.of(a), canvas=True))) for _ in range(2)) < 0.1  # (was 0.3 s)
+    assert min(_timed(lambda: (B.forget(), B.survey(B.Picture.of(a), canvas=True))) for _ in range(2)) < 0.2  # (was 0.3 s; 0.1 flaked at 0.12 on a busy Mac)
 
 
 def test_an_orientation_kept_from_the_last_look_must_fit_the_pieces_now():
