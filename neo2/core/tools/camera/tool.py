@@ -30,6 +30,10 @@ log = logger(__name__)
 
 SETTLE_S = 0.6  # a freshly started camera's exposure settles before the still is taken
 FIRST_FRAME_S = 4.0
+STILL_WINDOW_S = 0.3  # then the sharpest frame of this long is the still (a hand moving blurs)
+DARK_WAIT_S = 1.5  # a dark picture waits for the camera's exposure up to this long after it started
+_DARK = 40  # the picture's mean brightness (0-255) under which the exposure is still catching up
+_FRAME_GAP_S = 0.035
 
 # The user's own words asking NEO to look through the camera (for a model's call, or Live's).
 _ASKS = re.compile(
@@ -52,6 +56,37 @@ def asks_to_look(text: str) -> bool:
     ):
         return False  # "turn off the camera" never asks to look
     return bool(_ASKS.search(text)) or camera_words.wants_camera(text)
+
+
+def _quality(img: Any) -> tuple[float, float]:
+    """(sharpness: the edges' variance, brightness: the mean) of a frame, on a small grey copy."""
+    from PIL import ImageFilter, ImageStat
+
+    g = img.resize((max(1, img.width * 240 // max(1, img.height)), 240)).convert("L")
+    return float(ImageStat.Stat(g.filter(ImageFilter.FIND_EDGES)).var[0]), float(ImageStat.Stat(g).mean[0])
+
+
+async def pick_still(session: Any) -> Any:
+    """The still for the question: the sharpest frame over :data:`STILL_WINDOW_S`, waiting on while
+    the picture is dark and the camera started under :data:`DARK_WAIT_S` ago. None: no frame."""
+    t0 = time.monotonic()
+    best, best_q, last = None, (-1.0, 0.0), None
+    while True:
+        img = session.latest()
+        if img is not None and img is not last:
+            last = img
+            try:
+                q = _quality(img)
+            except Exception:  # noqa: BLE001 — (not a picture this can measure: taken as it is)
+                q = (0.0, 255.0)
+            bright = q[1] >= _DARK
+            if best is None or (bright, q[0]) > (best_q[1] >= _DARK, best_q[0]):
+                best, best_q = img, q
+        now = time.monotonic()
+        dark = best is not None and best_q[1] < _DARK and now - session.started_at < DARK_WAIT_S
+        if now - t0 >= STILL_WINDOW_S and not dark:
+            return best if best is not None else session.latest()
+        await asyncio.sleep(_FRAME_GAP_S)
 
 
 def refusal(ctx: ToolContext) -> str:
@@ -198,7 +233,7 @@ async def camera_look(args: dict, ctx: ToolContext) -> ToolOutput:
         settle = SETTLE_S - (time.monotonic() - session.started_at)
         if settle > 0:
             await asyncio.sleep(settle)
-        img = session.latest()
+        img = await pick_still(session)
         if img is None:
             camera_live.close("error")
             return ToolOutput("The camera didn't send a picture.", ok=False)

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import math
 import threading
 import weakref
 
@@ -89,6 +90,8 @@ class Brain:
             raise QuotaExhausted(f"{self.name}: 429 quota")
         if self.mode == "slow":
             await asyncio.sleep(30)
+        if self.mode == "late":  # answers, a little after the other brain
+            await asyncio.sleep(0.3)
         if self.mode == "empty":
             return Turn(text="")
         return Turn(text=f"**A blue mug** from {self.name}.")
@@ -96,9 +99,11 @@ class Brain:
 
 @pytest.fixture(autouse=True)
 def _fresh_layers():
+    ans._late_until.clear()
     yield
     apple.set_engine(None)
     detect.set_engine(None)
+    ans._late_until.clear()
 
 
 @pytest.fixture
@@ -174,6 +179,85 @@ def test_a_hand_whose_joints_are_unclear_has_no_finger_count():
     pts = {k: (x, y, 0.1) for k, (x, y, _) in _hand({"index"}, thumb=False).items()}
     assert apple.count_fingers(pts) is None
     assert apple.count_fingers({"index_tip": (0.5, 0.5, 0.9)}) is None
+
+
+# A right hand, palm to the camera (y up; the palm, wrist to middle knuckle, 1 long), as Vision's joints.
+_MCP = {"index": (-0.35, 0.95), "middle": (-0.1, 1.0), "ring": (0.15, 0.95), "little": (0.37, 0.85)}
+_BONES = {"index": (0.45, 0.27, 0.2), "middle": (0.5, 0.3, 0.22), "ring": (0.47, 0.29, 0.21), "little": (0.37, 0.2, 0.18)}
+_SPLAY = {"index": -0.12, "middle": -0.03, "ring": 0.06, "little": 0.16}
+_THUMB = {  # cmc, mp, ip, tip
+    "out": [(-0.2, 0.2), (-0.45, 0.42), (-0.65, 0.62), (-0.8, 0.8)],
+    "alongside": [(-0.2, 0.2), (-0.4, 0.4), (-0.52, 0.62), (-0.6, 0.8)],
+    "on_little": [(-0.2, 0.2), (-0.3, 0.45), (-0.05, 0.6), (0.2, 0.68)],  # holding the little finger down
+    "on_ring": [(-0.2, 0.2), (-0.3, 0.45), (-0.1, 0.62), (0.08, 0.72)],
+    "over_fist": [(-0.2, 0.2), (-0.35, 0.5), (-0.28, 0.78), (-0.05, 0.9)],
+}
+
+
+def _real_hand(up, thumb, *, turn=0.0, size=0.3, mirror=False, aspect=16 / 9):
+    pts = {"wrist": (0.0, 0.0)}
+    for f, (x, y) in _MCP.items():
+        a, b, c = _BONES[f]
+        if f in up:
+            dx, dy = math.sin(_SPLAY[f]), math.cos(_SPLAY[f])
+            chain = [(x + dx * t, y + dy * t) for t in (0, a, a + b, a + b + c)]
+        else:  # curled into the palm: the first bone toward the camera, the rest folded down
+            chain = [(x, y), (x, y + 0.12), (x, y - 0.08), (x + 0.02, y - 0.25)]
+        pts.update(zip((f"{f}_mcp", f"{f}_pip", f"{f}_dip", f"{f}_tip"), chain, strict=True))
+    pts.update(zip(("thumb_cmc", "thumb_mp", "thumb_ip", "thumb_tip"), _THUMB[thumb], strict=True))
+    out = {}
+    for k, (x, y) in pts.items():
+        x = -x if mirror else x
+        xr, yr = x * math.cos(turn) - y * math.sin(turn), x * math.sin(turn) + y * math.cos(turn)
+        out[k] = (0.5 + xr * size / aspect, 0.4 + yr * size, 0.9)
+    return out
+
+
+@pytest.mark.parametrize(
+    ("up", "thumb", "want"),
+    [
+        ((), "over_fist", 0),
+        (("index",), "over_fist", 1),
+        (("index", "middle"), "on_ring", 2),
+        (("index", "middle", "ring"), "on_little", 3),  # the thumb holding the little finger down
+        (("index", "middle"), "out", 3),
+        (("index", "little"), "out", 3),
+        (("index", "middle", "ring", "little"), "on_ring", 4),
+        (("index", "middle", "ring", "little"), "alongside", 5),  # the thumb up beside the index
+        (("index", "middle", "ring", "little"), "out", 5),
+    ],
+)
+@pytest.mark.parametrize("turn", [0.0, 0.6, -1.4, math.pi])
+@pytest.mark.parametrize("mirror", [False, True])
+def test_fingers_are_counted_however_the_hand_is_turned(up, thumb, want, turn, mirror):
+    pts = _real_hand(set(up), thumb, turn=turn, mirror=mirror)
+    assert apple.count_fingers(pts, 16 / 9) == want
+    far = _real_hand(set(up), thumb, turn=turn, mirror=mirror, size=0.1)  # a hand far from the camera
+    assert apple.count_fingers(far, 16 / 9) == want
+
+
+def test_an_unclear_finger_makes_the_count_a_range_never_a_wrong_number():
+    pts = _real_hand({"index", "middle", "ring"}, "on_little")
+    pts["ring_tip"] = (*pts["ring_tip"][:2], 0.1)  # the ring finger's tip unclear
+    states = apple.finger_states(pts, 16 / 9)
+    assert states == {"thumb": False, "index": True, "middle": True, "ring": None, "little": False}
+    assert apple.count_fingers(pts, 16 / 9) is None and apple.finger_range(states) == (2, 3)
+    hand = apple.Hand((0.4, 0.3, 0.2, 0.3), None, "right", 0.9, states)
+    got = apple.hands_summary([hand])
+    assert got["fingers"] is None and got["range"] == [2, 3] and got["raised"] == ["index", "middle"]
+    for f in ("index", "middle", "ring"):  # three fingers unclear: no count at all
+        pts[f"{f}_tip"] = (*pts[f"{f}_tip"][:2], 0.1)
+    assert apple.finger_range(apple.finger_states(pts, 16 / 9)) is None
+
+
+def test_a_half_bent_finger_is_unsure():
+    pts = _real_hand({"index", "middle", "ring", "little"}, "out", size=1.0, aspect=1.0)
+    x, y = 0.5 - 0.35, 0.4 + 0.95  # the index knuckle; its first bone up, the next two bent 60° each
+    bent = {"index_pip": (x, y + 0.45), "index_dip": (x + 0.234, y + 0.585), "index_tip": (x + 0.407, y + 0.485)}
+    pts.update({k: (*v, 0.9) for k, v in bent.items()})
+    states = apple.finger_states(pts, 1.0)
+    assert states["index"] is None and states["middle"] is True
+    assert apple.count_fingers(pts, 1.0) is None and apple.finger_range(states) == (4, 5)
 
 
 def test_a_hand_s_box_is_top_left_based_and_padded():
@@ -281,8 +365,14 @@ def test_the_hints_are_one_short_line():
     line = ans.format_hints(HINTS)
     assert line == (
         'likely objects: cup, person; scene: cup; text seen: "HYDRO FLASK"; '
-        "hand: 1 hand in view, holding something near it — likely a cup, 3 fingers up"
+        "hand: 1 hand in view, holding something near it — likely a cup, 3 fingers up (counted from the "
+        "hand's joints)"
     )
+    sure = ans.format_hints({"hands": {"count": 1, "fingers": 3, "raised": ["thumb", "index", "little"]}})
+    assert sure == "hand: 1 hand in view, 3 fingers up (counted from the hand's joints: thumb, index, little)"
+    unsure = ans.format_hints({"hands": {"count": 1, "fingers": None, "range": [3, 4], "raised": ["index"]}})
+    assert unsure == "hand: 1 hand in view, 3 or 4 fingers up (counted from the hand's joints)"
+    assert ans.format_hints({"hands": {"count": 1, "fingers": None, "range": None}}) == "hand: 1 hand in view"
     assert ans.format_hints(None) == "" and len(ans.format_hints({"text": ["x" * 999] * 9})) <= 360
 
 
@@ -294,8 +384,31 @@ async def test_gemini_answers_first_with_one_small_still_and_the_hints(mac):
     assert max(_image_of(sent).size) <= ans.MAX_EDGE
     words = sent["messages"][0].text
     assert words.startswith("what am I holding?") and "likely a cup" in words and "HYDRO FLASK" in words
-    assert sent["effort"] == "minimal" and sent["max_tokens"] <= 256 and "language" in sent["system"]
-    assert not b["cerebras_vision"].sent and not b["groq"].sent and not b["cerebras"].sent
+    assert sent["effort"] == "minimal" and sent["max_tokens"] <= 384 and "language" in sent["system"]
+    assert "finger count" in sent["system"]
+    (other,) = b["cerebras_vision"].sent  # asked at the same time, with the same still and words
+    assert other["effort"] == "low" and other["messages"][0].text == words
+    assert _image_of(other).size == _image_of(sent).size
+    assert not b["groq"].sent and not b["cerebras"].sent
+
+
+async def test_gemini_s_answer_is_waited_for_a_little_even_when_cerebras_s_came_first(mac):
+    mac(modes={"gemini": "late"})
+    r = await ans.ask(frame(), "what is this?", HINTS)
+    assert (r.by, r.text) == ("gemini", "A blue mug from gemini.")
+
+
+async def test_past_gemini_s_time_cerebras_s_ready_answer_is_taken_at_once(mac, monkeypatch):
+    monkeypatch.setattr(ans, "GEMINI_S", 0.05)
+    b = mac(modes={"gemini": "slow"})
+    r = await ans.ask(frame(), "what is this?", HINTS)
+    assert r.by == "cerebras_vision" and r.ms < 1000  # (not the 30 s Gemini would take)
+    assert len(b["gemini"].sent) == 1
+    r = await ans.ask(frame(), "and now?", HINTS)  # Gemini rests: not asked, no wait
+    assert r.by == "cerebras_vision" and len(b["gemini"].sent) == 1 and len(b["cerebras_vision"].sent) == 2
+    monkeypatch.setattr(ans, "_late_until", {"gemini": 0.0})  # rested: asked again
+    b["gemini"].mode = "ok"
+    assert (await ans.ask(frame(), "and now?", HINTS)).by == "gemini"
 
 
 @pytest.mark.parametrize("mode", ["busy", "quota", "slow", "empty"])
@@ -315,7 +428,7 @@ async def test_both_brains_down_the_answer_is_the_labels_and_says_so(mac):
     r = await ans.ask(frame(), "how many fingers am I holding up?", HINTS)
     assert (r.by, r.cloud, r.why) == ("local", False, "failed")
     assert r.text.startswith("I couldn't reach Gemini or Cerebras, so this is from the on-device labels only")
-    assert "holding a cup" in r.text and "HYDRO FLASK" in r.text and "3 fingers up" in r.text
+    assert "holding a cup" in r.text and "HYDRO FLASK" in r.text and "I count 3 fingers up." in r.text
     assert len(b["gemini"].sent) == len(b["cerebras_vision"].sent) == 1
 
 

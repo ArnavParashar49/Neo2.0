@@ -81,6 +81,8 @@ def cam(monkeypatch):
     monkeypatch.setattr(camera_live, "channel", ch)
     monkeypatch.setattr(camera_live, "backend_factory", FakeCamera)
     monkeypatch.setattr(cam_tool, "SETTLE_S", 0.0)
+    monkeypatch.setattr(cam_tool, "STILL_WINDOW_S", 0.0)
+    monkeypatch.setattr(cam_tool, "DARK_WAIT_S", 0.0)
     yield ch
     live.reset()
 
@@ -429,3 +431,51 @@ async def test_a_page_never_reuses_the_camera_in_its_follow_up_window(cam, monke
     assert not out.ok and "ask" in out.text
     ok = await cam_tool.camera_look({"question": "and now?"}, _user("and now?"))
     assert ok.ok and len(FakeCamera.instances) == 1
+
+
+class _Frames:
+    """A camera whose newest frame moves through ``frames``, one per read."""
+
+    def __init__(self, frames, started_ago: float = 5.0) -> None:
+        import time
+
+        self.frames, self.i = frames, 0
+        self.started_at = time.monotonic() - started_ago
+
+    def latest(self):
+        img = self.frames[min(self.i, len(self.frames) - 1)]
+        self.i += 1
+        return img
+
+
+def _checks(light: int = 200, blur: float = 0.0) -> Image.Image:
+    from PIL import ImageDraw, ImageFilter
+
+    img = Image.new("RGB", (640, 360), (light // 4,) * 3)
+    d = ImageDraw.Draw(img)
+    for x in range(0, 640, 20):
+        for y in range(0, 360, 20):
+            if (x + y) // 20 % 2:
+                d.rectangle((x, y, x + 9, y + 9), fill=(light,) * 3)
+    return img.filter(ImageFilter.GaussianBlur(blur)) if blur else img
+
+
+async def test_the_still_is_the_sharpest_frame_not_just_the_newest(monkeypatch):
+    monkeypatch.setattr(cam_tool, "STILL_WINDOW_S", 0.3)
+    sharp = _checks()
+    cam = _Frames([_checks(blur=4), sharp, _checks(blur=6), _checks(blur=3)])
+    assert await cam_tool.pick_still(cam) is sharp
+
+
+async def test_a_dark_picture_waits_for_the_exposure_then_gives_up(monkeypatch):
+    monkeypatch.setattr(cam_tool, "STILL_WINDOW_S", 0.05)
+    monkeypatch.setattr(cam_tool, "DARK_WAIT_S", 0.4)
+    bright = _checks(blur=2)
+    cam = _Frames([_checks(light=30)] * 3 + [bright], started_ago=0.0)
+    assert await cam_tool.pick_still(cam) is bright  # (a sharper dark frame came first)
+    dark = _checks(light=30)
+    import time
+
+    t0 = time.monotonic()
+    assert await cam_tool.pick_still(_Frames([dark], started_ago=0.0)) is dark  # dark all along
+    assert 0.3 < time.monotonic() - t0 < 1.0

@@ -6,9 +6,10 @@ Three requests on one image handler, in one pass (:func:`analyse`):
   "beverage", "keyboard"), top few with their confidence;
 * text — ``VNRecognizeTextRequest`` in fast mode: the words printed on the thing held up (a label,
   a book cover, a screen);
-* hands — ``VNDetectHumanHandPoseRequest``: up to two hands, each with its box and how many fingers
-  are raised (from the joints: a finger is up when its tip is well past its middle joint, seen from
-  the wrist; the thumb when its tip is clear of the palm).
+* hands — ``VNDetectHumanHandPoseRequest``: up to two hands, each with its box and which fingers
+  are raised (from the joints, :func:`finger_states`: a finger is up when it is straight and reaches
+  past its middle joint, the thumb when its tip is off the palm; a finger it can't tell is "unsure",
+  and the count is then a range rather than a guess).
 
 The frame reaches Vision as a CGImage over the picture's own bytes (no PNG round trip), and is never
 written anywhere. With pyobjc-framework-Vision installed its metadata is used; without it the system
@@ -65,9 +66,10 @@ _FINGERS = ("index", "middle", "ring", "little")
 @dataclass
 class Hand:
     box: Box  # 0..1 of the frame, origin top left
-    fingers: int | None = None  # raised, thumb included; None: the joints weren't clear enough
+    fingers: int | None = None  # raised, thumb included; None: a finger was unsure (see states)
     side: str = ""  # "left" / "right" as Vision tells it, "" when it can't
     conf: float = 0.0
+    states: dict[str, bool | None] = field(default_factory=dict)  # finger_states: up, down, unsure
 
 
 @dataclass
@@ -89,35 +91,78 @@ class Engine(Protocol):
 
 Point = tuple[float, float, float]  # x, y (0..1, any origin), confidence
 
+# A finger (not the thumb) is up when it is straight — its tip about as far from its knuckle as the
+# finger is long along its joints — and reaches past its middle joint, seen from the wrist; down when
+# its tip is back at or below that joint, or it is bent and doesn't reach. Neither (a finger pointed
+# at the camera, a half-bent one) or its joints unclear: unsure, and the hand's count is a range —
+# a wrong number is worse than "3 or 4". Both measures are ratios: any size, turn or tilt of the hand.
+_STRAIGHT_UP, _STRAIGHT_DOWN = 0.8, 0.6  # |knuckle → tip| / the finger's length along its joints
+_REACH_UP, _REACH_DOWN = 1.1, 0.95  # |wrist → tip| / |wrist → middle joint|
+# The thumb is up when its tip is away from the palm's middle (by this share of the palm's length)
+# and moving away from the little finger's side; down when it lies on the palm or folds back toward it.
+_THUMB_AWAY_UP, _THUMB_AWAY_DOWN = 0.5, 0.4
+
 
 def _dist(a: Point, b: Point, aspect: float) -> float:
     return math.hypot((a[0] - b[0]) * aspect, a[1] - b[1])
 
 
-def count_fingers(points: Mapping[str, Point], aspect: float = 1.0) -> int | None:
-    """Fingers raised (0–5) from a hand's joints (our names: :data:`JOINTS`). ``aspect``: the frame's
-    width / height, so distances are the same in both directions. None: too few joints were clear."""
+def finger_states(points: Mapping[str, Point], aspect: float = 1.0) -> dict[str, bool | None]:
+    """Each finger of a hand ("thumb", "index", "middle", "ring", "little"): True up, False down,
+    None unsure (its joints unclear, or in between). ``points``: the joints (our names:
+    :data:`JOINTS`); ``aspect``: the frame's width / height, so distances are the same both ways."""
     p = {k: v for k, v in points.items() if v[2] >= MIN_JOINT_CONF}
+    states: dict[str, bool | None] = dict.fromkeys(("thumb", *_FINGERS))
     wrist = p.get("wrist")
     if wrist is None:
-        return None
-    up, known = 0, 0
+        return states
+
+    def d(a: Point, b: Point) -> float:
+        return _dist(a, b, aspect)
+
     for f in _FINGERS:
-        tip, pip = p.get(f"{f}_tip"), p.get(f"{f}_pip")
-        if tip is None or pip is None:
+        mcp, pip, tip = p.get(f"{f}_mcp"), p.get(f"{f}_pip"), p.get(f"{f}_tip")
+        if mcp is None or pip is None or tip is None:
             continue
-        known += 1
-        if _dist(wrist, tip, aspect) > 1.15 * _dist(wrist, pip, aspect):
-            up += 1
-    if known < 3:
+        dip = p.get(f"{f}_dip")
+        length = d(mcp, pip) + (d(pip, dip) + d(dip, tip) if dip is not None else d(pip, tip))
+        if length <= 1e-6:
+            continue
+        straight = d(mcp, tip) / length
+        reach = d(wrist, tip) / max(1e-6, d(wrist, pip))
+        if straight >= _STRAIGHT_UP and reach >= _REACH_UP:
+            states[f] = True
+        elif reach <= _REACH_DOWN or (straight <= _STRAIGHT_DOWN and reach < _REACH_UP):
+            states[f] = False
+    mcps = [p[f"{f}_mcp"] for f in _FINGERS if f"{f}_mcp" in p]
+    tip, ip, little, middle = p.get("thumb_tip"), p.get("thumb_ip"), p.get("little_mcp"), p.get("middle_mcp")
+    if tip is not None and ip is not None and little is not None and middle is not None and len(mcps) >= 3:
+        palm = d(wrist, middle)
+        mid = (sum(q[0] for q in (wrist, *mcps)) / (len(mcps) + 1), sum(q[1] for q in (wrist, *mcps)) / (len(mcps) + 1), 1.0)
+        away = d(tip, mid) / max(1e-6, palm)
+        outward = d(tip, little) - d(ip, little)  # > 0: the tip is further from the little finger's side
+        if away >= _THUMB_AWAY_UP and outward >= 0:
+            states["thumb"] = True
+        elif away <= _THUMB_AWAY_DOWN or outward < -0.1 * palm:
+            states["thumb"] = False
+    return states
+
+
+def count_fingers(points: Mapping[str, Point], aspect: float = 1.0) -> int | None:
+    """Fingers raised (0–5, the thumb included) from a hand's joints (see :func:`finger_states`).
+    None: a finger is unsure — :func:`finger_range` then says how many it could be."""
+    s = finger_states(points, aspect)
+    return None if None in s.values() else sum(1 for v in s.values() if v)
+
+
+def finger_range(states: Mapping[str, bool | None]) -> tuple[int, int] | None:
+    """(fewest, most) fingers up from :func:`finger_states`; None when too little is known (over
+    two fingers unsure: no count is better than a wide guess)."""
+    unsure = sum(1 for v in states.values() if v is None)
+    if not states or unsure > 2:
         return None
-    tip, ip, imcp, lmcp = p.get("thumb_tip"), p.get("thumb_ip"), p.get("index_mcp"), p.get("little_mcp")
-    if tip is not None and ip is not None and imcp is not None:
-        palm = _dist(imcp, lmcp, aspect) if lmcp is not None else _dist(wrist, imcp, aspect) * 0.8
-        clear = _dist(tip, imcp, aspect) > 0.85 * palm
-        if clear and _dist(wrist, tip, aspect) > _dist(wrist, ip, aspect):
-            up += 1
-    return up
+    up = sum(1 for v in states.values() if v)
+    return up, up + unsure
 
 
 def hand_box(points: Mapping[str, Point], *, flip_y: bool = True, pad: float = 0.1) -> Box | None:
@@ -288,7 +333,9 @@ class _Vision:
             if box is None:
                 continue
             side = {-1: "left", 1: "right"}.get(int(o.chirality()) if hasattr(o, "chirality") else 0, "")
-            out.append(Hand(box=box, fingers=count_fingers(points, aspect), side=side, conf=round(float(o.confidence()), 3)))
+            states = finger_states(points, aspect)
+            fingers = None if None in states.values() else sum(1 for v in states.values() if v)
+            out.append(Hand(box, fingers, side, round(float(o.confidence()), 3), states))
         return out
 
 
@@ -352,11 +399,20 @@ def text(img: Image.Image) -> list[str]:
 
 
 def hands_summary(found: list[Hand]) -> dict[str, Any]:
-    """{count, fingers (all hands' raised fingers, when every hand's are known), hands: [...]}."""
+    """{count, fingers (all hands' raised fingers, when every finger is sure), range ([fewest, most]
+    when some are unsure, None when too many are), raised (the sure-up fingers' names), hands: [...]}."""
     counts = [h.fingers for h in found]
+    fingers = sum(c for c in counts if c is not None) if found and None not in counts else None
+    rng: list[int] | None = None
+    if found and fingers is None:
+        parts = [finger_range(h.states) if h.fingers is None else (h.fingers, h.fingers) for h in found]
+        if None not in parts:
+            rng = [sum(r[0] for r in parts), sum(r[1] for r in parts)]  # type: ignore[index]
     return {
         "count": len(found),
-        "fingers": sum(c for c in counts if c is not None) if found and None not in counts else None,
+        "fingers": fingers,
+        "range": rng,
+        "raised": [f for h in found for f, up in h.states.items() if up] if len(found) == 1 else [],
         "hands": [{"box": list(h.box), "fingers": h.fingers, "side": h.side} for h in found],
     }
 
@@ -374,6 +430,8 @@ __all__ = [
     "available",
     "classify",
     "count_fingers",
+    "finger_range",
+    "finger_states",
     "hand_box",
     "hands",
     "hands_summary",

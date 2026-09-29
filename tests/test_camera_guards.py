@@ -77,6 +77,8 @@ def cam(monkeypatch):
     monkeypatch.setattr(camera_live, "channel", ch)
     monkeypatch.setattr(camera_live, "backend_factory", SlowCamera)
     monkeypatch.setattr(cam_tool, "SETTLE_S", 0.0)
+    monkeypatch.setattr(cam_tool, "STILL_WINDOW_S", 0.0)
+    monkeypatch.setattr(cam_tool, "DARK_WAIT_S", 0.0)
     camera_words.forget()
     yield ch
     live.reset()

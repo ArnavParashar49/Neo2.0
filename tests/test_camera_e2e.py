@@ -148,6 +148,8 @@ def neo(monkeypatch):
     monkeypatch.setattr(camera_live, "channel", ch)
     monkeypatch.setattr(camera_live, "backend_factory", FakeCamera)
     monkeypatch.setattr(cam_tool, "SETTLE_S", 0.0)
+    monkeypatch.setattr(cam_tool, "STILL_WINDOW_S", 0.0)
+    monkeypatch.setattr(cam_tool, "DARK_WAIT_S", 0.0)
     camera_words.forget()
     yield type("Neo", (), {"brains": brains, "channel": ch, "warmed": warmed, "settings": s, "chats": chats})
     live.reset()
@@ -166,11 +168,11 @@ async def test_what_am_i_holding_end_to_end(neo):
     r = await _session().handle("Neo, what am I holding?", from_user=True)
     assert r.route == "quick" and r.tools == ("camera_look",)
     assert r.text == "You're holding a blue mug (gemini)."
-    # One small still went to Gemini, with the on-device hints; nobody else saw anything.
+    # One small still went to Gemini (and Cerebras, asked at once), with the on-device hints; nobody else.
     (sent,) = neo.brains["gemini"].sent
     words = sent["messages"][0].text
     assert "HYDRO FLASK" in words and "cup" in words and len(sent["messages"][0].images) == 1
-    assert all(not b.sent for n, b in neo.brains.items() if n != "gemini")
+    assert all(not b.sent for n, b in neo.brains.items() if n not in ("gemini", "cerebras_vision"))
     assert neo.warmed  # Cerebras's connection warmed when the request was recognised
     # The card: open, starting → live → analysing (the local boxes first) → answered, still on.
     types_ = [t for t, _ in neo.channel.sent]
