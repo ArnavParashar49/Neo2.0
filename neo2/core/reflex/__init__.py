@@ -1,8 +1,9 @@
 """Reflex facade: rules → Laya (local) → Flash-Lite (cloud) with confidence-based escalation.
 
-The Laya model is a process-wide singleton (1.7 GB on the GPU — load it once) shared with the
-memory embedder. All access is serialised behind one lock: PyTorch on MPS is not thread-safe,
-and two concurrent forward passes (or a load racing a call) trip a Metal command-buffer assertion.
+The Laya model is a process-wide singleton (1.7 GB on the GPU — load it once). All access is
+serialised behind one lock, the process's GPU lock (neo2.core.gpu): PyTorch on MPS is not
+thread-safe, and two concurrent forward passes (or a load racing a call) trip a Metal
+command-buffer assertion that kills the process.
 """
 
 from __future__ import annotations
@@ -11,7 +12,7 @@ import asyncio
 import re
 import threading
 
-from neo2.core import logger
+from neo2.core import gpu, logger
 from neo2.core.config import settings
 from neo2.core.reflex.schema import Decision, Intent, wants_reply
 from neo2.core.selftest.phrases import is_request as asks_for_selftest
@@ -34,7 +35,7 @@ _STOP_RE = re.compile(
 def is_bare_stop(text: str) -> bool:
     return bool(_STOP_RE.match(text))
 
-_lock = threading.Lock()
+_lock = gpu.lock()  # Laya's lock is the GPU lock: one for every torch pass on MPS in the process
 _laya = None
 _laya_failed = False
 

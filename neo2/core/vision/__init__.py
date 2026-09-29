@@ -2,7 +2,7 @@
 
 * :mod:`.apple` — Apple Vision, on this Mac, nothing to download: labels for the whole frame, the
   words printed on things, and hands (how many, fingers raised, where);
-* :mod:`.detect` — D-FINE small (Apache-2.0, 40 MB, transformers on MPS): object boxes for the live
+* :mod:`.detect` — D-FINE small (Apache-2.0, 40 MB, transformers on the CPU): object boxes for the live
   preview, and which object is by the hand;
 * :mod:`.answer` — the answer itself, from NEO's cloud brains that see, as the user chose: Gemini
   first, then Cerebras's vision model — one still per question, with the two layers above as short

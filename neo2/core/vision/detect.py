@@ -1,5 +1,12 @@
 """Object boxes on a camera frame: D-FINE small (ustc-community/dfine-small-coco, Apache-2.0, 40 MB,
-the 80 COCO objects), through transformers on the GPU (MPS; the CPU when MPS can't run it).
+the 80 COCO objects), through transformers on the CPU.
+
+Never on the GPU: PyTorch's MPS stream is the process's one (neo2.core.gpu), and a detector frame
+there beside a Laya pass aborted NEO. Taking turns under the GPU lock instead cost both sides —
+measured on an M3 Pro, 640 px, a preview frame every 0.4 s: D-FINE 33 ms alone on MPS but 69 ms
+(p90 94) waiting for Laya, and Laya's passes p90 36 → 38 ms, worst 40 → 81 ms; a Laya load or
+retrain would hold the boxes up for seconds. On the CPU a frame takes ~150 ms (p90 160, ~180 while
+Laya works; the first ~280) and Laya's passes don't notice it.
 
 Loaded on first use (:func:`warm` loads it ahead, in a thread, when the camera turns on) and kept:
 it's small. A frame is scaled to at most :data:`MAX_EDGE` px first; boxes under :data:`MIN_SCORE` are
@@ -116,12 +123,11 @@ def to_dets(
 
 
 class _DFine:
-    """D-FINE small through transformers. Loaded once; one frame at a time."""
+    """D-FINE small through transformers, on the CPU. Loaded once; one frame at a time."""
 
     def __init__(self) -> None:
         self._model: Any = None
         self._proc: Any = None
-        self._device = "cpu"
         self._load_lock = threading.Lock()
         self._run_lock = threading.Lock()
 
@@ -132,7 +138,7 @@ class _DFine:
             src, download = source()
             effects.guard("model", f"load the D-FINE object detector ({Path(src).name}) into memory")
             try:
-                import torch
+                import torch  # noqa: F401 — the models run on it: missing, the message below says so
                 from transformers import AutoImageProcessor, DFineForObjectDetection
             except ImportError as e:
                 raise Unavailable("The object detector needs transformers and torch (NEO's vision extra)") from e
@@ -148,14 +154,13 @@ class _DFine:
                 if download:
                     raise Unavailable(f"The object detector couldn't be downloaded ({type(e).__name__})") from e
                 raise Unavailable(_missing_words()) from e
-            device = "mps" if torch.backends.mps.is_available() else "cpu"
-            self._model, self._proc, self._device = model.to(device).eval(), proc, device
-            log.info(f"[vision] D-FINE loaded on {device} in {(time.perf_counter() - t0) * 1000:.0f} ms")
+            self._model, self._proc = model.eval(), proc  # from_pretrained leaves it on the CPU
+            log.info(f"[vision] D-FINE loaded on the CPU in {(time.perf_counter() - t0) * 1000:.0f} ms")
 
     def _run(self, img: Image.Image, min_score: float) -> tuple[list[float], list[str], list[list[float]]]:
         import torch
 
-        inputs = self._proc(images=img, return_tensors="pt").to(self._device)
+        inputs = self._proc(images=img, return_tensors="pt")
         with torch.inference_mode():
             outputs = self._model(**inputs)
         res = self._proc.post_process_object_detection(
@@ -172,15 +177,7 @@ class _DFine:
             return []  # the previous frame is still being read: the preview skips this one
         try:
             img = _fit(img)
-            try:
-                got = self._run(img, min_score)
-            except Exception as e:  # noqa: BLE001 — an op MPS can't run: the CPU from now on
-                if self._device == "cpu":
-                    raise
-                log.info(f"[vision] D-FINE on MPS failed ({type(e).__name__}); using the CPU")
-                self._model, self._device = self._model.to("cpu"), "cpu"
-                got = self._run(img, min_score)
-            return to_dets(*got, img.width, img.height, min_score=min_score, limit=limit)
+            return to_dets(*self._run(img, min_score), img.width, img.height, min_score=min_score, limit=limit)
         finally:
             self._run_lock.release()
 

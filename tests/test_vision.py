@@ -10,13 +10,15 @@ from __future__ import annotations
 import asyncio
 import io
 import math
+import sys
 import threading
+import types
 import weakref
 
 import pytest
 from PIL import Image
 
-from neo2.core import config, effects, health
+from neo2.core import config, effects, gpu, health
 from neo2.core import providers as prov
 from neo2.core.providers import cerebras_hooks as hooks
 from neo2.core.providers.base import Overloaded, QuotaExhausted, Turn
@@ -322,6 +324,82 @@ def test_the_real_detector_never_loads_in_the_tests(monkeypatch):
         detect.detect(frame(64, 48))
     assert not detect.loaded()
     assert pipeline.preview(frame(64, 48)) == []  # the live card: no boxes, no error
+
+
+def test_the_detector_runs_on_the_cpu_and_never_waits_for_the_gpu(tmp_path, monkeypatch):
+    """D-FINE off MPS: a frame there beside a Laya pass aborted NEO (neo2.core.gpu). So nothing it
+    loads or reads is moved to a device, and a frame is read while Laya holds the GPU lock."""
+    torch = pytest.importorskip("torch")
+    moved: list[object] = []
+
+    class Inputs(dict):
+        def to(self, *a, **k):
+            moved.append(("inputs", a, k))
+            return self
+
+    class Proc:
+        @classmethod
+        def from_pretrained(cls, src, **kw):
+            assert kw.get("local_files_only") is True  # the folder on this Mac, never a download
+            return cls()
+
+        def __call__(self, images, return_tensors):
+            return Inputs(pixel_values=torch.zeros(1, 3, 8, 8))
+
+        def post_process_object_detection(self, outputs, target_sizes, threshold):
+            h, w = (float(v) for v in target_sizes[0])
+            return [{"scores": torch.tensor([0.9]), "labels": torch.tensor([0]),
+                     "boxes": torch.tensor([[0.1 * w, 0.2 * h, 0.5 * w, 0.6 * h]])}]  # fmt: skip
+
+    class Model:
+        config = types.SimpleNamespace(id2label={0: "cup"})
+
+        @classmethod
+        def from_pretrained(cls, src, **kw):
+            return cls()
+
+        def to(self, *a, **k):
+            moved.append(("model", a, k))
+            return self
+
+        def eval(self):
+            return self
+
+        def __call__(self, **inputs):
+            return types.SimpleNamespace(**inputs)
+
+    fake = types.ModuleType("transformers")
+    fake.AutoImageProcessor, fake.DFineForObjectDetection = Proc, Model
+    monkeypatch.setitem(sys.modules, "transformers", fake)
+    folder = tmp_path / "dfine-small-coco"
+    folder.mkdir()
+    (folder / "config.json").write_text("{}")
+    s = config.Settings()
+    monkeypatch.setattr(config, "_settings", s)
+    monkeypatch.setattr(s, "vision_detector", str(folder))
+    monkeypatch.setattr(detect, "_dfine", None)
+    got: list[list[detect.Det]] = []
+    held, done = threading.Event(), threading.Event()
+
+    def laya_busy():  # a Laya pass (or its load) holding the GPU the whole time
+        with gpu.lock():
+            held.set()
+            done.wait(5)
+
+    busy = threading.Thread(target=laya_busy)
+    busy.start()
+    held.wait(5)
+    try:
+        with effects.allow("model"):
+            reader = threading.Thread(target=lambda: got.append(detect.detect(frame(640, 480))))
+            reader.start()
+            reader.join(5)
+    finally:
+        done.set()
+        busy.join(5)
+    assert got and got[0][0]["label"] == "cup"  # read while the GPU lock was held
+    assert got[0][0]["box"] == {"x": 0.1, "y": 0.2, "w": 0.4, "h": 0.4}
+    assert moved == []  # neither the weights nor a frame went to a device
 
 
 def test_detect_is_bounded_and_the_card_gets_its_boxes():
