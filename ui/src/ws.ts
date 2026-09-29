@@ -3,6 +3,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { BrowserHub } from "./browser/hub";
+import { CameraHub } from "./camera/hub";
+import { isCameraFrame } from "./camera/frames";
 
 export type NeoState =
   | "idle" | "listening" | "thinking" | "working" | "searching" | "speaking" | "connecting" | "confirming";
@@ -16,7 +18,9 @@ export type Item =
   | { kind: "msg"; id: number; role: "user" | "assistant" | "system"; text: string; final: boolean; ts: number; meta?: TurnMeta; job?: string }
   | { kind: "tools"; id: number; tools: ToolRun[]; job?: string }
   /** Where a browser session began: its card, its live row, or (once ended) its summary row. */
-  | { kind: "browser"; id: number; sid: string; job?: string; ts: number };
+  | { kind: "browser"; id: number; sid: string; job?: string; ts: number }
+  /** Where a camera session began: its live card is pinned atop the chat; once off, a row with the answer. */
+  | { kind: "camera"; id: number; sid: string; job?: string; ts: number };
 
 export interface NeoEvent { type: string; data: Record<string, any>; ts: number }
 /** A question NEO is waiting on: exactly what will run if the user says yes. `scopes`: how else
@@ -45,6 +49,12 @@ export function useNeo(opts: { surface?: "overlay" | "window" } = {}) {
     }
   }
   const hub = hubRef.current;
+  const camRef = useRef<CameraHub | null>(null);
+  if (!camRef.current) {
+    camRef.current = new CameraHub(opts.surface ?? "overlay");
+    if (import.meta.env.DEV && MOCK) ((window as unknown as { neoCams?: CameraHub[] }).neoCams ??= []).push(camRef.current);
+  }
+  const cam = camRef.current;
   const [connected, setConnected] = useState(false);
   const [state, setStateNow] = useState<NeoState>("idle");
   const lastChange = useRef(0);
@@ -72,6 +82,16 @@ export function useNeo(opts: { surface?: "overlay" | "window" } = {}) {
     let timer: number | undefined;
 
     const apply = (ev: NeoEvent) => {
+      if (ev.type.startsWith("camera_")) {
+        cam.handle(ev.type, ev.data);
+        if (ev.type === "camera_open" && ev.data?.sid) {
+          const { sid, job } = ev.data;
+          setItems((prev) => (prev.some((i) => i.kind === "camera" && i.sid === sid) ? prev : [...prev, { kind: "camera", id: nextId++, sid, job, ts: ev.ts }]));
+        } else if (ev.type === "camera_close" && ev.data?.reason === "erased") {
+          setItems((prev) => prev.filter((i) => i.kind !== "camera"));
+        }
+        return;
+      }
       if (ev.type.startsWith("browser_")) {
         hub.handle(ev.type, ev.data);
         if (ev.type === "browser_open") {
@@ -85,17 +105,21 @@ export function useNeo(opts: { surface?: "overlay" | "window" } = {}) {
       switch (ev.type) {
         case "hello":
           hub.beginHello();
+          cam.beginHello();
           setState(ev.data.state);
           setItems([]);
           for (const r of ev.data.recent ?? []) apply(r);
           setAsk(ev.data.confirm ?? null);
           setProblems(ev.data.problems ?? []);
           hub.endHello(ev.data.browser);
+          cam.endHello(ev.data.camera);
           setHelloAt(Date.now());
           {
             // A live session whose browser_open fell out of the replay still needs its anchor.
             const sid = hub.sid;
             if (sid) setItems((prev) => (prev.some((i) => i.kind === "browser" && i.sid === sid) ? prev : [...prev, { kind: "browser", id: nextId++, sid, job: ev.data.browser?.live?.job ?? undefined, ts: ev.ts }]));
+            const csid = cam.sid; // likewise a live camera session's
+            if (csid) setItems((prev) => (prev.some((i) => i.kind === "camera" && i.sid === csid) ? prev : [...prev, { kind: "camera", id: nextId++, sid: csid, ts: ev.ts }]));
           }
           break;
         case "problems":
@@ -104,6 +128,7 @@ export function useNeo(opts: { surface?: "overlay" | "window" } = {}) {
         case "erased":
           setItems([]);
           hub.clearEnded();
+          cam.clearEnded();
           setErasedAt(Date.now());
           break;
         case "confirm":
@@ -138,8 +163,8 @@ export function useNeo(opts: { surface?: "overlay" | "window" } = {}) {
               next[i] = { ...(prev[i] as Extract<Item, { kind: "msg" }>), text, final, ts: ev.ts };
               return next;
             }
-            // Trim old lines, but never a browser session's anchor (its row lives there).
-            const keep = prev.length > 120 ? prev.filter((it, k) => k >= prev.length - 120 || it.kind === "browser") : prev;
+            // Trim old lines, but never a browser or camera session's anchor (its row lives there).
+            const keep = prev.length > 120 ? prev.filter((it, k) => k >= prev.length - 120 || it.kind === "browser" || it.kind === "camera") : prev;
             return [...keep, { kind: "msg", id: nextId++, role, text, final, ts: ev.ts, job }];
           });
           break;
@@ -213,16 +238,21 @@ export function useNeo(opts: { surface?: "overlay" | "window" } = {}) {
       }
       ws.binaryType = "arraybuffer"; // live page frames arrive as binary (§10.4)
       sock.current = ws;
-      ws.onopen = () => { if (sock.current === ws) { setConnected(true); setError(""); hub.setConnected(true); } };
+      ws.onopen = () => { if (sock.current === ws) { setConnected(true); setError(""); hub.setConnected(true); cam.setConnected(true); } };
       ws.onmessage = (m) => {
         if (sock.current !== ws) return;
-        if (typeof m.data !== "string") { if (m.data instanceof ArrayBuffer) hub.frame(m.data); return; }
+        if (typeof m.data !== "string") {
+          // One socket, two cards: camera preview frames carry their own NBF1 kind.
+          if (m.data instanceof ArrayBuffer) { if (isCameraFrame(m.data)) cam.frame(m.data); else hub.frame(m.data); }
+          return;
+        }
         try { apply(JSON.parse(m.data)); } catch { /* ignore */ }
       };
       ws.onclose = () => {
         if (sock.current !== ws) return; // stale socket (StrictMode double-mount) must not clobber the live one
         setConnected(false);
         hub.setConnected(false);
+        cam.setConnected(false);
         setAsk(null); // the next hello says whether it's still waiting
         sock.current = null;
         timer = window.setTimeout(connect, 1500);
@@ -240,13 +270,15 @@ export function useNeo(opts: { surface?: "overlay" | "window" } = {}) {
     return true;
   }, []);
   hub.setSender(send);
+  cam.setSender(send);
 
   // Clear transcript: rows, posters and thumbnails go too — but a live session keeps its anchor.
   const clear = useCallback(() => {
-    const live = hub.sid;
-    setItems((prev) => prev.filter((i) => i.kind === "browser" && i.sid === live));
+    const live = hub.sid, camLive = cam.sid;
+    setItems((prev) => prev.filter((i) => (i.kind === "browser" && i.sid === live) || (i.kind === "camera" && i.sid === camLive)));
     hub.clearEnded();
-  }, [hub]);
+    cam.clearEnded();
+  }, [hub, cam]);
 
-  return { connected, state, items, error, note, ask, problems, erasedAt, helloAt, send, clear, hub };
+  return { connected, state, items, error, note, ask, problems, erasedAt, helloAt, send, clear, hub, cam };
 }

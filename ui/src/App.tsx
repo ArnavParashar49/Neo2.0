@@ -17,6 +17,9 @@ import { useReducedMotion } from "./browser/motion";
 import { closeBrowserWindow, openBrowserWindow, showBrowserWindow } from "./browser/popout";
 import { I } from "./browser/icons";
 import { inTauri, placeInitial, resizeAnchored, workArea, type Area, type Size } from "./win";
+import { useCamera } from "./camera/hub";
+import { CameraCard, CameraEndedRow, CameraPoppedRow, camIcon } from "./camera/CameraCard";
+import { CAMERA_POPIN_EVENT, closeCameraWindow, openCameraWindow, showCameraWindow } from "./camera/popout";
 import "./App.css";
 import "./browser/browser.css";
 
@@ -119,6 +122,9 @@ export default function App() {
   const neo = useNeo();
   const hub = neo.hub;
   const bsnap = useBrowser(hub);
+  const cam = neo.cam;
+  const csnap = useCamera(cam);
+  const camLive = csnap.live;
   const reduced = useReducedMotion();
   const [expanded, setExpanded] = useState(false);
   const [pinned, setPinned] = useState(false);
@@ -272,6 +278,29 @@ export default function App() {
     setViewFocus((n) => n + 1);
   }, [needUser]);
 
+  // ---- camera: while it is on, its preview is always in sight ----------------------------------
+  // The camera only turns on at the user's own request; its card opens with it — shown without
+  // stealing focus from other apps — and the overlay stays open until the camera is off.
+  const camSid = camLive?.sid ?? null;
+  useEffect(() => {
+    if (!camSid) return;
+    if (inTauri) void invoke("show_quiet").catch(() => getCurrentWindow().show()).catch(() => {});
+    setExpanded(true);
+  }, [camSid]);
+  // Off (answered, stopped, erased): its pop-out window goes with it.
+  useEffect(() => { if (!camSid) void closeCameraWindow(); }, [camSid]);
+  useEffect(() => {
+    if (!inTauri) return;
+    const un = listen(CAMERA_POPIN_EVENT, () => { cam.setPopped(false); setExpanded(true); });
+    return () => { un.then((f) => f()).catch(() => {}); };
+  }, [cam]);
+  const camPopOut = useCallback(async () => {
+    if (!cam.sid || !inTauri) return;
+    cam.setPopped(true);
+    if (!(await openCameraWindow())) cam.setPopped(false);
+  }, [cam]);
+  const camBringBack = useCallback(() => { cam.setPopped(false); void closeCameraWindow(); }, [cam]);
+
   // The pop-out window went away without "Bring back" (closed elsewhere): come home.
   const wasPopped = useRef(false);
   useEffect(() => {
@@ -424,10 +453,10 @@ export default function App() {
   }, [live, bmode, toggleFocus, toggleMini, popOut, bringBack]);
 
   useEffect(() => {
-    const v = () => hub.visibilityChanged();
+    const v = () => { hub.visibilityChanged(); cam.visibilityChanged(); };
     document.addEventListener("visibilitychange", v);
     return () => document.removeEventListener("visibilitychange", v);
-  }, [hub]);
+  }, [hub, cam]);
 
   // Native summon (hotkey / tray) → expand + arm the voice session.
   useEffect(() => {
@@ -468,19 +497,19 @@ export default function App() {
   // on stage, the user driving, or NEO waiting on them.
   const browsingHolds = !!live && (bmode === "docked" || bmode === "focus" || live.live!.controller === "user" || live.live!.status === "need_user");
   useEffect(() => {
-    if (!expanded || pinned || hover || neo.state !== "idle" || confirming || erasing || browsingHolds) return;
+    if (!expanded || pinned || hover || neo.state !== "idle" || confirming || erasing || browsingHolds || camLive) return;
     const t = window.setTimeout(() => {
       if (document.activeElement === inputRef.current && text) return;
       setExpanded(false);
     }, IDLE_COLLAPSE_MS);
     return () => clearTimeout(t);
-  }, [expanded, pinned, hover, neo.state, neo.items, text, confirming, erasing, browsingHolds]);
+  }, [expanded, pinned, hover, neo.state, neo.items, text, confirming, erasing, browsingHolds, camLive]);
 
   // Follow new content only when the user hasn't scrolled up.
   useEffect(() => {
     const el = logRef.current;
     if (el && stickToBottom.current) el.scrollTo({ top: el.scrollHeight, behavior: reduced ? "auto" : "smooth" });
-  }, [neo.items, neo.state, bsnap.ended, reduced]);
+  }, [neo.items, neo.state, bsnap.ended, csnap.ended, reduced]);
 
   // A (re)connect replays the transcript, and the log mounts afresh each time the orb opens: land on
   // the newest line at once. A layout change (the card docking, the strip appearing) jumps too — a
@@ -563,7 +592,9 @@ export default function App() {
   const latestBrowserSid = useMemo(() => { for (let i = neo.items.length - 1; i >= 0; i--) { const it = neo.items[i]; if (it.kind === "browser") return it.sid; } return null; }, [neo.items]);
 
   const liveHost = live?.live ? displayHost(live.live.url) : "";
-  const orbBadge = live?.live ? (
+  const orbBadge = camLive ? (
+    <span className="orb-badge cam" aria-hidden>{camIcon(12)}<span className="orb-badge-dot" style={{ background: "var(--cam-rec)" }} /></span>
+  ) : live?.live ? (
     <span className={"orb-badge" + (live.live.status === "need_user" || live.live.status === "waiting" ? " need" : live.live.controller === "neo" && live.live.status === "working" ? " acting" : "")} aria-hidden>
       {I.globe(12)}{(live.live.status === "need_user" || live.live.status === "waiting") && <span className="orb-badge-dot" />}
     </span>
@@ -577,7 +608,9 @@ export default function App() {
   );
 
   if (!expanded) {
-    const openLabel = live?.live
+    const openLabel = camLive
+      ? "Open NEO — the camera is on"
+      : live?.live
       ? live.live.status === "need_user" ? `Open NEO — your turn on ${liveHost}` : `Open NEO — browsing ${liveHost}`
       : neo.connected ? `Open NEO — ${LABEL[shown]}` : "NEO — core offline";
     return (
@@ -600,6 +633,11 @@ export default function App() {
       const e = bsnap.ended[it.sid];
       if (!e) return null;
       return <EndedRow key={it.id} e={e} landing={landingSid === it.sid} canReopen={it.sid === latestBrowserSid && !live} onReopen={() => void hub.controlSid(it.sid, "reopen").then((r) => { if (!r.ok && r.code === "no_session") hub.pageGone(it.sid); })} />;
+    }
+    if (it.kind === "camera") {
+      if (strip) return null;
+      const e = csnap.ended[it.sid];
+      return e ? <CameraEndedRow key={it.id} e={e} /> : null;
     }
     if (it.kind === "tools") {
       const tools = it.job && browserJobs.has(it.job) ? it.tools.filter((t) => !t.name.startsWith("browser")) : it.tools;
@@ -761,6 +799,8 @@ export default function App() {
         {stage}
         {(layout === "chat" || showStrip) && (
           <div className={"log" + (showStrip ? " strip" : "")} ref={logRef} onScroll={onScroll} role="log" aria-live="polite">
+            {layout === "chat" && camLive && !csnap.popped && <CameraCard key={camLive.sid} hub={cam} live={camLive} stopping={csnap.stopping} surface="chat" onPopout={inTauri ? () => void camPopOut() : undefined} />}
+            {layout === "chat" && camLive && csnap.popped && <CameraPoppedRow hub={cam} live={camLive} stopping={csnap.stopping} onShow={() => void showCameraWindow()} onBringBack={camBringBack} />}
             {layout === "chat" && live && bmode === "mini" && <MiniRow hub={hub} snap={live} onExpand={toggleMini} onStop={() => void hub.control("stop").then((r) => r.ok && hub.toast("Stopped. You're in control.", 2500))} />}
             {layout === "chat" && live && bmode === "popped" && <PoppedRow hub={hub} snap={live} onShow={showWindow} onBringBack={bringBack} />}
             {neo.connected && !showStrip && neo.problems.map((p) => <div key={p} className="msg system problem" role="alert">{p}</div>)}
@@ -776,6 +816,7 @@ export default function App() {
             {neo.error && <div className="msg system">{neo.error}</div>}
           </div>
         )}
+        {layout !== "chat" && camLive && !csnap.popped && <CameraCard key={camLive.sid} hub={cam} live={camLive} stopping={csnap.stopping} surface="pip" onPopout={inTauri ? () => void camPopOut() : undefined} />}
         {composer}
         <div className="hide-btn-hint" aria-hidden />
       </div>
