@@ -217,6 +217,10 @@ class UIServer:
         if self._clients:
             self._send_all(json.dumps(msg, default=str), lambda cl: True)
 
+    def viewers(self) -> int:
+        """Overlays connected now (the camera turns on only where its card can be seen)."""
+        return len(self._clients)
+
     def camera_frame(self, payload: bytes, who: Callable[[_Client], bool]) -> None:
         """One camera preview frame, into the latest-frame slot of each client showing the card."""
         for cl in list(self._clients.values()):

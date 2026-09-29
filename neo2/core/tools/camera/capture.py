@@ -109,6 +109,10 @@ class AVBackend:
         self._session: Any = None
         self._delegate: Any = None
         self._queue: Any = None
+        # stop() may come while start() is still turning the camera on (on its own thread: a
+        # cancelled request can't interrupt it): start() then turns it straight off again.
+        self._mu = threading.Lock()
+        self._stopped = False
 
     @staticmethod
     async def authorize() -> None:
@@ -180,14 +184,25 @@ class AVBackend:
         if not session.canAddOutput_(out):
             raise CameraUnavailable("The camera's video couldn't be read.")
         session.addOutput_(out)
+        with self._mu:
+            if self._stopped:  # stopped while it was being set up: never turned on
+                delegate._neo_on_frame = None
+                return
+            self._session, self._delegate = session, delegate  # before it runs: stop() can reach it
         session.startRunning()
-        self._session, self._delegate = session, delegate
+        with self._mu:
+            stopped = self._stopped
+        if stopped:  # stopped while it was starting: off at once (this is start's own thread)
+            with contextlib.suppress(Exception):
+                session.stopRunning()
 
     def stop(self) -> None:
-        session, self._session = self._session, None
-        if self._delegate is not None:
-            self._delegate._neo_on_frame = None
-            self._delegate = None
+        with self._mu:
+            self._stopped = True
+            session, self._session = self._session, None
+            delegate, self._delegate = self._delegate, None
+        if delegate is not None:
+            delegate._neo_on_frame = None
         if session is not None:
 
             def off() -> None:
@@ -196,6 +211,14 @@ class AVBackend:
 
             # stopRunning blocks until the camera is off: never on the event loop's thread
             threading.Thread(target=off, name="neo-camera-off", daemon=True).start()
+
+
+def _stop_quietly(backend: Backend, started: asyncio.Future | None = None) -> None:
+    """The camera off after a start that was cancelled, failed or stopped meanwhile."""
+    if started is not None and not started.cancelled():
+        started.exception()  # (retrieved: a failed start has nothing on to turn off)
+    with contextlib.suppress(Exception):
+        backend.stop()
 
 
 def encode_jpeg(img: Any, quality: int = JPEG_QUALITY) -> bytes:
@@ -235,15 +258,23 @@ class CameraSession:
             _load_av()  # a clear "install" message before anything else
             await AVBackend.authorize()
             self._backend = AVBackend()
+        backend = self._backend
         self.running = True
         self.started_at = time.monotonic()
+        # The backend starts on a thread nothing can cancel: a cancel meanwhile (the user's stop, a
+        # timeout) waits for it in the background and turns the camera off once it has started.
+        started = asyncio.ensure_future(asyncio.to_thread(backend.start, self._push))
         try:
-            await asyncio.to_thread(self._backend.start, self._push)
+            await asyncio.shield(started)
         except BaseException:
             self.running = False
-            with contextlib.suppress(Exception):
-                self._backend.stop()
+            if started.done():
+                _stop_quietly(backend, started)
+            else:
+                started.add_done_callback(lambda f: _stop_quietly(backend, f))
             raise
+        if not self.running:  # stop() came while it started (a backend may miss an early stop)
+            _stop_quietly(backend, started)
 
     def _push(self, img: Any) -> None:
         """A frame from the backend (any thread)."""

@@ -141,12 +141,12 @@ class CameraLive:
     def close(self, reason: str = "done") -> bool:
         """The camera off, the card told (False: it was off already)."""
         self._cancel_off()
-        if reason in ("stopped", "erased"):
-            # The user turned it off: "and now?" no longer reuses it (it asks afresh).
-            with contextlib.suppress(Exception):
-                from neo2.core.agent import camera_words
+        # Off, whyever (its window ran out, an error, the user's stop, an erase): "and now?" no
+        # longer reuses it, and never turns it back on (it asks afresh).
+        with contextlib.suppress(Exception):
+            from neo2.core.agent import camera_words
 
-                camera_words.forget()
+            camera_words.forget()
         session, self.session = self.session, None
         if session is None:
             return False

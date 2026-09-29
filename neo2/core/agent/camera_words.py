@@ -6,7 +6,11 @@
   colour is this", in English, Hinglish and Hindi. A sentence about the screen ("what is on my
   screen", "look at this page", "read this email") never is: that is the screen tools' job.
 * :func:`follow_up` — "and now?", "what about this one?", "aur ye?" right after a look: the camera
-  is still on for a short window, so the next question reuses it.
+  is still on for a short window, so the next question reuses it (the window closes whenever the
+  camera goes off: a follow-up never turns it back on).
+* :func:`wants_off` — "turn off the camera", "camera band karo", "कैमरा बंद करो".
+* :func:`pointing_only` — a bare "what is this?" / "ye kya hai" with nothing about the camera in it
+  (no hand, no "me", no object named): it could be about the screen, so the router asks Laya.
 
 Whole-sentence matches only (after how NEO was addressed and a polite lead come off): "remind me to
 ask what this is" never turns the camera on. Who said the words is fastpath.camera's to check.
@@ -135,6 +139,31 @@ _ASKS = re.compile(
 )
 _ASKS_HI = re.compile(r"^(?:" + "|".join(f"(?:{p})" for p in _HINDI) + r")$")
 
+# ---- the camera off ----------------------------------------------------------------------------------
+_CAM = r"(?:camera|webcam|cam)"
+_OFF = re.compile(
+    r"^(?:"
+    rf"(?:turn|switch|shut)\s+(?:off|down)\s+(?:the\s+|your\s+|my\s+)?{_CAM}"
+    rf"|(?:turn|switch|shut)\s+(?:the\s+|your\s+|my\s+)?{_CAM}\s+(?:off|down)"
+    rf"|(?:stop|close|end|disable|kill)\s+(?:the\s+|your\s+|my\s+)?{_CAM}"
+    rf"|(?:the\s+)?{_CAM}\s+off|stop\s+looking(?:\s+at\s+me)?|no\s+more\s+{_CAM}"
+    rf"|{_CAM}\s+(?:band|bandh|off)(?:\s+(?:karo|kar\s+do|kardo|kijiye|karna|kar))?"
+    r"|कैमरा\s+(?:बंद|ऑफ)(?:\s+(?:करो|कीजिए|कर\s+दो|कर))?"
+    r")$",
+    re.I,
+)
+
+# ---- something of the camera's in the words (not just "this") ---------------------------------------
+_CUE = re.compile(
+    rf"\b(?:hold|holding|held|hands?|fingers?|wear|wearing|camera|webcam|me|my|us|face|outfit|{_THING[3:-1]})s?\b"
+    r"|\b(?:haath|hath|haat|hathon|haathon|ungli\w*|pakd\w*|pakad\w*|mujhe|muje|mujhko|mere|mera|meri|"
+    r"cheez|chiz|chij|saaman|saman|dabba|label|packet|tag|sticker)\b"
+    r"|हाथ|उंगल|उँगल|पकड़|पकडा|मुझे|मेरे|कैमरा|लेबल|पैकेट|बोतल|डिब्बे",
+    re.I,
+)
+
+_NAMED = re.compile(r"\b(?:camera|webcam)\b|कैमरा", re.I)
+
 _FOLLOW = re.compile(
     r"^(?:(?:and|ok|okay|so|acha|achha)\s+)?(?:"
     r"now|now\s+what|this\s+one|that\s+one|what\s+about\s+now|how\s+about\s+now|what\s+about\s+(?:this|that)(?:\s+one)?|"
@@ -186,16 +215,40 @@ def wants_camera(text: str) -> bool:
     hit = any(_ASKS.match(c) or _ASKS_HI.match(c) for c in (plain, *_cores(text)))
     if not hit:
         return False
-    if re.search(r"\b(?:camera|webcam)\b|कैमरा", plain, re.I):
+    if _NAMED.search(plain):
         return True  # named the camera
     return not _SCREEN.search(plain)
 
 
+def wants_off(text: str) -> bool:
+    """"turn off the camera", "stop the camera", "camera band karo", "कैमरा बंद करो"."""
+    plain = _plain(text)
+    if not plain or len(plain) > 80:
+        return False
+    return any(_OFF.match(c) for c in (plain, *_cores(text)))
+
+
+def pointing_only(text: str) -> bool:
+    """A camera ask with nothing of the camera's in it: "what is this?", "look at this", "ye kya
+    hai" — the user may be pointing at the screen. ("what am I holding", "can you see me", "read
+    this label" name a hand, the user or an object: those are the camera's.)"""
+    return wants_camera(text) and not _CUE.search(core(text)) and not _NAMED.search(_plain(text))
+
+
+def _window() -> float:
+    try:
+        from neo2.core.config import settings
+
+        return max(FOLLOW_UP_S, float(getattr(settings(), "camera_follow_s", 0.0)) + 5.0)
+    except Exception:  # noqa: BLE001
+        return FOLLOW_UP_S
+
+
 def follow_up(text: str, *, now: float | None = None) -> bool:
     """"and now?", "what about this one?", "aur ye?" — a short follow-up said while the last look's
-    camera window is still open."""
+    camera window is still open (the camera going off closes it: :func:`forget`)."""
     now = time.monotonic() if now is None else now
-    if not _last_look or now - _last_look > FOLLOW_UP_S:
+    if not _last_look or now - _last_look > _window():
         return False
     c = _plain(text)
     for _ in range(2):
@@ -204,13 +257,13 @@ def follow_up(text: str, *, now: float | None = None) -> bool:
 
 
 def mark_look(now: float | None = None) -> None:
-    """A look was routed: its follow-up window starts now."""
+    """A look was routed (or answered): its follow-up window starts now."""
     global _last_look
     _last_look = time.monotonic() if now is None else now
 
 
 def forget() -> None:
-    """The user stopped (or erased): no follow-up reuses the camera."""
+    """The camera went off (or the user stopped, or erased): no follow-up reuses it."""
     global _last_look
     _last_look = 0.0
 
