@@ -59,6 +59,12 @@ APP_ADDED = {
     "pyobjc-framework-ScreenCaptureKit>=12.2,<13; sys_platform == 'darwin'",
     "pyobjc-framework-Vision>=12.2,<13; sys_platform == 'darwin'",
 }
+# And the camera (2026-09-29: "what am I holding?"): AVFoundation's capture, and D-FINE's boxes
+# through transformers (Laya's already) — the vision extra.
+CAMERA_ADDED = {
+    "pyobjc-framework-AVFoundation>=12.2,<13; sys_platform == 'darwin'",
+    "transformers",
+}
 HEAVY = ("torch", "laya", "mlx", "pyobjc", "playwright", "sentence-transformers", "google-genai", "openai", "anthropic")
 
 
@@ -82,8 +88,9 @@ def _name(req: str) -> str:
 
 
 def test_neo_app_gets_exactly_the_dependencies_it_always_had():
-    assert set(PROJECT["dependencies"]) | _flat("app") == APP_BEFORE | APP_ADDED
-    assert set(EXTRAS["mac"]) >= APP_ADDED  # macOS frameworks: the mac extra, nothing else
+    assert set(PROJECT["dependencies"]) | _flat("app") == APP_BEFORE | APP_ADDED | CAMERA_ADDED
+    assert set(EXTRAS["mac"]) >= APP_ADDED  # macOS frameworks: the mac extra, the camera's its own
+    assert set(EXTRAS["vision"]) >= CAMERA_ADDED
 
 
 def test_the_core_is_small_and_nothing_heavy():

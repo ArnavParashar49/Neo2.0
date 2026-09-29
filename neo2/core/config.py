@@ -282,6 +282,15 @@ class Settings(BaseSettings):
         s = str(v or "").strip().lower()
         return "window" if s in ("window", "headed", "visible", "separate") else "chat"
 
+    # ---- the camera's eyes (neo2/core/vision) ------------------------------------------
+    # A camera question's one still goes to Gemini, then Cerebras's vision model, for the answer
+    # (the user's choice). Off: the answer comes from the on-device labels only.
+    vision_cloud_ok: bool = True
+    # The object detector for the live preview's boxes: D-FINE small (Apache-2.0, 40 MB), a repo id
+    # or a folder; looked for in models_dir first. Downloaded only once the user says yes.
+    vision_detector: str = "ustc-community/dfine-small-coco"
+    vision_download_ok: bool = False
+
     # ---- server / ui -----------------------------------------------------------------
     ws_host: str = "127.0.0.1"
     ws_port: int = 8765
@@ -376,6 +385,8 @@ class LibrarySettings(Settings):
     include_username: bool = False
     # No early first look at the host's screen unless the host asks for it (neo2.core.agent.prefetch).
     prefetch_look: bool = False
+    # No camera still to any cloud brain unless the host asks for it (neo2.core.vision.answer).
+    vision_cloud_ok: bool = False
 
     def __init__(self, **values: Any) -> None:
         try:
