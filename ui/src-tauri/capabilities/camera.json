@@ -1,0 +1,16 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "camera-window",
+  "description": "The pop-out camera window: shows the live camera preview while NEO looks; no other powers",
+  "windows": [
+    "camera"
+  ],
+  "permissions": [
+    "core:default",
+    "core:event:default",
+    "core:window:allow-show",
+    "core:window:allow-set-focus",
+    "core:window:allow-destroy",
+    "core:window:allow-start-dragging"
+  ]
+}
