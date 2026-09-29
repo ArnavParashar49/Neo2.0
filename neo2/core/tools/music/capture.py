@@ -75,6 +75,7 @@ class Ring:
         self._pos = 0  # where the next sample goes
         self._total = 0  # samples heard since the start
         self._db = -120.0  # the latest chunk's loudness
+        self._wiped = False  # once wiped it takes nothing more (a push already on its way included)
         self._mu = threading.Lock()
 
     def write(self, pcm: np.ndarray) -> None:
@@ -85,6 +86,8 @@ class Ring:
         db = rms_db(pcm[-self.rate // 10 :])
         cap = self._buf.size
         with self._mu:
+            if self._wiped:
+                return
             if n >= cap:
                 pcm = pcm[-cap:]
             k = min(pcm.size, cap - self._pos)
@@ -111,8 +114,9 @@ class Ring:
             return level(self._db)
 
     def wipe(self) -> None:
-        """Nothing heard stays in memory."""
+        """Nothing heard stays in memory, and nothing more comes in."""
         with self._mu:
+            self._wiped = True
             self._buf[:] = 0
             self._pos = self._total = 0
             self._db = -120.0

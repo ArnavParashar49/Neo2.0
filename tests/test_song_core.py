@@ -149,6 +149,8 @@ def test_the_ring_keeps_only_the_latest_seconds_and_wipes():
     assert r.level() > 0.5
     r.wipe()
     assert r.heard_s() == 0 and r.last(2.0).size == 0 and not r._buf.any()
+    r.write(tone(0.1))  # a push that was already on its way when listening stopped
+    assert r.heard_s() == 0 and not r._buf.any()
 
 
 def test_a_chunk_bigger_than_the_ring_keeps_its_end():
@@ -214,7 +216,8 @@ async def test_a_source_that_starts_too_late_is_left_out_and_turned_off():
     lis.stop()
 
 
-async def test_the_real_microphone_and_the_macs_sound_are_refused_under_tests():
+async def test_the_real_microphone_is_refused_under_tests():
+    # (the Mac's own sound too: tests/test_v2_effects.py's the_macs_own_sound, before ScreenCaptureKit)
     pytest.importorskip("sounddevice")
     with pytest.raises(effects.EffectRefused) as e:
         capture.MicSource().start(lambda pcm: None)

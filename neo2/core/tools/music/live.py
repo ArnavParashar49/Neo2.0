@@ -170,10 +170,11 @@ class SongLive:
                 self.finish("found", result={**result, "cover": pic})
 
         try:
-            task = asyncio.get_running_loop().create_task(cover_then_close())
+            loop = asyncio.get_running_loop()
         except RuntimeError:  # no loop (a test calling it bare): no cover
             self.finish("found", result={**result, "cover": None})
             return
+        task = loop.create_task(cover_then_close())
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
 

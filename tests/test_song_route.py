@@ -381,20 +381,20 @@ def test_the_stop_button_stops_listening(monkeypatch):
 # ---- prompts, and Gemini Live ---------------------------------------------------------------------------
 
 
-def test_agent_prompt_knows_the_tool_only_when_it_is_there():
+def test_the_agents_prompt_pays_nothing_for_it(song_tool):
+    """Every agent request's system prompt stays as it was: the tool's own description carries its
+    rules, and the user's words reach it through the fast path before any model."""
     from neo2.core.agent import prompt
 
-    assert "song_identify" in prompt.persona(["song_identify", "screenshot"])
-    assert "song_identify" not in prompt.persona(["screenshot"])
-    assert "song_identify" not in prompt.PERSONA  # a library's persona never has it
+    assert "song_identify" not in prompt.persona() and "song_identify" not in prompt.PERSONA
 
 
-def test_neo_apps_prompt_has_the_song_line_only_while_the_tool_is_there(song_tool):
-    from neo2.core.agent import prompt
+def test_the_real_tools_description_carries_its_rules():
+    from neo2.core.tools import load_all
 
-    assert "song_identify" in prompt.persona()
-    catalog().remove(fastpath.SONG_TOOL)
-    assert "song_identify" not in prompt.persona()
+    load_all()
+    d = catalog().get("song_identify").description
+    assert "user themself asks" in d and "never on your own" in d and "who sings X" in d
 
 
 def test_live_declares_and_explains_song_identify(song_tool):
