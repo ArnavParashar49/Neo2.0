@@ -21,7 +21,10 @@ thing in front of the camera are hidden in the model itself (its ``classes`` inp
 word), so such a box takes its best other word or drops out: the words it gives frames with nothing
 in them (``blank`` in its metadata: sky, darkness, still life), words whose first sense in the Mac's
 dictionary isn't a noun (``pos``: "squeeze", "lick", "underwater" — but not the objects among them,
-:data:`OBJECTS_NOT_NOUNS`), and :data:`PHOTO_WORDS` about the picture rather than what's in it.
+:data:`OBJECTS_NOT_NOUNS`), and :data:`PHOTO_WORDS` about the picture rather than what's in it. By
+default (``vision_words="everyday"``) only :func:`everyday`'s ~370 words are left: on its own the
+model often names a thing wrongly (a phone "sky", a pen "dagger", a mouse "urinal"), while limited
+to what people hold up or have around them, a box takes its best everyday word.
 Which boxes the card draws — people as "person", no body parts, no duplicates — is
 neo2.core.vision.pipeline's.
 
@@ -131,16 +134,36 @@ def decode(
     return sorted(dets, key=lambda d: -d[1])
 
 
-def weights(names: list[str], pos: list[str], blank: list[int]) -> np.ndarray:
+@cache
+def everyday() -> frozenset[str]:
+    """The words the boxes use by default (``yoloe_words.txt``, lower case)."""
+    text = (Path(__file__).with_name("yoloe_words.txt")).read_text(encoding="utf-8")
+    return frozenset(ln.strip().lower() for ln in text.splitlines() if ln.strip() and not ln.startswith("#"))
+
+
+def weights(names: list[str], pos: list[str], blank: list[int], only: frozenset[str] | None = None) -> np.ndarray:
     """The ``classes`` input, (1, words) float32: 0 for a word that is never a thing in front of the
-    camera (see the module doc), 1 for the rest."""
+    camera (see the module doc) or, given ``only`` (:func:`everyday`), isn't one of those; 1 for the rest."""
     w = np.ones((1, len(names)), np.float32)
     for i, n in enumerate(names):
         p = pos[i] if i < len(pos) else ""
-        if n in PHOTO_WORDS or (p not in ("noun", "phrase", "") and n not in OBJECTS_NOT_NOUNS):
+        if (
+            n in PHOTO_WORDS
+            or (p not in ("noun", "phrase", "") and n not in OBJECTS_NOT_NOUNS)
+            or (only is not None and n.lower() not in only)
+        ):
             w[0, i] = 0.0
     w[0, [i for i in blank if 0 <= i < len(names)]] = 0.0
     return w
+
+
+def _setting(name: str, default: Any) -> Any:
+    try:
+        from neo2.core.config import settings
+
+        return getattr(settings(), name, default)
+    except Exception:  # noqa: BLE001 — no agent bound (library mode): the default
+        return default
 
 
 def _models_dir() -> Path | None:
@@ -306,7 +329,8 @@ class YOLOE:
                 arr, _ = CoreML.MLMultiArray.alloc().initWithShape_dataType_error_(
                     [1, len(names)], CoreML.MLMultiArrayDataTypeFloat32, None
                 )
-                data = weights(names, pos, blank).tobytes()
+                only = None if str(_setting("vision_words", "everyday")).lower() == "all" else everyday()
+                data = weights(names, pos, blank, only).tobytes()
                 arr.getMutableBytesWithHandler_(lambda ptr, size, strides: data)  # (the block's return: the contents)
             self._names, self._shape, self._classes = names, (h, w), arr
             self._model = model
@@ -366,6 +390,6 @@ class YOLOE:
 
 
 __all__ = [
-    "COMPILED", "MAX_PIXELS", "OBJECTS_NOT_NOUNS", "PHOTO_WORDS", "PKG", "YOLOE", "available", "decode",
+    "COMPILED", "MAX_PIXELS", "OBJECTS_NOT_NOUNS", "PHOTO_WORDS", "PKG", "YOLOE", "available", "decode", "everyday",
     "letterbox", "missing_words", "package", "runnable", "weights",
 ]  # fmt: skip

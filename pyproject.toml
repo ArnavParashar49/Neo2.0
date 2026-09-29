@@ -94,7 +94,7 @@ include = ["neo2*"]  # neo2, its core (neo2.core: NEO.app's own package, `neo` b
 exclude = ["neo", "neo.*"]  # the repo-only compatibility shim: never in the wheel
 
 [tool.setuptools.package-data]
-neo2 = ["py.typed"]
+neo2 = ["py.typed", "core/vision/yoloe_words.txt"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

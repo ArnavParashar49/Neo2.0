@@ -1,0 +1,371 @@
+# The words YOLOE's boxes may use by default (settings vision_words="everyday"): things people hold
+# up to a camera or have around them, and "person". The model knows 4,585 words, but on its own it
+# often picks a wrong one (a phone as "sky", a pen as "dagger"); limited to these, the box takes its
+# best everyday word. One word per line, exactly as in the model's vocabulary; "all" uses them all.
+person
+cup
+mug
+wine glass
+bottle
+wine bottle
+beer bottle
+jar
+teacup
+coffee cup
+plate
+bowl
+saucer
+spoon
+fork
+knife
+spatula
+ladle
+pan
+frying pan
+pot
+lid
+cutting board
+thermos
+flask
+straw
+lunch box
+container
+ice cream cone
+apple
+banana
+orange
+lemon
+lime
+grape
+strawberry
+cherry
+peach
+pear
+mango
+pineapple
+watermelon
+kiwi
+avocado
+tomato
+potato
+carrot
+onion
+cucumber
+broccoli
+corn
+pepper
+egg
+bread
+sandwich
+hamburger
+pizza
+cake
+donut
+muffin
+croissant
+chocolate
+candy
+lollipop
+popcorn
+noodle
+rice
+sushi
+hot dog
+cheese
+biscuit
+cereal
+snack
+phone
+smartphone
+iphone
+laptop
+computer
+tablet
+ipad
+keyboard
+mouse
+monitor
+television
+remote
+control
+camera
+earphone
+speaker
+microphone
+charger
+cable
+plug
+battery
+calculator
+watch
+clock
+alarm clock
+game controller
+joystick
+router
+torch
+lamp
+fan
+pen
+pencil
+crayon
+eraser
+ruler
+scissors
+stapler
+notebook
+book
+envelope
+card
+business card
+folder
+binder
+clipboard
+calendar
+brush
+glasses
+sunglasses
+handbag
+bag
+backpack
+briefcase
+key
+ring
+necklace
+bracelet
+earring
+hat
+cap
+helmet
+glove
+scarf
+tie
+shoe
+boot
+sock
+shirt
+t-shirt
+jacket
+hoodie
+sweater
+umbrella
+comb
+hairbrush
+toothbrush
+toothpaste
+razor
+lipstick
+mirror
+perfume
+soap
+towel
+mask
+badge
+ticket
+coin
+money
+banknote
+credit card
+passport
+toy
+teddy
+bear
+stuffed animal
+doll
+ball
+football
+basketball
+baseball
+volleyball
+puzzle
+rubik's cube
+lego
+balloon
+kite
+frisbee
+playing card
+chess
+board game
+figurine
+bat
+baseball bat
+racket
+tennis racket
+badminton racket
+skateboard
+dumbbell
+yoga mat
+hammer
+screwdriver
+wrench
+drill
+saw
+screw
+guitar
+violin
+ukulele
+piano
+drum
+flute
+trumpet
+medicine
+bandage
+thermometer
+candle
+vase
+flower
+plant
+houseplant
+pillow
+blanket
+shelf
+picture frame
+photo frame
+broom
+sponge
+cat
+dog
+bird
+parrot
+fish
+hamster
+rabbit
+turtle
+chair
+table
+couch
+bed
+door
+window
+car
+bicycle
+motorcycle
+scooter
+bus
+truck
+bow tie
+belt
+jeans
+dress
+coat
+vest
+slipper
+sandal
+pendant
+brooch
+hair
+clip
+nail polish
+shampoo
+bottle cap
+juice
+milk
+coffee
+tea
+soda
+drink
+beer
+wine
+cocktail
+tray
+napkin
+paper towel
+toilet paper
+box
+foil
+paper bag
+shopping bag
+gift
+gift box
+cardboard box
+package
+magazine
+comic book
+map
+poster
+sticker
+stamp
+card game
+golf club
+hockey stick
+bowling ball
+rugby ball
+rope
+tool
+toolbox
+hole
+punch
+light switch
+extension cord
+wire
+fire
+extinguisher
+kit
+mousepad
+webcam
+printer
+projector
+radio
+spray can
+water gun
+toy car
+toy gun
+duck
+robot
+drone
+fruit
+vegetable
+berry
+blueberry
+raspberry
+coconut
+papaya
+pomegranate
+peanut
+nut
+almond
+walnut
+candy bar
+chocolate bar
+ice
+cream
+bagel
+pastry
+pie
+tart
+waffle
+pancake
+french fries
+salad
+soup
+paper cup
+bottle opener
+can opener
+whisk
+grater
+peeler
+rolling pin
+bouquet
+rose
+sunflower
+cactus
+succulent
+cat food
+dog food
+leash
+baby bottle
+diaper
+pocket watch
+hourglass
+cowboy hat
+duvet
+mattress
+lock
+padlock
+piggy bank
+cigarette
+pencil case
+pencil sharpener
+tripod
+selfie
+stick

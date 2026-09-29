@@ -292,6 +292,9 @@ class Settings(BaseSettings):
     # from Hugging Face only once the user says yes: vision_download_ok).
     vision_detector: str = "auto"
     vision_download_ok: bool = False
+    # YOLOE's words: "everyday" (neo2/core/vision/yoloe_words.txt: things held up to a camera and
+    # "person" — much cleaner names) or "all" (its whole 4,585-word vocabulary, noisier).
+    vision_words: str = "everyday"
 
     # ---- server / ui -----------------------------------------------------------------
     ws_host: str = "127.0.0.1"

@@ -272,6 +272,15 @@ def test_words_that_are_never_a_thing_are_hidden_in_the_model():
     assert hidden == {"squeeze", "sky", "model"}  # "watch" is a verb first, and a thing: shown
 
 
+def test_by_default_the_boxes_only_use_everyday_words():
+    words = yolo.everyday()
+    assert {"person", "cup", "phone", "pen", "bottle", "keyboard", "book", "scissors"} <= words
+    assert not words & {"sky", "dagger", "urinal", "darkness", "hand", "man", "model"}  # its usual mistakes
+    w = yolo.weights(NAMES, POS, BLANK, words)
+    shown = {n for n, v in zip(NAMES, w[0], strict=True) if v == 1}
+    assert shown == {"cup", "watch", "person", "table", "ipad"}  # "man", "hand", "beer can": not everyday
+
+
 # ---- which detector ------------------------------------------------------------------------------------------
 
 
@@ -336,7 +345,7 @@ def test_a_frame_goes_through_core_ml_and_back_as_boxes(coreml, s):
     assert kind == "pixels" and (pb.w, pb.h) == (640, 384)  # the model's input, never the frame
     assert pb.rgb(10, 0) == (114, 114, 114) and pb.rgb(10, 200) == (200, 40, 40)  # letterboxed, BGRA as Core Video
     kind, weights = sent["classes"]
-    assert kind == "array" and weights.data.tolist() == yolo.weights(NAMES, POS, BLANK).tolist()
+    assert kind == "array" and weights.data.tolist() == yolo.weights(NAMES, POS, BLANK, yolo.everyday()).tolist()
     assert coreml.units == [3]  # the CPU and Neural Engine: the GPU is Laya's
     assert detect.loaded() and not detect.warm()  # loaded once, kept
 
