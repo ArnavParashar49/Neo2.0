@@ -3,8 +3,8 @@ that see, as the user chose: Gemini first, then Cerebras's vision model (qwen-3.
 key) when Gemini is overloaded, out of quota, slow or failing.
 
 One still per question: the frame, scaled to at most :data:`MAX_EDGE` px and sent as a JPEG, with
-the question and short hints from the on-device layers (Apple Vision's labels and words, D-FINE's
-objects, the hand and what is by it). Only those two brains ever get it — never a text-only brain
+the question and short hints from the on-device layers (Apple Vision's labels and words, the
+detector's objects, the hand and what is by it). Only those two brains ever get it — never a text-only brain
 (one that doesn't declare vision is skipped), never a host's own provider, never another service.
 Their keys, quota tracking, demotions and Cerebras's daily spend cap are NEO's own
 (neo2.core.providers: the brains are made and ordered by a :class:`~neo2.core.providers.Chain`).

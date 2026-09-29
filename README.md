@@ -165,6 +165,37 @@ again. For developers, `python -m neo2.core.selftest controls` runs the same tes
 that terminal's permissions (Accessibility; Screen Recording for the screenshot checks); it refuses to run as a
 command NEO itself runs (its shell tool) or without an interactive terminal.
 
+## The camera
+
+Ask NEO *"what am I holding?"*, *"how many fingers?"* or *"what does this say?"* and it turns on the
+Mac's camera. It does this only when you ask it yourself. The camera shows live in the chat, and NEO
+answers from one still. On the Mac, Apple Vision reads the picture's labels, the words printed on
+things, and your hands and raised fingers. The object detector draws its boxes on the live card, the
+way NEO 1 did: everything it's sure of, people as "person", at most ten. The answer comes from Gemini,
+or from Cerebras's vision model when Gemini is slow or down, with what the Mac found as hints.
+`NEO_VISION_CLOUD_OK=false` keeps the still on the Mac and answers from the on-device labels alone.
+The camera turns off 20 s after an answer (`NEO_CAMERA_FOLLOW_S`), on the stop button, or on the
+card's own stop.
+
+**The object detector** is YOLOE-26s prompt-free by Ultralytics, from NEO 1's YOLO family. It knows
+an open vocabulary of 4,585 words. NEO runs it through Core ML on the Neural Engine: about 9 ms a
+frame on an M3 Pro, with no GPU and no PyTorch. You make its model once, from Ultralytics' weights,
+in a throwaway environment. The weights are 40 MB and download only because you pass `--yes`:
+
+```bash
+uv run --no-project --python 3.12 --with ultralytics==8.4.165 --with coremltools==9.0 \
+    --with numpy==2.3.5 --with torch==2.14.0 --with torchvision==0.29.0 \
+    scripts/get_yoloe.py --out ~/.neo/models --yes
+```
+
+That writes `~/.neo/models/yoloe-26s-pf.mlpackage` (23 MB). The first time the camera turns on, NEO
+compiles it for the Neural Engine (about 2 s, once). Without it, NEO uses D-FINE small instead,
+which knows COCO's 80 objects and runs on the CPU, if its weights are in
+`~/.neo/models/dfine-small-coco`. Without either, the card shows no boxes and the answer comes from
+Apple Vision and the cloud brain. `NEO_VISION_DETECTOR` picks the detector: `auto` (the default),
+`yoloe`, or a D-FINE repo id or folder. YOLOE's weights and the model made from them are AGPL-3.0:
+see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
 ## Configuration
 
 Everything is an environment variable with the `NEO_` prefix (or a line in `.env`). The useful ones:
@@ -520,6 +551,7 @@ neo2/           the package: `python -m neo2` is NEO.app's core
     reflex/     laya_reflex.py · features.py · finetune.py · generate.py · dataset.py · schema.py · templates_hi.py · hf_data.py + sources.py (public data)
     tools/      computer/ (gates: every check, frozen · tools_ax/pointer/keys/label/apps · ax, input, pointer, screen, apps, shell) · browser.py · browser_live.py (the chat's live card) · system.py · web.py · memory_tool.py
     voice/      wake.py · local.py · live.py · audio.py · pipeline.py
+    vision/     the camera's eyes: apple.py (Apple Vision) · yolo.py + detect.py (object boxes) · pipeline.py · answer.py
     memory/     store.py (SQLite + FTS5 + vectors, playbooks, sessions) · embed.py · summarize.py
     server/     ws.py (websocket to the overlay)
     selftest/   controls.py ("check your computer controls") · testwin.py (its test window) · watch.py (its safety)
@@ -557,4 +589,5 @@ Built by **Arnav Parashar** — [GitHub](https://github.com/ArnavParashar49) · 
 
 [MIT](LICENSE). The models and datasets NEO downloads keep their own licences: training
 rows derived from public datasets are generated on your Mac and never committed (see
-`neo2/core/reflex/sources.py` for each source's licence).
+`neo2/core/reflex/sources.py` for each source's licence). The camera's object detector,
+YOLOE-26s by Ultralytics, is AGPL-3.0: see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

@@ -1,23 +1,32 @@
-"""Object boxes on a camera frame: D-FINE small (ustc-community/dfine-small-coco, Apache-2.0, 40 MB,
-the 80 COCO objects), through transformers on the CPU.
+"""Object boxes on a camera frame, from one of two detectors (the ``vision_detector`` setting):
 
-Never on the GPU: PyTorch's MPS stream is the process's one (neo2.core.gpu), and a detector frame
-there beside a Laya pass aborted NEO. Taking turns under the GPU lock instead cost both sides —
-measured on an M3 Pro, 640 px, a preview frame every 0.4 s: D-FINE 33 ms alone on MPS but 69 ms
-(p90 94) waiting for Laya, and Laya's passes p90 36 → 38 ms, worst 40 → 81 ms; a Laya load or
+* YOLOE-26s (:mod:`.yolo`, Ultralytics, AGPL-3.0): the user's choice — NEO 1's YOLO family, open
+  vocabulary (4,585 words), Core ML on the Neural Engine, ~9 ms a frame; its model is made by
+  ``scripts/get_yoloe.py`` into NEO's models dir. "auto" (the default) uses it whenever its model is
+  there, "yoloe" only it.
+* D-FINE small (ustc-community/dfine-small-coco, Apache-2.0, 40 MB, the 80 COCO objects) through
+  transformers on the CPU: the fallback — "auto" without YOLOE's model, or the setting is its repo
+  id or a folder.
+
+D-FINE never runs on the GPU: PyTorch's MPS stream is the process's one (neo2.core.gpu), and a
+detector frame there beside a Laya pass aborted NEO. Taking turns under the GPU lock instead cost both
+sides — measured on an M3 Pro, 640 px, a preview frame every 0.4 s: D-FINE 33 ms alone on MPS but
+69 ms (p90 94) waiting for Laya, and Laya's passes p90 36 → 38 ms, worst 40 → 81 ms; a Laya load or
 retrain would hold the boxes up for seconds. On the CPU a frame takes ~150 ms (p90 160, ~180 while
-Laya works; the first ~280) and Laya's passes don't notice it.
+Laya works; the first ~280) and Laya's passes don't notice it. (YOLOE has no torch at all.)
 
 Loaded on first use (:func:`warm` loads it ahead, in a thread, when the camera turns on) and kept:
-it's small. A frame is scaled to at most :data:`MAX_EDGE` px first; boxes under :data:`MIN_SCORE` are
-dropped and at most :data:`MAX_BOXES` are kept. Boxes are 0..1 of the frame, origin top left — what
-the live preview draws.
+both are small. Each engine says from which score its boxes come back and from which they are sure
+enough to show on their own (:func:`scores`: their scales differ); at most :data:`MAX_BOXES` come
+back. Boxes are 0..1 of the frame, origin top left — what the live preview draws. Which of them the
+card draws and the brains hear of is neo2.core.vision.pipeline's.
 
-Never downloads on its own: the weights are looked for in NEO's models dir (``<models_dir>/dfine-small-
-coco``, or a Hugging Face cache there), and only fetched from Hugging Face when the user said yes
+Never downloads on its own: YOLOE's model is only ever made by get_yoloe.py (its download needs
+``--yes``); D-FINE's weights are looked for in NEO's models dir (``<models_dir>/dfine-small-coco``,
+or a Hugging Face cache there), and only fetched from Hugging Face when the user said yes
 (``vision_download_ok``). Missing: :class:`~neo2.core.vision.Unavailable` with a message saying so.
 
-Loading it is a "model" effect (neo2.core.effects): refused in NEO's tests — a test sets a fake
+Loading either is a "model" effect (neo2.core.effects): refused in NEO's tests — a test sets a fake
 detector (:func:`set_engine`).
 """
 
@@ -31,14 +40,14 @@ from typing import Any, Protocol, TypedDict
 from PIL import Image
 
 from neo2.core import effects, logger
-from neo2.core.vision import Unavailable
+from neo2.core.vision import Unavailable, yolo
 
 log = logger(__name__)
 
 REPO = "ustc-community/dfine-small-coco"
 MAX_EDGE = 640
-MIN_SCORE = 0.5
-MAX_BOXES = 12
+MIN_SCORE = 0.5  # a detector that doesn't say its own (a test's)
+MAX_BOXES = 30
 _RUN_WAIT_S = 3.0
 
 
@@ -49,6 +58,9 @@ class Det(TypedDict):
 
 
 class Detector(Protocol):
+    """A detector: boxes from ``min_score`` up, best first, at most ``limit``. It may say its scale
+    with ``floor`` (its boxes come back from there up) and ``sure`` (shown on their own from there)."""
+
     def detect(self, img: Image.Image, *, min_score: float, limit: int) -> list[Det]: ...
 
 
@@ -70,12 +82,24 @@ def _models_dir() -> Path | None:
         return None
 
 
+_MODES = ("", "auto", "yoloe")  # the setting's words that aren't D-FINE's repo or folder
+
+
+def mode() -> str:
+    """Which detector the setting asks for: "auto" (YOLOE when its model is here, else D-FINE),
+    "yoloe", or "dfine" (a repo id or a folder)."""
+    v = str(_setting("vision_detector", "auto") or "auto").strip().lower()
+    return v if v in ("auto", "yoloe") else "auto" if not v else "dfine"
+
+
 def source() -> tuple[str, bool]:
-    """(where to load the weights from, may it download). A folder when one holds them: the setting
+    """D-FINE's (where to load the weights from, may it download). A folder when one holds them: the setting
     itself when it is a folder, else ``<models_dir>/<name>`` (the orchestrator's fetch, e.g.
     ``hf download ustc-community/dfine-small-coco --local-dir ~/.neo/models/dfine-small-coco``);
     else the repo id, looked up only in the Hugging Face cache unless downloads are allowed."""
-    repo = str(_setting("vision_detector", REPO) or REPO)
+    repo = str(_setting("vision_detector", "") or "").strip()
+    if repo.lower() in _MODES:
+        repo = REPO
     if Path(repo).expanduser().is_dir():
         return str(Path(repo).expanduser()), False
     md = _models_dir()
@@ -124,6 +148,9 @@ def to_dets(
 
 class _DFine:
     """D-FINE small through transformers, on the CPU. Loaded once; one frame at a time."""
+
+    floor = 0.4  # its boxes from here up come back...
+    sure = 0.5  # ...and are shown on their own from here (COCO's 80 words: NEO 1's YOLOv8n drew from 0.42)
 
     def __init__(self) -> None:
         self._model: Any = None
@@ -181,31 +208,25 @@ class _DFine:
         finally:
             self._run_lock.release()
 
+    @property
+    def loaded(self) -> bool:
+        return self._model is not None
+
 
 _engine: Detector | None = None  # a test's detector (set_engine)
 _dfine: _DFine | None = None
+_yolo: yolo.YOLOE | None = None
+_made = threading.Lock()  # one instance of each, whichever thread (the warm-up, a frame) asks first
 _warming: threading.Thread | None = None
 
 
 def set_engine(e: Detector | None) -> None:
-    """Use ``e`` instead of D-FINE (tests); None: D-FINE again."""
+    """Use ``e`` instead of the real detectors (tests); None: the real ones again."""
     global _engine
     _engine = e
 
 
-def _get() -> Detector:
-    global _dfine
-    if _engine is not None:
-        return _engine
-    if _dfine is None:
-        _dfine = _DFine()
-    return _dfine
-
-
-def available() -> tuple[bool, str]:
-    """(can boxes be drawn here, why not). Looks for the weights; loads nothing."""
-    if _engine is not None:
-        return True, ""
+def _dfine_available() -> tuple[bool, str]:
     try:
         import torch  # noqa: F401
         import transformers  # noqa: F401
@@ -220,34 +241,87 @@ def available() -> tuple[bool, str]:
     return False, _missing_words()
 
 
+def engine() -> str:
+    """The detector a frame goes to now: "test", "yoloe" or "dfine" (see :func:`mode`)."""
+    if _engine is not None:
+        return "test"
+    m = mode()
+    return "dfine" if m == "dfine" or (m == "auto" and not yolo.available()[0]) else "yoloe"
+
+
+def _get() -> Detector:
+    global _dfine, _yolo
+    if _engine is not None:
+        return _engine
+    choice = engine()
+    with _made:
+        if choice == "yoloe":
+            if _yolo is None:
+                _yolo = yolo.YOLOE()
+            return _yolo
+        if _dfine is None:
+            _dfine = _DFine()
+        return _dfine
+
+
+def available() -> tuple[bool, str]:
+    """(can boxes be drawn here, why not). Looks for the model files; loads nothing. "auto" with
+    neither detector here says what YOLOE needs (the one NEO ships with)."""
+    if _engine is not None:
+        return True, ""
+    m = mode()
+    if m == "dfine":
+        return _dfine_available()
+    ok, why = yolo.available()
+    if ok or m == "yoloe":
+        return ok, why
+    return (True, "") if _dfine_available()[0] else (False, why)
+
+
 def loaded() -> bool:
-    return _engine is not None or (_dfine is not None and _dfine._model is not None)
+    return _engine is not None or bool(getattr(_get(), "loaded", False))
 
 
-def detect(img: Image.Image, *, min_score: float = MIN_SCORE, limit: int = MAX_BOXES) -> list[Det]:
-    """The objects in the frame: [{label, score, box: {x, y, w, h}}], best first, at most ``limit``.
-    Raises Unavailable (not installed, not downloaded) — or EffectRefused with real effects off."""
-    return _get().detect(img, min_score=min_score, limit=max(0, min(int(limit), MAX_BOXES)))
+def scores() -> tuple[float, float]:
+    """(floor, sure) of the detector a frame goes to now: :func:`detect` returns its boxes from
+    ``floor`` up; from ``sure`` up a box is shown on its own (below it, only when Apple Vision names
+    the same thing: neo2.core.vision.pipeline)."""
+    d = _get()
+    floor = float(getattr(d, "floor", MIN_SCORE))
+    return floor, max(floor, float(getattr(d, "sure", floor)))
+
+
+def detect(img: Image.Image, *, min_score: float | None = None, limit: int = MAX_BOXES) -> list[Det]:
+    """The objects in the frame: [{label, score, box: {x, y, w, h}}], best first, at most ``limit``,
+    from ``min_score`` up (the detector's own floor when None). Raises Unavailable (not installed,
+    not there) — or EffectRefused with real effects off."""
+    d = _get()
+    floor = scores()[0] if min_score is None else float(min_score)
+    return d.detect(img, min_score=floor, limit=max(0, min(int(limit), MAX_BOXES)))
 
 
 def warm() -> bool:
     """Load the detector in the background (the camera just turned on), so the first frame's boxes
-    don't wait on it. Never raises; True when a load was started."""
+    don't wait on it (YOLOE's first load of a new model compiles it for the Neural Engine: ~2.5 s,
+    then ~0.05 s). Never raises; True when a load was started."""
     global _warming
-    if loaded() or (_warming is not None and _warming.is_alive()) or not available()[0]:
+    if (_warming is not None and _warming.is_alive()) or not available()[0] or loaded():
         return False
 
     def load() -> None:
         try:
             d = _get()
-            if isinstance(d, _DFine):
+            if isinstance(d, _DFine | yolo.YOLOE):
                 d._load()
         except (Exception, effects.EffectRefused) as e:  # noqa: BLE001 — a warm-up never fails anything
-            log.info(f"[vision] D-FINE warm-up skipped: {str(e)[:120]}")
+            log.info(f"[vision] detector warm-up skipped: {str(e)[:120]}")
 
     _warming = threading.Thread(target=load, name="neo-vision-warm", daemon=True)
     _warming.start()
     return True
 
 
-__all__ = ["REPO", "Det", "Detector", "available", "detect", "loaded", "set_engine", "source", "to_dets", "warm"]
+__all__ = [
+    "MAX_BOXES", "REPO", "Det", "Detector", "available", "detect", "engine", "loaded", "mode", "scores",
+    "set_engine", "source", "to_dets", "warm",
+]  # fmt: skip

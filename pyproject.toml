@@ -62,11 +62,15 @@ voice = [  # local voice (Apple Silicon)
     "torch",  # silero
 ]
 local = ["mlx-lm; sys_platform == 'darwin'"]  # python -m neo2 --local: the offline brain
-vision = [  # the camera: capture (AVFoundation), Apple Vision's labels / words / hands, D-FINE's boxes
+vision = [  # the camera: capture (AVFoundation), Apple Vision's labels / words / hands, the object boxes
     "pyobjc-framework-AVFoundation>=12.2,<13; sys_platform == 'darwin'",
     "pyobjc-framework-Vision>=12.2,<13; sys_platform == 'darwin'",
+    # YOLOE-26s's boxes: its Core ML model (scripts/get_yoloe.py makes it; building it needs
+    # ultralytics and coremltools, in their own throwaway environment, never here)
+    "pyobjc-framework-CoreML>=12.2,<13; sys_platform == 'darwin'",
+    "pyobjc-framework-Quartz; sys_platform == 'darwin'",  # (its pixel buffers)
     "pillow",
-    "transformers",  # (already there for Laya)
+    "transformers",  # D-FINE small, the fallback detector (transformers is already there for Laya)
     "torch",
     "torchvision",  # transformers' fast image processor for D-FINE
 ]

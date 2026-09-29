@@ -35,6 +35,8 @@ if [ ! -f "$HOME/.neo/.env" ] && [ -f "$ROOT/.env" ]; then
   echo "  copied your keys to ~/.neo/.env (edit them there)"
 fi
 [ -f "$HOME/.neo/.env" ] || echo "  ! no API keys yet: put GEMINI_API_KEY=… in ~/.neo/.env (see README)"
+# The camera's object boxes (YOLOE-26s): its model is made once by scripts/get_yoloe.py, never fetched here.
+[ -d "$HOME/.neo/models/yoloe-26s-pf.mlpackage" ] || echo "  ! no object boxes on the camera yet: make YOLOE's model once (README: The camera)"
 
 echo "→ building"
 cd "$ROOT/ui"

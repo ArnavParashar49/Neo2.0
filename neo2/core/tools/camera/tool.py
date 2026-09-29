@@ -7,8 +7,8 @@ turned the camera on (LibrarySettings camera=True). While it is on, the chat sho
 (neo2.core.tools.camera.live); it goes off ``camera_follow_s`` after the answer (a follow-up like
 "and now?" reuses it), on the stop button, on the card's stop and on an erase.
 
-The still is analysed by neo2.core.vision.pipeline.look (Apple Vision and D-FINE on the Mac as
-hints, then the cloud vision brains the user chose for the answer).
+The still is analysed by neo2.core.vision.pipeline.look (Apple Vision and the object detector —
+YOLOE-26s, or D-FINE — on the Mac as hints, then the cloud vision brains the user chose for the answer).
 """
 
 from __future__ import annotations
@@ -180,7 +180,7 @@ async def _look(question: str, img: Any) -> dict:
 def _prewarm() -> None:
     """While the camera starts: the paid Cerebras connection opens (the answer's fallback brain,
     only when the user lets camera answers go to the cloud: neo2.core.vision.answer.prewarm), and
-    the D-FINE detector loads in the background (detect.warm), so the still's boxes don't wait on it."""
+    the object detector loads in the background (detect.warm), so the still's boxes don't wait on it."""
     with contextlib.suppress(Exception):
         try:
             from neo2.core.vision import answer, detect

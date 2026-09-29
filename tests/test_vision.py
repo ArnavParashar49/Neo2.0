@@ -1,4 +1,5 @@
-"""The camera's eyes (neo2/core/vision): Apple Vision's labels, words and fingers, D-FINE's boxes, and
+"""The camera's eyes (neo2/core/vision): Apple Vision's labels, words and fingers, the detector's boxes
+(D-FINE here; YOLOE's own in test_vision_yolo.py), and
 the answer from the cloud brains that see — Gemini, then Cerebras's vision model, the on-device
 labels alone when those are off or down.
 
@@ -302,7 +303,8 @@ def test_pixel_boxes_become_bounded_frame_boxes_best_first():
 def test_the_detector_is_never_downloaded_unless_the_user_said_yes(tmp_path, monkeypatch):
     s = config.Settings()
     monkeypatch.setattr(config, "_settings", s)
-    assert detect.source() == (detect.REPO, False)
+    monkeypatch.setattr(s, "vision_detector", detect.REPO)  # D-FINE (the fallback), by its repo id
+    assert detect.source() == (detect.REPO, False) and detect.engine() == "dfine"
     ok, why = detect.available()
     assert not ok and "vision_download_ok" in why and "40 MB" in why
     monkeypatch.setattr(s, "vision_download_ok", True)
@@ -326,9 +328,12 @@ def test_the_real_detector_never_loads_in_the_tests(monkeypatch):
     assert pipeline.preview(frame(64, 48)) == []  # the live card: no boxes, no error
 
 
-def test_the_detector_runs_on_the_cpu_and_never_waits_for_the_gpu(tmp_path, monkeypatch):
+@pytest.mark.parametrize("chosen", ["folder", "auto"])
+def test_the_detector_runs_on_the_cpu_and_never_waits_for_the_gpu(tmp_path, monkeypatch, chosen):
     """D-FINE off MPS: a frame there beside a Laya pass aborted NEO (neo2.core.gpu). So nothing it
-    loads or reads is moved to a device, and a frame is read while Laya holds the GPU lock."""
+    loads or reads is moved to a device, and a frame is read while Laya holds the GPU lock. Whether
+    the setting names its folder, or is "auto" and YOLOE's model isn't there (D-FINE, the fallback,
+    from the models dir)."""
     torch = pytest.importorskip("torch")
     moved: list[object] = []
 
@@ -371,13 +376,15 @@ def test_the_detector_runs_on_the_cpu_and_never_waits_for_the_gpu(tmp_path, monk
     fake = types.ModuleType("transformers")
     fake.AutoImageProcessor, fake.DFineForObjectDetection = Proc, Model
     monkeypatch.setitem(sys.modules, "transformers", fake)
-    folder = tmp_path / "dfine-small-coco"
-    folder.mkdir()
-    (folder / "config.json").write_text("{}")
     s = config.Settings()
     monkeypatch.setattr(config, "_settings", s)
-    monkeypatch.setattr(s, "vision_detector", str(folder))
+    folder = (tmp_path if chosen == "folder" else s.models_dir) / "dfine-small-coco"
+    folder.mkdir(parents=True)
+    (folder / "config.json").write_text("{}")
+    if chosen == "folder":
+        monkeypatch.setattr(s, "vision_detector", str(folder))
     monkeypatch.setattr(detect, "_dfine", None)
+    assert detect.engine() == "dfine" and detect.source() == (str(folder), False)
     got: list[list[detect.Det]] = []
     held, done = threading.Event(), threading.Event()
 
@@ -406,8 +413,9 @@ def test_detect_is_bounded_and_the_card_gets_its_boxes():
     d = FakeDetector()
     detect.set_engine(d)
     assert len(detect.detect(frame(), limit=100)) <= detect.MAX_BOXES
-    boxes = pipeline.preview(frame())
-    assert boxes[0] == {"x": 0.45, "y": 0.35, "w": 0.15, "h": 0.25, "label": "cup", "score": 0.91}
+    boxes = pipeline.preview(frame())  # the person too, as NEO 1 drew them
+    assert [b["label"] for b in boxes] == ["person", "cup", "laptop"]
+    assert boxes[1] == {"x": 0.45, "y": 0.35, "w": 0.15, "h": 0.25, "label": "cup", "score": 0.91}
 
 
 # ---- what's in the hand ----------------------------------------------------------------------------
@@ -562,7 +570,8 @@ async def test_look_runs_the_layers_then_the_answer(mac):
     assert {"label", "score", "x", "y", "w", "h"} <= out["boxes"][0].keys()
     assert shown and shown[0]["boxes"] == out["boxes"] and "answer" not in shown[0]  # boxes before the answer
     assert set(out["ms"]) == {"apple", "detect", "answer", "total"}
-    assert "likely objects: cup;" in b["gemini"].sent[0]["messages"][0].text
+    assert "likely objects: cup, laptop;" in b["gemini"].sent[0]["messages"][0].text  # things, not the person
+    assert [x["label"] for x in out["boxes"]] == ["person", "cup", "laptop"]
 
 
 async def test_look_goes_on_without_a_slow_or_missing_layer(mac):

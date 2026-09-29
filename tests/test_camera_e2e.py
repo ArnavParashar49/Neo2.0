@@ -1,5 +1,5 @@
 """The camera end to end: the user's words → the router (fastpath.camera) → camera_look → the camera
-(a fake) → Apple Vision and D-FINE (fakes) → the answer from Gemini, else Cerebras's vision model (fake
+(a fake) → Apple Vision and the object detector (fakes) → the answer from Gemini, else Cerebras's vision model (fake
 brains), else the on-device labels → said, with the chat's card updated, and the camera off after
 the follow-up window, on the card's stop, and on the stop button. Nothing real: no camera, no model,
 no network."""
@@ -248,16 +248,16 @@ async def test_a_model_or_a_page_never_turns_it_on(neo):
     assert not any(t == "camera_open" for t, _ in neo.channel.sent)
 
 
-def test_only_boxes_apple_vision_agrees_with_or_d_fine_is_sure_of_are_drawn():
-    from neo2.core.vision.pipeline import trusted
+def test_the_card_draws_what_the_detector_is_sure_of_people_too_like_neo_1():
+    from neo2.core.vision.pipeline import objects
 
     box = {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}
     dets = [
-        {"label": "scissors", "score": 0.57, "box": box},  # a guitar D-FINE can't name
-        {"label": "sports ball", "score": 0.6, "box": box},  # Apple Vision says "ball"
-        {"label": "cell phone", "score": 0.9, "box": box},  # sure on its own
-        {"label": "person", "score": 0.99, "box": box},  # the user, always there
+        {"label": "guitar", "score": 0.3, "box": {**box, "x": 0.5}},  # unsure, but Apple Vision says "guitar"
+        {"label": "sports ball", "score": 0.35, "box": {**box, "y": 0.5}},  # unsure, and nobody else says so
+        {"label": "phone", "score": 0.9, "box": box},  # sure on its own
+        {"label": "man", "score": 0.99, "box": {"x": 0.0, "y": 0.0, "w": 0.9, "h": 1.0}},  # the user: drawn, as "person"
     ]
-    kept = [d["label"] for d in trusted(dets, [("ball", 0.79), ("sports_equipment", 0.79)])]
-    assert kept == ["sports ball", "cell phone"]
-    assert [d["label"] for d in trusted(dets, None)] == ["cell phone"]  # the live preview: sure ones only
+    kept = [d["label"] for d in objects(dets, [("guitar", 0.79), ("musical_instrument", 0.79)], scores=(0.25, 0.45))]
+    assert kept == ["person", "phone", "guitar"]
+    assert [d["label"] for d in objects(dets, None, scores=(0.25, 0.45))] == ["person", "phone"]  # the live preview

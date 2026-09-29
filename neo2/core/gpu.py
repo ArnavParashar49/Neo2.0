@@ -11,8 +11,8 @@ outside, so a holder keeps it for about one pass (the reflex's ~15-30 ms) and vo
 Today that is Laya and nothing else — the reflex, its zero-shot checkpoint and its learning, whose
 ``neo2.core.reflex.laya_lock()`` is this very lock. Core ML, MLX and Apple Vision have their own
 Metal queues and torch on the CPU has no stream: they need no lock. A new model on MPS takes it
-too, or runs on the CPU (the camera's D-FINE does: ~150 ms a frame, measured, and it never waits
-on Laya).
+too, or runs on the CPU (the camera's D-FINE fallback does: ~150 ms a frame, measured, and it
+never waits on Laya; its YOLOE detector is Core ML on the Neural Engine).
 """
 
 from __future__ import annotations

@@ -60,9 +60,11 @@ APP_ADDED = {
     "pyobjc-framework-Vision>=12.2,<13; sys_platform == 'darwin'",
 }
 # And the camera (2026-09-29: "what am I holding?"): AVFoundation's capture, and D-FINE's boxes
-# through transformers (Laya's already) — the vision extra.
+# through transformers (Laya's already) — the vision extra; then YOLOE-26s's boxes through Core ML
+# (the user's choice, the same pyobjc release; nothing new in requirements.lock).
 CAMERA_ADDED = {
     "pyobjc-framework-AVFoundation>=12.2,<13; sys_platform == 'darwin'",
+    "pyobjc-framework-CoreML>=12.2,<13; sys_platform == 'darwin'",
     "transformers",
     "torchvision",
 }

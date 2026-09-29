@@ -286,9 +286,11 @@ class Settings(BaseSettings):
     # A camera question's one still goes to Gemini, then Cerebras's vision model, for the answer
     # (the user's choice). Off: the answer comes from the on-device labels only.
     vision_cloud_ok: bool = True
-    # The object detector for the live preview's boxes: D-FINE small (Apache-2.0, 40 MB), a repo id
-    # or a folder; looked for in models_dir first. Downloaded only once the user says yes.
-    vision_detector: str = "ustc-community/dfine-small-coco"
+    # The object detector for the camera card's boxes (neo2.core.vision.detect): "auto" is YOLOE-26s
+    # (Core ML; scripts/get_yoloe.py puts its model in models_dir) when it's there, else D-FINE small;
+    # "yoloe" only YOLOE; a repo id or a folder is D-FINE (looked for in models_dir first, downloaded
+    # from Hugging Face only once the user says yes: vision_download_ok).
+    vision_detector: str = "auto"
     vision_download_ok: bool = False
 
     # ---- server / ui -----------------------------------------------------------------

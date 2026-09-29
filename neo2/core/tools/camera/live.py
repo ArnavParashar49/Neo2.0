@@ -15,8 +15,9 @@ UI → core: ``camera_stop`` (off now), ``camera_popout {popped}`` (or ``camera_
 The camera also goes off on the stop button, on an erase, and ``follow_s`` after an answer (a
 follow-up question reuses it until then). The hello's ``camera`` is ``{"live": state | None}``.
 
-While the camera is live, D-FINE's boxes for the newest preview frame are drawn on the card a few
-times a second (neo2.core.vision.pipeline.preview, on this Mac: nothing leaves it).
+While the camera is live, the object detector's boxes for the newest preview frame are drawn on the
+card a few times a second (neo2.core.vision.pipeline.preview: YOLOE-26s on the Neural Engine, ~11 ms
+a frame, on this Mac: nothing leaves it) — people too, as NEO 1 drew them.
 
 Frames and stills never reach the event bus, the transcript replay, a log or the disk.
 """
@@ -246,8 +247,8 @@ class CameraLive:
         return conn not in self._hidden
 
     async def _preview_boxes(self, session: CameraSession) -> None:
-        """D-FINE's boxes on the live preview (never while a still is analysed or answered: its own
-        boxes stand then). Nothing when NEO's vision isn't installed or its detector isn't there."""
+        """The detector's boxes on the live preview (never while a still is analysed or answered: its
+        own boxes stand then). Nothing when NEO's vision isn't installed or its detector isn't there."""
         try:
             pipeline = await asyncio.to_thread(importlib.import_module, "neo2.core.vision.pipeline")
         except Exception:  # noqa: BLE001 — no vision yet: a preview without boxes
