@@ -5,6 +5,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { BrowserHub } from "./browser/hub";
 import { CameraHub } from "./camera/hub";
 import { isCameraFrame } from "./camera/frames";
+import { SongHub } from "./song/hub";
 
 export type NeoState =
   | "idle" | "listening" | "thinking" | "working" | "searching" | "speaking" | "connecting" | "confirming";
@@ -20,7 +21,9 @@ export type Item =
   /** Where a browser session began: its card, its live row, or (once ended) its summary row. */
   | { kind: "browser"; id: number; sid: string; job?: string; ts: number }
   /** Where a camera session began: its live card is pinned atop the chat; once off, a row with the answer. */
-  | { kind: "camera"; id: number; sid: string; job?: string; ts: number };
+  | { kind: "camera"; id: number; sid: string; job?: string; ts: number }
+  /** Where NEO listened for a song: the listening card, then the song it found (or one calm line). */
+  | { kind: "song"; id: number; sid: string; job?: string; ts: number };
 
 export interface NeoEvent { type: string; data: Record<string, any>; ts: number }
 /** A question NEO is waiting on: exactly what will run if the user says yes. `scopes`: how else
@@ -36,8 +39,11 @@ const DEV_URL = import.meta.env.DEV ? (import.meta.env.VITE_NEO_WS_URL as string
 const DEV_TOKEN = import.meta.env.DEV ? (import.meta.env.VITE_NEO_WS_TOKEN as string | undefined) : undefined;
 const URL = DEV_URL || "ws://127.0.0.1:8765";
 let nextId = 1;
+const MOCK_KIND = import.meta.env.DEV ? new URLSearchParams(location.search).get("mock") : null;
 /** `?mock=browser` (dev builds only): a scripted in-page core instead of the real socket. */
-export const MOCK = import.meta.env.DEV && new URLSearchParams(location.search).get("mock") === "browser";
+export const MOCK = MOCK_KIND === "browser";
+/** `?mock=song` (dev builds only): a scripted core that listens for songs (no microphone, no network). */
+export const SONG_MOCK = MOCK_KIND === "song";
 
 export function useNeo(opts: { surface?: "overlay" | "window" } = {}) {
   const hubRef = useRef<BrowserHub | null>(null);
@@ -55,6 +61,12 @@ export function useNeo(opts: { surface?: "overlay" | "window" } = {}) {
     if (import.meta.env.DEV && MOCK) ((window as unknown as { neoCams?: CameraHub[] }).neoCams ??= []).push(camRef.current);
   }
   const cam = camRef.current;
+  const songRef = useRef<SongHub | null>(null);
+  if (!songRef.current) {
+    songRef.current = new SongHub();
+    if (import.meta.env.DEV && SONG_MOCK) ((window as unknown as { neoSongs?: SongHub[] }).neoSongs ??= []).push(songRef.current);
+  }
+  const song = songRef.current;
   const [connected, setConnected] = useState(false);
   const [state, setStateNow] = useState<NeoState>("idle");
   const lastChange = useRef(0);
@@ -82,6 +94,18 @@ export function useNeo(opts: { surface?: "overlay" | "window" } = {}) {
     let timer: number | undefined;
 
     const apply = (ev: NeoEvent) => {
+      if (ev.type.startsWith("song_")) {
+        // Its place in the transcript: where it opened, or (joined late) where its state first came.
+        const opened = song.handle(ev.type, ev.data);
+        const sid = ev.type === "song_open" ? ev.data?.sid : opened;
+        if (typeof sid === "string" && sid) {
+          const job = ev.type === "song_open" ? ev.data?.job : undefined;
+          setItems((prev) => (prev.some((i) => i.kind === "song" && i.sid === sid) ? prev : [...prev, { kind: "song", id: nextId++, sid, job, ts: ev.ts }]));
+        } else if (ev.type === "song_close" && ev.data?.reason === "erased") {
+          setItems((prev) => prev.filter((i) => i.kind !== "song"));
+        }
+        return;
+      }
       if (ev.type.startsWith("camera_")) {
         cam.handle(ev.type, ev.data);
         if (ev.type === "camera_open" && ev.data?.sid) {
@@ -113,6 +137,7 @@ export function useNeo(opts: { surface?: "overlay" | "window" } = {}) {
           setProblems(ev.data.problems ?? []);
           hub.endHello(ev.data.browser);
           cam.endHello(ev.data.camera);
+          song.endHello();
           setHelloAt(Date.now());
           {
             // A live session whose browser_open fell out of the replay still needs its anchor.
@@ -120,17 +145,23 @@ export function useNeo(opts: { surface?: "overlay" | "window" } = {}) {
             if (sid) setItems((prev) => (prev.some((i) => i.kind === "browser" && i.sid === sid) ? prev : [...prev, { kind: "browser", id: nextId++, sid, job: ev.data.browser?.live?.job ?? undefined, ts: ev.ts }]));
             const csid = cam.sid; // likewise a live camera session's
             if (csid) setItems((prev) => (prev.some((i) => i.kind === "camera" && i.sid === csid) ? prev : [...prev, { kind: "camera", id: nextId++, sid: csid, ts: ev.ts }]));
+            const ssid = song.sid; // and a song card still listening
+            if (ssid) setItems((prev) => (prev.some((i) => i.kind === "song" && i.sid === ssid) ? prev : [...prev, { kind: "song", id: nextId++, sid: ssid, ts: ev.ts }]));
           }
           break;
         case "problems":
           setProblems(ev.data.items ?? []);
           break;
-        case "erased":
-          setItems([]);
+        case "erased": {
+          // A song card still listening keeps its place: its Stop must stay in reach.
+          const ssid = song.sid;
+          setItems(ssid ? [{ kind: "song", id: nextId++, sid: ssid, ts: ev.ts }] : []);
           hub.clearEnded();
           cam.clearEnded();
+          song.clearEnded();
           setErasedAt(Date.now());
           break;
+        }
         case "confirm":
           setAsk(ev.data as ConfirmCard);
           break;
@@ -163,8 +194,8 @@ export function useNeo(opts: { surface?: "overlay" | "window" } = {}) {
               next[i] = { ...(prev[i] as Extract<Item, { kind: "msg" }>), text, final, ts: ev.ts };
               return next;
             }
-            // Trim old lines, but never a browser or camera session's anchor (its row lives there).
-            const keep = prev.length > 120 ? prev.filter((it, k) => k >= prev.length - 120 || it.kind === "browser" || it.kind === "camera") : prev;
+            // Trim old lines, but never a browser, camera or song session's anchor (its row lives there).
+            const keep = prev.length > 120 ? prev.filter((it, k) => k >= prev.length - 120 || it.kind === "browser" || it.kind === "camera" || it.kind === "song") : prev;
             return [...keep, { kind: "msg", id: nextId++, role, text, final, ts: ev.ts, job }];
           });
           break;
@@ -229,6 +260,10 @@ export function useNeo(opts: { surface?: "overlay" | "window" } = {}) {
         const { MockSocket } = await import("./browser/mock/socket");
         if (!alive) return;
         ws = new MockSocket() as unknown as WebSocket;
+      } else if (import.meta.env.DEV && SONG_MOCK) {
+        const { SongMockSocket } = await import("./song/mock/core");
+        if (!alive) return;
+        ws = new SongMockSocket() as unknown as WebSocket;
       } else {
         let token = "";
         try { token = await invoke<string>("ws_token"); } catch { /* outside NEO.app: no token, no access */ }
@@ -238,7 +273,7 @@ export function useNeo(opts: { surface?: "overlay" | "window" } = {}) {
       }
       ws.binaryType = "arraybuffer"; // live page frames arrive as binary (§10.4)
       sock.current = ws;
-      ws.onopen = () => { if (sock.current === ws) { setConnected(true); setError(""); hub.setConnected(true); cam.setConnected(true); } };
+      ws.onopen = () => { if (sock.current === ws) { setConnected(true); setError(""); hub.setConnected(true); cam.setConnected(true); song.setConnected(true); } };
       ws.onmessage = (m) => {
         if (sock.current !== ws) return;
         if (typeof m.data !== "string") {
@@ -253,6 +288,7 @@ export function useNeo(opts: { surface?: "overlay" | "window" } = {}) {
         setConnected(false);
         hub.setConnected(false);
         cam.setConnected(false);
+        song.setConnected(false);
         setAsk(null); // the next hello says whether it's still waiting
         sock.current = null;
         timer = window.setTimeout(connect, 1500);
@@ -271,14 +307,16 @@ export function useNeo(opts: { surface?: "overlay" | "window" } = {}) {
   }, []);
   hub.setSender(send);
   cam.setSender(send);
+  song.setSender(send);
 
   // Clear transcript: rows, posters and thumbnails go too — but a live session keeps its anchor.
   const clear = useCallback(() => {
-    const live = hub.sid, camLive = cam.sid;
-    setItems((prev) => prev.filter((i) => (i.kind === "browser" && i.sid === live) || (i.kind === "camera" && i.sid === camLive)));
+    const live = hub.sid, camLive = cam.sid, songLive = song.sid;
+    setItems((prev) => prev.filter((i) => (i.kind === "browser" && i.sid === live) || (i.kind === "camera" && i.sid === camLive) || (i.kind === "song" && i.sid === songLive)));
     hub.clearEnded();
     cam.clearEnded();
-  }, [hub, cam]);
+    song.clearEnded();
+  }, [hub, cam, song]);
 
-  return { connected, state, items, error, note, ask, problems, erasedAt, helloAt, send, clear, hub, cam };
+  return { connected, state, items, error, note, ask, problems, erasedAt, helloAt, send, clear, hub, cam, song };
 }
