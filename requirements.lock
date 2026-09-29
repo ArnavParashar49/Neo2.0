@@ -101,8 +101,10 @@ pyee==13.0.1
 pygments==2.21.0
 pyobjc-core==12.2.2
 pyobjc-framework-applicationservices==12.2.2
+pyobjc-framework-avfoundation==12.2.2
 pyobjc-framework-cocoa==12.2.2
 pyobjc-framework-contacts==12.2.2
+pyobjc-framework-coreaudio==12.2.2
 pyobjc-framework-coremedia==12.2.2
 pyobjc-framework-coreml==12.2.2
 pyobjc-framework-coretext==12.2.2
@@ -151,6 +153,7 @@ threadpoolctl==3.7.0
 tld==0.13.2
 tokenizers==0.23.2
 torch==2.14.0
+torchvision==0.29.0
 tqdm==4.70.1
 trafilatura==2.2.0
 transformers==5.17.0

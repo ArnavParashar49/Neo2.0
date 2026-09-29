@@ -228,6 +228,8 @@ async def test_a_users_yes_elsewhere_never_runs_a_staged_wire(tmp_path):
 
 
 def test_neo_apps_prompt_is_unchanged(monkeypatch, decide_modes):
+    # (without the camera: its one line is there only while camera_look is registered, below)
+    monkeypatch.setattr(prompt, "_registered", lambda name: False)
     decide_modes(web_search="legacy")
     assert prompt.persona() == GOLDEN["persona_legacy"] == prompt.PERSONA.replace(
         "{search_site}", prompt._SEARCH_SITE[0]
@@ -237,6 +239,15 @@ def test_neo_apps_prompt_is_unchanged(monkeypatch, decide_modes):
     assert prompt.build() == GOLDEN["build_legacy_plain"]
     decide_modes(web_search="on")
     assert prompt.persona() == GOLDEN["persona_on"]
+
+
+def test_the_camera_adds_one_line_to_neo_apps_prompt(monkeypatch, decide_modes):
+    decide_modes(web_search="legacy")
+    monkeypatch.setattr(prompt, "_registered", lambda name: name == "camera_look")
+    (line,) = [ln for ln, about in prompt._HOW_TO_WORK if about == frozenset({"camera_look"})]
+    assert GOLDEN["persona_legacy"].count("- Memory:") == 1
+    assert prompt.persona() == GOLDEN["persona_legacy"].replace("- Memory:", line + "- Memory:")
+    assert "camera_look" not in prompt.PERSONA  # a library's persona never has it
 
 
 def test_neo_apps_context_line_is_unchanged(monkeypatch):

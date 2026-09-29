@@ -43,8 +43,11 @@ _ASKS = re.compile(
 
 
 def asks_to_look(text: str) -> bool:
-    """Do these words ask NEO to look through the camera ("what am I holding?")?"""
-    return bool(_ASKS.search(str(text or "")))
+    """Do these words ask NEO to look through the camera ("what am I holding?", "ye kya hai")?"""
+    from neo2.core.agent import camera_words  # the router's words (Hinglish, Hindi) count too
+
+    text = str(text or "")
+    return bool(_ASKS.search(text)) or camera_words.wants_camera(text)
 
 
 def refusal(ctx: ToolContext) -> str:
@@ -95,14 +98,16 @@ async def _look(question: str, img: Any) -> dict:
 
 
 def _prewarm() -> None:
-    """The paid Cerebras connection opens while the camera starts (the answer's fallback brain),
-    only when the user lets camera answers go to the cloud (neo2.core.vision.answer.prewarm)."""
+    """While the camera starts: the paid Cerebras connection opens (the answer's fallback brain,
+    only when the user lets camera answers go to the cloud: neo2.core.vision.answer.prewarm), and
+    the D-FINE detector loads in the background (detect.warm), so the still's boxes don't wait on it."""
     with contextlib.suppress(Exception):
         try:
-            from neo2.core.vision import answer
+            from neo2.core.vision import answer, detect
         except ImportError:
             return
         answer.prewarm()
+        detect.warm()
 
 
 @tool(

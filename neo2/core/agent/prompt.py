@@ -137,8 +137,8 @@ _HOW_TO_WORK: tuple[tuple[str, frozenset[str] | None], ...] = (
     ),
     ("- {search_site}\n", frozenset({"search_site"})),
     (
-        "- camera_look answers about what is in front of the user (\"what am I holding\"). It turns the camera\n"
-        "  on only for the user's own words: never call it for the screen; if it refuses, ask them to ask NEO.\n",
+        "- camera_look: what's in front of the user (\"what am I holding\"), only on their own words;\n"
+        "  never the screen.\n",
         frozenset({"camera_look"}),
     ),
     (

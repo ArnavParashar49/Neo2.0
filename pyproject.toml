@@ -68,6 +68,7 @@ vision = [  # the camera: capture (AVFoundation), Apple Vision's labels / words 
     "pillow",
     "transformers",  # (already there for Laya)
     "torch",
+    "torchvision",  # transformers' fast image processor for D-FINE
 ]
 server = ["websockets>=13"]  # the overlay's websocket
 mcp = ["mcp>=2.2,<3"]  # python -m neo2.mcp (neo2-mcp)

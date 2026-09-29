@@ -64,6 +64,7 @@ APP_ADDED = {
 CAMERA_ADDED = {
     "pyobjc-framework-AVFoundation>=12.2,<13; sys_platform == 'darwin'",
     "transformers",
+    "torchvision",
 }
 HEAVY = ("torch", "laya", "mlx", "pyobjc", "playwright", "sentence-transformers", "google-genai", "openai", "anthropic")
 
@@ -207,15 +208,19 @@ def test_the_portable_marker_is_registered():
 
 def test_the_lock_pins_every_pyobjc_framework_the_app_installs():
     """scripts/install-app.sh builds NEO.app's runtime from requirements.lock: every pyobjc framework
-    of the mac extra is pinned there, with what the new ones need (ScreenCaptureKit: CoreMedia;
-    Vision: CoreML), all of one pyobjc release."""
+    of the mac and vision extras is pinned there, with what the new ones need (ScreenCaptureKit:
+    CoreMedia; Vision: CoreML; AVFoundation: CoreAudio), all of one pyobjc release."""
     lock = {
         name.lower(): version.strip()
         for line in (ROOT / "requirements.lock").read_text().splitlines()
         if "==" in line and not line.startswith("#")
         for name, version in [line.split("==", 1)]
     }
-    mac = {re.match(r"[A-Za-z0-9_.-]+", r).group(0).lower() for r in EXTRAS["mac"] if r.lower().startswith("pyobjc")}
-    needed = mac | {"pyobjc-core", "pyobjc-framework-coremedia", "pyobjc-framework-coreml"}
+    mac = {
+        re.match(r"[A-Za-z0-9_.-]+", r).group(0).lower()
+        for r in (*EXTRAS["mac"], *EXTRAS["vision"])
+        if r.lower().startswith("pyobjc")
+    }
+    needed = mac | {f"pyobjc-{n}" for n in ("core", "framework-coremedia", "framework-coreml", "framework-coreaudio")}
     assert needed <= lock.keys(), sorted(needed - lock.keys())
     assert len({v for n, v in lock.items() if n.startswith("pyobjc")}) == 1
