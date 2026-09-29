@@ -209,9 +209,16 @@ async def song_identify(args: dict, ctx: ToolContext) -> ToolOutput:
     lo, hi = LISTEN_S
     listen_s = min(max(float(getattr(settings(), "song_listen_s", 12.0) or 12.0), lo), hi)
     recognize.warm_soon()  # (shazamio's import, while the first seconds are heard)
-    names, _why_not_mac = await asyncio.to_thread(capture.plan)
-    listener = song_live.listener_for(names)
-    started = await listener.start()
+    song_live.begin()  # (a stop from now on counts, though the card isn't open yet)
+    try:
+        names, _why_not_mac = await asyncio.to_thread(capture.plan)
+        listener = song_live.listener_for(names)
+        started = await listener.start()
+    finally:
+        go_on = song_live.begun()
+    if not go_on:  # stopped while its sources started: they go off, no card opens
+        listener.stop()
+        return ToolOutput("Stopped listening.", say=False)
     if not started:
         return ToolOutput(f"I can't listen right now: {listener.why()}.", ok=False)
     sid = song_live.open(listener, "both" if len(started) > 1 else started[0], listen_s)

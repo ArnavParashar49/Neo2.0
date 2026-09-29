@@ -59,6 +59,8 @@ class SongLive:
         self.result: dict[str, Any] | None = None
         self.listener: capture.Listener | None = None
         self.stopped: asyncio.Event = asyncio.Event()  # set when this card's listening is stopped or over
+        self.starting = False  # a listen on its way: its sources starting, its card not open yet
+        self.halted = False  # …and stopped before its card opened (song_identify then never opens it)
         self._sent_at = 0.0
         self._links: OrderedDict[str, dict[str, str]] = OrderedDict()
         self._tasks: set[asyncio.Task] = set()
@@ -67,14 +69,23 @@ class SongLive:
 
     @property
     def listening(self) -> bool:
-        """Capturing sound now (the microphone or the Mac's)."""
+        """Capturing sound now, or about to (the microphone or the Mac's)."""
         listener = self.listener
-        return listener is not None and listener.capturing
+        return self.starting or (listener is not None and listener.capturing)
 
     @property
     def busy(self) -> bool:
-        """A card still listening or matching (a second ask waits for its answer)."""
-        return bool(self.sid) and self.status in ("listening", "matching")
+        """A listen starting, or a card still listening or matching (a second ask waits for its answer)."""
+        return self.starting or (bool(self.sid) and self.status in ("listening", "matching"))
+
+    def begin(self) -> None:
+        """A listen is on its way (its sources start before its card opens)."""
+        self.starting, self.halted = True, False
+
+    def begun(self) -> bool:
+        """Its sources are started (or failed): False when a stop came in the meantime."""
+        self.starting = False
+        return not self.halted
 
     def listener_for(self, names: list[str]) -> capture.Listener:
         make = self.source_factory or capture.source
@@ -195,8 +206,11 @@ class SongLive:
 
     def stop(self, reason: str = "stopped") -> bool:
         """Stop listening now: the card's stop, the stop button, "stop", an erase (False: nothing was
-        live)."""
-        return self.close(reason)
+        live). A listen still starting never opens its card."""
+        was_starting = self.starting
+        if was_starting:
+            self.halted = True
+        return self.close(reason) or was_starting
 
     def _keep_links(self, result: dict | None) -> None:
         links = {k: v for k, v in ((result or {}).get("links") or {}).items() if safe_link(v)}

@@ -418,12 +418,27 @@ def test_live_extra_without_the_tool_never_mentions_it():
             catalog().register(prev)
 
 
-def _voice():
+class _Speaker:
+    def __init__(self, playing: bool = False) -> None:
+        import threading
+
+        self.playing = threading.Event()
+        if playing:
+            self.playing.set()
+        self.interrupts = 0
+
+    def interrupt(self) -> None:
+        self.interrupts += 1
+        self.playing.clear()
+
+
+def _voice(*, speaking: bool = False):
     from neo2.core.voice import live as live_mod
 
     v = live_mod.LiveVoice.__new__(live_mod.LiveVoice)
     v._taint, v._seen_calls, v._recent_idem = [], {}, {}
     v._own_utt = -1
+    v._speaking, v.spk = speaking, _Speaker(playing=speaking)
     return v
 
 
@@ -450,6 +465,27 @@ def test_live_call_runs_only_when_the_users_words_asked(song_tool, monkeypatch):
     v._taint = ["web_fetch"]
     assert asyncio.run(v._song_call(fc3, {}, "what song is this", "c3", 3)).startswith("NEEDS_USER")
     assert len(song_tool.calls) == 1
+    assert v.spk.interrupts == 0  # (nothing was playing: nothing cut)
+
+
+def test_live_keeps_quiet_while_neo_listens(song_tool, monkeypatch):
+    """The model's "sure, let me listen…" would be in what NEO hears: what it is saying is cut when the
+    listening starts, and nothing it says is played while NEO listens."""
+    from neo2.core import events
+    from neo2.core.voice import live as live_mod
+
+    monkeypatch.setattr(events, "_bus", events.EventBus())
+    v = _voice(speaking=True)
+    fc = SimpleNamespace(name="song_identify", args={}, id="c1")
+    assert "Blinding Lights" in asyncio.run(v._song_call(fc, {}, "what song is this", "c1", 1))
+    assert v.spk.interrupts == 1 and not v._speaking and song_tool.calls
+
+    played: list[bytes] = []
+    monkeypatch.setattr(v, "_play", lambda data, voiced: played.append(data), raising=False)
+    monkeypatch.setattr(live_mod, "_song_listening", lambda: True)
+    asyncio.run(v._model_audio(b"\x40\x10" * 2400, [], ["Sure, let me listen"]))
+    assert played == []  # (and no gate decided for this turn by a preamble nobody heard)
+    assert getattr(v, "_gate", None) is None
 
 
 def test_live_sends_no_audio_up_while_neo_listens_and_stop_stops_it(monkeypatch):

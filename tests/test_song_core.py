@@ -241,6 +241,158 @@ def test_the_macs_sound_only_while_it_plays_and_with_the_permission(monkeypatch)
     assert capture.plan() == (["mic", "mac"], "")
 
 
+def test_the_microphone_source_with_a_stand_in_for_sounddevice(monkeypatch):
+    import sys
+    from types import SimpleNamespace
+
+    did: list[str] = []
+    chunk = tone(0.1).tobytes()
+    broken = [False]
+
+    class RawInputStream:  # sounddevice's, faked: nothing real opens
+        def __init__(self, *, samplerate, channels, dtype, blocksize, callback):
+            did.append(f"open {samplerate} {channels} {dtype} {blocksize}")
+            self.callback = callback
+
+        def start(self):
+            if broken[0]:
+                raise RuntimeError("the device went away")
+            did.append("start")
+            self.callback(chunk, 1600, None, None)
+
+        def abort(self):
+            did.append("abort")
+
+        def close(self):
+            did.append("close")
+
+    monkeypatch.setitem(sys.modules, "sounddevice", SimpleNamespace(RawInputStream=RawInputStream))
+    got: list[np.ndarray] = []
+    mic = capture.MicSource()
+    mic.start(got.append)
+    assert did == ["open 16000 1 int16 1600", "start"] and got[0].dtype == np.int16 and got[0].size == 1600
+    mic.stop()
+    mic.stop()
+    assert did[2:] == ["abort", "close"]  # (once)
+    early = capture.MicSource()
+    early.stop()
+    did.clear()
+    early.start(got.append)  # stopped before it opened: closed, never started
+    assert did == ["open 16000 1 int16 1600", "close"]
+    broken[0] = True
+    did.clear()
+    with pytest.raises(capture.Unavailable):
+        capture.MicSource().start(got.append)
+    assert did[-1] == "close"
+
+
+def _fake_sck(monkeypatch, *, when_asked=None, start_s: float = 0.05):
+    """ScreenCaptureKit, faked: what the stream was asked, in order. Nothing is captured."""
+    pytest.importorskip("CoreMedia")
+    from types import SimpleNamespace
+
+    from neo2.core.tools.camera import capture as camera_capture
+    from neo2.core.tools.computer import sck
+
+    did: list[str] = []
+    streams: list = []
+    config: dict[str, object] = {}
+
+    class Setters:
+        def __getattr__(self, name):
+            def call(*a):
+                if name.startswith("set") and a:
+                    config[name] = a[0]
+                return self
+
+            return call
+
+    class Out:
+        @classmethod
+        def alloc(cls):
+            return cls()
+
+        def init(self):
+            return self
+
+    class Stream:
+        @classmethod
+        def alloc(cls):
+            return cls()
+
+        def initWithFilter_configuration_delegate_(self, flt, cfg, delegate):
+            streams.append(self)
+            return self
+
+        def addStreamOutput_type_sampleHandlerQueue_error_(self, out, kind, queue, err):
+            self.out = out
+            did.append(f"output {kind}")
+            return True, None
+
+        def startCaptureWithCompletionHandler_(self, done):
+            did.append("start")
+            if when_asked is not None:
+                when_asked()
+
+            def later():
+                did.append("started")
+                done(None)
+
+            threading.Timer(start_s, later).start()
+
+        def stopCaptureWithCompletionHandler_(self, done):
+            did.append("stop")
+            done(None)
+
+    content = SimpleNamespace(displays=lambda: [SimpleNamespace()], applications=lambda: [])
+    fake = SimpleNamespace(
+        SCStream=Stream,
+        SCContentFilter=SimpleNamespace(alloc=Setters),
+        SCStreamConfiguration=SimpleNamespace(alloc=Setters),
+        SCStreamOutputTypeScreen=0,
+        SCStreamOutputTypeAudio=1,
+    )
+    monkeypatch.setattr(sck, "_SC", fake)
+    monkeypatch.setattr(sck, "_shareable", lambda deadline, fresh=False: content)
+    monkeypatch.setattr(sck, "_neo_apps", lambda content: [])
+    monkeypatch.setattr(camera_capture, "_dispatch_queue", lambda objc, name: "queue")
+    monkeypatch.setattr(capture, "_output_class", lambda objc: Out)
+    monkeypatch.setattr(capture, "_pcm_of", lambda cm, buf: buf)  # (a "sample buffer" here: its samples)
+    return did, streams, config
+
+
+def test_the_macs_sound_through_a_stand_in_for_screencapturekit(monkeypatch):
+    did, streams, config = _fake_sck(monkeypatch)
+    got: list[np.ndarray] = []
+    mac = capture.MacSource()
+    mac.start(got.append)
+    assert did == ["output 0", "output 1", "start", "started"]
+    assert config["setCapturesAudio_"] is True and config["setExcludesCurrentProcessAudio_"] is True
+    assert (config["setSampleRate_"], config["setChannelCount_"], config["setWidth_"]) == (16000, 1, 2)
+    out = streams[0].out
+    pcm = tone(0.1)
+    out._neo_on_buffer(pcm, 1)  # audio: into the ring
+    out._neo_on_buffer(pcm, 0)  # its 2×2 picture: dropped
+    assert len(got) == 1 and got[0] is pcm
+    mac.stop()
+    assert did[-1] == "stop" and out._neo_on_buffer is None
+
+
+def test_a_stop_while_screencapturekit_starts_turns_it_off_once_it_is_on(monkeypatch):
+    mac = capture.MacSource()
+    stopper = threading.Thread(target=mac.stop)  # another thread's stop, as the start is asked for
+    did, _streams, _config = _fake_sck(monkeypatch, when_asked=stopper.start, start_s=0.2)
+    mac.start(lambda pcm: None)
+    stopper.join(1.0)
+    assert did[:3] == ["output 0", "output 1", "start"]
+    assert did[-2:] == ["started", "stop"]  # on after the stop: off again at once
+    early = capture.MacSource()
+    early.stop()
+    did.clear()
+    early.start(lambda pcm: None)  # stopped before it was set up: never asked to start
+    assert "start" not in did
+
+
 # ---- recognize: the request, the answer, the cover ---------------------------------------------------------
 
 
@@ -371,12 +523,19 @@ async def test_a_failed_request_is_one_failure_never_retried(monkeypatch, respon
     assert calls == [1]  # one attempt (shazamio's own client would try up to 20 times)
 
 
-async def test_the_audio_never_touches_the_disk(monkeypatch):
+async def test_the_audio_never_touches_the_disk(monkeypatch, tmp_path):
     pytest.importorskip("shazamio")
     recognize._shazamio()  # (its modules load from disk once, before the check)
     monkeypatch.setattr(
         recognize, "transport", httpx.MockTransport(lambda r: httpx.Response(200, json={"matches": []}))
     )
+    # shazamio_core hands audio its own decoder can't read to an ffmpeg program, through files: a
+    # stand-in on PATH would notice. NEO's WAV never needs it.
+    ran = tmp_path / "ffmpeg-ran"
+    ffmpeg = tmp_path / "ffmpeg"
+    ffmpeg.write_text(f"#!/bin/sh\ntouch '{ran}'\nexit 1\n")
+    ffmpeg.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ.get('PATH', '')}")
 
     def no_file(*a, **k):
         raise AssertionError(f"a file was opened: {a[:1]}")
@@ -391,6 +550,7 @@ async def test_the_audio_never_touches_the_disk(monkeypatch):
     ):
         monkeypatch.setattr(mod, name, no_file)
     assert await recognize.identify(tone(4.0)) is None
+    assert not ran.exists()
 
 
 def _jpeg(w: int, h: int, *, noise: bool = False) -> bytes:
@@ -693,7 +853,7 @@ async def test_the_cards_stop_mid_listen_stops_at_once(card, monkeypatch):
     monkeypatch.setattr(recognize, "identify", shazam)
     task = asyncio.create_task(catalog().invoke("song_identify", {}, _user("what song is this")))
     for _ in range(100):
-        if song_live.busy:
+        if song_live.sid:  # (the card is open)
             break
         await asyncio.sleep(0.01)
     sid = song_live.sid
@@ -726,7 +886,7 @@ async def test_the_session_stop_cancels_listening(card, monkeypatch):
     monkeypatch.setattr(recognize, "identify", FakeShazam())
     task = asyncio.create_task(catalog().invoke("song_identify", {}, _user("what song is this")))
     for _ in range(100):
-        if song_live.busy:
+        if song_live.sid:  # (the card is open)
             break
         await asyncio.sleep(0.01)
     task.cancel()  # the stop button / "stop": the request is cancelled
@@ -734,6 +894,40 @@ async def test_the_session_stop_cancels_listening(card, monkeypatch):
         await task
     assert FakeSource.instances[0].stopped and not song_live.busy
     assert card.sent[-1][0] == "song_close" and card.sent[-1][1]["reason"] == "stopped"
+
+
+@pytest.mark.parametrize("how", ["stop", "cancel"])
+async def test_a_stop_while_its_sources_start_opens_no_card(card, monkeypatch, how):
+    """A "stop" (or the stop button) in the moment before the card opens: nothing goes on listening."""
+    go = threading.Event()
+
+    class Slow(FakeSource):
+        def start(self, push):
+            go.wait(2.0)
+            super().start(push)
+
+    monkeypatch.setattr(song_live, "source_factory", lambda n: Slow(n))
+    shazam = FakeShazam(SONG)
+    monkeypatch.setattr(recognize, "identify", shazam)
+    task = asyncio.create_task(catalog().invoke("song_identify", {}, _user("what song is this")))
+    for _ in range(100):
+        if song_live.starting:
+            break
+        await asyncio.sleep(0.01)
+    assert song_live.busy and song_live.listening and not song_live.sid
+    if how == "stop":
+        assert song_live.stop("stopped")  # (it was starting: that counts)
+        go.set()
+        out = await asyncio.wait_for(task, 2.0)
+        assert out.text == "Stopped listening." and out.say is False
+    else:
+        task.cancel()
+        go.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    await asyncio.sleep(0.05)  # (a start that finished after the cancel: off at once)
+    assert card.sent == [] and shazam.calls == []
+    assert FakeSource.instances[0].stopped and not song_live.busy and not song_live.listening
 
 
 async def test_a_second_ask_while_listening_waits_for_the_first(card, monkeypatch):

@@ -1160,6 +1160,8 @@ class LiveVoice:
         return self._gate
 
     async def _model_audio(self, data: bytes, user_buf: list[str], model_buf: list[str]) -> None:
+        if _song_listening():
+            return  # NEO is listening for a song: its own voice ("let me listen…") would be in what it hears
         gate = self._turn_gate(user_buf)
         if gate == "mute":
             return
@@ -1453,6 +1455,9 @@ class LiveVoice:
         if (first := self._duplicate_of(fc.name, args, key)) is not None:
             return f"(same call as {first} — its result is already on the way)"
         self._own_utt = utt  # their sentence ran as their own: an agent_task for it isn't run again
+        if self._speaking or self.spk.playing.is_set():
+            self.spk.interrupt()  # the model's "sure, let me listen" would be in what NEO hears
+            self._speaking = False
         self._register_call(fc.name, args, key)
         await bus().set_state(NeoState.WORKING, job=key)
         await bus().tool_start(fc.name, {}, job=key)

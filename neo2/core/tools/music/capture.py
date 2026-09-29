@@ -167,8 +167,13 @@ class MicSource:
                 with contextlib.suppress(Exception):
                     stream.close()
                 return
+            try:  # (under the lock: a stop() from another thread waits for the start, then ends it)
+                stream.start()
+            except Exception as e:  # noqa: BLE001 — the device went away as it opened
+                with contextlib.suppress(Exception):
+                    stream.close()
+                raise Unavailable("the microphone couldn't be started") from e
             self._stream = stream
-        stream.start()
 
     def stop(self) -> None:
         with self._mu:
@@ -386,13 +391,18 @@ class MacSource:
         def on_start(error: Any) -> None:
             box["error"] = error
             started.set()
+            if error is None and self._stopped:  # stopped while it was starting: off, now that it's on
+                with contextlib.suppress(Exception):
+                    stream.stopCaptureWithCompletionHandler_(lambda error: None)
 
         with self._mu:
             if self._stopped:  # stopped while it was being set up: never started
                 out._neo_on_buffer = None
                 return
             self._stream, self._out, self._queue = stream, out, queue
-        stream.startCaptureWithCompletionHandler_(on_start)
+            # Asked under the lock: a stop() either comes first (above) or finds the stream to stop,
+            # and one that lands before the start is done is repeated by on_start.
+            stream.startCaptureWithCompletionHandler_(on_start)
         if not started.wait(max(0.1, deadline - time.monotonic())):
             self.stop()
             raise Unavailable("the Mac's own sound can't be captured (ScreenCaptureKit didn't start in time)")
