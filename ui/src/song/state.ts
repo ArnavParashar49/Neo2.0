@@ -292,7 +292,7 @@ export function extraLine(r: SongResult): string {
 /** The line a screen reader hears when the card changes (never the ticking seconds). */
 export function announce(x: SongSession): string {
   switch (viewOf(x)) {
-    case "listening": return `Listening ${sourceLabel(x.source)}`;
+    case "listening": return `Listening ${sourceLabel(x.source)}` + (x.message ? `. ${x.message}` : "");
     case "matching": return "Matching the song";
     case "found": return `Found: ${x.result!.title}${x.result!.artist ? ` by ${x.result!.artist}` : ""}`;
     case "not_found": return x.message ?? NOT_FOUND_TEXT;
@@ -301,10 +301,11 @@ export function announce(x: SongSession): string {
   }
 }
 
-/** How loud it looks (0..1): a square-root curve, so ordinary room loudness (0.2–0.5) fills the
- *  meter visibly instead of hugging the floor. */
+/** How loud it looks (0..1). The core's level is already a meter's: -60 dBFS (a quiet room) is 0 and
+ *  -12 dBFS is 1, even steps in dB (neo2/core/tools/music/capture.py level()), so it is shown as it
+ *  comes — another curve on top would make a quiet room look like music. */
 export function shownLevel(level: number): number {
-  return Number.isFinite(level) ? Math.sqrt(Math.min(1, Math.max(0, level))) : 0;
+  return Number.isFinite(level) ? Math.min(1, Math.max(0, level)) : 0;
 }
 
 const MIN_BAR = 0.12;

@@ -115,6 +115,7 @@ function Listening({ hub, x, connected, view }: { hub: SongHub; x: SongSession; 
             <Meter level={x.level} seed={x.at} />
           </div>
           <div className="song-listen-sub">{connected ? `${sourceLabel(x.source)} · ${fmtSecs(secs)}` : "Reconnecting…"}</div>
+          {x.message && <div className="song-listen-note" title={x.message}>{x.message}</div>}
         </div>
         <span className="song-sr">{announce(x)}</span>
         <StopButton hub={hub} x={x} />

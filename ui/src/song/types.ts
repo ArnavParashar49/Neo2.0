@@ -22,7 +22,9 @@ export interface SongResult {
 /** `song_open`: NEO starts listening for this request. */
 export interface SongOpen { sid: string; source: SongSource; listen_s: number }
 
-/** `song_state`: where it is (level at most 10 times a second while listening). */
+/** `song_state`: where it is. `level` (0..1, dB steps: -60 dBFS is 0, -12 dBFS is 1) at most 10 times
+ *  a second while listening; `message` may come while listening too (the Mac's own sound couldn't be
+ *  captured, so only the microphone listens). */
 export interface SongStateMsg {
   sid: string;
   status: SongStatus;
@@ -32,5 +34,6 @@ export interface SongStateMsg {
   result: SongResult | null;
 }
 
-/** `song_close`: listening is over (the card stays in the transcript). */
-export interface SongClose { sid: string; reason: SongCloseReason }
+/** `song_close`: listening is over (the card stays in the transcript). "erased": an erase wiped the
+ *  chat, and every song card goes with it (as the camera's do). */
+export interface SongClose { sid: string; reason: SongCloseReason | "erased" }

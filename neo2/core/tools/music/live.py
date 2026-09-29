@@ -10,7 +10,8 @@ JSON through NEO's websocket beside the bus's, in the camera card's lane (neo2.c
   artist, album, year, genre, cover, links: {apple_music, shazam}}, the cover a ``data:image/jpeg``
   URL NEO fetched itself (the UI never loads a remote picture). A card's last state is kept in the
   replay too.
-* ``song_close {sid, reason}`` — done | stopped | error (kept in the replay).
+* ``song_close {sid, reason}`` — done | stopped | error, or "erased" (an erase wiped the chat: the UI
+  drops every song card, as it does the camera's). Kept in the replay.
 
 UI → core: ``song_stop {sid}`` (stop listening now), ``song_link {sid, which}`` (open that card's
 "apple_music" or "shazam" link with the Mac's default handler: only a link of that card's own result,
@@ -170,7 +171,8 @@ class SongLive:
         if self.listener is not None:
             self.listener.stop()
         self._keep_links(result)
-        self.update("found", level=0.0, message=None, result={**result, "cover": None})
+        # Kept in the replay too: a card stopped while its cover is on its way still shows its song.
+        self.update("found", level=0.0, message=None, result={**result, "cover": None}, recent=True)
 
         async def cover_then_close() -> None:
             pic = None
@@ -252,8 +254,9 @@ class SongLive:
             task.add_done_callback(self._tasks.discard)
 
     def forget(self) -> None:
-        """An erase: the card off, no old card's links open any more, no cover still on its way."""
-        self.stop("stopped")
+        """An erase: the card off (closed as "erased": the UI drops it with the rest of the chat), no
+        old card's links open any more, no cover still on its way."""
+        self.stop("erased")
         self._links.clear()
         for t in list(self._tasks):
             t.cancel()

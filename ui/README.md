@@ -30,4 +30,7 @@ gets no answer and ends). No microphone and no network: covers are drawn on a ca
 at example.com and are never opened. Gated on `import.meta.env.DEV` like the browser mock.
 
 The card's logic is one pure reducer (`src/song/state.ts`); `npm test` runs its tests with Node's
-own test runner (`tests/*.test.ts`, no packages needed).
+own test runner (`tests/*.test.ts`, no packages needed). `tests/fixtures/song-wire.json` is what the
+real core sends (recorded by NEO's end-to-end test, `tests/test_song_e2e.py`, which also checks the
+core still sends it): `tests/song-wire.test.ts` replays it through the reducer. If the core's messages
+change on purpose, rewrite it with `NEO_SONG_WIRE_WRITE=1` on that Python test.

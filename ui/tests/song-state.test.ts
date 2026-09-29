@@ -192,6 +192,13 @@ test("ended cards are bounded", () => {
   assert.ok(s.ended[`s${MAX_ENDED + 4}`]);
 });
 
+test("a note while listening (the Mac's sound couldn't be captured) is kept and read out", () => {
+  const note = "I couldn't capture the Mac's own sound, so I'm listening with the microphone.";
+  const s = run([open("a", "mic"), state("a", "listening", { message: note })]);
+  assert.equal(s.live?.message, note);
+  assert.equal(announce(s.live!), `Listening to the room. ${note}`);
+});
+
 test("unchanged input returns the same snapshot (no re-render)", () => {
   const s = run([open("a")]);
   assert.equal(reduce(s, open("a"), 9_000), s);
@@ -244,8 +251,8 @@ test("the overlay's shape ignores the ticking level and changes with the card's 
   assert.equal(sessionOf(s, "nope"), null);
 });
 
-test("the meter's curve lifts ordinary loudness and stays in 0..1", () => {
-  assert.equal(shownLevel(0.25), 0.5);
+test("the meter shows the core's level (already in dB steps) as it is, within 0..1", () => {
+  assert.equal(shownLevel(0.25), 0.25);
   assert.equal(shownLevel(4), 1);
   assert.equal(shownLevel(-1), 0);
   assert.equal(shownLevel(NaN), 0);

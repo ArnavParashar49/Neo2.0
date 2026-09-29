@@ -1,0 +1,373 @@
+{
+ "found": [
+  {
+   "type": "song_open",
+   "data": {
+    "sid": "s1",
+    "source": "mic",
+    "listen_s": 12.0
+   },
+   "ts": 0.0
+  },
+  {
+   "type": "song_state",
+   "data": {
+    "sid": "s1",
+    "status": "listening",
+    "level": 0.0,
+    "elapsed_s": 0.0,
+    "message": null,
+    "result": null
+   },
+   "ts": 0.0
+  },
+  {
+   "type": "song_state",
+   "data": {
+    "sid": "s1",
+    "status": "listening",
+    "level": 0.654,
+    "elapsed_s": 0.8,
+    "message": null,
+    "result": null
+   },
+   "ts": 0.102
+  },
+  {
+   "type": "song_state",
+   "data": {
+    "sid": "s1",
+    "status": "listening",
+    "level": 0.654,
+    "elapsed_s": 1.3,
+    "message": null,
+    "result": null
+   },
+   "ts": 0.204
+  },
+  {
+   "type": "song_state",
+   "data": {
+    "sid": "s1",
+    "status": "listening",
+    "level": 0.654,
+    "elapsed_s": 2.0,
+    "message": null,
+    "result": null
+   },
+   "ts": 0.305
+  },
+  {
+   "type": "song_state",
+   "data": {
+    "sid": "s1",
+    "status": "listening",
+    "level": 0.654,
+    "elapsed_s": 2.7,
+    "message": null,
+    "result": null
+   },
+   "ts": 0.407
+  },
+  {
+   "type": "song_state",
+   "data": {
+    "sid": "s1",
+    "status": "listening",
+    "level": 0.654,
+    "elapsed_s": 3.5,
+    "message": null,
+    "result": null
+   },
+   "ts": 0.508
+  },
+  {
+   "type": "song_state",
+   "data": {
+    "sid": "s1",
+    "status": "listening",
+    "level": 0.654,
+    "elapsed_s": 4.2,
+    "message": null,
+    "result": null
+   },
+   "ts": 0.61
+  },
+  {
+   "type": "song_state",
+   "data": {
+    "sid": "s1",
+    "status": "listening",
+    "level": 0.654,
+    "elapsed_s": 4.9,
+    "message": null,
+    "result": null
+   },
+   "ts": 0.712
+  },
+  {
+   "type": "song_state",
+   "data": {
+    "sid": "s1",
+    "status": "listening",
+    "level": 0.654,
+    "elapsed_s": 5.6,
+    "message": null,
+    "result": null
+   },
+   "ts": 0.813
+  },
+  {
+   "type": "song_state",
+   "data": {
+    "sid": "s1",
+    "status": "listening",
+    "level": 0.654,
+    "elapsed_s": 6.4,
+    "message": null,
+    "result": null
+   },
+   "ts": 0.915
+  },
+  {
+   "type": "song_state",
+   "data": {
+    "sid": "s1",
+    "status": "listening",
+    "level": 0.654,
+    "elapsed_s": 7.1,
+    "message": null,
+    "result": null
+   },
+   "ts": 1.016
+  },
+  {
+   "type": "song_state",
+   "data": {
+    "sid": "s1",
+    "status": "found",
+    "level": 0.0,
+    "elapsed_s": 7.1,
+    "message": null,
+    "result": {
+     "title": "Blinding Lights",
+     "artist": "The Weeknd",
+     "album": "After Hours",
+     "year": "2020",
+     "genre": "R&B/Soul",
+     "cover": null,
+     "links": {
+      "apple_music": "https://music.apple.com/us/album/1499378108?i=1499378615",
+      "shazam": "https://www.shazam.com/track/518495306/blinding-lights"
+     }
+    }
+   },
+   "ts": 1.068
+  },
+  {
+   "type": "song_state",
+   "data": {
+    "sid": "s1",
+    "status": "found",
+    "level": 0.0,
+    "elapsed_s": 7.1,
+    "message": null,
+    "result": {
+     "title": "Blinding Lights",
+     "artist": "The Weeknd",
+     "album": "After Hours",
+     "year": "2020",
+     "genre": "R&B/Soul",
+     "cover": "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAUDBAQEAwUEBAQFBQUGBwwIBwcHBw8LCwkMEQ8SEhEPERETFhwXExQaFRERGCEYGh0dHx8fExciJCIeJBweHx7/2wBDAQUFBQcGBw4ICA4eFBEUHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh7/wAARCAAwADADASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAf/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/8QAFgEBAQEAAAAAAAAAAAAAAAAAAAUH/8QAFBEBAAAAAAAAAAAAAAAAAAAAAP/aAAwDAQACEQMRAD8AnICS20AAAAAAAAAAAAAAAB//2Q==",
+     "links": {
+      "apple_music": "https://music.apple.com/us/album/1499378108?i=1499378615",
+      "shazam": "https://www.shazam.com/track/518495306/blinding-lights"
+     }
+    }
+   },
+   "ts": 1.125
+  },
+  {
+   "type": "song_close",
+   "data": {
+    "sid": "s1",
+    "reason": "done"
+   },
+   "ts": 1.125
+  }
+ ],
+ "rejoin": [
+  {
+   "type": "song_open",
+   "data": {
+    "sid": "s1",
+    "source": "mic",
+    "listen_s": 12.0
+   },
+   "ts": 0.0
+  },
+  {
+   "type": "song_state",
+   "data": {
+    "sid": "s1",
+    "status": "listening",
+    "level": 0.654,
+    "elapsed_s": 0.8,
+    "message": null,
+    "result": null
+   },
+   "ts": 0.183
+  }
+ ],
+ "replay": [
+  {
+   "type": "song_open",
+   "data": {
+    "sid": "s1",
+    "source": "mic",
+    "listen_s": 12.0
+   },
+   "ts": 0.0
+  },
+  {
+   "type": "song_state",
+   "data": {
+    "sid": "s1",
+    "status": "found",
+    "level": 0.0,
+    "elapsed_s": 7.1,
+    "message": null,
+    "result": {
+     "title": "Blinding Lights",
+     "artist": "The Weeknd",
+     "album": "After Hours",
+     "year": "2020",
+     "genre": "R&B/Soul",
+     "cover": null,
+     "links": {
+      "apple_music": "https://music.apple.com/us/album/1499378108?i=1499378615",
+      "shazam": "https://www.shazam.com/track/518495306/blinding-lights"
+     }
+    }
+   },
+   "ts": 1.068
+  },
+  {
+   "type": "song_state",
+   "data": {
+    "sid": "s1",
+    "status": "found",
+    "level": 0.0,
+    "elapsed_s": 7.1,
+    "message": null,
+    "result": {
+     "title": "Blinding Lights",
+     "artist": "The Weeknd",
+     "album": "After Hours",
+     "year": "2020",
+     "genre": "R&B/Soul",
+     "cover": "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAUDBAQEAwUEBAQFBQUGBwwIBwcHBw8LCwkMEQ8SEhEPERETFhwXExQaFRERGCEYGh0dHx8fExciJCIeJBweHx7/2wBDAQUFBQcGBw4ICA4eFBEUHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh7/wAARCAAwADADASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAf/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/8QAFgEBAQEAAAAAAAAAAAAAAAAAAAUH/8QAFBEBAAAAAAAAAAAAAAAAAAAAAP/aAAwDAQACEQMRAD8AnICS20AAAAAAAAAAAAAAAB//2Q==",
+     "links": {
+      "apple_music": "https://music.apple.com/us/album/1499378108?i=1499378615",
+      "shazam": "https://www.shazam.com/track/518495306/blinding-lights"
+     }
+    }
+   },
+   "ts": 1.125
+  },
+  {
+   "type": "song_close",
+   "data": {
+    "sid": "s1",
+    "reason": "done"
+   },
+   "ts": 1.125
+  }
+ ],
+ "stopped": [
+  {
+   "type": "song_open",
+   "data": {
+    "sid": "s1",
+    "source": "mic",
+    "listen_s": 12.0
+   },
+   "ts": 0.0
+  },
+  {
+   "type": "song_state",
+   "data": {
+    "sid": "s1",
+    "status": "listening",
+    "level": 0.0,
+    "elapsed_s": 0.0,
+    "message": null,
+    "result": null
+   },
+   "ts": 0.0
+  },
+  {
+   "type": "song_state",
+   "data": {
+    "sid": "s1",
+    "status": "listening",
+    "level": 0.654,
+    "elapsed_s": 0.8,
+    "message": null,
+    "result": null
+   },
+   "ts": 0.101
+  },
+  {
+   "type": "song_close",
+   "data": {
+    "sid": "s1",
+    "reason": "stopped"
+   },
+   "ts": 0.11
+  }
+ ],
+ "erased": [
+  {
+   "type": "song_open",
+   "data": {
+    "sid": "s1",
+    "source": "mic",
+    "listen_s": 12.0
+   },
+   "ts": 0.0
+  },
+  {
+   "type": "song_state",
+   "data": {
+    "sid": "s1",
+    "status": "listening",
+    "level": 0.0,
+    "elapsed_s": 0.0,
+    "message": null,
+    "result": null
+   },
+   "ts": 0.0
+  },
+  {
+   "type": "song_state",
+   "data": {
+    "sid": "s1",
+    "status": "listening",
+    "level": 0.655,
+    "elapsed_s": 0.7,
+    "message": null,
+    "result": null
+   },
+   "ts": 0.1
+  },
+  {
+   "type": "song_close",
+   "data": {
+    "sid": "s1",
+    "reason": "erased"
+   },
+   "ts": 0.112
+  }
+ ]
+}

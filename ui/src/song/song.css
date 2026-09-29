@@ -71,6 +71,8 @@
   -webkit-background-clip: text; background-clip: text; animation: br-shimmer 1.6s linear infinite;
 }
 .song-listen-sub { font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
+/* A note from the core while it listens (the Mac's own sound couldn't be captured: the microphone only). */
+.song-listen-note { font-size: 11.5px; line-height: 1.35; color: var(--muted); opacity: 0.9; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
 .song-eq { flex: none; display: inline-flex; align-items: flex-end; gap: 2px; height: 14px; }
 .song-eq i { width: 3px; height: 100%; border-radius: 2px; background: var(--accent); transform-origin: 50% 100%; transition: transform 110ms linear; }
 .song-stop { flex: none; align-self: center; gap: 5px; }

@@ -669,6 +669,7 @@ async def test_found_shows_the_song_then_its_cover_then_closes(card):
         and first["result"]["cover"] is None
         and first["result"]["title"] == "Blinding Lights"
     )
+    assert card.sent[-1][2] is True  # kept in the replay: a stop before the cover still shows the song
     assert not lis.capturing  # listening is over the moment it is found
     for _ in range(50):
         if card.types()[-1] == "song_close":
@@ -730,9 +731,10 @@ async def test_erase_stops_listening_and_forgets_the_links(card):
 
     lis = capture.Listener([FakeSource("mic")])
     await lis.start()
-    song_live.open(lis, "mic", 12.0)
+    sid0 = song_live.open(lis, "mic", 12.0)
     await app_bus().publish("erased", counts={})
     assert not song_live.busy and not lis.capturing
+    assert card.sent[-1] == ("song_close", {"sid": sid0, "reason": "erased"}, True)  # the UI drops it
     lis2 = capture.Listener([FakeSource("mic")])
     await lis2.start()
     sid = song_live.open(lis2, "mic", 12.0)

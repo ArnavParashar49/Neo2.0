@@ -1,6 +1,8 @@
 // The song mock core (dev only, `?mock=song`): speaks the song card's side of NEO's websocket —
 // hello with a transcript replay, state, transcripts, tool chips, notes and song_* — and plays
-// scripted runs: listening → matching → found, no match, an error, a stop. Nothing real happens:
+// scripted runs in the real core's order (neo2/core/tools/music): it tries at 3.5, 7 and 11 s while
+// the card stays "listening", shows "matching" only for the last try, and a match shows the song at
+// once, its cover a moment later; no match, an error, a stop. Nothing real happens:
 // no microphone (the level is synthesised), no network (covers are drawn on a canvas, links point
 // at example.com), and song_link only says which link NEO would have opened.
 import type { SongLinkKind, SongResult, SongSource, SongStatus } from "../types";
@@ -198,6 +200,7 @@ export class SongMockCore {
         void this.stopNow();
         return;
       case "forget_all":
+        this.close("erased"); // (the core stops listening on an erase, and the card goes with the chat)
         this.halt();
         this.recent = [];
         this.last = null;
@@ -227,7 +230,7 @@ export class SongMockCore {
     clearInterval(this.ticker);
     this.ticker = window.setInterval(() => {
       const l = this.live;
-      if (!l || (l.status !== "listening" && l.status !== "matching")) return;
+      if (!l || l.status !== "listening") return; // (matching: listening is over, the meter rests)
       l.level = this.levelAt(((Date.now() - l.t0) / 1000) * this.speed);
       this.emit();
     }, 100);
@@ -243,7 +246,7 @@ export class SongMockCore {
     this.changed();
   }
 
-  private close(reason: "done" | "stopped" | "error") {
+  private close(reason: "done" | "stopped" | "error" | "erased") {
     const l = this.live;
     if (!l) return;
     clearInterval(this.ticker);
@@ -258,7 +261,7 @@ export class SongMockCore {
     this.looping = false;
     this.current = "";
     this.close("stopped");
-    this.bcast("tool_end", { name: "recognise_song", ok: true, summary: "stopped", job: "song" });
+    this.bcast("tool_end", { name: "song_identify", ok: true, summary: "stopped", job: "song" });
     this.setNeo("idle");
     this.changed();
   }
@@ -274,7 +277,7 @@ export class SongMockCore {
       this.say("user", words, job);
       this.setNeo("thinking");
       await sleep(0.5);
-      this.bcast("tool_start", { name: "recognise_song", args: {}, job });
+      this.bcast("tool_start", { name: "song_identify", args: {}, job });
       this.setNeo("working");
       const sources: SongSource[] = ["both", "mic", "mac"];
       const source = sources[this.sourceIx++ % sources.length];
@@ -286,7 +289,8 @@ export class SongMockCore {
       this.emit();
       this.startTicker();
       const at = (s: number) => sleep(Math.max(0, s - ((Date.now() - t0) / 1000) * this.speed));
-      const blip = async (s: number, len = 0.6) => { await at(s); this.live!.status = "matching"; this.emit(); await sleep(len); this.live!.status = "listening"; this.emit(); };
+      // The core's last try (at 11 s of a 12 s listen): listening is over, the card says "matching".
+      const lastTry = async (len: number) => { await at(11); this.live!.status = "matching"; this.live!.level = 0; this.emit(); await sleep(len); };
       const final = (status: SongStatus, message: string | null, result: SongResult | null) => {
         const l = this.live!;
         Object.assign(l, { status, message, result, level: 0 });
@@ -296,37 +300,35 @@ export class SongMockCore {
       const finish = async (reason: "done" | "error", reply: string, ok = true) => {
         await sleep(0.35);
         this.close(reason);
-        this.bcast("tool_end", { name: "recognise_song", ok, summary: reply, job });
+        this.bcast("tool_end", { name: "song_identify", ok, summary: reply, job });
         this.say("assistant", reply, job);
         this.bcast("turn", { route: "quick", brain: "", model: "", ms: Date.now() - t0 + 500, tools: 1, job });
         this.setNeo("idle");
       };
       switch (kind) {
         case "found": {
+          // The try at 3.5 s finds nothing; the one at 7 s does (~1 s for Shazam's answer). The song
+          // shows at once, its cover (fetched by the core) follows, then the card closes.
           const tune = TUNES[this.tuneIx++ % TUNES.length];
-          await blip(3.5);
-          await at(7);
-          this.live!.status = "matching";
-          this.emit();
-          await sleep(0.8);
+          await at(8);
           const r = resultOf(tune);
+          final("found", null, { ...r, cover: null });
+          await sleep(0.6);
           final("found", null, r);
-          await finish("done", `That's **${r.title}** by ${r.artist}, from *${r.album}* (${r.year}).`);
+          await finish("done", `That's ${r.title} by ${r.artist}, from ${r.album}, ${r.year}.`);
           break;
         }
         case "not_found": {
-          await blip(3.5);
-          await blip(7);
-          await blip(11, 0.5);
-          await at(LISTEN_S);
-          final("not_found", "Couldn't recognise it — maybe try again closer to the music", null);
-          await finish("done", "I couldn't recognise it. Try again a little closer to the music?");
+          await lastTry(1);
+          final("not_found", "I couldn't recognise it.", null);
+          await finish("done", "I couldn't recognise it.");
           break;
         }
         case "error":
-          await sleep(1.4);
-          final("error", "Shazam didn't answer — check the internet connection and try again", null);
-          await finish("error", "I couldn't reach Shazam just now.", false);
+          // Two tries in a row with no answer from Shazam (3.5 s and 7 s): it gives up.
+          await at(8);
+          final("error", "I couldn't reach Shazam to recognise it.", null);
+          await finish("error", "I couldn't reach Shazam to recognise it.", false);
           break;
         case "stopped":
           await sleep(4);
@@ -335,7 +337,7 @@ export class SongMockCore {
           break;
         case "listening":
         case "matching":
-          if (kind === "matching") { await sleep(1.2); this.live!.status = "matching"; this.emit(); }
+          if (kind === "matching") { await sleep(1.2); this.live!.status = "matching"; this.live!.level = 0; this.emit(); }
           await new Promise<void>((_, no) => { const w = window.setInterval(() => { if (my !== this.gen) { clearInterval(w); no(CANCEL); } }, 200); });
           break;
       }
