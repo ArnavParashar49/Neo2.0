@@ -47,6 +47,10 @@ def asks_to_look(text: str) -> bool:
     from neo2.core.agent import camera_words  # the router's words (Hinglish, Hindi) count too
 
     text = str(text or "")
+    if camera_words.wants_off(text) or re.search(
+        r"\b(?:turn|switch|shut)\s+(?:\w+\s+){0,2}off\b", text, re.I
+    ):
+        return False  # "turn off the camera" never asks to look
     return bool(_ASKS.search(text)) or camera_words.wants_camera(text)
 
 
@@ -58,17 +62,58 @@ def refusal(ctx: ToolContext) -> str:
         return no  # no agent bound: nobody's request
     if not getattr(settings(), "camera", False):
         return "The camera is off in NEO's settings."
+    from neo2.core.agent import camera_words
+
     if embedded:
-        # An embedded agent: only a host that turned the camera on, for its user's own request.
-        return "" if ctx.origin == "user" and asks_to_look(ctx.user_text) else no
+        # An embedded agent: only a host that turned the camera on, for its user's own request
+        # (and never once that request has read a page, a mail or a file).
+        ok = ctx.origin == "user" and not ctx.tainted() and asks_to_look(ctx.user_text)
+        return "" if ok else no
     words = str(ctx.get(USERS_WORDS, "") or "")
-    if not words:
-        return no  # no words of the user's in this request: a model, a relay, a replay
-    if ctx.origin == "user" or asks_to_look(words):
-        return ""  # the user's own fast path, or a model doing what the user's words asked
-    if camera_live.on and not ctx.tainted():
-        return ""  # a follow-up ("and now?") while the camera is still on — never a page's idea
+    if not words or camera_words.wants_off(words):
+        return no  # no words of the user's in this request (a model, a relay, a replay), or "off"
+    if ctx.origin == "user":
+        return ""  # the user's own request: the Session's fast path, Live's for their own sentence
+    if ctx.tainted():
+        return no  # a model's call in a request that read a page, a mail or a file: never its idea
+    if camera_live.on or camera_words.wants_camera(words):
+        # A model doing what the user's whole sentence asked ("what am I holding"), or a follow-up
+        # ("and now?") while the camera is still on. Words that merely mention a camera ("my camera
+        # order", "the holding period") never are.
+        return ""
     return no
+
+
+def no_card() -> str:
+    """Why the camera may not turn on here: nobody would see it ("" = its card shows). NEO.app's
+    overlay shows the live preview; an embedded host that turned the camera on shows its own."""
+    if runtime.library_bound():
+        return ""
+    ch = camera_live.channel
+    viewers = getattr(ch, "viewers", None)
+    if ch is None or (callable(viewers) and not viewers()):
+        return "I only use the camera with NEO's window open, so you can see what it sees."
+    return ""
+
+
+# Why a vision layer sat out that passes by itself (not worth telling the user about).
+_PASSING = ("too slow", "still loading", "busy")
+
+
+def _report_notes(r: dict) -> None:
+    """A vision layer that can't run (the detector isn't downloaded, Apple Vision is missing) shows
+    in the overlay's problem list, not silently: cleared again once every layer ran."""
+    notes = [str(n) for n in (r.get("notes") or []) if n and not any(w in str(n) for w in _PASSING)]
+    if "notes" not in r and not r.get("missing"):
+        return
+    with contextlib.suppress(Exception):
+        from neo2.core import health
+
+        if r.get("missing"):
+            health.report("camera_vision", "The camera can't see yet: NEO's vision isn't installed.")
+        else:
+            note = notes[0].rstrip(".") if notes else ""
+            health.report("camera_vision", f"Camera answers are missing a part: {note}." if note else None)
 
 
 def _on_local(found: dict) -> None:
@@ -133,6 +178,8 @@ async def camera_look(args: dict, ctx: ToolContext) -> ToolOutput:
         return ToolOutput(why, ok=False)
     if camera_live.backend_factory is None and not camera_live.on and (missing := capture.available()):
         return ToolOutput(missing, ok=False)
+    if not camera_live.on and (hidden := no_card()):
+        return ToolOutput(hidden, ok=False)
     question = str(
         args.get("question") or ctx.get(USERS_WORDS) or ctx.user_text or "What do you see?"
     ).strip()[:500]
@@ -142,8 +189,10 @@ async def camera_look(args: dict, ctx: ToolContext) -> ToolOutput:
     except capture.CameraUnavailable as e:
         return ToolOutput(str(e), ok=False)
     session = camera_live.session
+    if session is None:  # turned off while it was starting (the user's stop, an erase)
+        return ToolOutput("The camera was turned off before it looked.", ok=False)
     try:
-        if session is None or not await session.wait_frame(FIRST_FRAME_S):
+        if not await session.wait_frame(FIRST_FRAME_S):
             camera_live.close("error")
             return ToolOutput("The camera didn't send a picture.", ok=False)
         settle = SETTLE_S - (time.monotonic() - session.started_at)
@@ -156,6 +205,7 @@ async def camera_look(args: dict, ctx: ToolContext) -> ToolOutput:
         camera_live.update("analysing")
         r = await _look(question, img)
         del img
+        _report_notes(r)
         answer = str(r.get("answer") or "").strip()
         if not answer:
             answer = (
@@ -166,6 +216,9 @@ async def camera_look(args: dict, ctx: ToolContext) -> ToolOutput:
         if camera_live.session is session:  # (not stopped from the card meanwhile)
             camera_live.update("answered", labels=r.get("labels"), boxes=r.get("boxes"), answer=answer)
             camera_live.schedule_off(float(getattr(settings(), "camera_follow_s", 20.0)))
+            from neo2.core.agent import camera_words
+
+            camera_words.mark_look()  # "and now?" reuses it from the answer on, while it stays on
         return ToolOutput(answer, say=True)
     except asyncio.CancelledError:
         camera_live.close("stopped")

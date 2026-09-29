@@ -229,8 +229,7 @@ async def test_the_stop_button_turns_the_camera_off(neo):
     s = _session()
     await s.handle("what am I holding", from_user=True)
     assert camera_live.on
-    await s.cancel_all()
-    camera_live.close("stopped")  # what the websocket server does on the stop button
+    await s.cancel_all()  # a spoken "stop", the stop button (App), an SDK host's stop: off now
     assert not camera_live.on
     r = await s.handle("and now?", from_user=True)
     assert "camera_look" not in (r.tools or ())

@@ -162,6 +162,23 @@ class Reply:
     taint: tuple[str, ...] = ()
 
 
+def _camera_on() -> bool:
+    try:
+        from neo2.core.tools.camera.live import camera_live
+    except Exception:  # noqa: BLE001 — no camera here
+        return False
+    return camera_live.on
+
+
+def _camera_off(reason: str) -> bool:
+    """The camera off (True when it was on)."""
+    try:
+        from neo2.core.tools.camera.live import camera_live
+    except Exception:  # noqa: BLE001
+        return False
+    return camera_live.close(reason)
+
+
 @dataclass
 class Session:
     reflex: Reflex = field(default_factory=Reflex)
@@ -270,6 +287,11 @@ class Session:
             self._drop_pending()
             await self._clear_confirming()
 
+        # "turn off the camera", "camera band karo": off now (turning it off is anyone's to ask).
+        if camera_words.wants_off(text):
+            was_on = _camera_off("stopped")
+            await bus().end_job(job)
+            return Reply("Okay, the camera's off." if was_on else "The camera is already off.", "stop", job=job)
         # "what am I holding", "ye kya hai": the user's own words ask NEO to look through the camera
         # (fastpath.camera: never a model's words). Its answer's cloud brains warm while Laya reads it.
         look = fastpath.camera(text, origin=origin)
@@ -277,6 +299,10 @@ class Session:
             camera_words.prewarm()
         d = await self.reflex.decide(text)
         await bus().publish("reflex", job=job, **d.__dict__)
+        if look is not None and d.needs_screen and camera_words.pointing_only(text) and not _camera_on():
+            # A bare "what is this?" / "ye kya hai" (no hand, no "me", no object named) that Laya
+            # reads as about the screen: the screen's, as before the camera — never a surprise camera.
+            look = None
 
         # A bare "stop" / "never mind" cancels everything; "stop the timer" is a command.
         if is_bare_stop(text) or (d.intent == "stop" and len(text.split()) <= 2 and d.intent_confidence >= 0.9):
@@ -357,6 +383,7 @@ class Session:
         """Stop every running job (the user said stop) and drop any unanswered question."""
         outcomes.stop()  # right after NEO answered, a stop says the answer was wrong
         camera_words.forget()  # a stop ends the camera's follow-up window ("and now?" asks afresh)
+        _camera_off("stopped")  # …and turns the camera off now, not when its window runs out
         replay.forget_last()  # …and a flow it just learned or replayed isn't one to repeat
         n = 0
         for t in list(self.jobs.values()):
