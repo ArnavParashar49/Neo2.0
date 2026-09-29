@@ -23,7 +23,7 @@ _MODULES = [
     "neo2.core.tools.system", "neo2.core.tools.web", "neo2.core.tools.weather", "neo2.core.tools.memory_tool", "neo2.core.tools.browser",
     "neo2.core.tools.browse",
 ]  # fmt: skip
-_MAC_ONLY = ["neo2.core.tools.media"]
+_MAC_ONLY = ["neo2.core.tools.media", "neo2.core.tools.camera.tool"]
 _MAC_MODULES = ["neo2.core.tools.computer", "neo2.core.tools.selftest"]
 
 
@@ -101,6 +101,8 @@ REFUSED: dict[str, str] = {
     "card, one job to pick up again); give the agent the browser tools and it browses itself",
     "selftest_controls": "selftest_controls is NEO.app's own check of its computer controls (its test "
     "window, its user's words): never an embedded agent's",
+    "camera_look": "camera_look isn't available to embedded agents yet: the camera turns on only for NEO.app's "
+    "user, on their own request, with its live card in NEO's chat",
 }
 
 

@@ -37,6 +37,8 @@ primitive) keeps working, while a path nobody faked is refused instead of acting
   Capturing the screen inside NEO's own process — ScreenCaptureKit, CGWindowListCreateImage, OCR
   of a fresh capture — starts no program for the audit hook to see: it is ``guard("capture", …)``
   (``CAPTURE``), right before the capture call (the ``screencapture`` program stays refused as one).
+  Turning on the Mac's camera (AVFoundation, in NEO's own process) is ``guard("camera", …)``
+  (``CAMERA``), right before the capture session starts.
 """
 
 from __future__ import annotations
@@ -59,6 +61,8 @@ from urllib.parse import urlsplit
 
 # The kind of effect a screen capture made in NEO's own process is (see the module doc).
 CAPTURE = "capture"
+# The kind of effect turning on the camera is (neo2.core.tools.camera).
+CAMERA = "camera"
 
 
 class EffectRefused(BaseException):

@@ -2,6 +2,8 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+  <key>NSCameraUsageDescription</key>
+  <string>NEO turns on the camera only when you ask it to look at something, and turns it off after answering.</string>
   <key>NSMicrophoneUsageDescription</key>
   <string>NEO listens for “Hey Neo” and to what you say to it.</string>
   <key>NSAppleEventsUsageDescription</key>
