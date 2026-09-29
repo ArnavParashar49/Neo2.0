@@ -45,6 +45,16 @@ SONG_ASKS = [
     "listen and tell me what song this is",
     "what track is this",
     "what's this tune",
+    "can you tell me the name of this song",
+    "do you know the name of this song",
+    "what song is currently playing",
+    "which song is currently playing",
+    "what's currently playing",
+    "do you know what song is playing",
+    "who's singing this song",
+    "what's the song playing in this video",
+    "what's the song on the radio",
+    "what is the name of the song playing",
     # Hinglish
     "ye kaunsa gaana hai",
     "yeh konsa gana hai",
@@ -56,12 +66,22 @@ SONG_ASKS = [
     "kaunsa gaana baj raha hai",
     "ye kaunsa gaana hai batao",
     "shazam karo",
+    "abhi kaunsa gaana chal raha hai",
+    "kaunsa gaana abhi baj raha hai",
+    "gaana kaunsa hai ye",
+    "ye gaana kisne gaaya hai",
+    "ye kya gaana hai",
+    "kya gaana hai ye",
+    "ye gaana kya hai",
     # Hindi
     "यह कौन सा गाना है",
     "ये कौनसा गाना है?",
     "कौन सा गाना बज रहा है",
     "इस गाने का नाम क्या है",
     "यह किसका गाना है",
+    "अभी कौन सा गाना चल रहा है",
+    "ये गाना किसने गाया है",
+    "ये क्या गाना है",
 ]
 
 NOT_SONG = [
@@ -93,12 +113,30 @@ NOT_SONG = [
     "what am I holding",  # the camera's
     "what is this",
     "what is on my screen",
+    # web questions about songs: nothing asks NEO to listen to what's playing
+    "what song won the grammy this year",
+    "which song is number one on the billboard chart right now",
+    "email Sam the name of this song we talked about",
+    "what is this music folder",
+    "which music app is playing right now",
+    # a song just named or described ("tell me about Bohemian Rhapsody" → "who sang it?")
+    "who sang it",
+    "who sang that",
+    "who sings it?",
+    "who performs it",
+    "whose song is it",
+    "what's the song called",
+    "what is the song",
+    "name the song",
+    "do you know the song",
+    "what's the song's name",
+    "what's the name of the song",
 ]
 
 
 @pytest.mark.parametrize("text", SONG_ASKS)
 def test_song_asks_are_recognised(text):
-    assert song_words.wants_song(text) and song_words.asks_about_song(text)
+    assert song_words.wants_song(text)
 
 
 @pytest.mark.parametrize("text", NOT_SONG)
@@ -113,20 +151,25 @@ def test_no_song_ask_turns_the_camera_on(text):
     assert not camera_words.wants_camera(text)
 
 
-def test_a_models_call_needs_a_sentence_about_the_song_playing():
+@pytest.mark.parametrize("origin", ["agent", "user"])
+def test_a_call_needs_the_users_whole_sentence_asking_what_plays(origin):
+    """A model's call listens only for what the user's whole sentence asked, as the camera's: the same
+    words the fast path and Live take. A web question that merely mentions a song never does."""
+    from neo2.core.agent.registry import ToolContext
+    from neo2.core.tools.music.tool import refusal
+
+    def ctx(words: str) -> ToolContext:
+        return ToolContext(user_text=words, extras={USERS_WORDS: words}, origin=origin)  # type: ignore[arg-type]
+
     for said in (
         "what's the song playing in this video",
         "hey what's that music",
         "what song is in the background",
     ):
-        assert song_words.asks_about_song(said), said
-    for said in (
-        "who sings Blinding Lights",
-        "what songs do you know",
-        "play the song despacito",
-        "what song should I listen to",
-    ):
-        assert not song_words.asks_about_song(said), said
+        assert refusal(ctx(said)) == "", said
+    for said in NOT_SONG + ["play the song despacito"]:
+        why = refusal(ctx(said))
+        assert why and '"what song is this?"' in why, said
 
 
 def test_stop_listening_words():
@@ -279,9 +322,20 @@ def test_session_named_song_and_play_never_listen(song_tool, session_env):
     from neo2.core.agent.session import Session
 
     s = Session(reflex=_Reflex("chat"))
-    for said in ("who sings Blinding Lights", "what songs do you know"):
+    for said in ("who sings Blinding Lights", "what songs do you know", "tell me about Bohemian Rhapsody"):
+        asyncio.run(s.handle(said, from_user=True))
+    for said in ("who sang it?", "what's the song called?"):  # (the song just named: a web question)
         asyncio.run(s.handle(said, from_user=True))
     assert song_tool.calls == []
+
+
+def test_session_common_hinglish_listens(song_tool, session_env):
+    from neo2.core.agent.session import Session
+
+    s = Session(reflex=_Reflex("chat"))
+    for said in ("ye kya gaana hai", "abhi kaunsa gaana chal raha hai", "ye gaana kisne gaaya hai"):
+        r = asyncio.run(s.handle(said, from_user=True))
+        assert r.tools == ("song_identify",), said
 
 
 def test_session_live_goal_never_listens(song_tool, session_env):
@@ -466,6 +520,43 @@ def test_live_call_runs_only_when_the_users_words_asked(song_tool, monkeypatch):
     assert asyncio.run(v._song_call(fc3, {}, "what song is this", "c3", 3)).startswith("NEEDS_USER")
     assert len(song_tool.calls) == 1
     assert v.spk.interrupts == 0  # (nothing was playing: nothing cut)
+
+
+@pytest.mark.parametrize(
+    "said",
+    [
+        "can you tell me the name of this song",
+        "do you know the name of this song",
+        "what song is currently playing",
+        "abhi kaunsa gaana chal raha hai",
+        "who's singing this song",
+    ],
+)
+def test_live_takes_what_the_typed_path_takes(song_tool, monkeypatch, said):
+    """Live and the typed chat share one test of the user's words: what one listens for, so does the other."""
+    from neo2.core import events
+    from neo2.core.agent.registry import ToolContext
+    from neo2.core.tools.music.tool import refusal
+
+    monkeypatch.setattr(events, "_bus", events.EventBus())
+    assert refusal(ToolContext(user_text=said, extras={USERS_WORDS: said}, origin="agent")) == ""
+    fc = SimpleNamespace(name="song_identify", args={}, id="c1")
+    out = asyncio.run(_voice()._song_call(fc, {}, said, "c1", 1))
+    assert "Blinding Lights" in out and len(song_tool.calls) == 1
+
+
+def test_lives_question_back_never_waits_for_a_yes(song_tool, monkeypatch):
+    """A call the user's words don't back asks them to say it themselves: a "yes" to the model could
+    never pass (it doesn't ask what song is playing), so the model isn't told to ask for one."""
+    from neo2.core import events
+
+    monkeypatch.setattr(events, "_bus", events.EventBus())
+    v = _voice()
+    fc = SimpleNamespace(name="song_identify", args={}, id="c1")
+    out = asyncio.run(v._song_call(fc, {}, "i love this", "c1", 1))
+    assert out.startswith("NEEDS_USER") and '"what song is this?"' in out and "whether" not in out
+    assert asyncio.run(v._song_call(fc, {}, "yes", "c1", 2)).startswith("NEEDS_USER")
+    assert song_tool.calls == []
 
 
 def test_live_keeps_quiet_while_neo_listens(song_tool, monkeypatch):

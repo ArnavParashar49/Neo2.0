@@ -1448,9 +1448,10 @@ class LiveVoice:
         from neo2.core.agent.registry import USERS_WORDS
 
         if not self._song_asked(asked, utt):
+            # (Never "ask them whether…": a "yes" doesn't ask what song is playing, so it could never pass.)
             return (
                 "NEEDS_USER: NEO listens for a song only when the user asks for it in their own words. "
-                "Ask them whether they want you to listen and name the song."
+                'If they want the song playing named, ask them to say "what song is this?".'
             )
         if (first := self._duplicate_of(fc.name, args, key)) is not None:
             return f"(same call as {first} — its result is already on the way)"

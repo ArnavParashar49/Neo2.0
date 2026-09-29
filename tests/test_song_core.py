@@ -286,6 +286,50 @@ def test_the_microphone_source_with_a_stand_in_for_sounddevice(monkeypatch):
     assert did[-1] == "close"
 
 
+def test_the_microphone_is_closed_even_when_its_abort_fails():
+    """A device that just went away can make abort() raise: the stream is still closed (PortAudio's
+    handle never left open), as the voice's Speaker does."""
+    did: list[str] = []
+
+    class Stream:
+        def abort(self):
+            did.append("abort")
+            raise RuntimeError("the device went away")
+
+        def close(self):
+            did.append("close")
+
+    mic = capture.MicSource()
+    mic._stream = Stream()
+    mic.stop()
+    assert did == ["abort", "close"]
+
+
+def test_the_macs_sound_counts_only_when_another_app_plays(monkeypatch):
+    """NEO's own voice keeps the output device running between replies: the device's flag alone would
+    say "playing" all the time. Where macOS lists each process's output (14.2+), only another app's counts."""
+    from neo2.core.decide import media
+
+    monkeypatch.setattr(capture, "_device_running", lambda: True)  # (NEO's speaker holds it open)
+    playing: list = []
+
+    class Watcher:
+        def playing(self):
+            return list(playing)
+
+    monkeypatch.setattr(media, "audio_confirmable", lambda: True)
+    monkeypatch.setattr(media, "AudioWatcher", Watcher)
+    assert capture.output_playing() is False
+    playing.append(object())  # another app's output stream (NEO's own are never listed)
+    assert capture.output_playing() is True
+    # older macOS (no process list): the device's flag it is
+    monkeypatch.setattr(media, "audio_confirmable", lambda: False)
+    playing.clear()
+    assert capture.output_playing() is True
+    monkeypatch.setattr(capture, "_device_running", lambda: False)
+    assert capture.output_playing() is False
+
+
 def _fake_sck(monkeypatch, *, when_asked=None, start_s: float = 0.05):
     """ScreenCaptureKit, faked: what the stream was asked, in order. Nothing is captured."""
     pytest.importorskip("CoreMedia")
@@ -702,6 +746,25 @@ async def test_a_links_that_isnt_https_is_never_kept(card):
     assert card.opened == []
 
 
+async def test_only_the_newest_results_links_open(card):
+    """The card shows its link buttons on the newest song only: an older card's sid opens nothing, and
+    neither does a result once a new card has opened."""
+    lis = capture.Listener([FakeSource("mic")])
+    await lis.start()
+    old = song_live.open(lis, "mic", 12.0)
+    song_live.finish("found", result=SONG.result())
+    lis2 = capture.Listener([FakeSource("mic")])
+    await lis2.start()
+    new = song_live.open(lis2, "mic", 12.0)
+    song_live.command(None, {"cmd": "song_link", "sid": old, "which": "shazam"})
+    assert card.opened == []  # a new card is listening: the old song's links are over
+    other = {**SONG.result(), "links": {"apple_music": None, "shazam": "https://www.shazam.com/track/1"}}
+    song_live.finish("found", result=other)
+    song_live.command(None, {"cmd": "song_link", "sid": old, "which": "shazam"})
+    song_live.command(None, {"cmd": "song_link", "sid": new, "which": "shazam"})
+    assert card.opened == ["https://www.shazam.com/track/1"]
+
+
 async def test_card_commands_stop_and_hello(card):
     lis = capture.Listener([FakeSource("mic")])
     await lis.start()
@@ -849,6 +912,85 @@ async def test_one_failed_try_then_an_answer_is_no_error(card, monkeypatch):
     assert out.ok and "Blinding Lights" in out.text and len(shazam.calls) == 3
 
 
+class Counting(FakeSource):
+    """A fake source that knows how much it had delivered when it was stopped (its ring is wiped then)."""
+
+    def __init__(self, name: str, **kw) -> None:
+        super().__init__(name, **kw)
+        self.heard, self.heard_at_stop = 0.0, None
+
+    def start(self, push) -> None:
+        def counted(pcm):
+            if not self._stop.is_set():
+                self.heard += pcm.size / RATE
+                push(pcm)
+
+        super().start(counted)
+
+    def stop(self) -> None:
+        if self.heard_at_stop is None:
+            self.heard_at_stop = self.heard
+        super().stop()
+
+
+async def test_a_slow_shazam_never_keeps_the_microphone_on_past_the_listen(card, monkeypatch):
+    """Capture ends at the last try's time, whatever an earlier request still waits for: a slow Shazam
+    makes NEO wait for its answer, never listen longer. The last try then uses what was heard."""
+    monkeypatch.setattr(song_live, "source_factory", lambda n: Counting(n, speed=10.0))
+    calls: list[int] = []
+
+    async def slow(pcm):  # the first answer comes only once the listen's time is long past
+        calls.append(int(pcm.size))
+        if len(calls) == 1:
+            for _ in range(300):
+                if FakeSource.instances[0].stopped:
+                    break
+                await asyncio.sleep(0.01)
+            await asyncio.sleep(0.2)
+        return None
+
+    monkeypatch.setattr(recognize, "identify", slow)
+    out = await catalog().invoke("song_identify", {}, _user("what song is this"))
+    assert out.text == "I couldn't recognise it."
+    (src,) = FakeSource.instances
+    assert src.stopped and src.heard_at_stop is not None
+    assert src.heard_at_stop <= 12.0 + 0.5, src.heard_at_stop  # song_listen_s (12), however slow
+    assert len(calls) == 2  # the first try, then one last try on everything heard
+    assert calls[1] >= 10.5 * RATE
+    states = card.states()
+    assert [d["status"] for d in states][-2:] == ["matching", "not_found"]
+    assert max(d["elapsed_s"] for d in states) <= 12.0
+
+
+async def test_sources_that_stall_are_still_off_by_the_listens_end(card, monkeypatch):
+    """A source that stops delivering (its device gone quiet) never keeps NEO listening past song_listen_s
+    of the clock either."""
+    from neo2.core import config
+
+    monkeypatch.setenv("NEO_SONG_LISTEN_S", "1.0")
+    monkeypatch.setattr(config, "_settings", None)
+    monkeypatch.setattr(song_tool, "LISTEN_S", (0.5, 30.0))
+
+    class Stalls(Counting):
+        def start(self, push) -> None:
+            super().start(lambda pcm: push(pcm) if self.heard < 0.5 else None)
+
+    monkeypatch.setattr(song_live, "source_factory", lambda n: Stalls(n, speed=1.0))
+    monkeypatch.setattr(recognize, "identify", FakeShazam())
+    task = asyncio.create_task(catalog().invoke("song_identify", {}, _user("what song is this")))
+    for _ in range(200):
+        if song_live.sid:
+            break
+        await asyncio.sleep(0.01)
+    t0 = time.monotonic()
+    for _ in range(300):
+        if FakeSource.instances and FakeSource.instances[0].stopped:
+            break
+        await asyncio.sleep(0.01)
+    assert FakeSource.instances[0].stopped and time.monotonic() - t0 <= 1.0 + 0.5
+    await asyncio.wait_for(task, 5.0)
+
+
 async def test_the_cards_stop_mid_listen_stops_at_once(card, monkeypatch):
     monkeypatch.setattr(song_live, "source_factory", lambda n: FakeSource(n, speed=1.0))  # real time
     shazam = FakeShazam()
@@ -973,6 +1115,9 @@ async def test_the_macs_sound_failing_leaves_the_microphone(card, monkeypatch):
         _user("summarize this page", origin="agent"),  # the user asked something else: the page said "listen"
         _user("open safari", origin="live"),
         _user("play this song"),  # (even the user's own words, when they don't ask what's playing)
+        _user("what song won the grammy this year", origin="agent"),  # a web question about songs
+        _user("what's this song about", origin="agent"),
+        _user("who sang it"),  # a song just named: a web question
     ],
 )
 async def test_only_on_the_users_own_request(card, monkeypatch, ctx):

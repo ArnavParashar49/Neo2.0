@@ -14,9 +14,10 @@ JSON through NEO's websocket beside the bus's, in the camera card's lane (neo2.c
   drops every song card, as it does the camera's). Kept in the replay.
 
 UI → core: ``song_stop {sid}`` (stop listening now), ``song_link {sid, which}`` (open that card's
-"apple_music" or "shazam" link with the Mac's default handler: only a link of that card's own result,
-only https), ``song_hello`` (the live card's state again, for a UI that reloaded). Listening also stops
-on the stop button, a spoken or typed "stop", Session.cancel_all() and an erase.
+"apple_music" or "shazam" link with the Mac's default handler: only a link of the newest card's result —
+the one the chat shows buttons for — only https), ``song_hello`` (the live card's state again, for a UI
+that reloaded). Listening also stops on the stop button, a spoken or typed "stop", Session.cancel_all()
+and an erase.
 
 What NEO hears never reaches the card, the event bus, the replay, a log or the disk: only how loud it is.
 """
@@ -27,7 +28,6 @@ import asyncio
 import contextlib
 import json
 import time
-from collections import OrderedDict
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -41,7 +41,6 @@ log = logger(__name__)
 
 STATUSES = ("listening", "matching", "found", "not_found", "error")
 TICK_S = 0.1  # the meter: at most ten states a second
-LINKS_KEPT = 8  # the cards whose links still open (a card from long ago: nothing)
 _KEEP: Any = object()
 
 
@@ -63,7 +62,7 @@ class SongLive:
         self.starting = False  # a listen on its way: its sources starting, its card not open yet
         self.halted = False  # …and stopped before its card opened (song_identify then never opens it)
         self._sent_at = 0.0
-        self._links: OrderedDict[str, dict[str, str]] = OrderedDict()
+        self._links: dict[str, dict[str, str]] = {}  # the newest card's result's links, by its sid
         self._tasks: set[asyncio.Task] = set()
 
     # ---- the state ------------------------------------------------------------------------------
@@ -96,6 +95,7 @@ class SongLive:
         """The card appears, listening through ``listener`` (already started). Returns its sid."""
         if self.sid:
             self.close("done")  # (one card at a time: a finished one still fetching its cover)
+        self._links = {}  # an older song's links: the chat shows no buttons for them any more
         self.sid = new_sid()[0]
         self.source, self.listen_s = source, float(listen_s)
         self.status, self.level, self.elapsed, self.message, self.result = "", 0.0, 0.0, None, None
@@ -215,11 +215,10 @@ class SongLive:
         return self.close(reason) or was_starting
 
     def _keep_links(self, result: dict | None) -> None:
+        """This card's result's links, the only ones that open (until the next card, or an erase)."""
         links = {k: v for k, v in ((result or {}).get("links") or {}).items() if safe_link(v)}
         if links and self.sid:
-            self._links[self.sid] = links
-            while len(self._links) > LINKS_KEPT:
-                self._links.popitem(last=False)
+            self._links = {self.sid: links}
 
     def _send(self, type_: str, data: dict, *, recent: bool = False) -> None:
         ch = self.channel
@@ -257,7 +256,7 @@ class SongLive:
         """An erase: the card off (closed as "erased": the UI drops it with the rest of the chat), no
         old card's links open any more, no cover still on its way."""
         self.stop("erased")
-        self._links.clear()
+        self._links = {}
         for t in list(self._tasks):
             t.cancel()
 

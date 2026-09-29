@@ -5,11 +5,12 @@ words to NEO.app (typed or said, marked by the Session as USERS_WORDS) that ask 
 — never a model on its own initiative, never words NEO read from a page, a mail or a file, and never
 an embedded agent's unless its host turned it on (LibrarySettings song_id=True).
 
-It listens to the room (the microphone) and, while the Mac itself plays something, to the Mac's own
-sound (a song in headphones the microphone can't hear): both at once, the first match wins
+It listens to the room (the microphone) and, while another app plays sound on the Mac, to the Mac's
+own sound (a song in headphones the microphone can't hear): both at once, the first match wins
 (neo2.core.tools.music.capture). It tries early and again as it hears more: after ``TRIES_S`` seconds
 of audio (3.5, 7, 11, then every ``THEN_EVERY_S``), each time on the latest ``WINDOW_S`` seconds,
-and stops at the first match or after ``song_listen_s`` (12 s): "I couldn't recognise it." The
+and stops at the first match or after ``song_listen_s`` (12 s): "I couldn't recognise it." It never
+listens longer than that, however slowly Shazam answers (it waits for the answer, not listening). The
 chat's song card (neo2.core.tools.music.live) shows it listening, with how loud what it hears is,
 then the song. The stop button, a spoken or typed "stop", the card's stop and an erase stop it at once.
 
@@ -20,7 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 import numpy as np
@@ -54,10 +55,11 @@ def schedule(listen_s: float) -> list[float]:
 
 
 def refusal(ctx: ToolContext) -> str:
-    """Why NEO may not listen for this call ("" = it may)."""
+    """Why NEO may not listen for this call ("" = it may). Every path asks the same of the user's words
+    (song_words.wants_song, as the fast path and Live do): what one listens for, so do the others."""
     from neo2.core.agent import song_words
 
-    no = "I only listen for a song when you ask me to yourself."
+    no = 'I only listen for a song when you ask me to yourself ("what song is this?").'
     embedded = runtime.library_bound()
     if runtime.library_mode() and not embedded:
         return no  # no agent bound: nobody's request
@@ -66,16 +68,19 @@ def refusal(ctx: ToolContext) -> str:
     if embedded:
         # An embedded agent: only a host that turned it on, for its user's own request (and never
         # once that request has read a page, a mail or a file).
-        ok = ctx.origin == "user" and not ctx.tainted() and song_words.asks_about_song(ctx.user_text)
+        ok = ctx.origin == "user" and not ctx.tainted() and song_words.wants_song(ctx.user_text)
         return "" if ok else no
     words = str(ctx.get(USERS_WORDS, "") or "")
-    if not words or not song_words.asks_about_song(words):
-        return no  # no words of the user's in this request (a model, a relay, a replay), or not this
+    if not words or not song_words.wants_song(words):
+        # No words of the user's in this request (a model, a relay, a replay), or words that don't ask
+        # to name what plays: a web question about songs ("what song won the Grammy"), one they named
+        # ("who sang it?"). A model's call for those is its own idea, never theirs.
+        return no
     if ctx.origin == "user":
         return ""  # the user's own request: the Session's fast path, Live's for their own sentence
     if ctx.tainted():
         return no  # a model's call in a request that read a page, a mail or a file: never its idea
-    return ""  # a model doing what the user's whole sentence asked ("what's the song in this video")
+    return ""  # a model doing what the user's whole sentence asked ("what's the song playing in this video")
 
 
 class _Stopped(Exception):
@@ -101,15 +106,31 @@ async def _unless_stopped(stopped: asyncio.Event, aw: Awaitable[Any]) -> Any:
 
 
 async def _heard(listener: capture.Listener, seconds: float, deadline: float) -> None:
-    """Until ``seconds`` of audio are in (or, sources that stopped delivering, ``deadline``)."""
-    while listener.heard_s() < seconds and time.monotonic() < deadline:
+    """Until ``seconds`` of audio are in (or, sources that stopped delivering, ``deadline``), or capture
+    is over."""
+    while listener.capturing and listener.heard_s() < seconds and time.monotonic() < deadline:
         await asyncio.sleep(TICK_S)
 
 
-async def _meter(sid: str, listener: capture.Listener, listen_s: float) -> None:
-    """The card's meter and time, at most ten times a second, while NEO is capturing."""
+async def _meter(
+    sid: str,
+    listener: capture.Listener,
+    listen_s: float,
+    *,
+    until_s: float,
+    deadline: float,
+    end: Callable[[], object],
+) -> None:
+    """The card's meter and time, at most ten times a second, while NEO is capturing — and capture's
+    end: once ``until_s`` is heard (the last try's time), or at ``deadline`` by the clock (sources that
+    stopped delivering), ``end()`` takes the last clip and turns the sources off. Whatever an earlier
+    try's request still waits for: a slow Shazam makes NEO wait for its answer, never listen longer."""
     while song_live.sid == sid and listener.capturing:
-        song_live.update(level=listener.level(), elapsed=min(listener.heard_s(), listen_s))
+        heard = listener.heard_s()
+        if heard >= until_s or time.monotonic() >= deadline:
+            end()
+            return
+        song_live.update(level=listener.level(), elapsed=min(heard, listen_s))
         await asyncio.sleep(TICK_S)
 
 
@@ -138,39 +159,53 @@ async def _first_match(clips: dict[str, np.ndarray]) -> recognize.Song | None:
 async def _listen(sid: str, listener: capture.Listener, listen_s: float) -> ToolOutput:
     stopped = song_live.stopped
     t0 = time.monotonic()
-    meter = asyncio.create_task(_meter(sid, listener, listen_s))
     heard_music = answered = False
     errors = 0
     tries = schedule(listen_s)
+    last: dict[str, np.ndarray] = {}
+
+    def end() -> dict[str, np.ndarray]:
+        """The last clips (once), then the microphone and the Mac's sound off: all it will hear is in hand."""
+        if listener.capturing:
+            last.update(listener.clips(WINDOW_S))
+            listener.stop()
+            song_live.update("matching", level=0.0)
+        return last
+
+    meter = asyncio.create_task(
+        _meter(sid, listener, listen_s, until_s=tries[-1], deadline=t0 + listen_s, end=end)
+    )
     try:
         for i, at in enumerate(tries):
             await _unless_stopped(stopped, _heard(listener, at, t0 + at + STALL_S))
-            clips = listener.clips(WINDOW_S)
-            if i == len(tries) - 1:
-                listener.stop()  # all it will hear is in hand: the microphone and the Mac's sound off
-                song_live.update("matching", level=0.0)
+            final = i == len(tries) - 1 or not listener.capturing  # (capture over: one last try on it all)
+            clips = dict(end()) if final else listener.clips(WINDOW_S)
+            if stopped.is_set():
+                raise _Stopped
             clips = {
                 n: c for n, c in clips.items() if c.size >= MIN_CLIP_S * capture.RATE and capture.audible(c)
             }
-            if not clips:
-                continue  # silence: nothing worth a request
-            heard_music = True
-            try:
-                song = await _unless_stopped(stopped, _first_match(clips))
-            except recognize.Failed as e:
-                errors += 1
-                log.info(f"[song] no answer from Shazam ({e})")
+            if clips:  # (silence: nothing worth a request)
+                heard_music = True
+                try:
+                    song = await _unless_stopped(stopped, _first_match(clips))
+                except recognize.Failed as e:
+                    errors, song = errors + 1, None
+                    log.info(f"[song] no answer from Shazam ({e})")
+                else:
+                    errors, answered = 0, True
+                finally:
+                    clips.clear()
+                if song is not None:
+                    song_live.found(song.result(), song.cover_url, recognize.cover)
+                    log.info("[song] found it")  # that it did — never what it heard
+                    return ToolOutput(song.sentence(), say=True)
                 if errors >= GIVE_UP_ERRORS:
                     break
-                continue
-            finally:
-                clips.clear()
-            errors, answered = 0, True
-            if song is not None:
-                song_live.found(song.result(), song.cover_url, recognize.cover)
-                log.info("[song] found it")  # that it did — never what it heard
-                return ToolOutput(song.sentence(), say=True)
+            if final:
+                break
         listener.stop()
+        last.clear()
         if errors and not answered:
             said = "I couldn't reach Shazam to recognise it."
             song_live.finish("error", message=said, reason="error")
@@ -183,6 +218,7 @@ async def _listen(sid: str, listener: capture.Listener, listen_s: float) -> Tool
     finally:
         meter.cancel()
         listener.stop()
+        last.clear()
 
 
 @tool(

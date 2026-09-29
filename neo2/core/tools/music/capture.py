@@ -6,9 +6,10 @@ Two sources, both 16 kHz mono int16 like the voice's microphone (neo2.core.voice
   so the voice pipeline's Mic and its queue are never touched.
 * ``mac`` — what the Mac itself plays (a song in headphones the microphone can't hear), through a
   ScreenCaptureKit stream with audio: NEO's own sound and windows left out, its 2×2-pixel picture
-  thrown away. Only while the default output device is running (CoreAudio's
-  kAudioDevicePropertyDeviceIsRunningSomewhere) and NEO already has Screen Recording: it is never
-  asked for here (asking would bring up macOS's prompt), the microphone alone listens then.
+  thrown away. Only while another app plays sound (CoreAudio's per-process output list, macOS 14.2+;
+  the default output device running, kAudioDevicePropertyDeviceIsRunningSomewhere, before that) and
+  NEO already has Screen Recording: it is never asked for here (asking would bring up macOS's
+  prompt), the microphone alone listens then.
 
 Each source fills a ring of at most ``RING_S`` seconds (about 420 KB) and knows how loud the latest
 tenth of a second was. Nothing is written to disk, logged or put on the event bus, and ``stop()``
@@ -180,8 +181,9 @@ class MicSource:
             self._stopped = True
             stream, self._stream = self._stream, None
         if stream is not None:
-            with contextlib.suppress(Exception):  # the device may be gone already
+            with contextlib.suppress(Exception):  # the device may be gone already…
                 stream.abort()
+            with contextlib.suppress(Exception):  # …closed all the same (PortAudio's handle never left open)
                 stream.close()
 
 
@@ -199,9 +201,9 @@ def _property(ca: Any, objc: Any, obj: int, selector: int) -> int:
     return int.from_bytes(bytes(data)[:4], sys.byteorder)
 
 
-def output_playing() -> bool:
-    """Is the Mac playing sound now: its default output device running, for any app? (False when
-    it can't tell.) A read: nothing is captured to find out."""
+def _device_running() -> bool:
+    """Is the default output device running, for any process (NEO's own included)? (False when it
+    can't tell.)"""
     try:
         import CoreAudio as ca  # type: ignore[import-not-found]
         import objc
@@ -210,6 +212,22 @@ def output_playing() -> bool:
         return bool(dev) and bool(_property(ca, objc, dev, ca.kAudioDevicePropertyDeviceIsRunningSomewhere))
     except Exception:  # noqa: BLE001 — no CoreAudio bindings, or an API that moved
         return False
+
+
+def output_playing() -> bool:
+    """Is another app playing sound on the Mac now? NEO's own voice keeps the output device running
+    between its replies, so the device's flag alone would say yes all the time: where CoreAudio lists
+    each process's output (macOS 14.2+, no permission), only a running output stream of a process that
+    isn't NEO's counts (neo2.core.decide.media.AudioWatcher); on older macOS, the device's flag. A read:
+    nothing is captured to find out."""
+    try:
+        from neo2.core.decide import media
+
+        if media.audio_confirmable():
+            return bool(media.AudioWatcher().playing())
+    except Exception:  # noqa: BLE001 — (the process list can't be read: the device's flag, below)
+        pass
+    return _device_running()
 
 
 def screen_recording() -> bool:
