@@ -312,6 +312,13 @@ class Settings(BaseSettings):
     camera: bool = True  # False: NEO never turns the camera on
     camera_follow_s: float = 20.0  # it stays on this long after an answer, for "and now?"
 
+    # ---- naming a song (neo2.core.tools.music) ----------------------------------------
+    # "What song is this?": NEO listens to the room (the microphone) and to the Mac's own sound
+    # (while something plays) for up to song_listen_s, only on the user's own request, with its card
+    # in the chat. The audio stays in memory; only Shazam's fingerprint of it goes to Shazam.
+    song_id: bool = True  # False: NEO never listens for a song
+    song_listen_s: float = 12.0  # the longest it listens before "I couldn't recognise it"
+
     @property
     def gemini_keys(self) -> list[str]:
         """All Gemini keys in priority order (free-tier quota is per key, so more keys = more quota)."""
@@ -394,6 +401,7 @@ class LibrarySettings(Settings):
     browser_headless: bool = True
     browser_view: Literal["chat", "window"] = "window"  # no chat card: that's NEO.app's overlay
     camera: bool = False  # the camera only for a host that turns it on (camera=True)
+    song_id: bool = False  # nor does it listen for a song unless the host turns that on (song_id=True)
     include_username: bool = False
     # No early first look at the host's screen unless the host asks for it (neo2.core.agent.prefetch).
     prefetch_look: bool = False

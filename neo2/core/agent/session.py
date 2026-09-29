@@ -19,7 +19,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any, Literal
 
 from neo2.core import logger, runtime
-from neo2.core.agent import batch, camera_words, confirm, fastpath, grants, prefetch, replay
+from neo2.core.agent import batch, camera_words, confirm, fastpath, grants, prefetch, replay, song_words
 from neo2.core.agent.loop import AgentResult, _supersede_observations, run_agent
 from neo2.core.agent.prompt import build as build_prompt
 from neo2.core.agent.registry import USERS_WORDS, Origin, ToolContext, ToolOutput, fence, registry, voiced
@@ -179,6 +179,23 @@ def _camera_off(reason: str) -> bool:
     return camera_live.close(reason)
 
 
+def _song_listening() -> bool:
+    try:
+        from neo2.core.tools.music.live import song_live
+    except Exception:  # noqa: BLE001 — no song card here
+        return False
+    return song_live.busy
+
+
+def _song_off(reason: str) -> bool:
+    """Listening for a song stopped now (True when it was listening)."""
+    try:
+        from neo2.core.tools.music.live import song_live
+    except Exception:  # noqa: BLE001
+        return False
+    return song_live.stop(reason)
+
+
 @dataclass
 class Session:
     reflex: Reflex = field(default_factory=Reflex)
@@ -292,9 +309,16 @@ class Session:
             was_on = _camera_off("stopped")
             await bus().end_job(job)
             return Reply("Okay, the camera's off." if was_on else "The camera is already off.", "stop", job=job)
+        # "stop listening" while NEO listens for a song: it stops now (anyone may ask it to stop).
+        if song_words.wants_stop(text) and _song_listening():
+            _song_off("stopped")
+            await bus().end_job(job)
+            return Reply("Okay, I stopped listening.", "stop", job=job)
         # "what am I holding", "ye kya hai": the user's own words ask NEO to look through the camera
         # (fastpath.camera: never a model's words). Its answer's cloud brains warm while Laya reads it.
         look = fastpath.camera(text, origin=origin)
+        # "what song is this", "ye kaunsa gaana hai": the user's own words ask NEO to listen and name it.
+        hear = fastpath.song(text, origin=origin)
         if look is not None:
             camera_words.prewarm()
         d = await self.reflex.decide(text)
@@ -315,6 +339,9 @@ class Session:
             # Whatever the reflex made of it (a question it may call chat): only the camera can answer.
             camera_words.mark_look()
             return await self._quick(text, d, [look], job=job, origin=origin)
+        if hear is not None:
+            # Whatever the reflex made of it (music, a chat): only listening can answer.
+            return await self._quick(text, d, [hear], job=job, origin=origin)
 
         # "play <game> as <side>" with that game installed on this Mac: the agent opens it and plays,
         # whatever the reflex made of it (music, a chat, the one-tool lane) and whatever a fast path
@@ -384,6 +411,7 @@ class Session:
         outcomes.stop()  # right after NEO answered, a stop says the answer was wrong
         camera_words.forget()  # a stop ends the camera's follow-up window ("and now?" asks afresh)
         _camera_off("stopped")  # …and turns the camera off now, not when its window runs out
+        _song_off("stopped")  # …and stops listening for a song
         replay.forget_last()  # …and a flow it just learned or replayed isn't one to repeat
         n = 0
         for t in list(self.jobs.values()):
@@ -491,8 +519,8 @@ class Session:
                 outcomes.step(job, tool, out.ok, halt=out.halt)
                 # e.g. weather for "the forecast for Q3 sales": the agent can do better. Never NEO's
                 # own question to the user: that is the user's to answer, not a model's.
-                if not out.ok and not out.halt and tool != fastpath.CAMERA_TOOL:
-                    # (never the camera: no model may turn it on, so its failure is said as it is)
+                if not out.ok and not out.halt and tool not in (fastpath.CAMERA_TOOL, fastpath.SONG_TOOL):
+                    # (never the camera or listening: no model may start them, so a failure is said as it is)
                     log.info(f"  ~ {tool} failed; handing to the agent")
                     ran = "; ".join(f"{tl}({', '.join(f'{k}={v!r}' for k, v in a.items())})" for tl, a in steps[:i])
                     note = f"\n[ALREADY DONE] These steps of the request already ran — don't repeat them: {ran}" if ran else ""

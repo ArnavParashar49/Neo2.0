@@ -769,6 +769,39 @@ def the_microphone(s):
     return audio.Mic().start
 
 
+@case("audio")
+def the_microphone_naming_a_song(s):
+    from neo2.core.tools.music import capture
+    from neo2.core.voice import audio
+
+    s.mp.setattr(audio.sd, "RawInputStream", s.cls("RawInputStream", poses_as="sounddevice"))
+    return lambda: capture.MicSource().start(lambda pcm: None)
+
+
+@case("audio")
+def the_macs_own_sound(s):
+    from neo2.core.tools.computer import sck
+    from neo2.core.tools.music import capture
+
+    display = SimpleNamespace()
+    content = SimpleNamespace(displays=lambda: [display], applications=lambda: [])
+
+    class Setters:  # a filter and a configuration: whatever is set on them does nothing
+        def __getattr__(self, name):
+            return lambda *a: self
+
+    fake = SimpleNamespace(
+        SCStream=s.cls("SCStream", poses_as="objc"),  # the stream that would capture the Mac's sound
+        SCContentFilter=SimpleNamespace(alloc=Setters),
+        SCStreamConfiguration=SimpleNamespace(alloc=Setters),
+        SCStreamOutputTypeScreen=0,
+        SCStreamOutputTypeAudio=1,
+    )
+    s.mp.setattr(sck, "_SC", fake)
+    s.mp.setattr(sck, "_shareable", lambda deadline, fresh=False: content)  # (the list of displays: a read)
+    return lambda: capture.MacSource().start(lambda pcm: None)
+
+
 @case("files")
 def a_note_file_in_the_users_documents(s):
     from neo2.core import config

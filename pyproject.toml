@@ -75,10 +75,14 @@ vision = [  # the camera: capture (AVFoundation), Apple Vision's labels / words 
     "torchvision",  # transformers' fast image processor for D-FINE
 ]
 server = ["websockets>=13"]  # the overlay's websocket
+# naming the song playing (song_identify): Shazam's fingerprint of what NEO hears (shazamio-core, Rust)
+# and the one request to Shazam; the microphone is the voice extra's sounddevice, the Mac's own sound
+# the mac extra's ScreenCaptureKit
+music = ["shazamio==0.8.1"]
 mcp = ["mcp>=2.2,<3"]  # python -m neo2.mcp (neo2-mcp)
 langchain = ["langchain-core>=1,<2"]  # neo2.adapters.langchain
 # NEO.app: exactly the dependencies it has always had
-app = ["neo2[brains,web,embeddings,reflex,mac,browser,voice,local,server,vision]"]
+app = ["neo2[brains,web,embeddings,reflex,mac,browser,voice,local,server,vision,music]"]
 all = ["neo2[app,mcp,langchain]"]
 
 [project.scripts]
