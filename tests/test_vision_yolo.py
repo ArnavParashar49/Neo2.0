@@ -8,6 +8,7 @@ onto the Neural Engine, no camera, nothing leaves the Mac."""
 
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
 import threading
@@ -196,6 +197,7 @@ def s(monkeypatch):
     monkeypatch.setattr(detect, "_yolo", None)
     monkeypatch.setattr(detect, "_dfine", None)
     monkeypatch.setattr(detect, "_warming", None)
+    monkeypatch.setattr(yolo, "_broken", {})
     monkeypatch.setattr(yolo, "runnable", lambda: "")
     detect.set_engine(None)
     yield st
@@ -221,6 +223,22 @@ def coreml(s, tmp_path, monkeypatch):
     monkeypatch.setitem(sys.modules, "Quartz", quartz())
     monkeypatch.setitem(sys.modules, "Foundation", types.SimpleNamespace(NSURL=types.SimpleNamespace(fileURLWithPath_=URL)))
     return fake
+
+
+@pytest.fixture
+def told(monkeypatch):
+    """The brains stubbed: what each camera question told them (its hints)."""
+    from neo2.core.vision import answer
+
+    got: list[dict] = []
+
+    async def ask(img, question, hints=None):
+        got.append(hints)
+        return answer.Reply("(stub)", "stub", False)
+
+    monkeypatch.setattr(pipeline._answer, "ask", ask)
+    monkeypatch.setattr(pipeline._answer, "prewarm", lambda: False)
+    return got
 
 
 def frame(w: int = 1280, h: int = 720, color=(200, 40, 40)) -> Image.Image:
@@ -272,23 +290,14 @@ def test_words_that_are_never_a_thing_are_hidden_in_the_model():
     assert hidden == {"squeeze", "sky", "model"}  # "watch" is a verb first, and a thing: shown
 
 
-def test_by_default_the_boxes_only_use_everyday_words():
-    words = yolo.everyday()
-    assert {"person", "cup", "phone", "pen", "bottle", "keyboard", "book", "scissors"} <= words
-    assert not words & {"sky", "dagger", "urinal", "darkness", "hand", "man", "model"}  # its usual mistakes
-    w = yolo.weights(NAMES, POS, BLANK, words)
-    shown = {n for n, v in zip(NAMES, w[0], strict=True) if v == 1}
-    assert shown == {"cup", "watch", "person", "table", "ipad"}  # "man", "hand", "beer can": not everyday
-
-
 # ---- which detector ------------------------------------------------------------------------------------------
 
 
 def test_yoloe_is_the_detector_whenever_its_model_is_there(s):
     assert s.vision_detector == "auto" and detect.mode() == "auto"
-    assert detect.engine() == "dfine"  # nothing there yet: D-FINE (the fallback)...
+    assert detect.engine() == "yoloe"  # nothing there yet: YOLOE, the one NEO is set up with...
     ok, why = detect.available()
-    assert not ok and "get_yoloe.py" in why and str(s.models_dir) in why  # ...but it's YOLOE that's missing
+    assert not ok and "get_yoloe.py" in why and str(s.models_dir) in why  # ...says what's missing
     put_model(s.models_dir)
     assert detect.engine() == "yoloe" and detect.available() == (True, "")
     assert detect.scores() == (0.25, 0.45)
@@ -306,7 +315,10 @@ def test_the_setting_picks_one(s, monkeypatch, tmp_path):
     assert detect.scores() == (0.4, 0.5)
     monkeypatch.setattr(s, "vision_detector", "auto")
     monkeypatch.setattr(yolo, "runnable", lambda: "The object detector (YOLOE, Core ML) needs macOS 14 or later")
-    assert detect.engine() == "dfine"  # a Mac that can't run it: D-FINE
+    assert detect.engine() == "yoloe" and "macOS 14" in detect.available()[1]  # a Mac that can't run it...
+    (s.models_dir / "dfine-small-coco").mkdir()
+    (s.models_dir / "dfine-small-coco" / "config.json").write_text("{}")
+    assert detect.engine() == "dfine" and detect.available() == (True, "")  # ...uses D-FINE when it's there
 
 
 def test_a_test_s_detector_says_its_own_scale(s):
@@ -345,7 +357,7 @@ def test_a_frame_goes_through_core_ml_and_back_as_boxes(coreml, s):
     assert kind == "pixels" and (pb.w, pb.h) == (640, 384)  # the model's input, never the frame
     assert pb.rgb(10, 0) == (114, 114, 114) and pb.rgb(10, 200) == (200, 40, 40)  # letterboxed, BGRA as Core Video
     kind, weights = sent["classes"]
-    assert kind == "array" and weights.data.tolist() == yolo.weights(NAMES, POS, BLANK, yolo.everyday()).tolist()
+    assert kind == "array" and weights.data.tolist() == yolo.weights(NAMES, POS, BLANK, words=yolo.EVERYDAY | yolo.NOT_SHOWN).tolist()
     assert coreml.units == [3]  # the CPU and Neural Engine: the GPU is Laya's
     assert detect.loaded() and not detect.warm()  # loaded once, kept
 
@@ -480,3 +492,201 @@ def test_the_brains_hear_of_a_few_things_not_people():
     dets = [det("man", 0.9, 0, 0, 1, 1), det("cup", 0.9, 0, 0, 0.1, 0.1), det("hand", 0.8, 0, 0, 0.1, 0.1),
             det("cup", 0.7, 0.5, 0.5, 0.1, 0.1), *(det(f"thing {i}", 0.6, 0, 0, 0.1, 0.1) for i in range(5))]  # fmt: skip
     assert pipeline.hint_objects(dets) == ["cup", "thing 0", "thing 1", "thing 2"]
+
+
+# ---- the everyday vocabulary, a model that won't load, library agents -------------------------------------
+
+
+def test_the_everyday_vocabulary_is_the_default_and_all_of_it_a_choice(coreml, s, monkeypatch):
+    assert s.vision_words == "everyday" and yolo.vocabulary() == "everyday"
+    ev = yolo.weights(NAMES, POS, BLANK, words=yolo.EVERYDAY | yolo.NOT_SHOWN)
+    assert {n for n, v in zip(NAMES, ev[0], strict=True) if v} == {"cup", "watch", "beer can", "person", "table", "hand"}
+    with effects.allow("model"):
+        detect.detect(frame())
+        monkeypatch.setattr(s, "vision_words", "all")  # the whole open vocabulary, as the user may choose
+        detect.detect(frame())
+    (_, a), (_, b) = (sent["classes"] for sent in coreml.inputs)
+    assert a.data.tolist() == ev.tolist() and b.data.tolist() == yolo.weights(NAMES, POS, BLANK).tolist()
+    monkeypatch.setattr(s, "vision_words", "nonsense")
+    assert yolo.vocabulary() == "everyday"  # a typo never opens the whole vocabulary
+
+
+def test_a_model_that_won_t_load_isn_t_compiled_again_every_frame(coreml, s, tmp_path, monkeypatch):
+    coreml.refuse = 10**6  # a copy cut short on its way into the models dir: Core ML can't read it
+    with effects.allow("model"):
+        with pytest.raises(Unavailable, match="couldn't be loaded"):
+            detect.detect(frame())
+        tried = coreml.compiled
+        with pytest.raises(Unavailable, match="couldn't be loaded"):
+            detect.detect(frame())
+        assert pipeline.preview(frame()) == []
+    assert coreml.compiled == tried  # remembered: not compiled again
+    ok, why = detect.available()
+    assert not ok and "couldn't be loaded" in why and detect.engine() == "yoloe"  # no D-FINE here: YOLOE's reason
+    folder = s.models_dir / "dfine-small-coco"
+    folder.mkdir()
+    (folder / "config.json").write_text("{}")
+    assert detect.engine() == "dfine" and detect.available() == (True, "")  # "auto" falls back to D-FINE
+    weights = s.models_dir / yolo.PKG / "Data" / "com.apple.CoreML" / "model.mlmodel"
+    weights.write_bytes(b"\1" * 80)  # a good copy this time
+    os.utime(weights, ns=(1, 1))
+    coreml.refuse = 0
+    assert detect.engine() == "yoloe"
+    with effects.allow("model"):
+        detect.detect(frame())
+    assert coreml.compiled == tried + 1 and detect.loaded()
+
+
+def test_auto_with_neither_detector_names_yoloe(s, monkeypatch, told):
+    monkeypatch.setattr(s, "vision_download_ok", False)
+    assert detect.engine() == "yoloe"
+    with pytest.raises(Unavailable, match="get_yoloe.py"):
+        detect.detect(frame())  # the detector the user chose, not D-FINE's download
+    got = asyncio.run(pipeline.look("what's this?", frame()))
+    assert any("get_yoloe.py" in n for n in got["notes"]) and not any("D-FINE" in n for n in got["notes"])
+
+
+def test_the_warm_up_loads_the_bound_agent_s_detector(tmp_path, monkeypatch):
+    from neo2.core import runtime
+    from neo2.core.config import LibrarySettings
+
+    agent = LibrarySettings(data_dir=tmp_path / "agent", models_path=tmp_path / "agent-models", camera=True)
+    agent.ensure_dirs()
+    put_model(agent.models_dir)
+    monkeypatch.setattr(detect, "_yolo", None)
+    monkeypatch.setattr(detect, "_dfine", None)
+    monkeypatch.setattr(detect, "_warming", None)
+    monkeypatch.setattr(yolo, "runnable", lambda: "")
+    seen: list = []
+
+    def load(self) -> None:
+        seen.append((type(self).__name__, str(yolo._models_dir())))
+
+    monkeypatch.setattr(yolo.YOLOE, "_load", load)
+    monkeypatch.setattr(detect._DFine, "_load", load)
+    monkeypatch.setattr(runtime, "_library", True)
+    rt = runtime.Runtime("cam", agent, None)
+    with runtime.bind(rt.scope()):
+        assert detect.engine() == "yoloe" and detect.warm()
+        detect._warming.join(5)
+    assert seen == [("YOLOE", str(agent.models_dir))] and detect._dfine is None
+
+
+# ---- people, what's worn, what's held ----------------------------------------------------------------------
+
+
+def test_every_everyday_word_is_drawn_as_itself_and_the_hands_and_clothes_never():
+    assert not yolo.EVERYDAY & yolo.NOT_SHOWN
+    assert {w for w in yolo.EVERYDAY if pipeline.name(w) != w} == set()  # ("person" is itself)
+    assert {pipeline.name(w) for w in yolo.NOT_SHOWN} == {None}
+
+
+def test_the_open_vocabulary_s_people_are_person():
+    for word in ("preacher", "jazz artist", "rock artist", "teacher", "mother", "tourist", "politician", "twin", "brunette"):
+        assert pipeline.name(word) == "person", word
+    for word in ("afro", "bangs", "ponytail", "hairstyle", "tattoo", "army"):
+        assert pipeline.name(word) is None, word
+    assert pipeline.name("speaker") == "speaker" and pipeline.name("CD player") == "CD player"  # things, though
+
+
+def test_a_role_word_is_a_person_on_the_card_and_never_a_hint():
+    dets = [
+        det("preacher", 0.929, 0.05, 0.08, 0.45, 0.92), det("preacher", 0.855, 0.52, 0.05, 0.45, 0.95),
+        det("tie", 0.472, 0.3, 0.5, 0.05, 0.3),
+    ]  # fmt: skip
+    got = pipeline.objects(dets, scores=SURE)
+    assert [d["label"] for d in got] == ["person", "person", "tie"]
+    assert pipeline.hint_objects(got) == ["tie"]
+    hand = apple.Hand(box=(0.60, 0.30, 0.05, 0.08), fingers=5)
+    assert pipeline.holding([hand], got) is None
+    same = [det("jazz artist", 0.9, 0.2, 0.0, 0.6, 1.0), det("rock artist", 0.8, 0.35, 0.1, 0.6, 0.9)]
+    assert pipeline.SAME_WORD < round(pipeline._iou(same[0]["box"], same[1]["box"]), 2) == 0.55 < pipeline.SAME_THING
+    assert [d["label"] for d in pipeline.objects(same, scores=SURE)] == ["person"]  # one person, one box
+
+
+def webcam() -> list[detect.Det]:
+    """What YOLOE gives a person at a webcam with glasses, a hat and a tie (a portrait photo's boxes)."""
+    return [
+        det("person", 0.866, 0.27, 0.05, 0.47, 0.95), det("glasses", 0.884, 0.42, 0.28, 0.16, 0.09),
+        det("hat", 0.837, 0.40, 0.05, 0.21, 0.2), det("tie", 0.746, 0.47, 0.62, 0.07, 0.12),
+        det("keycard", 0.889, 0.34, 0.8, 0.08, 0.05),
+    ]  # fmt: skip
+
+
+def test_an_empty_hand_beside_the_face_holds_nothing():
+    dets = webcam()
+    for box in ((0.60, 0.25, 0.12, 0.34), (0.24, 0.22, 0.12, 0.34), (0.45, 0.62, 0.12, 0.30)):
+        assert pipeline.holding([apple.Hand(box=box, fingers=5)], dets) is None, box
+    cup = det("cup", 0.85, 0.63, 0.30, 0.08, 0.14)
+    assert pipeline.holding([apple.Hand(box=(0.60, 0.25, 0.12, 0.34), fingers=3)], [*dets, cup]) == "cup"
+
+
+def test_the_brains_hear_first_of_what_s_held_then_what_isn_t_worn():
+    cup = det("cup", 0.85, 0.67, 0.64, 0.19, 0.28)  # on the desk, beside the person
+    dets = pipeline.objects([*webcam(), cup], scores=SURE)
+    assert pipeline.hint_objects(dets)[0] == "cup" and "cup" in pipeline.hint_objects(dets)[:1]
+    pen = det("pen", 0.6, 0.5, 0.5, 0.04, 0.1)
+    assert pipeline.hint_objects([*dets, pen], held="pen")[:2] == ["pen", "cup"]
+
+
+def test_a_finger_count_isn_t_told_what_the_hand_holds(s, told):
+    hand = apple.Hand(box=(0.60, 0.25, 0.12, 0.34), fingers=5)
+    cup = det("cup", 0.85, 0.63, 0.30, 0.08, 0.14)
+
+    class Eyes:
+        def analyse(self, img, *, labels, text, hands):
+            return apple.Seen(labels=[], text=[], hands=[hand])
+
+    class Boxes:
+        floor, sure = 0.25, 0.45
+
+        def detect(self, img, *, min_score, limit):
+            return [cup]
+
+    apple.set_engine(Eyes())
+    detect.set_engine(Boxes())
+    asyncio.run(pipeline.look("how many fingers am I holding up?", frame()))
+    asyncio.run(pipeline.look("what am I holding?", frame()))
+    assert told[0]["holding"] is None and told[1]["holding"] == "cup"
+
+
+def test_the_on_device_answer_says_its_things_in_plain_english():
+    from neo2.core.vision import answer
+
+    said = answer.local_answer("what's this?", {"objects": ["glasses", "apple", "cup", "scissors"]}, "off")
+    assert said.endswith("I can see glasses, an apple and a cup.")
+    assert answer.local_answer("what am I holding?", {"holding": "scissors"}, "off").endswith("you're holding scissors.")
+    assert answer.local_answer("what am I holding?", {"holding": "umbrella"}, "off").endswith("you're holding an umbrella.")
+    assert "a glass bottle" in answer.local_answer("?", {"objects": ["glass bottle"]}, "off")
+    assert "a bus" in answer.local_answer("?", {"objects": ["bus"]}, "off")
+
+
+def test_the_installer_makes_the_model_with_the_tools_it_was_tested_with():
+    """install-app.sh makes YOLOE's model when ~/.neo/models has none, with the same pinned build
+    tools as get_yoloe.py's own check and the README's command (a download only with --yes)."""
+    import importlib.util
+
+    root = Path(__file__).resolve().parents[1]
+    spec = importlib.util.spec_from_file_location("get_yoloe", root / "scripts" / "get_yoloe.py")
+    g = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(g)  # (its imports are the standard library's: nothing runs)
+    sh, readme = (root / "scripts" / "install-app.sh").read_text(), (root / "README.md").read_text()
+    import re
+
+    pins = {text: dict(re.findall(r"--with ([a-z]+)==([0-9.]+)", text)) for text in (sh, readme, g.__doc__)}
+    assert len({tuple(sorted(p.items())) for p in pins.values()}) == 1  # the same build tools everywhere
+    (got,) = {tuple(sorted(p.items())) for p in pins.values()}
+    assert dict(got).items() >= g.NEEDS.items() and {"numpy", "torch", "torchvision"} <= dict(got).keys()
+    assert f'$HOME/.neo/models/{yolo.PKG}' in sh and '--out "$HOME/.neo/models" --yes' in sh
+    assert g.PKG == yolo.PKG
+
+
+def test_a_hand_the_detector_misnames_isn_t_what_it_holds():
+    """Apple Vision's hand and a detector box in the same place are the hand, whatever word the box
+    got (a rendered emoji hand is a "banana" to YOLOE): not held, not a hint. A phone in it still is."""
+    hand = apple.Hand(box=(0.31, 0.06, 0.43, 0.86), fingers=5)
+    itself = det("banana", 0.72, 0.30, 0.10, 0.40, 0.80)
+    phone = det("remote", 0.61, 0.45, 0.40, 0.12, 0.20)
+    assert pipeline.holding([hand], [itself]) is None and pipeline.hint_objects([itself], hands=[hand]) == []
+    assert pipeline.holding([hand], [itself, phone]) == "remote"
+    assert pipeline.hint_objects([itself, phone], held="remote", hands=[hand]) == ["remote"]

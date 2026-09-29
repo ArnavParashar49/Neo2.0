@@ -35,8 +35,20 @@ if [ ! -f "$HOME/.neo/.env" ] && [ -f "$ROOT/.env" ]; then
   echo "  copied your keys to ~/.neo/.env (edit them there)"
 fi
 [ -f "$HOME/.neo/.env" ] || echo "  ! no API keys yet: put GEMINI_API_KEY=… in ~/.neo/.env (see README)"
-# The camera's object boxes (YOLOE-26s): its model is made once by scripts/get_yoloe.py, never fetched here.
-[ -d "$HOME/.neo/models/yoloe-26s-pf.mlpackage" ] || echo "  ! no object boxes on the camera yet: make YOLOE's model once (README: The camera)"
+# The camera's object boxes: YOLOE-26s (Ultralytics, AGPL-3.0: THIRD_PARTY_NOTICES.md), a Core ML model
+# in ~/.neo/models. Made here once from Ultralytics' weights (40 MB, checked by size and SHA-256) by
+# scripts/get_yoloe.py, in a throwaway environment of its own (a minute or two, ~1 GB of memory);
+# never inside NEO's runtime. A failure never stops the install: the camera then draws no boxes.
+YOLOE="$HOME/.neo/models/yoloe-26s-pf.mlpackage"
+if [ ! -f "$YOLOE/Manifest.json" ]; then
+  echo "→ making the camera's object detector (YOLOE-26s, once)"
+  mkdir -p "$HOME/.neo/models"
+  uv run --quiet --no-project --python 3.12 \
+      --with ultralytics==8.4.165 --with coremltools==9.0 --with numpy==2.3.5 \
+      --with torch==2.14.0 --with torchvision==0.29.0 \
+      "$ROOT/scripts/get_yoloe.py" --out "$HOME/.neo/models" --yes \
+    || echo "  ! couldn't make it now: no object boxes on the camera until it's made (README: The camera)"
+fi
 
 echo "→ building"
 cd "$ROOT/ui"

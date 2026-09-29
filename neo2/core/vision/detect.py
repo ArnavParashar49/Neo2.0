@@ -1,12 +1,13 @@
 """Object boxes on a camera frame, from one of two detectors (the ``vision_detector`` setting):
 
 * YOLOE-26s (:mod:`.yolo`, Ultralytics, AGPL-3.0): the user's choice — NEO 1's YOLO family, open
-  vocabulary (4,585 words), Core ML on the Neural Engine, ~9 ms a frame; its model is made by
-  ``scripts/get_yoloe.py`` into NEO's models dir. "auto" (the default) uses it whenever its model is
-  there, "yoloe" only it.
+  vocabulary (4,585 words; everyday things only by default), Core ML on the Neural Engine, ~9 ms a
+  frame; its model is made by ``scripts/get_yoloe.py`` into NEO's models dir. "auto" (the default)
+  uses it whenever its model is there and loads, "yoloe" only it.
 * D-FINE small (ustc-community/dfine-small-coco, Apache-2.0, 40 MB, the 80 COCO objects) through
-  transformers on the CPU: the fallback — "auto" without YOLOE's model, or the setting is its repo
-  id or a folder.
+  transformers on the CPU: the fallback — "auto" when YOLOE's model is missing or won't load and
+  D-FINE's weights are there, or the setting is its repo id or a folder. "auto" with neither says
+  what YOLOE needs: the detector NEO is set up with.
 
 D-FINE never runs on the GPU: PyTorch's MPS stream is the process's one (neo2.core.gpu), and a
 detector frame there beside a Laya pass aborted NEO. Taking turns under the GPU lock instead cost both
@@ -15,14 +16,14 @@ sides — measured on an M3 Pro, 640 px, a preview frame every 0.4 s: D-FINE 33 
 retrain would hold the boxes up for seconds. On the CPU a frame takes ~150 ms (p90 160, ~180 while
 Laya works; the first ~280) and Laya's passes don't notice it. (YOLOE has no torch at all.)
 
-Loaded on first use (:func:`warm` loads it ahead, in a thread, when the camera turns on) and kept:
-both are small. Each engine says from which score its boxes come back and from which they are sure
-enough to show on their own (:func:`scores`: their scales differ); at most :data:`MAX_BOXES` come
-back. Boxes are 0..1 of the frame, origin top left — what the live preview draws. Which of them the
+Loaded on first use (:func:`warm` loads it ahead, in a thread that carries the caller's agent,
+when the camera turns on) and kept: both are small. Each engine says from which score its boxes come
+back and from which they are sure enough to show on their own (:func:`scores`: their scales differ);
+at most :data:`MAX_BOXES` come back. Boxes are 0..1 of the frame, origin top left — what the live preview draws. Which of them the
 card draws and the brains hear of is neo2.core.vision.pipeline's.
 
 Never downloads on its own: YOLOE's model is only ever made by get_yoloe.py (its download needs
-``--yes``); D-FINE's weights are looked for in NEO's models dir (``<models_dir>/dfine-small-coco``,
+``--yes``: scripts/install-app.sh runs it once); D-FINE's weights are looked for in NEO's models dir (``<models_dir>/dfine-small-coco``,
 or a Hugging Face cache there), and only fetched from Hugging Face when the user said yes
 (``vision_download_ok``). Missing: :class:`~neo2.core.vision.Unavailable` with a message saying so.
 
@@ -32,6 +33,7 @@ detector (:func:`set_engine`).
 
 from __future__ import annotations
 
+import contextvars
 import threading
 import time
 from pathlib import Path
@@ -242,11 +244,15 @@ def _dfine_available() -> tuple[bool, str]:
 
 
 def engine() -> str:
-    """The detector a frame goes to now: "test", "yoloe" or "dfine" (see :func:`mode`)."""
+    """The detector a frame goes to now: "test", "yoloe" or "dfine" (see :func:`mode`). "auto" goes
+    to D-FINE only when YOLOE can't run (missing, or its model failed to load) and D-FINE's weights
+    are there; with neither, to YOLOE, whose Unavailable says what it needs."""
     if _engine is not None:
         return "test"
     m = mode()
-    return "dfine" if m == "dfine" or (m == "auto" and not yolo.available()[0]) else "yoloe"
+    if m == "dfine" or (m == "auto" and not yolo.available()[0] and _dfine_available()[0]):
+        return "dfine"
+    return "yoloe"
 
 
 def _get() -> Detector:
@@ -303,20 +309,23 @@ def detect(img: Image.Image, *, min_score: float | None = None, limit: int = MAX
 def warm() -> bool:
     """Load the detector in the background (the camera just turned on), so the first frame's boxes
     don't wait on it (YOLOE's first load of a new model compiles it for the Neural Engine: ~2.5 s,
-    then ~0.05 s). Never raises; True when a load was started."""
+    then ~0.05 s). The detector is picked here, and the thread runs in a copy of this context: an
+    embedded agent's warm-up loads its own models dir's detector, never the app's. Never raises;
+    True when a load was started."""
     global _warming
     if (_warming is not None and _warming.is_alive()) or not available()[0] or loaded():
         return False
+    d = _get()
 
     def load() -> None:
         try:
-            d = _get()
             if isinstance(d, _DFine | yolo.YOLOE):
                 d._load()
         except (Exception, effects.EffectRefused) as e:  # noqa: BLE001 — a warm-up never fails anything
             log.info(f"[vision] detector warm-up skipped: {str(e)[:120]}")
 
-    _warming = threading.Thread(target=load, name="neo-vision-warm", daemon=True)
+    ctx = contextvars.copy_context()
+    _warming = threading.Thread(target=ctx.run, args=(load,), name="neo-vision-warm", daemon=True)
     _warming.start()
     return True
 

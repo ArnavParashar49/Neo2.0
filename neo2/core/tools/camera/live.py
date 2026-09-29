@@ -6,8 +6,9 @@ latest-frame slot per client that never queues, and JSON beside them:
 
 * ``camera_open {sid, reason}`` — the card appears (kept in the transcript replay);
 * ``camera_state {sid, status, labels, boxes, answer?, popout}`` — status is
-  starting | live | analysing | answered | off; boxes are ``{x, y, w, h, label, score}`` in 0..1 of
-  the frame;
+  starting | live | analysing | answered | off; boxes are ``{x, y, w, h, label, score, id}`` in 0..1
+  of the frame, ``id`` the same while that thing stays in view (the card keys its boxes by it, so a
+  box moves with its thing and never slides over to another one), first seen first;
 * ``camera_close {sid, reason}`` — the camera is off (kept in the replay: the card shows it ended).
 
 UI → core: ``camera_stop`` (off now), ``camera_popout {popped}`` (or ``camera_popin``),
@@ -16,7 +17,7 @@ The camera also goes off on the stop button, on an erase, and ``follow_s`` after
 follow-up question reuses it until then). The hello's ``camera`` is ``{"live": state | None}``.
 
 While the camera is live, the object detector's boxes for the newest preview frame are drawn on the
-card a few times a second (neo2.core.vision.pipeline.preview: YOLOE-26s on the Neural Engine, ~11 ms
+card a few times a second (neo2.core.vision.pipeline.preview: YOLOE-26s on the Neural Engine, ~9 ms
 a frame, on this Mac: nothing leaves it) — people too, as NEO 1 drew them.
 
 Frames and stills never reach the event bus, the transcript replay, a log or the disk.
@@ -44,6 +45,8 @@ KIND_CAMERA = 3  # NBF1 kind of a camera preview frame (the browser's are 1 live
 MAX_LABELS, MAX_BOXES = 8, 20
 STATUSES = ("starting", "live", "analysing", "answered", "off")
 PREVIEW_BOXES_S = 0.4  # how often the live preview's boxes are refreshed (one detection at a time)
+SAME_BOX = 0.3  # a box with the same word overlapping last frame's this much (IoU) is the same thing...
+SAME_PLACE = 0.7  # ...and with another word, this much (near-tied words: "guitar" one frame, "ukulele" the next)
 
 
 def _boxes(raw: Any) -> list[dict]:
@@ -59,19 +62,20 @@ def _boxes(raw: Any) -> list[dict]:
             score = float(b.get("score", 0.0))
         except (TypeError, ValueError):
             continue
-        out.append(
-            {
-                "x": x,
-                "y": y,
-                "w": w,
-                "h": h,
-                "label": str(b.get("label") or "")[:40],
-                "score": round(score, 3),
-            }
-        )
+        box = {"x": x, "y": y, "w": w, "h": h, "label": str(b.get("label") or "")[:40], "score": round(score, 3)}
+        if isinstance(b.get("id"), int):
+            box["id"] = b["id"]
+        out.append(box)
         if len(out) >= MAX_BOXES:
             break
     return out
+
+
+def _iou(a: dict, b: dict) -> float:
+    ix = max(0.0, min(a["x"] + a["w"], b["x"] + b["w"]) - max(a["x"], b["x"]))
+    iy = max(0.0, min(a["y"] + a["h"], b["y"] + b["h"]) - max(a["y"], b["y"]))
+    inter = ix * iy
+    return inter / max(1e-9, a["w"] * a["h"] + b["w"] * b["h"] - inter)
 
 
 def _labels(raw: Any) -> list[str]:
@@ -101,6 +105,7 @@ class CameraLive:
         self.answer: str | None = None
         self.popout = False
         self._fid = 0
+        self._ids = 0  # the last box id given
         self._pump: asyncio.Task | None = None
         self._boxer: asyncio.Task | None = None
         self._off: asyncio.TimerHandle | None = None
@@ -190,11 +195,34 @@ class CameraLive:
         if labels is not None:
             self.labels = _labels(labels)
         if boxes is not None:
-            self.boxes = _boxes(boxes)
+            self.boxes = self._track(_boxes(boxes))
         if answer is not None:
             self.answer = str(answer)
         if self.sid:
             self._send("camera_state", self._state())
+
+    def _track(self, boxes: list[dict]) -> list[dict]:
+        """``boxes`` with the ids of the card's boxes they are (overlapping with the same word, or all
+        but in the same place with another), a new id for a new thing; oldest first. Boxes that have
+        an id already keep it."""
+        prev = [b for b in self.boxes if "id" in b]
+        taken = {b["id"] for b in boxes if "id" in b}
+        out = []
+        for b in boxes:
+            if "id" not in b:
+                same = [
+                    (p["label"] == b["label"], iou, p["id"])
+                    for p in prev
+                    if p["id"] not in taken and (iou := _iou(p, b)) >= (SAME_BOX if p["label"] == b["label"] else SAME_PLACE)
+                ]
+                if same:
+                    b = {**b, "id": max(same)[2]}
+                else:
+                    self._ids += 1
+                    b = {**b, "id": self._ids}
+                taken.add(b["id"])
+            out.append(b)
+        return sorted(out, key=lambda b: b["id"])
 
     def _state(self) -> dict:
         data: dict[str, Any] = {
@@ -262,7 +290,7 @@ class CameraLive:
             if img is None:
                 continue
             try:
-                boxes = _boxes(await asyncio.to_thread(preview, img))
+                boxes = self._track(_boxes(await asyncio.to_thread(preview, img)))
             except Exception:  # noqa: BLE001
                 return
             del img

@@ -148,9 +148,7 @@ def test_console_scripts_and_typing_marker():
     assert callable(neo2.mcp.main)
     # One marker for the whole package, neo2.core too (neo2 re-exports ToolContext, SAFETY_RULES…).
     assert (ROOT / "neo2" / "py.typed").is_file()
-    data = PYPROJECT["tool"]["setuptools"]["package-data"]
-    assert data == {"neo2": ["py.typed", "core/vision/yoloe_words.txt"]}  # (+ the camera boxes' words)
-    assert all((ROOT / "neo2" / f).is_file() for f in data["neo2"])
+    assert PYPROJECT["tool"]["setuptools"]["package-data"] == {"neo2": ["py.typed"]}
     assert neo2.__version__ == PROJECT["version"]
 
 

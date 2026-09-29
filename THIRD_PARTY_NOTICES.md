@@ -15,8 +15,9 @@ and keep their own licences.
   `https://github.com/ultralytics/assets/releases/download/v8.4.0/yoloe-26s-seg-pf.pt`, 40,003,064
   bytes, SHA-256 `01605da3f2e0e5325df45d5f5eef8e40b5b5c7d085399be3c33ac638258b150a`.
 - **How NEO uses it:**
-  - `scripts/get_yoloe.py` downloads the weights. It downloads only when you pass `--yes`, and it
-    checks the size and hash.
+  - `scripts/get_yoloe.py` downloads the weights. It downloads only when it is passed `--yes`, and it
+    checks the size and hash. `scripts/install-app.sh` runs it once, with `--yes`, when the converted
+    model isn't in `~/.neo/models` yet.
   - It then converts them with Ultralytics 8.4.165 and coremltools 9.0 into a Core ML model,
     `yoloe-26s-pf.mlpackage`, in NEO's models folder (`~/.neo/models`). The converted model is a
     derivative of the weights and is AGPL-3.0 too. Its `license` field says so.
@@ -25,8 +26,10 @@ and keep their own licences.
     per box and no masks. Tags for each word are added to the model's metadata: its part of speech
     and whether empty frames get it.
   - `neo2/core/vision/yolo.py` runs the converted model on camera frames, on the Mac, through
-    Core ML. The results are the boxes on the chat's camera card and the object hints NEO gives the
-    brain that answers a camera question.
+    Core ML. By default it lets the model name only about 230 everyday things of its vocabulary
+    (through the model's own per-word input); the setting `vision_words=all` allows all of it. The
+    results are the boxes on the chat's camera card and the object hints NEO gives the brain that
+    answers a camera question.
   - Frames never leave the Mac for this, and nothing is written to disk.
 - **Source for these parts:**
   - Ultralytics' code, at the link above.
