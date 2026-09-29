@@ -164,6 +164,7 @@ kbd { font: 11px/1 -apple-system, system-ui; opacity: 0.7; margin-left: 6px; }
 .msg.assistant li { margin: 2px 0; }
 .msg.assistant li p { margin: 0; }
 .msg.assistant strong { font-weight: 600; color: #fff; }
+[data-theme="light"] .msg.assistant strong { color: var(--fg); } /* white bold vanished on the light glass */
 .msg.assistant a { color: var(--accent); text-decoration: none; border-bottom: 1px solid rgba(158, 203, 255, 0.35); }
 .msg.assistant code { font: 12px "SF Mono", ui-monospace, Menlo, monospace; background: var(--bg-2); padding: 1px 5px; border-radius: 5px; }
 .msg.assistant pre { background: rgba(0, 0, 0, 0.35); border: 1px solid var(--edge); border-radius: 10px; padding: 10px 12px; overflow-x: auto; margin: 6px 0 8px; }
