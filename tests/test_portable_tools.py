@@ -165,7 +165,7 @@ def test_every_catalog_tool_is_in_a_preset_with_its_module():
 
     load_all()
     names = {t.name for t in catalog().all()} - {"zz_declared_while_bound"}
-    assert names - set(PRESETS["all"]) == {"play_music", "browse", "selftest_controls"} == set(REFUSED)
+    assert names - set(PRESETS["all"]) == {"play_music", "browse", "selftest_controls", "camera_look"} == set(REFUSED)
     assert set(PRESETS["all"]) <= set(MODULES_FOR)
     for n in PRESETS["all"]:
         assert catalog().get(n) is not None, n
@@ -177,7 +177,7 @@ def test_requires_tags_match_the_presets():
 
     load_all()
     mac = {t.name for t in catalog().all() if "macos" in t.requires}
-    assert mac == MACOS_ONLY | {"play_music", "selftest_controls"}
+    assert mac == MACOS_ONLY | {"play_music", "selftest_controls", "camera_look"}
     assert {t.name for t in catalog().all() if "playwright" in t.requires} == set(PRESETS["browser"])
     for n in ("weather", "clock", "memory"):
         assert not catalog().get(n).requires

@@ -16,6 +16,8 @@
   <string>NEO adds the reminders you ask for.</string>
   <key>NSRemindersUsageDescription</key>
   <string>NEO adds the reminders you ask for.</string>
+  <key>NSCameraUsageDescription</key>
+  <string>NEO looks through the camera only when you ask it what you’re holding or showing.</string>
   <key>NSContactsUsageDescription</key>
   <string>NEO finds the person you ask it to message or email.</string>
   <key>LSUIElement</key>

@@ -9,12 +9,14 @@ UI → Server  : {"cmd": "text", "text": "..."}      send a typed request
                {"cmd": "wake"}                     arm the voice session
                {"cmd": "state"}                    ask for a snapshot
                {"cmd": "browser_*", …}             NEO's browser card (neo2/core/tools/browser_live.py)
+               {"cmd": "camera_*", …}              the camera's card (neo2/core/tools/camera/live.py)
 
 NEO's browser card has its own lane: its commands go straight to the browser (never through the
 event bus, never logged — they carry what the user types), its JSON messages go out beside the
 bus's, and its live page frames go out as binary websocket messages, one latest-frame slot per
 client that never queues: pending JSON always goes first, and a flood of frames can't get a
-client dropped.
+client dropped. The camera's card works the same way, with a latest-frame slot of its own (its
+preview frames are NBF1 kind 3); the camera also goes off on the stop button.
 
 The relay never blocks the event bus: each client has its own outbound queue drained by its
 own task, and a client that stops reading is dropped. (An inline `await send()` to a half-dead
@@ -87,6 +89,7 @@ class _Client:
         self.conn = conn
         self.q: deque[str] = deque()
         self.frame: bytes | str | None = None
+        self.cam: bytes | None = None  # the camera card's latest preview frame
         self.wake = asyncio.Event()
         self.browser = False  # said browser_hello: gets the browser card's messages
 
@@ -104,6 +107,11 @@ class _Client:
         self.wake.set()
         return replaced
 
+    def offer_camera(self, payload: bytes) -> None:
+        """The camera's newest preview frame replaces one not yet sent."""
+        self.cam = payload
+        self.wake.set()
+
 
 class UIServer:
     def __init__(self, on_command: CommandHandler) -> None:
@@ -117,6 +125,9 @@ class UIServer:
         from neo2.core.tools.browser_live import live
 
         live.channel = self
+        from neo2.core.tools.camera.live import camera_live
+
+        camera_live.channel = self
         self._token = ws_token()
         # No per-message deflate: the socket is local, and page frames are JPEGs, which don't
         # compress — zlib on every frame was most of the core's cost of the live view.
@@ -169,6 +180,9 @@ class UIServer:
             from neo2.core.tools.browser_live import live
 
             live.viewer_gone(cl)
+            from neo2.core.tools.camera.live import camera_live
+
+            camera_live.viewer_gone(cl)
             # A client that stopped reading is cut off for good: close its socket, so the overlay
             # notices, reconnects and gets a fresh hello (an open socket that hears nothing never does).
             transport = getattr(c, "transport", None)
@@ -193,17 +207,35 @@ class UIServer:
         if self._clients:
             self._send_all(json.dumps(msg, default=str), lambda cl: recent or cl.browser)
 
+    def camera_send(self, type_: str, data: dict[str, Any], *, recent: bool = False) -> None:
+        """A camera card message (neo2/core/tools/camera/live.py), to every overlay: its opening and
+        closing are part of the transcript (replayed), its state goes to the clients connected now."""
+        msg = {"type": type_, "data": data, "ts": time.time()}
+        if recent:
+            self._recent.append(msg)
+            self._recent = self._recent[-60:]
+        if self._clients:
+            self._send_all(json.dumps(msg, default=str), lambda cl: True)
+
+    def camera_frame(self, payload: bytes, who: Callable[[_Client], bool]) -> None:
+        """One camera preview frame, into the latest-frame slot of each client showing the card."""
+        for cl in list(self._clients.values()):
+            if who(cl):
+                cl.offer_camera(payload)
+
     async def _drain(self, cl: _Client) -> None:
         c = cl.conn
         try:
             while True:
                 await cl.wake.wait()
                 cl.wake.clear()
-                while cl.q or cl.frame is not None:
+                while cl.q or cl.frame is not None or cl.cam is not None:
                     if cl.q:  # control and state beat pixels
                         data: str | bytes = cl.q.popleft()
+                    elif cl.frame is not None:
+                        data, cl.frame = cl.frame, None
                     else:
-                        data, cl.frame = cl.frame, None  # type: ignore[assignment]
+                        data, cl.cam = cl.cam, None  # type: ignore[assignment]
                     await asyncio.wait_for(c.send(data), 5.0)
         except (websockets.ConnectionClosed, TimeoutError, asyncio.CancelledError):
             pass
@@ -212,6 +244,7 @@ class UIServer:
 
     async def _handle(self, c: ServerConnection) -> None:
         from neo2.core.tools.browser_live import live
+        from neo2.core.tools.camera.live import camera_live
 
         cl = _Client(c)
         # The hello goes first, before anything the bus relays to this client.
@@ -225,6 +258,7 @@ class UIServer:
                         "confirm": confirm.card(confirm.peek()),  # a question still waiting
                         "problems": health.problems(),  # missing key, blocked mic, voice down…
                         "browser": live.hello_snapshot(),  # NEO's browser card, if one is live
+                        "camera": camera_live.hello_snapshot(),  # the camera's card, while it is on
                     },
                 },
                 default=str,
@@ -252,6 +286,14 @@ class UIServer:
                     except Exception as e:  # noqa: BLE001
                         print(f"[ui] browser command failed: {type(e).__name__}")
                     continue
+                if kind.startswith("camera_"):
+                    try:
+                        camera_live.command(cl, cmd)
+                    except Exception as e:  # noqa: BLE001
+                        print(f"[ui] camera command failed: {type(e).__name__}")
+                    continue
+                if kind == "stop":
+                    camera_live.close("stopped")  # the stop button turns the camera off too
                 if kind == "state":
                     cl.send_json(json.dumps({"type": "state", "data": {"state": bus().state.value}}))
                     continue

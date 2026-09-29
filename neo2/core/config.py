@@ -292,6 +292,12 @@ class Settings(BaseSettings):
     memory_path: Path | None = None  # the memory database (default: data_dir/memory.sqlite3)
     extra_secret_paths: list[Path] = []  # never read or written by NEO's tools (data_dir never is)
 
+    # ---- the camera (neo2.core.tools.camera) -----------------------------------------
+    # Only ever on the user's own request, with the chat's live preview card showing it. (Whether
+    # its one still per question may go to the cloud brains is neo2.core.vision's vision_cloud_ok.)
+    camera: bool = True  # False: NEO never turns the camera on
+    camera_follow_s: float = 20.0  # it stays on this long after an answer, for "and now?"
+
     @property
     def gemini_keys(self) -> list[str]:
         """All Gemini keys in priority order (free-tier quota is per key, so more keys = more quota)."""
@@ -373,6 +379,7 @@ class LibrarySettings(Settings):
     voice: VoiceBackend = "off"
     browser_headless: bool = True
     browser_view: Literal["chat", "window"] = "window"  # no chat card: that's NEO.app's overlay
+    camera: bool = False  # the camera only for a host that turns it on (camera=True)
     include_username: bool = False
     # No early first look at the host's screen unless the host asks for it (neo2.core.agent.prefetch).
     prefetch_look: bool = False
