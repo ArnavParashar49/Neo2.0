@@ -282,3 +282,30 @@ def camera(text: str, *, origin: str) -> Step | None:
     if not (camera_words.wants_camera(raw) or camera_words.follow_up(raw)):
         return None
     return CAMERA_TOOL, {"question": raw}
+
+
+# ---- the song lane ----------------------------------------------------------------------------
+# "what song is this", "ye kaunsa gaana hai", "यह कौन सा गाना है": the user's own words ask NEO to listen
+# and name the song playing (neo2.core.agent.song_words decides by the words). NEO listens only for the
+# user, exactly as the camera turns on only for them (above).
+
+SONG_TOOL = "song_identify"
+
+
+def song(text: str, *, origin: str) -> Step | None:
+    """``("song_identify", {})`` when the user's own words ask NEO to name the song playing, else
+    None. A question about a song they name ("who sings Blinding Lights") never is."""
+    if origin != "user":
+        return None
+    raw = " ".join((text or "").split())
+    if not raw:
+        return None
+    from neo2.core import runtime
+    from neo2.core.agent import song_words
+
+    if runtime.library_mode() and not runtime.library_bound():
+        return None  # a library's process-wide catalog: no host chose to let it listen
+    t = registry().get(SONG_TOOL)
+    if t is None or t.hidden or not song_words.wants_song(raw):
+        return None
+    return SONG_TOOL, {}

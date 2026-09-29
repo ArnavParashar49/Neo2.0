@@ -70,8 +70,8 @@ _SCREEN_STEPS = (
 )
 
 # Lines about these tools are in NEO.app's prompt (every tool: `tools` None) only while the tool is
-# registered: the camera's line costs every agent request nothing on a Mac without it.
-_WHEN_REGISTERED = frozenset({"camera_look"})
+# registered: the camera's and the song's lines cost every agent request nothing on a Mac without them.
+_WHEN_REGISTERED = frozenset({"camera_look", "song_identify"})
 
 # (line, tools it's about): None = a safety rule, always there.
 _HOW_TO_WORK: tuple[tuple[str, frozenset[str] | None], ...] = (
@@ -140,6 +140,11 @@ _HOW_TO_WORK: tuple[tuple[str, frozenset[str] | None], ...] = (
         "- camera_look: what's in front of the user (\"what am I holding\"), only on their own words;\n"
         "  never the screen.\n",
         frozenset({"camera_look"}),
+    ),
+    (
+        "- song_identify: names the song playing (\"what song is this?\"), only on the user's own words;\n"
+        "  a song they name (\"who sings X\") is a web question.\n",
+        frozenset({"song_identify"}),
     ),
     (
         "- Memory: when the user states a preference, corrects you, or shares a personal fact, save it\n"

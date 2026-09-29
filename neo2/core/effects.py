@@ -38,7 +38,9 @@ primitive) keeps working, while a path nobody faked is refused instead of acting
   of a fresh capture — starts no program for the audit hook to see: it is ``guard("capture", …)``
   (``CAPTURE``), right before the capture call (the ``screencapture`` program stays refused as one).
   Turning on the Mac's camera (AVFoundation, in NEO's own process) is ``guard("camera", …)``
-  (``CAMERA``), right before the capture session starts.
+  (``CAMERA``), right before the capture session starts. Listening — the microphone, or the Mac's
+  own sound through ScreenCaptureKit when NEO names a song (neo2.core.tools.music) — is
+  ``guard("audio", …)`` (``AUDIO``, the voice's microphone and speaker too), right before the stream opens.
 """
 
 from __future__ import annotations
@@ -63,6 +65,9 @@ from urllib.parse import urlsplit
 CAPTURE = "capture"
 # The kind of effect turning on the camera is (neo2.core.tools.camera).
 CAMERA = "camera"
+# The kind of effect the microphone, the speaker and capturing the Mac's sound are (neo2.core.voice,
+# neo2.core.tools.music).
+AUDIO = "audio"
 
 
 class EffectRefused(BaseException):

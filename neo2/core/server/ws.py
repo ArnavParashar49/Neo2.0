@@ -10,13 +10,16 @@ UI → Server  : {"cmd": "text", "text": "..."}      send a typed request
                {"cmd": "state"}                    ask for a snapshot
                {"cmd": "browser_*", …}             NEO's browser card (neo2/core/tools/browser_live.py)
                {"cmd": "camera_*", …}              the camera's card (neo2/core/tools/camera/live.py)
+               {"cmd": "song_*", …}                the song card (neo2/core/tools/music/live.py)
 
 NEO's browser card has its own lane: its commands go straight to the browser (never through the
 event bus, never logged — they carry what the user types), its JSON messages go out beside the
 bus's, and its live page frames go out as binary websocket messages, one latest-frame slot per
 client that never queues: pending JSON always goes first, and a flood of frames can't get a
 client dropped. The camera's card works the same way, with a latest-frame slot of its own (its
-preview frames are NBF1 kind 3); the camera also goes off on the stop button.
+preview frames are NBF1 kind 3); the camera also goes off on the stop button. The song card's JSON
+takes the camera's lane (no frames: only how loud what NEO hears is), and the stop button stops its
+listening too.
 
 The relay never blocks the event bus: each client has its own outbound queue drained by its
 own task, and a client that stops reading is dropped. (An inline `await send()` to a half-dead
@@ -128,6 +131,9 @@ class UIServer:
         from neo2.core.tools.camera.live import camera_live
 
         camera_live.channel = self
+        from neo2.core.tools.music.live import song_live
+
+        song_live.channel = self
         self._token = ws_token()
         # No per-message deflate: the socket is local, and page frames are JPEGs, which don't
         # compress — zlib on every frame was most of the core's cost of the live view.
@@ -217,6 +223,12 @@ class UIServer:
         if self._clients:
             self._send_all(json.dumps(msg, default=str), lambda cl: True)
 
+    def song_send(self, type_: str, data: dict[str, Any], *, recent: bool = False) -> None:
+        """A song card message (neo2/core/tools/music/live.py): the camera card's lane. Its opening, its
+        last state and its closing are part of the transcript (replayed); the rest goes to the clients
+        connected now."""
+        self.camera_send(type_, data, recent=recent)
+
     def viewers(self) -> int:
         """Overlays connected now (the camera turns on only where its card can be seen)."""
         return len(self._clients)
@@ -249,6 +261,7 @@ class UIServer:
     async def _handle(self, c: ServerConnection) -> None:
         from neo2.core.tools.browser_live import live
         from neo2.core.tools.camera.live import camera_live
+        from neo2.core.tools.music.live import song_live
 
         cl = _Client(c)
         # The hello goes first, before anything the bus relays to this client.
@@ -296,8 +309,15 @@ class UIServer:
                     except Exception as e:  # noqa: BLE001
                         print(f"[ui] camera command failed: {type(e).__name__}")
                     continue
+                if kind.startswith("song_"):
+                    try:
+                        song_live.command(cl, cmd)
+                    except Exception as e:  # noqa: BLE001
+                        print(f"[ui] song command failed: {type(e).__name__}")
+                    continue
                 if kind == "stop":
                     camera_live.close("stopped")  # the stop button turns the camera off too
+                    song_live.stop("stopped")  # …and stops listening for a song
                 if kind == "state":
                     cl.send_json(json.dumps({"type": "state", "data": {"state": bus().state.value}}))
                     continue
