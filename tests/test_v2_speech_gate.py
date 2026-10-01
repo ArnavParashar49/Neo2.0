@@ -114,6 +114,7 @@ def voice(monkeypatch):
     v = live_mod.LiveVoice(lambda t: None, Session())
     v.spk = FakeSpk()
     v._live = FakeLive()
+    v._listening = True  # a spoken conversation: the user said "Neo" (not a session typed words opened)
     v.ran, v.lane = ran, lane
     return v
 

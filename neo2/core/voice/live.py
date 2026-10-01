@@ -5,15 +5,22 @@ timer, memory, calendar) and ONE `agent_task` tool that runs NEO's own loop for 
 multi-step. The session opens on wake and closes after a quiet period to save quota.
 
 Design notes that came out of real use:
+- The mic goes up to the model only after "Neo" (or the hotkey / push-to-talk): `_listening`.
+  Typed words still get Live's spoken answer, but the session they open is deaf — nothing from
+  the room is streamed until the wake word. After a wake, `listen_timeout_s` with no words
+  transcribed closes the session again; the room's noise never keeps it open (`_silence_watch`).
 - Half-duplex: while NEO's own audio is playing (plus a short tail) the mic is NOT streamed to
   Live, otherwise the model hears itself, interrupts itself and the transcript fills with echoes.
+  That mute starts the moment the model's reply has a voice in it — even while that voice is
+  still held back by the speech gate — or the room would interrupt a reply nobody has heard yet.
   The local wake/stop spotter keeps listening during that time so "stop" still works.
 - One state machine (`_refresh_state`) decides what the orb shows — speaking > working >
   listening — instead of every event racing to set it. The agent loop is told not to drop to
   idle while a voice session owns the orb.
 - The websocket keepalive is relaxed: Google's endpoint is slow to answer pings while it is
   synthesising audio, and the default 20 s timeout killed every session mid-conversation.
-- An unexpected disconnect during an active conversation reconnects once, silently.
+- An unexpected disconnect mid-turn (a tool running, words just said) reconnects once, silently;
+  a socket that drops while nothing is going on just leaves NEO idle until the next "Neo".
 """
 
 from __future__ import annotations
@@ -83,7 +90,12 @@ _THINK_SETTLE_S = 2.5  # "thinking" for a reply the user will hear; back to list
 _LANE_S = 30.0  # how long the model's calls for a sentence NEO ran itself are skipped
 _SETTLE_S = 0.3  # no new words for this long after the model starts answering = sentence over
 _CONNECT_TIMEOUT_S = 12.0
-_RECONNECT_WINDOW_S = 60.0  # reopen automatically if the socket dies within this long of activity
+# A socket that dies mid-turn is reopened: a tool is running, or the user's words came within this
+# long and the model hasn't answered. Otherwise NEO goes idle and waits for "Neo" — nothing was lost.
+_RECONNECT_WINDOW_S = 10.0
+# A voice the local detector hears right as the listen window runs out gets this long for the
+# server to transcribe it before the session closes. Noise alone never holds it longer than that.
+_TRANSCRIBE_GRACE_S = 1.5
 _PLAYBACK_TAIL_S = 0.35  # keep the mic muted this long after NEO stops talking (room echo)
 _BARGE_IN_GRACE_S = 1.5  # ignore "stop" for the first moment of NEO's own speech (echo onset)
 _CONTEXT_S = 600.0  # spoken context older than this isn't "just now"
@@ -523,6 +535,12 @@ class LiveVoice:
     # voice confirmations (see _voiced)
     _asked: tuple[str, str, float] | None = None  # (action_id, question text handed to the model, when)
     _voiced_action: tuple[str, str, float] | None = None  # (action_id, what the model then said, when)
+    # listening (see _silence_watch for the rules)
+    _listening = False  # the mic goes up to the model: set by a wake, never by typed words
+    _woke_at = 0.0  # the latest wake (wake word / hotkey / push-to-talk)
+    _words_at = 0.0  # the user's latest words this session: transcribed by the server, or typed
+    _last_voice_at = 0.0  # the local detector last heard a voice in the room (anyone's)
+    _turn_audio = False  # the model's current turn has a voice in it (playing, or held by the gate)
 
     def __init__(self, on_text: TextHandler, session_for_agent) -> None:
         self._on_text = on_text
@@ -609,8 +627,16 @@ class LiveVoice:
 
     # ---- controls ----------------------------------------------------------------------
     async def wake(self, source: str = "ui") -> None:
+        """"Neo", the hotkey, the tray, push-to-talk: from now on the mic goes up to the model.
+        A session that was answering typed words starts listening too; the clock for "nothing
+        said" starts here (or when the session is actually open, if connecting took a while)."""
         early().listening("wake")  # warm what the request will need while the user speaks (never waits)
+        self._listening = True
+        self._woke_at = time.time()
         await self._ensure_session()
+        if self._live:
+            print(f"[voice] woke ({source})")
+            await self._refresh_state()
 
     async def push_to_talk(self, on: bool) -> None:
         self._ptt = on
@@ -623,7 +649,12 @@ class LiveVoice:
         early = time.time() - self._speaking_since <= outcomes.EARLY_S if speaking else None
         outcomes.stop((self._label or {}).get("id", ""), early=early)
         self.spk.interrupt()
-        self._speaking = False
+        self._speaking = self._turn_audio = False
+        # The rest of this turn stays unheard: what the gate was still holding, and the chunks
+        # the model keeps sending after the stop (the server never heard it — the mic was muted).
+        self._held = []
+        if self._turn_open and self._gate != "mute":
+            self._gate = "mute"
         for t in list(self._tool_tasks.values()):
             t.cancel()
         self._new_question()
@@ -664,6 +695,8 @@ class LiveVoice:
                 await self.inform(reply.text)
 
     async def send_text(self, text: str) -> None:
+        """Typed words: Live answers them aloud as before, but a session opened for them is deaf —
+        the mic isn't streamed until the user says "Neo" (see _listening)."""
         await self._ensure_session()
         if not self._live:
             await self._on_text(text)  # Live is down: fall back to the text session
@@ -671,7 +704,7 @@ class LiveVoice:
         await self._live.send_client_content(
             turns=gt.Content(role="user", parts=[gt.Part.from_text(text=text)])
         )
-        self._last_activity = self._last_user_speech = self._last_heard_at = time.time()  # typed = said
+        self._last_activity = self._last_user_speech = self._last_heard_at = self._words_at = time.time()  # typed = said
         self._new_question()
         self._new_sentence()
         self._calls_this_turn = 0
@@ -691,8 +724,10 @@ class LiveVoice:
             await bus().set_state(NeoState.SPEAKING)
         elif any(not t.done() for t in self._tool_tasks.values()):
             pass  # the agent loop is narrating (thinking / working / searching)
-        else:
+        elif self._listening:
             await bus().set_state(NeoState.LISTENING)
+        else:
+            await bus().set_state(NeoState.IDLE)  # answering typed words: the mic is off until "Neo"
 
     # ---- session -----------------------------------------------------------------------
     async def _ensure_session(self) -> None:
@@ -744,7 +779,8 @@ class LiveVoice:
             self._connect_failures = 0
             self._live_cm, self._live = cm, live
             self._last_activity = self._session_open = self._last_user_speech = time.time()
-            self._turn_open, self._utterance = False, ""
+            self._words_at = 0.0  # nothing said to this session yet
+            self._turn_open, self._utterance, self._turn_audio = False, "", False
             self._new_question()
             early().new_utterance()
             if self._vad is not None:
@@ -766,7 +802,7 @@ class LiveVoice:
         if self._closing:  # the conversation is over (not a dropped socket): forget its context
             self._dialog.clear()
         cm, self._live_cm, self._live = self._live_cm, None, None
-        self._speaking = False
+        self._speaking = self._turn_audio = self._listening = False  # the next "Neo" starts fresh
         self._agent_session.voice_owned = False
         if cm:
             try:
@@ -775,24 +811,34 @@ class LiveVoice:
                 pass
         await bus().set_state(NeoState.IDLE)
 
+    def _mid_turn(self) -> bool:
+        """Is a turn genuinely in progress — a tool running, or words the model hasn't answered
+        yet? (Not "something happened recently": a session idling after an answer isn't one.)"""
+        if any(not t.done() for t in self._tool_tasks.values()):
+            return True
+        return self._turn_open and bool(self._words_at) and time.time() - self._words_at < _RECONNECT_WINDOW_S
+
     async def _lost(self, live, why: str) -> None:
-        """The socket died under us. Reconnect if the user was mid-conversation."""
+        """The socket died under us. Reconnect only mid-turn; otherwise idle until "Neo"."""
         if self._live is not live:
             return
-        recent = time.time() - self._last_activity < _RECONNECT_WINDOW_S
+        mid_turn, listening = self._mid_turn(), self._listening
         await self._close_session()
-        if recent and not self._closing:
-            print(f"[live] {why}; reconnecting")
+        if mid_turn and not self._closing:
+            print(f"[voice] {why}; reconnecting (a turn was in progress)")
             await bus().note("Voice session dropped — reconnecting")
+            self._listening = listening  # as it was: a wake stays a wake, typed words stay deaf
             await self._ensure_session()
         else:
-            print(f"[live] {why}")
+            print(f"[voice] {why}; idle")
 
     async def _idle_watch(self, live) -> None:
+        """The backstop: nothing from either side for `_IDLE_CLOSE_S`, whatever the state."""
         while self._live is live:
             await asyncio.sleep(5)
             busy = self.spk.playing.is_set() or any(not t.done() for t in self._tool_tasks.values())
             if not busy and time.time() - self._last_activity > _IDLE_CLOSE_S:
+                print(f"[voice] nothing for {_IDLE_CLOSE_S:.0f}s; idle")
                 self._closing = True
                 await self._close_session()
                 return
@@ -808,27 +854,50 @@ class LiveVoice:
                 print(f"[early] {str(e)[:80]}")
 
     async def _silence_watch(self, live) -> None:
-        """Stop listening after `listen_timeout_s` of no speech from the user (background noise
-        doesn't count — silero decides what is speech). The wake word re-arms the session."""
+        """Close the session once the user has had `listen_timeout_s` (settings) to say something
+        and hasn't. In plain words:
+
+        * After a wake with nothing said yet, the clock runs from the wake (or from the moment
+          the session was really open, if connecting took a while). "Said" means words the
+          server transcribed, or typed words — never a voice the local detector heard: the TV,
+          someone else in the room, a cough. Nothing said in time: back to idle.
+        * Once NEO has answered, the same `listen_timeout_s` of quiet after it finished (its
+          playback, its turn, a tool result) closes the session: the follow-up window.
+        * The clock pauses while something is in progress: push-to-talk held, NEO speaking or
+          its reply on the way (`_turn_audio`), a tool running, or — only after the user's words
+          were transcribed — a turn the model hasn't finished within `_TURN_STALL_S` of its last
+          message.
+        * The local voice detector refreshes the clock only while the user's own sentence is
+          still open (the server transcribed words and hasn't finished the turn), so a pause
+          mid-sentence doesn't cut them off. Otherwise a voice in the room can delay the close
+          by `_TRANSCRIBE_GRACE_S` at most — time for the server to transcribe words that began
+          right at the end of the window — and never extend it."""
         timeout = settings().listen_timeout_s
         while self._live is live:
             await asyncio.sleep(0.25)
-            if self._ptt or self._speaking or self.spk.playing.is_set():
+            if self._ptt or self._speaking or self.spk.playing.is_set() or self._reply_coming():
                 continue
             if any(not t.done() for t in self._tool_tasks.values()):
                 continue
-            if self._turn_open and time.time() - self._last_activity < _TURN_STALL_S:
-                continue  # the model is still composing its answer
-            if time.time() - self._quiet_since() > timeout:
-                now = time.time()
+            now = time.time()
+            if self._turn_open and self._words_at and now - self._last_activity < _TURN_STALL_S:
+                continue  # the model is still composing its answer to what the user said
+            quiet = now - max(self._woke_at, self._quiet_since())
+            if quiet <= timeout:
+                continue
+            if now - self._last_voice_at < _TRANSCRIBE_GRACE_S and quiet <= timeout + _TRANSCRIBE_GRACE_S:
+                continue  # a voice right now: the server may still be transcribing it
+            if self._words_at:
                 print(
-                    f"[live] no speech for {timeout:.0f}s; closing session "
+                    f"[voice] quiet for {timeout:.0f}s; idle "
                     f"(you {_ago(now, self._last_user_speech)}, me {_ago(now, self.spk.last_stop)}, "
                     f"turn {_ago(now, self._last_turn_end)}, open {_ago(now, self._session_open)})"
                 )
-                self._closing = True
-                await self._close_session()
-                return
+            else:
+                print(f"[voice] nothing said for {timeout:.0f}s; idle")
+            self._closing = True
+            await self._close_session()
+            return
 
     def _quiet_since(self) -> float:
         """The last moment either side of the conversation did something."""
@@ -836,11 +905,18 @@ class LiveVoice:
             self._last_user_speech, self.spk.last_stop, self._session_open, self._last_turn_end
         )
 
+    def _mid_sentence(self) -> bool:
+        """The user's own words are on the table and the model hasn't finished answering: a
+        pause in them is part of the sentence, not silence."""
+        return self._turn_open and bool(self._words_at)
+
     def _hear(self, frame: bytes) -> None:
-        """Feed the local VAD; remember when the user last spoke."""
+        """Feed the local VAD; remember when a voice was last heard in the room. It counts as the
+        user speaking only mid-sentence (see _silence_watch) — the detector can't tell them
+        from the TV."""
         if self._vad is None:
             if rms(frame) > 0.02:
-                self._last_user_speech = time.time()
+                self._voice_now()
             return
         self._vad_buf = np.concatenate(
             [self._vad_buf, np.frombuffer(frame, dtype=np.int16).astype(np.float32) / 32768.0]
@@ -851,22 +927,37 @@ class LiveVoice:
                 import torch
 
                 if float(self._vad(torch.from_numpy(chunk.copy()), 16000).item()) > 0.5:
-                    now = time.time()
-                    if now - self._last_user_speech > 2.0:
-                        print("[live] hearing you")
-                    self._last_user_speech = now
+                    self._voice_now()
             except Exception:  # noqa: BLE001
                 pass
 
+    def _voice_now(self) -> None:
+        now = time.time()
+        if now - self._last_voice_at > 2.0:
+            print("[live] hearing a voice")
+        self._last_voice_at = now
+        if self._mid_sentence():
+            self._last_user_speech = now
+
     def _mic_muted(self) -> bool:
-        """Half-duplex: don't feed NEO its own voice."""
+        """Half-duplex: don't feed NEO its own voice — from the moment its reply has a voice in
+        it (even one the gate is still holding) until the playback tail is over. Otherwise the
+        room's sound reaches the server while it is composing, and its own activity detection
+        cuts the reply off before anyone heard it ("server-side interruption")."""
         if self._ptt:
             return False
         return (
             self._speaking
+            or self._reply_coming()
             or self.spk.playing.is_set()
             or (time.time() - self.spk.last_stop) < _PLAYBACK_TAIL_S
         )
+
+    def _reply_coming(self) -> bool:
+        """The model's turn has a voice in it that the user is going to hear — playing, or held
+        by the gate while it decides. (A turn the gate muted — a command's narration — isn't one:
+        the user may talk over that.)"""
+        return self._turn_audio and self._gate != "mute"
 
     async def _mic_loop(self) -> None:
         assert self._wake
@@ -875,26 +966,28 @@ class LiveVoice:
             if not frame:
                 return
             hit = self._wake.feed(frame)
-            if not self._live:
-                if hit and hit.startswith("wake"):
-                    try:
-                        await self.wake("voice")
-                    except Exception as e:  # noqa: BLE001
-                        print(f"[live] wake failed: {e}")
-                continue
-            if _song_listening():
+            if self._live and _song_listening():
                 # NEO is listening for a song for the user (neo2.core.tools.music, its own stream): the
                 # room's music isn't the user talking to the model, so none of it goes up. A committed
                 # "stop" still stops the listening.
                 if hit == "stop_final":
                     _song_stop_if_asked("stop")
                 continue
-            if self._mic_muted():
-                # NEO's own voice is in the mic now. Only a *committed* "stop", after the first
-                # moment of speech, may cut it off — partial hits and "neo" are its own echo.
+            if self._live and self._mic_muted():
+                # NEO's own voice is in the mic now (or about to be). Only a *committed* "stop",
+                # after the first moment of speech, may cut it off — partial hits and "neo" are
+                # its own echo.
                 if hit == "stop_final" and time.time() - self._speaking_since > _BARGE_IN_GRACE_S:
                     print("[live] barge-in: user said stop")
                     await self.interrupt()
+                continue
+            if not self._live or not self._listening:
+                # Idle, or a session answering typed words: nothing goes up until "Neo".
+                if hit and hit.startswith("wake"):
+                    try:
+                        await self.wake("voice")
+                    except Exception as e:  # noqa: BLE001
+                        print(f"[live] wake failed: {e}")
                 continue
             self._hear(frame)
             try:
@@ -928,7 +1021,7 @@ class LiveVoice:
                 talked_over = self._speaking and time.time() - self._speaking_since <= outcomes.EARLY_S
                 outcomes.barge_in((self._label or {}).get("id", ""), early=talked_over)
                 self.spk.interrupt()
-                self._speaking = False
+                self._speaking = self._turn_audio = False
                 model_buf.clear()
                 self._gate, self._held = None, []
                 self._result_pending = self._result_speech = False
@@ -936,7 +1029,8 @@ class LiveVoice:
                 await self._refresh_state()
             if sc.input_transcription and sc.input_transcription.text:
                 self._turn_open = True
-                self._last_user_speech = time.time()  # the server heard you, whatever the local VAD thinks
+                # The server heard you, whatever the local detector thinks: these are words.
+                self._last_user_speech = self._words_at = time.time()
                 if self._label is None or not self._label.get("open"):
                     self._file_label()  # the previous request is over: its label is final
                     self._label = self._new_label(open_=True)
@@ -953,7 +1047,7 @@ class LiveVoice:
             interim = getattr(sc, "interim_input_transcription", None)
             if interim and interim.text:  # words as they're being said, before they're committed
                 self._turn_open = True
-                self._last_user_speech = time.time()
+                self._last_user_speech = self._words_at = time.time()
                 early().feed("".join(user_buf) + " " + interim.text)
             if (sc.model_turn or sc.output_transcription) and self._gate is None and self._utterance and (
                 self._last_response_at <= self._last_heard_at
@@ -974,7 +1068,7 @@ class LiveVoice:
                     # A spoken reply with no tool call at all ("you're welcome"): it was conversation.
                     await self._open_gate(model_buf, final=True)
                 spoke = self._gate == "open"
-                self._gate, self._held = None, []
+                self._gate, self._held, self._turn_audio = None, [], False
                 if spoke and model_buf and self._asked and self._last_response_at >= self._asked[2]:
                     # The model's reply to the question NEO handed it: this is what the user heard.
                     self._voiced_action = (self._asked[0], "".join(model_buf), time.time())
@@ -1166,6 +1260,8 @@ class LiveVoice:
         if gate == "mute":
             return
         voiced = rms(data) >= _VOICE_RMS
+        if voiced:
+            self._turn_audio = True  # a reply the user will hear is on its way: mute the mic now
         if gate == "hold":
             if not voiced and not self._held:
                 return  # silence before any voice: nothing to hold (a silent turn never opens)
@@ -1201,7 +1297,14 @@ class LiveVoice:
         await self.spk.wait_done()
         await asyncio.sleep(0.4)  # let the tail settle so the orb doesn't blink between sentences
         if not self.spk.playing.is_set():
-            self._speaking = False
+            spoke, self._speaking = self._speaking, False
+            if spoke and self._live:
+                more = settings().listen_timeout_s
+                print(
+                    f"[voice] answered; listening {more:.0f}s more"
+                    if self._listening
+                    else f"[voice] answered; mic off until “Neo” (closing in {more:.0f}s)"
+                )
             await self._refresh_state()
 
     async def _run_tool(self, live, fc, asked: str = "", *, utt: int | None = None, said: str | None = None) -> None:
