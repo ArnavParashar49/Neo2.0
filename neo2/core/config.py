@@ -40,6 +40,9 @@ _ENV_FILES = _env_files(PROJECT_ROOT)
 BrainName = Literal["gemini", "gemini_lite", "groq", "local", "claude", "groq_vision", "cerebras", "cerebras_vision"]
 VoiceBackend = Literal["auto", "live", "local", "off"]
 DecideMode = Literal["legacy", "shadow", "on", "off"]
+# Where NEO's UI lives: NEO.app's own window, or the notch (NotchHub hosts the same page in its
+# island and NEO.app keeps its window hidden).
+UiHost = Literal["window", "notch"]
 
 
 class Settings(BaseSettings):
@@ -299,6 +302,9 @@ class Settings(BaseSettings):
     # ---- server / ui -----------------------------------------------------------------
     ws_host: str = "127.0.0.1"
     ws_port: int = 8765
+    # Set by the host over the websocket ({"cmd": "ui_host"}), kept in ~/.neo/.env as NEO_UI_HOST so
+    # NEO.app's shell reads it at launch; see set_ui_host.
+    ui_host: UiHost = "window"
 
     # ---- paths -----------------------------------------------------------------------
     data_dir: Path = Path.home() / ".neo"
@@ -660,6 +666,33 @@ def _mkdirs_private(path: Path) -> None:
 
 
 _settings: Settings | None = None
+
+
+def set_ui_host(host: str, env_path: Path | None = None) -> None:
+    """Record where NEO's UI lives ("window" | "notch"): the NEO_UI_HOST line of ~/.neo/.env (the one
+    setting NEO writes there itself; the rest of the file is the user's), and the live settings.
+    With effects off the user's own file is never touched — a test passes a path of its own."""
+    if host not in ("window", "notch"):
+        raise ValueError(f"ui_host must be window or notch, not {host!r}")
+    path = env_path if env_path is not None else USER_ENV
+    if env_path is None and effects.why_off():
+        raise RuntimeError("set_ui_host: effects are off, and ~/.neo/.env is the user's")
+    lines: list[str] = []
+    try:
+        lines = path.read_text().splitlines()
+    except OSError:
+        pass
+    line = f"NEO_UI_HOST={host}"
+    kept = [ln for ln in lines if not ln.strip().startswith("NEO_UI_HOST=")]
+    if kept and kept[-1].strip():
+        kept.append("")
+    kept.append(line)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write("\n".join(kept) + "\n")
+    os.chmod(path, 0o600)  # it holds the user's keys: theirs to read, nobody else's
+    settings().ui_host = host  # type: ignore[assignment]  # the live settings follow the file
 
 
 def settings() -> Settings:

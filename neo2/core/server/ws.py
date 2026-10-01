@@ -8,6 +8,8 @@ UI → Server  : {"cmd": "text", "text": "..."}      send a typed request
                {"cmd": "stop"}                     interrupt speech / cancel
                {"cmd": "wake"}                     arm the voice session
                {"cmd": "state"}                    ask for a snapshot
+               {"cmd": "ui_host", "host": "notch"} where NEO's UI lives: NEO.app's window, or the
+                                                   notch (NotchHub hosts the page; the app hides its window)
                {"cmd": "browser_*", …}             NEO's browser card (neo2/core/tools/browser_live.py)
                {"cmd": "camera_*", …}              the camera's card (neo2/core/tools/camera/live.py)
                {"cmd": "song_*", …}                the song card (neo2/core/tools/music/live.py)
@@ -52,13 +54,16 @@ from neo2.core.events import bus
 # A port probe or a half-open socket isn't a websocket client; don't dump a traceback for it.
 logging.getLogger("websockets.server").setLevel(logging.CRITICAL)
 
-# Where NEO's overlay runs from: the bundled app, and the dev server during `tauri dev`.
+# Where NEO's overlay runs from: the bundled app, the dev server during `tauri dev`, and the
+# notch — NotchHub serves the same built page from its own `neo://app/` scheme (a WKWebView, which
+# sends that as its Origin). Exactly that origin, nothing else with the scheme.
 _ALLOWED_ORIGINS = {
     "tauri://localhost",
     "http://tauri.localhost",
     "https://tauri.localhost",
     "http://localhost:1420",
     "http://127.0.0.1:1420",
+    "neo://app",
 }
 
 
@@ -276,6 +281,7 @@ class UIServer:
                         "problems": health.problems(),  # missing key, blocked mic, voice down…
                         "browser": live.hello_snapshot(),  # NEO's browser card, if one is live
                         "camera": camera_live.hello_snapshot(),  # the camera's card, while it is on
+                        "ui_host": settings().ui_host,  # NEO.app's window, or the notch
                     },
                 },
                 default=str,

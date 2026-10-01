@@ -13,7 +13,7 @@ from typing import Any
 from neo2.core import health
 from neo2.core.agent import confirm, grants
 from neo2.core.agent.session import Session, answer_of
-from neo2.core.config import settings
+from neo2.core.config import set_ui_host, settings
 from neo2.core.events import NeoState, bus
 from neo2.core.memory.store import store
 from neo2.core.reflex import warmup
@@ -161,6 +161,14 @@ class App:
         elif kind == "wake":
             if self.voice:
                 await self.voice.wake("ui")
+        elif kind == "ui_host":
+            # NotchHub takes NEO's UI into the notch ("notch") and gives it back when it quits
+            # ("window"); NEO.app's shell follows the event (its window hidden, or shown again).
+            host = str(cmd.get("host") or "")
+            if host not in ("window", "notch"):
+                return
+            set_ui_host(host)
+            await bus().publish("ui_host", host=host)
 
 
 # Argument values safe to keep in a log file people share for troubleshooting: app names, keys,
