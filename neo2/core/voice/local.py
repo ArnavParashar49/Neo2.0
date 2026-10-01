@@ -24,10 +24,10 @@ from neo2.core.voice.wake import WakeSpotter
 TextHandler = Callable[[str], Awaitable[None]]
 
 _SENT_RE = re.compile(r"(?<=[.!?])\s+")
-_FOLLOWUP_S = 6.0  # keep listening this long after a reply without needing the wake word
+# One knob for both windows — settings().listen_timeout_s: how long NEO waits for words after
+# "Neo", and how long it keeps listening after a reply without needing the wake word again.
 _MAX_UTTER_S = 20.0
 _SILENCE_MS = 800  # trailing silence that ends an utterance (silero)
-_NO_SPEECH_S = 5.0
 _VAD_CHUNK = 512  # silero works on 32 ms windows at 16 kHz
 _PARTIAL_EVERY_S = 1.2  # re-transcribe the growing buffer this often for live partials
 
@@ -49,7 +49,8 @@ class LocalVoice:
         self._speaking = False
         self._speaking_since = 0.0
         self._capturing = False
-        self._followup_until = 0.0
+        self._followup_until = 0.0  # listening after a reply until then, no wake word needed
+        self._wake_source = "ui"  # what armed listening last: ui / ptt (the wake word says "voice")
         self._vad = None
         self._vad_model = None
 
@@ -106,11 +107,13 @@ class LocalVoice:
 
     # ---- external controls -----------------------------------------------------------
     async def wake(self, source: str = "ui") -> None:
+        self._wake_source = source
         self._armed.set()
 
     async def push_to_talk(self, on: bool) -> None:
         self._ptt = on
         if on:
+            self._wake_source = "ptt"
             self._armed.set()
 
     async def interrupt(self) -> None:
@@ -122,6 +125,7 @@ class LocalVoice:
         outcomes.stop(early=early)
         self.spk.interrupt()
         self._speaking = False
+        self._followup_until = 0.0  # a stop ends the conversation: the next words need "Neo"
         if self._handler and not self._handler.done():
             self._handler.cancel()
 
@@ -171,15 +175,24 @@ class LocalVoice:
                     await bus().set_state(NeoState.IDLE)
                 else:
                     continue
-            armed = (
-                self._armed.is_set()
-                or (hit or "").startswith("wake")
-                or self._ptt
-                or time.time() < self._followup_until
-            )
-            if not armed:
+            elif hit == "stop_final" and time.time() < self._followup_until:
+                self._followup_until = 0.0  # "stop" right after an answer: the conversation is over
+                print("[voice] idle")
+                await bus().set_state(NeoState.IDLE)
+                continue
+            if self._armed.is_set():
+                source = self._wake_source
+            elif (hit or "").startswith("wake"):
+                source = "voice"
+            elif self._ptt:
+                source = "ptt"
+            elif time.time() < self._followup_until:
+                source = ""  # the follow-up window: still listening after the reply, no new wake
+            else:
                 continue
             self._armed.clear()
+            if source:
+                print(f"[voice] woke ({source})")
             early().listening("wake")  # warm what the request will need while the user speaks (never waits)
             self.mic.drain()
             text = await self._capture_utterance()
@@ -194,15 +207,25 @@ class LocalVoice:
                     if r.text and not (r.ok and t is not None and t.quiet and not r.text.startswith("NEEDS_")):
                         await bus().say(r.text, final=True)
                         await self.speak(r.text)
-                self._followup_until = time.time() + _FOLLOWUP_S if ran else 0.0
+                if ran:
+                    self._arm_followup()
+                else:
+                    self._followup_until = 0.0
+                    print("[voice] idle")
                 await bus().set_state(NeoState.LISTENING if ran else NeoState.IDLE)
                 continue
             self._handler = asyncio.create_task(self._handle(text))
 
+    def _arm_followup(self) -> None:
+        """NEO answered: keep listening `listen_timeout_s` more without the wake word."""
+        more = settings().listen_timeout_s
+        self._followup_until = time.time() + more
+        print(f"[voice] answered; listening {more:.0f}s more")
+
     async def _handle(self, text: str) -> None:
         try:
             await self._on_text(text)
-            self._followup_until = time.time() + _FOLLOWUP_S
+            self._arm_followup()
             await bus().set_state(NeoState.LISTENING)
         except asyncio.CancelledError:
             pass
@@ -215,6 +238,7 @@ class LocalVoice:
         to the overlay while the user is still talking, then return the final transcript."""
         self._capturing = True
         partial_task: asyncio.Task | None = None
+        no_speech_s = settings().listen_timeout_s  # nobody spoke to NEO within this: back to idle
         try:
             await bus().set_state(NeoState.LISTENING)
             frames: list[bytes] = []
@@ -265,7 +289,8 @@ class LocalVoice:
                             ended = True
                 if ended:
                     break
-                if not started and time.time() - t0 > _NO_SPEECH_S and not self._ptt:
+                if not started and time.time() - t0 > no_speech_s and not self._ptt:
+                    print(f"[voice] nothing said for {no_speech_s:.0f}s; idle")
                     return ""  # nobody spoke
                 # Live partials: re-transcribe the buffer so far, off the loop, at most every ~1 s.
                 if (
