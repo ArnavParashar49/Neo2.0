@@ -53,3 +53,24 @@ def test_the_host_is_told_once_and_the_page_fills_the_panel():
 def test_the_shim_has_its_tests():
     tests = (UI / "tests" / "notch-shell.test.ts").read_text()
     assert 'import("../src/shell.ts")' in tests and "__TAURI_INTERNALS__" in tests
+
+
+def test_the_notch_dress_is_scoped_and_compact():
+    """The notch's design (ui/src/notch.css) never leaks into NEO's own window: every rule is under
+    html[data-host="notch"]; the chat lays itself out for NotchHub's compact panel; nothing on it
+    waits on an entrance animation (WebKit holds the panel's page "hidden" unless the host says
+    otherwise, and a frozen fade would leave every row at opacity 0)."""
+    app = (SRC / "App.tsx").read_text()
+    assert 'import "./notch.css";' in app
+    assert "const NOTCH_CARD: Size = { w: 340, h: 300 };" in app  # NeoPanelLayout.standard in NotchHub
+    assert "if (inNotch) { void resizeAnchored(target); winSize.current = target; }" in app  # told on load
+    css = (SRC / "notch.css").read_text()
+    body = re.sub(r"/\*.*?\*/", "", css, flags=re.S)
+    for rule in re.findall(r"([^{}]+)\{", body):
+        for selector in rule.split(","):
+            selector = selector.strip()
+            if not selector or selector.startswith("@"):
+                continue
+            assert selector.startswith('html[data-host="notch"]'), selector
+    assert 'html[data-host="notch"] .msg, html[data-host="notch"] .tools' in body and "animation: none;" in body
+    assert "prefers-reduced-motion: reduce" in body

@@ -22,6 +22,7 @@ import { useSongShape } from "./song/hub";
 import { SongItem, noteIcon } from "./song/SongCard";
 import "./App.css";
 import "./browser/browser.css";
+import "./notch.css";
 
 // Dev only (`?mock=browser`): the scripted core's control panel and the simulated pop-out window.
 const MockHud = import.meta.env.DEV && MOCK ? lazy(() => import("./browser/mock/Hud")) : null;
@@ -61,8 +62,12 @@ const SUGGESTIONS = [
 ];
 
 const IDLE_COLLAPSE_MS = 40_000;
-/** The chat's size in the notch: NotchHub's panel under the notch (it grows for a browser card). */
-const NOTCH_CARD: Size = { w: 420, h: 520 };
+/** The chat's size in the notch: NotchHub's compact panel under the notch (`NeoPanelLayout.standard`
+ *  there) — what a click or a question opens. A live camera or song card asks a little taller; a
+ *  browser card asks for the host's room (`browserSizes`). The host clamps every request. */
+const NOTCH_CARD: Size = { w: 340, h: 300 };
+const NOTCH_CAMERA: Size = { w: 340, h: 440 };
+const NOTCH_SONG: Size = { w: 340, h: 380 };
 const MORPH_MS = 280;
 type BMode = "docked" | "focus" | "mini" | "popped";
 
@@ -91,7 +96,7 @@ function Tools({ tools }: { tools: ToolRun[] }) {
     <div className="tools">
       {tools.map((t, i) => (
         <span key={i} className={"chip" + (t.running ? " running" : t.ok === false ? " fail" : " ok")} title={t.summary || JSON.stringify(t.args ?? {})}>
-          <span className="dot" />{t.name}
+          <span className="dot" />{inNotch ? t.name.replace(/_/g, " ") : t.name}
         </span>
       ))}
     </div>
@@ -182,7 +187,9 @@ export default function App() {
   const stageMode: BMode | null = card ? (bmode === "popped" || bmode === "mini" ? (live ? bmode : null) : bmode) : null;
   const layout: "chat" | "docked" | "focus" = !card || stageMode === "mini" || stageMode === "popped" || !stageMode ? "chat" : stageMode === "focus" ? "focus" : "docked";
   const compact = sizes.compact && layout === "docked";
-  const target: Size = !expanded ? PILL : layout === "docked" ? sizes.browse : layout === "focus" ? sizes.focus : inNotch ? NOTCH_CARD : CARD;
+  // In the notch the chat is compact; a live camera or song card on it asks a little taller.
+  const notchChat: Size = camLive && !csnap.popped ? NOTCH_CAMERA : sshape.liveSid ? NOTCH_SONG : NOTCH_CARD;
+  const target: Size = !expanded ? PILL : layout === "docked" ? sizes.browse : layout === "focus" ? sizes.focus : inNotch ? notchChat : CARD;
 
   // A window drag ends with a click event whose client coords match the press (the window moved
   // with the cursor), so compare *screen* coords to tell a drag from a click.
@@ -225,7 +232,12 @@ export default function App() {
   useEffect(() => {
     // First mount: park the orb bottom-right. Every later change resizes around the orb's own
     // corner — after the initial placement has finished, so a StrictMode double-run can't race it.
-    if (!init.current) { init.current = placeInitial(PILL).then(() => { winSize.current = PILL; }); return; }
+    if (!init.current) {
+      init.current = placeInitial(PILL).then(() => { winSize.current = PILL; });
+      // The host hears what the chat needs from the start (its compact panel), not only on a change.
+      if (inNotch) { void resizeAnchored(target); winSize.current = target; }
+      return;
+    }
     const my = ++gen.current;
     const run = async () => {
       await init.current;
@@ -369,7 +381,8 @@ export default function App() {
       // the card to its chat size, then fly the copy onto the row's thumbnail (360 ms).
       const root = document.getElementById("root");
       const canvas = root?.querySelector<HTMLCanvasElement>(".stage .br-canvas");
-      if (!root || !canvas || !canvas.width || reduced || !neo.items.some((i) => i.kind === "browser" && i.sid === sid)) { fade(); return; }
+      // In the notch the host springs its panel down to the chat at the same time: a plain fade.
+      if (!root || !canvas || !canvas.width || reduced || inNotch || !neo.items.some((i) => i.kind === "browser" && i.sid === sid)) { fade(); return; }
       const rb = root.getBoundingClientRect(), cb = canvas.getBoundingClientRect();
       const el = document.createElement("canvas");
       el.width = canvas.width; el.height = canvas.height;
@@ -554,7 +567,8 @@ export default function App() {
   // Follow new content only when the user hasn't scrolled up.
   useEffect(() => {
     const el = logRef.current;
-    if (el && stickToBottom.current) el.scrollTo({ top: el.scrollHeight, behavior: reduced ? "auto" : "smooth" });
+    // A smooth scroll never arrives while the document counts as hidden: jump instead.
+    if (el && stickToBottom.current) el.scrollTo({ top: el.scrollHeight, behavior: reduced || document.hidden ? "auto" : "smooth" });
   }, [neo.items, neo.state, bsnap.ended, csnap.ended, sshape.liveView, sshape.ended, reduced]);
 
   // A (re)connect replays the transcript, and the log mounts afresh each time the orb opens: land on
@@ -570,6 +584,16 @@ export default function App() {
     const el = logRef.current;
     if (el && stickToBottom.current) el.scrollTop = el.scrollHeight;
   }, [layout, compact, neo.ask, erasing]); // what decides whether the log is the docked strip
+
+  // The log changing size under a reader at the bottom (the host springing its panel from a card's
+  // size to the chat's, a confirm card taking the input's place) keeps the newest line in view.
+  useEffect(() => {
+    const el = logRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(() => { if (stickToBottom.current) el.scrollTop = el.scrollHeight; });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [layout, compact]); // the log remounts with the layout
 
   const onScroll = () => {
     const el = logRef.current;
@@ -617,13 +641,17 @@ export default function App() {
   const busy = !["idle", "listening"].includes(shown);
   const lastReply = [...neo.items].reverse().find((i) => i.kind === "msg" && i.role === "assistant") as Extract<Item, { kind: "msg" }> | undefined;
 
-  // Replies while the page fills the card (focus, compact): a toast above the input.
+  // Replies while the page fills the card (focus, compact): a toast above the input — only replies
+  // that arrive while the page is filling it, never one from before that the chat already showed.
   const [replyToast, setReplyToast] = useState<{ id: number; text: string } | null>(null);
   const seenReply = useRef<number>(0);
+  const pageFills = layout === "focus" || compact;
+  const fillsSince = useRef<number>(0); // the newest reply there was when the page took the card
+  useEffect(() => { if (pageFills) fillsSince.current = lastReply?.id ?? 0; /* eslint-disable-line react-hooks/exhaustive-deps */ }, [pageFills]);
   useEffect(() => {
     if (!lastReply || !lastReply.final || lastReply.id === seenReply.current) return;
     seenReply.current = lastReply.id;
-    if (layout === "focus" || compact) setReplyToast({ id: lastReply.id, text: lastReply.text });
+    if (pageFills && lastReply.id > fillsSince.current) setReplyToast({ id: lastReply.id, text: lastReply.text });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [lastReply?.id, lastReply?.final]);
   useEffect(() => {
@@ -707,7 +735,28 @@ export default function App() {
   };
   const visibleItems = neo.items.filter((i) => (i.kind !== "browser" || bsnap.ended[i.sid]) && (i.kind !== "song" || songSid === i.sid || sshape.ended[i.sid]));
 
-  const header = layout === "docked" ? (
+  // The notch's header is one slim line whatever the layout: the small orb, NEO, its state.
+  const notchStatus = !neo.connected ? "Reconnecting…" : confirming ? LABEL.confirming : layout === "docked" ? browsingLine(card?.live ?? null) : LABEL[shown];
+  const headActions = (
+    <div className="head-actions">
+      <button className={"icon" + (pinned ? " on" : "")} title={pinned ? "Unpin (auto-hide when idle)" : "Pin open"} aria-label={pinned ? "Unpin" : "Pin open"} aria-pressed={pinned} onClick={() => setPinned((p) => !p)}>{Icon.pin}</button>
+      <button className="icon" title="Clear transcript" aria-label="Clear transcript" onClick={neo.clear}>{Icon.broom}</button>
+      <button className="icon" title="Collapse (Esc)" aria-label="Collapse" onClick={collapse}>{Icon.collapse}</button>
+    </div>
+  );
+  const header = inNotch ? (
+    <header className="head notch">
+      <div className="orb xs"><ThinkingOrb state={orb} size={32} theme="dark" speed={ORB_SPEED} /></div>
+      <div className="head-text">
+        <span className="title">NEO</span>
+        <span className={"status" + (neo.connected ? "" : " off")} aria-live="polite">
+          {notchStatus}
+          {neo.connected && neo.note && <span className="note-inline"> · {neo.note}</span>}
+        </span>
+      </div>
+      {headActions}
+    </header>
+  ) : layout === "docked" ? (
     <header className="head compact" data-tauri-drag-region>
       <div className="orb sm" data-tauri-drag-region><ThinkingOrb state={orb} size={32} theme="auto" speed={ORB_SPEED} {...({ "data-tauri-drag-region": true } as object)} /></div>
       <div className="head-text" data-tauri-drag-region>
@@ -787,10 +836,11 @@ export default function App() {
     </div>
   ) : neo.ask ? (
     <div className="confirm" role="alertdialog" aria-labelledby="confirm-q" aria-describedby="confirm-detail">
+      {inNotch && <div className="confirm-eyebrow" aria-hidden>Needs your OK</div>}
       <div className="confirm-q" id="confirm-q">NEO wants to {neo.ask.summary}.</div>
       {neo.ask.detail && <pre className="confirm-detail" id="confirm-detail">{neo.ask.detail}</pre>}
       <div className={offersTask ? "confirm-btns scoped" : "confirm-btns"}>
-        <button className="primary" onClick={() => answer(true)}>Yes, do it <kbd>⌘⏎</kbd></button>
+        <button className="primary" onClick={() => answer(true)}>{inNotch ? "Allow" : "Yes, do it"} <kbd>⌘⏎</kbd></button>
         {offersTask && (
           <button
             className="task"
@@ -798,12 +848,12 @@ export default function App() {
             title={`Also run the next steps like this${neo.ask.app ? ` in ${neo.ask.app}` : ""} without asking, until this task ends. Anything risky still asks.`}
           >
             <span className="task-label">
-              Yes for this task{neo.ask.app ? <>{" "}<span className="task-app">({neo.ask.app})</span></> : null}
+              {inNotch ? "Allow for this task" : "Yes for this task"}{neo.ask.app ? <>{" "}<span className="task-app">({neo.ask.app})</span></> : null}
             </span>
             <kbd>⌘⇧⏎</kbd>
           </button>
         )}
-        <button onClick={() => answer(false)}>No <kbd>esc</kbd></button>
+        <button onClick={() => answer(false)}>{inNotch ? "Cancel" : "No"} <kbd>esc</kbd></button>
       </div>
     </div>
   ) : (
@@ -813,11 +863,14 @@ export default function App() {
         value={text}
         onChange={(e) => setText(e.target.value)}
         onKeyDown={onKey}
-        placeholder={card ? "Tell NEO what to do next…" : busy ? "Working… type to queue" : "Ask NEO to do anything…"}
+        placeholder={!neo.connected && inNotch ? "Reconnecting…" : card ? "Tell NEO what to do next…" : busy ? "Working… type to queue" : "Ask NEO to do anything…"}
         spellCheck={false}
+        aria-label="Message NEO"
       />
-      {text ? (
+      {text && !inNotch ? (
         <button className="icon accent" title="Send" aria-label="Send" onClick={() => submit()}>{Icon.send}</button>
+      ) : inNotch && busy ? (
+        <button className="icon danger" title="Stop" aria-label="Stop" onClick={() => neo.send({ cmd: "stop" })}>{Icon.stop}</button>
       ) : (
         <button
           className={"icon" + (neo.state === "listening" ? " live" : "")}
@@ -834,7 +887,8 @@ export default function App() {
           {Icon.mic}
         </button>
       )}
-      {busy && <button className="icon danger" title="Stop" aria-label="Stop" onClick={() => neo.send({ cmd: "stop" })}>{Icon.stop}</button>}
+      {inNotch && <button className={"icon send" + (text ? " accent" : "")} title="Send (Enter)" aria-label="Send" disabled={!text} onClick={() => submit()}>{Icon.send}</button>}
+      {busy && !inNotch && <button className="icon danger" title="Stop" aria-label="Stop" onClick={() => neo.send({ cmd: "stop" })}>{Icon.stop}</button>}
     </div>
   );
 
@@ -874,6 +928,7 @@ export default function App() {
         {layout !== "chat" && !showStrip && songSid && (
           <div className={"song-pip" + (camLive && !csnap.popped ? " below-cam" : "")}><SongItem hub={song} sid={songSid} mini floating /></div>
         )}
+        {inNotch && !neo.connected && <div className="reconnect" role="status"><span className="reconnect-dot" aria-hidden />Reconnecting to NEO…</div>}
         {composer}
         <div className="hide-btn-hint" aria-hidden />
       </div>

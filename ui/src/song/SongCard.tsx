@@ -133,10 +133,10 @@ function Found({ hub, x }: { hub: SongHub; x: SongSession }) {
   const links = LINKS.filter((l) => r.links[l.which]);
   return (
     <section className="song-card found" aria-label={announce(x)} data-song-sid={x.sid}>
-      {r.cover && <img className="song-backdrop" src={r.cover} alt="" aria-hidden draggable={false} />}
+      {r.cover && <img className="song-backdrop" src={r.cover} alt="" aria-hidden draggable={false} loading="lazy" decoding="async" />}
       <div className="song-found">
         <div className="song-cover">
-          {r.cover ? <img src={r.cover} alt={`Cover art for ${r.album ?? r.title}`} draggable={false} /> : noteIcon(24)}
+          {r.cover ? <img src={r.cover} alt={`Cover art for ${r.album ?? r.title}`} draggable={false} loading="lazy" decoding="async" /> : noteIcon(24)}
         </div>
         <div className="song-meta">
           <div className="song-title" title={r.title}>{r.title}</div>
@@ -158,7 +158,7 @@ function PastSong({ x }: { x: SongSession }) {
   const second = [r.artist, r.album, r.year].filter(Boolean).join(" · ");
   return (
     <div className="song-row past" data-song-sid={x.sid}>
-      <span className="song-row-icon cover">{r.cover ? <img src={r.cover} alt="" draggable={false} /> : noteIcon(15)}</span>
+      <span className="song-row-icon cover">{r.cover ? <img src={r.cover} alt="" draggable={false} loading="lazy" decoding="async" /> : noteIcon(15)}</span>
       <span className="song-row-text">
         <span className="song-row-l1 strong" title={r.title}>{r.title}</span>
         {second && <span className="song-row-l2" title={second}>{second}</span>}
@@ -209,7 +209,7 @@ export function SongMini({ hub, x, connected, floating }: SongCardProps & { floa
     text = view === "matching" ? "Matching…" : `Listening ${sourceLabel(x.source)}`;
     dim = connected ? ` · ${fmtSecs(clockAt(x, now))}` : " · reconnecting…";
   } else if (view === "found" && r) {
-    icon = r.cover ? <img src={r.cover} alt="" draggable={false} /> : noteIcon(13);
+    icon = r.cover ? <img src={r.cover} alt="" draggable={false} loading="lazy" decoding="async" /> : noteIcon(13);
     text = r.title;
     dim = r.artist ? ` — ${r.artist}` : "";
   } else {

@@ -41,7 +41,7 @@ export function LiveThumb({ hub, w = 88, h = 55 }: { hub: BrowserHub; w?: number
 }
 
 function Fav({ src }: { src?: string | null }) {
-  return src ? <img className="br-row-fav" src={src} alt="" draggable={false} /> : <span className="br-row-fav glyph" aria-hidden>{I.globe(10)}</span>;
+  return src ? <img className="br-row-fav" src={src} alt="" draggable={false} loading="lazy" decoding="async" /> : <span className="br-row-fav glyph" aria-hidden>{I.globe(10)}</span>;
 }
 
 function rowCaption(snap: BrowserSnap): string {
@@ -118,7 +118,7 @@ export function EndedRow({ e, canReopen, onReopen, landing = false }: { e: Ended
         <button className="br-row-main" aria-expanded={open} aria-controls={`ended-${c.sid}`} onClick={() => setOpen((o) => !o)}
           aria-label={`Browsed ${host}. ${c.summary ? c.summary + ". " : ""}${meta}. ${open ? "Hide" : "Show"} steps`}>
           <span className="br-row-thumb">
-            {c.poster ? <img className="br-row-poster" src={c.poster} alt="" draggable={false} /> : <span className="br-row-poster empty">{I.globe(18)}</span>}
+            {c.poster ? <img className="br-row-poster" src={c.poster} alt="" draggable={false} loading="lazy" decoding="async" /> : <span className="br-row-poster empty">{I.globe(18)}</span>}
             <Fav src={c.favicon} />
           </span>
           <span className="br-row-text">
