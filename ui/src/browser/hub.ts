@@ -3,9 +3,10 @@
 // overlay), the frame pipe, and the commands the card sends back. React reads a snapshot via
 // useSyncExternalStore; frames and actions bypass React entirely.
 import { useSyncExternalStore } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { clipboardWrite } from "../shell";
 import { FramePipe, parseFrame, b64urlToBytes } from "./frames";
 import { inTauri } from "../win";
+import { inNotch } from "../host";
 import type {
   BrowserAction, BrowserClose, BrowserDialog, BrowserHelloSnapshot, BrowserHint, BrowserOpen, BrowserResult,
   BrowserSelect, BrowserState, BrowserStep, ControlAction, FrameMeta, NeedUser, Surface,
@@ -373,8 +374,8 @@ export class BrowserHub {
  *  it. Inside NEO the shell writes the pasteboard itself; the textarea fallback (dev tabs) gives
  *  focus back afterwards, so the user's next keys still reach the page. */
 async function writeClipboard(text: string): Promise<boolean> {
-  if (inTauri) {
-    try { await invoke("clipboard_write", { text }); return true; } catch { /* older shell: fall through */ }
+  if (inTauri || inNotch) {
+    if (await clipboardWrite(text)) return true; // an older shell: fall through
   }
   try { await navigator.clipboard.writeText(text); return true; } catch { /* outside a user gesture: fall back */ }
   const prev = document.activeElement as HTMLElement | null;

@@ -266,3 +266,18 @@ html[data-sim] body {
 }
 html[data-sim] #root { position: fixed; right: 20px; bottom: 20px; width: 84px; height: 84px; overflow: visible; }
 html[data-sim][data-surface="window"] #root { inset: 0; width: auto !important; height: auto !important; }
+
+/* ---- in the notch -------------------------------------------------------------------- */
+/* Hosted in NotchHub's island: the page IS the panel. No card of its own — no rounded edge,
+   border, shadow or glass — only the island's black, filled edge to edge; the host draws the
+   notch shape around it and springs it open and shut. */
+html[data-host="notch"] { --bg: #000; --radius: 0; }
+html[data-host="notch"] body, html[data-host="notch"] #root { background: #000; }
+html[data-host="notch"] .card {
+  position: absolute; inset: 0; width: 100% !important; height: 100% !important;
+  background: #000; backdrop-filter: none; -webkit-backdrop-filter: none;
+  border: 0; border-radius: 0; box-shadow: none; animation: none; transition: none;
+}
+html[data-host="notch"] .head { padding-top: 10px; }
+html[data-host="notch"] .log::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.18); }
+html[data-host="notch"] .pill { display: none; }

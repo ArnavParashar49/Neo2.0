@@ -1,7 +1,8 @@
 // Websocket client for the NEO core. Turns the event stream into a transcript timeline:
 // user bubbles, tool-activity groups, and assistant replies (streamed partials merge in place).
 import { useCallback, useEffect, useRef, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { uiHostChanged, wsToken } from "./shell";
+import type { UiHost } from "./host";
 import { BrowserHub } from "./browser/hub";
 import { CameraHub } from "./camera/hub";
 import { isCameraFrame } from "./camera/frames";
@@ -85,6 +86,9 @@ export function useNeo(opts: { surface?: "overlay" | "window" } = {}) {
   const [ask, setAsk] = useState<ConfirmCard | null>(null);
   const [problems, setProblems] = useState<string[]>([]);
   const [erasedAt, setErasedAt] = useState(0); // bumps when the core confirms an erase
+  // Where the core says NEO's UI lives: its own window, or the notch (NotchHub's panel). NEO.app's
+  // shell follows it — with "notch" it keeps its window hidden and leaves the UI to the host.
+  const [uiHost, setUiHost] = useState<UiHost>("window");
   const [helloAt, setHelloAt] = useState(0); // bumps when a (re)connect's replay has landed
   const sock = useRef<WebSocket | null>(null);
   const noteTimer = useRef<number | undefined>(undefined);
@@ -131,6 +135,7 @@ export function useNeo(opts: { surface?: "overlay" | "window" } = {}) {
           hub.beginHello();
           cam.beginHello();
           setState(ev.data.state);
+          if (ev.data.ui_host === "window" || ev.data.ui_host === "notch") { setUiHost(ev.data.ui_host); void uiHostChanged(ev.data.ui_host); }
           setItems([]);
           for (const r of ev.data.recent ?? []) apply(r);
           setAsk(ev.data.confirm ?? null);
@@ -151,6 +156,9 @@ export function useNeo(opts: { surface?: "overlay" | "window" } = {}) {
           break;
         case "problems":
           setProblems(ev.data.items ?? []);
+          break;
+        case "ui_host":
+          if (ev.data.host === "window" || ev.data.host === "notch") { setUiHost(ev.data.host); void uiHostChanged(ev.data.host); }
           break;
         case "erased": {
           // A song card still listening keeps its place: its Stop must stay in reach.
@@ -266,7 +274,7 @@ export function useNeo(opts: { surface?: "overlay" | "window" } = {}) {
         ws = new SongMockSocket() as unknown as WebSocket;
       } else {
         let token = "";
-        try { token = await invoke<string>("ws_token"); } catch { /* outside NEO.app: no token, no access */ }
+        try { token = await wsToken(); } catch { /* outside NEO.app: no token, no access */ }
         if (!token && DEV_TOKEN) token = DEV_TOKEN;
         if (!alive) return;
         ws = new WebSocket(`${URL}/?token=${encodeURIComponent(token)}`);
@@ -318,5 +326,5 @@ export function useNeo(opts: { surface?: "overlay" | "window" } = {}) {
     song.clearEnded();
   }, [hub, cam, song]);
 
-  return { connected, state, items, error, note, ask, problems, erasedAt, helloAt, send, clear, hub, cam, song };
+  return { connected, state, items, error, note, ask, problems, erasedAt, helloAt, uiHost, send, clear, hub, cam, song };
 }

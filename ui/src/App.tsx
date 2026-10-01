@@ -3,10 +3,8 @@ import { createPortal } from "react-dom";
 import { ThinkingOrb } from "thinking-orbs";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { listen } from "@tauri-apps/api/event";
-import { invoke } from "@tauri-apps/api/core";
-import { getCurrentWindow } from "@tauri-apps/api/window";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { hasShell, hideWindow, listen, openExternal, pinHost, showQuiet } from "./shell";
+import { inNotch } from "./host";
 import { MOCK, SONG_MOCK, useNeo, type ConfirmScope, type Item, type NeoState, type OrbState, type ToolRun, type TurnMeta } from "./ws";
 import { useBrowser, type BrowserSnap } from "./browser/hub";
 import { BrowserCard } from "./browser/BrowserCard";
@@ -63,6 +61,8 @@ const SUGGESTIONS = [
 ];
 
 const IDLE_COLLAPSE_MS = 40_000;
+/** The chat's size in the notch: NotchHub's panel under the notch (it grows for a browser card). */
+const NOTCH_CARD: Size = { w: 420, h: 520 };
 const MORPH_MS = 280;
 type BMode = "docked" | "focus" | "mini" | "popped";
 
@@ -104,7 +104,7 @@ function Md({ text }: { text: string }) {
       remarkPlugins={[remarkGfm]}
       components={{
         a: ({ href, children }) => (
-          <a href={href} onClick={(e) => { e.preventDefault(); if (href) (inTauri ? openUrl(href) : window.open(href, "_blank")); }}>{children}</a>
+          <a href={href} onClick={(e) => { e.preventDefault(); if (href) (hasShell ? void openExternal(href) : window.open(href, "_blank")); }}>{children}</a>
         ),
       }}
     >
@@ -133,8 +133,10 @@ export default function App() {
   const sshape = useSongShape(song); // which song card is live and its face — not its level
   const songHearing = sshape.hearing;
   const reduced = useReducedMotion();
-  const [expanded, setExpanded] = useState(false);
+  // In the notch the page is always the open chat: NotchHub's panel is what expands and collapses.
+  const [expanded, setExpanded] = useState(inNotch);
   const [pinned, setPinned] = useState(false);
+  useEffect(() => { if (inNotch) pinHost(pinned); }, [pinned]);
   // A pending question outranks everything: the card shows exactly what will run.
   const confirming = !!neo.ask;
   const shown = confirming ? "confirming" : neo.state;
@@ -180,7 +182,7 @@ export default function App() {
   const stageMode: BMode | null = card ? (bmode === "popped" || bmode === "mini" ? (live ? bmode : null) : bmode) : null;
   const layout: "chat" | "docked" | "focus" = !card || stageMode === "mini" || stageMode === "popped" || !stageMode ? "chat" : stageMode === "focus" ? "focus" : "docked";
   const compact = sizes.compact && layout === "docked";
-  const target: Size = !expanded ? PILL : layout === "docked" ? sizes.browse : layout === "focus" ? sizes.focus : CARD;
+  const target: Size = !expanded ? PILL : layout === "docked" ? sizes.browse : layout === "focus" ? sizes.focus : inNotch ? NOTCH_CARD : CARD;
 
   // A window drag ends with a click event whose client coords match the press (the window moved
   // with the cursor), so compare *screen* coords to tell a drag from a click.
@@ -194,10 +196,12 @@ export default function App() {
 
   const expand = useCallback(() => {
     setExpanded(true);
+    if (inNotch) void showQuiet(); // the host opens its panel
     // Into the chat input — unless something in the card (a page prompt, a dialog) already has focus.
     setTimeout(() => { const a = document.activeElement; if (!a || a === document.body) inputRef.current?.focus(); }, 60);
   }, []);
   const collapse = useCallback(() => {
+    if (inNotch) { void hideWindow(); return; } // the host folds its panel; the page stays the chat
     if (!["idle", "listening"].includes(neo.state)) collapsedDuringJob.current = true;
     setExpanded(false);
   }, [neo.state]);
@@ -226,6 +230,13 @@ export default function App() {
     const run = async () => {
       await init.current;
       if (my !== gen.current) return;
+      if (inNotch) {
+        // No window to morph: the card takes its size and the host springs its panel to it.
+        setSnapSize(true); setCardSize(target);
+        await resizeAnchored(target);
+        winSize.current = target;
+        return;
+      }
       const from = winSize.current;
       if (!expanded) { await resizeAnchored(PILL); winSize.current = PILL; return; }
       const hold = foldHold.current;
@@ -279,7 +290,7 @@ export default function App() {
   const needUser = liveStatus === "need_user";
   useEffect(() => {
     if (!needUser) return;
-    if (inTauri) void invoke("show_quiet").catch(() => getCurrentWindow().show()).catch(() => {});
+    if (hasShell) void showQuiet();
     setExpanded(true);
     setBmode((m) => (m === "mini" ? "docked" : m));
     setViewFocus((n) => n + 1);
@@ -291,13 +302,13 @@ export default function App() {
   const camSid = camLive?.sid ?? null;
   useEffect(() => {
     if (!camSid) return;
-    if (inTauri) void invoke("show_quiet").catch(() => getCurrentWindow().show()).catch(() => {});
+    if (hasShell) void showQuiet();
     setExpanded(true);
   }, [camSid]);
   // Off (answered, stopped, erased): its pop-out window goes with it.
   useEffect(() => { if (!camSid) void closeCameraWindow(); }, [camSid]);
   useEffect(() => {
-    if (!inTauri) return;
+    if (!hasShell) return;
     const un = listen(CAMERA_POPIN_EVENT, () => { cam.setPopped(false); setExpanded(true); });
     return () => { un.then((f) => f()).catch(() => {}); };
   }, [cam]);
@@ -314,7 +325,7 @@ export default function App() {
   const songSid = sshape.liveSid;
   useEffect(() => {
     if (!songSid) return;
-    if (inTauri) void invoke("show_quiet").catch(() => getCurrentWindow().show()).catch(() => {});
+    if (hasShell) void showQuiet();
     setExpanded(true);
   }, [songSid]);
 
@@ -327,7 +338,7 @@ export default function App() {
   }, [livePopped, bmode]);
 
   useEffect(() => {
-    if (!inTauri) return;
+    if (!hasShell) return;
     const un = listen("neo://browser-popin", () => { setBmode("docked"); setExpanded(true); });
     return () => { un.then((f) => f()).catch(() => {}); };
   }, []);
@@ -437,6 +448,7 @@ export default function App() {
   const toggleMini = useCallback(() => { if (live) { setBmode((m) => (m === "mini" ? "docked" : "mini")); setExpanded(true); } }, [live]);
   const popOut = useCallback(async () => {
     if (!live?.live) return;
+    if (inNotch) { hub.toast("The notch has no pop-out window", 2200); return; }
     setBmode("popped");
     void hub.control("popout");
     if (inTauri) { if (!(await openBrowserWindow(displayHost(live.live.url)))) { hub.toast("Couldn't open a window", 2200); setBmode("docked"); void hub.control("popin"); } }
@@ -477,7 +489,7 @@ export default function App() {
 
   // Native summon (hotkey / tray) → expand + arm the voice session.
   useEffect(() => {
-    if (!inTauri) return;
+    if (!hasShell) return;
     const un = listen("neo://wake", () => { expand(); neo.send({ cmd: "wake" }); });
     return () => { un.then((f) => f()).catch(() => {}); };
   }, [neo.send, expand]);
@@ -494,7 +506,7 @@ export default function App() {
 
   // Menu bar → Erase NEO's Memory…: the overlay asks before anything is deleted.
   useEffect(() => {
-    if (!inTauri) return;
+    if (!hasShell) return;
     const un = listen("neo://erase", () => { expand(); setErasing("ask"); });
     return () => { un.then((f) => f()).catch(() => {}); };
   }, [expand]);
@@ -510,10 +522,19 @@ export default function App() {
   // Dismissed without an answer (collapsed, hidden): the question doesn't linger for next time.
   useEffect(() => { if (!expanded && erasing === "ask") setErasing(false); }, [expanded, erasing]);
 
+  // NEO's UI lives in the notch, but the menu bar's "Erase NEO's Memory…" still opens this
+  // window for its dialog (the one thing it shows there): once the dialog is over, hide it again.
+  const wasErasing = useRef(false);
+  useEffect(() => {
+    if (inTauri && neo.uiHost === "notch" && wasErasing.current && erasing === false) void hideWindow();
+    wasErasing.current = erasing !== false;
+  }, [erasing, neo.uiHost]);
+
   // Auto-collapse after a quiet stretch unless pinned, hovered, being typed into — or browsing
   // on stage, the user driving, or NEO waiting on them.
   const browsingHolds = !!live && (bmode === "docked" || bmode === "focus" || live.live!.controller === "user" || live.live!.status === "need_user");
   useEffect(() => {
+    if (inNotch) return; // the host times its own collapse
     if (!expanded || pinned || hover || neo.state !== "idle" || confirming || erasing || browsingHolds || camLive || songHearing) return;
     const t = window.setTimeout(() => {
       if (document.activeElement === inputRef.current && text) return;
@@ -700,7 +721,7 @@ export default function App() {
       <div className="head-text" data-tauri-drag-region>
         <div className="title" data-tauri-drag-region>NEO</div>
         <div className={"status" + (neo.connected ? "" : " off")} data-tauri-drag-region aria-live="polite">
-          {neo.connected ? LABEL[shown] : inTauri ? "Core not running — menu bar → Restart NEO" : "core offline — run  python -m neo2"}
+          {neo.connected ? LABEL[shown] : hasShell ? "Core not running — NEO's menu bar → Restart NEO" : "core offline — run  python -m neo2"}
         </div>
         {neo.note && <div className="note" data-tauri-drag-region aria-live="polite">{neo.note}</div>}
       </div>
@@ -852,6 +873,3 @@ export default function App() {
     </>
   );
 }
-
-// Hide the window fully from the tray / app menu (kept for the Rust side).
-export const hideWindow = () => invoke("hide_window").catch(() => {});

@@ -3,7 +3,6 @@
 // keys forwarded to the page in page coordinates.
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ThinkingOrb } from "thinking-orbs";
-import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { BrowserHub, BrowserSnap } from "./hub";
 import type { Frame } from "./frames";
 import type { Rect, Surface } from "./types";
@@ -14,6 +13,8 @@ import type { OrbState } from "../ws";
 import { ClickCounter, FrameCoalescer, buttonName, buttonsMask, isPrintable, modsOf, reservedShortcut, toPage, wheelDelta, type PageMap } from "./input";
 import { I } from "./icons";
 import { inTauri } from "../win";
+import { inNotch } from "../host";
+import { focusWindow } from "../shell";
 
 export interface ViewProps {
   hub: BrowserHub;
@@ -458,7 +459,7 @@ export function BrowserView({ hub, snap, surface, connected, reduced, onTakeCont
     viewRef.current?.setPointerCapture(e.pointerId);
     ptrFocus.current = true;
     sinkRef.current?.focus({ preventScroll: true });
-    if (inTauri && !document.hasFocus()) getCurrentWindow().setFocus().catch(() => {});
+    if ((inTauri || inNotch) && !document.hasFocus()) void focusWindow();
     moves.flush();
     const p = toPage(e.clientX, e.clientY, m);
     hub.input("mousedown", { ...p, button: buttonName(e.button), buttons: buttonsMask(e.buttons), clicks: clicks.current.next(e.nativeEvent), mods: modsOf(e) });

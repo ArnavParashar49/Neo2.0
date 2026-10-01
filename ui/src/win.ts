@@ -1,10 +1,11 @@
 // The overlay window's frame. Inside NEO.app this is the real (transparent) Tauri window; in a
 // plain browser tab (npm run dev) #root stands in for it, parked bottom-right of a simulated
-// desktop, so layouts and the unfold animation can be checked at true size.
-import { invoke } from "@tauri-apps/api/core";
-import { getCurrentWindow, currentMonitor, primaryMonitor, LogicalPosition, LogicalSize } from "@tauri-apps/api/window";
+// desktop, so layouts and the unfold animation can be checked at true size. Hosted in the notch
+// there is no window of NEO's own: the page fills the host's panel and asks it for room.
+import { inNotch } from "./host";
+import { requestSize } from "./shell";
 
-export const inTauri = "__TAURI_INTERNALS__" in window;
+export const inTauri = !inNotch && "__TAURI_INTERNALS__" in window;
 export type Size = { w: number; h: number };
 export type Area = { x: number; y: number; w: number; h: number };
 
@@ -19,10 +20,16 @@ function simApply(size: Size) {
   r.style.height = `${size.h}px`;
 }
 
-if (!inTauri) document.documentElement.dataset.sim = "1";
+if (!inTauri && !inNotch) document.documentElement.dataset.sim = "1";
 
 export async function workArea(): Promise<Area | null> {
+  if (inNotch) {
+    // The most the host will give the panel: the card sizes itself within it.
+    const a = window.__NEO_HOST_AREA__;
+    return { x: 0, y: 0, w: a?.w ?? window.innerWidth, h: a?.h ?? window.innerHeight };
+  }
   if (!inTauri) return { x: 0, y: 0, w: window.innerWidth - 2 * SIM_MARGIN + 16, h: window.innerHeight - 2 * SIM_MARGIN + 16 };
+  const { currentMonitor, primaryMonitor } = await import("@tauri-apps/api/window");
   const mon = (await currentMonitor()) ?? (await primaryMonitor());
   if (!mon) return null;
   const s = mon.scaleFactor;
@@ -34,10 +41,12 @@ export async function workArea(): Promise<Area | null> {
 
 /** First placement: bottom-right corner of the work area. */
 export async function placeInitial(size: Size) {
+  if (inNotch) return; // the host places its panel
   if (!inTauri) { simApply(size); return; }
   try {
     const a = await workArea();
     if (!a) return;
+    const { getCurrentWindow, LogicalPosition, LogicalSize } = await import("@tauri-apps/api/window");
     const win = getCurrentWindow();
     await win.setSize(new LogicalSize(size.w, size.h));
     await win.setPosition(new LogicalPosition(a.x + a.w - size.w - 20, a.y + a.h - size.h - 20));
@@ -49,9 +58,15 @@ let setFrameCmd: boolean | null = null; // null = unknown until the first try
 /** Move + resize in one step when the shell offers `set_frame` (no one-frame jump); otherwise
  *  size then position, as before. */
 async function applyFrame(x: number, y: number, w: number, h: number) {
+  const { getCurrentWindow, LogicalPosition, LogicalSize } = await import("@tauri-apps/api/window");
   const win = getCurrentWindow();
   if (setFrameCmd !== false) {
-    try { await invoke("set_frame", { x, y, w, h }); setFrameCmd = true; return; } catch { setFrameCmd = false; }
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      await invoke("set_frame", { x, y, w, h });
+      setFrameCmd = true;
+      return;
+    } catch { setFrameCmd = false; }
   }
   await win.setSize(new LogicalSize(w, h));
   await win.setPosition(new LogicalPosition(x, y));
@@ -61,8 +76,10 @@ async function applyFrame(x: number, y: number, w: number, h: number) {
  *  and the orb lands back where the card was), clamped to the work area. Resolves to whether the
  *  anchor held (false = clamped near a screen edge; callers snap instead of animating). */
 export async function resizeAnchored(size: Size): Promise<boolean> {
+  if (inNotch) { requestSize(size.w, size.h); return true; } // the host grows its panel
   if (!inTauri) { simApply(size); return true; }
   try {
+    const { getCurrentWindow } = await import("@tauri-apps/api/window");
     const win = getCurrentWindow();
     const s = await win.scaleFactor();
     const pos = await win.outerPosition();
