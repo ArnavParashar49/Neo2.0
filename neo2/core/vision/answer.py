@@ -16,6 +16,8 @@ when Gemini fails, Cerebras's — usually ready in about a second. The thinking 
 
 A brain that misses its wait while another answered rests for :data:`LATE_REST_S` (Gemini's
 flash models are often overloaded: 6-20 s): meanwhile the camera's questions don't go to it at all.
+For :data:`LATE_MEMORY_S` after that it is asked again but not waited for — whichever brain answers
+first answers — so one slow brain never costs the user its wait twice in an hour.
 
 Counting fingers is where both brains are weakest (they miss a thumb, or don't count it): the hint
 gives the count Apple Vision's hand joints make (neo2.core.vision.apple.finger_states) — a range
@@ -49,8 +51,9 @@ DETAIL = "medium"  # Gemini: 560 tokens a picture — enough for a label's words
 # slow one); Cerebras's qwen at low — as fast as minimal there (~1 s), and it looks more carefully.
 EFFORT = {"gemini": "minimal", "cerebras_vision": "low"}
 MAX_TOKENS = 384  # a sentence or two (~80 tokens), plus a little thinking
-GEMINI_S = 2.5  # how long the user's first brain's answer is waited for when another's is ready
+GEMINI_S = 1.5  # how long the user's first brain's answer is waited for when another's is ready
 LATE_REST_S = 120.0  # a brain that missed that wait isn't asked again for this long (overloaded)
+LATE_MEMORY_S = 3600.0  # ...and for this long after, it is asked but never waited for: the first answer wins
 TOTAL_S = 14.0
 MAX_CHARS = 400
 _HINT_CHARS = 360
@@ -70,10 +73,17 @@ SYSTEM = (
 
 
 _late_until: dict[str, float] = {}  # brain → when it may be asked again (it missed its wait)
+_late_seen: dict[str, float] = {}  # brain → when it last missed its wait
 
 
 def _resting(name: str) -> bool:
     return time.monotonic() < _late_until.get(name, 0.0)
+
+
+def _unreliable(name: str) -> bool:
+    """Did this brain miss its wait within :data:`LATE_MEMORY_S`? Then nobody waits for it: it is
+    asked (it may well answer first), but the first answer in is the answer."""
+    return time.monotonic() - _late_seen.get(name, -1e9) < LATE_MEMORY_S
 
 
 @dataclass
@@ -281,7 +291,8 @@ async def ask(img: Image.Image | bytes, question: str, hints: dict[str, Any] | s
     prompt = f"{q}\n\n(On-device hints: {line})" if line else q
     msgs = [Message.user(prompt, [ImagePart(still(img), "image/jpeg", detail=DETAIL)])]
     t_start = time.monotonic()
-    deadline, prefer_until = t_start + TOTAL_S, t_start + GEMINI_S
+    deadline = t_start + TOTAL_S
+    prefer_until = t_start if any(_unreliable(p.name) for p in seeing[:-1]) else t_start + GEMINI_S
     calls: dict[asyncio.Future[Any], Any] = {}
     for p in seeing:  # all at once: the user's order decides whose answer is taken, not who is asked
         call = p.complete(msgs, system=SYSTEM, effort=for_brain(p, EFFORT.get(p.name, "minimal")), max_tokens=MAX_TOKENS)
@@ -298,6 +309,7 @@ async def ask(img: Image.Image | bytes, question: str, hints: dict[str, Any] | s
                     for q in seeing[:i]:  # the ones it was waited for, still thinking: overloaded
                         if q.name not in failed:
                             _late_until[q.name] = time.monotonic() + LATE_REST_S
+                            _late_seen[q.name] = time.monotonic()
                             log.info(f"[vision] {q.name} missed its {GEMINI_S:.1f}s; resting it {LATE_REST_S:.0f}s")
                     return done(Reply(answers[p.name], p.name, True))
                 if p.name not in failed and time.monotonic() < prefer_until:

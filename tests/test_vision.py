@@ -103,10 +103,12 @@ class Brain:
 @pytest.fixture(autouse=True)
 def _fresh_layers():
     ans._late_until.clear()
+    ans._late_seen.clear()
     yield
     apple.set_engine(None)
     detect.set_engine(None)
     ans._late_until.clear()
+    ans._late_seen.clear()
 
 
 @pytest.fixture
@@ -492,8 +494,13 @@ async def test_past_gemini_s_time_cerebras_s_ready_answer_is_taken_at_once(mac, 
     assert len(b["gemini"].sent) == 1
     r = await ans.ask(frame(), "and now?", HINTS)  # Gemini rests: not asked, no wait
     assert r.by == "cerebras_vision" and len(b["gemini"].sent) == 1 and len(b["cerebras_vision"].sent) == 2
-    monkeypatch.setattr(ans, "_late_until", {"gemini": 0.0})  # rested: asked again
+    monkeypatch.setattr(ans, "_late_until", {"gemini": 0.0})  # rested: asked again, not waited for
+    b["gemini"].mode = "late"
+    r = await ans.ask(frame(), "and now?", HINTS)
+    assert r.by == "cerebras_vision" and r.ms < 250  # (the first answer in; no 2.5 s wait for Gemini)
     b["gemini"].mode = "ok"
+    ans._late_until.clear()
+    ans._late_seen.clear()  # an hour later: Gemini is trusted again
     assert (await ans.ask(frame(), "and now?", HINTS)).by == "gemini"
 
 

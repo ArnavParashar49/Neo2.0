@@ -7,6 +7,7 @@ import queue
 import threading
 import time
 import weakref
+from collections.abc import Callable
 
 import numpy as np
 import sounddevice as sd
@@ -32,10 +33,16 @@ class Mic:
 
     def _cb(self, indata, frames, time_info, status) -> None:  # noqa: ANN001
         self.last_frame = time.monotonic()
+        frame = bytes(indata)
         try:
-            self.q.put_nowait(bytes(indata))
+            self.q.put_nowait(frame)
         except queue.Full:
             pass
+        for fn in _taps:  # (a tuple: a tap added or removed meanwhile is a new one)
+            try:
+                fn(frame)
+            except Exception:  # noqa: BLE001 — a listener's trouble never breaks the voice
+                pass
 
     @property
     def active(self) -> bool:
@@ -219,6 +226,28 @@ _STALL_RETRY_S = 30.0  # don't reopen for a stall more often than this (a broken
 _streams: weakref.WeakSet = weakref.WeakSet()
 _reopen_lock = threading.Lock()
 _watcher: threading.Thread | None = None
+_taps: tuple[Callable[[bytes], None], ...] = ()  # each running Mic's frames go to these too
+_taps_lock = threading.Lock()
+
+
+def mic_running() -> bool:
+    """Is a voice microphone stream capturing now (one a :func:`tap` would hear)?"""
+    return any(isinstance(o, Mic) and o.active and o._stream is not None for o in list(_streams))
+
+
+def tap(fn: Callable[[bytes], None]) -> Callable[[], None]:
+    """Hear every 20 ms int16 frame the voice's microphone captures (on PortAudio's thread: be quick,
+    never block), without touching its queue. Returns the call that removes the tap."""
+    global _taps
+    with _taps_lock:
+        _taps = (*_taps, fn)
+
+    def untap() -> None:
+        global _taps
+        with _taps_lock:
+            _taps = tuple(t for t in _taps if t is not fn)
+
+    return untap
 
 
 def _register(obj: Mic | Speaker) -> None:
