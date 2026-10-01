@@ -494,6 +494,14 @@ export default function App() {
     return () => { un.then((f) => f()).catch(() => {}); };
   }, [neo.send, expand]);
 
+  // The host opened its panel at the user's own hand (a click on the island, the hotkey): the
+  // chat is on screen, so the input takes the keyboard as it does when the card expands here.
+  useEffect(() => {
+    if (!inNotch) return;
+    const un = listen("neo://show", () => expand());
+    return () => { un.then((f) => f()).catch(() => {}); };
+  }, [expand]);
+
   // A confirmation request always surfaces the card.
   useEffect(() => { if (confirming) expand(); }, [confirming, expand]);
 
