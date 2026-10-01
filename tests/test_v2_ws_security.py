@@ -127,6 +127,36 @@ def test_ui_host_is_kept_in_the_env_file_and_told_to_clients(monkeypatch, tmp_pa
     assert seen == [{"cmd": "ui_host", "host": "notch"}]  # reaches the core's command handler
 
 
+def test_a_wake_by_hand_is_told_to_every_client():
+    """{"cmd":"wake"} (the hotkey, the menu-bar item, the orb) publishes `woke` before the voice
+    session starts listening: the wake word never does, so NotchHub can open its panel for a
+    summon by hand alone. With no voice session the event still goes out."""
+    from neo2.core.app import App
+    from neo2.core.events import bus
+
+    seen: list = []
+    unsub = bus().subscribe(lambda ev: seen.append((ev.type, dict(ev.data))))
+    try:
+        app = App.__new__(App)
+        app.voice = None
+        asyncio.run(app.on_command({"cmd": "wake"}))
+        assert seen == [("woke", {"source": "ui"})]
+
+        class V:
+            woke: list = []
+
+            async def wake(self, source="ui"):
+                self.woke.append((source, list(seen)))
+
+        app.voice = V()
+        asyncio.run(app.on_command({"cmd": "wake"}))
+        # The voice session is woken after the event left, so a client that opens for it sees
+        # `listening` arrive second.
+        assert V.woke == [("ui", [("woke", {"source": "ui"})] * 2)]
+    finally:
+        unsub()
+
+
 def test_token_file_is_private_and_stable():
     a, b = ws_mod.ws_token(), ws_mod.ws_token()
     from neo2.core.config import settings

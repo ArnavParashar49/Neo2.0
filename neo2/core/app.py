@@ -159,6 +159,9 @@ class App:
             if self.voice:
                 await self.voice.push_to_talk(bool(cmd.get("on")))
         elif kind == "wake":
+            # Summoned by hand (the hotkey, the menu-bar item, the orb) — never the wake word. Told
+            # to every client: NotchHub opens its panel for this and not for a voice turn.
+            await bus().publish("woke", source="ui")
             if self.voice:
                 await self.voice.wake("ui")
         elif kind == "ui_host":
