@@ -72,6 +72,18 @@ pub fn ws_token() -> String {
     token
 }
 
+/// Whether ~/.neo/.env says NEO's UI lives in the notch (`NEO_UI_HOST=notch`, written by the core
+/// when NotchHub asks). Read once at launch; later changes arrive from the core through the page.
+pub fn ui_host_is_notch() -> bool {
+    let path = home().join(".neo").join(".env");
+    let Ok(text) = fs::read_to_string(path) else { return false };
+    text.lines()
+        .filter_map(|l| l.trim().strip_prefix("NEO_UI_HOST="))
+        .last()
+        .map(|v| v.trim().trim_matches('"').trim_matches('\'') == "notch")
+        .unwrap_or(false)
+}
+
 /// ~/.neo/.env, where NEO's keys and settings live — created (readable only by this user) with
 /// every setting explained if it doesn't exist yet. Never overwritten.
 pub fn ensure_env_file() -> std::io::Result<PathBuf> {

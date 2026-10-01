@@ -55,6 +55,12 @@ cd "$ROOT/ui"
 [ -d node_modules ] || npm ci
 npm run tauri build >/dev/null
 APP="$ROOT/ui/src-tauri/target/release/bundle/macos/NEO.app"
+# The same built page, for the notch: NotchHub hosts NEO's UI in its island by serving these files
+# from its own `neo://app/` scheme (Tauri embeds them in the binary, where no other app can read
+# them). Beside the runtime, outside ~/Documents for the same reason the runtime is.
+echo "→ installing NEO's UI for the notch in $RUNTIME/ui"
+rm -rf "$RUNTIME/ui"
+ditto "$ROOT/ui/dist" "$RUNTIME/ui"
 
 echo "→ signing"
 # Ad-hoc signatures identify an app by a hash of this exact build, so every rebuild used to look

@@ -68,7 +68,10 @@ unsafe fn order_front(ns_window: *mut AnyObject) {
 }
 
 #[tauri::command]
-pub fn show_quiet(window: tauri::WebviewWindow) -> Result<(), String> {
+pub fn show_quiet(app: tauri::AppHandle, window: tauri::WebviewWindow) -> Result<(), String> {
+    if crate::in_notch(&app) {
+        return Ok(()); // the notch shows NEO's cards; this window stays hidden
+    }
     let ns = window.ns_window().map_err(|e| e.to_string())? as usize;
     if MainThreadMarker::new().is_some() {
         unsafe { order_front(ns as *mut AnyObject) };

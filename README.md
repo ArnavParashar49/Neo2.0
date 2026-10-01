@@ -248,8 +248,20 @@ Everything is an environment variable with the `NEO_` prefix (or a line in `.env
 | `NEO_LEARN_TEACHER` | `off` | `local` · `cloud`: while NEO is idle, a model re-checks up to 50 a day of the requests Laya was least sure about — `local` only with the local model, `cloud` only with the provider that already handled that request |
 | `NEO_HOME_LOCATION` | — | where "the weather" means if NEO doesn't know your city (else it guesses from your IP) |
 | `NEO_DATA_DIR` | `~/.neo` | memory DB, audit log, models, trained reflex head |
+| `NEO_UI_HOST` | `window` | where NEO's UI lives: `window` (NEO.app's own orb and card) · `notch` (NotchHub hosts the same page in the notch; NEO.app keeps its window hidden, its menu-bar item and hotkeys stay). Written by the core itself when NotchHub asks (`{"cmd": "ui_host"}`) and put back to `window` when NotchHub quits — nothing to set by hand |
 
 With NEO.app, settings live in `~/.neo/.env` (menu → *Settings & API Keys…*, then *Restart NEO*).
+
+### NEO in the notch
+
+[NotchHub](../../NotchHub) can host NEO's whole UI in the notch: its lane shows NEO's orb and a line
+while NEO listens or works, and its panel opens down from the notch with this same chat page — the
+transcript, the confirm buttons, the browser, camera and song cards — loaded in a WKWebView from
+its own `neo://app/` scheme. For that the page has a `host=notch` mode (`ui/src/host.ts`,
+`ui/src/shell.ts`: every Tauri call shimmed, no window of its own, the host's black theme), the
+core's websocket admits exactly the origin `neo://app`, and `scripts/install-app.sh` puts the built
+page in `~/Library/Application Support/NEO/ui/` where NotchHub reads it (Tauri embeds its copy in
+the binary). NotchHub tells the core `ui_host: notch` whenever it connects and `window` as it quits.
 
 ## Privacy
 

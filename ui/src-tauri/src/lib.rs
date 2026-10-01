@@ -1,6 +1,11 @@
 //! NEO overlay shell: a transparent always-on-top window, a menu-bar icon, and a global
 //! hotkey (⌘⇧Space) that summons NEO. All conversation logic lives in the Python core;
 //! the window talks to it over a local websocket.
+//!
+//! With `NEO_UI_HOST=notch` (NotchHub hosting NEO's page in its island) the window stays hidden:
+//! the core still runs, the menu-bar item stays, and the hotkeys still send the wake — through
+//! this window's own page, which keeps its socket to the core while hidden. The core tells the
+//! page when the host changes (`ui_host`), and the page relays it here (`ui_host_changed`).
 
 mod chord;
 mod core;
@@ -13,10 +18,23 @@ mod perms;
 use tauri::image::Image;
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager, RunEvent};
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
+/// Where NEO's UI lives right now: `true` while the notch (NotchHub) hosts it.
+pub struct UiHost(pub Mutex<bool>);
+
+pub fn in_notch(app: &AppHandle) -> bool {
+    app.state::<UiHost>().0.lock().map(|n| *n).unwrap_or(false)
+}
+
 fn show(app: &AppHandle) {
+    if in_notch(app) {
+        // The notch shows NEO; this window stays hidden. Its page still carries the wake to the core.
+        let _ = app.emit("neo://wake", ());
+        return;
+    }
     if reveal(app) {
         let _ = app.emit("neo://wake", ()); // summoned: NEO starts listening
     }
@@ -35,6 +53,10 @@ fn reveal(app: &AppHandle) -> bool {
 }
 
 fn toggle(app: &AppHandle) {
+    if in_notch(app) {
+        show(app);
+        return;
+    }
     if let Some(w) = app.get_webview_window("main") {
         match w.is_visible() {
             Ok(true) if w.is_focused().unwrap_or(false) => {
@@ -58,6 +80,26 @@ fn hide_window(app: AppHandle) {
     }
 }
 
+/// The core said where the UI lives (the page relays its `ui_host` event). Into the notch: this
+/// window goes away. Back to the window (NotchHub quit): NEO's own orb returns.
+#[tauri::command]
+fn ui_host_changed(app: AppHandle, host: String) {
+    let notch = host == "notch";
+    if let Ok(mut n) = app.state::<UiHost>().0.lock() {
+        if *n == notch {
+            return;
+        }
+        *n = notch;
+    }
+    if let Some(w) = app.get_webview_window("main") {
+        if notch {
+            let _ = w.hide();
+        } else {
+            let _ = w.show();
+        }
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     #[allow(unused_mut)]
@@ -72,11 +114,19 @@ pub fn run() {
                 })
                 .build(),
         )
-        .invoke_handler(tauri::generate_handler![hide_window, ws_token, frame::set_frame, native::clipboard_write, native::show_quiet])
+        .invoke_handler(tauri::generate_handler![hide_window, ws_token, ui_host_changed, frame::set_frame, native::clipboard_write, native::show_quiet])
         .manage(core::Core::default())
+        .manage(UiHost(Mutex::new(core::ui_host_is_notch())))
         .setup(|app| {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+
+            // NEO's UI is in the notch (NotchHub): this window never shows.
+            if in_notch(app.handle()) {
+                if let Some(w) = app.get_webview_window("main") {
+                    let _ = w.hide();
+                }
+            }
 
             // The brain: start NEO's Python core (or use one that's already running).
             app.state::<core::Core>().start();
