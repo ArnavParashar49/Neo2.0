@@ -770,7 +770,8 @@ class LiveVoice(OnDemandMic):
         heard, _ = await asyncio.gather(self._mic_on(source), self._ensure_session())
         if not heard:
             self._listening = False  # nothing can be heard: the orb doesn't claim to listen
-            await bus().note("NEO couldn't open the microphone")
+            if not self._mic_shut:
+                await bus().note("NEO couldn't open the microphone")
         if self._live:
             if heard:
                 print(f"[voice] woke ({source})")

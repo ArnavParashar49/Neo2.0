@@ -268,6 +268,7 @@ Everything is an environment variable with the `NEO_` prefix (or a line in `.env
 | `NEO_VOICE` | `auto` | `auto` (Live if the key allows it, else local) · `live` · `local` · `off` |
 | `NEO_REFLEX` | `laya` | `laya` · `lite` (Gemini Flash-Lite) · `off` |
 | `NEO_LISTEN_TIMEOUT_S` | `5` | stop listening after this many seconds without speech from you (silero VAD; noise doesn't count) |
+| `NEO_WAKE_WORD` | `true` | listen for “Neo”. `true`: the microphone stays open so the wake word can be heard (macOS shows its orange microphone dot all the time). `false`: the microphone is closed while NEO is idle and opens only when you summon NEO by hand — the summon keys (⌥⌘), the orb, push-to-talk — until NEO is idle again (`NEO_LISTEN_TIMEOUT_S`); typed requests never open it, and “what song is this?” opens it just for the listen. Switched while NEO runs from NotchHub's Settings → NEO (“Listen for “Neo””), which writes this line itself (`{"cmd": "set", "name": "wake_word"}`) |
 | `NEO_LOCAL_MODEL` | `mlx-community/gemma-4-12B-it-4bit` | offline model served by `--local` |
 | `NEO_CONFIRM_DESTRUCTIVE` | `true` | set `false` only if you enjoy surprises |
 | `NEO_CLOUD_MEMORY` | `full` | what NEO's memory sends to cloud models: `full` · `profile` (stable facts only) · `off` |

@@ -13,7 +13,7 @@ from typing import Any
 from neo2.core import health
 from neo2.core.agent import confirm, grants
 from neo2.core.agent.session import Session, answer_of
-from neo2.core.config import set_ui_host, settings
+from neo2.core.config import set_ui_host, set_wake_word, settings
 from neo2.core.events import NeoState, bus
 from neo2.core.memory.store import store
 from neo2.core.reflex import warmup
@@ -187,6 +187,23 @@ class App:
                 return
             set_ui_host(host)
             await bus().publish("ui_host", host=host)
+        elif kind == "set":
+            # A setting switched while NEO runs. The websocket lets only a host and NEO.app's own
+            # page send this (neo2/core/server/ws.py), and has checked the name and the value.
+            if cmd.get("name") == "wake_word" and isinstance(cmd.get("value"), bool):
+                await self.set_wake_word(cmd["value"])
+
+    async def set_wake_word(self, on: bool) -> None:
+        """"Listen for 'Neo'" switched: kept in ~/.neo/.env, applied to the running voice at once
+        (on: its microphone opens; off: it closes now if NEO is idle, else when it next is — a
+        voice that starts later reads the setting), and told to every client."""
+        if settings().wake_word != on:
+            set_wake_word(on)
+        if self.voice is not None and hasattr(self.voice, "set_wake_word"):
+            await self.voice.set_wake_word(on)
+        elif not on:
+            print("[voice] wake word off: the microphone opens only when summoned")
+        await bus().publish("settings", wake_word=on)
 
 
 # Argument values safe to keep in a log file people share for troubleshooting: app names, keys,

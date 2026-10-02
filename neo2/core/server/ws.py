@@ -13,6 +13,8 @@ UI → Server  : {"cmd": "text", "text": "..."}      send a typed request
                {"cmd": "shell", "action": "restart"}   a host asks for one of NEO.app's menu actions
                    (host only): show | settings | restart | open_logs | erase_memory |
                    open_at_login (+ "on": bool) | quit
+               {"cmd": "set", "name": "wake_word", "value": false}   switch a setting while NEO
+                   runs (a host, or NEO.app's own page): see "Settings a client may switch"
                {"cmd": "browser_*", …}             NEO's browser card (neo2/core/tools/browser_live.py)
                {"cmd": "camera_*", …}              the camera's card (neo2/core/tools/camera/live.py)
                {"cmd": "song_*", …}                the song card (neo2/core/tools/music/live.py)
@@ -42,6 +44,14 @@ where the UI lives: `ui_host`). None of this goes through NEO.app's page: with N
 its window is never on screen, and macOS suspends the process of a page nobody can see — it
 answered nothing, and the menu, the summon keys and the status stopped with it.
 
+Settings a client may switch. One so far: `wake_word` — "Listen for 'Neo'". true: the microphone
+stays open so the wake word can be heard. false: the microphone is closed while NEO is idle (macOS
+shows no microphone indicator) and opens only when NEO is summoned by hand — `wake` from the summon
+keys, the orb or a host, or push-to-talk — until NEO is idle again. `set` keeps the value in
+~/.neo/.env (NEO_WAKE_WORD), applies it to the running voice at once, and the sender gets a
+`set_result` {name, ok, error?} (error: forbidden | unknown | invalid | failed). Every client reads
+the value in the hello's "wake_word" and in a `settings` event {wake_word} when it changes.
+
 Who may say what. Everyone here knows the token (~/.neo/ws-token, the user's alone to read). The
 core then tells its clients apart by the one thing a web page cannot choose: the Origin header a
 browser engine puts on every websocket a page opens, which the page can neither set nor leave out.
@@ -56,6 +66,12 @@ browser engine puts on every websocket a page opens, which the page can neither 
     open_at_login among them. NEO's pages show what models and websites wrote; a page that was
     talked into something must not be able to quit NEO, restart it, or change what starts at
     login. A tool that wants the menu has to say so at connect (`role=host`), not slip it in.
+  - `set` is a host's and NEO.app's own page's (app): the two places the user has a switch for it —
+    the host's Settings, NEO.app's own window. Not NEO's page in the notch (page), which has no such
+    switch and shows what models and websites wrote, and not a tool: whether the microphone stays
+    open is the user's to decide in a UI of NEO's, not something a script flips in passing. Only the
+    names in SETTABLE, each with a value of its own type; nothing else of the settings can be
+    written from a socket.
   - What the menu shows is the shell's alone to say, and the menu's actions the shell's alone to
     hear — and the shell is not a websocket client at all: it is whoever started this core and
     kept the other end of the socket pair (shell_link.py), which nothing can connect to. So what a
@@ -120,6 +136,9 @@ _ALLOWED_ORIGINS = _APP_ORIGINS | {_NOTCH_ORIGIN}
 
 # NEO.app's menu actions a host may ask for (ui/src-tauri/src/lib.rs runs them: `act`).
 SHELL_ACTIONS = ("show", "settings", "restart", "open_logs", "erase_memory", "open_at_login", "quit")
+# The settings a client may switch while NEO runs (`set`), each with the type its value must have…
+SETTABLE: dict[str, type] = {"wake_word": bool}
+_MAY_SET = ("host", "app")  # …and who may: a host, and NEO.app's own page
 
 
 def client_kind(origin: str | None, role: str) -> str | None:
@@ -336,6 +355,33 @@ class UIServer:
         print(f"[ui] shell: {action}")
         return ""
 
+    async def _set_ask(self, cl: _Client, cmd: dict[str, Any]) -> None:
+        """`set` from a host or NEO.app's own page: one of the settings in SETTABLE, handed to the
+        core's command handler (it keeps the value, applies it and tells every client). The sender
+        hears how it went (`set_result`)."""
+        name, value = str(cmd.get("name") or "")[:32], cmd.get("value")
+        error = self._set_refused(cl, name, value)
+        if not error:
+            try:
+                await self._on_command({"cmd": "set", "name": name, "value": value})
+                print(f"[ui] set: {name}={value}")
+            except Exception as e:  # noqa: BLE001
+                print(f"[ui] set {name} failed: {type(e).__name__}: {str(e)[:120]}")
+                error = "failed"
+        data = {"name": name, "ok": not error, **({"error": error} if error else {})}
+        cl.send_json(json.dumps({"type": "set_result", "data": data, "ts": time.time()}))
+
+    def _set_refused(self, cl: _Client, name: str, value: Any) -> str:
+        """Why a `set` isn't done ("" when it is)."""
+        if cl.kind not in _MAY_SET:
+            print(f"[ui] set refused: from a {cl.kind}, not a host or NEO.app's page")
+            return "forbidden"
+        if name not in SETTABLE:
+            return "unknown"
+        if type(value) is not SETTABLE[name]:  # (exactly: 1 is not true)
+            return "invalid"
+        return ""
+
     def _relay(self, ev) -> None:
         msg = ev.to_dict()
         if ev.type == "erased":
@@ -467,6 +513,7 @@ class UIServer:
                         "browser": live.hello_snapshot(),  # NEO's browser card, if one is live
                         "camera": camera_live.hello_snapshot(),  # the camera's card, while it is on
                         "ui_host": settings().ui_host,  # NEO.app's window, or the notch
+                        "wake_word": settings().wake_word,  # "Listen for 'Neo'" (see `set`)
                         "host_attached": cl.kind == "host" or self._host_attached(),
                         "shell": self.shell_snapshot(),  # what NEO.app's menu shows
                     },
@@ -512,6 +559,9 @@ class UIServer:
                     continue
                 if kind == "shell":
                     self._shell_ask(cl, cmd)  # a host's alone; never the bus
+                    continue
+                if kind == "set":
+                    asyncio.create_task(self._set_ask(cl, cmd))  # a host's, or NEO.app's page's
                     continue
                 if kind == "shell_status":
                     # The shell says it itself, over its own socket: no websocket client speaks for it.

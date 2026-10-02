@@ -116,7 +116,8 @@ class LocalVoice(OnDemandMic):
         self._armed.set()
         if not await self._mic_on(source):  # (closed while idle with the wake word off)
             self._armed.clear()
-            await bus().note("NEO couldn't open the microphone")
+            if not self._mic_shut:
+                await bus().note("NEO couldn't open the microphone")
 
     async def push_to_talk(self, on: bool) -> None:
         self._ptt = on
