@@ -158,6 +158,11 @@ class Settings(BaseSettings):
     # ---- voice -----------------------------------------------------------------------
     voice: VoiceBackend = "auto"  # auto = Live if key + quota, else local cascade
     listen_timeout_s: float = 5.0  # close the voice session after this much silence from you
+    # Listen for "Neo". On: the microphone stays open so the wake word can be heard (macOS shows its
+    # orange dot all the time). Off: the microphone is closed while NEO is idle and opens only when NEO
+    # is summoned by hand (the summon keys, the orb, push-to-talk), until NEO is idle again. Switched
+    # while NEO runs ({"cmd": "set", "name": "wake_word"}) and kept in ~/.neo/.env; see set_wake_word.
+    wake_word: bool = True
     # Voice commands the fast paths fully cover run the moment you stop talking, without
     # waiting for Gemini Live to pick the tool (questions still go to the model).
     live_command_lane: bool = True
@@ -715,31 +720,64 @@ def _mkdirs_private(path: Path) -> None:
 _settings: Settings | None = None
 
 
-def set_ui_host(host: str, env_path: Path | None = None) -> None:
-    """Record where NEO's UI lives ("window" | "notch"): the NEO_UI_HOST line of ~/.neo/.env (the one
-    setting NEO writes there itself; the rest of the file is the user's), and the live settings.
-    With effects off the user's own file is never touched — a test passes a path of its own."""
-    if host not in ("window", "notch"):
-        raise ValueError(f"ui_host must be window or notch, not {host!r}")
+def _env_lines(env_path: Path | None, what: str) -> tuple[Path, list[str]]:
+    """The file a setting NEO writes itself goes to (~/.neo/.env, or a test's own), and its lines."""
     path = env_path if env_path is not None else USER_ENV
     if env_path is None and effects.why_off():
-        raise RuntimeError("set_ui_host: effects are off, and ~/.neo/.env is the user's")
-    lines: list[str] = []
+        raise RuntimeError(f"{what}: effects are off, and ~/.neo/.env is the user's")
     try:
-        lines = path.read_text().splitlines()
+        return path, path.read_text().splitlines()
     except OSError:
-        pass
+        return path, []
+
+
+def _write_env(path: Path, lines: list[str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write("\n".join(lines) + "\n")
+    os.chmod(path, 0o600)  # it holds the user's keys: theirs to read, nobody else's
+
+
+def set_ui_host(host: str, env_path: Path | None = None) -> None:
+    """Record where NEO's UI lives ("window" | "notch"): the NEO_UI_HOST line of ~/.neo/.env (one of
+    the two settings NEO writes there itself; the rest of the file is the user's), and the live
+    settings. With effects off the user's own file is never touched — a test passes a path of its own."""
+    if host not in ("window", "notch"):
+        raise ValueError(f"ui_host must be window or notch, not {host!r}")
+    path, lines = _env_lines(env_path, "set_ui_host")
     line = f"NEO_UI_HOST={host}"
     kept = [ln for ln in lines if not ln.strip().startswith("NEO_UI_HOST=")]
     if kept and kept[-1].strip():
         kept.append("")
     kept.append(line)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as f:
-        f.write("\n".join(kept) + "\n")
-    os.chmod(path, 0o600)  # it holds the user's keys: theirs to read, nobody else's
+    _write_env(path, kept)
     settings().ui_host = host  # type: ignore[assignment]  # the live settings follow the file
+
+
+def set_wake_word(on: bool, env_path: Path | None = None) -> None:
+    """Record whether NEO listens for "Neo": the NEO_WAKE_WORD line of ~/.neo/.env — replaced where
+    it stands, or added at the end; every other line of the file stays exactly as the user wrote it —
+    and the live settings. With effects off the user's own file is never touched (a test passes a
+    path of its own). The running voice follows through its own set_wake_word (neo2.core.voice.audio)."""
+    if not isinstance(on, bool):
+        raise ValueError(f"wake_word must be true or false, not {on!r}")
+    path, lines = _env_lines(env_path, "set_wake_word")
+    line = f"NEO_WAKE_WORD={'true' if on else 'false'}"
+    out: list[str] = []
+    placed = False
+    for ln in lines:
+        if not ln.strip().startswith("NEO_WAKE_WORD="):
+            out.append(ln)
+        elif not placed:  # (a second such line, if the user left one, goes: the last one would win)
+            out.append(line)
+            placed = True
+    if not placed:
+        if out and out[-1].strip():
+            out.append("")
+        out.append(line)
+    _write_env(path, out)
+    settings().wake_word = on  # the live settings follow the file
 
 
 def settings() -> Settings:

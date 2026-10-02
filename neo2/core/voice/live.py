@@ -42,6 +42,15 @@ Design notes that came out of real use:
   — only with `memory_live_inject` on — sent to the model as a note before it answers. A note
   that arrives after the model began would cut its answer short (the Live API appends client
   content by interrupting generation), which is why it is measured first and off by default.
+- "Listen for 'Neo'" (settings().wake_word). On, the microphone stream is always open and the
+  spotter hears "Neo". Off, the stream is closed while NEO is idle — macOS shows no microphone
+  indicator — and "Neo" said aloud wakes nothing: a wake by hand (the summon keys, the orb, a
+  host, push-to-talk) opens the microphone and the session together, NEO listens exactly as
+  after a spoken "Neo" (the spotter runs again, for "stop"), and when the session closes by the
+  rules above the stream is closed too. Typed words open a session but never the microphone.
+  Switched while NEO runs (`set_wake_word`): on opens the microphone at once; off closes it at
+  once when no session is listening, else when that session ends. The mechanics, shared with the
+  on-device voice, are neo2.core.voice.audio.OnDemandMic.
 """
 
 from __future__ import annotations
@@ -65,7 +74,7 @@ from neo2.core.config import decide_mode, settings
 from neo2.core.events import NeoState, bus
 from neo2.core.reflex import is_bare_stop, outcomes
 from neo2.core.reflex.schema import asks_something
-from neo2.core.voice.audio import Mic, Speaker, rms
+from neo2.core.voice.audio import Mic, OnDemandMic, Speaker, rms
 from neo2.core.voice.spoken import Asked, ok_line, speakable
 from neo2.core.voice.wake import WakeSpotter
 
@@ -629,7 +638,7 @@ def _declarations() -> list[gt.FunctionDeclaration]:
     return decls
 
 
-class LiveVoice:
+class LiveVoice(OnDemandMic):
     handles_text = True  # typed text is sent into the Live session so it answers aloud
     # speech gate (see _turn_gate): per model turn "open" | "hold" | "mute"
     _gate: str | None = None
@@ -653,6 +662,7 @@ class LiveVoice:
     _said: Asked | None = None  # the cards NEO has asked aloud: none is asked twice (see _card_line)
     # listening (see _silence_watch for the rules)
     _listening = False  # the mic goes up to the model: set by a wake, never by typed words
+    _reconnecting = False  # a dropped session that was listening is being reopened (see _lost)
     _woke_at = 0.0  # the latest wake (wake word / hotkey / push-to-talk)
     _words_at = 0.0  # the user's latest words this session: transcribed by the server, or typed
     _last_voice_at = 0.0  # the local detector last heard a voice in the room (anyone's)
@@ -725,7 +735,7 @@ class LiveVoice:
         except Exception as e:  # noqa: BLE001 — fall back to the energy gate
             print(f"[live] silero VAD unavailable ({e}); using energy gate for the listen timeout")
         try:
-            self.mic.start()
+            self._mic_begin()  # open now only if "Neo" is listened for
             self.spk.start()
         except Exception:
             self.mic.stop()  # never leave the microphone open behind a voice that didn't start
@@ -743,8 +753,9 @@ class LiveVoice:
         self._closing = True
         for t in self._tasks + list(self._tool_tasks.values()):
             t.cancel()
+        self._mic_shut = True  # (the session's end must not find a microphone to close, or open)
         await self._close_session()
-        self.mic.stop()
+        self._mic_end()
         self.spk.close()
 
     # ---- controls ----------------------------------------------------------------------
@@ -755,10 +766,22 @@ class LiveVoice:
         early().listening("wake")  # warm what the request will need while the user speaks (never waits)
         self._listening = True
         self._woke_at = time.time()
-        await self._ensure_session()
+        # (With the wake word off the microphone is closed while NEO is idle: it opens with the session.)
+        heard, _ = await asyncio.gather(self._mic_on(source), self._ensure_session())
+        if not heard:
+            self._listening = False  # nothing can be heard: the orb doesn't claim to listen
+            await bus().note("NEO couldn't open the microphone")
         if self._live:
-            print(f"[voice] woke ({source})")
+            if heard:
+                print(f"[voice] woke ({source})")
             await self._refresh_state()
+        else:
+            self._listening = False  # no session opened: nothing is listening
+            await self._mic_idle()
+
+    def _mic_needed(self) -> bool:
+        """A wake's session is listening (or coming back after a drop), or push-to-talk is held."""
+        return self._listening or self._ptt or self._reconnecting
 
     async def push_to_talk(self, on: bool) -> None:
         self._ptt = on
@@ -946,6 +969,7 @@ class LiveVoice:
             except Exception:
                 pass
         await bus().set_state(NeoState.IDLE)
+        await self._mic_idle()  # with the wake word off, idle is a closed microphone
 
     def _mid_turn(self) -> bool:
         """Is a turn genuinely in progress — a tool running, or words the model hasn't answered
@@ -959,14 +983,22 @@ class LiveVoice:
         if self._live is not live:
             return
         mid_turn, listening = self._mid_turn(), self._listening
-        await self._close_session()
-        if mid_turn and not self._closing:
-            print(f"[voice] {why}; reconnecting (a turn was in progress)")
-            await bus().note("Voice session dropped — reconnecting")
-            self._listening = listening  # as it was: a wake stays a wake, typed words stay deaf
-            await self._ensure_session()
-        else:
-            print(f"[voice] {why}; idle")
+        # (A listening session that comes straight back keeps its microphone meanwhile.)
+        self._reconnecting = mid_turn and listening and not self._closing
+        try:
+            await self._close_session()
+            if mid_turn and not self._closing:
+                print(f"[voice] {why}; reconnecting (a turn was in progress)")
+                await bus().note("Voice session dropped — reconnecting")
+                self._listening = listening  # as it was: a wake stays a wake, typed words stay deaf
+                await self._ensure_session()
+                if not self._live:
+                    self._listening = False  # it didn't come back: nothing is listening
+            else:
+                print(f"[voice] {why}; idle")
+        finally:
+            self._reconnecting = False
+        await self._mic_idle()
 
     async def _idle_watch(self, live) -> None:
         """The backstop: nothing from either side for `_IDLE_CLOSE_S`, whatever the state."""
@@ -1098,9 +1130,11 @@ class LiveVoice:
     async def _mic_loop(self) -> None:
         assert self._wake
         while True:
-            frame = await self.mic.read()
+            frame = await self._mic_frame()  # (waits while the microphone is closed on purpose)
             if not frame:
                 return
+            if await self._mic_idle():
+                continue  # the wake word is off and nothing is listening: closed until summoned
             hit = self._wake.feed(frame)
             if self._live and _song_listening():
                 # NEO is listening for a song for the user (neo2.core.tools.music, its own stream): the
@@ -1118,8 +1152,10 @@ class LiveVoice:
                     await self.interrupt()
                 continue
             if not self._live or not self._listening:
-                # Idle, or a session answering typed words: nothing goes up until "Neo".
-                if hit and hit.startswith("wake"):
+                # Idle, or a session answering typed words: nothing goes up until "Neo" — which
+                # counts only while it is listened for (off, the microphone is open here for a
+                # moment at most: a song being named through it, the frames before it closes).
+                if hit and hit.startswith("wake") and settings().wake_word:
                     try:
                         await self.wake("voice")
                     except Exception as e:  # noqa: BLE001

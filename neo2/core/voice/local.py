@@ -3,6 +3,11 @@
 Fully offline, no quota. The mic loop never blocks on the brain: each utterance is handled in
 its own task, so the loop keeps feeding the wake spotter while NEO thinks or speaks — saying
 "Neo" or "stop" mid-sentence cuts the speech off (barge-in) and re-arms listening.
+
+With "Listen for 'Neo'" off (settings().wake_word) the microphone is closed while NEO is idle: the
+loop waits, a wake by hand (the summon keys, the orb, push-to-talk) opens it, and it is closed
+again as soon as the loop has nothing to do — no utterance, no reply, no follow-up window
+(neo2.core.voice.audio.OnDemandMic).
 """
 
 from __future__ import annotations
@@ -18,7 +23,7 @@ from neo2.core.agent.early import early
 from neo2.core.agent.registry import registry
 from neo2.core.config import settings
 from neo2.core.events import NeoState, bus
-from neo2.core.voice.audio import MIC_RATE, Mic, Speaker, rms
+from neo2.core.voice.audio import MIC_RATE, Mic, OnDemandMic, Speaker, rms
 from neo2.core.voice.wake import WakeSpotter
 
 TextHandler = Callable[[str], Awaitable[None]]
@@ -32,7 +37,7 @@ _VAD_CHUNK = 512  # silero works on 32 ms windows at 16 kHz
 _PARTIAL_EVERY_S = 1.2  # re-transcribe the growing buffer this often for live partials
 
 
-class LocalVoice:
+class LocalVoice(OnDemandMic):
     handles_text = False  # typed text goes through the session; we only speak replies
 
     def __init__(self, on_text: TextHandler) -> None:
@@ -58,7 +63,7 @@ class LocalVoice:
     async def start(self) -> None:
         await asyncio.to_thread(self._load_models)
         try:
-            self.mic.start()
+            self._mic_begin()  # open now only if "Neo" is listened for
             self.spk.start()
         except Exception:
             self.mic.stop()  # never leave the microphone open behind a voice that didn't start
@@ -102,19 +107,32 @@ class LocalVoice:
         for t in (self._loop_task, self._handler):
             if t:
                 t.cancel()
-        self.mic.stop()
+        self._mic_end()
         self.spk.close()
 
     # ---- external controls -----------------------------------------------------------
     async def wake(self, source: str = "ui") -> None:
         self._wake_source = source
         self._armed.set()
+        if not await self._mic_on(source):  # (closed while idle with the wake word off)
+            self._armed.clear()
+            await bus().note("NEO couldn't open the microphone")
 
     async def push_to_talk(self, on: bool) -> None:
         self._ptt = on
         if on:
-            self._wake_source = "ptt"
-            self._armed.set()
+            await self.wake("ptt")
+
+    def _mic_needed(self) -> bool:
+        """Summoned, hearing an utterance, answering it, or in the follow-up window after."""
+        return bool(
+            self._armed.is_set()
+            or self._ptt
+            or self._capturing
+            or self._speaking
+            or (self._handler is not None and not self._handler.done())
+            or time.time() < self._followup_until
+        )
 
     async def interrupt(self) -> None:
         """Stop speaking and abandon the in-flight request (barge-in / stop button)."""
@@ -160,7 +178,7 @@ class LocalVoice:
     async def _loop(self) -> None:
         assert self._wake
         while True:
-            frame = await self.mic.read()
+            frame = await self._mic_frame()  # (waits while the microphone is closed on purpose)
             if not frame:  # mic stopped
                 return
             if self._capturing:
@@ -182,13 +200,14 @@ class LocalVoice:
                 continue
             if self._armed.is_set():
                 source = self._wake_source
-            elif (hit or "").startswith("wake"):
+            elif (hit or "").startswith("wake") and settings().wake_word:
                 source = "voice"
             elif self._ptt:
                 source = "ptt"
             elif time.time() < self._followup_until:
                 source = ""  # the follow-up window: still listening after the reply, no new wake
             else:
+                await self._mic_idle()  # nothing to do: with the wake word off the microphone closes
                 continue
             self._armed.clear()
             if source:

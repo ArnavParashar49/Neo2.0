@@ -5,7 +5,9 @@ Two sources, both 16 kHz mono int16 like the voice's microphone (neo2.core.voice
 * ``mic`` — the voice pipeline's own microphone stream, tapped (neo2.core.voice.audio.tap): a second
   PortAudio input stream on the same device fails on macOS (AUHAL error -50) and knocks the first one
   out for a moment. Its queue is never touched; a tap only sees each frame as it arrives. Without a
-  running voice Mic (NEO in text mode, a host without voice), a sounddevice stream of its own.
+  running voice Mic (NEO in text mode, a host without voice, or "Listen for 'Neo'" switched off: the
+  voice's microphone is closed while NEO is idle), a sounddevice stream of its own — handed over for
+  a tap the moment the voice opens its microphone after all (the user summoned NEO meanwhile).
 * ``mac`` — what the Mac itself plays (a song in headphones the microphone can't hear), through a
   ScreenCaptureKit stream with audio: NEO's own sound and windows left out, its 2×2-pixel picture
   thrown away. Only while another app plays sound (CoreAudio's per-process output list, macOS 14.2+;
@@ -148,6 +150,7 @@ class MicSource:
     def __init__(self) -> None:
         self._stream: Any = None
         self._untap: Callable[[], None] | None = None
+        self._unyield: Callable[[], None] | None = None
         self._stopped = False
         self._mu = threading.Lock()
 
@@ -156,11 +159,15 @@ class MicSource:
             from neo2.core.voice import audio
         except Exception:  # noqa: BLE001 — (the voice extra isn't installed)
             audio = None
+
+        def tap() -> Callable[[], None]:
+            return audio.tap(lambda frame: push(np.frombuffer(frame, dtype=np.int16)))
+
         if audio is not None and audio.mic_running():
             with self._mu:
                 if self._stopped:
                     return
-                self._untap = audio.tap(lambda frame: push(np.frombuffer(frame, dtype=np.int16)))
+                self._untap = tap()
             return
         try:
             import sounddevice as sd
@@ -189,19 +196,39 @@ class MicSource:
                     stream.close()
                 raise Unavailable("the microphone couldn't be started") from e
             self._stream = stream
+            if audio is not None:
+
+                def hand_over() -> None:
+                    """The voice is about to open its microphone (NEO was summoned while this
+                    listened on a stream of its own): close this one first, hear the voice's."""
+                    with self._mu:
+                        if self._stopped or self._stream is None:
+                            return
+                        own, self._stream = self._stream, None
+                        self._untap = tap()
+                    _close(own)
+
+                self._unyield = audio.before_mic(hand_over)
 
     def stop(self) -> None:
         with self._mu:
             self._stopped = True
             stream, self._stream = self._stream, None
             untap, self._untap = self._untap, None
+            unyield, self._unyield = self._unyield, None
+        if unyield is not None:
+            unyield()
         if untap is not None:
             untap()
         if stream is not None:
-            with contextlib.suppress(Exception):  # the device may be gone already…
-                stream.abort()
-            with contextlib.suppress(Exception):  # …closed all the same (PortAudio's handle never left open)
-                stream.close()
+            _close(stream)
+
+
+def _close(stream: Any) -> None:
+    with contextlib.suppress(Exception):  # the device may be gone already…
+        stream.abort()
+    with contextlib.suppress(Exception):  # …closed all the same (PortAudio's handle never left open)
+        stream.close()
 
 
 # ---- the Mac's own sound -------------------------------------------------------------------------

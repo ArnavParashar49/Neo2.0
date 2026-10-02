@@ -13,6 +13,7 @@ import numpy as np
 import sounddevice as sd
 
 from neo2.core import effects
+from neo2.core.config import settings
 
 MIC_RATE = 16000
 OUT_RATE = 24000
@@ -70,14 +71,29 @@ class Mic:
                 pass
 
     def start(self) -> None:
+        """Open the stream. Also after a stop(): with the wake word off the voice closes its
+        microphone whenever NEO is idle and starts it again when summoned (OnDemandMic)."""
         if self._stream:
             return
-        self._closed = False
-        self._open_stream()
-        self._wanted = True
+        self.drain()  # frames from before a stop (and its wake-the-reader marker) are not news
+        for fn in _yielders:  # whoever holds the input device on its own lets go of it first
+            try:
+                fn()
+            except Exception:  # noqa: BLE001 — their trouble never keeps the voice from its microphone
+                pass
+        with _reopen_lock:  # never while the device watcher is refreshing PortAudio
+            self._closed = False
+            try:
+                self._open_stream()
+            except Exception:
+                self._closed = True  # no stream, and nobody is left reading one that isn't there
+                raise
+            self._wanted = True
         _register(self)
 
     def stop(self) -> None:
+        """Close the stream; until the next start() the device watcher leaves this one alone (it is
+        not `active`: closed on purpose, not broken)."""
         self._closed, self._wanted = True, False
         with _reopen_lock:  # never while the device watcher is reopening it
             self._close_stream()
@@ -228,6 +244,7 @@ _reopen_lock = threading.Lock()
 _watcher: threading.Thread | None = None
 _taps: tuple[Callable[[bytes], None], ...] = ()  # each running Mic's frames go to these too
 _taps_lock = threading.Lock()
+_yielders: tuple[Callable[[], None], ...] = ()  # see before_mic
 
 
 def mic_running() -> bool:
@@ -248,6 +265,28 @@ def tap(fn: Callable[[bytes], None]) -> Callable[[], None]:
             _taps = tuple(t for t in _taps if t is not fn)
 
     return untap
+
+
+def tapped() -> bool:
+    """Is anything listening through a :func:`tap` now (NEO naming a song)?"""
+    return bool(_taps)
+
+
+def before_mic(fn: Callable[[], None]) -> Callable[[], None]:
+    """For whoever opened the input device on its own while no voice microphone ran (NEO naming a
+    song with the wake word off): `fn` is called right before a voice Mic opens its stream, to close
+    that stream and take a :func:`tap` instead — two input streams on one device fail on macOS.
+    Returns the call that takes `fn` off the list."""
+    global _yielders
+    with _taps_lock:
+        _yielders = (*_yielders, fn)
+
+    def remove() -> None:
+        global _yielders
+        with _taps_lock:
+            _yielders = tuple(y for y in _yielders if y is not fn)
+
+    return remove
 
 
 def _register(obj: Mic | Speaker) -> None:
@@ -324,6 +363,126 @@ def _watch() -> None:
                 last = (devices.default_input(), devices.default_output())
         except Exception as e:  # noqa: BLE001 — the watcher must outlive any one bad poll
             print(f"[audio] device watch hiccup: {e}")
+
+
+class OnDemandMic:
+    """What a voice (LiveVoice, LocalVoice — anything with a `mic`) does about "Listen for 'Neo'"
+    (settings().wake_word):
+
+    * on — the microphone stream is open for as long as the voice runs, so the spotter can hear
+      "Neo". macOS shows its microphone indicator all that time.
+    * off — the stream is closed while NEO is idle: no stream, no frames, nothing for the spotter
+      to hear, no indicator. Being summoned by hand (`wake` from the summon keys, the orb, a host;
+      push-to-talk) opens it, and NEO listens exactly as after a spoken "Neo" — the spotter runs
+      again too, for "stop". When NEO is idle again (the voice's own rules: `listen_timeout_s`)
+      the stream is closed. Typed words never open it. Said aloud, "Neo" wakes nothing.
+
+    The voice's loop reads through `_mic_frame()` (it waits while the microphone is closed on
+    purpose), says when it needs the microphone (`_mic_needed`), and calls `_mic_idle()` wherever
+    it finds itself with nothing to do. A song being named through a tap on this microphone keeps
+    it open until that is over. The device watcher never reopens a microphone closed here: a
+    stopped Mic is not `active`."""
+
+    mic: Mic
+    _mic_parked = False  # the microphone is closed on purpose (wake word off, NEO idle)
+    _mic_shut = False  # the voice is closing: its microphone never opens again
+    _mic_resume: asyncio.Event | None = None
+    _mic_lock: asyncio.Lock | None = None
+
+    def _mic_needed(self) -> bool:
+        """Is the voice listening, or about to (a session a wake opened, an utterance in progress)?"""
+        raise NotImplementedError
+
+    def _mic_resumed(self) -> asyncio.Event:
+        if self._mic_resume is None:
+            self._mic_resume = asyncio.Event()
+        return self._mic_resume
+
+    def _mic_guard(self) -> asyncio.Lock:
+        if self._mic_lock is None:
+            self._mic_lock = asyncio.Lock()
+        return self._mic_lock
+
+    def _mic_begin(self) -> None:
+        """The voice starts: the microphone opens now only if "Neo" is listened for."""
+        if settings().wake_word:
+            self.mic.start()
+        else:
+            self._mic_parked = True
+            self._mic_resumed().clear()
+            print("[voice] wake word off: the microphone opens only when summoned")
+
+    def _mic_end(self) -> None:
+        """The voice closes."""
+        self._mic_shut = True
+        self.mic.stop()
+        self._mic_resumed().set()  # a loop waiting for the microphone sees that it is over
+
+    async def _mic_on(self, why: str) -> bool:
+        """Open the microphone if it is closed on purpose (off the event loop: a Bluetooth device
+        can take a second). False when it couldn't be opened."""
+        async with self._mic_guard():
+            if self._mic_shut:
+                return False
+            if not self._mic_parked:
+                return True
+            try:
+                await asyncio.to_thread(self.mic.start)
+            except Exception as e:  # noqa: BLE001 — no input device, or macOS said no
+                print(f"[voice] couldn't open the microphone: {str(e)[:120]}")
+                return False
+            if self._mic_shut:  # closed while it opened
+                self.mic.stop()
+                return False
+            reset = getattr(getattr(self, "_wake", None), "reset", None)
+            if reset is not None:
+                reset()  # the spotter starts from silence, not from where the last session ended
+            self._mic_parked = False
+            self._mic_resumed().set()
+        print(f"[voice] microphone on ({why})")
+        return True
+
+    def _mic_free(self) -> bool:
+        return not (
+            self._mic_parked or self._mic_shut or settings().wake_word or self._mic_needed() or tapped()
+        )
+
+    async def _mic_idle(self) -> bool:
+        """Close the microphone if nothing needs it: the wake word is off, the voice isn't listening,
+        no song is being named through it. True when it was closed now."""
+        if not self._mic_free():
+            return False
+        async with self._mic_guard():
+            if not self._mic_free():  # summoned while this waited its turn
+                return False
+            self._mic_parked = True
+            self._mic_resumed().clear()
+            self.mic.stop()
+        print("[voice] microphone off (idle)")
+        return True
+
+    async def _mic_frame(self) -> bytes:
+        """The next frame for the voice's loop. While the microphone is closed on purpose this
+        waits for it to open again; b"" only once it is stopped for good."""
+        while True:
+            if self._mic_parked and not self._mic_shut:
+                await self._mic_resumed().wait()
+                continue
+            frame = await self.mic.read()
+            if frame:
+                return frame
+            if self._mic_shut or not (self._mic_parked or getattr(self.mic, "active", False)):
+                return b""
+
+    async def set_wake_word(self, on: bool) -> None:
+        """The setting was switched while NEO runs (neo2.core.config.set_wake_word has it already).
+        On: the microphone opens now. Off: it closes now if NEO is idle, else when it next is."""
+        if on:
+            print("[voice] wake word on: the microphone stays on to hear “Neo”")
+            await self._mic_on("wake word")
+        else:
+            print("[voice] wake word off: the microphone opens only when summoned")
+            await self._mic_idle()
 
 
 def rms(frame: bytes) -> float:
