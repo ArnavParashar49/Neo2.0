@@ -572,3 +572,22 @@ def test_the_question_being_asked_is_not_its_own_answer(st):
     assert [h.text for h in st.search("when is the plumber coming")] == ["the plumber is coming on friday"]
     assert [h.text for h in st.search("plumber", asking="When is the plumber coming")] == ["the plumber is coming on friday"]
     assert "when is the plumber coming" not in st.context("when is the plumber coming", not_after=0.0).split("Earlier today")[0]
+
+
+def test_a_journal_line_scores_the_same_with_or_without_the_embedding_model(tmp_path, monkeypatch):
+    """Lines have no vectors: with the model loaded they are still ranked by their words alone,
+    and a clear match is still a clear match (what Gemini Live is told unasked: HIGH_SCORE)."""
+    from neo2.core.memory.store import HIGH_SCORE
+
+    def line(st):
+        st.add_turns([(_day(200), "user", "the plumber is coming on friday", "live", "voice", False)])
+        return st.search("when is the plumber coming")[0].score
+
+    plain = Store(tmp_path / "a.sqlite3")
+    without = line(plain)
+    plain.close()
+    monkeypatch.setattr(emb, "embed_texts", fake_embed)
+    loaded = Store(tmp_path / "b.sqlite3")
+    with_model = line(loaded)
+    loaded.close()
+    assert with_model == without >= HIGH_SCORE

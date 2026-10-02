@@ -1344,7 +1344,6 @@ class Store:
                 fuse("sessions", [i for i, _ in sem], dict(sem))
         if not ranked:
             return []
-        lists = 2 if qvec is not None else 1
         hits: list[Hit] = []
         with self._rlock:
             if self._closed:
@@ -1382,7 +1381,10 @@ class Store:
                         else (1.0 if listing else 0.0)
                     )
                     about = max(cover, sim)
-                    base = min(1.0, rrf / (lists * 0.1))
+                    # First in either ranking is a full base; lower in both adds up. (Never divided
+                    # by the number of rankings: a journal line has no vector to be ranked by, and
+                    # must not score half for it once the embedding model is loaded.)
+                    base = min(1.0, rrf / 0.1)
                     age_days = max(0.0, now - ts) / 86400.0
                     score = (
                         0.45 * base * (0.35 + 0.65 * about)
