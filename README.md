@@ -34,7 +34,7 @@ The router is **Laya**, a 421M-parameter local decision model. One encoder pass 
 | **Browser** | `browser_open`, `browser_read` (ARIA snapshot + text), `browser_click`, `browser_type`, `browser_press`, `browser_scroll`, `browser_back`, `browser_screenshot` — NEO's own Chromium with a persistent profile, so logins stick. It runs headless and shows live in the chat's browser card, where you can take it over, hand it back or pop it out (`NEO_BROWSER_VIEW=window` gives it a separate window instead) |
 | **Files & shell** | `shell`, `read_file`, `write_file`, `edit_file`, `trash` |
 | **System** | `volume`, `brightness`, `timer`, `clock`, `sleep_display` |
-| **Memory** | `memory` — profile facts, lessons, notes; hybrid keyword + embedding recall into every prompt |
+| **Memory** | `memory_search`, `remember`, `forget` (and the older all-in-one `memory`) — facts about you, a journal of what was said, conversation summaries; searched together (keywords + meaning) and told to every model on every route. See [Memory](#memory) |
 
 Every tool is a plain Python function registered with a decorator; adding one is a few lines (see below).
 
@@ -224,6 +224,33 @@ the cover art itself. `NEO_SONG_ID=false` turns this off. It uses
 [shazamio](https://github.com/dotX12/ShazamIO) (MIT), an unofficial client for Shazam: see
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
+## Memory
+
+NEO remembers three kinds of things, all in one SQLite file on this Mac (`~/.neo/memory.sqlite3`):
+
+- **Facts** about you — your name, your people, what you like, how you want NEO to behave. You can tell it ("remember that I park on level 3"), and it also picks them up from what you say: sentences that state a fact in so many words ("my sister's name is Priya", "I live in Dubai", "mujhe adrak wali chai pasand hai") are read by rules on this Mac the moment you say them, and while NEO is idle the fast brain reads the new lines for the rest. Each fact knows which lines it came from. A newer value replaces the old one (the old one is kept, marked superseded): never two that contradict.
+- **The journal** — every line you say or type and every line NEO says, written as it happens (within a quarter of a second, by a background writer: nothing waits for it). A voice session that closes, a quit or a crash loses nothing. Lines of NEO's that quote a page, a mail or a file are marked and never fed back into a prompt; tool outputs are never journaled, only which tools ran.
+- **Summaries** — one per conversation, written from the journal once it goes quiet. A conversation that never got one (NEO was killed) gets it at the next start.
+
+**Recall.** Every request — typed, spoken to the on-device voice, or spoken to Gemini Live — starts with a memory block: your profile and lessons, the last three conversation summaries, the last lines said today, and the best search hits for what you just asked. Gemini Live gets it fresh every time a session opens, so "Neo" ten seconds later continues the same conversation. For anything older, the models call `memory_search` (and are told never to say "I don't remember" without it). You can ask directly: "what do you remember about my sister", "what did we talk about yesterday / last week / on Monday", "what do you know about me", "kal humne kya baat ki thi".
+
+**Search** is keyword and meaning together: SQLite FTS5 (Unicode words — Devanagari included — with diacritics folded and English endings stemmed, plus a trigram index for substrings) and MiniLM embeddings held in RAM, fused, then ordered by how much of the question a row covers (rare words count for more), how recent and important it is, and what it is (a fact over a summary over a line). Time phrases ("yesterday", "last week", "kal", "pichle hafte") become a time window. A warm search takes about a millisecond on 20,000 journal lines; the embedding model is never loaded on a request's path (keywords only until it is ready).
+
+**Secrets are never stored.** Passwords, PINs, one-time codes, API keys, tokens and card numbers are masked before anything is written, and "remember my password is …" is refused out loud.
+
+**Forgetting.** "Forget what I said about the Goa trip" finds the facts, the journal lines and the summaries about it, shows you exactly what will go, and deletes them when you say yes; the conversations that lost a line are summarised again without it. *Erase NEO's Memory…* removes everything (see [Privacy](#privacy)).
+
+When an older database is first opened by this version it is upgraded in place, after a copy is kept next to it (`memory.sqlite3.bak-v2`); every memory it held is still there.
+
+| Setting | Default | |
+|---|---|---|
+| `NEO_MEMORY_JOURNAL` | `true` | keep the journal (off: only what NEO is told to remember is kept) |
+| `NEO_MEMORY_RETENTION_DAYS` | `365` | journal lines older than this are deleted; facts and summaries stay (`0` keeps everything) |
+| `NEO_MEMORY_EXTRACT` | `rules+llm` | `rules+llm` · `rules` (on this Mac only) · `off` — how facts are taken from what you say |
+| `NEO_MEMORY_RECALL_K` | `6` | search hits a request's memory block may carry |
+| `NEO_MEMORY_LIVE_INJECT` | `false` | Gemini Live: also send what memory has about a sentence as a note before the model answers. Off until measured on your connection: the log line `[memory] live recall: …` says, for each sentence, whether the note would have arrived in time — a late one would cut the answer short |
+| `NEO_CLOUD_MEMORY` | `full` | what of all this goes to cloud models: `full` · `profile` (only your profile facts ride along with requests) · `off` (nothing: no memory block, no search results; summaries are made locally, and no model reads the journal) |
+
 ## Configuration
 
 Everything is an environment variable with the `NEO_` prefix (or a line in `.env`). The useful ones:
@@ -277,7 +304,7 @@ NEO keeps its data on this Mac, in `~/.neo` (readable only by you). What leaves 
 | Goes to | What | When |
 |---|---|---|
 | **Google** (Gemini API, Gemini Live) | what you say and type, the recent conversation, NEO's memory about you (see `NEO_CLOUD_MEMORY`), tool results, and screenshots when a task needs to see the screen | every request that needs a model; voice sessions stream your microphone audio while listening |
-| **Groq** (optional key) | chat turns, and the conversation text when NEO writes a session summary; a screenshot only when no other model that sees can answer (its vision model, `NEO_GROQ_VISION_MODEL`) | quick answers and summaries; a screen step while Gemini is overloaded or out of quota |
+| **Groq** (optional key) | chat turns, and the conversation text when NEO writes a conversation summary or reads it for facts while idle (not with `NEO_CLOUD_MEMORY=off`); a screenshot only when no other model that sees can answer (its vision model, `NEO_GROQ_VISION_MODEL`) | quick answers and summaries; a screen step while Gemini is overloaded or out of quota |
 | **Cerebras** (optional paid key) | the same as a Gemini request (what you say and type, the conversation, NEO's memory per `NEO_CLOUD_MEMORY`, tool results); screenshots only to its seeing model, at most two per request | steps and chat turns it answers (ahead of Groq), and screen steps when Gemini is overloaded |
 | **DuckDuckGo, Brave, Bing** | your search queries (raced for speed) | web searches |
 | **Open-Meteo**, and **ipinfo.io** if NEO doesn't know your city | the place, or your IP address to guess it | weather |
@@ -287,12 +314,12 @@ The free tiers of Gemini and Groq allow those companies to use what you send to 
 
 What NEO keeps, and for how long:
 
-- **Memory** (facts and preferences you tell it) until you delete it; **playbooks** (the path of past tasks, without message text) — the newest 300; **session summaries** — 90 days.
+- **Memory**: facts and preferences until you delete them ("forget …"); **the journal** of what was said — `NEO_MEMORY_RETENTION_DAYS` (a year), never passwords, codes, keys or card numbers; **conversation summaries** until you erase; **playbooks** (the path of past tasks, without message text) — the newest 300. `NEO_MEMORY_JOURNAL=false` keeps no journal at all.
 - **Requests Laya learns from** (`reflex_extra.jsonl`: no dictated text, notes, memories, mail, or anything that looks like a code or password) — the latest 2,000 within 180 days; `NEO_LEARN=off` stops it.
 - **Logs** (`~/.neo/logs`) record which tools ran and whether they worked — never what you typed, said, sent or read. The **audit log** records confirmed actions (not the words of messages).
 - The overlay is hidden from screen sharing, recordings and screenshots.
 
-**Erase everything:** menu → *Erase NEO's Memory…* (or `python -m neo2 --forget-all`) deletes memories, playbooks, session summaries, learned requests and their cached features, logs, the audit log and the logins in NEO's own browser. Your settings and keys stay. No model or web page can trigger it.
+**Erase everything:** menu → *Erase NEO's Memory…* (or `python -m neo2 --forget-all`) deletes memories, the journal, conversation summaries (and the copy of the database kept from before an upgrade), playbooks, learned requests and their cached features, logs, the audit log and the logins in NEO's own browser. Your settings and keys stay. No model or web page can trigger it.
 
 ## Training the reflex
 
@@ -599,7 +626,7 @@ neo2/           the package: `python -m neo2` is NEO.app's core
     tools/      computer/ (gates: every check, frozen · tools_ax/pointer/keys/label/apps · ax, input, pointer, screen, apps, shell) · browser.py · browser_live.py (the chat's live card) · system.py · web.py · memory_tool.py · music/ (naming a song: capture, recognize, the song card)
     voice/      wake.py · local.py · live.py · audio.py · pipeline.py
     vision/     the camera's eyes: apple.py (Apple Vision) · yolo.py + detect.py (object boxes) · pipeline.py · answer.py
-    memory/     store.py (SQLite + FTS5 + vectors, playbooks, sessions) · embed.py · summarize.py
+    memory/     store.py (SQLite: facts, journal, summaries, playbooks; hybrid search) · journal.py (the background writer) · extract.py (facts from what is said) · summarize.py · redact.py (secrets never stored) · timephrase.py · embed.py
     server/     ws.py (websocket to the overlay)
     selftest/   controls.py ("check your computer controls") · testwin.py (its test window) · watch.py (its safety)
   sdk/ · adapters/ · mcp/ · providers.py    the library other apps embed (AsyncAgent, Agent, host tools)
