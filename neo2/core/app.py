@@ -241,8 +241,10 @@ async def _cocoa_pump() -> None:
 
 async def run() -> None:
     from neo2.core import log_to_stdout
+    from neo2.core.server import shell_link
 
     log_to_stdout()
+    app_socket = shell_link.inherited()  # NEO.app's shell, if it started us: claimed before any child starts
     s = settings()
     from neo2.core.permissions import request_missing
 
@@ -264,6 +266,7 @@ async def run() -> None:
     live.hooks.decline = app.decline
     ui = UIServer(app.on_command)
     await ui.start()
+    ui.shell_task = shell_link.start(ui, app_socket)  # the menu, the summon keys, the status: no page needed
     warmup(app.session.reflex)  # Laya, then the memory embedder, sequentially
     from neo2.core.tools.system import restore_timers
 

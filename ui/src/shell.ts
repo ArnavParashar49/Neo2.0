@@ -96,37 +96,11 @@ export function pinHost(on: boolean): void {
   post({ type: "pin", on });
 }
 
-/** The core said where the UI should live; NEO.app's shell hides or shows its window accordingly. */
+/** The core said where the UI should live; NEO.app's shell hides or shows its window accordingly.
+ *  (The shell hears it from the core directly too. Nothing else of the shell's goes through a page:
+ *  a host's menu actions, what the menu shows and the summon keys in the notch travel between the
+ *  shell and the core on their own socket — the page of a hidden window is suspended by macOS.) */
 export async function uiHostChanged(host: string): Promise<void> {
   if (inNotch) return;
   try { const { invoke } = await import("@tauri-apps/api/core"); await invoke("ui_host_changed", { host }); } catch { /* an older shell */ }
-}
-
-// ---- NEO.app's menu, for a host ------------------------------------------------------------------
-// In the notch NEO has no menu-bar item: the host's Settings carry the menu. The host asks the core
-// (`{"cmd":"shell"}`), the core hands the request to NEO.app's own page — hidden, but connected —
-// and that page gives it to the shell here, which runs the menu's own action. What the menu shows
-// goes the other way: the shell's status, passed to the core for the host to read. A page hosted in
-// the notch does neither: it has no shell of NEO's to speak for.
-
-/** What NEO.app's menu shows: its permissions, Open at Login, its version, the summon keys. */
-export interface ShellStatus { accessibility: boolean; screen_recording: boolean; open_at_login: boolean; version: string; hotkey: string }
-
-/** A host's request (show, settings, restart, open_logs, erase_memory, open_at_login, quit). */
-export async function shellAction(action: string, on?: boolean): Promise<void> {
-  if (inNotch) return;
-  try { const { invoke } = await import("@tauri-apps/api/core"); await invoke("shell_action", { action, on: typeof on === "boolean" ? on : null }); } catch { /* an older shell, or not inside one */ }
-}
-
-/** The shell's status now, or null where there is no shell of NEO's own. */
-export async function shellStatus(): Promise<ShellStatus | null> {
-  if (inNotch) return null;
-  try { const { invoke } = await import("@tauri-apps/api/core"); return await invoke<ShellStatus>("shell_status"); } catch { return null; }
-}
-
-/** Whether the notch's host is connected to the core (null: the page can't tell — its socket is
- *  down). NEO.app keeps its menu-bar item away only while a host is really there. */
-export async function hostAttached(attached: boolean | null): Promise<void> {
-  if (inNotch) return;
-  try { const { invoke } = await import("@tauri-apps/api/core"); await invoke("host_attached", { attached }); } catch { /* an older shell */ }
 }

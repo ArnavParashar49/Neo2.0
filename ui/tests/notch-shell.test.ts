@@ -77,14 +77,10 @@ test("without a host handler, posting reports it rather than throwing", async ()
   (win as { webkit?: unknown }).webkit = saved;
 });
 
-test("the page in the notch never speaks for NEO.app's shell", async () => {
-  // The menu's actions and what it shows are NEO.app's own page's to relay (it has the shell);
-  // hosted in the notch the page has none, and asks neither Tauri nor the host.
-  posted.length = 0;
-  await shell.shellAction("quit");
-  await shell.shellAction("open_at_login", true);
-  assert.equal(await shell.shellStatus(), null);
-  await shell.hostAttached(true);
-  assert.equal(posted.length, 0);
+test("no page speaks for NEO.app's shell: the shim has no door to its menu", () => {
+  // A host's menu actions, the menu's status and the host's presence go between NEO.app's shell
+  // and the core on a socket of their own. The page — in the notch or in NEO's window — has no
+  // call for any of them (it shows what models and websites wrote; it must not reach quit).
+  for (const name of ["shellAction", "shellStatus", "hostAttached"]) assert.equal(name in shell, false, name);
   assert.equal(tauriTouched, 0);
 });

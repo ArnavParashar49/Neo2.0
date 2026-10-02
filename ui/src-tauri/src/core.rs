@@ -5,10 +5,20 @@
 //! the app goes away without stopping it (force quit, crash), so a core with the mic open can't
 //! be left behind; if one ever is, the next launch recognises it by its pidfile and replaces it.
 //! A core started some other way (a developer's `python -m neo2`) is used as-is.
+//!
+//! The app and the core it started also talk directly, over an anonymous socket pair made here
+//! before the core starts (the core inherits its end: `NEO_APP_FD`; neo2/core/server/shell_link.py
+//! is the other side, and says what goes over it). The menu's actions for a host, the summon keys,
+//! what the menu shows, whether a host is there and where the UI lives all go this way — none of
+//! it through the window's page: macOS suspends the process of a page whose window is hidden
+//! (runningboardd: "Suspending task", seconds after), and in the notch that window always is.
 
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpStream};
+use std::os::fd::AsRawFd;
+use std::os::unix::net::UnixStream;
+use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -27,6 +37,11 @@ const RETRY_AFTER_GIVING_UP: Duration = Duration::from_secs(600);
 /// How the core is started: `python -u -m neo2` (NEO's package was `neo` before 2.1).
 const CORE_ARGS: [&str; 3] = ["-u", "-m", "neo2"];
 
+/// The core's end of the socket pair, by number, in the core's environment.
+const LINK_ENV: &str = "NEO_APP_FD";
+/// Longer than anything the core says here (a line is under a hundred bytes): dropped.
+const LINK_MAX_LINE: usize = 4096;
+
 #[derive(Clone, Default)]
 pub struct Core {
     child: Arc<Mutex<Option<Child>>>,
@@ -34,6 +49,105 @@ pub struct Core {
     restart_now: Arc<AtomicBool>,
     supervising: Arc<AtomicBool>,
     pub status: Arc<Mutex<String>>,
+    link: Arc<Mutex<Link>>,
+    listener: Arc<Mutex<Option<Listener>>>,
+}
+
+/// This app's end of the socket it shares with the core it started.
+#[derive(Default)]
+struct Link {
+    stream: Option<UnixStream>,
+    /// The core said hello on it: it is reading. Nothing is written before that — a summon made
+    /// while the core was still starting must not open the microphone half a minute later.
+    ready: bool,
+    /// Which core this is (each start has its own pair): an old core's last words don't count.
+    generation: u64,
+}
+
+type Listener = Arc<dyn Fn(FromCore) + Send + Sync>;
+
+/// What the core says to the app over their socket (shell_link.py lists the lines).
+#[derive(Debug, PartialEq)]
+pub enum FromCore {
+    /// The core is up and reading: where the UI lives, and whether a host is connected.
+    Hello { notch: bool, host_attached: bool },
+    HostAttached(bool),
+    UiHost { notch: bool },
+    /// A host asked for one of the menu's actions (the core checked who asked).
+    Shell { action: String, on: Option<bool> },
+    /// The core at the other end is gone.
+    Gone,
+}
+
+fn parse_from_core(line: &str) -> Option<FromCore> {
+    let v: serde_json::Value = serde_json::from_str(line).ok()?;
+    let notch = |key: &str| match v.get(key)?.as_str()? {
+        "notch" => Some(true),
+        "window" => Some(false),
+        _ => None,
+    };
+    match v.get("t")?.as_str()? {
+        "hello" => Some(FromCore::Hello { notch: notch("ui_host")?, host_attached: v.get("host_attached")?.as_bool()? }),
+        "host_attached" => Some(FromCore::HostAttached(v.get("attached")?.as_bool()?)),
+        "ui_host" => Some(FromCore::UiHost { notch: notch("host")? }),
+        "shell" => Some(FromCore::Shell {
+            action: v.get("action")?.as_str()?.to_string(),
+            on: v.get("on").and_then(|on| on.as_bool()),
+        }),
+        _ => None,
+    }
+}
+
+/// The next line of the core's (without its newline), `Some(None)` for one too long to be a
+/// message (dropped whole), `None` when the core is gone.
+fn read_link_line(reader: &mut impl BufRead) -> Option<Option<String>> {
+    let mut buf = Vec::new();
+    let n = reader.by_ref().take(LINK_MAX_LINE as u64).read_until(b'\n', &mut buf).ok()?;
+    if n == 0 {
+        return None;
+    }
+    if buf.last() != Some(&b'\n') {
+        if n < LINK_MAX_LINE {
+            return None; // the core went mid-line
+        }
+        loop {
+            buf.clear();
+            let n = reader.by_ref().take(LINK_MAX_LINE as u64).read_until(b'\n', &mut buf).ok()?;
+            if n == 0 {
+                return None;
+            }
+            if buf.last() == Some(&b'\n') {
+                return Some(None);
+            }
+        }
+    }
+    buf.pop();
+    Some(String::from_utf8(buf).ok())
+}
+
+/// A socket pair for the app and the core `cmd` is about to start: this app's end, and the core's
+/// (to be dropped here once the core has started — the child has its own copy by then). The pair
+/// has no name and no address: nothing can connect to it, a process can only be given it. Both
+/// ends are close-on-exec, so no other child of this app (`open`, `ps`) gets one; the core's end
+/// is let through only in the core's own fork.
+fn link_for(cmd: &mut Command) -> Option<(UnixStream, UnixStream)> {
+    let (ours, theirs) = UnixStream::pair().ok()?;
+    let fd = theirs.as_raw_fd();
+    if fd < 3 {
+        return None; // would be taken for the core's stdin/stdout/stderr
+    }
+    let _ = ours.set_write_timeout(Some(Duration::from_millis(250))); // a core that isn't reading never blocks the app
+    cmd.env(LINK_ENV, fd.to_string());
+    unsafe {
+        // After fork, before exec, in the child only: fcntl is async-signal-safe.
+        cmd.pre_exec(move || {
+            if libc::fcntl(fd, libc::F_SETFD, 0) == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    Some((ours, theirs))
 }
 
 fn home() -> PathBuf {
@@ -60,7 +174,6 @@ pub fn ws_token() -> String {
     }
     let mut bytes = [0u8; 32];
     if let Ok(mut f) = File::open("/dev/urandom") {
-        use std::io::Read;
         let _ = f.read_exact(&mut bytes);
     }
     let token: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
@@ -73,7 +186,7 @@ pub fn ws_token() -> String {
 }
 
 /// Whether ~/.neo/.env says NEO's UI lives in the notch (`NEO_UI_HOST=notch`, written by the core
-/// when NotchHub asks). Read once at launch; later changes arrive from the core through the page.
+/// when NotchHub asks). Read once at launch; after that the core says it (`FromCore::Hello`, `UiHost`).
 pub fn ui_host_is_notch() -> bool {
     let path = home().join(".neo").join(".env");
     let Ok(text) = fs::read_to_string(path) else { return false };
@@ -166,7 +279,7 @@ fn port_in_use() -> bool {
     TcpStream::connect_timeout(&addr, Duration::from_millis(300)).is_ok()
 }
 
-fn log(msg: &str) {
+pub fn log(msg: &str) {
     let _ = fs::create_dir_all(logs_dir());
     if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(logs_dir().join("app.log")) {
         let secs = std::time::SystemTime::now()
@@ -256,22 +369,24 @@ impl RotatingLog {
     }
 }
 
-fn spawn(dir: &PathBuf, sink: Arc<Mutex<RotatingLog>>) -> std::io::Result<Child> {
+fn spawn(dir: &PathBuf, sink: Arc<Mutex<RotatingLog>>) -> std::io::Result<(Child, Option<UnixStream>)> {
     // Apps started from Finder get a bare PATH; the core shells out to Homebrew tools too.
     let path = format!(
         "/opt/homebrew/bin:/usr/local/bin:{}",
         std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin:/usr/sbin:/sbin".into())
     );
-    let mut child = Command::new(dir.join(".venv").join("bin").join("python"))
-        .args(CORE_ARGS)
+    let mut cmd = Command::new(dir.join(".venv").join("bin").join("python"));
+    cmd.args(CORE_ARGS)
         .current_dir(dir)
         .env("PATH", path)
         .env("PYTHONUNBUFFERED", "1")
         .env("NEO_LAUNCHED_BY_APP", "1") // the core exits if this app disappears
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
+        .stderr(Stdio::piped());
+    let link = link_for(&mut cmd);
+    let mut child = cmd.spawn()?;
+    let link = link.map(|(ours, _theirs)| ours); // the core has its end; this app's copy of it closes here
     let _ = fs::write(pidfile(), child.id().to_string());
     if let Some(out) = child.stdout.take() {
         let sink = sink.clone();
@@ -288,12 +403,75 @@ fn spawn(dir: &PathBuf, sink: Arc<Mutex<RotatingLog>>) -> std::io::Result<Child>
             }
         });
     }
-    Ok(child)
+    Ok((child, link))
 }
 
 impl Core {
     fn set_status(&self, s: &str) {
         *self.status.lock().unwrap() = s.to_string();
+    }
+
+    /// Who hears what the core says over the socket (set once, before `start`).
+    pub fn listen(&self, listener: impl Fn(FromCore) + Send + Sync + 'static) {
+        *self.listener.lock().unwrap() = Some(Arc::new(listener));
+    }
+
+    fn hear(&self, msg: FromCore) {
+        let listener = self.listener.lock().unwrap().clone();
+        if let Some(listener) = listener {
+            listener(msg);
+        }
+    }
+
+    /// A core just started, with this socket to it (or none): read what it says until it goes.
+    fn attach(&self, stream: Option<UnixStream>) {
+        let generation = {
+            let mut link = self.link.lock().unwrap();
+            link.generation += 1;
+            link.ready = false;
+            link.stream = stream.as_ref().and_then(|s| s.try_clone().ok());
+            link.generation
+        };
+        let Some(stream) = stream else { return };
+        let me = self.clone();
+        thread::spawn(move || {
+            let mut reader = BufReader::new(stream);
+            while let Some(line) = read_link_line(&mut reader) {
+                let Some(msg) = line.as_deref().and_then(parse_from_core) else { continue };
+                {
+                    let mut link = me.link.lock().unwrap();
+                    if link.generation != generation {
+                        return; // a newer core has the app's ear
+                    }
+                    if matches!(msg, FromCore::Hello { .. }) {
+                        link.ready = true;
+                    }
+                }
+                me.hear(msg);
+            }
+            {
+                let mut link = me.link.lock().unwrap();
+                if link.generation != generation {
+                    return;
+                }
+                link.stream = None;
+                link.ready = false;
+            }
+            me.hear(FromCore::Gone);
+        });
+    }
+
+    /// One line to the core over the socket. False when there is no core of this app's that is
+    /// listening (still starting, gone, or started outside the app) — the caller decides what then.
+    pub fn tell(&self, msg: &serde_json::Value) -> bool {
+        let mut link = self.link.lock().unwrap();
+        if !link.ready {
+            return false;
+        }
+        let Some(stream) = link.stream.as_mut() else { return false };
+        let mut line = msg.to_string();
+        line.push('\n');
+        stream.write_all(line.as_bytes()).is_ok()
     }
 
     /// Start the core (or use one that is already running) and supervise it.
@@ -362,9 +540,10 @@ impl Core {
                 return;
             }
             match spawn(&dir, sink.clone()) {
-                Ok(child) => {
+                Ok((child, link)) => {
                     log(&format!("core started (pid {})", child.id()));
                     self.set_status("running");
+                    self.attach(link);
                     *self.child.lock().unwrap() = Some(child);
                 }
                 Err(e) => {
@@ -618,6 +797,109 @@ mod tests {
         touch("neo2/__main__.py");
         assert!(!runtime_predates_app(&dir)); // current, next to NeuralEnsemble's neo
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn what_the_core_says_over_the_socket() {
+        let p = parse_from_core;
+        assert_eq!(p(r#"{"t":"hello","ui_host":"notch","host_attached":false}"#), Some(FromCore::Hello { notch: true, host_attached: false }));
+        assert_eq!(p(r#"{"t":"hello","ui_host":"window","host_attached":true}"#), Some(FromCore::Hello { notch: false, host_attached: true }));
+        assert_eq!(p(r#"{"t":"host_attached","attached":true}"#), Some(FromCore::HostAttached(true)));
+        assert_eq!(p(r#"{"t":"ui_host","host":"window"}"#), Some(FromCore::UiHost { notch: false }));
+        assert_eq!(p(r#"{"t":"shell","action":"restart"}"#), Some(FromCore::Shell { action: "restart".into(), on: None }));
+        assert_eq!(
+            p(r#"{"t":"shell","action":"open_at_login","on":false}"#),
+            Some(FromCore::Shell { action: "open_at_login".into(), on: Some(false) })
+        );
+        // Anything else is not a message: no guesses about where the UI lives or who is there.
+        for bad in [
+            "",
+            "quit",
+            "[]",
+            r#"{"t":"quit"}"#,
+            r#"{"action":"quit"}"#,
+            r#"{"t":"shell"}"#,
+            r#"{"t":"shell","action":7}"#,
+            r#"{"t":"hello","ui_host":"desk","host_attached":true}"#,
+            r#"{"t":"hello","ui_host":"notch"}"#,
+            r#"{"t":"host_attached","attached":"yes"}"#,
+            r#"{"t":"ui_host","host":"elsewhere"}"#,
+        ] {
+            assert_eq!(p(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_line_too_long_to_be_a_message_is_dropped_whole() {
+        let mut text = String::from("{\"t\":\"host_attached\",\"attached\":true}\n");
+        text.push_str(&"x".repeat(LINK_MAX_LINE * 2 + 17));
+        text.push_str("\n{\"t\":\"ui_host\",\"host\":\"notch\"}\nhalf a li");
+        let mut reader = BufReader::new(text.as_bytes());
+        assert_eq!(read_link_line(&mut reader), Some(Some("{\"t\":\"host_attached\",\"attached\":true}".into())));
+        assert_eq!(read_link_line(&mut reader), Some(None));
+        assert_eq!(read_link_line(&mut reader), Some(Some("{\"t\":\"ui_host\",\"host\":\"notch\"}".into())));
+        assert_eq!(read_link_line(&mut reader), None); // the core went mid-line: nothing of it counts
+    }
+
+    /// The whole way, with the core's own code at the other end: a process started the way the
+    /// core is inherits its end of the pair, claims it with `shell_link.inherited()`, says hello —
+    /// and only then does a wake go out; what it answers is heard; when it exits the app knows.
+    #[test]
+    fn the_app_and_the_core_it_starts_share_a_socket() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
+        let python = root.join(".venv").join("bin").join("python");
+        if !python.exists() {
+            eprintln!("skipped: no Python environment in the checkout ({})", python.display());
+            return;
+        }
+        const CHILD: &str = r#"
+import json, os
+from neo2.core.server import shell_link
+sock = shell_link.inherited()
+assert sock is not None, "no socket inherited"
+assert shell_link.ENV not in os.environ and not os.get_inheritable(sock.fileno())
+sock.setblocking(True)
+f = sock.makefile("rwb")
+f.write(b'{"t":"hello","ui_host":"notch","host_attached":true}\n'); f.flush()
+msg = json.loads(f.readline())
+assert msg == {"t": "wake"}, msg
+f.write(b"x" * 9000 + b'\nnot json\n{"t":"shell","action":"open_at_login","on":true}\n'); f.flush()
+"#;
+        let core = Core::default();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let tx = Mutex::new(tx);
+        core.listen(move |msg| {
+            let _ = tx.lock().unwrap().send(msg);
+        });
+        assert!(!core.tell(&serde_json::json!({"t": "wake"}))); // no core at all
+
+        let mut cmd = Command::new(&python);
+        cmd.args(["-c", CHILD]).current_dir(&root).stdin(Stdio::null());
+        let (ours, theirs) = link_for(&mut cmd).expect("a socket pair");
+        let mut child = cmd.spawn().expect("python starts");
+        drop(theirs);
+        core.attach(Some(ours));
+        // Before the hello nothing is written: this wake is dropped, not kept for later.
+        assert!(!core.tell(&serde_json::json!({"t": "wake", "early": true})));
+        let wait = Duration::from_secs(20);
+        assert_eq!(rx.recv_timeout(wait), Ok(FromCore::Hello { notch: true, host_attached: true }));
+        assert!(core.tell(&serde_json::json!({"t": "wake"})));
+        assert_eq!(rx.recv_timeout(wait), Ok(FromCore::Shell { action: "open_at_login".into(), on: Some(true) }));
+        assert_eq!(rx.recv_timeout(wait), Ok(FromCore::Gone)); // it exited: the socket says so
+        assert!(child.wait().expect("python ran").success(), "the core's side of the test failed");
+        assert!(!core.tell(&serde_json::json!({"t": "wake"})));
+
+        // No other child of the app gets either end: one started without `link_for` has no such
+        // descriptor open, even while a pair exists.
+        let mut other = Command::new(&python);
+        let (ours, theirs) = link_for(&mut other).expect("a socket pair");
+        let probe = format!(
+            "import os\nfor fd in ({}, {}):\n    try:\n        os.fstat(fd)\n    except OSError:\n        continue\n    raise SystemExit(f'fd {{fd}} leaked')",
+            ours.as_raw_fd(),
+            theirs.as_raw_fd()
+        );
+        let status = Command::new(&python).args(["-c", &probe]).stdin(Stdio::null()).status().expect("python starts");
+        assert!(status.success(), "another child inherited the socket");
     }
 
     #[test]

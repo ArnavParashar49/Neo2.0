@@ -76,19 +76,29 @@ def test_the_notch_dress_is_scoped_and_compact():
     assert "prefers-reduced-motion: reduce" in body
 
 
-def test_only_neo_apps_own_page_speaks_for_its_shell():
-    """A host's `shell` request, the shell's status and whether a host is there are relayed by one
-    page: NEO.app's overlay — never a pop-out window (it would run each action a second time), never
-    the page in the notch (it has no shell of NEO's). A `shell` event is acted on only as it arrives:
-    the core never replays one (tests/test_v2_ws_security.py)."""
+def test_no_page_speaks_for_neo_apps_shell():
+    """A host's menu actions, what the menu shows, whether a host is there and the summon keys in
+    the notch go between NEO.app's shell and the core on their own socket (core.rs,
+    neo2/core/server/shell_link.py) — never through a page. The page of a hidden window is
+    suspended by macOS and answers nothing; and a page shows what models and websites wrote, so it
+    must have no way to ask the shell for the menu (quit, restart, Open at Login)."""
     ws = (SRC / "ws.ts").read_text()
-    assert 'const forShell = !inNotch && (opts.surface ?? "overlay") === "overlay";' in ws
-    for line in ws.splitlines():
-        if any(call in line for call in ("shellAction(", "hostAttached(", "reportShell()")) and "import" not in line and "const reportShell" not in line:
-            assert "forShell" in line, line
     shell = (SRC / "shell.ts").read_text()
-    for fn in ("shellAction", "shellStatus", "hostAttached"):
-        body = shell.split(f"export async function {fn}(")[1].split("\n}\n")[0]
-        assert "if (inNotch) return" in body and 'await import("@tauri-apps/api/core")' in body, fn
-    tests = (UI / "tests" / "shell-menu.test.ts").read_text()
-    assert "shell_action" in tests and "host_attached" in tests
+    for gone in ("shellAction", "shellStatus", "hostAttached", "shell_action", "shell_status", "host_attached", "neo://shell-status"):
+        assert gone not in ws and gone not in shell, gone
+    assert 'case "shell":' not in ws
+    # The shell offers the page none of it either: no such command exists to be invoked…
+    lib = (UI / "src-tauri" / "src" / "lib.rs").read_text()
+    handlers = lib.split("tauri::generate_handler![")[1].split("]")[0]
+    names = {h.strip().split("::")[-1] for h in handlers.split(",") if h.strip()}
+    assert names == {"hide_window", "ws_token", "ui_host_changed", "set_frame", "clipboard_write", "show_quiet"}
+    for gone in ("fn shell_action", "fn shell_status", "fn host_attached", "neo://shell-status"):
+        assert gone not in lib, gone
+    # …and in the notch the summon keys go to the core, not to the hidden page.
+    show = lib.split("\nfn show(app: &AppHandle) {")[1].split("\n}\n")[0]
+    notch, window = show.split("        return;\n", 1)
+    assert 'tell(&serde_json::json!({"t": "wake"}))' in notch and "emit(" not in notch
+    assert 'emit("neo://wake"' in window  # NEO's own window: the page on screen expands, and wakes
+    core = (UI / "src-tauri" / "src" / "core.rs").read_text()
+    link = (UI.parent / "neo2" / "core" / "server" / "shell_link.py").read_text()
+    assert 'const LINK_ENV: &str = "NEO_APP_FD";' in core and 'ENV = "NEO_APP_FD"' in link

@@ -13,7 +13,6 @@ UI → Server  : {"cmd": "text", "text": "..."}      send a typed request
                {"cmd": "shell", "action": "restart"}   a host asks for one of NEO.app's menu actions
                    (host only): show | settings | restart | open_logs | erase_memory |
                    open_at_login (+ "on": bool) | quit
-               {"cmd": "shell_status", …}          NEO.app's shell says what its menu shows (app only)
                {"cmd": "browser_*", …}             NEO's browser card (neo2/core/tools/browser_live.py)
                {"cmd": "camera_*", …}              the camera's card (neo2/core/tools/camera/live.py)
                {"cmd": "song_*", …}                the song card (neo2/core/tools/music/live.py)
@@ -28,22 +27,26 @@ takes the camera's lane (no frames: only how loud what NEO hears is), and the st
 listening too.
 
 NEO.app's menu, for a host. In the notch NEO has no menu-bar item; the host's Settings carry the
-menu instead. The host sends `shell`; the core hands it — as a `shell` event, to that one client
-and never through the bus or the replay — to NEO.app's own page (hidden, but connected), whose
-shell runs the very action its menu item runs. `erase_memory` erases nothing by itself: it makes
-NEO.app put up its own "Erase everything?" question, and only that dialog's button erases. The
-sender gets a `shell_result` {action, ok, error?} (error: forbidden | unknown | no_app). The other
-way, NEO.app's page reports what the menu shows (`shell_status`); every client reads it in the
-hello's "shell" and in a `shell_status` event when it changes:
+menu instead. The host sends `shell`; the core hands it to NEO.app's shell — over the socket the
+shell and the core share (neo2/core/server/shell_link.py), never a websocket, the bus or the
+replay — and the shell runs the very action its menu item runs. `erase_memory` erases nothing by
+itself: it makes NEO.app put up its own "Erase everything?" question, and only that dialog's
+button erases. The sender gets a `shell_result` {action, ok, error?} (error: forbidden | unknown |
+no_app). The other way, the shell reports what the menu shows, over the same socket; every client
+reads it in the hello's "shell" and in a `shell_status` event when it changes:
 {running: true, app, accessibility, screen_recording, open_at_login, version, hotkey} — `app` says
-whether NEO.app's shell has reported at all (a core run by hand has none; the rest is then null).
+whether NEO.app's shell is there at all (a core run by hand has none; the rest is then null).
 The hello's "host_attached" (and a `host_attached` event) says whether a host is connected:
-NEO.app hides its menu-bar item only while one is.
+NEO.app hides its menu-bar item only while one is (the shell hears it over its socket too, with
+where the UI lives: `ui_host`). None of this goes through NEO.app's page: with NEO in the notch
+its window is never on screen, and macOS suspends the process of a page nobody can see — it
+answered nothing, and the menu, the summon keys and the status stopped with it.
 
 Who may say what. Everyone here knows the token (~/.neo/ws-token, the user's alone to read). The
 core then tells its clients apart by the one thing a web page cannot choose: the Origin header a
 browser engine puts on every websocket a page opens, which the page can neither set nor leave out.
-    app    Origin is NEO.app's own page (tauri://localhost, or the dev server's).
+    app    Origin is NEO.app's own page (tauri://localhost, or the dev server's). A page like
+           the next: it does not speak for NEO.app's shell, which has its own socket.
     page   Origin is neo://app: NEO's page shown by a host (NotchHub's WKWebView).
     host   no Origin, and `role=host` in the query beside the token: a native client (NotchHub's
            NeoListener). `role=host` with any Origin is refused at the door (403), so no page —
@@ -53,12 +56,16 @@ browser engine puts on every websocket a page opens, which the page can neither 
     open_at_login among them. NEO's pages show what models and websites wrote; a page that was
     talked into something must not be able to quit NEO, restart it, or change what starts at
     login. A tool that wants the menu has to say so at connect (`role=host`), not slip it in.
-  - `shell_status` is the app's alone, so what a host's Settings show about NEO.app's permissions
-    is what NEO.app itself said — not a page in the notch, not a host, not a tool.
+  - What the menu shows is the shell's alone to say, and the menu's actions the shell's alone to
+    hear — and the shell is not a websocket client at all: it is whoever started this core and
+    kept the other end of the socket pair (shell_link.py), which nothing can connect to. So what a
+    host's Settings show about NEO.app's permissions is what NEO.app itself said, and `quit` goes
+    to NEO.app and nobody else. A `shell_status` on the websocket is refused, whoever sends it.
   What this does not claim: a program running as the user can read the token and send any header
-  it likes — it is the user, and could as well kill NEO or edit its files. The roles keep web
-  content out of the menu and every honest client in its lane; they are not a wall between the
-  user's own programs.
+  it likes — it is the user, and could as well kill NEO or edit its files. It can be a host, and
+  ask for the menu. The roles keep web content out of the menu and every honest client in its
+  lane; they are not a wall between the user's own programs. (Speaking for the shell is no longer
+  among the things such a program can do: there is no token for that, only the inherited socket.)
 
 The relay never blocks the event bus: each client has its own outbound queue drained by its
 own task, and a client that stops reading is dropped. (An inline `await send()` to a half-dead
@@ -185,7 +192,8 @@ class UIServer:
         self._on_command = on_command
         self._recent: list[dict[str, Any]] = []  # replayed to late-joining clients
         self._shell: dict[str, Any] | None = None  # what NEO.app's menu shows, as its shell reported
-        self._shell_from: _Client | None = None  # …and the client that did: NEO.app's own page
+        self._link: Any = None  # the shell's socket (shell_link.ShellLink) while NEO.app is at its end
+        self.shell_task: asyncio.Task | None = None  # …and the task reading it (kept: the loop holds it weakly)
 
     async def start(self) -> None:
         s = settings()
@@ -238,23 +246,53 @@ class UIServer:
         """To every client connected now — not the bus, not the replay."""
         self._send_all(json.dumps({"type": type_, "data": data, "ts": time.time()}), lambda cl: True)
 
-    def _shell_report(self, cl: _Client, cmd: dict[str, Any]) -> None:
-        """`shell_status` from NEO.app's own page: kept, and told to everyone when it changed."""
-        if cl.kind != "app":
-            print(f"[ui] shell_status refused: from a {cl.kind}, not NEO.app")
+    # NEO.app's shell, at the other end of its socket (shell_link.py): the three calls it makes.
+
+    def shell_hello(self, link: Any) -> dict[str, Any]:
+        """The shell's socket is open: what the shell needs to know first."""
+        self._link = link
+        return {"t": "hello", "ui_host": settings().ui_host, "host_attached": self._host_attached()}
+
+    def shell_said(self, msg: dict[str, Any]) -> None:
+        """One message of the shell's: what its menu shows, or the summon keys."""
+        kind = msg.get("t")
+        if kind == "status":
+            self._shell_report(msg)
+        elif kind == "wake":
+            # Summoned by hand while the notch shows NEO: the same command the orb's page sends.
+            asyncio.create_task(self._safe({"cmd": "wake"}))
+
+    def shell_left(self, link: Any) -> None:
+        """NEO.app is gone from its socket: nobody speaks for the shell, nobody runs the menu."""
+        if self._link is not link:
             return
-        flags = {k: cmd.get(k) for k in ("accessibility", "screen_recording", "open_at_login")}
+        self._link = None
+        if self._shell is not None:
+            self._shell = None
+            self._tell("shell_status", self.shell_snapshot())
+
+    def _to_shell(self, msg: dict[str, Any]) -> bool:
+        link = self._link
+        return link is not None and bool(link.send(msg))
+
+    def _shell_report(self, msg: dict[str, Any]) -> None:
+        """What the menu shows, from the shell: kept, and told to everyone when it changed."""
+        flags = {k: msg.get(k) for k in ("accessibility", "screen_recording", "open_at_login")}
         if not all(isinstance(v, bool) for v in flags.values()):
             return
-        version, hotkey = str(cmd.get("version") or "")[:32], str(cmd.get("hotkey") or "")[:16]
+        version, hotkey = str(msg.get("version") or "")[:32], str(msg.get("hotkey") or "")[:16]
         status = {**flags, "version": version, "hotkey": hotkey}
-        self._shell_from = cl
         if status != self._shell:
             self._shell = status
             self._tell("shell_status", self.shell_snapshot())
 
+    def _host_changed(self, attached: bool) -> None:
+        """The first host came, or the last one went: NEO.app's menu-bar item follows."""
+        self._tell("host_attached", {"attached": attached})
+        self._to_shell({"t": "host_attached", "attached": attached})
+
     def _shell_ask(self, cl: _Client, cmd: dict[str, Any]) -> None:
-        """`shell` from a host: one of the menu's actions, handed to NEO.app's own page. The sender
+        """`shell` from a host: one of the menu's actions, handed to NEO.app's shell. The sender
         hears how it went (`shell_result`)."""
         action = str(cmd.get("action") or "")[:32]
         error = self._shell_relay(cl, action, cmd.get("on"))
@@ -262,7 +300,7 @@ class UIServer:
         cl.send_json(json.dumps({"type": "shell_result", "data": data, "ts": time.time()}))
 
     def _shell_relay(self, cl: _Client, action: str, on: Any) -> str:
-        """Hands the action to NEO.app's page; returns why not ("" when it went)."""
+        """Hands the action to NEO.app's shell; returns why not ("" when it went)."""
         if cl.kind != "host":
             print(f"[ui] shell refused: from a {cl.kind}, not a host")
             return "forbidden"
@@ -273,19 +311,17 @@ class UIServer:
             if not isinstance(on, bool):
                 return "unknown"
             data["on"] = on
-        app = self._shell_from
-        if app is None or app.conn not in self._clients:
+        if not self._to_shell({"t": "shell", **data}):
             return "no_app"  # a core run by hand: there is no NEO.app to do it
         print(f"[ui] shell: {action}")
-        if not app.send_json(json.dumps({"type": "shell", "data": data, "ts": time.time()})):
-            self._gone(app.conn)
-            return "no_app"
         return ""
 
     def _relay(self, ev) -> None:
         msg = ev.to_dict()
         if ev.type == "erased":
             self._recent.clear()  # late-joining overlays must not get the old transcript back
+        if ev.type == "ui_host":
+            self._to_shell({"t": "ui_host", "host": ev.data.get("host")})  # NEO.app's window follows
         if ev.type in ("transcript", "state", "tool_start", "tool_end", "turn"):
             last = self._recent[-1] if self._recent else None
             if (
@@ -310,12 +346,8 @@ class UIServer:
 
     def _gone(self, c: ServerConnection) -> None:
         if (cl := self._clients.pop(c, None)) is not None:
-            if cl is self._shell_from:
-                # NEO.app's page left: nobody speaks for the shell until it is back.
-                self._shell = self._shell_from = None
-                self._tell("shell_status", self.shell_snapshot())
             if cl.kind == "host" and not self._host_attached():
-                self._tell("host_attached", {"attached": False})  # NEO.app's menu-bar item returns
+                self._host_changed(False)  # NEO.app's menu-bar item returns
             from neo2.core.tools.browser_live import live
 
             live.viewer_gone(cl)
@@ -423,7 +455,7 @@ class UIServer:
             )
         )
         if first_host:
-            self._tell("host_attached", {"attached": True})  # NEO.app puts its menu-bar item away
+            self._host_changed(True)  # NEO.app puts its menu-bar item away
         self._clients[c] = cl
         drain = asyncio.create_task(self._drain(cl))
         try:
@@ -462,7 +494,8 @@ class UIServer:
                     self._shell_ask(cl, cmd)  # a host's alone; never the bus
                     continue
                 if kind == "shell_status":
-                    self._shell_report(cl, cmd)  # NEO.app's alone
+                    # The shell says it itself, over its own socket: no websocket client speaks for it.
+                    print(f"[ui] shell_status refused: from a {cl.kind} (the shell has its own socket)")
                     continue
                 if kind == "stop":
                     camera_live.close("stopped")  # the stop button turns the camera off too

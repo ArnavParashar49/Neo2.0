@@ -1,8 +1,8 @@
 // Websocket client for the NEO core. Turns the event stream into a transcript timeline:
 // user bubbles, tool-activity groups, and assistant replies (streamed partials merge in place).
 import { useCallback, useEffect, useRef, useState } from "react";
-import { hostAttached, listen, shellAction, shellStatus, uiHostChanged, wsToken } from "./shell";
-import { inNotch, type UiHost } from "./host";
+import { uiHostChanged, wsToken } from "./shell";
+import { type UiHost } from "./host";
 import { BrowserHub } from "./browser/hub";
 import { CameraHub } from "./camera/hub";
 import { isCameraFrame } from "./camera/frames";
@@ -93,20 +93,9 @@ export function useNeo(opts: { surface?: "overlay" | "window" } = {}) {
   const sock = useRef<WebSocket | null>(null);
   const noteTimer = useRef<number | undefined>(undefined);
 
-  // NEO.app's own page (never a pop-out window, never the page in the notch) speaks for the shell:
-  // it hands the core's `shell` requests to it, and tells the core what the menu would show.
-  const forShell = !inNotch && (opts.surface ?? "overlay") === "overlay";
-
   useEffect(() => {
     let alive = true;
     let timer: number | undefined;
-    const reportShell = async () => {
-      const status = await shellStatus();
-      if (status && alive && sock.current?.readyState === WebSocket.OPEN) sock.current.send(JSON.stringify({ cmd: "shell_status", ...status }));
-    };
-    let unlistenShell: (() => void) | undefined;
-    if (forShell) listen("neo://shell-status", () => { void reportShell(); }).then((un) => { if (alive) unlistenShell = un; else un(); }).catch(() => {});
-
     const apply = (ev: NeoEvent) => {
       if (ev.type.startsWith("song_")) {
         // Its place in the transcript: where it opened, or (joined late) where its state first came.
@@ -146,7 +135,6 @@ export function useNeo(opts: { surface?: "overlay" | "window" } = {}) {
           cam.beginHello();
           setState(ev.data.state);
           if (ev.data.ui_host === "window" || ev.data.ui_host === "notch") { setUiHost(ev.data.ui_host); void uiHostChanged(ev.data.ui_host); }
-          if (forShell) { void hostAttached(ev.data.host_attached === true); void reportShell(); }
           setItems([]);
           for (const r of ev.data.recent ?? []) apply(r);
           setAsk(ev.data.confirm ?? null);
@@ -170,13 +158,6 @@ export function useNeo(opts: { surface?: "overlay" | "window" } = {}) {
           break;
         case "ui_host":
           if (ev.data.host === "window" || ev.data.host === "notch") { setUiHost(ev.data.host); void uiHostChanged(ev.data.host); }
-          break;
-        case "host_attached":
-          if (forShell) void hostAttached(ev.data.attached === true);
-          break;
-        case "shell":
-          // A host asked for one of the menu's actions (the core checked who): the shell runs it.
-          if (forShell && typeof ev.data.action === "string") void shellAction(ev.data.action, ev.data.on);
           break;
         case "erased": {
           // A song card still listening keeps its place: its Stop must stay in reach.
@@ -316,14 +297,13 @@ export function useNeo(opts: { surface?: "overlay" | "window" } = {}) {
         cam.setConnected(false);
         song.setConnected(false);
         setAsk(null); // the next hello says whether it's still waiting
-        if (forShell) void hostAttached(null); // no core to say whether the host is there
         sock.current = null;
         timer = window.setTimeout(connect, 1500);
       };
       ws.onerror = () => ws.close();
     };
     connect();
-    return () => { alive = false; if (timer) clearTimeout(timer); unlistenShell?.(); sock.current?.close(); };
+    return () => { alive = false; if (timer) clearTimeout(timer); sock.current?.close(); };
   }, []);
 
   /** Returns whether the command actually went out (the core may be restarting). */

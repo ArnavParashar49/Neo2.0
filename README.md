@@ -248,7 +248,7 @@ Everything is an environment variable with the `NEO_` prefix (or a line in `.env
 | `NEO_LEARN_TEACHER` | `off` | `local` · `cloud`: while NEO is idle, a model re-checks up to 50 a day of the requests Laya was least sure about — `local` only with the local model, `cloud` only with the provider that already handled that request |
 | `NEO_HOME_LOCATION` | — | where "the weather" means if NEO doesn't know your city (else it guesses from your IP) |
 | `NEO_DATA_DIR` | `~/.neo` | memory DB, audit log, models, trained reflex head |
-| `NEO_UI_HOST` | `window` | where NEO's UI lives: `window` (NEO.app's own orb and card) · `notch` (NotchHub hosts the same page in the notch; NEO.app keeps its window hidden, its menu-bar item and hotkeys stay). Written by the core itself when NotchHub asks (`{"cmd": "ui_host"}`) and put back to `window` when NotchHub quits — nothing to set by hand |
+| `NEO_UI_HOST` | `window` | where NEO's UI lives: `window` (NEO.app's own orb and card) · `notch` (NotchHub hosts the same page in the notch; NEO.app keeps its window hidden and its hotkeys; its menu-bar item goes while NotchHub is connected, whose Settings carry the menu). Written by the core itself when NotchHub asks (`{"cmd": "ui_host"}`) and put back to `window` when NotchHub quits — nothing to set by hand |
 
 With NEO.app, settings live in `~/.neo/.env` (menu → *Settings & API Keys…*, then *Restart NEO*).
 
@@ -262,6 +262,13 @@ its own `neo://app/` scheme. For that the page has a `host=notch` mode (`ui/src/
 core's websocket admits exactly the origin `neo://app`, and `scripts/install-app.sh` puts the built
 page in `~/Library/Application Support/NEO/ui/` where NotchHub reads it (Tauri embeds its copy in
 the binary). NotchHub tells the core `ui_host: notch` whenever it connects and `window` as it quits.
+
+While NotchHub is connected NEO.app has no menu-bar item: NotchHub's Settings carry its menu, and
+ask the core for an action (`{"cmd": "shell"}`, a host's alone). The core hands it to NEO.app over a
+socket the two share — an anonymous pair NEO.app makes when it starts the core
+(`ui/src-tauri/src/core.rs`, `neo2/core/server/shell_link.py`) — and hears what the menu shows, and
+the summon keys, the same way. Not through NEO.app's own page: its window is hidden in the notch,
+and macOS suspends the process of a web page nobody can see.
 
 ## Privacy
 

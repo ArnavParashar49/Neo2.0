@@ -3,17 +3,22 @@
 //! the window talks to it over a local websocket.
 //!
 //! With `NEO_UI_HOST=notch` (NotchHub hosting NEO's page in its island) the window stays hidden:
-//! the core still runs, and the hotkeys still send the wake — through this window's own page,
-//! which keeps its socket to the core while hidden. The core tells the page when the host changes
-//! (`ui_host`), and the page relays it here (`ui_host_changed`).
-//!
-//! In the notch NEO has no menu-bar item either: the host's Settings carry the menu. Everything
-//! the menu does is one function (`act`), reached from the menu itself and — for a host — from
-//! the core's `shell` event, which the hidden page hands to `shell_action`. What the menu shows
-//! (the permissions, Open at Login, the version) goes the other way: `shell_status`, which the
-//! page passes to the core for the host to read. The item is only hidden while a host is really
-//! there (`host_attached`): a host that went away without handing NEO back must not leave an
+//! the core still runs, and the hotkeys still wake it. In the notch NEO has no menu-bar item
+//! either: the host's Settings carry the menu. Everything the menu does is one function (`act`),
+//! reached from the menu itself and — for a host — from the core (`FromCore::Shell`). What the
+//! menu shows (the permissions, Open at Login, the version) goes the other way (`tell_status`),
+//! for the host to read. The item is only hidden while a host is really there
+//! (`FromCore::HostAttached`): a host that went away without handing NEO back must not leave an
 //! app with no way to quit it.
+//!
+//! None of that goes through the hidden window's page. It used to — and nothing arrived: macOS
+//! suspends the process of a web page whose window is not on screen, a few seconds after it is
+//! hidden, so the page's websocket stayed open while no script ran to read it. The shell and the
+//! core it starts talk over a socket of their own instead (core.rs: `Core::listen`, `Core::tell`).
+//! The page keeps only what it does while it is on screen: in NEO's own window it expands and
+//! sends the wake itself (`neo://wake`), it asks "Erase everything?" (`neo://erase`: the window
+//! comes up for it), and it passes on a `ui_host` it hears (`ui_host_changed` — the only word of
+//! where the UI lives when the core was started outside the app).
 
 mod chord;
 mod core;
@@ -39,8 +44,8 @@ pub fn in_notch(app: &AppHandle) -> bool {
     app.state::<UiHost>().0.lock().map(|n| *n).unwrap_or(false)
 }
 
-/// Whether the notch's host is connected to the core right now, as far as the page knows
-/// (`None`: it doesn't — no core yet, or its socket is down), and since when.
+/// Whether the notch's host is connected to the core right now, as the core says (`None`: nothing
+/// says — no core of this app's yet, or it is gone), and since when.
 pub struct HostAttached(pub Mutex<(Option<bool>, Instant)>);
 
 /// A host that left without a word (it crashed, or was never started): the menu-bar item returns.
@@ -70,6 +75,61 @@ fn sync_tray(app: &AppHandle) {
         if let Some(tray) = app.tray_by_id("neo") {
             let _ = tray.set_visible(visible);
         }
+        core::log(if visible { "menu-bar item: shown" } else { "menu-bar item: hidden (the notch's host carries the menu)" });
+    }
+}
+
+fn set_host_attached(app: &AppHandle, attached: Option<bool>) {
+    if let Ok(mut g) = app.state::<HostAttached>().0.lock() {
+        if g.0 != attached {
+            *g = (attached, Instant::now());
+        }
+    }
+    if attached == Some(true) {
+        sync_tray(app); // hidden at once; coming back waits out its grace (the status loop)
+    }
+}
+
+/// Where NEO's UI lives changed. Into the notch: this window goes away. Back to the window
+/// (NotchHub quit): NEO's own orb returns, and its menu-bar item.
+fn set_ui_host(app: &AppHandle, notch: bool) {
+    if let Ok(mut n) = app.state::<UiHost>().0.lock() {
+        if *n == notch {
+            return;
+        }
+        *n = notch;
+    }
+    core::log(if notch { "the UI lives in the notch: the window hides" } else { "the UI lives in NEO's own window again" });
+    if let Some(w) = app.get_webview_window("main") {
+        if notch {
+            let _ = w.hide();
+        } else {
+            let _ = w.show();
+        }
+    }
+    sync_tray(app);
+}
+
+/// What the core says over the socket it shares with the app (off the main thread).
+fn from_core(app: &AppHandle, msg: core::FromCore) {
+    match msg {
+        core::FromCore::Hello { notch, host_attached } => {
+            set_ui_host(app, notch);
+            set_host_attached(app, Some(host_attached));
+            tell_status(app, true); // a new core knows nothing of the menu yet
+        }
+        core::FromCore::HostAttached(attached) => set_host_attached(app, Some(attached)),
+        core::FromCore::UiHost { notch } => set_ui_host(app, notch),
+        core::FromCore::Shell { action, on } => {
+            if !SHELL_ACTIONS.contains(&action.as_str()) {
+                core::log(&format!("a host asked for something the menu doesn't have: {action:.32}"));
+                return;
+            }
+            core::log(&format!("a host asked for: {action}"));
+            let handle = app.clone();
+            let _ = app.run_on_main_thread(move || act(&handle, &action, on));
+        }
+        core::FromCore::Gone => set_host_attached(app, None), // no core to say whether the host is there
     }
 }
 
@@ -79,6 +139,8 @@ struct Tray {
     login: Mutex<Option<CheckMenuItem<Wry>>>,
     /// ⌥⌘ works (it needs Accessibility); until then ⌘⇧Space is the way in.
     chord: AtomicBool,
+    /// What the core was last told the menu shows (`tell_status`).
+    told: Mutex<Option<ShellStatus>>,
 }
 
 /// What NEO's menu shows, for a host that carries the menu instead (the notch's Settings).
@@ -101,8 +163,24 @@ fn status_now(app: &AppHandle) -> ShellStatus {
     }
 }
 
+/// Tells the core what the menu shows, when it changed (or `anyway`: a core that just started).
+/// With no core of this app's listening nothing is remembered as told, so the next look tries again.
+fn tell_status(app: &AppHandle, anyway: bool) {
+    let status = status_now(app);
+    let tray = app.state::<Tray>();
+    let Ok(mut told) = tray.told.lock() else { return };
+    if !anyway && told.as_ref() == Some(&status) {
+        return;
+    }
+    let mut msg = serde_json::to_value(&status).unwrap_or_default();
+    if let Some(map) = msg.as_object_mut() {
+        map.insert("t".into(), "status".into());
+    }
+    *told = if app.state::<core::Core>().tell(&msg) { Some(status) } else { None };
+}
+
 /// Everything NEO's menu does, by name — the menu's own items and a host's `shell` command
-/// (`shell_action`) both end here. On the main thread.
+/// (`from_core`) both end here. On the main thread.
 fn act(app: &AppHandle, action: &str, on: Option<bool>) {
     match action {
         "quit" => app.exit(0),
@@ -140,7 +218,7 @@ fn act(app: &AppHandle, action: &str, on: Option<bool>) {
                     let _ = item.set_checked(core::launch_at_login());
                 }
             }
-            let _ = app.emit("neo://shell-status", ()); // the host's switch follows
+            tell_status(app, false); // the host's switch follows
         }
         _ => {}
     }
@@ -149,42 +227,15 @@ fn act(app: &AppHandle, action: &str, on: Option<bool>) {
 /// What a host may ask for (the core checks who is asking; see neo2/core/server/ws.py).
 const SHELL_ACTIONS: [&str; 7] = ["show", "settings", "restart", "open_logs", "erase_memory", "open_at_login", "quit"];
 
-/// A host's `shell` command, relayed by the core to this window's page: the menu's own action.
-#[tauri::command]
-fn shell_action(app: AppHandle, window: tauri::WebviewWindow, action: String, on: Option<bool>) -> Result<(), String> {
-    if window.label() != "main" {
-        return Err("only NEO's own window relays the shell".into());
-    }
-    if !SHELL_ACTIONS.contains(&action.as_str()) {
-        return Err(format!("unknown shell action: {action}"));
-    }
-    let handle = app.clone();
-    app.run_on_main_thread(move || act(&handle, &action, on)).map_err(|e| e.to_string())
-}
-
-/// What the menu shows (permissions, Open at Login, the version), for the page to pass to the core.
-#[tauri::command]
-fn shell_status(app: AppHandle) -> ShellStatus {
-    status_now(&app)
-}
-
-/// The page says whether the notch's host is connected to the core (`null`: it can't tell).
-#[tauri::command]
-fn host_attached(app: AppHandle, attached: Option<bool>) {
-    if let Ok(mut g) = app.state::<HostAttached>().0.lock() {
-        if g.0 != attached {
-            *g = (attached, Instant::now());
-        }
-    }
-    if attached == Some(true) {
-        sync_tray(&app); // hidden at once; coming back waits out its grace (the status loop)
-    }
-}
-
 fn show(app: &AppHandle) {
     if in_notch(app) {
-        // The notch shows NEO; this window stays hidden. Its page still carries the wake to the core.
-        let _ = app.emit("neo://wake", ());
+        // The notch shows NEO; this window stays hidden, and its page asleep with it: the wake
+        // goes to the core directly. With no core of this app's listening (it is starting, or was
+        // started outside the app) the summon is dropped — handed to the sleeping page it would
+        // be sent whenever that page next woke, and open the microphone then.
+        if !app.state::<core::Core>().tell(&serde_json::json!({"t": "wake"})) {
+            core::log("summoned, but no core of this app's is listening: nothing sent");
+        }
         return;
     }
     if reveal(app) {
@@ -232,25 +283,14 @@ fn hide_window(app: AppHandle) {
     }
 }
 
-/// The core said where the UI lives (the page relays its `ui_host` event). Into the notch: this
-/// window goes away. Back to the window (NotchHub quit): NEO's own orb returns.
+/// The page heard the core say where the UI lives, and passes it on. The core says so to the
+/// shell directly too (`from_core`); this is the word that arrives when the core was started
+/// outside the app, and has no socket to it.
 #[tauri::command]
-fn ui_host_changed(app: AppHandle, host: String) {
-    let notch = host == "notch";
-    if let Ok(mut n) = app.state::<UiHost>().0.lock() {
-        if *n == notch {
-            return;
-        }
-        *n = notch;
+fn ui_host_changed(app: AppHandle, window: tauri::WebviewWindow, host: String) {
+    if window.label() == "main" && (host == "notch" || host == "window") {
+        set_ui_host(&app, host == "notch");
     }
-    if let Some(w) = app.get_webview_window("main") {
-        if notch {
-            let _ = w.hide();
-        } else {
-            let _ = w.show();
-        }
-    }
-    sync_tray(&app); // back in its own window, NEO has its menu-bar item again
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -271,9 +311,6 @@ pub fn run() {
             hide_window,
             ws_token,
             ui_host_changed,
-            host_attached,
-            shell_action,
-            shell_status,
             frame::set_frame,
             native::clipboard_write,
             native::show_quiet
@@ -281,7 +318,7 @@ pub fn run() {
         .manage(core::Core::default())
         .manage(UiHost(Mutex::new(core::ui_host_is_notch())))
         .manage(HostAttached(Mutex::new((None, Instant::now()))))
-        .manage(Tray { visible: AtomicBool::new(true), login: Mutex::new(None), chord: AtomicBool::new(false) })
+        .manage(Tray { visible: AtomicBool::new(true), login: Mutex::new(None), chord: AtomicBool::new(false), told: Mutex::new(None) })
         .setup(|app| {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
@@ -293,7 +330,10 @@ pub fn run() {
                 }
             }
 
-            // The brain: start NEO's Python core (or use one that's already running).
+            // The brain: start NEO's Python core (or use one that's already running). What it
+            // says to the shell (a host's menu action, where the UI lives) is heard here.
+            let listener = app.handle().clone();
+            app.state::<core::Core>().listen(move |msg| from_core(&listener, msg));
             app.state::<core::Core>().start();
             core::sync_launch_at_login();
             // Accessibility + Screen Recording belong to NEO.app: ask once per version, then the
@@ -368,15 +408,9 @@ pub fn run() {
             let (ax_w, sc_w) = (ax_item.clone(), sc_item.clone());
             std::thread::spawn(move || {
                 let mut last = String::new();
-                let mut told: Option<ShellStatus> = None;
                 loop {
                     let (ax, sc) = (perms::accessibility(), perms::screen_recording());
-                    // The host shows the same things: tell the page when one of them changed.
-                    let status = status_now(&handle);
-                    if told.as_ref() != Some(&status) {
-                        told = Some(status);
-                        let _ = handle.emit("neo://shell-status", ());
-                    }
+                    tell_status(&handle, false); // the host shows the same things: the core hears when one changed
                     sync_tray(&handle); // a host that went away: the item comes back
                     let core_status = core.status.lock().unwrap().clone();
                     let now = match (ax, sc) {
