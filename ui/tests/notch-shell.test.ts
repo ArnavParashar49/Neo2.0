@@ -76,3 +76,15 @@ test("without a host handler, posting reports it rather than throwing", async ()
   assert.equal(await shell.clipboardWrite("x"), false);
   (win as { webkit?: unknown }).webkit = saved;
 });
+
+test("the page in the notch never speaks for NEO.app's shell", async () => {
+  // The menu's actions and what it shows are NEO.app's own page's to relay (it has the shell);
+  // hosted in the notch the page has none, and asks neither Tauri nor the host.
+  posted.length = 0;
+  await shell.shellAction("quit");
+  await shell.shellAction("open_at_login", true);
+  assert.equal(await shell.shellStatus(), null);
+  await shell.hostAttached(true);
+  assert.equal(posted.length, 0);
+  assert.equal(tauriTouched, 0);
+});

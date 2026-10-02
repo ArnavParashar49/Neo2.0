@@ -543,8 +543,9 @@ export default function App() {
   // Dismissed without an answer (collapsed, hidden): the question doesn't linger for next time.
   useEffect(() => { if (!expanded && erasing === "ask") setErasing(false); }, [expanded, erasing]);
 
-  // NEO's UI lives in the notch, but the menu bar's "Erase NEO's Memory…" still opens this
-  // window for its dialog (the one thing it shows there): once the dialog is over, hide it again.
+  // NEO's UI lives in the notch, but "Erase NEO's Memory…" (the host's Settings ask NEO.app's shell
+  // for it; the menu bar's item, when there is one) still opens this window for its dialog — the
+  // one thing it shows there: once the dialog is over, hide it again.
   const wasErasing = useRef(false);
   useEffect(() => {
     if (inTauri && neo.uiHost === "notch" && wasErasing.current && erasing === false) void hideWindow();

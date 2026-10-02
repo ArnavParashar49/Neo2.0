@@ -74,3 +74,21 @@ def test_the_notch_dress_is_scoped_and_compact():
             assert selector.startswith('html[data-host="notch"]'), selector
     assert 'html[data-host="notch"] .msg, html[data-host="notch"] .tools' in body and "animation: none;" in body
     assert "prefers-reduced-motion: reduce" in body
+
+
+def test_only_neo_apps_own_page_speaks_for_its_shell():
+    """A host's `shell` request, the shell's status and whether a host is there are relayed by one
+    page: NEO.app's overlay — never a pop-out window (it would run each action a second time), never
+    the page in the notch (it has no shell of NEO's). A `shell` event is acted on only as it arrives:
+    the core never replays one (tests/test_v2_ws_security.py)."""
+    ws = (SRC / "ws.ts").read_text()
+    assert 'const forShell = !inNotch && (opts.surface ?? "overlay") === "overlay";' in ws
+    for line in ws.splitlines():
+        if any(call in line for call in ("shellAction(", "hostAttached(", "reportShell()")) and "import" not in line and "const reportShell" not in line:
+            assert "forShell" in line, line
+    shell = (SRC / "shell.ts").read_text()
+    for fn in ("shellAction", "shellStatus", "hostAttached"):
+        body = shell.split(f"export async function {fn}(")[1].split("\n}\n")[0]
+        assert "if (inNotch) return" in body and 'await import("@tauri-apps/api/core")' in body, fn
+    tests = (UI / "tests" / "shell-menu.test.ts").read_text()
+    assert "shell_action" in tests and "host_attached" in tests
