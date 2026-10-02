@@ -920,7 +920,8 @@ class LiveVoice(OnDemandMic):
                 print(f"[live] connect failed: {why}")
                 self._connect_failures += 1
                 kind = _failure_kind(e)
-                await bus().note(f"Voice session failed ({why[:60]}) — say “Neo” to retry")
+                again = "say “Neo”" if s.wake_word else "summon NEO again"  # (off: "Neo" isn't heard)
+                await bus().note(f"Voice session failed ({why[:60]}) — {again} to retry")
                 await bus().set_state(NeoState.IDLE)
                 if (
                     (kind == "quota" or self._connect_failures >= 2)
