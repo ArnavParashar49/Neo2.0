@@ -562,3 +562,85 @@ def test_the_summon_keys_need_no_page(monkeypatch):
     woke, again, rest = _with_server(monkeypatch, body, app.on_command)
     assert woke == {"source": "ui"} and again == {"source": "ui"}
     assert woken == ["ui", "ui"] and "erased" not in rest and "transcript" not in rest
+
+
+def test_a_card_is_answered_by_its_buttons_wherever_they_are(monkeypatch):
+    """`confirm` — the answer to a pending confirmation — reaches the core from NEO.app's page, from
+    NEO's page in the notch, and from a host: NotchHub's native Allow / Cancel under the notch
+    send it over the host's own connection, in the very shape the page's card sends. It carries
+    the card's action id. A page the user merely visits never gets in to send anything."""
+
+    async def run():
+        srv, port, seen = await _server(monkeypatch)
+        tok = ws_mod.ws_token()
+        try:
+            for origin, role in (("tauri://localhost", None), ("neo://app", None), (None, "host")):
+                q = f"/?token={tok}" + (f"&role={role}" if role else "")
+                headers = {"Origin": origin} if origin else None
+                async with websockets.connect(f"ws://127.0.0.1:{port}{q}", additional_headers=headers) as c:
+                    await asyncio.wait_for(c.recv(), 3)  # the hello
+                    await c.send(json.dumps({"cmd": "confirm", "yes": False, "action_id": f"trash:{role or origin}"}))
+                    await c.send(json.dumps({"cmd": "confirm", "yes": True, "action_id": "trash:t", "scope": "task"}))
+                    for _ in range(100):
+                        if len([x for x in seen if x.get("cmd") == "confirm"]) % 2 == 0 and any(
+                            x.get("action_id") == f"trash:{role or origin}" for x in seen
+                        ):
+                            break
+                        await asyncio.sleep(0.01)
+            page = await _try(port, token=tok, origin="https://evil.example")
+            return [x for x in seen if x.get("cmd") == "confirm"], page
+        finally:
+            if srv._server:
+                srv._server.close()
+
+    answers, page = asyncio.run(run())
+    assert [a for a in answers if a.get("scope") != "task"] == [
+        {"cmd": "confirm", "yes": False, "action_id": "trash:tauri://localhost"},
+        {"cmd": "confirm", "yes": False, "action_id": "trash:neo://app"},
+        {"cmd": "confirm", "yes": False, "action_id": "trash:host"},
+    ]
+    assert [a for a in answers if a.get("scope") == "task"] == [
+        {"cmd": "confirm", "yes": True, "action_id": "trash:t", "scope": "task"}
+    ] * 3
+    assert page == "403"
+
+
+def test_the_voice_knows_whether_a_card_is_on_screen(monkeypatch):
+    """`card_on_screen`: a UI that shows the pending card's buttons is connected — NEO's own page,
+    the notch's page, or a host (the notch's native buttons). A local tool shows nothing. The
+    voice asks aloud once and leaves the rest to those buttons (neo2.core.voice.live)."""
+
+    async def run():
+        srv, port, _ = await _server(monkeypatch)
+        tok = ws_mod.ws_token()
+        got = {"nobody": ws_mod.card_on_screen()}
+
+        async def while_connected(origin=None, role=None):
+            q = f"/?token={tok}" + (f"&role={role}" if role else "")
+            headers = {"Origin": origin} if origin else None
+            async with websockets.connect(f"ws://127.0.0.1:{port}{q}", additional_headers=headers) as c:
+                await asyncio.wait_for(c.recv(), 3)
+                await asyncio.sleep(0.05)
+                return ws_mod.card_on_screen()
+
+        try:
+            got["a tool"] = await while_connected()
+            got["a host"] = await while_connected(role="host")
+            got["the notch's page"] = await while_connected(origin="neo://app")
+            got["NEO's page"] = await while_connected(origin="tauri://localhost")
+            await asyncio.sleep(0.1)
+            got["after they left"] = ws_mod.card_on_screen()
+            return got
+        finally:
+            if srv._server:
+                srv._server.close()
+            monkeypatch.setattr(ws_mod, "_serving", None)
+
+    assert asyncio.run(run()) == {
+        "nobody": False,
+        "a tool": False,
+        "a host": True,
+        "the notch's page": True,
+        "NEO's page": True,
+        "after they left": False,
+    }

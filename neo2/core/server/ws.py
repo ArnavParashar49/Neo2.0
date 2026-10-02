@@ -61,6 +61,13 @@ browser engine puts on every websocket a page opens, which the page can neither 
     kept the other end of the socket pair (shell_link.py), which nothing can connect to. So what a
     host's Settings show about NEO.app's permissions is what NEO.app itself said, and `quit` goes
     to NEO.app and nobody else. A `shell_status` on the websocket is refused, whoever sends it.
+  - `confirm` — the answer to a pending confirmation — is anyone's who was admitted and names the
+    card: NEO.app's own page, NEO's page in the notch, and a host (NotchHub's native Allow /
+    Cancel buttons under the notch send it over the host's connection). It must carry the exact
+    `action_id` of the card it answers, which only a client that was sent the card knows, so a
+    stale or guessed answer approves nothing. No web page the user merely visits can send it: a
+    foreign Origin is refused at the door. A local tool can — it is the user's own program (see
+    below), and could as well type "yes".
   What this does not claim: a program running as the user can read the token and send any header
   it likes — it is the user, and could as well kill NEO or edit its files. It can be a host, and
   ask for the menu. The roles keep web content out of the menu and every honest client in its
@@ -149,6 +156,17 @@ def ws_token() -> str:
     return tok
 
 
+_serving: UIServer | None = None  # the server started in this process (NEO.app's core has one)
+
+
+def card_on_screen() -> bool:
+    """Whether a UI that shows a pending confirmation's buttons is connected now: NEO.app's page,
+    NEO's page in the notch, or a host (NotchHub's Allow / Cancel under the notch). A local tool
+    shows nothing. The voice asks aloud once and leaves the rest to those buttons."""
+    s = _serving
+    return s is not None and any(cl.kind in ("app", "page", "host") for cl in list(s._clients.values()))
+
+
 CommandHandler = Callable[[dict[str, Any]], Awaitable[None]]
 _QUEUE_MAX = 500
 _POSTER_KEEP_S = 600.0  # a closed card's poster stays in the replay this long
@@ -208,6 +226,8 @@ class UIServer:
 
         song_live.channel = self
         self._token = ws_token()
+        global _serving
+        _serving = self
         # No per-message deflate: the socket is local, and page frames are JPEGs, which don't
         # compress — zlib on every frame was most of the core's cost of the live view.
         self._server = await serve(

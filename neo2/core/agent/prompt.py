@@ -114,7 +114,9 @@ _HOW_TO_WORK: tuple[tuple[str, frozenset[str] | None], ...] = (
     (
         "- If a result says NEEDS_CONFIRM, stop and ask the user the question in it, verbatim and short.\n"
         "  Never work around a confirmation (another tool, another route to the same effect). Only the\n"
-        "  user can approve: you never can. If it says NEEDS_USER, ask the one thing you need.\n",
+        "  user can approve: you never can. If it says NEEDS_USER, ask the one thing you need.\n"
+        "  Don't ask permission in words first (\"should I delete it?\"): call the tool — NEO itself asks\n"
+        "  the user, once, when an OK is needed.\n",
         None,
     ),
     (
