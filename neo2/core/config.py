@@ -237,7 +237,47 @@ class Settings(BaseSettings):
     embeddings: Literal["local", "off"] = "local"  # off: keyword-only recall, no local model
     memory_enabled: bool = True  # long-term memory (memory.sqlite3) at all
     playbooks: bool = True  # recall and save the tool paths of past tasks (needs memory)
-    summaries: bool = True  # session summaries (needs memory)
+    summaries: bool = True  # conversation summaries (needs memory)
+    # The journal (neo2.core.memory.journal): every line you say or type and every line NEO says is
+    # written to the memory database as it happens, so NEO can find what was said last week and
+    # a voice session that closed (or a crash) loses nothing. Off: only what NEO is told to
+    # remember is kept.
+    memory_journal: bool = True
+    memory_retention_days: int = 365  # journal lines older than this are deleted (facts and summaries stay); 0 = keep
+    # Facts taken from what you say (neo2.core.memory.extract): "rules" reads only sentences that
+    # state one in so many words, on this Mac; "rules+llm" also has the fast brain read the
+    # journal while NEO is idle (never with NEO_CLOUD_MEMORY=off); "off" keeps only what NEO is
+    # told to remember.
+    memory_extract: Literal["rules+llm", "rules", "off"] = "rules+llm"
+    memory_recall_k: int = 6  # how many search hits a request's memory block may carry
+    # Gemini Live: after each sentence, tell the model what memory has about it before it
+    # answers. Off by default: a note that arrives after the model began would cut its answer
+    # short, and whether it arrives in time is only measured (logged) until it is switched on.
+    memory_live_inject: bool = False
+
+    @field_validator("memory_extract", mode="before")
+    @classmethod
+    def _memory_extract(cls, v):
+        """A typo must not stop NEO from starting, and never sends more to a model than asked:
+        an unknown value is "rules" (nothing leaves the Mac)."""
+        s = str(v or "").strip().lower().replace(" ", "")
+        if s in ("rules+llm", "llm", "all", "full", "on", "true", "yes"):
+            return "rules+llm"
+        if s in ("off", "none", "no", "false", "0"):
+            return "off"
+        return "rules"
+
+    @field_validator("memory_retention_days", "memory_recall_k", mode="before")
+    @classmethod
+    def _memory_number(cls, v, info):
+        """A number it can't read is the default (a typo never stops NEO from starting)."""
+        default = {"memory_retention_days": 365, "memory_recall_k": 6}[info.field_name]
+        try:
+            n = int(str(v).strip())
+        except (TypeError, ValueError):
+            return default
+        return max(0, min(n, 36500 if info.field_name == "memory_retention_days" else 12))
+
     persona: str | None = None  # replaces the identity paragraph of the prompt; the rules stay
     instructions: str = ""  # appended to the system prompt
     include_username: bool = True  # the macOS user name in the prompt's context line
@@ -402,6 +442,11 @@ class LibrarySettings(Settings):
     groq_vision_model: str = ""
     embeddings: Literal["local", "off"] = "off"
     memory_enabled: bool = False
+    # Nothing of a conversation is stored unless the host turns it on: no journal, and no facts
+    # taken from what is said (with the journal on, "rules" stays on the machine; "rules+llm"
+    # sends journal lines to the agent's fast brain while it is idle).
+    memory_journal: bool = False
+    memory_extract: Literal["rules+llm", "rules", "off"] = "off"
     learn: bool = False
     voice: VoiceBackend = "off"
     browser_headless: bool = True
@@ -609,7 +654,9 @@ def _refuse_foreign_folder(data_dir: Path) -> None:
 # database it didn't make — a host's own, NEO.app's — is never an agent's memory, nor erased.
 AGENT_DB_ID = 0x4E454F41
 _SQLITE_MAGIC = b"SQLite format 3\x00"
-_NEO_TABLES = re.compile(r"memory|memory_vec|memory_fts(?:_[a-z]+)?|playbook|playbook_vec|sessions|sqlite_\w+")
+_NEO_TABLES = re.compile(
+    r"(?:memory|sessions|turns)(?:_(?:fts|tri)(?:_[a-z]+)?|_vec|_vocab)?|playbook|playbook_vec|conversations|meta|sqlite_\w+"
+)
 
 
 def agent_memory_db(path: str | os.PathLike) -> bool:

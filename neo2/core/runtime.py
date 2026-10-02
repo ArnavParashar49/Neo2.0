@@ -294,7 +294,8 @@ def secret_roots() -> list[Path]:
     return out
 
 
-_SIDE_FILES = ("-wal", "-shm", "-journal")  # what SQLite keeps next to a database
+# What SQLite keeps next to a database, and the copy NEO keeps of it from before a schema upgrade.
+_SIDE_FILES = ("-wal", "-shm", "-journal", ".bak-v0", ".bak-v1", ".bak-v2")
 
 
 def _kept(rt: Runtime) -> list[Path]:

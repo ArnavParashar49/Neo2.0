@@ -30,14 +30,16 @@ class App:
         self.voice = None  # set in run() when a backend is available
         self._tasks: set[asyncio.Task] = set()
 
-    async def handle_text(self, text: str, *, speak: bool = True) -> None:
-        """Handle one request. Several may be in flight at once (the session runs them as jobs)."""
-        self.session.memory_context = await asyncio.to_thread(store().prompt_context, text)
+    async def handle_text(self, text: str, *, speak: bool = True, source: str = "typed") -> None:
+        """Handle one request. Several may be in flight at once (the session runs them as jobs;
+        each works out its own memory context: neo2.core.agent.session). `source`: "typed", or
+        "voice" for the on-device voice's transcription — what the journal records."""
         task = asyncio.current_task()
         if task:
             self._tasks.add(task)
         try:
-            reply = await self.session.handle(text, from_user=True)  # typed, or the user's own speech
+            # typed, or the user's own speech
+            reply = await self.session.handle(text, from_user=True, source="voice" if source == "voice" else "typed")
             if speak and self.voice and reply.text and not reply.silent:
                 await self.voice.speak(reply.text)
         except asyncio.CancelledError:
@@ -45,6 +47,10 @@ class App:
         finally:
             if task:
                 self._tasks.discard(task)
+
+    async def handle_speech(self, text: str) -> None:
+        """What the on-device voice heard the user say."""
+        await self.handle_text(text, source="voice")
 
     async def erase(self) -> dict[str, int]:
         """Erase everything NEO kept about the user. Everything that could write a piece of the
@@ -109,8 +115,14 @@ class App:
         if reply is None:
             await bus().note("That question had already expired — nothing was done.")
             return
+        live = self.voice is not None and hasattr(self.voice, "inform")
+        if reply.text and not reply.silent and not live:
+            # What NEO answers is in the journal (Live writes down what it then says itself).
+            from neo2.core.memory import journal
+
+            journal.log_turn("assistant", reply.text, route=reply.route, tainted=bool(reply.taint))
         if self.voice and reply.text and not reply.silent:  # approved and done: nothing to say
-            if hasattr(self.voice, "inform"):
+            if live:
                 await self.voice.inform(reply.text)  # Live says what went wrong, in the user's language
             else:
                 await self.voice.speak(reply.text)
@@ -121,6 +133,9 @@ class App:
             text = str(cmd.get("text", ""))
             if confirm.peek() is not None and (ans := answer_of(text)) is not None:
                 await bus().say(text, role="user")
+                from neo2.core.memory import journal
+
+                journal.log_turn("user", text, route="confirm", source="typed")
                 await self.answer(ans, said=text)  # typed straight to the question, in any voice mode
             elif self.voice and getattr(self.voice, "handles_text", False):
                 from neo2.core.tools.browser_live import live
@@ -309,7 +324,7 @@ async def run() -> None:
         from neo2.core.tools.computer import ocr
 
         prefetch.register_warmer(ocr.warm)
-    asyncio.create_task(_checkpoint_loop(app, _idle))
+    asyncio.create_task(_memory_loop(app, _idle))
     bus().subscribe(_log_activity)
     print("NEO is running. Say 'Neo', or type in the overlay.")
     await stop.wait()
@@ -319,6 +334,12 @@ async def run() -> None:
             await asyncio.wait_for(app.voice.close(), 2)
         except Exception:  # noqa: BLE001
             pass
+    # What was said is on disk already (the journal commits within a quarter of a second): this
+    # only writes the last lines out. Nothing about memory depends on the rest of the shutdown.
+    from neo2.core.memory import journal
+
+    with contextlib.suppress(Exception):
+        await asyncio.wait_for(asyncio.to_thread(journal.flush, 0.8), 1.0)
     try:
         from neo2.core.tools import render
         from neo2.core.tools.browser import shutdown as close_browser
@@ -326,27 +347,80 @@ async def run() -> None:
         await asyncio.wait_for(close_browser(), 2)
         with contextlib.suppress(Exception):  # the invisible page renderer (atexit would also do it)
             await asyncio.wait_for(render.shutdown(), 2)
-        if s := await asyncio.wait_for(app.session.checkpoint(final=True, budget_s=5.0), _SUMMARY_BUDGET_S):
-            print(f"[memory] session saved ({len(s)} chars)")  # not what was said: logs stay content-free
+    except Exception as e:  # noqa: BLE001
+        print(f"[neo] browser shutdown skipped: {str(e)[:80]}")
+    # A short best effort at the open conversation's summary; one that doesn't make it is
+    # written at the next start (neo2.core.memory.summarize.catch_up).
+    try:
+        if s := await asyncio.wait_for(app.session.checkpoint(final=True, budget_s=2.5), _SUMMARY_BUDGET_S):
+            print(f"[memory] summaries saved ({s})")  # not what was said: logs stay content-free
     except TimeoutError:
-        print("[memory] shutdown summary took too long — skipped")
+        print("[memory] shutdown summary took too long — it is written at the next start")
     except Exception as e:  # noqa: BLE001
         print(f"[memory] shutdown summary skipped: {str(e)[:80]}")
+    with contextlib.suppress(Exception):
+        await asyncio.to_thread(journal.close, 0.5)
 
 
 _CHECKPOINT_EVERY_S = 20 * 60
+_MEMORY_TICK_S = 30.0  # how often the memory's background work looks for something to do
+_EXTRACT_IDLE_S = 60.0  # the model reads the journal for facts only after this long without a line
+_PRUNE_EVERY_S = 86400.0
 
 
-async def _checkpoint_loop(app: App, is_idle) -> None:
-    """Summarise the conversation every so often while idle, so a crash or a power cut loses at
-    most the last stretch instead of the whole day."""
+async def _memory_loop(app: App, is_idle, *, tick_s: float = _MEMORY_TICK_S) -> None:
+    """Memory's background work, only ever while NEO is idle — never on a request's path:
+
+    * at start, the conversations an earlier run left without a summary (it was killed, or quit
+      mid-conversation) get one, and journal lines past their keep-by date go;
+    * a conversation that has gone quiet gets its summary (written again if it goes on);
+    * after a minute without a line, the fast brain reads the new journal lines for facts
+      (neo2.core.memory.extract — nothing with NEO_CLOUD_MEMORY=off or NEO_MEMORY_EXTRACT=rules);
+    * the vectors that couldn't be made while the embedding model was loading are made, and the
+      journal's writer is nudged to write the recall counters.
+
+    With the journal off, the session's history is summarised now and then instead, as before."""
+    from neo2.core.memory import embed, extract, journal, summarize
+
+    s = settings()
+    if not s.memory_enabled:
+        return
+    last_checkpoint, last_prune = time.time(), 0.0
+    first = True
     while True:
-        await asyncio.sleep(_CHECKPOINT_EVERY_S)
-        if is_idle():
-            try:
-                await app.session.checkpoint()
-            except Exception as e:  # noqa: BLE001
-                print(f"[memory] checkpoint skipped: {str(e)[:80]}")
+        await asyncio.sleep(2.0 if first else tick_s)
+        try:
+            if not is_idle():
+                continue
+            now = time.time()
+            if embed.ready() and not store()._backfilled:
+                # vectors for what was written while the embedding model was still loading
+                await asyncio.to_thread(store().backfill)
+            j = journal.journal()
+            if j is None:  # no journal: summaries come from the session's history, every so often
+                first = False
+                if now - last_checkpoint >= _CHECKPOINT_EVERY_S:
+                    last_checkpoint = now
+                    await app.session.checkpoint()
+                continue
+            if first or now - last_prune >= _PRUNE_EVERY_S:
+                last_prune = now
+                gone = await asyncio.to_thread(store().prune_turns, s.memory_retention_days)
+                if gone:
+                    print(f"[memory] {gone} journal lines older than {s.memory_retention_days} days removed")
+            if first:
+                first = False
+                if s.summaries and (n := await summarize.catch_up()):
+                    print(f"[memory] caught up: {n} conversation(s) from before summarised")
+            elif s.summaries and (n := await summarize.summarize_due()):
+                print(f"[memory] {n} conversation(s) summarised")
+            if is_idle() and now - j.last_turn_at >= _EXTRACT_IDLE_S:
+                await extract.idle_pass()
+            j.kick()  # (the recall counters)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            print(f"[memory] background work skipped: {str(e)[:80]}")
 
 
 _VOICE_RETRY_S = 60.0
@@ -381,7 +455,7 @@ async def _voice_supervisor(app: App, stop: asyncio.Event) -> None:
     while not stop.is_set():
         if app.voice is None:
             try:
-                app.voice = await make_voice(app.handle_text, app.session)
+                app.voice = await make_voice(app.handle_text, app.session, on_speech=app.handle_speech)
                 health.report("voice", None)
             except Exception as e:  # noqa: BLE001
                 print(f"[voice] unavailable: {str(e)[:160]}")
@@ -399,7 +473,7 @@ async def _voice_supervisor(app: App, stop: asyncio.Event) -> None:
             await _wait_idle(app, live, limit_s=120.0)
             print(f"[voice] Gemini Live is down ({why}); switching to the on-device voice")
             try:
-                local = await make_local(app.handle_text)  # up before Live goes: never a gap
+                local = await make_local(app.handle_speech)  # up before Live goes: never a gap
             except Exception as e:  # noqa: BLE001
                 print(f"[voice] on-device voice failed too: {str(e)[:120]}")
                 health.report("voice", f"Voice is unavailable: {reason}. You can still type; NEO keeps trying.")
@@ -475,7 +549,7 @@ async def _back_to_live(app: App, stop: asyncio.Event, kind: str, on_down) -> No
         return
 
 
-_SUMMARY_BUDGET_S = 7.0  # the model gets 5 s inside; this covers the crude fallback + the write
+_SUMMARY_BUDGET_S = 3.0  # the model gets 2.5 s inside; this covers the crude fallback + the write
 
 
 async def _exit_with_parent(stop: asyncio.Event) -> None:

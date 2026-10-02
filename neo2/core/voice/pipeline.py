@@ -45,7 +45,9 @@ async def make_local(on_text: TextHandler):
     return v
 
 
-async def make_voice(on_text: TextHandler, agent_session=None):
+async def make_voice(on_text: TextHandler, agent_session=None, *, on_speech: TextHandler | None = None):
+    """`on_text`: what handles typed words (Gemini Live hands them over when it is down);
+    `on_speech`: what handles the on-device voice's transcribed speech (default: the same)."""
     s = settings()
     mode = s.voice
     if mode in ("auto", "live") and s.gemini_api_key:
@@ -68,4 +70,4 @@ async def make_voice(on_text: TextHandler, agent_session=None):
             await v.start()
             print(f"[voice] Gemini Live ({s.gemini_live_model})")
             return v
-    return await make_local(on_text)
+    return await make_local(on_speech or on_text)

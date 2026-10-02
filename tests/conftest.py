@@ -24,6 +24,7 @@ __all__ = [
     "_isolated_data_dir",
     "_never_the_real_data_dir",
     "_no_real_embeddings",
+    "_fresh_memory_store",
     "_fresh_learning_state",
     "_no_shadow_dry_runs",
     "_app_mode",
@@ -71,6 +72,25 @@ def _no_real_embeddings(monkeypatch):
     from neo2.core.memory import embed
 
     monkeypatch.setattr(embed, "embed_texts", lambda texts: None)
+
+
+@pytest.fixture(autouse=True)
+def _fresh_memory_store(_isolated_data_dir):
+    """NEO.app's memory store is one per process: closed and dropped around every test, so no
+    test reads the database (or leaves the journal's writer thread) of the one before it."""
+    from neo2.core.memory import store as store_mod
+
+    def drop():
+        st, store_mod._store = store_mod._store, None
+        if st is not None:
+            try:
+                st.close()
+            except Exception:  # noqa: BLE001 - already closed by the test
+                pass
+
+    drop()
+    yield
+    drop()
 
 
 @pytest.fixture(autouse=True)

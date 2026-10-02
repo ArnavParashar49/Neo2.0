@@ -401,8 +401,6 @@ class AsyncAgent:
                 try:
                     session = sc.session
                     assert session is not None
-                    if self._rt.settings.memory_enabled:
-                        session.memory_context = await asyncio.to_thread(_memory_context, text)
                     with confirm.collecting() as sink:
                         reply = await session.handle(
                             text,
@@ -1191,15 +1189,6 @@ def _image(i: bytes | tuple[bytes, str]) -> ImagePart:
     raise TypeError("an image is bytes (PNG) or (bytes, mime type)")
 
 
-def _memory_context(text: str) -> str:
-    from neo2.core.memory.store import store
-
-    try:
-        return store().prompt_context(text)
-    except Exception:  # noqa: BLE001 — memory is context, never a failure
-        return ""
-
-
 def _frozen(params: Mapping[str, Any]) -> Mapping[str, Any]:
     try:
         d = copy.deepcopy(dict(params))
@@ -1253,6 +1242,7 @@ def _finalize(rt_ref: weakref.ReferenceType[runtime.Runtime], tmp: Path | None) 
 # would keep (an embedded agent never writes those; erased all the same if present).
 _OWN_FILES = (
     "memory.sqlite3", "memory.sqlite3-wal", "memory.sqlite3-shm", "memory.sqlite3-journal",
+    "memory.sqlite3.bak-v0", "memory.sqlite3.bak-v1", "memory.sqlite3.bak-v2",  # kept before a schema upgrade
     "audit.log", "audit.log.1", "audit.log.tmp", "brain_cooldowns.json", "cerebras_spend.json",
     "decide.json", "decide_shadow.log", "media_uris.json", "reflex_extra.jsonl", "reflex_learn.json",
 )  # fmt: skip
@@ -1279,7 +1269,7 @@ def _erase_files(s: Any) -> int:
     # Memory kept elsewhere (MemoryConfig.path): that file and its side files, only while it's the
     # database NEO made for the agent (a table the host added since keeps it: its rows are gone).
     if mp is not None and agent_memory_db(mp):
-        for p in (Path(mp), *(Path(str(mp) + x) for x in ("-wal", "-shm", "-journal"))):
+        for p in (Path(mp), *(Path(str(mp) + x) for x in ("-wal", "-shm", "-journal", ".bak-v0", ".bak-v1", ".bak-v2"))):
             if p.is_file():
                 p.unlink(missing_ok=True)
                 n += 1

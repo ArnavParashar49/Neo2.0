@@ -207,8 +207,14 @@ def test_memory_store_survives_concurrent_use(tmp_path):
 
 
 def test_history_is_bounded_and_drops_old_screenshots(monkeypatch):
+    from neo2.core import config
     from neo2.core.agent import session as sess_mod
     from neo2.core.providers.base import ImagePart, Message, ToolResult
+
+    # Without the journal (an embedded agent's default): what leaves the history is summarised
+    # first. With it, summaries are written from the journal (tests/test_memory_journal.py).
+    monkeypatch.setenv("NEO_MEMORY_JOURNAL", "0")
+    monkeypatch.setattr(config, "_settings", None)
 
     summarised = []
 

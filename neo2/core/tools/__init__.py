@@ -95,6 +95,11 @@ MACOS_ONLY: frozenset[str] = frozenset(PRESETS["mac"]) | frozenset(PRESETS["mac_
 # process-wide (NEO.app's), not kept per agent yet; browse keeps the job it runs, and the one it
 # may pick up again, process-wide too (and drives NEO.app's own browser and chat card).
 REFUSED: dict[str, str] = {
+    **dict.fromkeys(
+        ("memory_search", "remember", "forget"),
+        "an embedded agent's memory tool is `memory` (remember, recall and forget in one): the separate "
+        "memory_search / remember / forget tools are NEO.app's",
+    ),
     "play_music": "play_music isn't available to embedded agents yet: which app plays what is learned "
     "process-wide (NEO.app's), not per agent",
     "browse": "browse isn't available to embedded agents yet: its jobs are NEO.app's (one browser, one "

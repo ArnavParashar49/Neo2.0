@@ -1,6 +1,7 @@
 """Erase everything NEO has kept about the user, in one step.
 
-What goes: memories (profile, lessons, notes), playbooks, session summaries, the requests Laya
+What goes: memories (profile, lessons, notes), the journal of what was said (every line, and
+the copy of the database kept from before an upgrade), playbooks, conversation summaries, the requests Laya
 learned from (on disk, still settling in RAM, and the correction memory) and their cached
 features, which apps worked for what (and the songs/videos, sites, lists and contacts NEO
 learned, and the flows it replays), the audit trail, the core's logs, and NEO's own browser profile (its cookies and logins). What stays: settings and keys (~/.neo/.env), timers that are still running, and

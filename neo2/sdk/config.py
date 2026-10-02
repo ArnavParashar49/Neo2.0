@@ -34,6 +34,12 @@ class MemoryConfig:
     cloud: Literal["full", "profile", "off"] = "profile"  # how much of it rides along to the cloud model
     playbooks: bool = True  # recall and save the tool paths of past tasks
     summaries: bool = False  # summarise long conversations into memory
+    # Nothing of a conversation is stored unless you turn it on. journal: every line your user says
+    # (source="user") and every answer is kept in the memory file, searchable by the agent's memory
+    # tool. extract: "rules" also keeps the facts a user states in so many words ("my name is …"),
+    # read on the machine, no model.
+    journal: bool = False
+    extract: Literal["off", "rules"] = "off"
 
 
 class AgentConfig(BaseModel):
@@ -159,6 +165,8 @@ class AgentConfig(BaseModel):
             "playbooks": bool(mem and mem.playbooks),
             "summaries": bool(mem and mem.summaries),
             "cloud_memory": mem.cloud if mem else "off",
+            "memory_journal": bool(mem and mem.journal),
+            "memory_extract": mem.extract if mem and mem.journal else "off",
             "fast_paths": self.fast_paths,
             "persona": self.persona,
             "instructions": self.instructions,

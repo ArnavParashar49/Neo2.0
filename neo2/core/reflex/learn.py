@@ -36,6 +36,7 @@ import time
 from pathlib import Path
 
 from neo2.core.config import settings
+from neo2.core.memory.redact import MENTIONS_SECRET
 
 EXTRA = "reflex_extra.jsonl"
 STATE = "reflex_learn.json"
@@ -67,11 +68,9 @@ _PAYLOAD = re.compile(
     r"|^(?P<cmd2>(?:text|message|msg|tell|whatsapp|dm|ping)\s+(?!(?:me|us|a|an|the|about)\b)\S+)\s+\S+(?:\s+\S+){2,}$",
     re.I,
 )
-_SECRET = re.compile(
-    r"\b(?:password|passcode|pass\s*word|pin|otp|one[-\s]?time\s+code|cvv|api\s*key|token|secret|ssn)\b"
-    r"|\d[\d\s-]{5,}\d",  # long digit runs: codes, card and phone numbers
-    re.I,
-)
+# A request that mentions a secret, or carries a long digit run, is never recorded (the pattern is
+# shared with the memory's redaction: neo2.core.memory.redact).
+_SECRET = MENTIONS_SECRET
 _SKIP = re.compile(r"^\s*(?:(?:hey\s+)?neo|stop|cancel|never\s*mind|ok(?:ay)?|yes|yeah|no|thanks?(?:\s+you)?)\s*[.!?]*\s*$", re.I)
 _DEVANAGARI = re.compile("[ऀ-ॿ]")
 _KIND = re.compile(r"[a-z_]{1,32}")
@@ -494,7 +493,8 @@ def summary() -> str:
         f"{c.get('barge_ins', 0)} stopped within 3 s",
         f"tool lane {c.get('tool_lane', 0)}",
         f"unsure {100 * c.get('unsure', 0) / dec:.0f}%" if dec else "unsure n/a",
-        f"memory hits {c.get('memory_hits', 0)}",
+        # Laya's correction cache (neo2.core.reflex.memory) — not NEO's long-term memory
+        f"correction hits {c.get('memory_hits', 0)}",
     ]
     return f"[reflex] {day}: " + " · ".join(parts)
 

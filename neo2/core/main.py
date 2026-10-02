@@ -33,20 +33,22 @@ def _print_event(ev) -> None:
 
 async def text_repl(verbose: bool) -> None:
     from neo2.core.agent.session import Session
-    from neo2.core.memory.store import store
     from neo2.core.reflex import warmup
     from neo2.core.tools import load_all
 
     load_all()
-    sess = Session()
-    sess.memory_context = store().prompt_context()
+    sess = Session()  # (each request works out its own memory context: neo2.core.agent.session)
     warmup(sess.reflex)
     if verbose:
         bus().subscribe(_print_event)
     print("NEO ready. Type a request (Ctrl-D to quit).")
     import time
 
+    from neo2.core.memory import journal, summarize
+
     started = time.time()
+    if journal.enabled():  # conversations an earlier run left without a summary get one now
+        asyncio.create_task(summarize.catch_up())
     loop = asyncio.get_event_loop()
     while True:
         try:
@@ -56,16 +58,19 @@ async def text_repl(verbose: bool) -> None:
             break
         if not text.strip():
             continue
-        sess.memory_context = store().prompt_context(text)
         reply = await sess.handle(text, from_user=True)
         print(f"neo> {reply.text}")
-    from neo2.core.memory.summarize import summarize_session
     from neo2.core.tools import render
     from neo2.core.tools.browser import shutdown as close_browser
 
     await close_browser()
     await render.shutdown()
-    if summary := await summarize_session(sess.history, started):
+    if journal.enabled():  # the conversation is in the journal: its summary is written from there
+        await asyncio.to_thread(journal.flush, 2.0)
+        if n := await summarize.summarize_due(idle_s=0.0):
+            print(f"[memory] {n} conversation(s) summarised", file=sys.stderr)
+        await asyncio.to_thread(journal.close, 1.0)
+    elif summary := await summarize.summarize_session(sess.history, started):
         print(f"[memory] session saved: {summary[:120]}", file=sys.stderr)
 
 

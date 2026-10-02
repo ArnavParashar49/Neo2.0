@@ -122,6 +122,13 @@ _NO_EXTRAS: Mapping[str, Any] = types.MappingProxyType({})
 _request_extras: contextvars.ContextVar[Mapping[str, Any]] = contextvars.ContextVar("request_extras", default=_NO_EXTRAS)
 # Whose words the request is (Session.handle's origin): only the user's own start or teach a replay.
 _request_origin: contextvars.ContextVar[str] = contextvars.ContextVar("request_origin", default="")
+# What memory says for THIS request (neo2.core.memory.store.Store.context), worked out inside it the
+# first time a model is about to be asked: requests run at once, so it is never an attribute of
+# the session that the next request overwrites. None = not worked out (yet).
+_memory_ctx: contextvars.ContextVar[str | None] = contextvars.ContextVar("memory_ctx", default=None)
+# Set while the user's own request is being handled and journaled (neo2.core.memory.journal): a
+# request handed on inside it (new words typed while a question was pending) is written once.
+_journaling: contextvars.ContextVar[bool] = contextvars.ContextVar("journaling", default=False)
 _SCREEN_CATEGORY = "computer"  # the tools that read and work the screen
 
 
@@ -220,6 +227,9 @@ class Session:
     _bg: set = field(default_factory=set)  # background summaries in flight
     _expiries: set = field(default_factory=set)  # the timers that close unanswered questions
     _hist_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    # When this session began: the journal lines it wrote itself since then are in `history`
+    # already, so the memory block doesn't repeat them (Store.context's `not_after`).
+    _born: float = field(default_factory=time.time)
     max_agent_jobs: int = _MAX_AGENT_JOBS  # agent runs at once; more wait their turn
     _agent_slots: asyncio.Semaphore = field(init=False)
     jobs: dict[str, asyncio.Task] = field(default_factory=dict)
@@ -238,13 +248,19 @@ class Session:
         taint: list[str] | tuple[str, ...] = (),
         origin: Literal["user", "live"] | None = None,
         extras: Mapping[str, Any] | None = None,
+        source: Literal["typed", "voice"] = "typed",
     ) -> Reply:
         """Handle one request. `from_user` = these are the user's own words (typed, or their
         transcribed speech) — only then can they answer a pending confirmation. Text a model wrote
         (Gemini Live's agent_task goal) never can. `origin`: who chose the words a fast path runs,
         the user or Live's model; by default the user only with `from_user` (Live passes "user" for
         the user's own sentence, which it hands over without `from_user`). `extras`: handed to
-        every tool this request calls (ToolContext.extras)."""
+        every tool this request calls (ToolContext.extras). `source`: how the user's words came
+        ("typed", or "voice" for their transcribed speech) — what the journal records.
+
+        The user's own words and what NEO answers go to the journal (neo2.core.memory.journal) here:
+        a request Gemini Live relays (a model's goal, or the sentence Live journaled itself) is
+        Live's to write, never this session's."""
         origin = origin or ("user" if from_user else "live")
         # This request's taint and extras hold while it runs and are put back when it returns: the
         # caller's next call from the same task (approving another agent's card, say) never gets
@@ -259,7 +275,20 @@ class Session:
             (_request_taint, _request_taint.set(tuple(taint))),
             (_request_extras, _request_extras.set(request_extras)),
             (_request_origin, _request_origin.set(origin)),
+            (_memory_ctx, _memory_ctx.set(None)),  # this request's own memory block, worked out in it
         ]
+        # The user's own words: typed or spoken to NEO.app, or what an embedding host says is its
+        # user's (an agent whose host turned the journal on).
+        journaled = (from_user or (own and origin == "user")) and not _journaling.get() and _journal_on()
+        generation = 0
+        if journaled:
+            from neo2.core import privacy
+            from neo2.core.memory import journal
+
+            generation = privacy.generation()
+            reset.append((_journaling, _journaling.set(True)))
+            said = _WAKE_PREFIX.sub("", text.strip(), count=1).strip() or text.strip()
+            journal.log_turn("user", said, source=source, generation=generation)
         if conversation or own:
             token = _conversation.set(conversation)
             if own:
@@ -276,7 +305,10 @@ class Session:
             # midnight, a refused key) is heard with the reply — each once a day, this agent's only.
             from neo2.core.providers.cerebras_hooks import add_spoken_notes
 
-            return add_spoken_notes(reply)
+            reply = add_spoken_notes(reply)
+            if journaled:
+                _journal_reply(reply, source, generation)
+            return reply
         finally:
             for var, tok in reversed(reset):
                 var.reset(tok)
@@ -352,7 +384,9 @@ class Session:
         # Regex fast paths are precise; trust them unless the reflex says this is conversation.
         # ("type Laptops in the heading" reads as an agent task to the reflex, but the words are
         # the whole job — no model needed.) A plan covers the whole utterance or nothing.
-        if d.intent != "chat" and settings().fast_paths and (steps := fastpath.plan(text)):
+        # (A memory write — "remember that …", "forget what I said about …" — runs here even when
+        # the reflex calls the sentence chat: a chat model would only say it will.)
+        if settings().fast_paths and (steps := fastpath.plan(text)) and (d.intent != "chat" or _memory_write(steps)):
             return await self._quick(text, d, steps, job=job, origin=origin)
         # The by-utterance lane: the user's own words point at a control ("start wala button dabao",
         # "click the new game button") and a tool that grounds them itself takes the whole request —
@@ -441,6 +475,7 @@ class Session:
         outcomes.route(job, "chat")
         await bus().set_state(NeoState.THINKING, job=job)
         t0 = time.time()
+        await self._recall(text)
         msgs = self._trimmed() + [Message.user(_with_conversation(text))]
         out: list[str] = []
         chain = brain("fast")
@@ -714,6 +749,7 @@ class Session:
                 first_look = prefetch.start(
                     text, d, only=only, game=game, images=images, sees=prefetch.sees(chain)
                 )
+                await self._recall(text)  # (while the first look is read)
                 playbook_ctx = await asyncio.to_thread(self._playbooks_for, text) if _playbooks_on() else ""
                 if only:  # the reflex chose: that tool's schema and nothing else to get lost in
                     from neo2.core.agent.toolselect import MORE_TOOLS
@@ -1012,7 +1048,10 @@ class Session:
         snapshot = self._trimmed(continuing=request)
         ctx = ToolContext(user_text=text or "yes", taint=taint, extras=dict(extras))
         chain = brain("agent")
+        # (an answer may come outside any request — the card's button: its memory block is its own)
+        memory_token = _memory_ctx.set(None) if _memory_ctx.get() is None else None
         try:
+            await self._recall(request or text)
             with grants.task(task):  # the same task goes on: its grants and notes still hold
                 res = await run_agent(
                     follow, provider=chain, system=self._system(), history=snapshot, ctx=ctx, effort="medium", job=job
@@ -1022,6 +1061,9 @@ class Session:
             if isinstance(e, asyncio.CancelledError) and episode:
                 outcomes.cancelled(episode)  # stopped before it finished: not what they wanted
             raise
+        finally:
+            if memory_token is not None:
+                _memory_ctx.reset(memory_token)
         await self._remember(*res.messages[len(snapshot) :])
         if episode:  # how the job the user said yes to actually ended (maybe at another question)
             _learn_from(episode, res)
@@ -1062,7 +1104,23 @@ class Session:
 
     # ---- helpers ---------------------------------------------------------------------
     def _system(self, extra: str = "", *, screen_tools: list[str] | None = None) -> str:
-        return build_prompt(self.memory_context, extra, screen_tools=screen_tools)
+        memory = _memory_ctx.get()  # this request's own (see _recall); else what a caller set
+        return build_prompt(self.memory_context if memory is None else memory, extra, screen_tools=screen_tools)
+
+    async def _recall(self, text: str) -> None:
+        """Work out what memory says for this request (once per request, off the event loop): the
+        profile, the lessons, the last conversations, what was said earlier today and the best
+        search hits for `text`. Kept in a context variable — two requests running at once each
+        get their own, where a shared attribute would give one the other's."""
+        if _memory_ctx.get() is not None or not settings().memory_enabled:
+            return
+        try:
+            block = await asyncio.to_thread(_memory_block, text, self._born)
+        except Exception as e:  # noqa: BLE001 — memory is context, never a failure
+            log.warning(f"[memory] recall failed: {str(e)[:80]}")
+            block = None
+        if block is not None:
+            _memory_ctx.set(block)
 
     async def _remember(self, *msgs: Message) -> None:
         from neo2.core import privacy
@@ -1089,7 +1147,9 @@ class Session:
                         (i for i in range(len(self.history) - 1, -1, -1) if self.history[i].role == "user"), 0
                     )
                 gone = self.history[self._summarized : cut]
-                if sum(1 for m in gone if m.role == "user") >= 1 and _summaries_on():
+                if sum(1 for m in gone if m.role == "user") >= 1 and _summaries_on() and not _journal_on():
+                    # (With the journal on, summaries are written from it — every line is on
+                    # disk already — and nothing here needs summarising before it is let go.)
                     self._spawn(self._summarize(gone, self._chunk_started))
                     self._chunk_started = time.time()
                 kept = self.history[cut:]
@@ -1122,6 +1182,14 @@ class Session:
         most the last stretch. Runs periodically while idle, and once at shutdown."""
         if not _summaries_on():
             return ""
+        if _journal_on():
+            # From the journal (neo2.core.memory.summarize): the conversations that have gone quiet —
+            # at shutdown, every one that has lines its summary doesn't cover.
+            from neo2.core.memory import journal, summarize
+
+            await asyncio.to_thread(journal.flush, 1.0)
+            n = await summarize.summarize_due(idle_s=0.0 if final else summarize.IDLE_S, budget_s=budget_s)
+            return f"{n} conversation{'s' if n != 1 else ''}" if n else ""
         async with self._hist_lock:
             chunk = self.history[self._summarized :]
             if sum(1 for m in chunk if m.role == "user") < (1 if final else _CHECKPOINT_MIN_ASKS):
@@ -1248,6 +1316,45 @@ def _summaries_on() -> bool:
     return s.memory_enabled and s.summaries
 
 
+def _journal_on() -> bool:
+    s = settings()
+    return bool(s.memory_enabled and s.memory_journal)
+
+
+def _memory_block(text: str, born: float) -> str | None:
+    """Store.context for one request (in a worker thread). None: this agent has no memory."""
+    from neo2.core.memory.store import MemoryDisabled, store
+
+    try:
+        return store().context(text, not_after=born if _journal_on() else None)
+    except MemoryDisabled:
+        return None
+
+
+def _memory_write(steps: list[tuple[str, dict]]) -> bool:
+    """A fast-path plan that only writes to memory (remember, forget): never a search."""
+    for name, args in steps:
+        t = registry().get(name)
+        if t is None or t.category != "memory" or t.read_only or args.get("action") == "recall":
+            return False
+    return bool(steps)
+
+
+def _journal_reply(reply: Reply, source: str, generation: int) -> None:
+    """What NEO answered goes to the journal: the words the user saw or heard (marked when they
+    quote a page, a mail or a file), and for what was simply done, which tools ran — their names,
+    never an argument or an output."""
+    from neo2.core.memory import journal
+
+    if reply.text and not reply.silent:
+        journal.log_turn(
+            "assistant", reply.text, route=reply.route, source=source, tainted=bool(reply.taint), generation=generation  # type: ignore[arg-type]
+        )
+    tools = list(reply.tools) or [st.tool for st in (reply.result.steps if reply.result else [])]
+    if tools:
+        journal.log_tools(tools, route=reply.route, generation=generation)
+
+
 def _with_conversation(text: str) -> str:
     """The request, plus the spoken conversation it came from as clearly quoted material. It goes
     in the user's turn, not the system prompt: those lines can contain web text NEO read aloud,
@@ -1278,7 +1385,7 @@ def _learn_from(job: str, res: AgentResult) -> None:
 # however the request was phrased ("John ki unread emails mein kya likha hai").
 _INFO_TOOLS = {
     "web_search", "web_fetch", "weather", "clock", "calendar_today", "mail_unread", "page_read", "safari_read",
-    "browse", "browser_read",
+    "browse", "browser_read", "memory_search",
 }  # fmt: skip
 
 

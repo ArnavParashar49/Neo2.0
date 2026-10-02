@@ -138,16 +138,27 @@ def warmup(reflex: Reflex | None = None) -> None:
     """Load Laya, then the memory embedder, in ONE background thread.
 
     Both lazily import `transformers`; two threads doing that at once trip its lazy-module
-    loader ("cannot import name 'AutoTokenizer'"), which silently disabled the reflex."""
+    loader ("cannot import name 'AutoTokenizer'"), which silently disabled the reflex. The
+    embedder's load is taken here, now (embed.hold): a remember or a recall in the meantime finds
+    it "loading" and uses keywords, instead of starting a second load beside Laya's."""
+    held = None
+    try:
+        from neo2.core.memory import embed
+
+        held = embed.hold()
+    except Exception as e:  # noqa: BLE001
+        log.warning(f"[memory] embedder warmup failed: {str(e)[:80]}")
 
     def _load() -> None:
-        get_laya()
         try:
-            from neo2.core.memory import embed
+            get_laya()
+        finally:
+            try:
+                from neo2.core.memory import embed
 
-            embed._get()
-        except Exception as e:  # noqa: BLE001
-            log.warning(f"[memory] embedder warmup failed: {str(e)[:80]}")
+                embed.load_held(held)
+            except Exception as e:  # noqa: BLE001
+                log.warning(f"[memory] embedder warmup failed: {str(e)[:80]}")
 
     threading.Thread(target=_load, daemon=True).start()
 

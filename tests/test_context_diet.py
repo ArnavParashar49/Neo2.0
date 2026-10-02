@@ -429,13 +429,13 @@ async def test_the_task_as_before_is_the_trees_own_numbers(monkeypatch):
     """The switched-off diet is the tree as it was: the same requests, token for token (this replica
     run on main 04757ee's providers: 21 requests of 139,317 input + 34,212 output tokens, two out of
     room; as the second game of a session, 242,370 input — on this tree's own prompt and tool list,
-    174,910 and 280,547, its context line held still). The numbers are this tree's: re-pin them when
+    178,684 and 284,322, its context line held still). The numbers are this tree's: re-pin them when
     the system prompt or the tool list changes."""
     as_before(monkeypatch)
     r = await replay(monkeypatch, Brain())
-    assert (len(r.brain.requests), r.input_tokens, r.output_tokens, r.retries) == (21, 174_910, 34_212, 2)
+    assert (len(r.brain.requests), r.input_tokens, r.output_tokens, r.retries) == (21, 178_684, 34_212, 2)
     second = await _game_after_game(monkeypatch)
-    assert (len(second.brain.requests), second.input_tokens, second.retries) == (21, 280_547, 2)
+    assert (len(second.brain.requests), second.input_tokens, second.retries) == (21, 284_322, 2)
 
 
 async def test_the_chess_task_on_the_diet_makes_the_same_moves_for_less(monkeypatch):

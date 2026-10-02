@@ -8,7 +8,8 @@ gets a short list instead:
    description; the top hits come in,
 2. category expansion — a multi-step task needs the whole family (browser_open alone is useless
    without browser_read/click), so the categories of the top hits are added,
-3. rules — screen-related requests always get the observe/act tools; memory is always present,
+3. rules — screen-related requests always get the observe/act tools; memory (and its search) is
+   always present,
 4. playbooks — tools a similar past task used are included,
 5. `more_tools(query)` — a meta-tool the model can call mid-run to pull in anything else.
 
@@ -34,7 +35,9 @@ from neo2.core.agent.registry import RegisteredTool, Registry
 from neo2.core.agent.registry import registry as default_registry
 from neo2.core.providers.base import ToolSpec
 
-ALWAYS = {"memory"}
+# Memory is always at hand: the one tool that saves, searches and forgets, and the search by itself
+# (what a model reaches for when the user asks about something earlier or about themselves).
+ALWAYS = ("memory", "memory_search")
 SCREEN = {
     "ax_tree",
     "ax_find",
@@ -64,8 +67,8 @@ _ASKED_SIM = 0.35  # …and a close one
 FAMILIES = {"browser", "computer"}
 _TOP_K = 6
 _MIN_SIM = 0.25
-_MAX_TOOLS = 18
-_MAX_SCREEN_TOOLS = 16
+_MAX_TOOLS = 19  # (one more than before memory_search became always-there: it crowds nothing out)
+_MAX_SCREEN_TOOLS = 17
 
 MORE_TOOLS = ToolSpec(
     "more_tools",

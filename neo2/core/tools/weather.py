@@ -67,7 +67,8 @@ def _remembered_city() -> str:
 
         db = store()._db
         row = db.execute(
-            "SELECT text FROM memory WHERE kind='profile' AND key IN ('city','location','home') ORDER BY updated DESC LIMIT 1"
+            "SELECT text FROM memory WHERE kind='profile' AND key IN ('city','location','home') "
+            "AND superseded_by IS NULL ORDER BY updated DESC LIMIT 1"
         ).fetchone()
         return row[0] if row else ""
     except Exception:  # noqa: BLE001
