@@ -255,6 +255,7 @@ class Session:
         extras: Mapping[str, Any] | None = None,
         source: Literal["typed", "voice"] = "typed",
         prompt_context: str = "",
+        checkin: bool = False,
     ) -> Reply:
         """Handle one request. `from_user` = these are the user's own words (typed, or their
         transcribed speech) — only then can they answer a pending confirmation. Text a model wrote
@@ -267,7 +268,11 @@ class Session:
         The user's own words and what NEO answers go to the journal (neo2.core.memory.journal) here:
         a request Gemini Live relays (a model's goal, or the sentence Live journaled itself) is
         Live's to write, never this session's. `prompt_context` is temporary guidance for this
-        answer only; it isn't added to the user's text, history, or memory."""
+        answer only; it isn't added to the user's text, history, or memory.
+
+        `checkin`: these are the words the on-device voice heard right after a check-in NEO started
+        itself (neo2.core.voice.wellbeing; App.handle_speech). They are answered, never routed or
+        kept: see _checkin_answer."""
         origin = origin or ("user" if from_user else "live")
         # This request's taint and extras hold while it runs and are put back when it returns: the
         # caller's next call from the same task (approving another agent's card, say) never gets
@@ -287,7 +292,9 @@ class Session:
         ]
         # The user's own words: typed or spoken to NEO.app, or what an embedding host says is its
         # user's (an agent whose host turned the journal on).
-        journaled = (from_user or (own and origin == "user")) and not _journaling.get() and _journal_on()
+        journaled = (
+            (from_user or (own and origin == "user")) and not checkin and not _journaling.get() and _journal_on()
+        )
         generation = 0
         if journaled:
             from neo2.core import privacy
@@ -308,7 +315,10 @@ class Session:
             from neo2.core.providers.cerebras_hooks import prewarm_soon
 
             prewarm_soon()
-            reply = await self._handle(text, images=images, from_user=from_user, origin=origin)
+            if checkin:
+                reply = await self._checkin_answer(text)
+            else:
+                reply = await self._handle(text, images=images, from_user=from_user, origin=origin)
             # What a paid brain has to say (Cerebras: 80% of the day's budget used, skipped until
             # midnight, a refused key) is heard with the reply — each once a day, this agent's only.
             from neo2.core.providers.cerebras_hooks import add_spoken_notes
@@ -320,6 +330,39 @@ class Session:
         finally:
             for var, tok in reversed(reset):
                 var.reset(tok)
+
+    async def _checkin_answer(self, text: str) -> Reply:
+        """The reply to a check-in NEO started itself ("yes please", "I'm fine"), as the on-device
+        voice heard it. NEO opened that listen on its own and a TV may be talking, so it is an
+        answer and nothing more: no fast path, tool, camera, song, or card it could answer, and
+        nothing kept (no journal, no history, no Laya label), as with Gemini Live's reply window
+        (LiveVoice.listen_after_checkin). The chat brain answers it with the check-in's context
+        (prompt_context); if that brain fails, a short line does, never the agent and its tools."""
+        _mark_job()
+        text = _WAKE_PREFIX.sub("", text.strip(), count=1).strip() or text.strip()
+        if not text:
+            return Reply("", "chat")
+        job = f"j{next(_job_ids)}"
+        bus().new_user_turn()
+        await bus().say(text, role="user", job=job)
+        await bus().set_state(NeoState.THINKING, job=job)
+        out: list[str] = []
+        chain = brain("fast")
+        try:
+            async for chunk in chain.stream(self._trimmed() + [Message.user(text)], system=self._system()):
+                if not out:
+                    await bus().set_state(NeoState.SPEAKING, job=job)
+                out.append(chunk)
+                await bus().say("".join(out), final=False, job=job)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001 — a check-in's answer is never worth the agent's tools
+            log.warning(f"[wellbeing] the reply's answer failed: {type(e).__name__}")
+            out = []
+        reply = "".join(out).strip() or "Okay. I'm here if you need anything."
+        await bus().say(reply, final=True, job=job)
+        await bus().end_job(job)
+        return Reply(reply, "chat", job=job, brain=getattr(chain, "last_used", ""), model=getattr(chain, "last_model", ""))
 
     async def _handle(self, text: str, *, images: list[ImagePart] | None, from_user: bool, origin: Origin) -> Reply:
         _mark_job()

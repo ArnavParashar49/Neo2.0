@@ -627,3 +627,75 @@ def test_local_with_the_wake_word_off_it_never_listens(devices, monkeypatch):  #
             await v.close()
 
     assert asyncio.run(run()) == (None, [])
+
+
+class _NoReflex:
+    async def decide(self, text):
+        raise AssertionError(f"Laya was asked to route {text!r}")
+
+
+def _chat_brain(monkeypatch) -> list[tuple[list, str]]:
+    """The chat brain the session answers with: what it was given (the messages, the system prompt)."""
+    from neo2.core.agent import session as sess_mod
+
+    given: list[tuple[list, str]] = []
+
+    class Chat:
+        name, supports_vision, supports_tools = "fake", False, True
+
+        async def stream(self, messages, *, system="", max_tokens=2048):
+            given.append((list(messages), system))
+            yield "Rest and warm water can help."
+
+    monkeypatch.setattr(sess_mod, "brain", lambda purpose="agent", **kw: Chat())
+    return given
+
+
+def test_local_the_session_answers_the_reply_and_never_routes_or_keeps_it(monkeypatch):
+    """The on-device voice's reply to a check-in reaches the session as an answer: the chat brain
+    answers it with the check-in's context, and nothing routes it (no fast path, tool, camera, song,
+    or card it could answer: Session._handle never sees it) or keeps it (no journal, no history).
+    A TV may be what spoke."""
+    from neo2.core import events
+    from neo2.core.agent import session as sess_mod
+
+    monkeypatch.setattr(events, "_bus", EventBus())
+    lines = _journal(monkeypatch)
+    given = _chat_brain(monkeypatch)
+    routed: list[str] = []
+
+    async def route(self, text, **kw):
+        routed.append(text)
+        return sess_mod.Reply("", "chat")
+
+    monkeypatch.setattr(sess_mod.Session, "_handle", route)
+    s = sess_mod.Session(reflex=_NoReflex())
+    reply = asyncio.run(
+        s.handle("open safari", from_user=True, source="voice", prompt_context="NEO just offered tips.", checkin=True)
+    )
+    assert (reply.text, reply.route) == ("Rest and warm water can help.", "chat")
+    assert routed == [] and lines == [] and s.history == []
+    ((messages, system),) = given
+    assert messages[-1].text == "open safari" and "NEO just offered tips." in system
+    # (The user's own words afterwards are routed and journaled as ever.)
+    asyncio.run(s.handle("thanks", from_user=True, source="voice"))
+    assert routed == ["thanks"] and ("user", "thanks") in lines
+
+
+def test_local_only_the_timely_reply_is_answered_as_the_check_ins(app):
+    """App.handle_speech: the first thing the on-device voice heard in the check-in's reply window is
+    the reply; whatever the user says later is their own again."""
+    from neo2.core.agent.session import Reply
+
+    seen: list[tuple[str, bool, str]] = []
+
+    async def handle(text, **kw):
+        seen.append((text, kw.get("checkin", False), kw.get("prompt_context", "")))
+        return Reply("", "chat")
+
+    app.session = NS(handle=handle)
+    app.voice = NS(_last_utterance_started_at=time.monotonic())
+    app._wellbeing_reply_context = (time.monotonic() + 5.0, "NEO just offered tips.")
+    asyncio.run(app.handle_speech("yes please"))
+    asyncio.run(app.handle_speech("open safari"))
+    assert seen == [("yes please", True, "NEO just offered tips."), ("open safari", False, "")]

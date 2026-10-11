@@ -38,11 +38,12 @@ class App:
         self._last_active = time.monotonic()  # (starting up counts as busy)
 
     async def handle_text(
-        self, text: str, *, speak: bool = True, source: str = "typed", prompt_context: str = ""
+        self, text: str, *, speak: bool = True, source: str = "typed", prompt_context: str = "", checkin: bool = False
     ) -> None:
         """Handle one request. Several may be in flight at once (the session runs them as jobs;
         each works out its own memory context: neo2.core.agent.session). `source`: "typed", or
-        "voice" for the on-device voice's transcription — what the journal records."""
+        "voice" for the on-device voice's transcription — what the journal records. `checkin`: the
+        reply to a check-in NEO started itself (handle_speech): answered, never routed or kept."""
         task = asyncio.current_task()
         if task:
             self._tasks.add(task)
@@ -53,6 +54,7 @@ class App:
                 from_user=True,
                 source="voice" if source == "voice" else "typed",
                 prompt_context=prompt_context,
+                checkin=checkin,
             )
             if speak and self.voice and reply.text and not reply.silent:
                 await self.voice.speak(reply.text)
@@ -63,7 +65,9 @@ class App:
                 self._tasks.discard(task)
 
     async def handle_speech(self, text: str) -> None:
-        """What the on-device voice heard the user say."""
+        """What the on-device voice heard the user say. The first words it heard in a check-in's
+        reply window are the reply to it: the session answers them with the check-in's context and
+        never runs or keeps them (Session._checkin_answer); later words are the user's own again."""
         context = self._wellbeing_reply_context
         self._wellbeing_reply_context = None
         started = getattr(self.voice, "_last_utterance_started_at", None)
@@ -74,7 +78,7 @@ class App:
             and time.monotonic() <= context[0] + 15.0  # allow local transcription to finish
         )
         if timely and context is not None:
-            await self.handle_text(text, source="voice", prompt_context=context[1])
+            await self.handle_text(text, source="voice", prompt_context=context[1], checkin=True)
         else:
             await self.handle_text(text, source="voice")
 
