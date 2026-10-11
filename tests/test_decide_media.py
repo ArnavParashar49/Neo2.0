@@ -357,7 +357,7 @@ async def test_script_path_plays_and_confirms_by_sound(audio, osa, engine):
 async def test_script_ok_without_sound_is_not_success(audio, osa, engine):
     osa.on("«event hookSrch»", (0, "OK", ""))  # "the script said OK" is not proof
     out = await media.play("505", make_app(library_dict()), "script_search_play")
-    assert not out.ok and out.reason == "timeout" and out.blame
+    assert not out.ok and out.reason == "audio_not_started" and out.blame
 
 
 async def test_permission_denied_is_not_the_apps_fault(audio, osa, engine):
@@ -775,7 +775,7 @@ async def test_play_best_notices_a_late_start_after_its_last_attempt(monkeypatch
     out = await media.play_best("505")
     assert out == "Playing 505 in Fixture Player", out
     assert [r[1:5] for r in engine.records] == [
-        (BID, "script_search_play", False, "timeout"),
+        (BID, "script_search_play", False, "audio_not_started"),
         ("web", "web", False, "offline"),
         (BID, "script_search_play", True, ""),
     ]
