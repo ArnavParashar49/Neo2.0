@@ -367,6 +367,15 @@ class Session:
             # A bare "what is this?" / "ye kya hai" (no hand, no "me", no object named) that Laya
             # reads as about the screen: the screen's, as before the camera — never a surprise camera.
             look = None
+        if origin == "user":
+            # Any other request of the user's ends a missed song's "try again", and is the last thing
+            # they asked for: a bare retry after it is neither the camera's nor the song's.
+            from neo2.core.agent import retry_words
+
+            if hear is None:
+                song_words.clear_retry()
+            if look is None and hear is None:
+                retry_words.mark("other")
 
         # A bare "stop" / "never mind" cancels everything; "stop the timer" is a command.
         if is_bare_stop(text) or (d.intent == "stop" and len(text.split()) <= 2 and d.intent_confidence >= 0.9):
@@ -405,20 +414,26 @@ class Session:
         if settings().fast_paths and (step := fastpath.by_utterance(text, origin=origin, decision=d)) is not None:
             return await self._quick(text, d, [step], job=job, origin=origin)
 
-        # A phrase definition is an explicit user command. Give the model only the constrained
-        # routine manager for complex definitions; the common explicit form is parsed locally.
-        if origin == "user":
-            from neo2.core.tools.routines import is_setup_request, parse_local_setup
+        # "When I say <phrase>, open <apps and sites>" at the start of the user's own sentence: saved
+        # locally, whatever Laya calls it (routines.parse_local_setup reads only that plain form).
+        if origin == "user" and registry().get("routine_manage") is not None:
+            from neo2.core.tools.routines import parse_local_setup
 
-            if is_setup_request(text) and registry().get("routine_manage") is not None:
-                if routine_args := parse_local_setup(text):
-                    return await self._quick(
-                        text, d, [("routine_manage", routine_args)], job=job, origin=origin
-                    )
-                return await self._agent(text, d, images, job, only=["routine_manage"])
+            if routine_args := parse_local_setup(text):
+                return await self._quick(text, d, [("routine_manage", routine_args)], job=job, origin=origin)
 
         if d.intent == "chat" and not images and not d.needs_screen:
             return await self._chat(text, d, job)
+
+        # A definition the local parser can't read ("when I say good night, …" with more than apps
+        # and sites): a model that has only the routine manager, which saves app and site launches
+        # or says why it can't. Only for a sentence that starts as one (routines.is_setup_request),
+        # and never ahead of Laya calling it conversation.
+        if origin == "user" and registry().get("routine_manage") is not None:
+            from neo2.core.tools.routines import is_setup_request
+
+            if is_setup_request(text):
+                return await self._agent(text, d, images, job, only=["routine_manage"])
 
         # The user asked for this before, in this app, and a model twice did it the same way: NEO
         # does it itself (neo2.core.agent.replay). Only the user's own words, never a model's; only a
@@ -461,15 +476,20 @@ class Session:
         # "open <game> and play as <side>": not music, whatever the plan says
         if (game := await asyncio.to_thread(_game_to_play, text)) is not None:
             return await self._play_game(text, d, None, job, game)
+        names = {t for t, _ in steps}
+        if fastpath.SONG_TOOL not in names:
+            from neo2.core.agent import retry_words
+
+            song_words.clear_retry()  # (another request of the user's: as Session._handle)
+            if fastpath.CAMERA_TOOL not in names:
+                retry_words.mark("other")
         return await self._quick(text, d, steps, job=job, origin="user")
 
     async def cancel_all(self) -> int:
         """Stop every running job (the user said stop) and drop any unanswered question."""
         outcomes.stop()  # right after NEO answered, a stop says the answer was wrong
         camera_words.forget()  # a stop ends the camera's follow-up window ("and now?" asks afresh)
-        from neo2.core.agent import song_words
-
-        song_words.clear_retry()
+        song_words.clear_retry()  # …and a missed song's "try again"
         _camera_off("stopped")  # …and turns the camera off now, not when its window runs out
         _song_off("stopped")  # …and stops listening for a song
         replay.forget_last()  # …and a flow it just learned or replayed isn't one to repeat
@@ -576,8 +596,9 @@ class Session:
                     await settle.app_ready(typing=tool in settle.TYPING)  # (the app just opened: ready, not 0.8 s)
                 await bus().tool_start(tool, args, job=job)
                 tool_extras = dict(_request_extras.get())
-                tool_extras["neo_job"] = job
                 if tool == fastpath.SONG_TOOL and args.get("_retry") is True:
+                    # The song lane checked the user's retry after a miss (fastpath.song); the tool
+                    # checks it again and uses it up. Only the song tool ever gets this marker.
                     tool_extras["song_retry"] = True
                 ctx = ToolContext(user_text=text, taint=taint, origin=origin, extras=tool_extras)
                 out = await registry().invoke(tool, args, ctx)

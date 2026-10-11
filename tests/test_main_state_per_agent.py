@@ -64,7 +64,7 @@ def grantable(monkeypatch):
         return f"did {a['step']}"
 
     monkeypatch.setitem(catalog()._tools, "zz_step", RegisteredTool("zz_step", "Do one step in an app.", _OBJ, step))
-    monkeypatch.setattr(sess_mod.fastpath, "plan", lambda text: None)  # no fast path reaches a real tool
+    monkeypatch.setattr(sess_mod.fastpath, "plan", lambda text, **_: None)  # no fast path reaches a real tool
     return ran
 
 

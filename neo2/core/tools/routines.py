@@ -26,19 +26,47 @@ _FILE = "routines.json"
 _LOCK = threading.RLock()
 _MAX_ROUTINES = 50
 _MAX_ACTIONS = 8
+_MAX_TARGET_WORDS = 4  # an app name or a site, not a description ("the notes app I use for class")
 _WAKE = re.compile(r"^\s*(?:(?:hey|hi|okay|ok)\s+)?neo[\s,:!.-]*", re.I)
 _SPACE = re.compile(r"[^\w\s]", re.UNICODE)
+# Only a sentence that *starts* as a definition teaches a routine. "Make a shortcut to Downloads" or
+# "why do you open Safari when I say Neo?" merely contain the words: they go wherever Laya sends them.
+_POLITE = r"^\s*(?:(?:can|could|would|will)\s+you\s+|please[\s,]+)*"
+_WHEN_I_SAY = r"(?:make\s+it\s+so\s+(?:that\s+)?)?(?:when|whenever)\s+i\s+say\b"
 _SETUP = re.compile(
-    r"\b(?:when|whenever)\s+i\s+say\b|\b(?:create|make|set\s+up|save)\s+(?:a\s+|my\s+)?"
-    r"(?:spoken\s+|voice\s+)?(?:routine|shortcut|custom\s+phrase)\b",
+    _POLITE + r"(?:" + _WHEN_I_SAY
+    + r"|(?:create|make|save|set\s+up|add)\s+(?:a\s+|my\s+)?(?:new\s+)?"
+    r"(?:(?:spoken|voice)\s+(?:routine|shortcut|phrase)|custom\s+(?:spoken\s+)?phrase)s?\b)",
     re.I,
 )
-_LOCAL_SETUP = re.compile(
-    r"^\s*(?:when|whenever)\s+i\s+say\s+(?P<trigger>.+?)"
-    r"(?:\s*[,;:]\s*|\s+then\s+|\s+(?=(?:please\s+)?(?:open|launch|start|bring\s+up)\b))"
-    r"(?:open|launch|start|bring\s+up)\s+(?P<targets>.+?)\s*[.!?]*\s*$",
+_HEAD = re.compile(_POLITE + _WHEN_I_SAY + r"\s*", re.I)
+_OPEN = r"(?:open|launch|start|bring\s+up)"
+# What may come between the trigger and the first launch: "then", "you", "please", "just".
+_BRIDGE = r"(?:then\s+)?(?:(?:you|please|just)\s+)*"
+_QUOTE_L, _QUOTE_R = "\"“‘'", "\"”’'"
+# A quoted trigger is taken as written (an apostrophe inside it is fine: the closing quote is the one
+# a launch follows).
+_QUOTED = re.compile(
+    rf"^[{_QUOTE_L}](?P<trigger>.+?)[.,!?]?[{_QUOTE_R}]\s*[,;:]?\s*(?P<rest>{_BRIDGE}{_OPEN}\b.*)$", re.I
+)
+# Otherwise the trigger ends at the first comma, semicolon, colon or "then": "time to start working,
+# open VS Code" keeps its "start".
+_SEPARATED = re.compile(r"^(?P<trigger>.+?)(?:\s*[,;:]\s*|\s+then\s+)(?P<rest>.*)$", re.I)
+_TARGETS = re.compile(rf"^{_BRIDGE}{_OPEN}\s+(?P<targets>.+?)\s*[.!?]*\s*$", re.I)
+_TARGET_SPLIT = re.compile(r"\s*(?:,\s*(?:and\s+)?|;|\band\b|\bthen\b)\s*", re.I)
+_TARGET_VERB = re.compile(
+    r"^(?:(?:please\s+)?(?:open|launch|start|visit|go\s+to|navigate\s+to|bring\s+up)\s+)+", re.I
+)
+# A part that is a command, not something to open: "turn off the lights", "play my liked songs".
+_OTHER_VERB = re.compile(
+    r"^(?:turn|switch|set|dim|brighten|play|pause|resume|mute|unmute|close|quit|exit|send|call|text|email|"
+    r"message|lock|unlock|sleep|shut|restart|reboot|log|type|click|press|stop|kill|delete|remove|search|"
+    r"tell|say|read|remind|change|toggle|enable|disable|increase|decrease|raise|lower)\b",
     re.I,
 )
+# A description, not a name ("my email", "a new tab"), or a second launch run into the first.
+_NOT_A_NAME = re.compile(r"^(?:a|an|my|your|our|some|this|that|these|those)\b|\b(?:open|launch|bring\s+up)\b", re.I)
+_HOST_PORT = re.compile(r"^[\w.-]+:\d+(?:[/?#]\S*)?$")
 _URL_TARGET = re.compile(
     r"^(?:https?://)?(?:www\.)?[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?(?::\d+)?"
     r"(?:[/?#][^\s]*)?$",
@@ -56,49 +84,88 @@ def normalize(text: str) -> str:
 
 
 def is_setup_request(text: str) -> bool:
-    """Recognize an explicit user instruction to teach a routine; never infer one from a goal."""
-    return bool(_SETUP.search(_WAKE.sub("", str(text or ""), count=1)))
+    """Recognize an explicit user instruction to teach a routine; never infer one from a goal.
+
+    The sentence has to start that way (after the wake word and a polite "can you" or "please"):
+    "when I say …", "make it so when I say …", "create a spoken routine". The words anywhere else in
+    a sentence are a question or another request, and they must not take it over."""
+    return bool(_SETUP.match(_WAKE.sub("", str(text or ""), count=1)))
+
+
+def _split_trigger(rest: str) -> tuple[str, str] | None:
+    """(the trigger, what follows it), or None when no launch follows a trigger."""
+    if (m := _QUOTED.match(rest)) is not None:
+        return m.group("trigger"), m.group("rest")
+    if (m := _SEPARATED.match(rest)) is not None and _TARGETS.match(m.group("rest")):
+        return m.group("trigger"), m.group("rest")
+    # No separator before the launch (a spoken transcript often has none, or only between the
+    # apps): the trigger runs up to the first "open" / "launch" / "bring up", and only failing those
+    # to a "start", which is often part of the phrase itself ("time to start working open VS Code").
+    # A trigger never spans a separator: "good night, turn off the lights and open Safari" is not
+    # the phrase "good night, turn off the lights and".
+    for verb in (r"(?:open|launch|bring\s+up)", r"start"):
+        m = re.match(rf"^(?P<trigger>.+?)\s+(?P<rest>{_BRIDGE}{verb}\b.*)$", rest, re.I)
+        if m is not None and not re.search(r"[,;:]|\bthen\b", m.group("trigger"), re.I):
+            return m.group("trigger"), m.group("rest")
+    return None
+
+
+def _local_action(part: str) -> dict | None:
+    """One "open …" part as a safe action, or None when it isn't plainly an app or a site."""
+    target = re.sub(r"\s+please$", "", part.strip(), flags=re.I).strip()
+    target = _TARGET_VERB.sub("", target)
+    target = re.sub(r"^(?:the\s+)?(?:website|site|app)\s+", "", target, flags=re.I).strip()
+    target = re.sub(r"^the\s+(.+?)\s+(?:app|website|site)$", r"\1", target, flags=re.I)
+    target = target.strip(" \t,;:'\"“”‘’")
+    if not target or _OTHER_VERB.match(target) or _NOT_A_NAME.search(target):
+        return None
+    if len(target.split()) > _MAX_TARGET_WORDS:
+        return None
+    if (
+        re.match(r"^(?:https?://|www\.)", target, re.I)
+        or (_URL_TARGET.fullmatch(target) and "." in target.split(":", 1)[0])
+        or _HOST_PORT.match(target)
+    ):
+        kind = "open_url"
+    else:
+        # A dotted first token usually means the user intended a site but omitted a valid URL.
+        if re.match(r"^[\w-]+\.[\w.-]+", target) and any(ch.isspace() for ch in target):
+            return None
+        kind = "open_app"
+    try:
+        return _safe_action({"kind": kind, "target": target})
+    except (TypeError, ValueError):
+        return None
 
 
 def parse_local_setup(text: str) -> dict | None:
     """Parse the unambiguous routine form locally, without sending its words to a model.
 
     Examples: ``When I say “I want to study”, open Notion, Safari, and youtube.com`` and the
-    spoken equivalent ``When I say I want to study, then open Notion and Safari``. More open-ended
-    definitions can still go through the constrained routine manager.
+    spoken equivalent ``When I say I want to study, then open Notion and Safari``. Anything that
+    isn't plainly "open these apps and sites" (a part that turns, plays or sends something, a
+    description instead of a name) is None: the constrained routine manager decides, or refuses.
     """
     raw = _WAKE.sub("", " ".join(str(text or "").split()), count=1)
-    m = _LOCAL_SETUP.match(raw)
-    if m is None:
+    head = _HEAD.match(raw)
+    if head is None:
         return None
-    trigger = m.group("trigger").strip().strip(" \t,;:'\"“”‘’")
+    split = _split_trigger(raw[head.end():])
+    if split is None:
+        return None
+    trigger = split[0].strip().strip(" \t,;:'\"“”‘’").rstrip(".,!?").strip()
     if len(trigger.split()) < 2:
         return None
-    targets = m.group("targets").strip().rstrip(".!?").strip()
-    parts = [
-        re.sub(r"\s+please$", "", part.strip(), flags=re.I).strip()
-        for part in re.split(r"\s*(?:,|;|\band\b|\bthen\b)\s*", targets, flags=re.I)
-    ]
+    m = _TARGETS.match(split[1])
+    if m is None:
+        return None
+    parts = [p for p in _TARGET_SPLIT.split(m.group("targets").strip()) if p and p.strip()]
     actions: list[dict] = []
-    for target in parts:
-        target = re.sub(r"^(?:(?:please\s+)?(?:open|launch|start|visit|go\s+to|navigate\s+to)\s+)+", "", target, flags=re.I)
-        target = re.sub(r"^(?:the\s+)?(?:website|site|app)\s+", "", target, flags=re.I).strip()
-        target = target.strip(" \t,;:'\"“”‘’")
-        if not target:
+    for part in parts:
+        action = _local_action(part)
+        if action is None:
             return None
-        if re.match(r"^(?:https?://|www\.)", target, re.I):
-            kind = "open_url"
-        elif _URL_TARGET.fullmatch(target) and "." in target.split(":", 1)[0]:
-            kind = "open_url"
-        else:
-            # A dotted first token usually means the user intended a site but omitted a valid URL.
-            if re.match(r"^[\w-]+\.[\w.-]+", target) and any(ch.isspace() for ch in target):
-                return None
-            kind = "open_app"
-        try:
-            actions.append(_safe_action({"kind": kind, "target": target}))
-        except (TypeError, ValueError):
-            return None
+        actions.append(action)
     if not 1 <= len(actions) <= _MAX_ACTIONS:
         return None
     return {"action": "create", "trigger": trigger, "actions": actions}
@@ -273,9 +340,25 @@ def _list() -> str:
     return "Your spoken routines:\n" + "\n".join(f"• {_routine_label(r)}" for r in rows)
 
 
+def _word_matches(rows: list[dict], target: str) -> list[dict]:
+    """The routines whose name or trigger holds every word of ``target`` as a whole word: "study"
+    finds "I want to study", never "students"."""
+    words = normalize(target).split()
+    if not words:
+        return []
+    found = []
+    for row in rows:
+        for label in (row.get("name"), row.get("trigger")):
+            have = set(normalize(str(label or "")).split())
+            if have and all(w in have for w in words):
+                found.append(row)
+                break
+    return found
+
+
 def _delete(args: dict, ctx: ToolContext) -> str | ToolOutput:
     target = " ".join(str(args.get("name") or args.get("trigger") or "").split())
-    target = target.strip(" \'\"“”‘’.,!? ").casefold()
+    target = target.strip(" \'\"“”‘’.,!? ").casefold()  # noqa: B005 — a set of edge characters, on purpose
     if not target:
         return "Error: tell me which routine to delete."
     with _LOCK:
@@ -284,7 +367,16 @@ def _delete(args: dict, ctx: ToolContext) -> str | ToolOutput:
                                                    str(r.get("name", "")).casefold(),
                                                    str(r.get("trigger", "")).casefold())), None)
         if row is None:
-            return "Error: I couldn't find that routine. Ask me to list your routines."
+            found = _word_matches(rows, target)
+            if len(found) > 1:
+                # Not an error: the user just has to say which (a delete never guesses).
+                names = "; ".join(f"“{r.get('name') or r.get('trigger')}”" for r in found)
+                return f"Which one: {names}? Say “delete the … routine” with its full name."
+            if not found:
+                # Not an "Error" either: the quick lane would hand that to the cloud agent. Saying
+                # what there is answers it here.
+                return f"I couldn't find a routine called “{target}”. " + _list()
+            row = found[0]
         from neo2.core.agent import confirm
 
         detail = _routine_label(row)
@@ -351,7 +443,11 @@ async def routine_run(args: dict, ctx: ToolContext) -> ToolOutput:
     if row is None:
         return ToolOutput("That routine is no longer available. Ask me to list your routines.", ok=False, say=True)
     _record_use(rid)
-    job = str(ctx.get("neo_job") or "")
+    from neo2.core.events import bus, current_job
+
+    # The job the session announced this step under (events.current_job): never a value from the
+    # caller's extras, which an embedding host owns.
+    job = current_job.get()
     for index, action in enumerate(row.get("actions", []), 1):
         try:
             action = _safe_action(action)
@@ -360,8 +456,6 @@ async def routine_run(args: dict, ctx: ToolContext) -> ToolOutput:
                               ok=False, say=True)
         tool_name = action["kind"]
         call_args = {"target": action["target"]} if tool_name == "open_app" else {"url": action["target"]}
-        from neo2.core.events import bus
-
         await bus().tool_start(tool_name, call_args, job=job)
         out = await registry().invoke(tool_name, call_args, ctx)
         await bus().tool_end(tool_name, out.ok, out.text, job=job)

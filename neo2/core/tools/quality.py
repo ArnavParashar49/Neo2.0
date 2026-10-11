@@ -14,10 +14,12 @@ from neo2.core.reflex import learn
     category="system",
     parallel_safe=True,
     read_only=True,
+    # Only an explicit ask about reliability: "how are you doing?" or "how is Neo?" is a greeting,
+    # and a chat answers it (statistics would be a strange reply).
     fast_path=[
-        (r"^\s*(?:how(?:'s| is) neo(?: doing)?|how(?:'s| is) your reliability|how are you doing|"
-         r"show (?:me )?(?:neo'?s )?(?:recent )?reliability|show (?:me )?(?:your )?quality report|"
-         r"how have you been doing)\s*[?.!]*$", {"days": 7}),
+        (r"^\s*(?:how(?:'s| is) neo doing|how(?:'s| is) your reliability|"
+         r"show (?:me )?(?:neo'?s )?(?:recent )?reliability|show (?:me )?(?:your )?quality report)"
+         r"\s*[?.!]*$", {"days": 7}),
     ],
 )
 async def quality_report(args: dict, ctx: ToolContext) -> str:

@@ -234,7 +234,7 @@ def test_the_chess_run_sends_every_brain_a_valid_history_through_many_approvals(
     _chess_tools(monkeypatch, ran)
     b = ChessBrain()
     monkeypatch.setattr(sess_mod, "brain", lambda purpose="agent": b)
-    monkeypatch.setattr(sess_mod.fastpath, "plan", lambda text: None)  # the model plays every step
+    monkeypatch.setattr(sess_mod.fastpath, "plan", lambda text, **_: None)  # the model plays every step
 
     async def go():
         s = Session(reflex=_agent_reflex())
@@ -858,7 +858,7 @@ def test_the_chess_run_survives_on_groq_when_gemini_is_spent(monkeypatch):
         registry()._tools, "ax_tree",
         RegisteredTool("ax_tree", "test tool", _OBJ, lambda a, c: "AXWindow “Chess” " * 400, parallel_safe=True),
     )  # fmt: skip
-    monkeypatch.setattr(sess_mod.fastpath, "plan", lambda text: None)
+    monkeypatch.setattr(sess_mod.fastpath, "plan", lambda text, **_: None)
 
     first_run: list[int] = []
 
@@ -1410,7 +1410,7 @@ def test_a_yes_after_another_request_continues_the_request_it_was_asked_for(monk
         registry()._tools, "ax_tree",
         RegisteredTool("ax_tree", "test tool", _OBJ, lambda a, c: board, parallel_safe=True),
     )  # fmt: skip
-    monkeypatch.setattr(sess_mod.fastpath, "plan", lambda text: None)
+    monkeypatch.setattr(sess_mod.fastpath, "plan", lambda text, **_: None)
 
     class Reflex:
         async def decide(self, t):

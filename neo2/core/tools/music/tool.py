@@ -249,7 +249,7 @@ async def song_identify(args: dict, ctx: ToolContext) -> ToolOutput:
         return ToolOutput(why, ok=False)
     from neo2.core.agent import song_words
 
-    song_words.clear_retry()  # an explicit new listen replaces any previous retry window
+    song_words.begin_listen()  # a new listen replaces any previous retry window, and is the last lane
     if missing := recognize.available():
         return ToolOutput(missing, ok=False)
     if song_live.busy:

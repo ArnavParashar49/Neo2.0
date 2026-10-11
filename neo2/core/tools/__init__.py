@@ -113,6 +113,13 @@ REFUSED: dict[str, str] = {
     "user, on their own request, with its live card in NEO's chat",
     "song_identify": "song_identify isn't available to embedded agents yet: NEO listens for a song only for "
     "NEO.app's user, on their own request, with its card in NEO's chat",
+    **dict.fromkeys(
+        ("routine_manage", "routine_run"),
+        "spoken routines are NEO.app's: its user's own phrases, saved in NEO's data directory and run only "
+        "from that user's own words, never an embedded agent's",
+    ),
+    "quality_report": "quality_report reads NEO.app's own reliability counters (its requests, corrections and "
+    "Laya's routing), not an embedded agent's",
 }
 
 

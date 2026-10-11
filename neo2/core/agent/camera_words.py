@@ -21,14 +21,15 @@ from __future__ import annotations
 import re
 import time
 
-from neo2.core.agent.retry_words import is_retry_request
+from neo2.core.agent import retry_words
+from neo2.core.agent.retry_words import ADDRESS, is_retry_request
 
 FOLLOW_UP_S = 25.0  # the camera's follow-up window (≈20 s after the answer, plus the answer itself)
 _last_look = 0.0
 _last_question = ""
 
 # ---- how the sentence is framed ------------------------------------------------------------------
-_ADDRESS = re.compile(r"^(?:(?:hey|hi|ok|okay|yo|arre|arey)\s+)?neo\b[\s,.:!-]*", re.I)
+_ADDRESS = ADDRESS  # (one for every lane: retry_words)
 _LEAD = re.compile(
     r"^(?:(?:please|pls|so|ok|okay|hey|um+|uh+|and|acha|achha|accha)\s+)*"
     r"(?:(?:can|could|would|will)\s+you\s+(?:please\s+)?(?:(?:tell|show)\s+me|check|see|say|guess|look\s+and\s+tell\s+me)?\s*"
@@ -248,11 +249,14 @@ def _window() -> float:
 
 
 def follow_up(text: str, *, now: float | None = None) -> bool:
-    """A short follow-up or retry while the last look's camera window is still open."""
+    """A short follow-up ("and now?", "aur ye?") or a retry ("try again", "phir se dekho") while the
+    last look's camera window is still open. A retry is the camera's only while a look is the last
+    retryable thing NEO did (retry_words.last_lane): not after another request, nor after a song
+    NEO couldn't name since."""
     now = time.monotonic() if now is None else now
     if not _last_look or now - _last_look > _window():
         return False
-    if is_retry_request(text):
+    if is_retry_request(text, "camera") and retry_words.last_lane() == "camera":
         return True
     c = _plain(text)
     for _ in range(2):
@@ -266,9 +270,11 @@ def follow_up_question(text: str) -> str:
 
 
 def mark_look(now: float | None = None, *, question: str | None = None) -> None:
-    """A look was routed (or answered): refresh its window and retain its question."""
+    """A look was routed (or answered): refresh its window, retain its question, and make it the
+    lane a bare retry goes to."""
     global _last_look, _last_question
     _last_look = time.monotonic() if now is None else now
+    retry_words.mark("camera")
     if question:
         _last_question = str(question)[:500]
 

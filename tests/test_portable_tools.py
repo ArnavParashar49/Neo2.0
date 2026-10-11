@@ -159,6 +159,13 @@ def test_unknown_names_and_play_music_are_refused():
     assert "play_music" not in resolve("*", platform="darwin") and "play_music" in REFUSED
 
 
+@pytest.mark.parametrize("name", ["routine_manage", "routine_run", "quality_report"])
+def test_neo_apps_routines_and_reliability_report_are_refused_with_a_reason(name):
+    with pytest.raises(ValueError, match="NEO.app's"):
+        resolve(("web", name))
+    assert name not in resolve("*", platform="darwin")
+
+
 def test_every_catalog_tool_is_in_a_preset_with_its_module():
     from neo2.core.agent.registry import catalog
     from neo2.core.tools import load_all
@@ -168,6 +175,7 @@ def test_every_catalog_tool_is_in_a_preset_with_its_module():
     assert names - set(PRESETS["all"]) == {
         "play_music", "browse", "selftest_controls", "camera_look", "song_identify",
         "memory_search", "remember", "forget",  # NEO.app's: an embedded agent has the one `memory` tool
+        "routine_manage", "routine_run", "quality_report",  # NEO.app's user's routines and counters
     } == set(REFUSED)
     assert set(PRESETS["all"]) <= set(MODULES_FOR)
     for n in PRESETS["all"]:

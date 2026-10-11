@@ -23,12 +23,14 @@ from __future__ import annotations
 import re
 import time
 
-from neo2.core.agent.retry_words import is_retry_request
+from neo2.core.agent import retry_words
+from neo2.core.agent.retry_words import ADDRESS, is_retry_request
 
 _EDGE = " ,.;:!?।"
-RETRY_WINDOW_S = 45.0
+# A retry after a miss is said right away ("try again"); much later the words mean something else.
+RETRY_WINDOW_S = 20.0
 _retry_until = 0.0
-_ADDRESS = re.compile(r"^(?:(?:hey|hi|ok|okay|yo|arre|arey)\s+)?neo\b[\s,.:!-]*", re.I)
+_ADDRESS = ADDRESS  # (one for every lane: retry_words)
 _LEAD = re.compile(
     r"^(?:(?:please|pls|so|ok|okay|hey|um+|uh+|and|acha|achha|accha|abhi|अभी|quick(?:ly)?)\s+)*"
     r"(?:(?:can|could|would|will)\s+you\s+(?:please\s+)?(?:(?:tell|let)\s+me\s+(?:know\s+)?|check\s+|find\s+out\s+)?"
@@ -158,16 +160,31 @@ def wants_stop(text: str) -> bool:
     return bool(plain) and len(plain) <= 60 and any(_STOP.match(c) for c in _cores(text))
 
 
+def begin_listen() -> None:
+    """A new listen started: it replaces any earlier retry window, and it is now the last thing a
+    bare retry could mean (a camera look before it no longer is)."""
+    clear_retry()
+    retry_words.mark("song")
+
+
 def mark_no_match(now: float | None = None) -> None:
     """Allow a short conversational retry after song recognition found no match."""
     global _retry_until
     _retry_until = (time.monotonic() if now is None else now) + RETRY_WINDOW_S
+    retry_words.mark("song")
 
 
 def retry_after_miss(text: str, *, now: float | None = None) -> bool:
-    """A retry phrase is meaningful only just after NEO failed to identify a song."""
+    """A retry phrase ("try again", "listen again", "phir se suno") is meaningful only just after
+    NEO failed to identify a song, and only while that miss is the last retryable thing NEO did.
+    Bare "again", "repeat that" or "redo" never are: they would open the mic for anything."""
     now = time.monotonic() if now is None else now
-    return _retry_until > 0 and now <= _retry_until and is_retry_request(text)
+    return (
+        _retry_until > 0
+        and now <= _retry_until
+        and retry_words.last_lane() == "song"
+        and is_retry_request(text, "song")
+    )
 
 
 def consume_retry(text: str, *, now: float | None = None) -> bool:

@@ -1,7 +1,9 @@
 """Quiet, local counters for repeated successful app/site setup workflows.
 
 Only a hash of the ordered app names / website hosts, a count and timestamps are persisted. No
-request text, page content, titles, paths or query strings are kept here.
+request text, page content, titles, paths or query strings are kept here. The offer itself names the
+apps and sites (from the task that just ran, never from disk) so the user can say the exact sentence
+that saves the routine.
 """
 
 from __future__ import annotations
@@ -28,15 +30,17 @@ def _path() -> Path:
     return settings().data_dir / _FILE
 
 
+def _tool_args(step) -> tuple[str, dict]:
+    """(tool, args) of a fast-path step dict or an agent step."""
+    if isinstance(step, dict):
+        return str(step.get("tool") or ""), step.get("args") or {}
+    return str(getattr(step, "tool", "") or ""), getattr(step, "args", {}) or {}
+
+
 def _signature(steps: list) -> tuple[str, int] | None:
     actions = []
     for step in steps:
-        if isinstance(step, dict):
-            name = str(step.get("tool") or "")
-            args = step.get("args") or {}
-        else:
-            name = str(getattr(step, "tool", "") or "")
-            args = getattr(step, "args", {}) or {}
+        name, args = _tool_args(step)
         if name == "open_app":
             target = " ".join(str(args.get("target") or "").casefold().split())
             if not target or "/" in target or "://" in target:
@@ -67,6 +71,24 @@ def _read() -> dict:
         return {}
 
 
+def _offer(steps: list) -> str:
+    """The suggestion, with the sentence that saves it: "When I say [your phrase], open Notion and
+    youtube.com" (routines.parse_local_setup reads exactly that form)."""
+    names: list[str] = []
+    for step in steps:
+        name, args = _tool_args(step)
+        if name == "open_app":
+            names.append(" ".join(str(args.get("target") or "").split()))
+        else:
+            host = (urlsplit(str(args.get("url") or "")).hostname or "").lower()
+            names.append(host.removeprefix("www."))
+    joined = " and ".join(names) if len(names) == 2 else ", ".join(names[:-1]) + ", and " + names[-1]
+    return (
+        f"You’ve opened {joined} together a few times. Want a spoken shortcut for it? "
+        f"Say “When I say [your phrase], open {joined}” and I’ll save it."
+    )
+
+
 def record_success(steps: list) -> str:
     """Record a verified launch-only workflow and suggest a shortcut on its third success."""
     if runtime.library_bound() or not settings().learn or not settings().workflow_suggestions:
@@ -80,10 +102,7 @@ def record_success(steps: list) -> str:
 
         routine_actions = []
         for step in steps:
-            if isinstance(step, dict):
-                name, args = step.get("tool"), step.get("args") or {}
-            else:
-                name, args = getattr(step, "tool", ""), getattr(step, "args", {}) or {}
+            name, args = _tool_args(step)
             routine_actions.append({"kind": name, "target": args.get("target") if name == "open_app" else args.get("url")})
         if has_actions(routine_actions):
             return ""
@@ -98,7 +117,7 @@ def record_success(steps: list) -> str:
             k: v for k, v in patterns.items()
             if isinstance(v, dict) and now - float(v.get("last", 0)) <= _KEEP_S
         }
-        old = patterns.get(key, {})
+        old = patterns.pop(key, {})  # (put back at the end: the cap below keeps the recent ones)
         count = int(old.get("count", 0)) + 1
         patterns[key] = {"count": count, "last": now, "actions": actions}
         # Keep recent patterns only; the insertion order is from the most recent successful task.
@@ -113,7 +132,7 @@ def record_success(steps: list) -> str:
         os.replace(tmp, path)
     if count != _SUGGEST_AT:
         return ""
-    return "You’ve repeated this app and website setup a few times. Want to give it a spoken shortcut? Tell me the phrase you’d like to say and I’ll save it as a routine."
+    return _offer(steps)
 
 
 def forget() -> int:
