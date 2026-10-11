@@ -291,3 +291,129 @@ def test_bare_repeat_after_a_song_miss_never_opens_the_mic(lanes):
         song_words.mark_no_match()
         _say(s, said)
     assert lanes.song == []
+
+
+# ---- Gemini Live, the default voice, routes them the same way --------------------------------------
+
+
+def _msg(**kw):
+    content = dict(
+        interrupted=False, input_transcription=None, interim_input_transcription=None,
+        output_transcription=None, model_turn=None, turn_complete=False,
+    )
+    content.update(kw)
+    return SimpleNamespace(
+        server_content=SimpleNamespace(**content), tool_call=None, tool_call_cancellation=None, go_away=None
+    )
+
+
+def _heard(text):
+    """The user's sentence as Live transcribes it."""
+    return _msg(input_transcription=SimpleNamespace(text=text, finished=True))
+
+
+def _answer(text):
+    """The model's spoken answer, as Live transcribes it."""
+    return _msg(output_transcription=SimpleNamespace(text=text))
+
+
+def _model_calls(name, cid):
+    fc = SimpleNamespace(id=cid, name=name, args={})
+    return SimpleNamespace(
+        server_content=None, tool_call=SimpleNamespace(function_calls=[fc]), tool_call_cancellation=None, go_away=None
+    )
+
+
+_DONE = _msg(turn_complete=True)
+
+
+class _LiveSpeaker:
+    def __init__(self):
+        import threading
+
+        self.playing = threading.Event()
+
+    def play_pcm16(self, data):
+        pass
+
+    def interrupt(self):
+        pass
+
+    async def wait_done(self):
+        return None
+
+
+class _LiveConnection:
+    def __init__(self):
+        self.responses = []
+
+    async def send_tool_response(self, function_responses):
+        self.responses.extend(function_responses)
+
+    async def send_client_content(self, turns):
+        pass
+
+
+@pytest.fixture
+def live(lanes, monkeypatch):
+    """Gemini Live with a fake connection and speaker; the model's calls reach lanes' fake camera_look
+    and song_identify, and a sentence NEO does itself goes to a session that only records it."""
+    from neo2.core import config
+    from neo2.core.voice import live as live_mod
+
+    monkeypatch.setenv("GEMINI_API_KEY", "test")
+    monkeypatch.setattr(config, "_settings", None)
+
+    class _Session:
+        memory_context = ""
+
+        async def command(self, text, steps):
+            from neo2.core.agent.session import Reply
+
+            return Reply("did it", "quick", silent=True)
+
+        async def handle(self, text, **kw):
+            from neo2.core.agent.session import Reply
+
+            return Reply("a chat reply", "chat", silent=True)
+
+    v = live_mod.LiveVoice(lambda t: None, _Session())
+    v.spk, v._live, v._listening = _LiveSpeaker(), _LiveConnection(), True
+    return v
+
+
+def _turn(v, *msgs):
+    async def run():
+        user_buf, model_buf = [], []
+        for m in msgs:
+            await v._on_message(m, user_buf, model_buf, v._live)
+            await asyncio.sleep(0)
+        await asyncio.sleep(0.05)
+
+    asyncio.run(run())
+
+
+def test_live_another_request_ends_a_missed_songs_retry(live, lanes):
+    """As in a typed chat (Session._handle): a question the model answers in between is the user's
+    last request, so their "try again" after it never opens the mic, whatever the model calls."""
+    song_words.mark_no_match()
+    _turn(live, _heard("what's the capital of France?"), _answer("Paris."), _DONE)
+    assert retry_words.last_lane() == "other" and not song_words.retry_after_miss("try again")
+    _turn(live, _heard("try again"), _model_calls(fastpath.SONG_TOOL, "s1"), _DONE)
+    assert lanes.song == []
+
+
+def test_live_try_again_right_after_a_miss_still_listens(live, lanes):
+    """The sentence is weighed before the model's call for it runs: the retry it asks for is still
+    there to pass on (the call spends it)."""
+    song_words.mark_no_match()
+    _turn(live, _heard("try again"), _model_calls(fastpath.SONG_TOOL, "s1"), _DONE)
+    ((_, ctx),) = lanes.song
+    assert ctx.get("song_retry") is True
+
+
+def test_live_another_request_ends_the_camera_retry_but_not_its_follow_ups(live):
+    camera_words.mark_look(question="what am I holding?")
+    _turn(live, _heard("tell me a joke"), _answer("Why did the scarecrow win an award?"), _DONE)
+    assert retry_words.last_lane() == "other"
+    assert not camera_words.follow_up("try again") and camera_words.follow_up("and now?")

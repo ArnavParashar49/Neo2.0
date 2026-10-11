@@ -684,6 +684,7 @@ class LiveVoice(OnDemandMic):
     _lane_utt = -1  # the sentence the lane is doing
     _lane_at = 0.0
     _own_utt = -1  # the sentence whose words an agent_task call already ran as the user's own
+    _retry_noted_utt = -1  # the sentence _note_request last weighed (a retry's lane: once each)
     # voice confirmations (see _voiced)
     _asked: tuple[str, str, float] | None = None  # (action_id, question text handed to the model, when)
     _voiced_action: tuple[str, str, float] | None = None  # (action_id, what the model then said, when)
@@ -1448,6 +1449,8 @@ class LiveVoice(OnDemandMic):
                     self._completed_utterance = (self._utt_id, said)
                     if self._utt_id == self._checkin_utt:
                         self._end_checkin_reply(said)
+                    elif not checkin:
+                        self._note_request(said)  # (a sentence the model only talked about)
                 p = confirm.peek()
                 if said and p is not None and self._utt_started > p.staged_at:
                     ans = answer_of(said)
@@ -1489,6 +1492,7 @@ class LiveVoice(OnDemandMic):
         if msg.tool_call:
             said = self._utterance or "".join(user_buf)  # this turn's own words (the camera's only)
             asked = said or (self._label or {}).get("text", "")
+            self._note_request(said)  # (before the calls run: a song call spends its retry)
             calls = list(msg.tool_call.function_calls or [])
             if self._lane_owns(asked):
                 # NEO is already doing this sentence itself: the model's calls for it are redundant.
@@ -1541,6 +1545,7 @@ class LiveVoice(OnDemandMic):
         text = " ".join((text or "").split())
         if self._utt_id == self._checkin_utt:
             return  # the answer to a check-in NEO started itself: never a command (a TV may be talking)
+        self._note_request(text)
         _camera_off_if_asked(text)
         _song_stop_if_asked(text)
         if not text or self._lane_tried_utt == self._utt_id:
@@ -1581,6 +1586,27 @@ class LiveVoice(OnDemandMic):
         if not steps:
             return  # a question, or something only the model can work out
         self._run_lane(text, steps)
+
+    def _note_request(self, text: str) -> None:
+        """The user's sentence, weighed once and before anything it starts has run: unless it asks
+        to look or to listen (a retry while that window is open included), it is another request of
+        theirs, so a bare "try again" after it retries neither the last look nor a song NEO couldn't
+        name (neo2.core.agent.retry_words). Session._handle does the same for typed words and the
+        on-device voice; here the model answers most sentences without the session seeing them."""
+        utt = self._utt_id
+        text = " ".join((text or "").split())
+        if not text or utt in (self._retry_noted_utt, self._checkin_utt, self._own_utt, self._lane_utt):
+            # (The reply to a check-in is an answer, never a request: a TV may be talking. A sentence
+            # that already ran as the user's own, here or in the lane, set its lane where it ran.)
+            return
+        self._retry_noted_utt = utt
+        from neo2.core.agent import fastpath, retry_words, song_words
+
+        hear = fastpath.song(text, origin="user")
+        if hear is None:
+            song_words.clear_retry()
+            if fastpath.camera(text, origin="user") is None:
+                retry_words.mark("other")
 
     def _run_lane(self, text: str, steps: list[tuple[str, dict]]) -> None:
         """NEO does the current sentence itself: these steps, through the session's command path."""
