@@ -613,6 +613,121 @@ def test_local_the_reply_is_returned_and_never_run_from_the_transcript(devices, 
     assert asyncio.run(run()) == "open safari" and fed == []
 
 
+_LOUD = b"\x00\x40" * 320  # 20 ms at int16 16384: well over the energy gate
+_QUIET = b"\x00\x00" * 320
+
+
+async def _mic_hears(v, frame: bytes, n: int) -> None:
+    """The microphone delivers `n` frames of `frame`, 20 ms apart (as PortAudio would)."""
+    for _ in range(n):
+        if (stream := v.mic._stream) is None:
+            return
+        stream.cb(frame, 320, None, None)
+        await asyncio.sleep(0.02)
+
+
+def _hearing_local(monkeypatch, said: str):
+    """A LocalVoice whose own utterance capture runs for real (the energy gate, a live partial every
+    0.1 s) over fake frames, with a fake speech-to-text that always hears `said`."""
+    from neo2.core.voice import local as local_mod
+    from tests.test_wake_word_setting import _Spotter
+
+    monkeypatch.setattr(local_mod, "_PARTIAL_EVERY_S", 0.1)
+    handled: list[str] = []
+
+    async def on_text(text):
+        handled.append(text)
+
+    v = local_mod.LocalVoice(on_text)
+
+    class STT:
+        def generate(self, pcm):
+            return NS(text=said)
+
+    def load():
+        v._wake, v._vad, v._stt = _Spotter(), None, STT()
+
+    monkeypatch.setattr(v, "_load_models", load)
+    v.handled = handled
+    return v
+
+
+@pytest.mark.parametrize("checkin", [True, False])
+@pytest.mark.parametrize("said", ["Mute.", "Open Safari."])
+def test_local_the_replys_live_partials_never_reach_the_early_actor(devices, monkeypatch, said, checkin):  # noqa: F811
+    """While a reply is still being spoken the on-device voice re-transcribes it to show it live. In a
+    check-in's reply window those partial transcripts are shown but never reach the early actor (the
+    fast paths that run mid-sentence): a TV saying "Mute." or "Open Safari." runs nothing. A turn the
+    user started still acts on them, as ever."""
+    pytest.importorskip("sounddevice")
+    pytest.importorskip("mlx.core")
+    from neo2.core import events
+    from neo2.core.agent.early import Ran, early
+    from neo2.core.tools import load_all
+    from tests.test_wake_word_setting import _settings
+
+    load_all()
+    _settings(monkeypatch, True)
+    ran: list[tuple] = []
+    heard_mid_sentence: list[str] = []
+    real_feed = type(early()).feed
+
+    def feed(self, text):
+        if v._capturing:
+            heard_mid_sentence.append(text)
+        real_feed(self, text)
+
+    async def fake_run(self, tool, args, utt):
+        ran.append((tool, args))
+        r = Ran(tool, args, True, "")
+        if self._utt == utt:
+            self.executed.append(r)
+        return r
+
+    monkeypatch.setattr(type(early()), "feed", feed)  # (the class: see test_voice_wake)
+    monkeypatch.setattr(type(early()), "_run", fake_run)
+    shown: list[str] = []
+    events.bus().subscribe(
+        lambda e: shown.append(e.data["text"])
+        if e.type == "transcript" and e.data.get("role") == "user" and not e.data.get("final")
+        else None
+    )
+    v = _hearing_local(monkeypatch, said)
+
+    async def run():
+        await v.start()
+        try:
+            if checkin:
+                listen = asyncio.create_task(v.listen_after_checkin(seconds=1.0))
+            else:
+                await v.wake("ui")
+            await asyncio.sleep(0.05)
+            await _mic_hears(v, _LOUD, 60)  # ~1.2 s of a voice: a partial every 0.1 s
+            await _mic_hears(v, _QUIET, 60)  # then quiet: the utterance ends
+            if checkin:
+                return await asyncio.wait_for(listen, 5)
+            assert await _until_true(lambda: bool(ran))
+            return None
+        finally:
+            await v.close()
+
+    reply = asyncio.run(run())
+    assert shown, "no live partial was shown: the test never exercised them"
+    if checkin:
+        assert reply == said and ran == [] and heard_mid_sentence == []
+    else:
+        assert heard_mid_sentence and ran
+
+
+async def _until_true(cond, s: float = 3.0) -> bool:
+    t0 = time.time()
+    while time.time() - t0 < s:
+        if cond():
+            return True
+        await asyncio.sleep(0.02)
+    return cond()
+
+
 def test_local_with_the_wake_word_off_it_never_listens(devices, monkeypatch):  # noqa: F811
     pytest.importorskip("sounddevice")
     from tests.test_wake_word_setting import _inputs, _local, _settings

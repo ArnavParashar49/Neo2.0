@@ -43,6 +43,7 @@ class LocalVoice(OnDemandMic):
     _listen_timeout_override: float | None = None  # one check-in reply; normal turns use settings
     _last_utterance_started_at: float | None = None  # monotonic: when the latest utterance began
     _checkin_reply: asyncio.Future[str] | None = None  # what the reply to a check-in said ("" = nothing)
+    _checkin_capture = False  # hearing the reply to a check-in: its live partials are shown, never acted on
 
     def __init__(self, on_text: TextHandler) -> None:
         self._on_text = on_text
@@ -60,6 +61,7 @@ class LocalVoice(OnDemandMic):
         self._capturing = False
         self._listen_timeout_override: float | None = None
         self._last_utterance_started_at: float | None = None
+        self._checkin_capture = False
         self._followup_until = 0.0  # listening after a reply until then, no wake word needed
         self._wake_source = "ui"  # what armed listening last: ui / ptt (the wake word says "voice")
         self._vad = None
@@ -251,7 +253,13 @@ class LocalVoice(OnDemandMic):
                 print(f"[voice] woke ({source})")
             early().listening("wake")  # warm what the request will need while the user speaks (never waits)
             self.mic.drain()
-            text = await self._capture_utterance()
+            # The answer to a check-in NEO started itself: nothing in it runs straight from the
+            # transcript (a TV may be talking) — not its live partials either (_emit_partial).
+            self._checkin_capture = source == "check-in"
+            try:
+                text = await self._capture_utterance()
+            finally:
+                self._checkin_capture = False
             if source == "check-in":
                 self._end_checkin_reply(text)
                 early().new_utterance()
@@ -264,12 +272,17 @@ class LocalVoice(OnDemandMic):
                     print("[voice] idle")
                     await bus().set_state(NeoState.IDLE)
                 continue
+            said = text
             early().feed(text)
             await early().tick(final=True)  # the whole utterance, if fast paths can cover it
             text = early().remaining()
             ran = early().new_utterance()
             if not text:
-                # Everything ran without a model. Actions stay silent; answers and failures are spoken.
+                # Everything ran without a model, and the session never sees it: it is still the
+                # user's last request (as Session._handle would note it).
+                if ran:
+                    self._note_request(said)
+                # Actions stay silent; answers and failures are spoken.
                 for r in ran:
                     t = registry().get(r.tool)
                     if r.text and not (r.ok and t is not None and t.quiet and not r.text.startswith("NEEDS_")):
@@ -283,6 +296,19 @@ class LocalVoice(OnDemandMic):
                 await bus().set_state(NeoState.LISTENING if ran else NeoState.IDLE)
                 continue
             self._handler = asyncio.create_task(self._handle(text))
+
+    @staticmethod
+    def _note_request(text: str) -> None:
+        """A command the early actor ran entirely by itself: unless it asked to look or to listen, it
+        is another request of the user's, so a bare "try again" after it retries neither the last
+        look nor a song NEO couldn't name (neo2.core.agent.retry_words). Session._handle does this for
+        everything it is handed, and LiveVoice._note_request for the sentences only Live's model saw."""
+        from neo2.core.agent import fastpath, retry_words, song_words
+
+        if fastpath.song(text, origin="user") is None:
+            song_words.clear_retry()
+            if fastpath.camera(text, origin="user") is None:
+                retry_words.mark("other")
 
     def _arm_followup(self) -> None:
         """NEO answered: keep listening `listen_timeout_s` more without the wake word."""
@@ -371,7 +397,9 @@ class LocalVoice(OnDemandMic):
                     and (partial_task is None or partial_task.done())
                 ):
                     last_partial = time.time()
-                    partial_task = asyncio.create_task(self._emit_partial(b"".join(frames)))
+                    partial_task = asyncio.create_task(
+                        self._emit_partial(b"".join(frames), act=not self._checkin_capture)
+                    )
             if not frames:
                 return ""
             await bus().set_state(NeoState.THINKING)
@@ -389,7 +417,9 @@ class LocalVoice(OnDemandMic):
             if self._wake:
                 self._wake.reset()
 
-    async def _emit_partial(self, raw: bytes) -> None:
+    async def _emit_partial(self, raw: bytes, *, act: bool = True) -> None:
+        """Show what the user has said so far and, unless `act` is False (the reply to a check-in),
+        let the early actor run a finished clause of it."""
         try:
             import mlx.core as mx
 
@@ -397,8 +427,9 @@ class LocalVoice(OnDemandMic):
             res = await asyncio.to_thread(self._stt.generate, mx.array(pcm))
             if res.text and self._capturing:
                 await bus().say(res.text.strip(), role="user", final=False)
-                early().feed(res.text.strip())
-                asyncio.create_task(early().tick())  # act on a finished clause; never block the STT
+                if act:
+                    early().feed(res.text.strip())
+                    asyncio.create_task(early().tick())  # act on a finished clause; never block the STT
         except asyncio.CancelledError:
             pass
         except Exception:  # noqa: BLE001 — partials are cosmetic

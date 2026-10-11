@@ -14,6 +14,7 @@ import pytest
 from neo2.core.agent import camera_words, fastpath, retry_words, song_words
 from neo2.core.agent.registry import RegisteredTool, ToolOutput, catalog
 from neo2.core.agent.retry_words import is_retry_request
+from tests.test_wake_word_setting import devices  # noqa: F401 — (a fixture: fake audio streams)
 
 
 @pytest.fixture(autouse=True)
@@ -211,9 +212,10 @@ def lanes(monkeypatch):
     monkeypatch.setattr(sess_mod, "_camera_on", lambda: True)
     yield SimpleNamespace(camera=camera.calls, song=song.calls, others=others)
     for name, prev in saved.items():
-        catalog().remove(name)
         if prev is not None:
-            catalog().register(prev)
+            catalog().register(prev)  # replaced where it stands: another test reads the catalog's order
+        else:
+            catalog().remove(name)
 
 
 class _Reflex:
@@ -417,3 +419,83 @@ def test_live_another_request_ends_the_camera_retry_but_not_its_follow_ups(live)
     _turn(live, _heard("tell me a joke"), _answer("Why did the scarecrow win an award?"), _DONE)
     assert retry_words.last_lane() == "other"
     assert not camera_words.follow_up("try again") and camera_words.follow_up("and now?")
+
+
+# ---- the on-device voice: a command the early actor runs by itself -----------------------------------
+
+
+def _early_runs(monkeypatch) -> list[tuple]:
+    """The early actor's fast paths run as fakes: what ran, recorded (nothing opens or changes)."""
+    from neo2.core.agent.early import Ran, early
+
+    ran: list[tuple] = []
+
+    async def fake_run(self, tool, args, utt):
+        ran.append((tool, args))
+        r = Ran(tool, args, True, "")
+        if self._utt == utt:
+            self.executed.append(r)
+        return r
+
+    monkeypatch.setattr(type(early()), "_run", fake_run)
+    return ran
+
+
+@pytest.mark.parametrize("missed", ["song", "camera"])
+def test_local_a_command_run_before_the_session_ends_the_retry(devices, monkeypatch, missed):  # noqa: F811
+    """On the on-device voice the early actor may run a whole command ("turn the volume up") before
+    the session ever sees it: it is still the user's last request, so a "try again" after it neither
+    opens the mic for a song NEO couldn't name nor looks again (as Session._handle and Live)."""
+    pytest.importorskip("sounddevice")
+    from neo2.core.tools import load_all
+    from tests.test_wake_word_setting import _frames, _local, _settings, _until
+
+    load_all()
+    _settings(monkeypatch, True)
+    ran = _early_runs(monkeypatch)
+    if missed == "song":
+        song_words.mark_no_match()
+    else:
+        camera_words.mark_look(question="what am I holding?")
+    assert retry_words.last_lane() == missed
+
+    async def run():
+        v = await _local(monkeypatch, ["turn the volume up"])
+        try:
+            await v.wake("ui")
+            await _frames(v, 2)
+            assert await _until(lambda: bool(ran))
+            await asyncio.sleep(0.1)
+            return v.handled
+        finally:
+            await v.close()
+
+    assert asyncio.run(run()) == []  # (the session never saw it)
+    assert ran == [("volume", {"action": "up"})]
+    assert retry_words.last_lane() == "other"
+    assert not song_words.retry_after_miss("try again") and not camera_words.follow_up("try again")
+
+
+def test_local_a_retry_the_early_actor_cant_run_still_reaches_the_session(devices, monkeypatch):  # noqa: F811
+    """(The song's own "try again" is never run early: the session gets it, with the retry still open.)"""
+    pytest.importorskip("sounddevice")
+    from neo2.core.tools import load_all
+    from tests.test_wake_word_setting import _frames, _local, _settings, _until
+
+    load_all()
+    _settings(monkeypatch, True)
+    ran = _early_runs(monkeypatch)
+    song_words.mark_no_match()
+
+    async def run():
+        v = await _local(monkeypatch, ["try again"])
+        try:
+            await v.wake("ui")
+            await _frames(v, 2)
+            assert await _until(lambda: v.handled == ["try again"])
+            return v.handled
+        finally:
+            await v.close()
+
+    asyncio.run(run())
+    assert ran == [] and retry_words.last_lane() == "song" and song_words.retry_after_miss("try again")
