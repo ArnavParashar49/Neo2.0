@@ -42,6 +42,7 @@ class LocalVoice(OnDemandMic):
     # (Class defaults too, as LiveVoice has them: a voice built without __init__ still has them.)
     _listen_timeout_override: float | None = None  # one check-in reply; normal turns use settings
     _last_utterance_started_at: float | None = None  # monotonic: when the latest utterance began
+    _checkin_reply: asyncio.Future[str] | None = None  # what the reply to a check-in said ("" = nothing)
 
     def __init__(self, on_text: TextHandler) -> None:
         self._on_text = on_text
@@ -112,6 +113,7 @@ class LocalVoice(OnDemandMic):
         for t in (self._loop_task, self._handler):
             if t:
                 t.cancel()
+        self._end_checkin_reply("")
         self._mic_end()
         self.spk.close()
 
@@ -126,10 +128,32 @@ class LocalVoice(OnDemandMic):
             if not self._mic_shut:
                 await bus().note("NEO couldn't open the microphone")
 
-    async def listen_after_checkin(self, *, seconds: float = 5.0, context: str = "") -> None:
-        """Listen locally for one short reply after a spoken check-in."""
+    async def listen_after_checkin(self, *, seconds: float = 5.0, context: str = "") -> str | None:
+        """Listen locally for one short reply after a spoken check-in, and return it ("" = nothing
+        said), or None when NEO couldn't listen. Only while the microphone is open anyway ("Listen
+        for 'Neo'" on): a check-in never opens it. The reply goes to the session as an answer — never
+        straight to the fast paths from the transcript (the early actor): a TV may be talking."""
         del context  # App.handle_speech supplies the ephemeral context to the local answer model.
-        await self.wake("check-in", listen_timeout_s=max(0.1, float(seconds)))
+        if self._mic_parked or self._mic_shut or not settings().wake_word:
+            return None
+        seconds = max(0.1, float(seconds))
+        reply: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+        self._checkin_reply = reply
+        await self.wake("check-in", listen_timeout_s=seconds)
+        if not self._armed.is_set() and not self._capturing:
+            self._end_checkin_reply("")  # the microphone couldn't be opened
+        try:
+            return await asyncio.wait_for(asyncio.shield(reply), seconds + _MAX_UTTER_S + 5.0)
+        except TimeoutError:
+            return ""
+        finally:
+            if self._checkin_reply is reply:
+                self._checkin_reply = None
+
+    def _end_checkin_reply(self, said: str) -> None:
+        waiter = self._checkin_reply
+        if waiter is not None and not waiter.done():
+            waiter.set_result(" ".join((said or "").split()))
 
     async def push_to_talk(self, on: bool) -> None:
         self._ptt = on
@@ -228,6 +252,18 @@ class LocalVoice(OnDemandMic):
             early().listening("wake")  # warm what the request will need while the user speaks (never waits)
             self.mic.drain()
             text = await self._capture_utterance()
+            if source == "check-in":
+                self._end_checkin_reply(text)
+                early().new_utterance()
+                if text:
+                    # The answer to a check-in NEO started itself: the session answers it, but
+                    # nothing in it runs straight from the transcript (a TV may be talking).
+                    self._handler = asyncio.create_task(self._handle(text))
+                else:
+                    self._followup_until = 0.0
+                    print("[voice] idle")
+                    await bus().set_state(NeoState.IDLE)
+                continue
             early().feed(text)
             await early().tick(final=True)  # the whole utterance, if fast paths can cover it
             text = early().remaining()

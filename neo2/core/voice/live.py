@@ -130,6 +130,9 @@ _ROUTINE_SETUP_MAX_S = 12.0  # …however long the user keeps adding to it
 # short; a routine definition said with pauses ("…open Notion … Safari … and YouTube") arrives as
 # several sentences, which the routine collector puts back together (_routine_transcript_after_pause).
 _LIVE_VAD_SILENCE_MS = 700
+# After a check-in NEO listens `seconds` for a reply to start; the whole reply gets this much more,
+# then the session closes whatever the room keeps saying (a TV, a call): see _silence_watch.
+_CHECKIN_REPLY_S = 10.0
 _CONNECT_TIMEOUT_S = 12.0
 # A socket that dies mid-turn is reopened: a tool is running, or the user's words came within this
 # long and the model hasn't answered. Otherwise NEO goes idle and waits for "Neo" — nothing was lost.
@@ -688,6 +691,12 @@ class LiveVoice(OnDemandMic):
     # listening (see _silence_watch for the rules)
     _listening = False  # the mic goes up to the model: set by a wake, never by typed words
     _listen_timeout_override: float | None = None  # one check-in reply; normal turns use settings
+    # gentle check-ins (neo2.core.voice.wellbeing; see speak_checkin, listen_after_checkin)
+    _checkin_turn = False  # the model's current turn says NEO's check-in line: never journaled
+    _checkin_listening = False  # listening for the reply to a check-in (no wake by the user)
+    _checkin_until = 0.0  # …until then at the latest, whatever the room keeps saying
+    _checkin_utt = -1  # the sentence that replies to it: never the user's command, never journaled
+    _checkin_reply: asyncio.Future[str] | None = None  # what that reply said ("" = nothing)
     _routine_claim: tuple[int, dict[int, str]] | None = None  # a routine being said: first sentence, all of them
     _reconnecting = False  # a dropped session that was listening is being reopened (see _lost)
     _woke_at = 0.0  # the latest wake (wake word / hotkey / push-to-talk)
@@ -796,6 +805,8 @@ class LiveVoice(OnDemandMic):
         said" starts here (or when the session is actually open, if connecting took a while)."""
         early().listening("wake")  # warm what the request will need while the user speaks (never waits)
         self._listen_timeout_override = listen_timeout_s
+        if source != "check-in":  # the user summoned NEO: what follows is their own request
+            self._checkin_listening, self._checkin_until = False, 0.0
         self._listening = True
         self._woke_at = time.time()
         # (With the wake word off the microphone is closed while NEO is idle: it opens with the session.)
@@ -813,16 +824,29 @@ class LiveVoice(OnDemandMic):
             self._listen_timeout_override = None
             await self._mic_idle()
 
-    async def listen_after_checkin(self, *, seconds: float = 5.0, context: str = "") -> None:
-        """Open a short voice turn after NEO's local check-in has finished speaking.
+    async def listen_after_checkin(self, *, seconds: float = 5.0, context: str = "") -> str | None:
+        """Open a short voice turn after NEO's local check-in has finished speaking, and return what
+        the user said back ("" = nothing), or None when NEO couldn't listen.
 
-        The note is generic and does not include the sound-classifier label. It stays in the
-        unfinished Live turn until the user's answer arrives.
-        """
+        Only while the microphone is open anyway ("Listen for 'Neo'" on): a check-in never opens it.
+        The reply has `seconds` to start and `_CHECKIN_REPLY_S` more to finish, then the session
+        closes whatever the room keeps saying. The reply is the user's answer, never their command
+        (no fast paths, camera, song, routine or early actor for it: a TV may be talking) and, like
+        the check-in line, never goes to the journal. The note is generic and does not include the
+        sound-classifier label; it stays in the unfinished Live turn until the answer arrives."""
         seconds = max(0.1, float(seconds))
+        if self._mic_parked or self._mic_shut or not settings().wake_word:
+            return None
         await self._ensure_session()
         live = self._live
-        if live is not None and context:
+        if live is None:
+            return None  # offline: nothing to listen with (and no second, third failed connect)
+        loop = asyncio.get_running_loop()
+        reply: asyncio.Future[str] = loop.create_future()
+        self._checkin_reply = reply
+        self._checkin_listening = True
+        self._checkin_until = time.time() + seconds + _CHECKIN_REPLY_S
+        if context:
             note = f"(NEO context, not the user speaking: {context})"
             try:
                 await live.send_client_content(
@@ -832,6 +856,21 @@ class LiveVoice(OnDemandMic):
             except Exception as error:  # noqa: BLE001 — still allow the user to answer
                 print(f"[live] couldn't queue check-in context: {type(error).__name__}")
         await self.wake("check-in", listen_timeout_s=seconds)
+        if self._live is None:
+            self._end_checkin_reply("")
+        try:
+            return await asyncio.wait_for(asyncio.shield(reply), seconds + _CHECKIN_REPLY_S + _TURN_STALL_S)
+        except TimeoutError:
+            return ""
+        finally:
+            if self._checkin_reply is reply:
+                self._checkin_reply = None
+
+    def _end_checkin_reply(self, said: str) -> None:
+        """The reply to a check-in is in (or there was none)."""
+        waiter = self._checkin_reply
+        if waiter is not None and not waiter.done():
+            waiter.set_result(" ".join((said or "").split()))
 
     def _mic_needed(self) -> bool:
         """A wake's session is listening (or coming back after a drop), or push-to-talk is held."""
@@ -889,11 +928,14 @@ class LiveVoice(OnDemandMic):
         except Exception as e:  # noqa: BLE001
             print(f"[live] couldn't pass the result on: {e}")
 
-    async def speak_checkin(self, text: str) -> bool:
+    async def speak_checkin(self, text: str) -> bool | None:
         """Say the personalized check-in in NEO's configured Live voice, then wait for playback.
 
         The sentence is sent to Gemini so Charon can speak it. The local audio classifier label
-        is not sent separately. Returns False if Live could not finish speaking the line.
+        is not sent separately, and the turn that says it never goes to the journal or the spoken
+        context (`_checkin_turn`). True: Live said it. False: Live was reached but didn't finish
+        saying it (the caller says it locally; a fresh session can still hear the reply). None:
+        Live couldn't be reached at all — the caller says it locally and doesn't listen.
         """
         line = " ".join((text or "").split())
         if not line:
@@ -902,10 +944,10 @@ class LiveVoice(OnDemandMic):
             await self._ensure_session()
         except Exception as error:  # noqa: BLE001 — the check-in can fall back to local speech
             print(f"[live] couldn't open check-in voice: {type(error).__name__}")
-            return False
+            return None
         live = self._live
         if live is None:
-            return False
+            return None
 
         waiter = asyncio.get_running_loop().create_future()
         self._checkin_playback = waiter
@@ -917,6 +959,7 @@ class LiveVoice(OnDemandMic):
             f"natural conversational tone, and add nothing before or after it: “{line}”)"
         )
         spoke = False
+        self._checkin_turn = True  # the model's next turn is this line: shown and said, never kept
         try:
             await live.send_client_content(
                 turns=gt.Content(role="user", parts=[gt.Part.from_text(text=note)])
@@ -938,6 +981,7 @@ class LiveVoice(OnDemandMic):
             return True
         # If a partial Live response may still arrive, close it before local fallback so the two
         # voices cannot overlap. The follow-up listen will open a fresh session afterward.
+        self._checkin_turn = False
         if self._live is live:
             self._closing = True
             await self._close_session()
@@ -1068,6 +1112,10 @@ class LiveVoice(OnDemandMic):
         self._file_label()
         self._new_question()
         self._finish_checkin_playback(False)
+        # The check-in's turn and its listen end with the session: what the reply said so far is it.
+        self._end_checkin_reply(self._utterance if self._utt_id == self._checkin_utt else "")
+        self._checkin_turn = self._checkin_listening = False
+        self._checkin_until = 0.0
         self._routine_claim = None  # (a collector still waiting has its parts; it returns them)
         self._gate, self._held = None, []
         self._result_pending = self._result_speech = False
@@ -1167,6 +1215,13 @@ class LiveVoice(OnDemandMic):
             if any(not t.done() for t in self._tool_tasks.values()):
                 continue
             now = time.time()
+            if self._checkin_listening and self._checkin_until and now > self._checkin_until:
+                # NEO opened this listen itself, after a check-in: it ends on time, however recently
+                # words came (a TV or a call never keeps it open).
+                print("[voice] check-in reply window over; idle")
+                self._closing = True
+                await self._close_session()
+                return
             if self._turn_open and self._words_at and now - self._last_activity < _TURN_STALL_S:
                 continue  # the model is still composing its answer to what the user said
             quiet = now - max(self._woke_at, self._quiet_since())
@@ -1316,6 +1371,7 @@ class LiveVoice(OnDemandMic):
                 model_buf.clear()
                 self._gate, self._held = None, []
                 self._result_pending = self._result_speech = False
+                self._checkin_turn = False  # (the check-in line was cut off: nothing of it is kept)
                 self._new_question()
                 await self._refresh_state()
             if sc.input_transcription and sc.input_transcription.text:
@@ -1328,6 +1384,8 @@ class LiveVoice(OnDemandMic):
                     self._label = self._new_label(open_=True)
                 if not user_buf:
                     self._new_sentence()
+                    if self._checkin_listening:
+                        self._checkin_utt = self._utt_id  # the reply to a check-in NEO started itself
                 self._last_heard_at = time.time()
                 user_buf.append(sc.input_transcription.text)
                 self._utterance = "".join(user_buf)
@@ -1335,25 +1393,26 @@ class LiveVoice(OnDemandMic):
                 await bus().say(self._utterance, role="user", final=False)
                 from neo2.core.tools.routines import is_setup_request
 
-                # A routine being defined ("…open Notion") is not a command the early actor may run as
-                # it is said.
+                # Neither the answer to a check-in nor a routine being defined ("…open Notion") is a
+                # command the early actor may run as it is said.
+                checkin_reply = self._utt_id == self._checkin_utt
                 setup = self._routine_part(self._utterance) or is_setup_request(self._utterance)
-                if not setup:
+                if not (checkin_reply or setup):
                     early().feed(self._utterance)  # the 150 ms ticker acts on it — never inline here
                 finished = getattr(sc.input_transcription, "finished", False)
-                if finished or setup:
+                if not checkin_reply and (finished or setup):
                     # Routine setup can span several committed transcription chunks. Claim it as
                     # soon as the intent is clear, then let the quiet-window collector use the
                     # final wording instead of waiting for Live's optional `finished` marker.
                     self._maybe_command_lane(self._utterance, settled=False)
-                if finished:
+                if finished and not checkin_reply:
                     self._recall_for(live, self._utterance)
             interim = getattr(sc, "interim_input_transcription", None)
             if interim and interim.text:  # words as they're being said, before they're committed
                 self._turn_open = True
                 self._listen_timeout_override = None
                 self._last_user_speech = self._words_at = self._last_heard_at = time.time()
-                if self._routine_claim is None:
+                if not self._checkin_listening and self._routine_claim is None:
                     early().feed("".join(user_buf) + " " + interim.text)
             if (sc.model_turn or sc.output_transcription) and self._gate is None and self._utterance and (
                 self._last_response_at <= self._last_heard_at
@@ -1381,8 +1440,14 @@ class LiveVoice(OnDemandMic):
                 self._turn_open = False
                 self._last_turn_end = time.time()
                 said = "".join(user_buf)
+                # A check-in's own line, or the user's reply to it and NEO's answer: said and shown,
+                # never kept (the journal is put back into every session's instruction that day).
+                checkin = self._checkin_turn or self._utt_id == self._checkin_utt
+                self._checkin_turn = False
                 if said:
                     self._completed_utterance = (self._utt_id, said)
+                    if self._utt_id == self._checkin_utt:
+                        self._end_checkin_reply(said)
                 p = confirm.peek()
                 if said and p is not None and self._utt_started > p.staged_at:
                     ans = answer_of(said)
@@ -1390,9 +1455,10 @@ class LiveVoice(OnDemandMic):
                         asyncio.create_task(self._answer_by_voice(ans, said))
                 if user_buf:
                     await bus().say("".join(user_buf), role="user", final=True)
-                    self._remember_line("user", "".join(user_buf))
-                    self._journal_user("".join(user_buf))
-                    self._recall_for(live, "".join(user_buf))  # (for the count: the model has answered)
+                    if not checkin:
+                        self._remember_line("user", "".join(user_buf))
+                        self._journal_user("".join(user_buf))
+                        self._recall_for(live, "".join(user_buf))  # (for the count: the model has answered)
                     if self._label is not None and self._label.get("open"):
                         self._label["text"] = " ".join("".join(user_buf).split())  # the final wording
                         self._label["open"] = False
@@ -1408,8 +1474,9 @@ class LiveVoice(OnDemandMic):
                 if model_buf:
                     if spoke:
                         await bus().say("".join(model_buf), final=True)
-                        self._remember_line("NEO", "".join(model_buf))  # only what the user heard
-                        self._journal_reply("".join(model_buf))
+                        if not checkin:
+                            self._remember_line("NEO", "".join(model_buf))  # only what the user heard
+                            self._journal_reply("".join(model_buf))
                         if self._label is not None:
                             self._label["spoke"] = True
                             outcomes.touch(self._label.get("id", ""))
@@ -1472,6 +1539,8 @@ class LiveVoice(OnDemandMic):
     def _maybe_command_lane(self, text: str, *, settled: bool, routine_ready: bool = False) -> None:
         """Run a recognized camera ask or a fully covered command once the sentence is finished."""
         text = " ".join((text or "").split())
+        if self._utt_id == self._checkin_utt:
+            return  # the answer to a check-in NEO started itself: never a command (a TV may be talking)
         _camera_off_if_asked(text)
         _song_stop_if_asked(text)
         if not text or self._lane_tried_utt == self._utt_id:
@@ -1838,7 +1907,9 @@ class LiveVoice(OnDemandMic):
                     # user's last sentence run again as their request.
                     from neo2.core.agent import fastpath
 
-                    unused = utt not in (self._own_utt, self._lane_utt)
+                    # (Never the reply to a check-in: NEO opened that listen itself, so its words
+                    # never run as the user's own request.)
+                    unused = utt not in (self._own_utt, self._lane_utt, self._checkin_utt)
                     steps = fastpath.plan(asked) if asked and unused else None
                     own = bool(steps) and not any(_vague(v) for _, a in steps for v in a.values())
                     # "what am I holding" wrapped in agent_task: the user's own sentence goes to the
@@ -2056,8 +2127,8 @@ class LiveVoice(OnDemandMic):
         from neo2.core.agent import fastpath
         from neo2.core.tools.camera.live import camera_live
 
-        if not said or fastpath.camera(said, origin="user") is None:
-            return False
+        if not said or utt == self._checkin_utt or fastpath.camera(said, origin="user") is None:
+            return False  # (the reply to a check-in is an answer, never a request to look)
         if camera_live.on:
             return True
         return utt != self._own_utt and not self._taint
@@ -2107,8 +2178,8 @@ class LiveVoice(OnDemandMic):
         later, is not their request), and never once this question has read a page, a mail or a file."""
         from neo2.core.agent import fastpath
 
-        if not said or fastpath.song(said, origin="user") is None:
-            return False
+        if not said or utt == self._checkin_utt or fastpath.song(said, origin="user") is None:
+            return False  # (the reply to a check-in is an answer, never a request to listen)
         return utt != self._own_utt and not self._taint
 
     def _new_label(self, text: str = "", *, open_: bool = False) -> dict:
@@ -2236,8 +2307,8 @@ class LiveVoice(OnDemandMic):
     # ---- memory (see the module doc) ---------------------------------------------------------
     def _journal_user(self, text: str, *, source: str = "voice") -> None:
         """The user's sentence — its final transcription, or what they typed — goes to the journal,
-        once (never blocks: neo2.core.memory.journal)."""
-        if self._journaled_utt == self._utt_id or not text.strip():
+        once (never blocks: neo2.core.memory.journal). Never the reply to a check-in."""
+        if self._journaled_utt == self._utt_id or not text.strip() or self._utt_id == self._checkin_utt:
             return
         self._journaled_utt = self._utt_id
         from neo2.core.memory import journal
@@ -2262,7 +2333,7 @@ class LiveVoice(OnDemandMic):
     def _recall_for(self, live, text: str) -> None:
         """The sentence is over: search memory for it, once, off the event loop."""
         text = " ".join((text or "").split())
-        if not text or self._recall_utt == self._utt_id:
+        if not text or self._recall_utt == self._utt_id or self._utt_id == self._checkin_utt:
             return
         self._recall_utt = self._utt_id
         asyncio.create_task(self._recall(live, text, self._utt_id, time.monotonic()))
