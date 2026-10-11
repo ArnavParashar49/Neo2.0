@@ -281,7 +281,8 @@ def test_who_a_client_is():
     # A page is never a host, whichever page; and no role but that one exists.
     assert kind("tauri://localhost", "host") is None and kind("neo://app", "host") is None
     assert kind(None, "admin") is None and kind("https://evil.example", "") is None
-    assert ws_mod._ALLOWED_ORIGINS == ws_mod._APP_ORIGINS | {"neo://app"} and "neo://app" not in ws_mod._APP_ORIGINS
+    allowed, app_origins = ws_mod._ALLOWED_ORIGINS, ws_mod._APP_ORIGINS
+    assert allowed == app_origins | {"neo://app"} and "neo://app" not in app_origins
 
 
 def test_the_shells_socket_is_the_cores_alone(monkeypatch):
