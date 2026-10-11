@@ -78,6 +78,7 @@ def devices(monkeypatch):
     monkeypatch.setattr(sd, "_initialize", lambda: calls.append("initialize"))
     monkeypatch.setattr(audio, "_register", lambda o: audio._streams.add(o))
     monkeypatch.setattr(audio, "_taps", ())
+    monkeypatch.setattr(audio, "_listeners", ())
     monkeypatch.setattr(audio, "_yielders", ())
     yield calls
     for o in list(audio._streams):
@@ -429,6 +430,105 @@ def test_off_the_song_opens_its_own_stream_and_hands_it_over_when_neo_is_summone
     asyncio.run(run())
 
 
+class _FakeAnalyzer:
+    """Apple's sound classifier, faked: takes buffers, classifies nothing."""
+
+    def __init__(self):
+        self.fed = 0
+
+    def analyzeAudioBuffer_atAudioFramePosition_(self, buffer, position):
+        self.fed += 1
+
+
+class _FakeBuffer:
+    def __init__(self):
+        self.data = bytearray(640)
+
+    def int16ChannelData(self):
+        data = self.data
+        return [types.SimpleNamespace(as_buffer=lambda n: memoryview(data))]
+
+    def setFrameLength_(self, n):
+        pass
+
+
+def _monitor(monkeypatch):
+    """Gentle check-ins switched on for real (its tap, its worker), Apple's classifier faked."""
+    from neo2.core.voice import wellbeing
+
+    analyzer = _FakeAnalyzer()
+    monkeypatch.setattr(
+        wellbeing.WellbeingMonitor,
+        "_make_analyzer",
+        staticmethod(lambda: (analyzer, object(), types.SimpleNamespace(), _FakeBuffer())),
+    )
+    m = wellbeing.WellbeingMonitor(loop=asyncio.get_running_loop(), on_event=lambda kind: None, is_ignored=lambda: False)
+    m.set_enabled(True)
+    m.analyzer = analyzer
+    return m
+
+
+def test_off_check_ins_never_hold_the_microphone_open(devices, monkeypatch):
+    """Gentle check-ins hear only frames a microphone NEO opened for something else captures: with
+    the wake word off, a summon opens it, the monitor hears that session, and idle closes it — the
+    check-ins' tap never keeps it open (macOS's orange dot goes off)."""
+    _settings(monkeypatch, False)
+
+    async def run():
+        v = await _live(monkeypatch)
+        m = _monitor(monkeypatch)
+        try:
+            assert _inputs() == [] and v._mic_parked and not audio.tapped()  # switching check-ins on opens nothing
+            await v.wake("ui")
+            await _frames(v, 3)
+            assert await _until(lambda: m.analyzer.fed >= 1)  # the monitor hears the session the user opened
+            assert await _until(lambda: v._live is None)  # nothing said: idle…
+            assert await _until(lambda: not v.mic.active)  # …and the microphone closes, the tap notwithstanding
+            assert _inputs() == [] and v._mic_parked and not audio.mic_running()
+        finally:
+            await asyncio.to_thread(m.close)
+            await v.close()
+
+    asyncio.run(run())
+
+
+def test_local_off_check_ins_never_hold_the_microphone_open(devices, monkeypatch):
+    _settings(monkeypatch, False)
+
+    async def run():
+        v = await _local(monkeypatch, [""])
+        m = _monitor(monkeypatch)
+        try:
+            await v.wake("ui")
+            assert len(_inputs()) == 1
+            await _frames(v, 1)
+            assert await _until(lambda: not v._armed.is_set() and not v._capturing)
+            await _frames(v, 1)
+            assert await _until(lambda: not v.mic.active)
+            assert _inputs() == [] and v._mic_parked
+        finally:
+            await asyncio.to_thread(m.close)
+            await v.close()
+
+    asyncio.run(run())
+
+
+def test_a_listen_only_tap_hears_frames_but_never_counts_as_using_the_microphone(devices):
+    heard: list[bytes] = []
+    untap = audio.tap(heard.append, hold=False)
+    assert not audio.tapped()  # the voice may close its microphone whenever it likes
+    mic = audio.Mic()
+    mic.start()
+    mic._stream.cb(_FRAME, 320, None, None)
+    assert heard == [_FRAME]
+    hold = audio.tap(lambda frame: None)  # naming a song: that one does keep it
+    assert audio.tapped()
+    hold()
+    untap()
+    assert not audio.tapped() and audio._listeners == () and audio._taps == ()
+    mic.stop()
+
+
 def test_off_a_song_named_and_over_at_idle_never_involves_the_voice(devices, monkeypatch):
     _settings(monkeypatch, False)
     from neo2.core.tools.music import capture
@@ -647,7 +747,7 @@ def test_set_takes_only_the_settings_it_knows_with_values_of_their_type(monkeypa
     got, seen = _with_server(monkeypatch, body)
     assert got == ["unknown", "unknown", "unknown", "invalid", "invalid", "invalid", "invalid"]
     assert seen == []
-    assert ws_settable() == {"wake_word": bool}
+    assert ws_settable() == {"wake_word": bool, "wellbeing_checkins": bool}
 
 
 def ws_settable():
@@ -704,7 +804,8 @@ def test_the_core_keeps_it_applies_it_to_the_voice_and_tells_every_client(monkey
             return told, result, hello, config.settings().wake_word
 
     told, result, hello, now = _with_server(monkeypatch, body)
-    assert told == [{"wake_word": False}, {"wake_word": False}, {"wake_word": True}]
+    off = {"wellbeing_checkins": False}  # (check-ins: off by default, told alongside)
+    assert told == [{"wake_word": False, **off}, {"wake_word": False, **off}, {"wake_word": True, **off}]
     assert result == {"name": "wake_word", "ok": True} and hello is False and now is True
     assert Voice.calls == [False, True]
     assert env.read_text() == "GEMINI_API_KEY=keep-me\n\nNEO_WAKE_WORD=true\n"
@@ -727,4 +828,47 @@ def test_without_a_voice_the_setting_is_still_kept_and_told(monkeypatch, tmp_pat
     asyncio.run(app.on_command({"cmd": "set", "name": "wake_word", "value": "true"}))  # not a bool: nothing
     asyncio.run(app.on_command({"cmd": "set", "name": "voice", "value": False}))  # not settable: nothing
     assert env.read_text() == "NEO_WAKE_WORD=false\n" and config.settings().wake_word is False
-    assert seen == [("settings", {"wake_word": False})]
+    assert seen == [("settings", {"wake_word": False, "wellbeing_checkins": False})]
+
+
+def test_gentle_check_ins_are_switched_the_same_way(monkeypatch, tmp_path):
+    """{"cmd":"set","name":"wellbeing_checkins"} end to end, minus the user's own env file: written, the
+    live settings, the running monitor (it never opens the microphone), a `settings` event to everyone
+    connected and the next hello. A tool, or NEO's page in the notch, can't."""
+    from neo2.core import app as app_mod
+    from neo2.core import config
+
+    env = tmp_path / ".env"
+    env.write_text("GEMINI_API_KEY=keep-me\n")
+    real = config.set_wellbeing_checkins
+    monkeypatch.setattr(app_mod, "set_wellbeing_checkins", lambda on: real(on, env_path=env))
+
+    class Monitor:
+        calls: list[bool] = []
+
+        def set_enabled(self, on):
+            self.calls.append(on)
+
+    async def body(srv, port, seen):
+        app = app_mod.App.__new__(app_mod.App)
+        app.voice, app.wellbeing = None, Monitor()
+        srv._on_command = app.on_command
+        async with _Peer(port, origin=PAGE) as page, _Peer(port, role="host") as host:
+            await page.send(cmd="set", name="wellbeing_checkins", value=True)  # the notch's page: no
+            refused = (await page.next("set_result"))["data"]
+            await host.send(cmd="set", name="wellbeing_checkins", value=True)
+            told = [(await page.next("settings"))["data"], (await host.next("settings"))["data"]]
+            result = (await host.next("set_result"))["data"]
+            await host.send(cmd="set", name="wellbeing_checkins", value="yes")  # not a bool
+            invalid = (await host.next("set_result"))["data"]
+            async with _Peer(port) as later:
+                hello = later.hello.get("wellbeing_checkins")
+            return refused, told, result, invalid, hello, config.settings().wellbeing_checkins
+
+    refused, told, result, invalid, hello, now = _with_server(monkeypatch, body)
+    assert refused == {"name": "wellbeing_checkins", "ok": False, "error": "forbidden"}
+    on = {"wake_word": True, "wellbeing_checkins": True}
+    assert told == [on, on] and result == {"name": "wellbeing_checkins", "ok": True}
+    assert invalid == {"name": "wellbeing_checkins", "ok": False, "error": "invalid"}
+    assert hello is True and now is True and Monitor.calls == [True]
+    assert env.read_text() == "GEMINI_API_KEY=keep-me\n\nNEO_WELLBEING_CHECKINS=true\n"
