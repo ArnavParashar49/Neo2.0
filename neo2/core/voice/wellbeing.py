@@ -9,8 +9,10 @@ or a log.
 
 What leaves the Mac: with Gemini Live, the check-in line and about 5 s of the user's reply audio go
 to Gemini (Live speaks the line in NEO's voice and hears the answer, as in any turn). NEO listens for
-that reply only while "Listen for 'Neo'" has the microphone open anyway. The on-device voice keeps
-both on the Mac. Neither the line nor the reply goes to NEO's memory journal (neo2.core.voice.live).
+that reply only while "Listen for 'Neo'" has the microphone open anyway. With the on-device voice the
+line is spoken and the reply heard on the Mac, and the reply's words (with a note that NEO just
+checked in) go to the chat brain like any request (the README's "what you say and type"). Neither the
+line nor the reply goes to NEO's memory journal (neo2.core.voice.live, neo2.core.agent.session).
 
 How often (CheckinPolicy, RAM only): the same kind of check-in waits 10 min, then 1 h, then 4 h; at
 most 3 a day; none for the rest of the day after a "no" or after two check-ins nobody answered. NEO
