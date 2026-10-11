@@ -48,9 +48,11 @@ Settings a client may switch. `wake_word` — "Listen for 'Neo'". true: the micr
 stays open so the wake word can be heard. false: the microphone is closed while NEO is idle (macOS
 shows no microphone indicator) and opens only when NEO is summoned by hand — `wake` from the summon
 keys, the orb or a host, or push-to-talk — until NEO is idle again. `set` keeps the value in
-~/.neo/.env (NEO_WAKE_WORD), applies it to the running voice at once. `wellbeing_checkins` is a
-separate, opt-in local sound check: it classifies cough and crying/sobbing labels only from frames
-the existing mic captures, and saves neither audio nor detection history. It never opens a mic.
+~/.neo/.env (NEO_WAKE_WORD), applies it to the running voice at once. `wellbeing_checkins` — gentle
+check-ins, opt-in (NEO_WELLBEING_CHECKINS): detection stays on-device (Apple's sound classifier hears
+only frames NEO's microphone captures while it is open anyway; it never opens or holds it, and saves
+neither audio nor detection history); with Gemini Live, the check-in line and ~5 s of reply audio go
+to Gemini.
 Both settings return `set_result` {name, ok, error?} (error: forbidden | unknown | invalid | failed),
 and are reported in the hello and `settings` events.
 

@@ -164,8 +164,12 @@ class Settings(BaseSettings):
     # is summoned by hand (the summon keys, the orb, push-to-talk), until NEO is idle again. Switched
     # while NEO runs ({"cmd": "set", "name": "wake_word"}) and kept in ~/.neo/.env; see set_wake_word.
     wake_word: bool = True
-    # Local, opt-in cough/crying sound check-ins. This only taps frames from NEO's existing microphone
-    # while it is open; it never opens a microphone itself or saves audio/event history.
+    # Gentle check-ins (opt-in): repeated coughs, sniffles, sneezes or a few seconds of crying make NEO
+    # ask a short, kind question. Detection stays on-device (Apple's sound classifier hears only what
+    # NEO's microphone captures while it is open anyway; it never opens or holds it, and nothing about
+    # it is saved). With Gemini Live, the check-in line and ~5 s of reply audio go to Gemini. At most 3
+    # a day, backing off per kind; only while NEO is idle and no other app plays sound. See
+    # neo2/core/voice/wellbeing.py. Switched while NEO runs ({"cmd": "set", "name": "wellbeing_checkins"}).
     wellbeing_checkins: bool = False
     # Voice commands the fast paths fully cover run the moment you stop talking, without
     # waiting for Gemini Live to pick the tool (questions still go to the model).

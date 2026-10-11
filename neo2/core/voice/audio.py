@@ -39,7 +39,7 @@ class Mic:
             self.q.put_nowait(frame)
         except queue.Full:
             pass
-        for fn in _taps:  # (a tuple: a tap added or removed meanwhile is a new one)
+        for fn in (*_taps, *_listeners):  # (tuples: a tap added or removed meanwhile is a new one)
             try:
                 fn(frame)
             except Exception:  # noqa: BLE001 — a listener's trouble never breaks the voice
@@ -243,6 +243,9 @@ _streams: weakref.WeakSet = weakref.WeakSet()
 _reopen_lock = threading.Lock()
 _watcher: threading.Thread | None = None
 _taps: tuple[Callable[[bytes], None], ...] = ()  # each running Mic's frames go to these too
+# …and to these, which only hear what a microphone opened for something else captures: they never
+# keep it open (gentle check-ins, neo2.core.voice.wellbeing). See tap(hold=False).
+_listeners: tuple[Callable[[bytes], None], ...] = ()
 _taps_lock = threading.Lock()
 _yielders: tuple[Callable[[], None], ...] = ()  # see before_mic
 
@@ -252,23 +255,34 @@ def mic_running() -> bool:
     return any(isinstance(o, Mic) and o.active and o._stream is not None for o in list(_streams))
 
 
-def tap(fn: Callable[[bytes], None]) -> Callable[[], None]:
+def tap(fn: Callable[[bytes], None], *, hold: bool = True) -> Callable[[], None]:
     """Hear every 20 ms int16 frame the voice's microphone captures (on PortAudio's thread: be quick,
-    never block), without touching its queue. Returns the call that removes the tap."""
-    global _taps
+    never block), without touching its queue. Returns the call that removes the tap.
+
+    `hold`: the tap needs the microphone for itself (NEO naming a song the user asked about), so with
+    the wake word off the voice keeps it open until the tap is removed (:func:`tapped`). False: the
+    tap only listens in while the microphone is open anyway — a summon, "Listen for 'Neo'" on — and
+    never keeps it open a moment longer. Gentle check-ins take that kind: switched on, they must not
+    turn the user's "the microphone opens only when I ask" into a microphone open all day."""
+    global _taps, _listeners
     with _taps_lock:
-        _taps = (*_taps, fn)
+        if hold:
+            _taps = (*_taps, fn)
+        else:
+            _listeners = (*_listeners, fn)
 
     def untap() -> None:
-        global _taps
+        global _taps, _listeners
         with _taps_lock:
             _taps = tuple(t for t in _taps if t is not fn)
+            _listeners = tuple(t for t in _listeners if t is not fn)
 
     return untap
 
 
 def tapped() -> bool:
-    """Is anything listening through a :func:`tap` now (NEO naming a song)?"""
+    """Is anything listening through a :func:`tap` that holds the microphone open now (NEO naming a
+    song)? Listen-only taps (`hold=False`) never count."""
     return bool(_taps)
 
 
