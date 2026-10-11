@@ -35,9 +35,9 @@ from neo2.core.agent.registry import RegisteredTool, Registry
 from neo2.core.agent.registry import registry as default_registry
 from neo2.core.providers.base import ToolSpec
 
-# Memory is always at hand: the one tool that saves, searches and forgets, and the search by itself
-# (what a model reaches for when the user asks about something earlier or about themselves).
-ALWAYS = ("memory", "memory_search")
+# Core personal tools stay at hand: memory search/write, the user's custom spoken routines and
+# NEO's own local reliability report.
+ALWAYS = ("memory", "memory_search", "routine_manage", "quality_report")
 SCREEN = {
     "ax_tree",
     "ax_find",

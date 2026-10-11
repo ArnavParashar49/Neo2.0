@@ -499,6 +499,45 @@ def summary() -> str:
     return f"[reflex] {day}: " + " · ".join(parts)
 
 
+def quality_report(days: int = 7) -> str:
+    """A local, content-free reliability snapshot for the last `days` calendar days."""
+    if not enabled():
+        return "NEO's learning and reliability counters are turned off. Turn NEO_LEARN on to collect them locally."
+    flush_counts()
+    days = max(1, min(int(days), 30))
+    with _lock:
+        daily = dict(_state().get("daily") or {})
+    cutoff = time.localtime(time.time() - (days - 1) * 86400)
+    first = time.strftime("%Y-%m-%d", cutoff)
+    rows = [v for day, v in daily.items() if day >= first and isinstance(v, dict)]
+    totals: dict[str, int] = {}
+    for row in rows:
+        for key, value in row.items():
+            try:
+                totals[key] = totals.get(key, 0) + int(value)
+            except (TypeError, ValueError):
+                continue
+    requests = totals.get("requests", 0)
+    corrections = totals.get("corrections", 0)
+    interruptions = totals.get("barge_ins", 0)
+    decisions = totals.get("decisions", 0)
+    unsure = totals.get("unsure", 0)
+    if not requests and not decisions:
+        return f"I don't have reliability data for the last {days} days yet."
+    correction_rate = f"{100 * corrections / requests:.1f}%" if requests else "n/a"
+    unsure_rate = f"{100 * unsure / decisions:.1f}%" if decisions else "n/a"
+    verified = totals.get("verified", 0)
+    recovered = totals.get("recovered", 0)
+    unresolved = totals.get("unresolved", 0)
+    return (
+        f"NEO reliability, last {days} days: {requests} settled requests; {verified} outcomes NEO could verify; "
+        f"{corrections} user corrections ({correction_rate}); {interruptions} replies stopped within 3 seconds; "
+        f"{recovered} corrected requests later completed; {unresolved} outcomes remained unclear. "
+        f"Laya was unsure on {unsure_rate} of {decisions} routing decisions. These are interaction signals, "
+        "not a measure of factual accuracy."
+    )
+
+
 async def learn_loop(is_idle) -> None:
     """Background task in the core: settle requests, keep the counters, rebuild the correction
     memory and retrain — the heavy parts only when NEO is idle."""

@@ -613,6 +613,7 @@ class Ledger:
         # first request's words were content.
         ep.resolved_tools = tuple(ep.teacher) + tuple(t for t, _ in ep.steps)
         if fix is not None and fix.resolved is not None:
+            learn.count("recovered")
             before = _attempted(ep)
             wrong = [before] if before and before != _fmt(fix.resolved) else []
             ep.corrected = ep.corrected or bool(wrong)
@@ -622,9 +623,12 @@ class Ledger:
         elif fix is None and not (ep.early_stop or ep.corrected) and (out := _outcome(ep)) is not None:
             label, verified = out
             ep.resolved = label if verified else None
+            learn.count("verified" if verified else "unresolved")
             self._emit(ep, label, verified)
             if verified and ep.sigs and ep.confirm is not False:
                 _flow_learned(ep.text, ep.sigs)
+        else:
+            learn.count("unresolved")
         if ep.corrected:
             learn.count("corrections")
         ep.fix = None  # nothing further needs it; don't keep a chain of old requests alive

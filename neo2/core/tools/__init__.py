@@ -23,7 +23,10 @@ _MODULES = [
     "neo2.core.tools.system", "neo2.core.tools.web", "neo2.core.tools.weather", "neo2.core.tools.memory_tool", "neo2.core.tools.browser",
     "neo2.core.tools.browse",
 ]  # fmt: skip
-_MAC_ONLY = ["neo2.core.tools.media", "neo2.core.tools.camera.tool", "neo2.core.tools.music.tool"]
+_MAC_ONLY = [
+    "neo2.core.tools.media", "neo2.core.tools.camera.tool", "neo2.core.tools.music.tool",
+    "neo2.core.tools.routines", "neo2.core.tools.quality",
+]
 _MAC_MODULES = ["neo2.core.tools.computer", "neo2.core.tools.selftest"]
 
 

@@ -106,6 +106,8 @@ _DIRECT_TOOLS = {
     "weather",
     "web_fetch",
     "play_music",
+    "routine_manage",
+    "quality_report",
     "page_read",
     "browse",  # declared only while a tool of that name is registered and shown (_declarations)
     "camera_look",  # (the same) — and it runs only for the user's own words (_camera_call)
@@ -122,6 +124,8 @@ _VOICE_RMS = 0.006
 _THINK_SETTLE_S = 2.5  # "thinking" for a reply the user will hear; back to listening if none comes
 _LANE_S = 30.0  # how long the model's calls for a sentence NEO ran itself are skipped
 _SETTLE_S = 0.3  # no new words for this long after the model starts answering = sentence over
+_ROUTINE_SETUP_SETTLE_S = 1.2  # let a spoken routine definition finish before saving it
+_LIVE_VAD_SILENCE_MS = 1400  # routine instructions often include short pauses between destinations
 _CONNECT_TIMEOUT_S = 12.0
 # A socket that dies mid-turn is reopened: a tool is running, or the user's words came within this
 # long and the model hasn't answered. Otherwise NEO goes idle and waits for "Neo" — nothing was lost.
@@ -662,6 +666,7 @@ class LiveVoice(OnDemandMic):
     _said: Asked | None = None  # the cards NEO has asked aloud: none is asked twice (see _card_line)
     # listening (see _silence_watch for the rules)
     _listening = False  # the mic goes up to the model: set by a wake, never by typed words
+    _listen_timeout_override: float | None = None  # one check-in reply; normal turns use settings
     _reconnecting = False  # a dropped session that was listening is being reopened (see _lost)
     _woke_at = 0.0  # the latest wake (wake word / hotkey / push-to-talk)
     _words_at = 0.0  # the user's latest words this session: transcribed by the server, or typed
@@ -692,6 +697,8 @@ class LiveVoice(OnDemandMic):
         self._goals: dict[str, str] = {}  # function-call id → agent_task goal in flight
         self._server_cancelled: set[str] = set()
         self._utterance = ""  # what the user said in the current turn (for "did they ask something?")
+        self._completed_utterance: tuple[int, str] = (-1, "")  # final transcript, even after Live clears it
+        self._routine_setup_waiting: set[int] = set()
         self._dialog: list[tuple[float, str, str]] = []  # (when, who, text): context for agent_task
         self._lookups: dict[str, int] = {}  # web_search/web_fetch calls since the user last spoke
         # What the model did with the user's last sentence — becomes a training label for Laya.
@@ -717,6 +724,8 @@ class LiveVoice(OnDemandMic):
         self._last_activity = 0.0
         self._ptt = False
         self._speaking = False  # audio for the current model turn is playing / still arriving
+        self._checkin_playback: asyncio.Future[bool] | None = None
+        self._checkin_audio_started = False
         self._closing = False  # a close we asked for (idle timeout / shutdown) → don't reconnect
         self._speaking_since = 0.0
         self._vad = None  # silero: local "is the user talking?" so we know when to stop listening
@@ -759,11 +768,12 @@ class LiveVoice(OnDemandMic):
         self.spk.close()
 
     # ---- controls ----------------------------------------------------------------------
-    async def wake(self, source: str = "ui") -> None:
+    async def wake(self, source: str = "ui", *, listen_timeout_s: float | None = None) -> None:
         """"Neo", the hotkey, the tray, push-to-talk: from now on the mic goes up to the model.
         A session that was answering typed words starts listening too; the clock for "nothing
         said" starts here (or when the session is actually open, if connecting took a while)."""
         early().listening("wake")  # warm what the request will need while the user speaks (never waits)
+        self._listen_timeout_override = listen_timeout_s
         self._listening = True
         self._woke_at = time.time()
         # (With the wake word off the microphone is closed while NEO is idle: it opens with the session.)
@@ -778,7 +788,28 @@ class LiveVoice(OnDemandMic):
             await self._refresh_state()
         else:
             self._listening = False  # no session opened: nothing is listening
+            self._listen_timeout_override = None
             await self._mic_idle()
+
+    async def listen_after_checkin(self, *, seconds: float = 5.0, context: str = "") -> None:
+        """Open a short voice turn after NEO's local check-in has finished speaking.
+
+        The note is generic and does not include the sound-classifier label. It stays in the
+        unfinished Live turn until the user's answer arrives.
+        """
+        seconds = max(0.1, float(seconds))
+        await self._ensure_session()
+        live = self._live
+        if live is not None and context:
+            note = f"(NEO context, not the user speaking: {context})"
+            try:
+                await live.send_client_content(
+                    turns=gt.Content(role="user", parts=[gt.Part.from_text(text=note)]),
+                    turn_complete=False,
+                )
+            except Exception as error:  # noqa: BLE001 — still allow the user to answer
+                print(f"[live] couldn't queue check-in context: {type(error).__name__}")
+        await self.wake("check-in", listen_timeout_s=seconds)
 
     def _mic_needed(self) -> bool:
         """A wake's session is listening (or coming back after a drop), or push-to-talk is held."""
@@ -836,6 +867,65 @@ class LiveVoice(OnDemandMic):
         except Exception as e:  # noqa: BLE001
             print(f"[live] couldn't pass the result on: {e}")
 
+    async def speak_checkin(self, text: str) -> bool:
+        """Say the personalized check-in in NEO's configured Live voice, then wait for playback.
+
+        The sentence is sent to Gemini so Charon can speak it. The local audio classifier label
+        is not sent separately. Returns False if Live could not finish speaking the line.
+        """
+        line = " ".join((text or "").split())
+        if not line:
+            return True
+        try:
+            await self._ensure_session()
+        except Exception as error:  # noqa: BLE001 — the check-in can fall back to local speech
+            print(f"[live] couldn't open check-in voice: {type(error).__name__}")
+            return False
+        live = self._live
+        if live is None:
+            return False
+
+        waiter = asyncio.get_running_loop().create_future()
+        self._checkin_playback = waiter
+        self._checkin_audio_started = False
+        self._result_pending = self._result_speech = True
+        self._last_response_at = self._last_activity = time.time()
+        note = (
+            "(NEO check-in, not the user speaking: say this exact short line to the user, in a "
+            f"natural conversational tone, and add nothing before or after it: “{line}”)"
+        )
+        spoke = False
+        try:
+            await live.send_client_content(
+                turns=gt.Content(role="user", parts=[gt.Part.from_text(text=note)])
+            )
+            try:
+                spoke = await asyncio.wait_for(asyncio.shield(waiter), timeout=20.0)
+            except TimeoutError:
+                print("[live] check-in speech timed out")
+        except Exception as error:  # noqa: BLE001 — fall back to the local system voice
+            print(f"[live] couldn't speak check-in: {type(error).__name__}")
+        finally:
+            if self._checkin_playback is waiter:
+                self._checkin_playback = None
+            self._checkin_audio_started = False
+            if not waiter.done():
+                waiter.cancel()
+
+        if spoke:
+            return True
+        # If a partial Live response may still arrive, close it before local fallback so the two
+        # voices cannot overlap. The follow-up listen will open a fresh session afterward.
+        if self._live is live:
+            self._closing = True
+            await self._close_session()
+        return False
+
+    def _finish_checkin_playback(self, spoke: bool) -> None:
+        waiter = self._checkin_playback
+        if waiter is not None and not waiter.done():
+            waiter.set_result(spoke)
+
     async def _answer_by_voice(self, yes: bool, said: str) -> None:
         """The user answered a pending question out loud: act on their words, not on whatever
         the model does with them."""
@@ -865,7 +955,7 @@ class LiveVoice(OnDemandMic):
         self._file_label()
         self._label = self._new_label(text)
         self._turn_open = True
-        self._maybe_command_lane(text, settled=False)  # a typed command runs at once too
+        self._maybe_command_lane(text, settled=False, routine_ready=True)  # typed text is already complete
 
     # ---- state machine -----------------------------------------------------------------
     async def _refresh_state(self) -> None:
@@ -908,7 +998,7 @@ class LiveVoice(OnDemandMic):
                 output_audio_transcription=gt.AudioTranscriptionConfig(),
                 realtime_input_config=gt.RealtimeInputConfig(
                     automatic_activity_detection=gt.AutomaticActivityDetection(
-                        silence_duration_ms=700, prefix_padding_ms=200
+                        silence_duration_ms=_LIVE_VAD_SILENCE_MS, prefix_padding_ms=200
                     )
                 ),
             )
@@ -955,6 +1045,7 @@ class LiveVoice(OnDemandMic):
     async def _close_session(self) -> None:
         self._file_label()
         self._new_question()
+        self._finish_checkin_playback(False)
         self._gate, self._held = None, []
         self._result_pending = self._result_speech = False
         self._lane_utt = -1
@@ -964,6 +1055,7 @@ class LiveVoice(OnDemandMic):
         # journal has them anyway. A new "Neo" moments later goes on with the same conversation.)
         cm, self._live_cm, self._live = self._live_cm, None, None
         self._speaking = self._turn_audio = self._listening = False  # the next "Neo" starts fresh
+        self._listen_timeout_override = None
         self._agent_session.voice_owned = False
         if cm:
             try:
@@ -1042,9 +1134,11 @@ class LiveVoice(OnDemandMic):
           mid-sentence doesn't cut them off. Otherwise a voice in the room can delay the close
           by `_TRANSCRIBE_GRACE_S` at most — time for the server to transcribe words that began
           right at the end of the window — and never extend it."""
-        timeout = settings().listen_timeout_s
         while self._live is live:
             await asyncio.sleep(0.25)
+            timeout = self._listen_timeout_override
+            if timeout is None:
+                timeout = settings().listen_timeout_s
             if self._ptt or self._speaking or self.spk.playing.is_set() or self._reply_coming():
                 continue
             if any(not t.done() for t in self._tool_tasks.values()):
@@ -1203,6 +1297,7 @@ class LiveVoice(OnDemandMic):
                 await self._refresh_state()
             if sc.input_transcription and sc.input_transcription.text:
                 self._turn_open = True
+                self._listen_timeout_override = None  # the check-in window ends when speech arrives
                 # The server heard you, whatever the local detector thinks: these are words.
                 self._last_user_speech = self._words_at = time.time()
                 if self._label is None or not self._label.get("open"):
@@ -1216,13 +1311,20 @@ class LiveVoice(OnDemandMic):
                 self._label["text"] = " ".join(self._utterance.split())
                 await bus().say(self._utterance, role="user", final=False)
                 early().feed(self._utterance)  # the 150 ms ticker acts on it — never inline here
+                from neo2.core.tools.routines import is_setup_request
+
+                if getattr(sc.input_transcription, "finished", False) or is_setup_request(self._utterance):
+                    # Routine setup can span several committed transcription chunks. Claim it as
+                    # soon as the intent is clear, then let the quiet-window collector use the
+                    # final wording instead of waiting for Live's optional `finished` marker.
+                    self._maybe_command_lane(self._utterance, settled=False)
                 if getattr(sc.input_transcription, "finished", False):
-                    self._maybe_command_lane(self._utterance, settled=False)  # the sentence is over
                     self._recall_for(live, self._utterance)
             interim = getattr(sc, "interim_input_transcription", None)
             if interim and interim.text:  # words as they're being said, before they're committed
                 self._turn_open = True
-                self._last_user_speech = self._words_at = time.time()
+                self._listen_timeout_override = None
+                self._last_user_speech = self._words_at = self._last_heard_at = time.time()
                 early().feed("".join(user_buf) + " " + interim.text)
             if (sc.model_turn or sc.output_transcription) and self._gate is None and self._utterance and (
                 self._last_response_at <= self._last_heard_at
@@ -1250,6 +1352,8 @@ class LiveVoice(OnDemandMic):
                 self._turn_open = False
                 self._last_turn_end = time.time()
                 said = "".join(user_buf)
+                if said:
+                    self._completed_utterance = (self._utt_id, said)
                 p = confirm.peek()
                 if said and p is not None and self._utt_started > p.staged_at:
                     ans = answer_of(said)
@@ -1327,27 +1431,57 @@ class LiveVoice(OnDemandMic):
     # A sentence that is purely a command NEO's fast paths fully cover ("open notes and type
     # hello", "volume 30", "close this tab") runs the moment the user stops talking — the same
     # local path typed commands take — instead of waiting for Gemini to decide on a tool call.
-    # The model's own calls for that sentence are then skipped and its speech muted. Questions,
-    # and anything the fast paths can't cover whole, go to the model as before.
+    # Explicit camera questions use the same direct route: they are already unambiguous user asks,
+    # and relying on the model to remember to call the camera again made repeated looks flaky. The
+    # model's own calls for a sentence handled here are skipped. Other questions go to the model.
     def _new_sentence(self) -> None:
         """The user started a new sentence (spoken or typed)."""
         self._utt_id += 1
         self._utt_started = time.time()
         bus().new_user_turn()
 
-    def _maybe_command_lane(self, text: str, *, settled: bool) -> None:
-        """Look at a finished sentence once; run it here if it's purely a command NEO covers."""
+    def _maybe_command_lane(self, text: str, *, settled: bool, routine_ready: bool = False) -> None:
+        """Run a recognized camera ask or a fully covered command once the sentence is finished."""
         text = " ".join((text or "").split())
         _camera_off_if_asked(text)
         _song_stop_if_asked(text)
-        if not text or self._lane_tried_utt == self._utt_id or not settings().live_command_lane:
+        if not text or self._lane_tried_utt == self._utt_id:
             return
-        self._lane_tried_utt = self._utt_id
         if self._calls_this_turn or confirm.peek() is not None:
             return  # the model already acted on it, or the user is answering a question
-        steps = _command_steps(text, settled=settled)
+        from neo2.core.agent import fastpath
+
+        # A direct camera ask (or a short follow-up in its live window) is a user-authorized read,
+        # not a vague command for Laya to classify. Run the same fast path typed chat uses so a
+        # repeated question cannot be answered with a request to ask again.
+        camera = fastpath.camera(text, origin="user")
+        if camera is not None:
+            steps = [camera]
+        else:
+            # Spoken routines are exact local matches. Route them before Gemini's response so
+            # they work reliably even when Live would otherwise treat the phrase as conversation.
+            from neo2.core.tools.routines import is_setup_request, match as match_routine, parse_local_setup
+
+            setup_requested = is_setup_request(text)
+            setup = parse_local_setup(text) if setup_requested else None
+            if setup_requested and not routine_ready:
+                self._defer_routine_setup()
+                return
+            routine = None if setup else match_routine(text)
+            if setup_requested and setup is None:
+                self._start_routine_setup(text)
+                return
+            elif setup is not None:
+                steps = [("routine_manage", setup)]
+            elif routine is not None:
+                steps = [("routine_run", {"routine_id": str(routine["id"])})]
+            elif settings().live_command_lane:
+                steps = _command_steps(text, settled=settled)
+            else:
+                return
         if not steps:
             return  # a question, or something only the model can work out
+        self._lane_tried_utt = self._utt_id
         from neo2.core.agent.early import key as early_key
 
         # The early actor must not run any of these again from the same transcript.
@@ -1360,6 +1494,86 @@ class LiveVoice(OnDemandMic):
         key = f"lane:{self._utt_id}"
         lab = (self._label or {}).get("id", "")
         self._tool_tasks[key] = asyncio.create_task(self._command_lane(text, steps, key, lab))
+
+    def _defer_routine_setup(self) -> None:
+        """Hold a spoken routine definition until its transcript has been quiet and complete."""
+        utt = self._utt_id
+        if utt in self._routine_setup_waiting:
+            return
+        self._routine_setup_waiting.add(utt)
+        print("[routine] setup detected; waiting for the complete spoken phrase")
+        # Claim this sentence now so Live doesn't race the local save with its own routine tool call.
+        self._lane_utt, self._lane_at = utt, time.time()
+        if not (self._result_pending and self._result_speech):
+            self._gate, self._held = "mute", []
+
+        async def wait_for_complete_transcript() -> None:
+            try:
+                text = await self._routine_transcript_after_pause(utt, self._utterance)
+                if text:
+                    # Re-parse the latest wording after the silence window; the first transcript
+                    # may have ended before the user finished listing destinations.
+                    from neo2.core.tools.routines import is_setup_request
+
+                    if is_setup_request(text):
+                        self._maybe_command_lane(text, settled=True, routine_ready=True)
+            finally:
+                self._routine_setup_waiting.discard(utt)
+
+        self._tasks.append(asyncio.create_task(wait_for_complete_transcript()))
+
+    def _start_routine_setup(self, text: str) -> None:
+        """Use the constrained routine manager for an explicit definition the local parser can't read."""
+        print("[routine] routing setup to the constrained routine manager")
+        utt = self._utt_id
+        self._lane_tried_utt = utt
+        self._lane_utt, self._lane_at = utt, time.time()
+        if not (self._result_pending and self._result_speech):
+            self._gate, self._held = "mute", []
+        if self._label is not None:
+            self._label["tools"].append("routine_manage")
+        key = f"lane:{utt}"
+        lab = (self._label or {}).get("id", "")
+        self._tool_tasks[key] = asyncio.create_task(self._routine_setup_command(text, key, lab))
+
+    async def _routine_setup_command(self, text: str, key: str, lab: str = "") -> None:
+        outcomes.call_started(lab)
+        try:
+            reply = await self._agent_session.handle(
+                text,
+                conversation=self._conversation(text),
+                taint=list(self._taint),
+                origin="user",
+            )
+            self._journal_tools(list(reply.tools) or [x.tool for x in (reply.result.steps if reply.result else [])])
+            why = ""
+        except asyncio.CancelledError:
+            outcomes.cancelled()
+            return
+        except Exception as error:  # noqa: BLE001
+            reply, why = None, str(error)[:160]
+        finally:
+            self._tool_tasks.pop(key, None)
+            outcomes.call_done(lab)
+        self._last_activity = time.time()
+        if reply is None or not reply.silent:
+            await self.inform(reply.text if reply else f"That didn't work: {why}")
+
+    async def _routine_transcript_after_pause(self, utt: int, fallback: str) -> str:
+        """Return the final wording after a resettable pause, even if Live already cleared it."""
+        started = time.time()
+        live = self._live
+        while live is self._live and self._utt_id == utt:
+            if time.time() - self._last_heard_at >= _ROUTINE_SETUP_SETTLE_S:
+                break
+            if time.time() - started > 12.0:
+                break
+            await asyncio.sleep(0.1)
+        if self._utt_id == utt and self._utterance.strip():
+            return self._utterance.strip()
+        if self._completed_utterance[0] == utt and self._completed_utterance[1].strip():
+            return self._completed_utterance[1].strip()
+        return fallback.strip()
 
     async def _lane_when_settled(self) -> None:
         """The model started answering before the transcript was marked finished: give trailing
@@ -1443,6 +1657,8 @@ class LiveVoice(OnDemandMic):
         voiced = rms(data) >= _VOICE_RMS
         if voiced:
             self._turn_audio = True  # a reply the user will hear is on its way: mute the mic now
+            if self._checkin_playback is not None:
+                self._checkin_audio_started = True
         if gate == "hold":
             if not voiced and not self._held:
                 return  # silence before any voice: nothing to hold (a silent turn never opens)
@@ -1479,6 +1695,7 @@ class LiveVoice(OnDemandMic):
         await asyncio.sleep(0.4)  # let the tail settle so the orb doesn't blink between sentences
         if not self.spk.playing.is_set():
             spoke, self._speaking = self._speaking, False
+            self._finish_checkin_playback(self._checkin_audio_started)
             if spoke and self._live:
                 more = settings().listen_timeout_s
                 print(
@@ -1548,6 +1765,18 @@ class LiveVoice(OnDemandMic):
                     # session as theirs, which turns the camera on (a model's goal never could).
                     words = asked if said is None else said
                     own = own or (unused and (self._camera_asked(words, utt) or self._song_asked(words, utt)))
+                    routine_setup = False
+                    if unused:
+                        try:
+                            from neo2.core.tools.routines import is_setup_request
+
+                            routine_setup = is_setup_request(words)
+                            own = own or routine_setup
+                        except ImportError:
+                            pass
+                    if routine_setup:
+                        words = await self._routine_transcript_after_pause(utt, words)
+                        asked = words
                     if own:
                         self._own_utt = utt
                     reply = await self._agent_session.handle(
@@ -1585,6 +1814,13 @@ class LiveVoice(OnDemandMic):
                 async with self._ui_lock if ui else _nullcontext():
                     await bus().set_state(NeoState.WORKING, job=key)
                     await bus().tool_start(fc.name, args, job=key)
+                    if fc.name == "routine_manage" and str(args.get("action") or "").lower() == "create":
+                        asked = await self._routine_transcript_after_pause(utt, said or asked)
+                        from neo2.core.tools.routines import is_setup_request, parse_local_setup
+
+                        parsed = parse_local_setup(asked) if is_setup_request(asked) else None
+                        if parsed is not None:
+                            args = parsed  # replace a model's early partial arguments with the final phrase
                     out = await registry().invoke(
                         fc.name, args, ToolContext(user_text=asked or str(args), taint=self._taint, origin="live")
                     )
@@ -1716,7 +1952,7 @@ class LiveVoice(OnDemandMic):
         self._own_utt = utt  # their sentence ran as their own: an agent_task for it isn't run again
         question = step[1]["question"]  # the user's own words, never the model's paraphrase
         camera_words.prewarm()
-        camera_words.mark_look()
+        camera_words.mark_look(question=question)
         self._register_call(fc.name, args, key)
         await bus().set_state(NeoState.WORKING, job=key)
         await bus().tool_start(fc.name, {"question": question}, job=key)

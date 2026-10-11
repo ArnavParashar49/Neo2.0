@@ -97,6 +97,9 @@ touch "$ROOT/ui/src-tauri/target/.metadata_never_index"
 
 echo "→ starting"
 if [ -f "$AGENT" ]; then
+  # The LaunchAgent may have been written by a build copy in target/. Keep login startup pointed
+  # at the installed bundle: the build copy is removed above on every install.
+  /usr/libexec/PlistBuddy -c "Set :ProgramArguments:0 $DEST/Contents/MacOS/neo-ui" "$AGENT"
   launchctl bootstrap "gui/$(id -u)" "$AGENT"
 else
   nohup "$DEST/Contents/MacOS/neo-ui" >/dev/null 2>&1 &

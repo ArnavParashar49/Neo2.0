@@ -35,6 +35,7 @@ The router is **Laya**, a 421M-parameter local decision model. One encoder pass 
 | **Files & shell** | `shell`, `read_file`, `write_file`, `edit_file`, `trash` |
 | **System** | `volume`, `brightness`, `timer`, `clock`, `sleep_display` |
 | **Memory** | `memory_search`, `remember`, `forget` (and the older all-in-one `memory`) — facts about you, a journal of what was said, conversation summaries; searched together (keywords + meaning) and told to every model on every route. See [Memory](#memory) |
+| **Routines & quality** | Teach NEO “when I say *I want to study*, open …” for an exact spoken app/site setup; ask “how's your reliability?” for local interaction signals. |
 
 Every tool is a plain Python function registered with a decorator; adding one is a few lines (see below).
 
@@ -75,6 +76,10 @@ Every tool is a plain Python function registered with a decorator; adding one is
 **It checks its own work.** After any side-effect tool, the loop makes the model re-observe (Accessibility tree, file, page, inbox) and confirm the goal before it reports — one extra call, far fewer "done!" replies that weren't.
 
 **It remembers how it did things.** A successful multi-step task is saved as a *playbook* (goal + the tools it used, never the text it typed or sent). A similar request later gets that path in its prompt, so repeats are shorter and cheaper. The conversation is summarised every 20 idle minutes and at shutdown, so "what did we do yesterday" works and a crash loses little; recall is hybrid — FTS5 keyword search fused with local embeddings from Laya's encoder, already resident on the GPU.
+
+**It suggests shortcuts from repeated success.** After the same app-and-website setup succeeds three times, NEO can offer a spoken shortcut. It stores only a hash and count for this suggestion signal; it does not monitor the screen in the background. Suggestions require `NEO_LEARN` to be on. Create a routine by saying, for example, “When I say ‘I want to study’, open Notion, Safari, and https://example.com.” This clear “when I say…, open…” form is parsed locally; more open-ended definitions may be interpreted by NEO's configured brain (Gemini when the cloud brain is selected). Routine matching, saved definitions and execution stay on the Mac. Actions can only open apps or ordinary web pages, and launches still pass through the regular safety checks. Routine definitions live in `~/.neo/routines.json`. Ask “list my routines” or “delete the study routine” to manage them. `NEO_WORKFLOW_SUGGESTIONS=false` disables suggestions.
+
+**It reports how it is doing.** Ask “how's your reliability?” for the last seven days of local counts: settled requests, verified outcomes, corrections, quick interruptions and unresolved outcomes. These are interaction signals, not a factual-accuracy score. Laya's corrections and held-out no-regression evaluation already feed the learning loop; this report makes the recent signals visible.
 
 **Safety is structural, not a prompt.** Anything consequential *stages* the action and returns `NEEDS_CONFIRM`; the run stops, the overlay shows exactly what will run (the full command, script, file path and contents, or mail body), and nothing happens until *you* approve it:
 
@@ -273,6 +278,7 @@ Everything is an environment variable with the `NEO_` prefix (or a line in `.env
 | `NEO_CONFIRM_DESTRUCTIVE` | `true` | set `false` only if you enjoy surprises |
 | `NEO_CLOUD_MEMORY` | `full` | what NEO's memory sends to cloud models: `full` · `profile` (stable facts only) · `off` |
 | `NEO_LEARN` | `on` | `off` stops Laya recording your requests to learn from (a reflex with no head for its encoder still gets one, trained on the public data alone) |
+| `NEO_WORKFLOW_SUGGESTIONS` | `true` | offer a spoken shortcut after the same successful app/site setup repeats three times; stores only a local hash and count |
 | `NEO_LEARN_TEACHER` | `off` | `local` · `cloud`: while NEO is idle, a model re-checks up to 50 a day of the requests Laya was least sure about — `local` only with the local model, `cloud` only with the provider that already handled that request |
 | `NEO_HOME_LOCATION` | — | where "the weather" means if NEO doesn't know your city (else it guesses from your IP) |
 | `NEO_DATA_DIR` | `~/.neo` | memory DB, audit log, models, trained reflex head |
@@ -315,12 +321,12 @@ The free tiers of Gemini and Groq allow those companies to use what you send to 
 
 What NEO keeps, and for how long:
 
-- **Memory**: facts and preferences until you delete them ("forget …"); **the journal** of what was said — `NEO_MEMORY_RETENTION_DAYS` (a year), never passwords, codes, keys or card numbers; **conversation summaries** until you erase; **playbooks** (the path of past tasks, without message text) — the newest 300. `NEO_MEMORY_JOURNAL=false` keeps no journal at all.
+- **Memory**: facts and preferences until you delete them ("forget …"); **the journal** of what was said — `NEO_MEMORY_RETENTION_DAYS` (a year), never passwords, codes, keys or card numbers; **conversation summaries** until you erase; **playbooks** (the path of past tasks, without message text) — the newest 300; **spoken routines** (the trigger phrase and app/site launch list) until you delete them. `NEO_MEMORY_JOURNAL=false` keeps no journal at all.
 - **Requests Laya learns from** (`reflex_extra.jsonl`: no dictated text, notes, memories, mail, or anything that looks like a code or password) — the latest 2,000 within 180 days; `NEO_LEARN=off` stops it.
 - **Logs** (`~/.neo/logs`) record which tools ran and whether they worked — never what you typed, said, sent or read. The **audit log** records confirmed actions (not the words of messages).
 - The overlay is hidden from screen sharing, recordings and screenshots.
 
-**Erase everything:** menu → *Erase NEO's Memory…* (or `python -m neo2 --forget-all`) deletes memories, the journal, conversation summaries (and the copy of the database kept from before an upgrade), playbooks, learned requests and their cached features, logs, the audit log and the logins in NEO's own browser. Your settings and keys stay. No model or web page can trigger it.
+**Erase everything:** menu → *Erase NEO's Memory…* (or `python -m neo2 --forget-all`) deletes memories, the journal, conversation summaries (and the copy of the database kept from before an upgrade), playbooks, spoken routines, workflow-suggestion counters, learned requests and their cached features, logs, the audit log and the logins in NEO's own browser. Your settings and keys stay. No model or web page can trigger it.
 
 ## Training the reflex
 

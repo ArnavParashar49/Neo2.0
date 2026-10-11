@@ -1,6 +1,6 @@
 """Erase everything NEO has kept about the user, in one step.
 
-What goes: memories (profile, lessons, notes), the journal of what was said (every line, and
+What goes: memories (profile, lessons, notes), spoken routines and their trigger/action lists, local workflow suggestion counters, the journal of what was said (every line, and
 the copy of the database kept from before an upgrade), playbooks, conversation summaries, the requests Laya
 learned from (on disk, still settling in RAM, and the correction memory) and their cached
 features, which apps worked for what (and the songs/videos, sites, lists and contacts NEO
@@ -40,13 +40,17 @@ async def forget_everything() -> dict[str, int]:
         raise RuntimeError("forget_everything is NEO.app's erase; an embedded agent erases its own data dir")
     runtime.check_unbound("forget_everything()")  # embedded, with no agent bound: before anything changes
     from neo2.core.memory.store import store
-    from neo2.core.reflex import finetune, learn, memory, outcomes
+    from neo2.core.reflex import finetune, learn, memory, outcomes, suggestions
 
     _generation += 1
     s = settings()
     counts = store().forget_all()
     outcomes.forget()  # requests still settling in RAM: nothing more is learned from them
     counts["learned requests"] = learn.forget_examples()
+    counts["workflow patterns"] = suggestions.forget()
+    from neo2.core.tools import routines
+
+    counts["spoken routines"] = routines.forget()
     memory.forget()  # the corrections' embeddings (RAM only)
     finetune.feature_cache().unlink(missing_ok=True)  # rebuilt from the public datasets on the next retrain
     finetune.reset_to_base()  # the heads fit on your requests go; the one trained without them stays (never raises)

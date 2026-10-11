@@ -122,6 +122,11 @@ _NO_EXTRAS: Mapping[str, Any] = types.MappingProxyType({})
 _request_extras: contextvars.ContextVar[Mapping[str, Any]] = contextvars.ContextVar("request_extras", default=_NO_EXTRAS)
 # Whose words the request is (Session.handle's origin): only the user's own start or teach a replay.
 _request_origin: contextvars.ContextVar[str] = contextvars.ContextVar("request_origin", default="")
+# Short-lived context for one request (e.g. the answer to an ephemeral spoken check-in). It is
+# injected into that request's system prompt only; it is not user text, history, or memory.
+_request_prompt_context: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "request_prompt_context", default=""
+)
 # What memory says for THIS request (neo2.core.memory.store.Store.context), worked out inside it the
 # first time a model is about to be asked: requests run at once, so it is never an attribute of
 # the session that the next request overwrites. None = not worked out (yet).
@@ -249,6 +254,7 @@ class Session:
         origin: Literal["user", "live"] | None = None,
         extras: Mapping[str, Any] | None = None,
         source: Literal["typed", "voice"] = "typed",
+        prompt_context: str = "",
     ) -> Reply:
         """Handle one request. `from_user` = these are the user's own words (typed, or their
         transcribed speech) — only then can they answer a pending confirmation. Text a model wrote
@@ -260,7 +266,8 @@ class Session:
 
         The user's own words and what NEO answers go to the journal (neo2.core.memory.journal) here:
         a request Gemini Live relays (a model's goal, or the sentence Live journaled itself) is
-        Live's to write, never this session's."""
+        Live's to write, never this session's. `prompt_context` is temporary guidance for this
+        answer only; it isn't added to the user's text, history, or memory."""
         origin = origin or ("user" if from_user else "live")
         # This request's taint and extras hold while it runs and are put back when it returns: the
         # caller's next call from the same task (approving another agent's card, say) never gets
@@ -276,6 +283,7 @@ class Session:
             (_request_extras, _request_extras.set(request_extras)),
             (_request_origin, _request_origin.set(origin)),
             (_memory_ctx, _memory_ctx.set(None)),  # this request's own memory block, worked out in it
+            (_request_prompt_context, _request_prompt_context.set(prompt_context.strip())),
         ]
         # The user's own words: typed or spoken to NEO.app, or what an embedding host says is its
         # user's (an agent whose host turned the journal on).
@@ -369,7 +377,7 @@ class Session:
             outcomes.begin(job, text, decision=d)
         if look is not None:
             # Whatever the reflex made of it (a question it may call chat): only the camera can answer.
-            camera_words.mark_look()
+            camera_words.mark_look(question=look[1].get("question", text))
             return await self._quick(text, d, [look], job=job, origin=origin)
         if hear is not None:
             # Whatever the reflex made of it (music, a chat): only listening can answer.
@@ -386,13 +394,28 @@ class Session:
         # the whole job — no model needed.) A plan covers the whole utterance or nothing.
         # (A memory write — "remember that …", "forget what I said about …" — runs here even when
         # the reflex calls the sentence chat: a chat model would only say it will.)
-        if settings().fast_paths and (steps := fastpath.plan(text)) and (d.intent != "chat" or _memory_write(steps)):
+        if settings().fast_paths and (steps := fastpath.plan(text, origin=origin)) and (
+            d.intent != "chat" or _memory_write(steps)
+            or any(name in ("quality_report", "routine_manage", "routine_run") for name, _ in steps)
+        ):
             return await self._quick(text, d, steps, job=job, origin=origin)
         # The by-utterance lane: the user's own words point at a control ("start wala button dabao",
         # "click the new game button") and a tool that grounds them itself takes the whole request —
         # no model filling in a label. Only the user's words to NEO.app (registry.utterance_lane).
         if settings().fast_paths and (step := fastpath.by_utterance(text, origin=origin, decision=d)) is not None:
             return await self._quick(text, d, [step], job=job, origin=origin)
+
+        # A phrase definition is an explicit user command. Give the model only the constrained
+        # routine manager for complex definitions; the common explicit form is parsed locally.
+        if origin == "user":
+            from neo2.core.tools.routines import is_setup_request, parse_local_setup
+
+            if is_setup_request(text) and registry().get("routine_manage") is not None:
+                if routine_args := parse_local_setup(text):
+                    return await self._quick(
+                        text, d, [("routine_manage", routine_args)], job=job, origin=origin
+                    )
+                return await self._agent(text, d, images, job, only=["routine_manage"])
 
         if d.intent == "chat" and not images and not d.needs_screen:
             return await self._chat(text, d, job)
@@ -444,6 +467,9 @@ class Session:
         """Stop every running job (the user said stop) and drop any unanswered question."""
         outcomes.stop()  # right after NEO answered, a stop says the answer was wrong
         camera_words.forget()  # a stop ends the camera's follow-up window ("and now?" asks afresh)
+        from neo2.core.agent import song_words
+
+        song_words.clear_retry()
         _camera_off("stopped")  # …and turns the camera off now, not when its window runs out
         _song_off("stopped")  # …and stops listening for a song
         replay.forget_last()  # …and a flow it just learned or replayed isn't one to repeat
@@ -534,6 +560,7 @@ class Session:
         spoken: list[int] = []  # the steps whose text is said
         prev = ""
         asked = ""  # the card a step stopped to ask about
+        action_ok: list[bool] = []
         # One request, one taint: a page one step read counts for the next step and for the caller.
         taint = list(_request_taint.get())
         for i, (tool, args) in enumerate(steps):
@@ -548,7 +575,11 @@ class Session:
                 if prev in _APP_TOOLS and tool not in _APP_TOOLS:
                     await settle.app_ready(typing=tool in settle.TYPING)  # (the app just opened: ready, not 0.8 s)
                 await bus().tool_start(tool, args, job=job)
-                ctx = ToolContext(user_text=text, taint=taint, origin=origin, extras=dict(_request_extras.get()))
+                tool_extras = dict(_request_extras.get())
+                tool_extras["neo_job"] = job
+                if tool == fastpath.SONG_TOOL and args.get("_retry") is True:
+                    tool_extras["song_retry"] = True
+                ctx = ToolContext(user_text=text, taint=taint, origin=origin, extras=tool_extras)
                 out = await registry().invoke(tool, args, ctx)
                 await bus().tool_end(tool, out.ok, out.text, job=job)
                 outcomes.step(job, tool, out.ok, halt=out.halt)
@@ -569,6 +600,7 @@ class Session:
                     _request_taint.set(tuple(taint))  # what the steps before it read counts for the agent
                     return await self._agent(text, d, None, job, done_note=note)
                 asked = out.staged or asked
+            action_ok.append(out.ok and not out.halt)
             prev = tool
             untrusted = bool(t and t.untrusted and out.ok and not out.halt)
             if untrusted and tool not in taint:
@@ -585,11 +617,31 @@ class Session:
             return (" " if spoken else "; ").join(parts)
 
         plain = said(False)  # what the user sees and hears
+        suggestion = ""
+        if (
+            origin == "user"
+            and len(steps) >= 2
+            and all(name in ("open_app", "open_url") for name, _ in steps)
+            and len(action_ok) == len(steps)
+            and all(action_ok)
+        ):
+            try:
+                from neo2.core.reflex import suggestions
+
+                suggestion = await asyncio.to_thread(
+                    suggestions.record_success,
+                    [{"tool": name, "args": args} for name, args in steps],
+                )
+            except Exception as e:  # noqa: BLE001 — suggestions never interrupt a task
+                log.info(f"[suggestion] skipped ({str(e)[:60]})")
+        if suggestion:
+            plain = (plain + " " + suggestion).strip()
         # A model reading the reply (Live's agent_task goal matched a fast path) gets a page or a mail
         # fenced as data, like any untrusted tool result; the history never keeps it as NEO's words.
-        reply_text = said(origin != "user")
-        await self._remember(Message.user(text), Message.assistant(said(True)))
-        silent = not spoken  # every step was an action that worked: just done, nothing to say
+        reply_text = (said(origin != "user") + (" " + suggestion if suggestion else "")).strip()
+        remembered = said(True) + ("\n" + suggestion if suggestion else "")
+        await self._remember(Message.user(text), Message.assistant(remembered))
+        silent = not spoken and not suggestion  # actions stay quiet unless NEO has a useful suggestion
         if silent:
             await bus().note(plain[:120])
         else:
@@ -808,10 +860,11 @@ class Session:
             q = self._with_scope_hint(res.question)
             await bus().say(q, final=True, job=job)
             return Reply(q, "confirm", d, res, job=job, taint=tuple(ctx.taint))
+        suggestion = ""
         if res.stopped == "done" and not ctx.taint and _playbooks_on():
             # A path learned while reading a page or an email could have been steered by it.
-            await asyncio.to_thread(self._save_playbook, text, res)
-        silent = _quietly(d, res)
+            suggestion = await asyncio.to_thread(self._save_playbook, text, res)
+        silent = _quietly(d, res) and not suggestion
         if app_at is not None:
             try:
                 app = await asyncio.wait_for(app_at, 1.0)
@@ -819,10 +872,11 @@ class Session:
                 app = ""
             if silent:
                 replay.learn(text, app, res, reg=registry(), tainted=bool(ctx.taint))
+        reply_text = " ".join(part for part in (res.text.strip(), suggestion) if part)
         if silent:
-            await bus().note(res.text[:160])
+            await bus().note(reply_text[:160])
         else:
-            await bus().say(res.text, final=True, job=job)
+            await bus().say(reply_text, final=True, job=job)
         await bus().publish(
             "turn",
             job=job,
@@ -834,7 +888,7 @@ class Session:
         )
         await bus().end_job(job)
         return Reply(
-            res.text, "agent", d, res, job=job, silent=silent, taint=tuple(ctx.taint),
+            reply_text, "agent", d, res, job=job, silent=silent, taint=tuple(ctx.taint),
             brain=getattr(chain, "last_used", ""), model=getattr(chain, "last_model", ""),
         )
 
@@ -862,24 +916,30 @@ class Session:
             return ""
 
     @staticmethod
-    def _save_playbook(goal: str, res: AgentResult) -> None:
+    def _save_playbook(goal: str, res: AgentResult) -> str:
         """Keep the successful tool path of a multi-step task with at least one real action."""
         ok_steps = [s for s in res.steps if s.ok]
         if len(ok_steps) < 2:
-            return
+            return ""
         try:
             from neo2.core.agent.registry import registry as _reg
             from neo2.core.memory.store import store
 
             if not any((t := _reg().get(s.tool)) and not t.parallel_safe for s in ok_steps):
-                return
+                return ""
             # The path, not the content: no message bodies, typed text, commands or queries (they
             # would be sent back to the cloud model on some unrelated later day).
             from neo2.core.memory.store import path_only
 
             store().save_playbook(goal, path_only([{"tool": s.tool, "args": s.args} for s in ok_steps]), "")
+            if len(ok_steps) != len(res.steps):
+                return ""
+            from neo2.core.reflex import suggestions
+
+            return suggestions.record_success(ok_steps)
         except Exception as e:  # noqa: BLE001
             log.warning(f"[playbook] save failed: {str(e)[:80]}")
+            return ""
 
     # ---- confirmation ------------------------------------------------------------------
     def _stage_pending(
@@ -1105,6 +1165,9 @@ class Session:
     # ---- helpers ---------------------------------------------------------------------
     def _system(self, extra: str = "", *, screen_tools: list[str] | None = None) -> str:
         memory = _memory_ctx.get()  # this request's own (see _recall); else what a caller set
+        private_context = _request_prompt_context.get()
+        if private_context:
+            extra = "\n\n".join(part for part in (extra.strip(), private_context) if part)
         return build_prompt(self.memory_context if memory is None else memory, extra, screen_tools=screen_tools)
 
     async def _recall(self, text: str) -> None:

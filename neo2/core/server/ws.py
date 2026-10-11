@@ -44,13 +44,15 @@ where the UI lives: `ui_host`). None of this goes through NEO.app's page: with N
 its window is never on screen, and macOS suspends the process of a page nobody can see — it
 answered nothing, and the menu, the summon keys and the status stopped with it.
 
-Settings a client may switch. One so far: `wake_word` — "Listen for 'Neo'". true: the microphone
+Settings a client may switch. `wake_word` — "Listen for 'Neo'". true: the microphone
 stays open so the wake word can be heard. false: the microphone is closed while NEO is idle (macOS
 shows no microphone indicator) and opens only when NEO is summoned by hand — `wake` from the summon
 keys, the orb or a host, or push-to-talk — until NEO is idle again. `set` keeps the value in
-~/.neo/.env (NEO_WAKE_WORD), applies it to the running voice at once, and the sender gets a
-`set_result` {name, ok, error?} (error: forbidden | unknown | invalid | failed). Every client reads
-the value in the hello's "wake_word" and in a `settings` event {wake_word} when it changes.
+~/.neo/.env (NEO_WAKE_WORD), applies it to the running voice at once. `wellbeing_checkins` is a
+separate, opt-in local sound check: it classifies cough and crying/sobbing labels only from frames
+the existing mic captures, and saves neither audio nor detection history. It never opens a mic.
+Both settings return `set_result` {name, ok, error?} (error: forbidden | unknown | invalid | failed),
+and are reported in the hello and `settings` events.
 
 Who may say what. Everyone here knows the token (~/.neo/ws-token, the user's alone to read). The
 core then tells its clients apart by the one thing a web page cannot choose: the Origin header a
@@ -137,7 +139,7 @@ _ALLOWED_ORIGINS = _APP_ORIGINS | {_NOTCH_ORIGIN}
 # NEO.app's menu actions a host may ask for (ui/src-tauri/src/lib.rs runs them: `act`).
 SHELL_ACTIONS = ("show", "settings", "restart", "open_logs", "erase_memory", "open_at_login", "quit")
 # The settings a client may switch while NEO runs (`set`), each with the type its value must have…
-SETTABLE: dict[str, type] = {"wake_word": bool}
+SETTABLE: dict[str, type] = {"wake_word": bool, "wellbeing_checkins": bool}
 _MAY_SET = ("host", "app")  # …and who may: a host, and NEO.app's own page
 
 
@@ -514,6 +516,7 @@ class UIServer:
                         "camera": camera_live.hello_snapshot(),  # the camera's card, while it is on
                         "ui_host": settings().ui_host,  # NEO.app's window, or the notch
                         "wake_word": settings().wake_word,  # "Listen for 'Neo'" (see `set`)
+                        "wellbeing_checkins": settings().wellbeing_checkins,
                         "host_attached": cl.kind == "host" or self._host_attached(),
                         "shell": self.shell_snapshot(),  # what NEO.app's menu shows
                     },

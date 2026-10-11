@@ -87,7 +87,7 @@ def is_payload(name: str) -> bool:
     return bool(t and t.payload)
 
 
-def plan(text: str, *, first_index: int = 0, whole: str = "") -> list[Step] | None:
+def plan(text: str, *, first_index: int = 0, whole: str = "", origin: str = "user") -> list[Step] | None:
     """Fast-path steps that cover the *whole* text, in order, or None.
 
     `first_index` > 0 means steps already ran for this utterance (chain rules apply). `whole`:
@@ -95,6 +95,20 @@ def plan(text: str, *, first_index: int = 0, whole: str = "") -> list[Step] | No
     text = text.strip(_EDGE)
     if not text:
         return []
+    # A saved routine is an exact whole-utterance shortcut. It is available only for the user's
+    # own words; a model's goal or a library host must never activate local personal routines.
+    if origin == "user" and first_index == 0 and not _utterance.get():
+        try:
+            from neo2.core import runtime
+
+            if not runtime.library_bound():
+                from neo2.core.tools.routines import match as match_routine
+
+                row = match_routine(text)
+                if row is not None:
+                    return [("routine_run", {"routine_id": str(row["id"])})]
+        except (ImportError, KeyError, TypeError):
+            pass
     if _utterance.get():  # a clause of the request being planned
         return _plan(text, first_index)
     token = _utterance.set(whole.strip(_EDGE) or text)
@@ -263,9 +277,7 @@ CAMERA_TOOL = "camera_look"
 
 
 def camera(text: str, *, origin: str) -> Step | None:
-    """``("camera_look", {"question": <the user's words>})`` when the user's own words ask NEO to look
-    through the camera — or follow up on a look moments ago ("and now?") — else None. A sentence about
-    the screen ("what is on my screen") never is."""
+    """Route a camera ask or a contextual follow-up, carrying the original question forward."""
     if origin != "user":
         return None
     raw = " ".join((text or "").split())
@@ -279,9 +291,12 @@ def camera(text: str, *, origin: str) -> Step | None:
     t = registry().get(CAMERA_TOOL)
     if t is None or t.hidden:
         return None
-    if not (camera_words.wants_camera(raw) or camera_words.follow_up(raw)):
+    explicit = camera_words.wants_camera(raw)
+    follow_up = camera_words.follow_up(raw)
+    if not (explicit or follow_up):
         return None
-    return CAMERA_TOOL, {"question": raw}
+    question = raw if explicit else camera_words.follow_up_question(raw)
+    return CAMERA_TOOL, {"question": question}
 
 
 # ---- the song lane ----------------------------------------------------------------------------
@@ -293,8 +308,7 @@ SONG_TOOL = "song_identify"
 
 
 def song(text: str, *, origin: str) -> Step | None:
-    """``("song_identify", {})`` when the user's own words ask NEO to name the song playing, else
-    None. A question about a song they name ("who sings Blinding Lights") never is."""
+    """Route a song ask or a fresh no-match retry from the user's own words."""
     if origin != "user":
         return None
     raw = " ".join((text or "").split())
@@ -306,6 +320,10 @@ def song(text: str, *, origin: str) -> Step | None:
     if runtime.library_mode() and not runtime.library_bound():
         return None  # a library's process-wide catalog: no host chose to let it listen
     t = registry().get(SONG_TOOL)
-    if t is None or t.hidden or not song_words.wants_song(raw):
+    explicit = song_words.wants_song(raw)
+    retry = song_words.retry_after_miss(raw)
+    if t is None or t.hidden or not (explicit or retry):
         return None
-    return SONG_TOOL, {}
+    # The registry strips private arguments before a handler sees them. The quick route uses this
+    # marker only to authorize the user's contextual retry after the same lane checks it again.
+    return SONG_TOOL, {"_retry": True} if retry and not explicit else {}

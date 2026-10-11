@@ -161,6 +161,32 @@ def test_the_command_lane_runs_the_sentence_itself_and_skips_the_models_calls(vo
     assert {r.id for r in skipped} == {"m1", "m2"} and voice.spk.played == []
 
 
+def test_three_camera_questions_in_a_row_all_take_the_direct_voice_route(voice):
+    questions = [
+        "what am I holding?",
+        "what am I holding?",
+        "how many fingers am I holding?",
+    ]
+
+    async def run():
+        for index, question in enumerate(questions):
+            # Even if Live also proposes a camera call, the user's request has already taken the
+            # direct lane, so that model call must not replace or duplicate it.
+            await feed(
+                voice,
+                heard(question),
+                call("camera_look", {"question": question}, f"camera-{index}"),
+                DONE,
+                settle=0.05,
+            )
+
+    asyncio.run(run())
+    assert voice.lane == [(question, ["camera_look"]) for question in questions]
+    assert voice.ran == []
+    skipped = [r for r in voice._live.responses if "already did" in r.response["result"]]
+    assert {r.id for r in skipped} == {"camera-0", "camera-1", "camera-2"}
+
+
 def test_questions_and_references_go_to_the_model(voice):
     asyncio.run(feed(voice, heard("what time is it"), DONE))
     asyncio.run(feed(voice, heard("search for it on amazon"), DONE))

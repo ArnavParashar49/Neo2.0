@@ -13,7 +13,7 @@ from typing import Any
 from neo2.core import health
 from neo2.core.agent import confirm, grants
 from neo2.core.agent.session import Session, answer_of
-from neo2.core.config import set_ui_host, set_wake_word, settings
+from neo2.core.config import set_ui_host, set_wake_word, set_wellbeing_checkins, settings
 from neo2.core.events import NeoState, bus
 from neo2.core.memory.store import store
 from neo2.core.reflex import warmup
@@ -29,8 +29,13 @@ class App:
         self.session = Session()
         self.voice = None  # set in run() when a backend is available
         self._tasks: set[asyncio.Task] = set()
+        self.wellbeing = None  # local sound monitor; it never opens the microphone
+        self._wellbeing_speaking_until = 0.0
+        self._wellbeing_reply_context: tuple[float, str] | None = None
 
-    async def handle_text(self, text: str, *, speak: bool = True, source: str = "typed") -> None:
+    async def handle_text(
+        self, text: str, *, speak: bool = True, source: str = "typed", prompt_context: str = ""
+    ) -> None:
         """Handle one request. Several may be in flight at once (the session runs them as jobs;
         each works out its own memory context: neo2.core.agent.session). `source`: "typed", or
         "voice" for the on-device voice's transcription — what the journal records."""
@@ -39,7 +44,12 @@ class App:
             self._tasks.add(task)
         try:
             # typed, or the user's own speech
-            reply = await self.session.handle(text, from_user=True, source="voice" if source == "voice" else "typed")
+            reply = await self.session.handle(
+                text,
+                from_user=True,
+                source="voice" if source == "voice" else "typed",
+                prompt_context=prompt_context,
+            )
             if speak and self.voice and reply.text and not reply.silent:
                 await self.voice.speak(reply.text)
         except asyncio.CancelledError:
@@ -50,7 +60,19 @@ class App:
 
     async def handle_speech(self, text: str) -> None:
         """What the on-device voice heard the user say."""
-        await self.handle_text(text, source="voice")
+        context = self._wellbeing_reply_context
+        self._wellbeing_reply_context = None
+        started = getattr(self.voice, "_last_utterance_started_at", None)
+        timely = (
+            context is not None
+            and started is not None
+            and started <= context[0]
+            and time.monotonic() <= context[0] + 15.0  # allow local transcription to finish
+        )
+        if timely and context is not None:
+            await self.handle_text(text, source="voice", prompt_context=context[1])
+        else:
+            await self.handle_text(text, source="voice")
 
     async def erase(self) -> dict[str, int]:
         """Erase everything NEO kept about the user. Everything that could write a piece of the
@@ -192,6 +214,8 @@ class App:
             # page send this (neo2/core/server/ws.py), and has checked the name and the value.
             if cmd.get("name") == "wake_word" and isinstance(cmd.get("value"), bool):
                 await self.set_wake_word(cmd["value"])
+            elif cmd.get("name") == "wellbeing_checkins" and isinstance(cmd.get("value"), bool):
+                await self.set_wellbeing_checkins(cmd["value"])
 
     async def set_wake_word(self, on: bool) -> None:
         """"Listen for 'Neo'" switched: kept in ~/.neo/.env, applied to the running voice at once
@@ -203,7 +227,91 @@ class App:
             await self.voice.set_wake_word(on)
         elif not on:
             print("[voice] wake word off: the microphone opens only when summoned")
-        await bus().publish("settings", wake_word=on)
+        await bus().publish(
+            "settings", wake_word=on, wellbeing_checkins=settings().wellbeing_checkins
+        )
+
+    async def set_wellbeing_checkins(self, on: bool) -> None:
+        """Switch the local sound check-in monitor without opening or retaining microphone audio."""
+        if settings().wellbeing_checkins != on:
+            set_wellbeing_checkins(on)
+        if self.wellbeing is not None:
+            self.wellbeing.set_enabled(on)
+        await bus().publish(
+            "settings", wake_word=settings().wake_word, wellbeing_checkins=on
+        )
+
+    def wellbeing_event(self, kind: str) -> None:
+        """Deliver a local cue as a short check-in through the active voice backend."""
+        asyncio.create_task(self._wellbeing_checkin(kind))
+
+    async def _wellbeing_checkin(self, kind: str) -> None:
+        # Don't interrupt a tool/task or NEO speaking. Detection stays local; Live receives only
+        # the short personalized sentence so it can speak it in the configured Charon voice.
+        if not settings().wellbeing_checkins:
+            return
+        if bus().state not in (NeoState.IDLE, NeoState.LISTENING):
+            return
+        speaker = getattr(self.voice, "spk", None)
+        if getattr(self.voice, "_speaking", False) or (speaker is not None and speaker.playing.is_set()):
+            return
+        if getattr(self.voice, "_turn_open", False) or getattr(self.voice, "_capturing", False):
+            return  # let an active user sentence finish before offering an unsolicited check-in
+        text = {
+            "cough": "A bit of a cough? You okay? Want a few simple tips?",
+            "cough_or_throat": "A cough or throat tickle? Everything okay? Want a few simple tips?",
+            "sniffling": "Some sniffles? Feeling okay, or catching a cold? Want a few simple tips?",
+            "sneezing": "A few sneezes? You alright? Want a few simple tips?",
+            "throat_clearing": "Clearing your throat a lot? Everything okay? Want a few simple tips?",
+            "crying": "Hey, are you okay? I'm here if you want to talk.",
+        }.get(kind, "Hey, are you doing okay? I'm here if you need anything.")
+        # Use the active NEO voice. Live speaks the personalized line through Charon; the local
+        # classifier label itself remains on-device. The on-device voice keeps using its own TTS.
+        self._wellbeing_speaking_until = time.monotonic() + max(6.0, len(text) / 8.0)
+        speak_checkin = getattr(self.voice, "speak_checkin", None)
+        if callable(speak_checkin):
+            try:
+                spoke = await speak_checkin(text)
+            except Exception as error:  # noqa: BLE001 — check-ins must not affect the voice loop
+                print(f"[wellbeing] configured voice unavailable: {type(error).__name__}")
+                spoke = False
+            if not spoke:
+                await bus().say(text, role="assistant")
+                await asyncio.to_thread(_say_aloud_wait, text)
+        elif self.voice is not None and hasattr(self.voice, "speak"):
+            await bus().say(text, role="assistant")
+            await self.voice.speak(text)  # local Kokoro output goes through NEO's normal playback gate
+        else:
+            await bus().say(text, role="assistant")
+            await asyncio.to_thread(_say_aloud_wait, text)
+
+        listen = getattr(self.voice, "listen_after_checkin", None)
+        if callable(listen):
+            # This ephemeral context lets a plain "yes" make sense to the answer model. The
+            # classifier's internal label and the audio sample itself are never attached to it.
+            reply_context = (
+                "NEO just asked if the user is okay and is listening to the answer. Respond gently "
+                "to what they actually say; do not infer a condition."
+                if kind == "crying"
+                else "NEO just offered a few simple comfort tips and is listening to the answer. "
+                "If the user accepts, give brief, low-risk general suggestions; do not diagnose."
+            )
+            if not hasattr(self.voice, "_live"):
+                self._wellbeing_reply_context = (time.monotonic() + 5.0, reply_context)
+            try:
+                await listen(seconds=5.0, context=reply_context)
+            except Exception as error:  # noqa: BLE001 — check-ins must not affect the voice loop
+                self._wellbeing_reply_context = None
+                print(f"[wellbeing] follow-up listening unavailable: {type(error).__name__}")
+
+    def wellbeing_unavailable(self, _reason: str) -> None:
+        asyncio.create_task(self._wellbeing_unavailable())
+
+    async def _wellbeing_unavailable(self) -> None:
+        if not settings().wellbeing_checkins:
+            return
+        await bus().note("Local sound check-ins couldn't start on this Mac, so they were turned off.")
+        await self.set_wellbeing_checkins(False)
 
 
 # Argument values safe to keep in a log file people share for troubleshooting: app names, keys,
@@ -299,6 +407,20 @@ async def run() -> None:
     ui = UIServer(app.on_command)
     await ui.start()
     ui.shell_task = shell_link.start(ui, app_socket)  # the menu, the summon keys, the status: no page needed
+    if sys.platform == "darwin":
+        from neo2.core.voice.wellbeing import WellbeingMonitor
+
+        app.wellbeing = WellbeingMonitor(
+            loop=loop,
+            on_event=app.wellbeing_event,
+            on_error=app.wellbeing_unavailable,
+            is_ignored=lambda: (
+                time.monotonic() < app._wellbeing_speaking_until
+                or bool(getattr(app.voice, "_speaking", False))
+                or bool(getattr(getattr(app.voice, "spk", None), "playing", None) and app.voice.spk.playing.is_set())
+            ),
+        )
+        app.wellbeing.set_enabled(s.wellbeing_checkins)
     warmup(app.session.reflex)  # Laya, then the memory embedder, sequentially
     from neo2.core.tools.system import restore_timers
 
@@ -349,6 +471,8 @@ async def run() -> None:
         else "NEO is running. Summon it with its keys, or type in the overlay."
     )
     await stop.wait()
+    if app.wellbeing is not None:
+        await asyncio.to_thread(app.wellbeing.close)
     # Everything below must finish well inside NEO.app's grace period (it SIGKILLs after 12 s).
     if app.voice:
         try:
@@ -446,6 +570,7 @@ async def _memory_loop(app: App, is_idle, *, tick_s: float = _MEMORY_TICK_S) -> 
 
 _VOICE_RETRY_S = 60.0
 _LIVE_RETRY_S = {"quota": 3600.0, "network": 180.0, "other": 600.0}
+_MACOS_SYSTEM_VOICE = "com.apple.voice.Aman.premium"  # natural masculine Siri voice, stays on-device
 
 
 def _say_aloud(text: str) -> None:
@@ -453,8 +578,28 @@ def _say_aloud(text: str) -> None:
     import subprocess
 
     try:
-        subprocess.Popen(["say", text], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.Popen(
+            ["say", "-v", _MACOS_SYSTEM_VOICE, text],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
     except Exception:  # noqa: BLE001
+        pass
+
+
+def _say_aloud_wait(text: str) -> None:
+    """Speak a short local prompt and wait so voice capture remains muted through its audio tail."""
+    import subprocess
+
+    try:
+        subprocess.run(
+            ["say", "-v", _MACOS_SYSTEM_VOICE, text],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=30,
+            check=False,
+        )
+    except Exception:  # noqa: BLE001 — an unavailable system voice shouldn't break NEO
         pass
 
 

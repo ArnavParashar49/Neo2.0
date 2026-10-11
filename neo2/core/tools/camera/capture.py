@@ -22,8 +22,9 @@ from typing import Any, Protocol
 
 from neo2.core import effects
 
-PREVIEW_FPS = 12.0
-JPEG_QUALITY = 70
+PREVIEW_FPS = 24.0
+JPEG_QUALITY = 65
+PREVIEW_MAX_EDGE = 960
 WIDTH, HEIGHT = 1280, 720
 _INSTALL = "install NEO's vision extra (pyobjc-framework-AVFoundation)"
 
@@ -290,7 +291,11 @@ class CameraSession:
         if self._q is not None and now - self._last_jpeg >= 1.0 / max(self.fps, 0.1):
             self._last_jpeg = now
             with contextlib.suppress(Exception):
-                frame = (encode_jpeg(img, self.quality), img.width, img.height, now)
+                preview = img
+                if max(img.width, img.height) > PREVIEW_MAX_EDGE:
+                    preview = img.copy()
+                    preview.thumbnail((PREVIEW_MAX_EDGE, PREVIEW_MAX_EDGE))
+                frame = (encode_jpeg(preview, self.quality), preview.width, preview.height, now)
         with contextlib.suppress(RuntimeError):  # the loop is shutting down
             loop.call_soon_threadsafe(self._arrived, frame)
 

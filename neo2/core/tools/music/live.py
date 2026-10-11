@@ -256,6 +256,9 @@ class SongLive:
         """An erase: the card off (closed as "erased": the UI drops it with the rest of the chat), no
         old card's links open any more, no cover still on its way."""
         self.stop("erased")
+        from neo2.core.agent import song_words
+
+        song_words.clear_retry()
         self._links = {}
         for t in list(self._tasks):
             t.cancel()

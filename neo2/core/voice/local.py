@@ -54,6 +54,8 @@ class LocalVoice(OnDemandMic):
         self._speaking = False
         self._speaking_since = 0.0
         self._capturing = False
+        self._listen_timeout_override: float | None = None
+        self._last_utterance_started_at: float | None = None
         self._followup_until = 0.0  # listening after a reply until then, no wake word needed
         self._wake_source = "ui"  # what armed listening last: ui / ptt (the wake word says "voice")
         self._vad = None
@@ -111,13 +113,20 @@ class LocalVoice(OnDemandMic):
         self.spk.close()
 
     # ---- external controls -----------------------------------------------------------
-    async def wake(self, source: str = "ui") -> None:
+    async def wake(self, source: str = "ui", *, listen_timeout_s: float | None = None) -> None:
         self._wake_source = source
+        self._listen_timeout_override = listen_timeout_s
         self._armed.set()
         if not await self._mic_on(source):  # (closed while idle with the wake word off)
             self._armed.clear()
+            self._listen_timeout_override = None
             if not self._mic_shut:
                 await bus().note("NEO couldn't open the microphone")
+
+    async def listen_after_checkin(self, *, seconds: float = 5.0, context: str = "") -> None:
+        """Listen locally for one short reply after a spoken check-in."""
+        del context  # App.handle_speech supplies the ephemeral context to the local answer model.
+        await self.wake("check-in", listen_timeout_s=max(0.1, float(seconds)))
 
     async def push_to_talk(self, on: bool) -> None:
         self._ptt = on
@@ -258,11 +267,13 @@ class LocalVoice(OnDemandMic):
         to the overlay while the user is still talking, then return the final transcript."""
         self._capturing = True
         partial_task: asyncio.Task | None = None
-        no_speech_s = settings().listen_timeout_s  # nobody spoke to NEO within this: back to idle
+        no_speech_s = self._listen_timeout_override or settings().listen_timeout_s
+        self._listen_timeout_override = None  # this timeout is only for the first reply
         try:
             await bus().set_state(NeoState.LISTENING)
             frames: list[bytes] = []
             started = False
+            self._last_utterance_started_at = None
             t0 = time.time()
             last_voice = t0
             last_partial = t0
@@ -286,6 +297,7 @@ class LocalVoice(OnDemandMic):
                         ev = self._vad(torch.from_numpy(chunk.copy()), return_seconds=False)
                         if ev and "start" in ev:
                             if not started:
+                                self._last_utterance_started_at = time.monotonic()
                                 early().listening("speech")
                             started = True
                             last_voice = time.time()
@@ -300,6 +312,7 @@ class LocalVoice(OnDemandMic):
                         noise = 0.9 * noise + 0.1 * level
                     if level > max(0.012, noise * 3.5):
                         if not started:
+                            self._last_utterance_started_at = time.monotonic()
                             early().listening("speech")
                         started = True
                         last_voice = time.time()

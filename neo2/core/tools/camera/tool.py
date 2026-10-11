@@ -253,7 +253,7 @@ async def camera_look(args: dict, ctx: ToolContext) -> ToolOutput:
             camera_live.schedule_off(float(getattr(settings(), "camera_follow_s", 20.0)))
             from neo2.core.agent import camera_words
 
-            camera_words.mark_look()  # "and now?" reuses it from the answer on, while it stays on
+            camera_words.mark_look(question=question)  # carry the question through camera follow-ups
         return ToolOutput(answer, say=True)
     except asyncio.CancelledError:
         camera_live.close("stopped")

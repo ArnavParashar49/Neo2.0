@@ -123,6 +123,7 @@ class Settings(BaseSettings):
     reflex_tool_floor: float = 0.85  # Laya may pick the tool itself above this confidence
     home_location: str = ""  # e.g. "Dubai" — where "the weather" means, if not remembered
     learn: bool = True  # NEO_LEARN=off: Laya stops recording requests to learn from
+    workflow_suggestions: bool = True  # local shortcut suggestions after repeated successful app/site setups
     # NEO_LEARN_TEACHER=local|cloud: while idle, have a model re-check the requests Laya was least
     # sure about (reflex/teacher.py) — the local model, or only the provider that already saw each one.
     learn_teacher: Literal["off", "local", "cloud"] = "off"
@@ -163,6 +164,9 @@ class Settings(BaseSettings):
     # is summoned by hand (the summon keys, the orb, push-to-talk), until NEO is idle again. Switched
     # while NEO runs ({"cmd": "set", "name": "wake_word"}) and kept in ~/.neo/.env; see set_wake_word.
     wake_word: bool = True
+    # Local, opt-in cough/crying sound check-ins. This only taps frames from NEO's existing microphone
+    # while it is open; it never opens a microphone itself or saves audio/event history.
+    wellbeing_checkins: bool = False
     # Voice commands the fast paths fully cover run the moment you stop talking, without
     # waiting for Gemini Live to pick the tool (questions still go to the model).
     live_command_lane: bool = True
@@ -778,6 +782,28 @@ def set_wake_word(on: bool, env_path: Path | None = None) -> None:
         out.append(line)
     _write_env(path, out)
     settings().wake_word = on  # the live settings follow the file
+
+
+def set_wellbeing_checkins(on: bool, env_path: Path | None = None) -> None:
+    """Persist the opt-in local sound check-ins without changing any other ~/.neo/.env line."""
+    if not isinstance(on, bool):
+        raise ValueError(f"wellbeing_checkins must be true or false, not {on!r}")
+    path, lines = _env_lines(env_path, "set_wellbeing_checkins")
+    line = f"NEO_WELLBEING_CHECKINS={'true' if on else 'false'}"
+    out: list[str] = []
+    placed = False
+    for ln in lines:
+        if not ln.strip().startswith("NEO_WELLBEING_CHECKINS="):
+            out.append(ln)
+        elif not placed:
+            out.append(line)
+            placed = True
+    if not placed:
+        if out and out[-1].strip():
+            out.append("")
+        out.append(line)
+    _write_env(path, out)
+    settings().wellbeing_checkins = on
 
 
 def settings() -> Settings:

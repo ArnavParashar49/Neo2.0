@@ -71,7 +71,13 @@ def refusal(ctx: ToolContext) -> str:
         ok = ctx.origin == "user" and not ctx.tainted() and song_words.wants_song(ctx.user_text)
         return "" if ok else no
     words = str(ctx.get(USERS_WORDS, "") or "")
-    if not words or not song_words.wants_song(words):
+    retry = (
+        ctx.origin == "user"
+        and not ctx.tainted()
+        and bool(ctx.get("song_retry"))
+        and song_words.consume_retry(words)
+    )
+    if not words or not (song_words.wants_song(words) or retry):
         # No words of the user's in this request (a model, a relay, a replay), or words that don't ask
         # to name what plays: a web question about songs ("what song won the Grammy"), one they named
         # ("who sang it?"). A model's call for those is its own idea, never theirs.
@@ -212,6 +218,9 @@ async def _listen(sid: str, listener: capture.Listener, listen_s: float) -> Tool
             return ToolOutput(said, ok=False)
         said = "I couldn't recognise it." if heard_music else "I couldn't hear any music."
         song_live.finish("not_found", message=said)
+        from neo2.core.agent import song_words
+
+        song_words.mark_no_match()
         return ToolOutput(said, say=True)
     except _Stopped:
         return ToolOutput("Stopped listening.", say=False)
@@ -238,6 +247,9 @@ async def song_identify(args: dict, ctx: ToolContext) -> ToolOutput:
     why = refusal(ctx)
     if why:
         return ToolOutput(why, ok=False)
+    from neo2.core.agent import song_words
+
+    song_words.clear_retry()  # an explicit new listen replaces any previous retry window
     if missing := recognize.available():
         return ToolOutput(missing, ok=False)
     if song_live.busy:

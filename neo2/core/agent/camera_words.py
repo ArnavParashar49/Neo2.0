@@ -21,8 +21,11 @@ from __future__ import annotations
 import re
 import time
 
+from neo2.core.agent.retry_words import is_retry_request
+
 FOLLOW_UP_S = 25.0  # the camera's follow-up window (≈20 s after the answer, plus the answer itself)
 _last_look = 0.0
+_last_question = ""
 
 # ---- how the sentence is framed ------------------------------------------------------------------
 _ADDRESS = re.compile(r"^(?:(?:hey|hi|ok|okay|yo|arre|arey)\s+)?neo\b[\s,.:!-]*", re.I)
@@ -245,27 +248,36 @@ def _window() -> float:
 
 
 def follow_up(text: str, *, now: float | None = None) -> bool:
-    """"and now?", "what about this one?", "aur ye?" — a short follow-up said while the last look's
-    camera window is still open (the camera going off closes it: :func:`forget`)."""
+    """A short follow-up or retry while the last look's camera window is still open."""
     now = time.monotonic() if now is None else now
     if not _last_look or now - _last_look > _window():
         return False
+    if is_retry_request(text):
+        return True
     c = _plain(text)
     for _ in range(2):
         c = re.sub(r"[\s,]*(?:neo|please|pls)$", "", c).strip(_EDGE)
     return bool(c) and len(c) <= 40 and bool(_FOLLOW.match(c))
 
 
-def mark_look(now: float | None = None) -> None:
-    """A look was routed (or answered): its follow-up window starts now."""
-    global _last_look
+def follow_up_question(text: str) -> str:
+    """Reuse the original visual question for a short follow-up or retry."""
+    return _last_question if follow_up(text) and _last_question else text
+
+
+def mark_look(now: float | None = None, *, question: str | None = None) -> None:
+    """A look was routed (or answered): refresh its window and retain its question."""
+    global _last_look, _last_question
     _last_look = time.monotonic() if now is None else now
+    if question:
+        _last_question = str(question)[:500]
 
 
 def forget() -> None:
     """The camera went off (or the user stopped, or erased): no follow-up reuses it."""
-    global _last_look
+    global _last_look, _last_question
     _last_look = 0.0
+    _last_question = ""
 
 
 def prewarm() -> bool:

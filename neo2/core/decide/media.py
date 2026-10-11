@@ -844,11 +844,21 @@ def _post_return(pid: int) -> None:
     """A Return keystroke to that app only (not to whatever is frontmost), through the input door."""
     import Quartz as Q
 
+    _post_key(pid, 36)
+
+
+def _post_key(pid: int, keycode: int, flags: int = 0) -> None:
+    """A key chord sent only to the app whose search field NEO found."""
+    import Quartz as Q
+
     from neo2.core.tools.computer import input as inp
 
-    effects.guard("input", "press Return in another app", via=Q.CGEventPostToPid)
+    effects.guard("input", "type into another app's search field", via=Q.CGEventPostToPid)
     for down in (True, False):
-        inp._post_to_pid(pid, Q.CGEventCreateKeyboardEvent(None, 36, down))
+        event = Q.CGEventCreateKeyboardEvent(None, keycode, down)
+        if flags:
+            Q.CGEventSetFlags(event, flags)
+        inp._post_to_pid(pid, event)
 
 
 def _s(v) -> str:
@@ -1050,13 +1060,37 @@ def _needs_sign_in(win) -> bool:
 
 
 def _set_query(field, text: str) -> bool:
-    _set(field, "AXFocused", True)
-    ok = _set(field, "AXValue", text)
-    if ok:
-        v = _attr(field, "AXValue")
-        ok = v is None or _s(v) == text  # some web inputs ignore a value set
-    _perform(field, "AXConfirm")
-    return ok
+    """Set a discovered search field; fall back to a real click and typed replacement.
+
+    Spotify's Electron search box can reject AXValue writes even though it is an ordinary visible
+    text field. The generic search setter handles AX and keyboard input where possible. If it still
+    cannot confirm the value, click this known search field, replace its contents with targeted
+    keystrokes, and let the caller submit it.
+    """
+    from neo2.core.decide import axkit
+
+    if axkit.set_search(field, text):
+        return True
+
+    pid = axkit._pid_of(field)
+    if pid is None:
+        return False
+    frame = axkit._frame(field)
+    if frame is not None and frame[2] > 0 and frame[3] > 0:
+        from neo2.core.tools.computer import input as inp
+
+        inp.click(frame[0] + frame[2] / 2, frame[1] + frame[3] / 2)
+    elif not _set(field, "AXFocused", True) and not _attr(field, "AXFocused", False):
+        return False
+
+    import Quartz as Q
+
+    _post_key(pid, 0, Q.kCGEventFlagMaskCommand)  # select any old or partial query
+    _post_key(pid, 51)  # clear it before typing, never append to stale text
+    axkit._type(pid, text, "return")
+    # CGEventPostToPid can be silently dropped when macOS/app focus changed. Confirm the
+    # discovered field actually contains the query before reporting success or pressing Return.
+    return axkit._reads(field, text)
 
 
 def _focus_holds(app_el, roles: tuple[str, ...], value: str | None = None) -> bool:
@@ -1067,13 +1101,27 @@ def _focus_holds(app_el, roles: tuple[str, ...], value: str | None = None) -> bo
 
 
 def _press(hit: _Hit, pid: int, app_el) -> bool:
-    if "AXPress" in _actions(hit.el) and _perform(hit.el, "AXPress"):
-        return True
-    # A row: select it, then Return plays the selection in list-based players - only while the list
-    # has the focus, so the keystroke can never land on a dialog's default button.
+    # A row is not a Play button. AXPress on Spotify result rows can navigate/open the row without
+    # starting playback, so select it and use Return only while the app confirms list focus.
     lists = ("AXTable", "AXOutline", "AXList", "AXRow", "AXCell", "AXGrid")
-    if hit.kind == "row" and _set(hit.el, "AXSelected", True) and _focus_holds(app_el, lists):
-        _post_return(pid)
+    if hit.kind == "row":
+        if _set(hit.el, "AXSelected", True) and _focus_holds(app_el, lists):
+            _post_return(pid)
+            return True
+        return False
+
+    # Electron players can report AXPress as successful while ignoring it. Use the visible
+    # control's actual screen bounds first, like a user clicking its Play button; fall back to the
+    # accessibility action only when the app doesn't expose usable geometry.
+    from neo2.core.decide import axkit
+
+    frame = axkit._frame(hit.el)
+    if frame is not None and frame[2] > 0 and frame[3] > 0:
+        from neo2.core.tools.computer import input as inp
+
+        inp.click(frame[0] + frame[2] / 2, frame[1] + frame[3] / 2)
+        return True
+    if "AXPress" in _actions(hit.el) and _perform(hit.el, "AXPress"):
         return True
     return False
 
@@ -1110,29 +1158,27 @@ def _ax_flow(pid: int, app_path: str, query: str, stop: threading.Event, ready_s
                         break
                     continue
             if time.monotonic() - t0 > ready_s:
-                return False, "no search box found", ""
+                return False, "no search box found", "search_box_not_found"
             time.sleep(_AX_STEP_S)
         if not _set_query(field, query):
-            return False, "couldn't type into its search box", ""
-        t1, returned = time.monotonic(), False
+            return False, "couldn't type into its search box", "search_box_input_failed"
+        _post_return(pid)  # submit the query to this player, not whichever app is frontmost
+        t1 = time.monotonic()
         while True:
             if stop.is_set():
                 return False, "stopped", "timeout"
             hits = find_play_controls(_window(app_el) or app_el, query)
             if hits:
                 break
-            if not returned and time.monotonic() - t1 > 1.5 and _focus_holds(app_el, _TEXT_ROLES, query):
-                _post_return(pid)  # web inputs that only search on a real Return
-                returned = True
             if time.monotonic() - t1 > action_s:
-                return False, "nothing in its results matched", ""
+                return False, "nothing in its results matched", "search_results_not_matched"
             time.sleep(_AX_STEP_S)
         for h in hits[:3]:
             if stop.is_set():
                 return False, "stopped", "timeout"
             if _press(h, pid, app_el):
                 return True, h.label, ""
-        return False, "couldn't press play", ""
+        return False, "couldn't press play", "play_control_not_pressed"
     finally:
         _restore(app_el, changed)
 
@@ -1249,7 +1295,7 @@ async def _confirmed(
 ) -> Outcome:  # fmt: skip
     state = await watch.wait(confirm_s)
     if state == "silent":
-        return _fail(f"{app.name} didn't start playing", "timeout")
+        return _fail(f"{app.name} didn't start playing", "audio_not_started")
     np = await _now_playing(app)
     if state == "unavailable":  # only the app's own now-playing can tell
         if not (np and _overlap(query, f"{np[0]} {np[1]}") >= 0.5):
@@ -1880,6 +1926,11 @@ async def play_best(query: str, text: str = "") -> Any:
     web = next((c for c in cands if getattr(c, "app", None) is None), None)
     if web is not None and not getattr(web, "site", "") and settings().play_site:
         web.site = settings().play_site  # the site they prefer, unless they named another
+    route = [
+        f"{getattr(getattr(c, 'app', None), 'name', 'web')}:{','.join(tuple(getattr(c, 'methods', ()) or ()) or (methods_for(c.app) if getattr(c, 'app', None) is not None else (WEB,)))}"
+        for c in cands
+    ]
+    print(f"[media] route: {' -> '.join(route)}")
     named_keys = {getattr(c, "key", "") for c in named}
     named_failed: list[str] = []
     site = next((str(getattr(c, "site", "") or "") for c in cands if getattr(c, "app", None) is None), "")
@@ -1931,7 +1982,10 @@ async def play_best(query: str, text: str = "") -> Any:
                 )
             except TimeoutError:
                 res = _fail("took too long", "timeout")
+            duration_ms = int((time.monotonic() - started) * 1000)
             _record(key, m, res.ok, res.reason)
+            state = res.reason or ("confirmed" if res.ok else "failed")
+            print(f"[media] {who} / {_LABELS.get(m, m)}: {state} in {duration_ms} ms")
             if res.ok:
                 if named_failed and key not in named_keys:
                     # They asked for an app and got another source: say so, and why.
