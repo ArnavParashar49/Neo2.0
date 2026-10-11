@@ -174,8 +174,11 @@ class EventBus:
         current_job.set(job)  # the caller's task runs the tool next: it can tell which job it is
         await self.publish("tool_start", name=name, args=args, job=job)
 
-    async def tool_end(self, name: str, ok: bool, summary: str, *, job: str = "") -> None:
-        await self.publish("tool_end", name=name, ok=ok, summary=summary[:300], job=job)
+    async def tool_end(self, name: str, ok: bool, summary: str, *, job: str = "", kind: str = "") -> None:
+        """`kind`: a failure's kind (neo2.core.agent.failures), when the agent loop knows it. Only a
+        failure with one carries it: every other tool_end is the event it always was."""
+        extra = {"kind": kind} if kind else {}
+        await self.publish("tool_end", name=name, ok=ok, summary=summary[:300], job=job, **extra)
 
 
 _bus: EventBus | None = None

@@ -181,6 +181,10 @@ class Settings(BaseSettings):
 
     # ---- agent -----------------------------------------------------------------------
     max_steps: int = 24
+    # The stuck-call breaker (neo2.core.agent.failures): in one agent run, an action that failed twice
+    # the same way gets a hint by kind of failure, and a third identical call isn't run ("skipped: …";
+    # the run goes on). Any action that works clears the count. Off: neither — the loop as before.
+    stuck_breaker: bool = True
     max_seconds: float = 180.0  # wall-clock budget for one agent run
     max_tool_result_chars: int = 6000
     confirm_destructive: bool = True

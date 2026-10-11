@@ -416,9 +416,13 @@ def _log_activity(ev) -> None:
     if ev.type == "tool_start":
         print(f"  ▶ {d['name']} {_safe_args(d.get('args', {}))}")
     elif ev.type == "tool_end":
+        from neo2.core.agent.failures import KINDS
+
         summary = str(d.get("summary", ""))
-        # Failures too: an error can quote a path, a URL with a token, or a file's first line.
-        print(f"  ◀ {d['name']} {'ok' if d['ok'] else 'FAIL'} ({len(summary)} chars)")
+        # Failures too: an error can quote a path, a URL with a token, or a file's first line. A
+        # failure's kind is one of NEO's fixed names (neo2.core.agent.failures), never anything else.
+        kind = f" [{d['kind']}]" if d.get("kind") in KINDS else ""
+        print(f"  ◀ {d['name']} {'ok' if d['ok'] else 'FAIL'}{kind} ({len(summary)} chars)")
     elif ev.type == "reflex":
         print(f"  ~ {d['intent']} ({d['intent_confidence']:.2f}) via {d['source']} {d['latency_ms']:.0f}ms")
     elif ev.type == "turn":

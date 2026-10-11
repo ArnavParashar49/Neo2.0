@@ -9,6 +9,10 @@ the screen under the rest (neo2.core.agent.batch). The model is asked to check i
 reports only when it hasn't seen the state after every action since it last looked — and then
 with a look attached. A run may end on the model's own final words when NEO verified its last
 actions itself and nothing done before them is still unseen.
+
+An action that failed twice the same way in a run gets a hint, and a third identical try isn't run
+(neo2.core.agent.failures): the thrash guard misses a failing step with looks between the tries.
+Every run ends on one content-free line saying why (``[loop] end=… steps=N s=…``).
 """
 
 from __future__ import annotations
@@ -21,7 +25,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any, Literal
 
 from neo2.core import logger
-from neo2.core.agent import batch
+from neo2.core.agent import batch, failures
 from neo2.core.agent.confirm import NEEDS_CONFIRM, NEEDS_USER
 from neo2.core.agent.prompt import guidance as prompt_guidance
 from neo2.core.agent.registry import Registry, ToolContext, ToolOutput, fence
@@ -216,9 +220,12 @@ async def _run_calls(
     job: str = "",
     allowed: set[str] | None = None,
     blind: bool = False,
+    *,
+    stuck: failures.RunFailures | None = None,
 ) -> list[ToolResult]:
     """`allowed`: the only tools that may run (None = any the model names). `blind`: the brain
-    that chose these calls has no vision (the input tools won't act on screen coordinates)."""
+    that chose these calls has no vision (the input tools won't act on screen coordinates).
+    `stuck`: the run's failed steps (neo2.core.agent.failures; None: the breaker is off)."""
     # A model chose these calls, whoever started the run (the taint list stays shared).
     ctx = ctx if ctx.origin == "agent" else replace(ctx, origin="agent")
     if blind:
@@ -229,17 +236,36 @@ async def _run_calls(
             return ToolResult(
                 c.id, c.name, f"Error: {c.name[:60]} isn't available here — use only the tools you were given.", ok=False
             )
+        look = _looks(reg, c.name)
+        if stuck is not None and not look and (twice := stuck.seen_twice(c)):
+            # This exact step already failed twice the same way: not run, and not shown to the host
+            # (no tool_start / tool_end) — the run goes on, and the model reads why.
+            failures.tally("tool_skip_repeat")
+            log.info(f"  ~ {c.name} skipped: it failed twice the same way [{twice}]")
+            return ToolResult(c.id, c.name, failures.skipped(twice), ok=False)
         await ev.tool_start(c.name, c.args, job=job)
         t = reg.get(c.name)
         if t and any(k in c.name for k in _SEARCHY):
             await ev.set_state(NeoState.SEARCHING, job=job)
         out: ToolOutput = await reg.invoke(c.name, c.args, ctx)
-        await ev.tool_end(c.name, out.ok, out.text, job=job)
+        # A failure's kind, from NEO's own words (a question for the user is no failure: it ends the
+        # run). Only a failure with a kind passes one: the bus's event is otherwise as it was.
+        kind = failures.kind_of(c.name, out.text) if not out.ok and not out.halt else ""
+        await ev.tool_end(c.name, out.ok, out.text, job=job, **({"kind": kind} if kind else {}))
+        if kind:
+            failures.tally("tool_fail")
+            failures.tally(f"tool_fail_{kind}")
         content = _truncate(out.text, limit)
         if t and t.untrusted and not out.halt and out.fence:
             # Third-party words — a failure too can quote them (a page's element names, a report
             # that starts with "Error"): data for the model, never orders.
             content = fence(c.name, content)
+        if stuck is not None and not out.halt:
+            if look:
+                if out.ok:
+                    stuck.looked()
+            elif stuck.record(c, ok=out.ok, kind=kind) == 2:
+                content += "\n" + failures.advice(kind)  # NEO's own words: after the fence, never in it
         return ToolResult(
             call_id=c.id, name=c.name, content=content, ok=out.ok, images=out.images, effect=batch.effect(out)
         )
@@ -323,7 +349,8 @@ async def run_agent(
     max_steps = max_steps or s.max_steps
     import time as _time
 
-    deadline = _time.monotonic() + (max_seconds or s.max_seconds)
+    started = _time.monotonic()
+    deadline = started + (max_seconds or s.max_seconds)
     paused0 = paused()
 
     messages: list[Message] = list(history or [])
@@ -349,6 +376,15 @@ async def run_agent(
     unseen: list[ToolCall] = []
     verified = False
     sees = True  # the brain that answered last can see pictures
+    stuck = failures.RunFailures() if s.stuck_breaker else None  # this run's failed steps
+
+    def end(r: AgentResult, why: str = "") -> AgentResult:
+        """Every run ends here: one line saying why, how many steps and how long — no words of
+        the run — and NEO.app's daily count of it (neo2.core.reflex.learn)."""
+        why = why or r.stopped
+        log.info(f"[loop] end={why} steps={len(r.steps)} s={_time.monotonic() - started:.1f}")
+        failures.tally(f"agent_end_{why}")
+        return r
 
     async def check() -> Message:
         note = await batch.verify_message(reg, enabled, ctx, unseen, sees=sees, ev=ev, job=job)
@@ -360,12 +396,15 @@ async def run_agent(
         if _time.monotonic() - (paused() - paused0) > deadline:
             await _settle(ev, idle_on_finish, job)
             summary = "; ".join(f"{st.tool}: {'ok' if st.ok else 'failed'}" for st in steps[-4:])
-            return AgentResult(
-                f"This is taking longer than I allow myself ({int(max_seconds or s.max_seconds)}s), so I stopped. "
-                f"Last steps — {summary or 'none'}.",
-                "max_steps",
-                steps,
-                messages,
+            return end(
+                AgentResult(
+                    f"This is taking longer than I allow myself ({int(max_seconds or s.max_seconds)}s), so I stopped. "
+                    f"Last steps — {summary or 'none'}.",
+                    "max_steps",
+                    steps,
+                    messages,
+                ),
+                "deadline",  # (stopped stays "max_steps": callers read it)
             )
         await ev.set_state(NeoState.THINKING, job=job)
         _supersede_observations(messages, start=len(history or []))
@@ -382,7 +421,7 @@ async def run_agent(
                 turn: Turn = await provider.complete(messages, system=system, tools=tools, effort=effort)
         except Exception as e:  # noqa: BLE001
             await _settle(ev, idle_on_finish, job)
-            return AgentResult(_model_trouble(e, steps), "error", steps, messages)
+            return end(AgentResult(_model_trouble(e, steps), "error", steps, messages))
 
         messages.append(Message.assistant(turn.text, turn.tool_calls, raw=turn.raw))
         sees = getattr(turn, "sees", True)
@@ -406,7 +445,7 @@ async def run_agent(
                 continue
             messages.append(Message.assistant(answer))
             await _settle(ev, idle_on_finish, job)
-            return AgentResult(answer, "done", steps, messages)
+            return end(AgentResult(answer, "done", steps, messages))
         if not calls:
             # Acted without seeing the state afterwards? Make it check its work once before
             # reporting — with a look at the screen attached when it acted there.
@@ -415,7 +454,7 @@ async def run_agent(
                 messages.append(await check())
                 continue
             await _settle(ev, idle_on_finish, job)
-            return AgentResult(turn.text.strip(), "done", steps, messages)
+            return end(AgentResult(turn.text.strip(), "done", steps, messages))
 
         # Thrash guard — the same side-effect call three turns in a row means the model is stuck.
         # Read-only observations (ax_tree, read_file…) legitimately repeat in observe/act loops.
@@ -433,11 +472,13 @@ async def run_agent(
             )
             await _settle(ev, idle_on_finish, job)
             name = calls[0].name
-            return AgentResult(
-                f"I kept repeating the same step ({name}) without progress, so I stopped.",
-                "thrash",
-                steps,
-                messages,
+            return end(
+                AgentResult(
+                    f"I kept repeating the same step ({name}) without progress, so I stopped.",
+                    "thrash",
+                    steps,
+                    messages,
+                )
             )
 
         # `more_tools` is answered here, not by the registry: it grows this run's tool list.
@@ -471,7 +512,7 @@ async def run_agent(
         ran = (
             await _run_calls(
                 real, reg, ctx, ev, s.max_tool_result_chars, job, set(enabled) if strict else None,
-                blind=not _saw(turn, provider),
+                blind=not _saw(turn, provider), stuck=stuck,
             )
             if real
             else []
@@ -524,13 +565,15 @@ async def run_agent(
                 p = peek()
                 if kind == "needs_confirm" and p is not None:
                     question = f"{p.summary} — Should I go ahead?"  # the staged action's own words
-                return AgentResult(
-                    question,
-                    kind,
-                    steps,
-                    messages,
-                    question=question,
-                    pending_action=p.action_id if p else "",
+                return end(
+                    AgentResult(
+                        question,
+                        kind,
+                        steps,
+                        messages,
+                        question=question,
+                        pending_action=p.action_id if p else "",
+                    )
                 )
 
         # The model finished with these actions, and NEO saw each one work: done, with no model
@@ -539,10 +582,9 @@ async def run_agent(
             answer = str(fin[0].args.get("answer") or turn.text or "Done.").strip()
             messages.append(Message.assistant(answer))  # the run's answer, after its results
             await _settle(ev, idle_on_finish, job)
-            return AgentResult(answer, "done", steps, messages)
+            return end(AgentResult(answer, "done", steps, messages))
 
     await _settle(ev, idle_on_finish, job)
     summary = "; ".join(f"{st.tool}: {'ok' if st.ok else 'failed'}" for st in steps[-4:])
-    return AgentResult(
-        f"I reached my step limit before finishing. Last steps — {summary}.", "max_steps", steps, messages
-    )
+    said = f"I reached my step limit before finishing. Last steps — {summary}."
+    return end(AgentResult(said, "max_steps", steps, messages))
