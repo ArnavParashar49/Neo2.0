@@ -31,7 +31,10 @@ _WAKE = re.compile(r"^\s*(?:(?:hey|hi|okay|ok)\s+)?neo[\s,:!.-]*", re.I)
 _SPACE = re.compile(r"[^\w\s]", re.UNICODE)
 # Only a sentence that *starts* as a definition teaches a routine. "Make a shortcut to Downloads" or
 # "why do you open Safari when I say Neo?" merely contain the words: they go wherever Laya sends them.
-_POLITE = r"^\s*(?:(?:can|could|would|will)\s+you\s+|please[\s,]+)*"
+# A spoken transcript often opens with a filler ("Okay, when I say …", "So Neo, when I say …"): those
+# words may come first, and the sentence still has to start as a definition right after them.
+_FILLER = r"(?:(?:okay|ok|so|um+|uh+|erm|hmm+|and|alright|all\s+right|well|now|hey|neo)[\s,.!:-]+)*"
+_POLITE = r"^\s*" + _FILLER + r"(?:(?:can|could|would|will)\s+you\s+|please[\s,]+)*"
 _WHEN_I_SAY = r"(?:make\s+it\s+so\s+(?:that\s+)?)?(?:when|whenever)\s+i\s+say\b"
 _SETUP = re.compile(
     _POLITE + r"(?:" + _WHEN_I_SAY
@@ -64,8 +67,20 @@ _OTHER_VERB = re.compile(
     r"tell|say|read|remind|change|toggle|enable|disable|increase|decrease|raise|lower)\b",
     re.I,
 )
-# A description, not a name ("my email", "a new tab"), or a second launch run into the first.
-_NOT_A_NAME = re.compile(r"^(?:a|an|my|your|our|some|this|that|these|those)\b|\b(?:open|launch|bring\s+up)\b", re.I)
+# A description, not a name ("my email", "a new tab", "the timer"), a second launch run into the
+# first, or a choice ("Safari or Chrome").
+_NOT_A_NAME = re.compile(
+    r"^(?:a|an|the|my|your|our|some|this|that|these|those)\b|\b(?:open|launch|bring\s+up|or)\b", re.I
+)
+# Chatter after the list, not something to open: "…, does that work?", "…, right?", "…, thanks".
+_CHATTER = re.compile(
+    r"^(?:does|do|did|is|are|was|can|could|would|will|should|right|thanks|thank\s+you|thx|ok|okay|cool|"
+    r"great|got\s+it|alright|yes|yeah|no|nope|sure)\b",
+    re.I,
+)
+# What "start" starts that isn't an app: "start playing", "start working" (a name is never a lowercase
+# "-ing" word: "Sling" stays a name).
+_GERUND = re.compile(r"^[a-z]+ing$")
 _HOST_PORT = re.compile(r"^[\w.-]+:\d+(?:[/?#]\S*)?$")
 _URL_TARGET = re.compile(
     r"^(?:https?://)?(?:www\.)?[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?(?::\d+)?"
@@ -86,9 +101,10 @@ def normalize(text: str) -> str:
 def is_setup_request(text: str) -> bool:
     """Recognize an explicit user instruction to teach a routine; never infer one from a goal.
 
-    The sentence has to start that way (after the wake word and a polite "can you" or "please"):
-    "when I say …", "make it so when I say …", "create a spoken routine". The words anywhere else in
-    a sentence are a question or another request, and they must not take it over."""
+    The sentence has to start that way (after the wake word, a filler such as "okay" or "so", and a
+    polite "can you" or "please"): "when I say …", "make it so when I say …", "create a spoken
+    routine". The words anywhere else in a sentence are a question or another request, and they must
+    not take it over."""
     return bool(_SETUP.match(_WAKE.sub("", str(text or ""), count=1)))
 
 
@@ -117,7 +133,9 @@ def _local_action(part: str) -> dict | None:
     target = re.sub(r"^(?:the\s+)?(?:website|site|app)\s+", "", target, flags=re.I).strip()
     target = re.sub(r"^the\s+(.+?)\s+(?:app|website|site)$", r"\1", target, flags=re.I)
     target = target.strip(" \t,;:'\"“”‘’")
-    if not target or _OTHER_VERB.match(target) or _NOT_A_NAME.search(target):
+    if not target or _OTHER_VERB.match(target) or _NOT_A_NAME.search(target) or _CHATTER.match(target):
+        return None
+    if _GERUND.match(target):
         return None
     if len(target.split()) > _MAX_TARGET_WORDS:
         return None
@@ -144,7 +162,8 @@ def parse_local_setup(text: str) -> dict | None:
     Examples: ``When I say “I want to study”, open Notion, Safari, and youtube.com`` and the
     spoken equivalent ``When I say I want to study, then open Notion and Safari``. Anything that
     isn't plainly "open these apps and sites" (a part that turns, plays or sends something, a
-    description instead of a name) is None: the constrained routine manager decides, or refuses.
+    description instead of a name, a choice, a question or a thank-you after the list) is None: the
+    constrained routine manager decides, or refuses.
     """
     raw = _WAKE.sub("", " ".join(str(text or "").split()), count=1)
     head = _HEAD.match(raw)

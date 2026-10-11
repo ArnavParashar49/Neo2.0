@@ -6,12 +6,28 @@ nothing here reads or writes the real ~/.neo, and no app or page really opens.""
 from __future__ import annotations
 
 import asyncio
+from contextlib import contextmanager
+from types import ModuleType
 
 import pytest
 
 from neo2.core.agent.registry import RegisteredTool, ToolContext, ToolOutput, catalog
-from neo2.core.tools import routines
-from neo2.core.tools.routines import is_setup_request, parse_local_setup
+
+routines: ModuleType  # neo2.core.tools.routines, imported by _routines_after_the_catalog below
+
+
+@pytest.fixture(autouse=True)
+def _routines_after_the_catalog():
+    """Import routines inside a test, after load_all: imported while the tests are collected, its tools
+    would be registered ahead of every other one, and a test elsewhere that fits "every tool" into a
+    small budget (test_v2_brain_fallback) reads the catalog in its order."""
+    global routines
+    from neo2.core.tools import load_all
+
+    load_all()
+    from neo2.core.tools import routines as module
+
+    routines = module
 
 
 def _app(name: str) -> dict:
@@ -36,6 +52,14 @@ SETUP = [
     "make a voice shortcut for studying",
     "set up a voice routine",
     "save my spoken phrase",
+    # A spoken transcript often starts with a filler: still the user's own definition.
+    "Okay, when I say focus mode, open Notion.",
+    "So when I say focus mode, open Notion",
+    "Um, when I say focus mode, open Notion",
+    "Alright, when I say focus mode, open Notion",
+    "okay so uh when I say focus mode open Notion",
+    "So Neo, when I say focus mode, open Notion",
+    "And can you make it so when I say study time, open Notion",
 ]
 
 NOT_SETUP = [
@@ -48,18 +72,21 @@ NOT_SETUP = [
     "remind me what I said when I say goodbye to Sam",
     "create a morning routine in my calendar",
     "save a shortcut to the desktop",
+    "Okay, why do you open Safari when I say Neo?",  # a filler doesn't make a question a definition
+    "So make a shortcut to Downloads",
+    "um, what happens when I say stop",
     "",
 ]
 
 
 @pytest.mark.parametrize("text", SETUP)
 def test_an_explicit_definition_is_a_setup_request(text):
-    assert is_setup_request(text)
+    assert routines.is_setup_request(text)
 
 
 @pytest.mark.parametrize("text", NOT_SETUP)
 def test_the_phrase_somewhere_in_a_sentence_is_not(text):
-    assert not is_setup_request(text)
+    assert not routines.is_setup_request(text)
 
 
 # ---- the local parser ---------------------------------------------------------------------------------
@@ -87,12 +114,15 @@ PARSED = [
     ("can you make it so when I say study time, open Notion", "study time", [_app("Notion")]),
     ("When I say work mode, open the app Slack and the website github.com/me please.",
      "work mode", [_app("Slack"), _url("https://github.com/me")]),
+    ("Okay, when I say focus mode, open Notion.", "focus mode", [_app("Notion")]),
+    ("So um, when I say deep work open Notion and Safari", "deep work", [_app("Notion"), _app("Safari")]),
+    ("When I say work mode, open the Notion app and start Slack", "work mode", [_app("Notion"), _app("Slack")]),
 ]
 
 
 @pytest.mark.parametrize(("text", "trigger", "actions"), PARSED)
 def test_the_plain_form_is_parsed_locally(text, trigger, actions):
-    assert parse_local_setup(text) == {"action": "create", "trigger": trigger, "actions": actions}
+    assert routines.parse_local_setup(text) == {"action": "create", "trigger": trigger, "actions": actions}
 
 
 UNPARSED = [
@@ -108,12 +138,22 @@ UNPARSED = [
     "When I say study time, open 192.168.1.10",
     "Make a shortcut to Downloads",
     "When I say good night",
+    # Not an app or a site: "start" followed by what to start, a question or a thank-you tacked on,
+    # a choice between two.
+    "When I say chill out, open Spotify and start playing",
+    "When I say chill out, start playing",
+    "When I say focus mode, open Notion and start the timer",
+    "When I say focus mode, open Safari, does that work?",
+    "When I say focus mode, open Safari, right?",
+    "When I say focus mode, open Notion please, thanks",
+    "When I say focus mode, open Safari or Chrome",
+    "Okay, why do you open Safari when I say Neo?",
 ]
 
 
 @pytest.mark.parametrize("text", UNPARSED)
 def test_anything_else_is_left_to_the_constrained_manager(text):
-    assert parse_local_setup(text) is None
+    assert routines.parse_local_setup(text) is None
 
 
 # ---- what a routine may open ----------------------------------------------------------------------
@@ -172,6 +212,12 @@ def test_create_saves_locally_and_the_exact_phrase_matches():
     assert path.exists() and oct(path.stat().st_mode & 0o777) == "0o600"
 
 
+def test_the_models_call_for_a_definition_said_after_a_filler_is_saved():
+    """Live often hears "Okay, …" first: the user still said to define it, so the model may save it."""
+    out = _create("focus mode", [_app("Notion")], words="Okay, when I say focus mode, open Notion.")
+    assert str(out).startswith("Saved locally") and routines.match("focus mode") is not None
+
+
 def test_a_model_cannot_create_one_the_user_never_asked_for():
     out = _create("open sesame", [_app("Terminal")], words="what's the weather like?", origin="agent")
     assert str(out).startswith("Error:") and routines.match("open sesame") is None
@@ -226,9 +272,8 @@ def test_delete_with_no_match_lists_them_without_an_error():
     assert "couldn't find" in out and "I want to study" in out
 
 
-@pytest.fixture
-def launchers():
-    """Fake open_app / open_url in NEO.app's catalog: what a routine would launch, recorded."""
+@contextmanager
+def _fake_launchers():
     calls: list[tuple[str, dict]] = []
     saved = {}
     for name in ("open_app", "open_url"):
@@ -239,11 +284,30 @@ def launchers():
 
         saved[name] = catalog().get(name)
         catalog().register(RegisteredTool(name, name, {"type": "object", "properties": {}}, handler))
-    yield calls
-    for name, prev in saved.items():
-        catalog().remove(name)
-        if prev is not None:
-            catalog().register(prev)
+    try:
+        yield calls
+    finally:
+        for name, prev in saved.items():
+            if prev is not None:
+                catalog().register(prev)  # replaced where it stands: never moved to the end
+            else:
+                catalog().remove(name)
+
+
+@pytest.fixture
+def launchers():
+    """Fake open_app / open_url in NEO.app's catalog: what a routine would launch, recorded."""
+    with _fake_launchers() as calls:
+        yield calls
+
+
+def test_the_fake_launchers_leave_the_catalog_as_it_was():
+    """Another test fits "every tool" into a small budget in the catalog's order: faking the launchers
+    for a while must leave both the tools and their order as they were."""
+    before = list(catalog()._tools.items())
+    with _fake_launchers():
+        assert catalog().get("open_app") is not dict(before).get("open_app")
+    assert list(catalog()._tools.items()) == before
 
 
 def test_run_launches_in_order_under_the_running_job(launchers, monkeypatch):

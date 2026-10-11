@@ -5,11 +5,27 @@ hash and a count. Every test has its own data dir (conftest)."""
 from __future__ import annotations
 
 import json
+from types import ModuleType
 
 import pytest
 
 from neo2.core.reflex import suggestions
-from neo2.core.tools import routines
+
+routines: ModuleType  # neo2.core.tools.routines, imported by _routines_after_the_catalog below
+
+
+@pytest.fixture(autouse=True)
+def _routines_after_the_catalog():
+    """Import routines (here, and in suggestions' own check for a saved routine) only after load_all:
+    imported first, its tools would be registered ahead of every other one, and a test elsewhere that
+    fits "every tool" into a small budget (test_v2_brain_fallback) reads the catalog in its order."""
+    global routines
+    from neo2.core.tools import load_all
+
+    load_all()
+    from neo2.core.tools import routines as module
+
+    routines = module
 
 STEPS = [
     {"tool": "open_app", "args": {"target": "Notion"}},
