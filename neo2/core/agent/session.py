@@ -106,6 +106,9 @@ _QUALIFIER = re.compile(
 # A game to play (neo2.core.decide.games): the run can open the app or bring it forward, whatever the
 # tool selector makes of "play <game> as <side>".
 _GAME_TOOLS = ("open_app", "activate_app")
+# What the user selected, copied or has in front of them (neo2.core.tools.context_now), and the page in
+# their browser: a request about "this" gets both, whatever its own words select.
+_CONTEXT_TOOLS = ("in_front", "page_read")
 _job_ids = itertools.count(1)
 # The recent voice conversation, when a request comes from Gemini Live: the agent can't hear
 # it, so "open it on Amazon" needs it to know what "it" is. Per task (jobs run concurrently).
@@ -469,6 +472,14 @@ class Session:
 
             if routine_args := parse_local_setup(text):
                 return await self._quick(text, d, [("routine_manage", routine_args)], job=job, origin=origin)
+
+        # "summarize what I copied", "translate the selected text", "ye copy kiya hua padho": the user's
+        # own words point at what is in front of them, which no chat model can see. Whatever Laya made
+        # of it (chat, its one-tool lane), a model that has in_front — and page_read, for a page — beside
+        # the tools the request's words select takes it. Only the user's own words (a model's goal never
+        # reads their clipboard), and never a routine definition ("when I say …" is saved, not run).
+        if origin == "user" and wants_context(text):
+            return await self._agent(text, d, images, job, also=_CONTEXT_TOOLS)
 
         if d.intent == "chat" and not images and not d.needs_screen:
             return await self._chat(text, d, job)
@@ -1470,6 +1481,23 @@ def _memory_write(steps: list[tuple[str, dict]]) -> bool:
         if t is None or t.category != "memory" or t.read_only or args.get("action") == "recall":
             return False
     return bool(steps)
+
+
+def wants_context(text: str) -> bool:
+    """Do the user's words ask about what they selected, copied or have in front of them
+    (context_words), with in_front there to read it and switched on (NEO_CONTEXT_CAPTURE)? A routine
+    definition never does: its words are saved for later, not run now. (Gemini Live asks it too, to
+    hand such a sentence over as the user's own.)"""
+    from neo2.core.agent import context_words
+
+    t = registry().get("in_front")
+    if t is None or t.hidden or not getattr(settings(), "context_capture", True) or not context_words.wants(text):
+        return False
+    if registry().get("routine_manage") is None:
+        return True
+    from neo2.core.tools.routines import is_setup_request
+
+    return not is_setup_request(text)
 
 
 def _timer_words(text: str) -> bool:

@@ -378,6 +378,12 @@ class Settings(BaseSettings):
     song_id: bool = True  # False: NEO never listens for a song
     song_listen_s: float = 12.0  # the longest it listens before "I couldn't recognise it"
 
+    # ---- "this": what the user selected, copied or has in front (neo2.core.tools.context_now) ----
+    # Read only when the user's own words ask for it ("summarize what I copied", "translate the
+    # selected text"), never on a model's initiative, and nothing of it is kept. False: in_front
+    # refuses, the Session never hands such a request to it, and Gemini Live isn't told about it.
+    context_capture: bool = True
+
     @property
     def gemini_keys(self) -> list[str]:
         """All Gemini keys in priority order (free-tier quota is per key, so more keys = more quota)."""

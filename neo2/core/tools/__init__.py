@@ -25,7 +25,7 @@ _MODULES = [
 ]  # fmt: skip
 _MAC_ONLY = [
     "neo2.core.tools.media", "neo2.core.tools.camera.tool", "neo2.core.tools.music.tool",
-    "neo2.core.tools.routines", "neo2.core.tools.quality",
+    "neo2.core.tools.routines", "neo2.core.tools.quality", "neo2.core.tools.context_now",
 ]
 _MAC_MODULES = ["neo2.core.tools.computer", "neo2.core.tools.selftest"]
 
@@ -121,6 +121,8 @@ REFUSED: dict[str, str] = {
     ),
     "quality_report": "quality_report reads NEO.app's own reliability counters (its requests, corrections and "
     "Laya's routing), not an embedded agent's",
+    "in_front": "in_front reads NEO.app's user's own selection and clipboard, on their own request: never an "
+    "embedded agent's",
 }
 
 
