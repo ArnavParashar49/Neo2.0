@@ -68,6 +68,19 @@ log = logger(__name__)
 Purpose = Literal["agent", "fast", "vision", "offline", "light"]
 
 _cache: dict[str, Provider] = {}
+# (brain, kind of error) already logged as unavailable. A chain is built for every step, so a brain
+# with no key said so on every one (270 identical lines in one log): once per process tells as much.
+_said_unavailable: set[tuple[str, str]] = set()
+
+
+def _unavailable(name: str, e: BaseException) -> None:
+    """Log that a brain isn't set up, once per process for each brain and kind of error (the chain
+    still leaves it out every time, and keeps its reason for the "every brain failed" answer)."""
+    key = (str(name), type(e).__name__)
+    if key in _said_unavailable:
+        return
+    _said_unavailable.add(key)
+    log.info(f"[brain] {name} unavailable: {e}")
 
 
 class BrainPool:
@@ -329,7 +342,7 @@ class Chain:
             try:
                 out.append(make(n))
             except ProviderError as e:  # missing key → skip silently
-                log.info(f"[brain] {n} unavailable: {e}")
+                _unavailable(n, e)
                 self._missing.append((n, e))
         if self.sticky:
             # A brain that knows it's spent (all its quota) goes last: the next one is asked at once.
@@ -386,7 +399,7 @@ class Chain:
             try:
                 p = make(n)
             except Exception as e:  # noqa: BLE001 — not set up (no key, no package): it can't look
-                log.info(f"[brain] {n} unavailable: {e}")
+                _unavailable(n, e)
                 continue
             if getattr(p, "supports_vision", False):
                 out.append(p)

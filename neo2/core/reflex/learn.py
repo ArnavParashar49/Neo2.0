@@ -529,13 +529,71 @@ def quality_report(days: int = 7) -> str:
     verified = totals.get("verified", 0)
     recovered = totals.get("recovered", 0)
     unresolved = totals.get("unresolved", 0)
+    more = "".join(f"{line} " for line in _signal_lines(totals))
     return (
         f"NEO reliability, last {days} days: {requests} settled requests; {verified} outcomes NEO could verify; "
         f"{corrections} user corrections ({correction_rate}); {interruptions} replies stopped within 3 seconds; "
         f"{recovered} corrected requests later completed; {unresolved} outcomes remained unclear. "
-        f"Laya was unsure on {unsure_rate} of {decisions} routing decisions. These are interaction signals, "
+        f"Laya was unsure on {unsure_rate} of {decisions} routing decisions. {more}These are interaction signals, "
         "not a measure of factual accuracy."
     )
+
+
+# The report's other lines read what the wake word, the microphone and computer control count. A
+# counter is only written when its event happens, so a line none of whose counters exist yet (a
+# feature that is off, or hasn't counted anything) is left out, and the report reads as before.
+_WAKE_GATE = ("wake_gate_pass", "wake_gate_drop", "wake_gate_drop_words", "wake_gate_pass_nowords")
+_MIC = ("mic_stall", "mic_reopen_silent", "mic_recovered", "mic_notice")
+# Kinds of failure and ways a run ended, as the report says them (any other name: its words).
+_SAID = {
+    "not_found": "not found", "offscreen": "off screen", "stale_id": "a stale element",
+    "not_frontmost": "the app not in front", "timeout": "timed out", "secure_field": "a secure field",
+    "done": "finished", "max_steps": "ran out of steps", "deadline": "ran out of time",
+    "thrash": "went in circles", "needs_confirm": "waited for a confirmation", "needs_user": "needed you",
+    "error": "ended on an error",
+}  # fmt: skip
+
+
+def _said(name: str) -> str:
+    return _SAID.get(name, name.replace("_", " "))
+
+
+def _by_name(totals: dict[str, int], prefix: str) -> list[tuple[str, int]]:
+    """The counters under `prefix` with a plain name after it (never anything else a state file
+    might hold), most first; a tie by name, so the report says the same thing every time."""
+    named = [(k[len(prefix) :], v) for k, v in totals.items() if k.startswith(prefix)]
+    return sorted(((n, v) for n, v in named if _KIND.fullmatch(n) and v > 0), key=lambda nv: (-nv[1], nv[0]))
+
+
+def _signal_lines(totals: dict[str, int]) -> list[str]:
+    """The wake word, the microphone, computer control and agent runs, from their counters: numbers
+    and fixed names only. Within a line a counter that isn't there yet is 0, except the wake check,
+    which has its own switch: without its counters it is "n/a"."""
+    lines: list[str] = []
+    n = totals.get
+    if "wake_voice" in totals or any(k in totals for k in _WAKE_GATE):
+        if any(k in totals for k in _WAKE_GATE):
+            gate = (
+                f"the wake check flagged {n('wake_gate_drop', 0)} to drop ({n('wake_gate_drop_words', 0)} had words "
+                f"after all) and passed {n('wake_gate_pass', 0)} ({n('wake_gate_pass_nowords', 0)} with no words after)"
+            )
+        else:
+            gate = "the wake check n/a"
+        lines.append(f"Wake word: {n('wake_voice', 0)} spoken wakes; {gate}.")
+    if any(k in totals for k in _MIC):
+        lines.append(
+            f"Microphone: {n('mic_stall', 0)} stalls; {n('mic_reopen_silent', 0)} reopens that brought no sound; "
+            f"{n('mic_recovered', 0)} recoveries; {n('mic_notice', 0)} notices that NEO couldn't hear."
+        )
+    kinds = _by_name(totals, "tool_fail_")
+    if "tool_fail" in totals or "tool_skip_repeat" in totals or kinds:
+        fails, skipped = n("tool_fail", sum(v for _, v in kinds)), n("tool_skip_repeat", 0)
+        top = f", most often {_said(kinds[0][0])} ({kinds[0][1]})" if kinds else ""
+        lines.append(f"Computer control: {fails} tool failures{top}; {skipped} repeated steps skipped.")
+    if ends := _by_name(totals, "agent_end_"):
+        said = ", ".join(f"{v} {_said(r)}" for r, v in ends)
+        lines.append(f"Agent runs: {sum(v for _, v in ends)} ({said}).")
+    return lines
 
 
 async def learn_loop(is_idle) -> None:

@@ -9,6 +9,8 @@ overnight. Revisions here only change when NEO is updated and re-tested.
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
+from typing import Any
 
 LAYA = "convaiinnovations/laya"
 LAYA_REVISION = "55cf4c4ebb4ebe31b2550e8bdf3bd21b99753851"
@@ -35,24 +37,75 @@ def revision(repo: str) -> str | None:
     return {LAYA: LAYA_REVISION, EMBEDDER: EMBEDDER_REVISION, **REVISIONS}.get(repo)
 
 
-def laya_dir(encoder: str = "english") -> str:
-    """One Laya checkpoint at the pinned revision (downloaded once; afterwards from the cache): only
-    its own files, so the multilingual reflex never pulls the 1.7 GB English weights.
-
-    Raises FileNotFoundError when the checkpoint's files aren't all there: offline,
-    snapshot_download hands back the cached revision's folder even when this checkpoint was never
-    fetched into it, and laya.load would then fail somewhere less clear."""
-    from huggingface_hub import snapshot_download
-
-    sub = LAYA_SUBFOLDERS[encoder]
-    patterns = [f"{sub}/{f}" if sub else f for f in LAYA_FILES]
-    root = snapshot_download(LAYA, revision=LAYA_REVISION, allow_patterns=patterns)
-    path = os.path.join(root, sub) if sub else root
+def _laya_missing(path: str) -> list[str]:
+    """What laya.load needs from a checkpoint's folder that isn't there."""
     missing = [f for f in _LAYA_REQUIRED if not os.path.isfile(os.path.join(path, f))]
     tok = os.path.join(path, "tokenizer")
     if not (os.path.isdir(tok) and any(os.path.isfile(os.path.join(tok, f)) for f in os.listdir(tok))):
         missing.append("tokenizer/*")
-    if missing:
+    return missing
+
+
+def _whole(path: str) -> bool:
+    """A cached snapshot folder fit to load without asking the Hub: it holds files, and none of its
+    links points at a blob that's gone. (The hub checks a cached folder against the file list it
+    saved with the download; this covers a folder it has no list for.)"""
+    found = False
+    for folder, _dirs, files in os.walk(path):
+        for f in files:
+            if not os.path.isfile(os.path.join(folder, f)):
+                return False
+            found = True
+    return found
+
+
+def _snapshot(repo: str, rev: str, ok: Callable[[str], bool], **kw: Any) -> str:
+    """A pinned repo's snapshot folder, the cache first (local_files_only): the call as it always was
+    only when the cache misses or `ok` (what the loader reads is there) says no.
+
+    Asking the Hub first on every start printed "Fetching 5 files" and its unauthenticated-request
+    warning each time and made an offline start wait on the network for files already here. Under
+    HF_HUB_OFFLINE that second call is the hub's own offline one, as before: it never goes online.
+    When the call fails (no network), a cached folder the hub calls incomplete — it lacks some of the
+    repo's files, such as a README a loader never fetched — is still used if `ok`: today that start
+    failed, and a loader missing a file it needs says so itself."""
+    from huggingface_hub import snapshot_download
+
+    partial = None
+    try:
+        root = snapshot_download(repo, revision=rev, local_files_only=True, **kw)
+    except Exception as e:  # noqa: BLE001 — not in the cache, or not all of it: the call below
+        partial = getattr(e, "snapshot_path", None)  # (the hub's IncompleteSnapshotError)
+    else:
+        if ok(root):
+            return root
+    try:
+        return snapshot_download(repo, revision=rev, **kw)  # as it always was
+    except Exception:
+        if partial and ok(partial):
+            return partial  # no network: what the loader reads is here
+        raise
+
+
+def laya_dir(encoder: str = "english") -> str:
+    """One Laya checkpoint at the pinned revision (downloaded once; afterwards from the cache): only
+    its own files, so the multilingual reflex never pulls the 1.7 GB English weights. The cache is
+    asked first (_snapshot): a start with the checkpoint here needs no network.
+
+    Raises FileNotFoundError when the checkpoint's files aren't all there: offline,
+    snapshot_download hands back the cached revision's folder even when this checkpoint was never
+    fetched into it, and laya.load would then fail somewhere less clear."""
+    sub = LAYA_SUBFOLDERS[encoder]
+    patterns = [f"{sub}/{f}" if sub else f for f in LAYA_FILES]
+
+    def checkpoint(root: str) -> str:
+        return os.path.join(root, sub) if sub else root
+
+    def whole(root: str) -> bool:
+        return not _laya_missing(checkpoint(root))
+
+    path = checkpoint(_snapshot(LAYA, LAYA_REVISION, whole, allow_patterns=patterns))
+    if missing := _laya_missing(path):
         raise FileNotFoundError(
             f"Laya's {encoder} checkpoint isn't on this Mac yet ({', '.join(missing)} missing under {path}): "
             "connect to the internet once so it can download"
@@ -60,12 +113,10 @@ def laya_dir(encoder: str = "english") -> str:
     return path
 
 
-
 def local_path(repo: str) -> str:
-    """A pinned repo as a local snapshot path (loaders accept paths); an unpinned one as given."""
+    """A pinned repo as a local snapshot path (loaders accept paths); an unpinned one as given.
+    The cache first (_snapshot): the Hub only when it misses, or its folder is empty or broken."""
     rev = revision(repo)
     if not rev:
         return repo
-    from huggingface_hub import snapshot_download
-
-    return snapshot_download(repo, revision=rev)
+    return _snapshot(repo, rev, _whole)
