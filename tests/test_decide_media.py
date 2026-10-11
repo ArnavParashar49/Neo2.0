@@ -14,11 +14,14 @@ from types import SimpleNamespace
 
 import pytest
 
-from neo2.core.decide import media
+from neo2.core.decide import axkit, media
 from neo2.core.decide.engine import Candidate
 from neo2.core.decide.inventory import App
 from neo2.core.decide.sdef import Command, Dictionary
 from neo2.core.tools.computer import apps as apps_mod
+from neo2.core.tools.computer import ax as ax_mod
+from neo2.core.tools.computer import focus as focus_mod
+from neo2.core.tools.computer import input as inp_mod
 
 BID = "com.fixture.player"
 APP_PID = 500
@@ -146,6 +149,7 @@ class El:
         self.actions = list(actions)
         self.on_press = on_press
         self.on_set: dict[str, object] = {}
+        self.refuse: set[str] = set()  # attributes the app turns a write of down (an AX error)
         self.pressed = 0
 
 
@@ -154,6 +158,7 @@ class FakeAX:
         self.root = root
         self.sets: list[tuple[str, object]] = []
         self.returns: list[int] = []
+        self.performed: list[tuple[El, str]] = []
         monkeypatch.setattr(media, "_attr", self.attr)
         monkeypatch.setattr(media, "_set", self.set)
         monkeypatch.setattr(media, "_perform", self.perform)
@@ -174,13 +179,15 @@ class FakeAX:
         if el is None:
             return False
         self.sets.append((name, value))
+        if name in el.refuse:
+            return False
         el.attrs[name] = value
         if name in el.on_set:
             el.on_set[name](value)
         return True
 
-    @staticmethod
-    def perform(el, action):
+    def perform(self, el, action):
+        self.performed.append((el, action))
         if action in el.actions:
             if action == "AXPress":
                 el.pressed += 1
@@ -214,6 +221,127 @@ def player_window(audio: FakeAudio | None, *, with_search: bool = True, results:
 
     field.on_set["AXValue"] = typed
     return root, target, transport.children[1]
+
+
+PLAYER = "Fixture Player"
+OTHER, OTHER_PID = "Fixture Mail", 777
+_CMD = 1 << 20  # kCGEventFlagMaskCommand
+
+
+def search_field(root: El) -> El:
+    return root.children[0].children[0].children[0]  # (window → toolbar → search box)
+
+
+def focusable(root: El, el: El) -> None:
+    """Accessibility can give ``el`` the keyboard focus: the app then says it is its focused element."""
+    el.on_set["AXFocused"] = lambda v: root.attrs.__setitem__("AXFocusedUIElement", el if v else None)
+
+
+def framed(el: El, x: float = 100.0, y: float = 200.0, w: float = 80.0, h: float = 30.0) -> El:
+    el.attrs.update(AXPosition=(x, y), AXSize=(w, h))
+    return el
+
+
+class FakeScreen:
+    """The window server and the pointer for a guarded click: which app is in front, what is at each
+    point (the player's own elements by their frames, unless another window is over them), the apps
+    brought forward and the clicks made. A click lands on whatever is at the point when it is made.
+    Nothing real is looked at, brought forward or clicked."""
+
+    def __init__(self, monkeypatch, *els: El):
+        self.els = list(els)
+        self.front = (PLAYER, APP_PID)
+        self.over: tuple[str, int] | None = None  # another window over the player's elements
+        self.over_stays = False  # …still there with the player in front (a floating panel)
+        self.brought: list[int] = []
+        self.clicks: list[tuple[float, float]] = []
+        self.on_click: dict[int, object] = {}
+        monkeypatch.setattr(ax_mod, "visible_frame", self.frame)
+        monkeypatch.setattr(ax_mod, "hit", self.hit)
+        monkeypatch.setattr(ax_mod, "is_neo", lambda pid, name="": pid == NEO_PID)
+        monkeypatch.setattr(ax_mod, "app_names", lambda pid: set())
+        monkeypatch.setattr(ax_mod, "windows_at", lambda x, y: [ax_mod.Win(APP_PID, PLAYER, 0, (0.0, 0.0, 1000.0, 800.0))])
+        monkeypatch.setattr(focus_mod, "front_app", lambda: self.front)
+        monkeypatch.setattr(apps_mod, "bring_pid_front", self.bring)
+        monkeypatch.setattr(inp_mod, "click", self.click)
+
+    @staticmethod
+    def frame(el):
+        pos, size = el.attrs.get("AXPosition"), el.attrs.get("AXSize")
+        return (*pos, *size) if pos and size else None
+
+    def at(self, x, y) -> El | None:
+        for el in self.els:
+            f = self.frame(el)
+            if f and f[0] <= x <= f[0] + f[2] and f[1] <= y <= f[1] + f[3]:
+                return el
+        return None
+
+    def hit(self, x, y):
+        if self.over is not None:
+            name, pid = self.over
+            return ax_mod.Hit(pid=pid, app=name, label="Inbox", role="AXStaticText", regular=True, el=El("AXStaticText"))
+        el = self.at(x, y)
+        if el is None:
+            return ax_mod.Hit(pid=APP_PID, app=PLAYER, role="AXGroup", regular=True, el=El("AXGroup"))
+        label = str(el.attrs.get("AXDescription") or el.attrs.get("AXPlaceholderValue") or "")
+        return ax_mod.Hit(pid=APP_PID, app=PLAYER, label=label, role=el.attrs["AXRole"], regular=True, el=el)
+
+    async def bring(self, pid):  # (async, like apps.bring_pid_front)
+        self.brought.append(pid)
+        self.front = (PLAYER, pid)
+        if not self.over_stays:
+            self.over = None
+        return True, PLAYER
+
+    def click(self, x, y, **k):
+        self.clicks.append((x, y))
+        el = None if self.over is not None else self.at(x, y)
+        if el is not None and id(el) in self.on_click:
+            self.on_click[id(el)]()
+        return "clicked"
+
+
+class FakeKeys:
+    """Keystrokes and typing NEO sends to the player's pid. Like the real thing they land in whatever
+    element the app has focused, or nowhere: ⌘A selects its text, Delete deletes the selection (else
+    one character), typing replaces the selection. Everything sent is recorded."""
+
+    def __init__(self, monkeypatch, root: El):
+        self.root = root
+        self.keys: list[tuple[int, int]] = []
+        self.typed: list[str] = []
+        monkeypatch.setattr(media, "_post_key", self.key)
+        monkeypatch.setattr(axkit, "_type", self.type)
+        monkeypatch.setattr(axkit, "_pid_of", lambda el: APP_PID)
+        monkeypatch.setattr(axkit, "_READBACK_S", 0.05)
+        monkeypatch.setattr(media, "_whole_range", lambda el: ("all", len(str(el.attrs.get("AXValue", "")))))
+
+    def _focused(self) -> El | None:
+        return self.root.attrs.get("AXFocusedUIElement")
+
+    def key(self, pid, keycode, flags=0):
+        assert pid == APP_PID  # only ever to the player
+        self.keys.append((keycode, flags))
+        el = self._focused()
+        if el is None:
+            return
+        if (keycode, flags) == (0, _CMD):
+            el.attrs["AXSelectedTextRange"] = ("all", len(str(el.attrs.get("AXValue", ""))))
+        elif keycode == 51:
+            v = str(el.attrs.get("AXValue", ""))
+            el.attrs["AXValue"] = "" if el.attrs.pop("AXSelectedTextRange", None) else v[:-1]
+
+    def type(self, pid, text, newline):
+        assert pid == APP_PID
+        self.typed.append(text)
+        el = self._focused()
+        if el is None:
+            return
+        v = "" if el.attrs.pop("AXSelectedTextRange", None) else str(el.attrs.get("AXValue", ""))
+        el.attrs["AXValue"] = v + text
+        if "AXValue" in el.on_set:
+            el.on_set["AXValue"](el.attrs["AXValue"])
 
 
 # ---------------------------------------------------------------- shared setup
@@ -296,8 +424,12 @@ def _fast_and_hermetic(monkeypatch):
         raise AssertionError("no real AX actions or keystrokes in this test")
 
     monkeypatch.setattr(media, "_osascript", no_osascript)
-    for name in ("_set", "_perform", "_post_return", "_ax_app", "_pid_of"):
+    for name in ("_set", "_perform", "_post_return", "_post_key", "_ax_app", "_pid_of"):
         monkeypatch.setattr(media, name, no_ax)
+    # Nothing on screen and no pointer unless a test sets up a fake one (FakeScreen).
+    monkeypatch.setattr(ax_mod, "visible_frame", lambda el: None)
+    monkeypatch.setattr(inp_mod, "click", no_ax)
+    monkeypatch.setattr(media, "_PRESS_GRACE_S", 0.05)
     yield
     media._rx.cache_clear()
 
@@ -357,7 +489,7 @@ async def test_script_path_plays_and_confirms_by_sound(audio, osa, engine):
 async def test_script_ok_without_sound_is_not_success(audio, osa, engine):
     osa.on("«event hookSrch»", (0, "OK", ""))  # "the script said OK" is not proof
     out = await media.play("505", make_app(library_dict()), "script_search_play")
-    assert not out.ok and out.reason == "timeout" and out.blame
+    assert not out.ok and out.reason == "audio_not_started" and out.blame
 
 
 async def test_permission_denied_is_not_the_apps_fault(audio, osa, engine):
@@ -436,6 +568,236 @@ async def test_a_cancelled_ax_attempt_still_restores_the_switch(monkeypatch, aud
     while root.attrs["AXManualAccessibility"] is not False and time.monotonic() < deadline:
         await asyncio.sleep(0.02)
     assert root.attrs["AXManualAccessibility"] is False and target.pressed == 0
+
+
+# ---------------------------------------------------------------- pressing: never a blind click
+async def test_a_play_control_with_a_press_is_pressed_not_clicked(monkeypatch, audio, osa, engine):
+    """Accessibility's press comes first, even for a control that shows on screen: no pointer, no
+    app brought forward, nothing that could land on another window."""
+    root, target, _ = player_window(audio)
+    FakeAX(monkeypatch, root)
+    screen = FakeScreen(monkeypatch, framed(target))
+    out = await media.play("505", make_app(None), "ax_search_play")
+    assert out.ok, out
+    assert target.pressed == 1 and screen.clicks == [] and screen.brought == []
+
+
+async def test_a_control_with_no_press_is_clicked_through_the_pointers_checks(monkeypatch, audio, osa, engine):
+    root, target, _ = player_window(audio)
+    target.actions = []  # nothing Accessibility can press
+    FakeAX(monkeypatch, root)
+    screen = FakeScreen(monkeypatch, framed(target))
+    screen.on_click[id(target)] = audio.app_plays
+    out = await media.play("505", make_app(None), "ax_search_play")
+    assert out.ok, out
+    assert screen.clicks == [(140.0, 215.0)]  # the middle of the control
+    assert target.pressed == 0
+
+
+async def test_a_player_behind_another_app_comes_forward_before_its_control_is_clicked(monkeypatch, audio, osa, engine):
+    root, target, _ = player_window(audio)
+    target.actions = []
+    FakeAX(monkeypatch, root)
+    screen = FakeScreen(monkeypatch, framed(target))
+    screen.on_click[id(target)] = audio.app_plays
+    screen.front = screen.over = (OTHER, OTHER_PID)  # another app in front, its window over the control
+    out = await media.play("505", make_app(None), "ax_search_play")
+    assert out.ok, out
+    assert screen.brought == [APP_PID] and screen.clicks == [(140.0, 215.0)]
+
+
+async def test_no_click_lands_on_a_window_that_stays_over_the_player(monkeypatch, audio, osa, engine):
+    root, target, _ = player_window(audio)
+    target.actions = []
+    FakeAX(monkeypatch, root)
+    screen = FakeScreen(monkeypatch, framed(target))
+    screen.front = screen.over = (OTHER, OTHER_PID)
+    screen.over_stays = True  # with the player in front, the other window is still over the control
+    out = await media.play("505", make_app(None), "ax_search_play")
+    assert not out.ok and out.reason == "play_control_not_pressed", out
+    assert screen.clicks == []
+
+
+async def test_neos_own_window_over_the_player_is_never_clicked_or_moved(monkeypatch, audio, osa, engine):
+    root, target, _ = player_window(audio)
+    target.actions = []
+    FakeAX(monkeypatch, root)
+    screen = FakeScreen(monkeypatch, framed(target))
+    screen.over = ("NEO", NEO_PID)
+    out = await media.play("505", make_app(None), "ax_search_play")
+    assert not out.ok and out.reason == "play_control_not_pressed", out
+    assert screen.clicks == [] and screen.brought == []
+
+
+async def test_something_else_of_the_players_over_its_control_is_not_clicked(monkeypatch, audio, osa, engine):
+    """The player's own popup (a menu, a tooltip) over the control: the click would press that, so
+    there is none."""
+    root, target, _ = player_window(audio)
+    target.actions = []
+    FakeAX(monkeypatch, root)
+    popup = framed(El("AXMenu"), 120.0, 190.0, 200.0, 100.0)
+    screen = FakeScreen(monkeypatch, popup, framed(target))
+    out = await media.play("505", make_app(None), "ax_search_play")
+    assert not out.ok and out.reason == "play_control_not_pressed", out
+    assert screen.clicks == []
+
+
+async def test_a_press_the_player_ignores_gets_one_guarded_click(monkeypatch, audio, osa, engine):
+    """Some Electron players say a press worked and do nothing: still silent a moment later, with
+    the control not showing Pause, it gets one click, through the same checks."""
+    root, target, _ = player_window(None)  # its press plays nothing
+    FakeAX(monkeypatch, root)
+    screen = FakeScreen(monkeypatch, framed(target))
+    screen.on_click[id(target)] = audio.app_plays
+    out = await media.play("505", make_app(None), "ax_search_play")
+    assert out.ok, out
+    assert target.pressed == 1 and screen.clicks == [(140.0, 215.0)]
+
+
+async def test_a_press_that_shows_pause_is_never_clicked_again(monkeypatch, audio, osa, engine):
+    """A player that started (its control says Pause now) but whose sound hasn't come yet: a
+    second press would pause it."""
+    root, target, _ = player_window(None)
+    target.on_press = lambda: target.attrs.update(AXDescription="Pause 505 by The Fixtures")
+    FakeAX(monkeypatch, root)
+    screen = FakeScreen(monkeypatch, framed(target))
+    out = await media.play("505", make_app(None), "ax_search_play")
+    assert not out.ok and out.reason == "audio_not_started", out
+    assert target.pressed == 1 and screen.clicks == []
+
+
+async def test_a_press_is_not_clicked_again_while_the_player_was_already_playing(monkeypatch, audio, osa, engine):
+    """It was playing before the press: whether the press took can't be told by sound, so no click."""
+    root, target, _ = player_window(None)
+    FakeAX(monkeypatch, root)
+    screen = FakeScreen(monkeypatch, framed(target))
+    audio.app_plays()
+    await media.play("505", make_app(None), "ax_search_play")
+    assert target.pressed == 1 and screen.clicks == []
+
+
+# ---------------------------------------------------------------- typing: only into the focused box
+async def test_return_goes_only_while_the_search_box_has_the_focus_and_reads_the_query(monkeypatch, audio, osa, engine):
+    root, _target, _ = player_window(audio)
+    ax = FakeAX(monkeypatch, root)
+    field = search_field(root)
+    out = await media.play("505", make_app(None), "ax_search_play")
+    assert out.ok, out
+    # The box took the query, but the app never said it has the focus: no Return (it could land on
+    # something else in the app); the box's own confirm action instead.
+    assert ax.returns == [] and (field, "AXConfirm") in ax.performed
+
+    audio.clients.clear()
+    root, _target, _ = player_window(audio)
+    ax = FakeAX(monkeypatch, root)
+    field = search_field(root)
+    focusable(root, field)
+    out = await media.play("505", make_app(None), "ax_search_play")
+    assert out.ok, out
+    assert ax.returns == [APP_PID] and (field, "AXConfirm") not in ax.performed
+
+
+async def test_a_box_that_turns_its_value_down_is_typed_into_once_it_has_the_focus(monkeypatch, audio, osa, engine):
+    root, target, _ = player_window(audio)
+    FakeAX(monkeypatch, root)
+    field = search_field(root)
+    field.refuse = {"AXValue"}
+    focusable(root, field)
+    keys = FakeKeys(monkeypatch, root)
+    screen = FakeScreen(monkeypatch, framed(field, 300.0, 20.0, 200.0, 24.0))
+    out = await media.play("505", make_app(None), "ax_search_play")
+    assert out.ok, out
+    assert keys.typed == ["505"] and keys.keys == [] and screen.clicks == []  # (empty: nothing to clear)
+    assert field.attrs["AXValue"] == "505" and target.pressed == 1
+
+
+async def test_the_old_query_is_selected_and_deleted_before_the_new_one_is_typed(monkeypatch, audio, osa, engine):
+    root, _target, _ = player_window(audio)
+    ax = FakeAX(monkeypatch, root)
+    field = search_field(root)
+    field.refuse = {"AXValue"}
+    field.attrs["AXValue"] = "an old song"
+    focusable(root, field)
+    keys = FakeKeys(monkeypatch, root)
+    out = await media.play("505", make_app(None), "ax_search_play")
+    assert out.ok, out
+    assert ("AXSelectedTextRange", ("all", 11)) in ax.sets
+    assert keys.keys == [(51, 0)] and keys.typed == ["505"]  # selected through Accessibility: no ⌘A
+    assert field.attrs["AXValue"] == "505"
+
+
+async def test_without_a_selection_through_accessibility_select_all_goes_to_the_focused_box(monkeypatch, audio, osa, engine):
+    root, _target, _ = player_window(audio)
+    FakeAX(monkeypatch, root)
+    field = search_field(root)
+    field.refuse = {"AXValue", "AXSelectedTextRange"}
+    field.attrs["AXValue"] = "an old song"
+    focusable(root, field)
+    keys = FakeKeys(monkeypatch, root)
+    out = await media.play("505", make_app(None), "ax_search_play")
+    assert out.ok, out
+    assert keys.keys == [(0, _CMD), (51, 0)] and keys.typed == ["505"]
+    assert field.attrs["AXValue"] == "505"
+
+
+async def test_a_box_that_wont_take_the_focus_is_clicked_through_the_pointers_checks(monkeypatch, audio, osa, engine):
+    root, _target, _ = player_window(audio)
+    FakeAX(monkeypatch, root)
+    field = search_field(root)
+    field.refuse = {"AXValue", "AXFocused"}
+    keys = FakeKeys(monkeypatch, root)
+    screen = FakeScreen(monkeypatch, framed(field, 300.0, 20.0, 200.0, 24.0))
+    screen.on_click[id(field)] = lambda: root.attrs.__setitem__("AXFocusedUIElement", field)
+    out = await media.play("505", make_app(None), "ax_search_play")
+    assert out.ok, out
+    assert screen.clicks == [(400.0, 32.0)] and keys.typed == ["505"]
+
+
+async def test_nothing_is_typed_while_another_window_is_over_the_search_box(monkeypatch, audio, osa, engine):
+    root, _target, _ = player_window(audio)
+    FakeAX(monkeypatch, root)
+    field = search_field(root)
+    field.refuse = {"AXValue", "AXFocused"}
+    keys = FakeKeys(monkeypatch, root)
+    screen = FakeScreen(monkeypatch, framed(field, 300.0, 20.0, 200.0, 24.0))
+    screen.front = screen.over = (OTHER, OTHER_PID)
+    screen.over_stays = True
+    out = await media.play("505", make_app(None), "ax_search_play")
+    assert not out.ok and out.reason == "search_box_input_failed", out
+    assert screen.clicks == [] and keys.keys == [] and keys.typed == []
+
+
+async def test_nothing_is_typed_when_a_click_leaves_the_focus_elsewhere(monkeypatch, audio, osa, engine):
+    root, _target, _ = player_window(audio)
+    FakeAX(monkeypatch, root)
+    field = search_field(root)
+    field.refuse = {"AXValue", "AXFocused"}
+    field.attrs["AXValue"] = "an old song"
+    root.attrs["AXFocusedUIElement"] = root.children[0].children[1]  # the results list keeps it
+    keys = FakeKeys(monkeypatch, root)
+    screen = FakeScreen(monkeypatch, framed(field, 300.0, 20.0, 200.0, 24.0))
+    out = await media.play("505", make_app(None), "ax_search_play")
+    assert not out.ok and out.reason == "search_box_input_failed", out
+    assert screen.clicks == [(400.0, 32.0)]
+    assert keys.keys == [] and keys.typed == [] and field.attrs["AXValue"] == "an old song"
+
+
+async def test_a_password_field_is_never_typed_into(monkeypatch):
+    root = El("AXApplication")
+    field = El("AXTextField", AXSubrole="AXSecureTextField")
+    root.attrs["AXFocusedUIElement"] = field
+    FakeAX(monkeypatch, root)
+    keys = FakeKeys(monkeypatch, root)
+    assert media._set_query(field, "505", root) is False
+    assert keys.typed == [] and keys.keys == [] and "AXValue" not in field.attrs
+
+
+def test_the_whole_text_is_an_accessibility_range_in_utf16_units(monkeypatch):
+    AS = pytest.importorskip("ApplicationServices")
+    monkeypatch.setattr(media, "_attr", FakeAX.attr)
+    rng = media._whole_range(El("AXTextField", AXValue="naïve 🎵"))
+    ok, span = AS.AXValueGetValue(rng, AS.kAXValueCFRangeType, None)
+    assert ok and tuple(span) == (0, 8)  # (the note is two UTF-16 units)
 
 
 # ---------------------------------------------------------------- learned item URIs
@@ -775,7 +1137,7 @@ async def test_play_best_notices_a_late_start_after_its_last_attempt(monkeypatch
     out = await media.play_best("505")
     assert out == "Playing 505 in Fixture Player", out
     assert [r[1:5] for r in engine.records] == [
-        (BID, "script_search_play", False, "timeout"),
+        (BID, "script_search_play", False, "audio_not_started"),
         ("web", "web", False, "offline"),
         (BID, "script_search_play", True, ""),
     ]

@@ -12,7 +12,10 @@ and moves on when that doesn't work:
                            script source;
 * ``ax_search_play``     - the app's own search box and a matching play control through the
                            Accessibility tree (localized words from the OS's own string tables;
-                           the web-content switch for Electron/Chromium apps is always restored);
+                           the web-content switch for Electron/Chromium apps is always restored).
+                           Accessibility's press first; a control it can't press is clicked only
+                           through the computer tools' pointer checks, and keys go only to the
+                           player while its search box has the focus;
 * ``local_file``         - a matching audio/video file of the user's (Spotlight) opened in the app;
 * ``web``                - a search-engine video search picks the page (only on the site the user
                            named, if they did; a host that worked before wins ties), opened in the
@@ -88,7 +91,10 @@ class Outcome:
     ok: bool
     text: str
     blame: bool = True
-    reason: str = ""  # '', permission, login, offline, not_found, timeout, unconfirmed, empty
+    # '', permission, login, offline, not_found, timeout, unconfirmed, empty, audio_not_started (it
+    # took the request but no sound came), search_box_not_found, search_box_input_failed,
+    # search_results_not_matched, play_control_not_pressed (the steps of ax_search_play)
+    reason: str = ""
 
 
 def _fail(text: str, reason: str = "") -> Outcome:
@@ -778,6 +784,12 @@ class _Watch:
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await self._task
 
+    def quiet(self) -> bool:
+        """Nothing of the targets' was playing before the action and nothing has started since, as
+        far as this Mac can tell (False when it can't). Read from a worker thread: plain reads of
+        what the watch loop keeps (a flag and a set it swaps whole)."""
+        return self.available and not self.before and not self.now and not self.hit.is_set()
+
     async def wait(self, budget: float) -> str:
         if not self.available:
             await asyncio.sleep(min(max(0.0, budget), 1.5))  # give the app a moment to start
@@ -840,20 +852,24 @@ def _trusted() -> bool:
         return False
 
 
+_KEY_A, _KEY_DELETE, _KEY_RETURN = 0, 51, 36
+_CMD = 1 << 20  # kCGEventFlagMaskCommand
+
+
 def _post_return(pid: int) -> None:
     """A Return keystroke to that app only (not to whatever is frontmost), through the input door."""
-    import Quartz as Q
-
-    _post_key(pid, 36)
+    _post_key(pid, _KEY_RETURN)
 
 
 def _post_key(pid: int, keycode: int, flags: int = 0) -> None:
-    """A key chord sent only to the app whose search field NEO found."""
+    """A key chord sent only to the player NEO is driving (CGEventPostToPid, through the input door:
+    never NEO's own processes or a protected app). Callers check first that the element the keys are
+    meant for has the app's focus: the app puts them wherever its focus is."""
     import Quartz as Q
 
     from neo2.core.tools.computer import input as inp
 
-    effects.guard("input", "type into another app's search field", via=Q.CGEventPostToPid)
+    effects.guard("input", "press a key in another app", via=Q.CGEventPostToPid)
     for down in (True, False):
         event = Q.CGEventCreateKeyboardEvent(None, keycode, down)
         if flags:
@@ -1059,37 +1075,158 @@ def _needs_sign_in(win) -> bool:
     )
 
 
-def _set_query(field, text: str) -> bool:
-    """Set a discovered search field; fall back to a real click and typed replacement.
+# ---- a click on the player's own controls: only through the computer tools' pointer checks
+_CLICK_S = 6.0  # one guarded click: look at the spot, bring the player forward, look again, click
+_FOCUS_S = 0.5  # after a click on the search box: how long its focus may take to show
+_PRESS_GRACE_S = 2.0  # after a press the app said it took: how long its sound may take before a click
 
-    Spotify's Electron search box can reject AXValue writes even though it is an ordinary visible
-    text field. The generic search setter handles AX and keyboard input where possible. If it still
-    cannot confirm the value, click this known search field, replace its contents with targeted
-    keystrokes, and let the caller submit it.
-    """
+
+def _holds(el, at) -> bool:
+    """Is ``at`` (what Accessibility finds at a point) ``el`` itself or something inside it?"""
+    same, node = _ax_mod()._same, at
+    for _ in range(8):
+        if node is None:
+            return False
+        if same(node, el):
+            return True
+        node = _attr(node, "AXParent")
+    return False
+
+
+async def _guarded_click(pid: int, el, stop: threading.Event | None = None) -> bool:
+    """Click one of the player's own elements the way the computer tools click one Accessibility
+    can't press: at the middle of the part of it that is on screen; never on NEO's own window, a
+    protected app's or a window a sheet blocks (pointer.probe); the player brought to the front first
+    and the spot looked at again (pointer.bring) - and only when what is at the spot then is that
+    element of that player. Another app's window over it, or a popup of the player's own: no click.
+    False: not clicked. A refusal (pointer.Refused) goes up."""
+    from neo2.core.tools.computer import ax, pointer
+    from neo2.core.tools.computer import input as inp
+
+    frame = await asyncio.to_thread(ax.visible_frame, el)
+    spot = await asyncio.to_thread(pointer.spot, frame) if frame is not None else None
+    if spot is None:
+        return False  # none of it on screen (scrolled away, or off every display)
+    t = await pointer.probe([spot])
+    await pointer.bring(t, [spot], want_pid=pid)
+    h = t.hits[0]
+    if h.pid != pid or not await asyncio.to_thread(_holds, el, h.el):
+        return False
+    if stop is not None and stop.is_set():
+        return False  # the attempt was called off while the player came forward
+    await asyncio.to_thread(inp.click, *spot)
+    return True
+
+
+def _clicker(pid: int, loop: asyncio.AbstractEventLoop | None, stop: threading.Event):
+    """For the worker thread: ``click(el) -> bool``, a :func:`_guarded_click` on one of this player's
+    elements, run on NEO's event loop (the pointer's checks are async). None without a loop: then
+    nothing is ever clicked, only pressed through Accessibility."""
+    if loop is None:
+        return None
+
+    def click(el) -> bool:
+        if stop.is_set():
+            return False
+        coro = _guarded_click(pid, el, stop)
+        try:
+            fut = asyncio.run_coroutine_threadsafe(coro, loop)
+        except RuntimeError:  # the loop is gone (NEO is shutting down)
+            coro.close()
+            return False
+        try:
+            return bool(fut.result(_CLICK_S))
+        except TimeoutError:
+            fut.cancel()
+            # The click may have gone out already: taken as made, so nothing is clicked a second
+            # time - the sound check says whether it worked.
+            return True
+        except Exception as e:  # noqa: BLE001 - a refusal of the pointer's checks: nothing was clicked
+            print(f"[media] didn't click the player's control ({type(e).__name__})")
+            return False
+
+    return click
+
+
+# ---- the search box
+def _focus_on(app_el, field) -> bool:
+    """Does the search box itself have the app's keyboard focus? (Where the app hands out a new
+    reference for the same box, the box saying it is focused, with a text input focused, counts.)"""
+    foc = _attr(app_el, "AXFocusedUIElement")
+    if foc is None:
+        return False
+    if _ax_mod()._same(foc, field):
+        return True
+    return _s(_attr(foc, "AXRole")) in _TEXT_ROLES and _attr(field, "AXFocused") is True
+
+
+def _gets_focus(app_el, field) -> bool:
+    """After a click on the box: its focus, looked at for up to _FOCUS_S."""
+    end = time.monotonic() + _FOCUS_S
+    while not _focus_on(app_el, field):
+        if time.monotonic() >= end:
+            return False
+        time.sleep(0.05)
+    return True
+
+
+def _whole_range(field):
+    """All of the box's text as an Accessibility range (UTF-16 units, as Accessibility counts), or
+    None where one can't be made."""
+    n = len(_s(_attr(field, "AXValue")).encode("utf-16-le")) // 2
+    try:
+        import ApplicationServices as AS
+
+        span = AS.CFRangeMake(0, n) if hasattr(AS, "CFRangeMake") else (0, n)
+        return AS.AXValueCreate(AS.kAXValueCFRangeType, span)
+    except Exception:  # noqa: BLE001 - no such value here: the keyboard's select-all instead
+        return None
+
+
+def _cleared(field, pid: int, app_el) -> bool:
+    """Take the box's old text out, so the query is never typed onto a stale one: all of it
+    selected (through Accessibility; else ⌘A, while the box has the focus), one Delete while the box
+    still has the focus, and the box seen empty."""
     from neo2.core.decide import axkit
 
-    if axkit.set_search(field, text):
-        return True
+    rng = _whole_range(field)
+    if rng is None or not _set(field, "AXSelectedTextRange", rng):
+        if not _focus_on(app_el, field):
+            return False
+        _post_key(pid, _KEY_A, _CMD)
+    if not _focus_on(app_el, field):
+        return False
+    _post_key(pid, _KEY_DELETE)
+    return axkit._reads(field, "")
 
+
+def _set_query(field, text: str, app_el=None, click=None) -> bool:
+    """Put the query into the player's search box. Its value through Accessibility first. Some
+    Electron search boxes turn that down though they are ordinary text fields: then the box gets the
+    keyboard focus (through Accessibility, else ``click`` - a guarded click on it, never a blind
+    one), its old text is taken out and the query typed. Every key goes to this player only, and
+    only while the box itself has the focus: the app puts keys wherever its focus is. True when the
+    box reads the query back. Never a password field."""
+    from neo2.core.decide import axkit
+
+    if "AXSecureTextField" in (_s(_attr(field, "AXRole")), _s(_attr(field, "AXSubrole"))):
+        return False
+    _set(field, "AXFocused", True)
+    if _set(field, "AXValue", text) and axkit._reads(field, text):
+        return True
     pid = axkit._pid_of(field)
     if pid is None:
         return False
-    frame = axkit._frame(field)
-    if frame is not None and frame[2] > 0 and frame[3] > 0:
-        from neo2.core.tools.computer import input as inp
-
-        inp.click(frame[0] + frame[2] / 2, frame[1] + frame[3] / 2)
-    elif not _set(field, "AXFocused", True) and not _attr(field, "AXFocused", False):
+    app_el = _ax_app(pid) if app_el is None else app_el
+    if not _focus_on(app_el, field):
+        clicked = click is not None and click(field)
+        if not (clicked and _gets_focus(app_el, field)):
+            return False  # never a key while the app's focus is anywhere but this box
+    if axkit._norm(_s(_attr(field, "AXValue"))) and not _cleared(field, pid, app_el):
         return False
-
-    import Quartz as Q
-
-    _post_key(pid, 0, Q.kCGEventFlagMaskCommand)  # select any old or partial query
-    _post_key(pid, 51)  # clear it before typing, never append to stale text
+    if not _focus_on(app_el, field):
+        return False
     axkit._type(pid, text, "return")
-    # CGEventPostToPid can be silently dropped when macOS/app focus changed. Confirm the
-    # discovered field actually contains the query before reporting success or pressing Return.
     return axkit._reads(field, text)
 
 
@@ -1100,39 +1237,56 @@ def _focus_holds(app_el, roles: tuple[str, ...], value: str | None = None) -> bo
     return value is None or _s(_attr(foc, "AXValue")) == value
 
 
-def _press(hit: _Hit, pid: int, app_el) -> bool:
-    # A row is not a Play button. AXPress on Spotify result rows can navigate/open the row without
-    # starting playback, so select it and use Return only while the app confirms list focus.
-    lists = ("AXTable", "AXOutline", "AXList", "AXRow", "AXCell", "AXGrid")
+# ---- the play control
+_LISTS = ("AXTable", "AXOutline", "AXList", "AXRow", "AXCell", "AXGrid")
+
+
+def _press(hit: _Hit, pid: int, app_el, click=None) -> str:
+    """Press a play control. How it went: "ax" (its own press action), "row" (selected, then
+    Return), "click" (a guarded click) or "" (not pressed).
+
+    Accessibility's press comes first: it needs no pointer and no app in front, and can't land on
+    anything else. A row is not a Play button - pressing a result row can open it without playing -
+    so a row is selected, and Return goes to this player only while it says its list has the focus
+    (never onto a dialog's default button). Only a control with no press of its own, or whose press
+    the app turned down, is clicked, through the pointer's checks (``click``; None: never)."""
     if hit.kind == "row":
-        if _set(hit.el, "AXSelected", True) and _focus_holds(app_el, lists):
+        if _set(hit.el, "AXSelected", True) and _focus_holds(app_el, _LISTS):
             _post_return(pid)
-            return True
-        return False
-
-    # Electron players can report AXPress as successful while ignoring it. Use the visible
-    # control's actual screen bounds first, like a user clicking its Play button; fall back to the
-    # accessibility action only when the app doesn't expose usable geometry.
-    from neo2.core.decide import axkit
-
-    frame = axkit._frame(hit.el)
-    if frame is not None and frame[2] > 0 and frame[3] > 0:
-        from neo2.core.tools.computer import input as inp
-
-        inp.click(frame[0] + frame[2] / 2, frame[1] + frame[3] / 2)
-        return True
+            return "row"
+        return ""
     if "AXPress" in _actions(hit.el) and _perform(hit.el, "AXPress"):
-        return True
+        return "ax"
+    return "click" if click is not None and click(hit.el) else ""
+
+
+def _press_ignored(el, quiet, stop: threading.Event) -> bool:
+    """After a press the app said it took: still no sound from it _PRESS_GRACE_S later (``quiet``,
+    the sound watch's), and the control doesn't read Pause now (a player that started shows that
+    before its sound comes, and a second press would pause it)."""
+    end = time.monotonic() + _PRESS_GRACE_S
+    while quiet() and not stop.is_set():
+        if time.monotonic() >= end:
+            label = (_s(_attr(el, "AXDescription")) or _s(_attr(el, "AXTitle"))).strip()
+            return not _rx("pause").match(label)
+        time.sleep(_AX_STEP_S)
     return False
 
 
 @pooled
-def _ax_flow(pid: int, app_path: str, query: str, stop: threading.Event, ready_s: float, action_s: float) -> tuple[bool, str, str]:
+def _ax_flow(
+    pid: int, app_path: str, query: str, stop: threading.Event, ready_s: float, action_s: float,
+    loop: asyncio.AbstractEventLoop | None = None, quiet=None,
+) -> tuple[bool, str, str]:  # fmt: skip
     """Worker thread: type the query into the app's own search box and press the best matching
     play control. (pressed, label or why not, reason). The web-content switch is restored however
-    this ends; `stop` ends it early (the async side was cancelled or ran out of time)."""
+    this ends; `stop` ends it early (the async side was cancelled or ran out of time). `loop`: NEO's
+    event loop, for the guarded click on a control Accessibility can't press (None: no clicks).
+    `quiet`: the sound watch's "nothing has started" - a press the app said it took and that left it
+    so gets one guarded click."""
     app_el = _ax_app(pid)
     changed = _enable_web_tree(app_el, _runtime(app_path))
+    click = _clicker(pid, loop, stop)
     t0 = time.monotonic()
     try:
         field, menu_tried = None, False
@@ -1160,9 +1314,12 @@ def _ax_flow(pid: int, app_path: str, query: str, stop: threading.Event, ready_s
             if time.monotonic() - t0 > ready_s:
                 return False, "no search box found", "search_box_not_found"
             time.sleep(_AX_STEP_S)
-        if not _set_query(field, query):
+        if not _set_query(field, query, app_el, click):
             return False, "couldn't type into its search box", "search_box_input_failed"
-        _post_return(pid)  # submit the query to this player, not whichever app is frontmost
+        if _focus_holds(app_el, _TEXT_ROLES, query):
+            _post_return(pid)  # web inputs that search only on a real Return: to this player, into its box
+        else:
+            _perform(field, "AXConfirm")  # (focus elsewhere: a Return could press something else)
         t1 = time.monotonic()
         while True:
             if stop.is_set():
@@ -1176,8 +1333,15 @@ def _ax_flow(pid: int, app_path: str, query: str, stop: threading.Event, ready_s
         for h in hits[:3]:
             if stop.is_set():
                 return False, "stopped", "timeout"
-            if _press(h, pid, app_el):
-                return True, h.label, ""
+            how = _press(h, pid, app_el, click)
+            if not how:
+                continue
+            if (
+                how == "ax" and click is not None and quiet is not None
+                and action_s - (time.monotonic() - t1) >= _PRESS_GRACE_S and _press_ignored(h.el, quiet, stop)
+            ):  # fmt: skip
+                click(h.el)  # (refused: the sound check reports the press as it was)
+            return True, h.label, ""
         return False, "couldn't press play", "play_control_not_pressed"
     finally:
         _restore(app_el, changed)
@@ -1517,10 +1681,12 @@ async def _play_ax(q: str, app: App) -> Outcome:
         return _fail(f"couldn't open {app.name}")
     np_before = await _now_playing(app)
     stop = threading.Event()
+    loop = asyncio.get_running_loop()
     async with _Watch(_targets(app)) as watch:
         try:
+            ready_left = max(1.0, ready - (time.monotonic() - t0))
             ok, detail, reason = await asyncio.to_thread(
-                _ax_flow, pid, app.path, q, stop, max(1.0, ready - (time.monotonic() - t0)), action
+                _ax_flow, pid, app.path, q, stop, ready_left, action, loop, watch.quiet
             )
         finally:
             stop.set()  # a cancelled attempt: the worker stops at its next step and restores the switches
