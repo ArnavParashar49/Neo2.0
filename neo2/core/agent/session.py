@@ -367,6 +367,15 @@ class Session:
             # A bare "what is this?" / "ye kya hai" (no hand, no "me", no object named) that Laya
             # reads as about the screen: the screen's, as before the camera — never a surprise camera.
             look = None
+        if origin == "user":
+            # Any other request of the user's ends a missed song's "try again", and is the last thing
+            # they asked for: a bare retry after it is neither the camera's nor the song's.
+            from neo2.core.agent import retry_words
+
+            if hear is None:
+                song_words.clear_retry()
+            if look is None and hear is None:
+                retry_words.mark("other")
 
         # A bare "stop" / "never mind" cancels everything; "stop the timer" is a command.
         if is_bare_stop(text) or (d.intent == "stop" and len(text.split()) <= 2 and d.intent_confidence >= 0.9):
@@ -467,15 +476,20 @@ class Session:
         # "open <game> and play as <side>": not music, whatever the plan says
         if (game := await asyncio.to_thread(_game_to_play, text)) is not None:
             return await self._play_game(text, d, None, job, game)
+        names = {t for t, _ in steps}
+        if fastpath.SONG_TOOL not in names:
+            from neo2.core.agent import retry_words
+
+            song_words.clear_retry()  # (another request of the user's: as Session._handle)
+            if fastpath.CAMERA_TOOL not in names:
+                retry_words.mark("other")
         return await self._quick(text, d, steps, job=job, origin="user")
 
     async def cancel_all(self) -> int:
         """Stop every running job (the user said stop) and drop any unanswered question."""
         outcomes.stop()  # right after NEO answered, a stop says the answer was wrong
         camera_words.forget()  # a stop ends the camera's follow-up window ("and now?" asks afresh)
-        from neo2.core.agent import song_words
-
-        song_words.clear_retry()
+        song_words.clear_retry()  # …and a missed song's "try again"
         _camera_off("stopped")  # …and turns the camera off now, not when its window runs out
         _song_off("stopped")  # …and stops listening for a song
         replay.forget_last()  # …and a flow it just learned or replayed isn't one to repeat
