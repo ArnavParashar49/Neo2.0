@@ -289,12 +289,15 @@ def test_substring_search_works_without_the_trigram_tokenizer(st):
 
 
 def test_time_phrases_limit_lines_and_summaries_to_that_window(st):
+    # Earlier today, whatever the hour the test runs: 9 o'clock, or before nine halfway since midnight
+    # (a fixed 9 o'clock is still to come between midnight and nine, and "today so far" misses it).
+    today = _day(0, 0) + min(9 * 3600, (time.time() - _day(0, 0)) / 2)
     st.add_turns(
         [
             (_day(8), "user", "remind me about the passport renewal", "live", "voice", False),
             (_day(1), "user", "the passport photos are ready", "live", "voice", False),
             (_day(1, 16), "assistant", "Good, I'll note the photos are ready.", "live", "voice", False),
-            (_day(0, 9), "user", "what time is the passport office open", "live", "voice", False),
+            (today, "user", "what time is the passport office open", "live", "voice", False),
         ]
     )
     assert [h.text for h in st.search("passport yesterday", kinds=("turn",))] == ["the passport photos are ready"]
