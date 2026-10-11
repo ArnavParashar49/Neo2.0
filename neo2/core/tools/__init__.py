@@ -20,7 +20,7 @@ from neo2.core.runtime import UnsupportedPlatform
 log = logger(__name__)
 
 _MODULES = [
-    "neo2.core.tools.system", "neo2.core.tools.web", "neo2.core.tools.weather", "neo2.core.tools.memory_tool", "neo2.core.tools.browser",
+    "neo2.core.tools.system", "neo2.core.tools.timers", "neo2.core.tools.web", "neo2.core.tools.weather", "neo2.core.tools.memory_tool", "neo2.core.tools.browser",
     "neo2.core.tools.browse",
 ]  # fmt: skip
 _MAC_ONLY = [
@@ -72,7 +72,7 @@ PRESETS: dict[str, tuple[str, ...]] = {
     "web": ("web_search", "web_fetch", "weather", "clock"),
     "browser": _BROWSER,
     "mac_read": ("ax_tree", "ax_find", "screenshot", "map_board", "look", "apps_running", "mail_unread", "calendar_today", "page_read", "read_file"),
-    "mac": _COMPUTER + _TASKS + ("volume", "brightness", "sleep_display", "timer", "search_site"),
+    "mac": _COMPUTER + _TASKS + ("volume", "brightness", "sleep_display", "timer", "timers", "search_site"),
     "memory": ("memory",),
     "none": (),
 }
@@ -84,6 +84,7 @@ MODULES_FOR: dict[str, str] = {
     **dict.fromkeys(("web_search", "web_fetch", "search_site"), "neo2.core.tools.web"),
     "weather": "neo2.core.tools.weather",
     **dict.fromkeys(("clock", "volume", "brightness", "sleep_display", "timer"), "neo2.core.tools.system"),
+    "timers": "neo2.core.tools.timers",  # (the timer tool's timers: listed, cancelled, how long left)
     "memory": "neo2.core.tools.memory_tool",
     **dict.fromkeys(_BROWSER, "neo2.core.tools.browser"),
     **dict.fromkeys(_COMPUTER + _TASKS, "neo2.core.tools.computer"),

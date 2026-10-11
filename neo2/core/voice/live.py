@@ -112,6 +112,7 @@ _DIRECT_TOOLS = {
     "browse",  # declared only while a tool of that name is registered and shown (_declarations)
     "camera_look",  # (the same) — and it runs only for the user's own words (_camera_call)
     "song_identify",  # (the same) — and it runs only for the user's own words (_song_call)
+    "timers",  # list, cancel, "how long left": answered aloud (the timer tool sets them)
 }
 # tool -> the task kind that makes it a direct tool once the user switched the kind on
 _DIRECT_WHEN_ON = {"calendar_add": "add_event"}

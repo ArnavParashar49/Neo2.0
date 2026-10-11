@@ -420,8 +420,12 @@ class Session:
             if look is None and hear is None:
                 retry_words.mark("other")
 
-        # A bare "stop" / "never mind" cancels everything; "stop the timer" is a command.
-        if is_bare_stop(text) or (d.intent == "stop" and len(text.split()) <= 2 and d.intent_confidence >= 0.9):
+        # A bare "stop" / "never mind" cancels everything; "stop the timer" is a command. So are
+        # "stop timer" and "cancel timer" — two words Laya can read as a sure stop — when the timers
+        # tool's own words cover them: they cancel the timer, and leave every running job alone.
+        if is_bare_stop(text) or (
+            d.intent == "stop" and len(text.split()) <= 2 and d.intent_confidence >= 0.9 and not _timer_words(text)
+        ):
             await self.cancel_all()
             await bus().end_job(job)
             return Reply("Okay.", "stop", d, job=job)
@@ -445,10 +449,11 @@ class Session:
         # ("type Laptops in the heading" reads as an agent task to the reflex, but the words are
         # the whole job — no model needed.) A plan covers the whole utterance or nothing.
         # (A memory write — "remember that …", "forget what I said about …" — runs here even when
-        # the reflex calls the sentence chat: a chat model would only say it will.)
+        # the reflex calls the sentence chat: a chat model would only say it will. So does a question
+        # about NEO's timers — "how long is left on the pasta timer": a chat model can't see them.)
         if settings().fast_paths and (steps := fastpath.plan(text, origin=origin)) and (
             d.intent != "chat" or _memory_write(steps)
-            or any(name in ("quality_report", "routine_manage", "routine_run") for name, _ in steps)
+            or any(name in ("quality_report", "routine_manage", "routine_run", "timers") for name, _ in steps)
         ):
             return await self._quick(text, d, steps, job=job, origin=origin)
         # The by-utterance lane: the user's own words point at a control ("start wala button dabao",
@@ -1465,6 +1470,13 @@ def _memory_write(steps: list[tuple[str, dict]]) -> bool:
         if t is None or t.category != "memory" or t.read_only or args.get("action") == "recall":
             return False
     return bool(steps)
+
+
+def _timer_words(text: str) -> bool:
+    """Do the timers tool's own fast paths cover these words ("stop timer", "cancel timer")? Then
+    they are about a timer, never a bare stop. (No timers tool registered: never.)"""
+    hit = fastpath.match(text)
+    return hit is not None and hit[0] == "timers"
 
 
 def _journal_reply(reply: Reply, source: str, generation: int) -> None:

@@ -56,6 +56,14 @@ to Gemini.
 Both settings return `set_result` {name, ok, error?} (error: forbidden | unknown | invalid | failed),
 and are reported in the hello and `settings` events.
 
+NEO's timers, for a host that shows a countdown (NotchHub's island). The hello's "timers" lists the
+ones counting down, soonest first: [{id, title, ends_at}]. Each one that starts (set, or restored
+after a restart) or ends is an `activity` event: {op: "present" | "end", id: "timer:<its id>", kind:
+"timer", title, ends_at, done} — `ends_at` in seconds since the epoch (the Mac's own clock), `done`
+true when it went off and false when it was cancelled (always false with "present"). The client
+counts down from `ends_at` itself: nothing is sent per second. Not replayed: the hello says what runs
+now. (`kind` says what an activity is: a client shows the kinds it knows and ignores the rest.)
+
 Who may say what. Everyone here knows the token (~/.neo/ws-token, the user's alone to read). The
 core then tells its clients apart by the one thing a web page cannot choose: the Origin header a
 browser engine puts on every websocket a page opens, which the page can neither set nor leave out.
@@ -108,6 +116,7 @@ import json
 import logging
 import os
 import secrets
+import sys
 import time
 from collections import deque
 from collections.abc import Awaitable, Callable
@@ -180,6 +189,20 @@ def ws_token() -> str:
 
 
 _serving: UIServer | None = None  # the server started in this process (NEO.app's core has one)
+
+
+def _timers() -> list[dict[str, Any]]:
+    """NEO's running timers, for the hello (see the module's "NEO's timers"). They live in the timer
+    tool's module: when nothing has loaded it, no timer can be running — and the hello never loads a
+    tool module itself."""
+    mod = sys.modules.get("neo2.core.tools.system")
+    if mod is None:
+        return []
+    try:
+        return mod.timers_snapshot()
+    except Exception as e:  # noqa: BLE001 — a hello without the timers beats no hello
+        print(f"[ui] timers not in the hello: {type(e).__name__}")
+        return []
 
 
 def card_on_screen() -> bool:
@@ -521,6 +544,7 @@ class UIServer:
                         "wellbeing_checkins": settings().wellbeing_checkins,
                         "host_attached": cl.kind == "host" or self._host_attached(),
                         "shell": self.shell_snapshot(),  # what NEO.app's menu shows
+                        "timers": _timers(),  # NEO's running timers (then `activity` events)
                     },
                 },
                 default=str,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import datetime as _dt
 import json
 import os
@@ -10,8 +11,13 @@ import re
 import threading
 import time
 import uuid
+from collections.abc import Collection
+from typing import Any
 
+from neo2.core import logger
 from neo2.core.agent.registry import ToolContext, tool
+
+log = logger(__name__)
 
 _MAC = frozenset({"macos"})
 
@@ -237,18 +243,95 @@ def _start(t: dict) -> None:
 
 async def _run_timer(t: dict) -> None:
     try:
+        await _announce("present", t)
         while (left := t["due"] - time.time()) > 0:
             await asyncio.sleep(min(left, 5.0))  # re-check the wall clock: wakes up on time after sleep
         late = time.time() - t["due"] > 90
         with _timers_lock:
             _save_timers([x for x in _load_timers() if x["id"] != t["id"]])
+        await _announce("end", t, done=True)
         note = f"{t['label']} is done" + (" (late — your Mac was asleep)" if late else "")
         await osascript(f'display notification {_q(note)} with title "NEO" sound name "Glass"')
         from neo2.core.events import bus
 
         await bus().say(f"{t['label']}: time's up." + (" (A bit late — your Mac was asleep.)" if late else ""))
+    except asyncio.CancelledError:
+        # Cancelled before it went off (the user's "cancel the timer", or NEO quitting): no
+        # notification, no "time's up". Whoever cancelled it took it out of timers.json and told
+        # the clients (cancel_timers); quitting leaves it in the file, for the next start to restore.
+        raise
     finally:
         _timer_tasks.pop(t["id"], None)
+
+
+# ---- what the clients see: NEO's running timers ----------------------------------------------
+# Each timer that starts counting down (set, or restored after a restart) and each one that ends
+# (it went off: done=true; it was cancelled: done=false) is an `activity` event on the bus, and a
+# client's hello carries the running ones (server/ws.py), so NotchHub can show a countdown. It
+# counts down from `ends_at` itself: nothing is sent per second.
+_TITLE_MAX = 40
+
+
+def timer_title(t: dict) -> str:
+    """A timer's name as a client shows it (and NEO says it): one line, at most 40 characters."""
+    return " ".join(str(t.get("label") or "").split())[:_TITLE_MAX] or "Timer"
+
+
+def _activity(op: str, t: dict, *, done: bool = False) -> dict[str, Any]:
+    """The `activity` event's data for one timer. Always the same keys, so a client can read every
+    one alike; `id` is "timer:" + the timer's own id, so other kinds of activity never collide."""
+    return {
+        "op": op, "id": f"timer:{t['id']}", "kind": "timer", "title": timer_title(t), "ends_at": float(t["due"]), "done": done,
+    }  # fmt: skip
+
+
+async def _announce(op: str, t: dict, *, done: bool = False) -> None:
+    """Tell the clients; never a reason for a timer not to go off."""
+    try:
+        from neo2.core.events import bus
+
+        await bus().publish("activity", **_activity(op, t, done=done))
+    except Exception as e:  # noqa: BLE001 — (the bus already keeps a bad subscriber to itself)
+        log.warning(f"[timer] activity not announced: {type(e).__name__}")
+
+
+def running_timers() -> list[dict]:
+    """The timers in timers.json, the soonest first."""
+    with _timers_lock:
+        return sorted(_load_timers(), key=lambda t: t["due"])
+
+
+def timers_snapshot() -> list[dict[str, Any]]:
+    """The timers counting down in this process, the soonest first, as a client's hello carries
+    them: [{id, title, ends_at}] (an `activity` event's keys). One in timers.json that nothing counts
+    down (a core that never restored it) would never go off, so it isn't shown."""
+    out = []
+    for t in running_timers():
+        task = _timer_tasks.get(t["id"])
+        if task is not None and not task.done():
+            a = _activity("present", t)
+            out.append({"id": a["id"], "title": a["title"], "ends_at": a["ends_at"]})
+    return out
+
+
+async def cancel_timers(ids: Collection[str]) -> list[dict]:
+    """Stop these timers before they go off: out of timers.json, their countdown cancelled (it
+    never notifies or speaks), and an `activity` end (done=false) told to the clients. Returns the
+    ones that were still set. (No await before the file is written: a countdown can't go off in
+    between — it takes its timer out of the file before it says anything.)"""
+    want = set(ids)
+    with _timers_lock:
+        ts = _load_timers()
+        gone = [t for t in ts if t["id"] in want]
+        if gone:
+            _save_timers([t for t in ts if t["id"] not in want])
+    for t in gone:
+        task = _timer_tasks.pop(t["id"], None)
+        if task is not None and not task.done():
+            with contextlib.suppress(RuntimeError):  # its loop is already closed: nothing to stop
+                task.cancel()
+        await _announce("end", t, done=False)
+    return gone
 
 
 def restore_timers() -> int:
