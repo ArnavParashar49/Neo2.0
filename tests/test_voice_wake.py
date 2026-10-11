@@ -295,6 +295,104 @@ def test_quiet_since_still_counts_typed_text_and_model_turns(voice):
     assert v._quiet_since() == 130.0
 
 
+# ---- a spoken routine said with pauses -----------------------------------------------------------
+
+
+def test_live_ends_a_turn_after_700_ms_of_silence():
+    """Every reply waits this long after the user stops: it stays short (a routine's pauses are the
+    collector's to bridge, below)."""
+    from neo2.core.voice import live as live_mod
+
+    assert live_mod._LIVE_VAD_SILENCE_MS == 700
+
+
+def test_a_routine_said_with_a_pause_is_saved_whole(voice, monkeypatch):
+    """"When I say I want to study, open Notion" … pause … "Safari and youtube.com": the server ends
+    the first turn at the pause; the collector keeps the definition open until the user has been quiet
+    for a moment, claims the second sentence too (the model's calls for it are skipped, nothing of it
+    runs by itself) and saves the whole thing once."""
+    from neo2.core.agent.session import Reply
+    from neo2.core.config import settings
+    from neo2.core.voice import live as live_mod
+
+    monkeypatch.setattr(live_mod, "_ROUTINE_SETUP_SETTLE_S", 0.4)
+    settings().listen_timeout_s = 5.0  # (as it is by default: the session outlives the pause)
+    ran = []
+
+    async def command(text, steps):
+        ran.append((text, steps))
+        return Reply("", "quick", silent=True)
+
+    monkeypatch.setattr(voice._agent_session, "command", command, raising=False)
+
+    async def run():
+        await voice.wake("ui")
+        ub, mb = [], []
+        await voice._on_message(heard("When I say I want to study, open Notion."), ub, mb, voice._live)
+        await voice._on_message(DONE, ub, mb, voice._live)  # the server ends the turn at the pause
+        await asyncio.sleep(0.2)
+        await voice._on_message(heard("Safari and youtube.com."), ub, mb, voice._live)
+        assert voice._lane_owns() and voice._lane_tried_utt == voice._utt_id  # claimed with the first
+        await voice._on_message(DONE, ub, mb, voice._live)
+        t0 = time.time()
+        while not ran and time.time() - t0 < 3:
+            await asyncio.sleep(0.05)
+
+    asyncio.run(run())
+    ((text, steps),) = ran
+    ((tool, args),) = steps
+    assert text == "When I say I want to study, open Notion, Safari and youtube.com"
+    assert tool == "routine_manage" and args["trigger"] == "I want to study"
+    targets = [a["target"] for a in args["actions"]]
+    assert targets[:2] == ["Notion", "Safari"] and "youtube.com" in targets[2] and len(targets) == 3
+
+
+def test_routine_parts_join_as_said():
+    from neo2.core.voice.live import _join_parts
+
+    assert _join_parts(["When I say I want to study, open Notion.", "Safari and YouTube."]) == (
+        "When I say I want to study, open Notion, Safari and YouTube"
+    )
+    assert _join_parts(["When I say", "time to start working, open VS Code"]) == (
+        "When I say time to start working, open VS Code"
+    )
+    assert _join_parts(["When I say focus, open Notion and", "Safari"]) == "When I say focus, open Notion and Safari"
+    assert _join_parts(["", "  "]) == ""
+
+
+@pytest.mark.parametrize(
+    "local_trigger, replaced",
+    [("Time to start working!", True), ("time to", False)],
+)
+def test_the_models_routine_is_replaced_only_by_a_parse_of_the_same_phrase(voice, monkeypatch, local_trigger, replaced):
+    """The model's routine_manage call is replaced by the local parse of the whole definition only when
+    both heard the same phrase: a parse that misread it never overrides the model, which heard it too."""
+    from neo2.core.agent.registry import Registry, ToolOutput
+    from neo2.core.tools import routines
+
+    mine = {"action": "create", "trigger": local_trigger, "actions": [{"kind": "open_app", "target": "VS Code"}, {"kind": "open_app", "target": "Slack"}]}
+    model = {"action": "create", "trigger": "time to start working", "actions": [{"kind": "open_app", "target": "VS Code"}]}
+    monkeypatch.setattr(routines, "is_setup_request", lambda text: True)
+    monkeypatch.setattr(routines, "parse_local_setup", lambda text: dict(mine))
+    got = []
+
+    async def invoke(self, name, args, ctx):
+        got.append(args)
+        return ToolOutput("Saved.")
+
+    monkeypatch.setattr(Registry, "invoke", invoke)  # (the class: an instance attribute would outlive the test)
+    said = "When I say time to start working, open VS Code and Slack"
+
+    async def run():
+        await voice._ensure_session()
+        voice._last_heard_at = 0.0  # (quiet long since: the definition is complete)
+        fc = NS(name="routine_manage", args=dict(model), id="r1")
+        await voice._run_tool(voice._live, fc, said, utt=voice._utt_id, said=said)
+
+    asyncio.run(run())
+    assert got == [mine if replaced else model]
+
+
 # ---- the local cascade -------------------------------------------------------------------------
 
 

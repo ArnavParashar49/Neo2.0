@@ -124,8 +124,12 @@ _VOICE_RMS = 0.006
 _THINK_SETTLE_S = 2.5  # "thinking" for a reply the user will hear; back to listening if none comes
 _LANE_S = 30.0  # how long the model's calls for a sentence NEO ran itself are skipped
 _SETTLE_S = 0.3  # no new words for this long after the model starts answering = sentence over
-_ROUTINE_SETUP_SETTLE_S = 1.2  # let a spoken routine definition finish before saving it
-_LIVE_VAD_SILENCE_MS = 1400  # routine instructions often include short pauses between destinations
+_ROUTINE_SETUP_SETTLE_S = 1.2  # let a spoken routine definition finish before saving it…
+_ROUTINE_SETUP_MAX_S = 12.0  # …however long the user keeps adding to it
+# The server's end-of-turn silence. Every reply waits this long after the user stops, so it stays
+# short; a routine definition said with pauses ("…open Notion … Safari … and YouTube") arrives as
+# several sentences, which the routine collector puts back together (_routine_transcript_after_pause).
+_LIVE_VAD_SILENCE_MS = 700
 _CONNECT_TIMEOUT_S = 12.0
 # A socket that dies mid-turn is reopened: a tool is running, or the user's words came within this
 # long and the model hasn't answered. Otherwise NEO goes idle and waits for "Neo" — nothing was lost.
@@ -642,6 +646,23 @@ def _declarations() -> list[gt.FunctionDeclaration]:
     return decls
 
 
+# A routine definition said in pieces: a piece that ends mid-phrase ("when I say", "open Notion
+# and") runs on into the next; one that ends a list item is separated from the next by a comma.
+_RUNS_ON = re.compile(r"(?:\b(?:say|says|and|then|open|launch|start|to|is)|[,;:])\s*$", re.I)
+
+
+def _join_parts(parts: list[str]) -> str:
+    out = ""
+    for part in (p.strip().rstrip(".!?।").strip() for p in parts):  # (a transcript ends each with a full stop)
+        if not part:
+            continue
+        if not out:
+            out = part
+        else:
+            out += (" " if _RUNS_ON.search(out) else ", ") + part
+    return out
+
+
 class LiveVoice(OnDemandMic):
     handles_text = True  # typed text is sent into the Live session so it answers aloud
     # speech gate (see _turn_gate): per model turn "open" | "hold" | "mute"
@@ -667,6 +688,7 @@ class LiveVoice(OnDemandMic):
     # listening (see _silence_watch for the rules)
     _listening = False  # the mic goes up to the model: set by a wake, never by typed words
     _listen_timeout_override: float | None = None  # one check-in reply; normal turns use settings
+    _routine_claim: tuple[int, dict[int, str]] | None = None  # a routine being said: first sentence, all of them
     _reconnecting = False  # a dropped session that was listening is being reopened (see _lost)
     _woke_at = 0.0  # the latest wake (wake word / hotkey / push-to-talk)
     _words_at = 0.0  # the user's latest words this session: transcribed by the server, or typed
@@ -1046,6 +1068,7 @@ class LiveVoice(OnDemandMic):
         self._file_label()
         self._new_question()
         self._finish_checkin_playback(False)
+        self._routine_claim = None  # (a collector still waiting has its parts; it returns them)
         self._gate, self._held = None, []
         self._result_pending = self._result_speech = False
         self._lane_utt = -1
@@ -1310,22 +1333,28 @@ class LiveVoice(OnDemandMic):
                 self._utterance = "".join(user_buf)
                 self._label["text"] = " ".join(self._utterance.split())
                 await bus().say(self._utterance, role="user", final=False)
-                early().feed(self._utterance)  # the 150 ms ticker acts on it — never inline here
                 from neo2.core.tools.routines import is_setup_request
 
-                if getattr(sc.input_transcription, "finished", False) or is_setup_request(self._utterance):
+                # A routine being defined ("…open Notion") is not a command the early actor may run as
+                # it is said.
+                setup = self._routine_part(self._utterance) or is_setup_request(self._utterance)
+                if not setup:
+                    early().feed(self._utterance)  # the 150 ms ticker acts on it — never inline here
+                finished = getattr(sc.input_transcription, "finished", False)
+                if finished or setup:
                     # Routine setup can span several committed transcription chunks. Claim it as
                     # soon as the intent is clear, then let the quiet-window collector use the
                     # final wording instead of waiting for Live's optional `finished` marker.
                     self._maybe_command_lane(self._utterance, settled=False)
-                if getattr(sc.input_transcription, "finished", False):
+                if finished:
                     self._recall_for(live, self._utterance)
             interim = getattr(sc, "interim_input_transcription", None)
             if interim and interim.text:  # words as they're being said, before they're committed
                 self._turn_open = True
                 self._listen_timeout_override = None
                 self._last_user_speech = self._words_at = self._last_heard_at = time.time()
-                early().feed("".join(user_buf) + " " + interim.text)
+                if self._routine_claim is None:
+                    early().feed("".join(user_buf) + " " + interim.text)
             if (sc.model_turn or sc.output_transcription) and self._gate is None and self._utterance and (
                 self._last_response_at <= self._last_heard_at
             ):
@@ -1460,7 +1489,8 @@ class LiveVoice(OnDemandMic):
         else:
             # Spoken routines are exact local matches. Route them before Gemini's response so
             # they work reliably even when Live would otherwise treat the phrase as conversation.
-            from neo2.core.tools.routines import is_setup_request, match as match_routine, parse_local_setup
+            from neo2.core.tools.routines import is_setup_request, parse_local_setup
+            from neo2.core.tools.routines import match as match_routine
 
             setup_requested = is_setup_request(text)
             setup = parse_local_setup(text) if setup_requested else None
@@ -1481,6 +1511,10 @@ class LiveVoice(OnDemandMic):
                 return
         if not steps:
             return  # a question, or something only the model can work out
+        self._run_lane(text, steps)
+
+    def _run_lane(self, text: str, steps: list[tuple[str, dict]]) -> None:
+        """NEO does the current sentence itself: these steps, through the session's command path."""
         self._lane_tried_utt = self._utt_id
         from neo2.core.agent.early import key as early_key
 
@@ -1506,6 +1540,7 @@ class LiveVoice(OnDemandMic):
         self._lane_utt, self._lane_at = utt, time.time()
         if not (self._result_pending and self._result_speech):
             self._gate, self._held = "mute", []
+        self._claim_routine(utt, self._utterance)
 
         async def wait_for_complete_transcript() -> None:
             try:
@@ -1513,14 +1548,48 @@ class LiveVoice(OnDemandMic):
                 if text:
                     # Re-parse the latest wording after the silence window; the first transcript
                     # may have ended before the user finished listing destinations.
-                    from neo2.core.tools.routines import is_setup_request
-
-                    if is_setup_request(text):
-                        self._maybe_command_lane(text, settled=True, routine_ready=True)
+                    self._finish_routine_setup(text)
             finally:
                 self._routine_setup_waiting.discard(utt)
 
         self._tasks.append(asyncio.create_task(wait_for_complete_transcript()))
+
+    def _finish_routine_setup(self, text: str) -> None:
+        """The whole spoken definition is in: save it locally when it parses, else hand it to the
+        constrained routine manager. (Not through _maybe_command_lane: the sentences that joined
+        the definition are claimed already, so that would see them as done.)"""
+        from neo2.core.tools.routines import is_setup_request, parse_local_setup
+
+        if not is_setup_request(text) or confirm.peek() is not None:
+            return
+        setup = parse_local_setup(text)
+        if setup is None:
+            self._start_routine_setup(text)
+        else:
+            self._run_lane(text, [("routine_manage", setup)])
+
+    def _claim_routine(self, utt: int, text: str) -> tuple[int, dict[int, str]]:
+        """Start collecting a spoken routine definition at sentence `utt` (or go on with it)."""
+        claim = self._routine_claim
+        if claim is None or claim[0] != utt:
+            claim = self._routine_claim = (utt, {utt: " ".join((text or "").split())})
+        return claim
+
+    def _routine_part(self, text: str) -> bool:
+        """While a spoken routine definition is being collected, the user's current sentence is a
+        part of it: noted, and claimed like the first — the model's calls for it are skipped and
+        nothing of it runs on its own ("Safari and YouTube" after a pause is not a command)."""
+        claim = self._routine_claim
+        if claim is None or self._utt_id < claim[0]:
+            return False
+        parts = claim[1]
+        if self._utt_id not in parts:
+            self._lane_tried_utt = self._utt_id
+            self._lane_utt, self._lane_at = self._utt_id, time.time()
+            if not (self._result_pending and self._result_speech):
+                self._gate, self._held = "mute", []
+        parts[self._utt_id] = " ".join(text.split())
+        return True
 
     def _start_routine_setup(self, text: str) -> None:
         """Use the constrained routine manager for an explicit definition the local parser can't read."""
@@ -1560,20 +1629,31 @@ class LiveVoice(OnDemandMic):
             await self.inform(reply.text if reply else f"That didn't work: {why}")
 
     async def _routine_transcript_after_pause(self, utt: int, fallback: str) -> str:
-        """Return the final wording after a resettable pause, even if Live already cleared it."""
+        """The whole spoken routine definition that sentence `utt` began, once the user has been
+        quiet for `_ROUTINE_SETUP_SETTLE_S` (or after `_ROUTINE_SETUP_MAX_S`), even if Live already
+        cleared it. Live ends a turn after 700 ms of silence, so "when I say I want to study, open
+        Notion … Safari … and YouTube" can come as three sentences: every sentence that starts while
+        this waits joins the definition (_routine_part), in order."""
+        claim = self._claim_routine(utt, fallback)
         started = time.time()
         live = self._live
-        while live is self._live and self._utt_id == utt:
-            if time.time() - self._last_heard_at >= _ROUTINE_SETUP_SETTLE_S:
-                break
-            if time.time() - started > 12.0:
-                break
-            await asyncio.sleep(0.1)
-        if self._utt_id == utt and self._utterance.strip():
-            return self._utterance.strip()
-        if self._completed_utterance[0] == utt and self._completed_utterance[1].strip():
-            return self._completed_utterance[1].strip()
-        return fallback.strip()
+        try:
+            while live is self._live:
+                if time.time() - self._last_heard_at >= _ROUTINE_SETUP_SETTLE_S:
+                    break
+                if time.time() - started > _ROUTINE_SETUP_MAX_S:
+                    break
+                await asyncio.sleep(0.1)
+        finally:
+            if self._routine_claim is claim:
+                self._routine_claim = None
+        parts = claim[1]
+        if self._utt_id in parts and self._utterance.strip():
+            parts[self._utt_id] = " ".join(self._utterance.split())
+        done_utt, done = self._completed_utterance
+        if done_utt in parts and done.strip():
+            parts[done_utt] = " ".join(done.split())
+        return _join_parts([parts[k] for k in sorted(parts)]) or fallback.strip()
 
     async def _lane_when_settled(self) -> None:
         """The model started answering before the transcript was marked finished: give trailing
@@ -1816,11 +1896,15 @@ class LiveVoice(OnDemandMic):
                     await bus().tool_start(fc.name, args, job=key)
                     if fc.name == "routine_manage" and str(args.get("action") or "").lower() == "create":
                         asked = await self._routine_transcript_after_pause(utt, said or asked)
-                        from neo2.core.tools.routines import is_setup_request, parse_local_setup
+                        from neo2.core.tools.routines import is_setup_request, normalize, parse_local_setup
 
                         parsed = parse_local_setup(asked) if is_setup_request(asked) else None
-                        if parsed is not None:
-                            args = parsed  # replace a model's early partial arguments with the final phrase
+                        if parsed is not None and normalize(parsed["trigger"]) == normalize(str(args.get("trigger") or "")):
+                            # The same phrase, read locally from the whole definition: its actions
+                            # replace a model's early partial ones. A parse that heard a different
+                            # phrase ("time to" for "time to start working") never overrides the
+                            # model, which heard the whole sentence too.
+                            args = parsed
                     out = await registry().invoke(
                         fc.name, args, ToolContext(user_text=asked or str(args), taint=self._taint, origin="live")
                     )
