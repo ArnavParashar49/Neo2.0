@@ -405,20 +405,26 @@ class Session:
         if settings().fast_paths and (step := fastpath.by_utterance(text, origin=origin, decision=d)) is not None:
             return await self._quick(text, d, [step], job=job, origin=origin)
 
-        # A phrase definition is an explicit user command. Give the model only the constrained
-        # routine manager for complex definitions; the common explicit form is parsed locally.
-        if origin == "user":
-            from neo2.core.tools.routines import is_setup_request, parse_local_setup
+        # "When I say <phrase>, open <apps and sites>" at the start of the user's own sentence: saved
+        # locally, whatever Laya calls it (routines.parse_local_setup reads only that plain form).
+        if origin == "user" and registry().get("routine_manage") is not None:
+            from neo2.core.tools.routines import parse_local_setup
 
-            if is_setup_request(text) and registry().get("routine_manage") is not None:
-                if routine_args := parse_local_setup(text):
-                    return await self._quick(
-                        text, d, [("routine_manage", routine_args)], job=job, origin=origin
-                    )
-                return await self._agent(text, d, images, job, only=["routine_manage"])
+            if routine_args := parse_local_setup(text):
+                return await self._quick(text, d, [("routine_manage", routine_args)], job=job, origin=origin)
 
         if d.intent == "chat" and not images and not d.needs_screen:
             return await self._chat(text, d, job)
+
+        # A definition the local parser can't read ("when I say good night, …" with more than apps
+        # and sites): a model that has only the routine manager, which saves app and site launches
+        # or says why it can't. Only for a sentence that starts as one (routines.is_setup_request),
+        # and never ahead of Laya calling it conversation.
+        if origin == "user" and registry().get("routine_manage") is not None:
+            from neo2.core.tools.routines import is_setup_request
+
+            if is_setup_request(text):
+                return await self._agent(text, d, images, job, only=["routine_manage"])
 
         # The user asked for this before, in this app, and a model twice did it the same way: NEO
         # does it itself (neo2.core.agent.replay). Only the user's own words, never a model's; only a
@@ -576,8 +582,9 @@ class Session:
                     await settle.app_ready(typing=tool in settle.TYPING)  # (the app just opened: ready, not 0.8 s)
                 await bus().tool_start(tool, args, job=job)
                 tool_extras = dict(_request_extras.get())
-                tool_extras["neo_job"] = job
                 if tool == fastpath.SONG_TOOL and args.get("_retry") is True:
+                    # The song lane checked the user's retry after a miss (fastpath.song); the tool
+                    # checks it again and uses it up. Only the song tool ever gets this marker.
                     tool_extras["song_retry"] = True
                 ctx = ToolContext(user_text=text, taint=taint, origin=origin, extras=tool_extras)
                 out = await registry().invoke(tool, args, ctx)
