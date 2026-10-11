@@ -1982,6 +1982,7 @@ class LiveVoice(OnDemandMic):
         """Live's model asked to name the song playing. NEO listens only when the user's own latest
         sentence asked for it (fastpath.song on their words): then it runs as the user's request. A
         call the user's words don't back (the model's own idea, a page it read) never listens."""
+        from neo2.core.agent import fastpath
         from neo2.core.agent.registry import USERS_WORDS
 
         if not self._song_asked(asked, utt):
@@ -1999,7 +2000,13 @@ class LiveVoice(OnDemandMic):
         self._register_call(fc.name, args, key)
         await bus().set_state(NeoState.WORKING, job=key)
         await bus().tool_start(fc.name, {}, job=key)
-        ctx = ToolContext(user_text=asked, taint=self._taint, origin="user", extras={USERS_WORDS: asked})
+        extras: dict = {USERS_WORDS: asked}
+        step = fastpath.song(asked, origin="user")
+        if step is not None and step[1].get("_retry") is True:
+            # "try again" right after a miss: the one-shot retry, as the typed path passes it on
+            # (Session._quick). The tool checks it against the miss itself and spends it.
+            extras["song_retry"] = True
+        ctx = ToolContext(user_text=asked, taint=self._taint, origin="user", extras=extras)
         out = await registry().invoke(fc.name, {}, ctx)
         await bus().tool_end(fc.name, out.ok, out.text, job=key)
         outcomes.step("", fc.name, out.ok, halt=getattr(out, "halt", False))

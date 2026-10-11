@@ -522,6 +522,41 @@ def test_live_call_runs_only_when_the_users_words_asked(song_tool, monkeypatch):
     assert v.spk.interrupts == 0  # (nothing was playing: nothing cut)
 
 
+def test_live_try_again_after_a_miss_listens_again(song_tool, monkeypatch):
+    """Gemini Live, the default voice, passes the one-shot retry on as the typed path does: right after
+    a miss, the user's own "try again" reaches the tool with `song_retry`, which the tool checks and
+    spends itself (its refusal). Without a miss just before, "try again" asks for nothing."""
+    from neo2.core import events
+
+    monkeypatch.setattr(events, "_bus", events.EventBus())
+    song_words.clear_retry()
+    v = _voice()
+    fc = SimpleNamespace(name="song_identify", args={}, id="c1")
+    assert asyncio.run(v._song_call(fc, {}, "try again", "c1", 1)).startswith("NEEDS_USER")
+    song_words.mark_no_match()
+    try:
+        out = asyncio.run(v._song_call(fc, {}, "try again", "c1", 2))
+        assert "Blinding Lights" in out
+        # A plain ask (a new question) carries no retry flag.
+        v._new_question()
+        fc2 = SimpleNamespace(name="song_identify", args={}, id="c2")
+        asyncio.run(v._song_call(fc2, {}, "what song is this", "c2", 3))
+        (_, ctx), (_, plain) = song_tool.calls
+        assert ctx.get("song_retry") is True and ctx.origin == "user" and ctx.get(USERS_WORDS) == "try again"
+        assert plain.get("song_retry") is None
+        # (Imported after the calls: importing the music tool registers the real one.)
+        from neo2.core.agent.registry import ToolContext
+        from neo2.core.tools.music.tool import refusal
+
+        # What the real tool decides from what Live handed over (before its answer tainted the turn):
+        # the retry goes through, once.
+        handed = ToolContext(user_text=ctx.user_text, extras=dict(ctx.extras), origin=ctx.origin)
+        assert refusal(handed) == ""
+        assert refusal(handed) != ""
+    finally:
+        song_words.clear_retry()
+
+
 @pytest.mark.parametrize(
     "said",
     [
