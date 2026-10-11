@@ -39,6 +39,9 @@ _PARTIAL_EVERY_S = 1.2  # re-transcribe the growing buffer this often for live p
 
 class LocalVoice(OnDemandMic):
     handles_text = False  # typed text goes through the session; we only speak replies
+    # (Class defaults too, as LiveVoice has them: a voice built without __init__ still has them.)
+    _listen_timeout_override: float | None = None  # one check-in reply; normal turns use settings
+    _last_utterance_started_at: float | None = None  # monotonic: when the latest utterance began
 
     def __init__(self, on_text: TextHandler) -> None:
         self._on_text = on_text
