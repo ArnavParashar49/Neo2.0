@@ -388,6 +388,14 @@ class Settings(BaseSettings):
     # refuses, the Session never hands such a request to it, and Gemini Live isn't told about it.
     context_capture: bool = True
 
+    # ---- the user's own Shortcuts as NEO verbs (neo2.core.tools.shortcuts) ----
+    # "run my Send ETA shortcut" runs it; a run a model chose, or one after NEO read something untrusted,
+    # asks first. False: shortcut_run is hidden from every model and refuses, and NEO never reads the list.
+    shortcuts: bool = True
+    # The first 30 names in shortcut_run's description, so a model knows them before the user says one.
+    # That sends the names to whichever model gets the tool, a cloud one included: off unless switched on.
+    shortcuts_names_in_prompt: bool = False
+
     @property
     def gemini_keys(self) -> list[str]:
         """All Gemini keys in priority order (free-tier quota is per key, so more keys = more quota)."""

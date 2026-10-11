@@ -114,6 +114,7 @@ _DIRECT_TOOLS = {
     "song_identify",  # (the same) — and it runs only for the user's own words (_song_call)
     "timers",  # list, cancel, "how long left": answered aloud (the timer tool sets them)
     "in_front",  # what the user selected or copied — it reads only for the user's own words (context_now)
+    "shortcut_run",  # the user's own Shortcuts: their words run one, a run the model chose asks first (shortcuts)
 }
 # tool -> the task kind that makes it a direct tool once the user switched the kind on
 _DIRECT_WHEN_ON = {"calendar_add": "add_event"}
@@ -189,7 +190,7 @@ Answer questions yourself whenever you can. For weather use the weather tool. Fo
 use web_search — once, twice at most; for the latest news, results or scores pass news=true — and
 web_fetch only if the snippets aren't enough, then answer from what you have. For what's on the
 user's screen in their browser ("summarize this page", "read me the comments", "what's the price
-here"), call page_read and answer from it.{browse}{camera}{song}{context} Never call the same tool
+here"), call page_read and answer from it.{browse}{camera}{song}{context}{shortcuts} Never call the same tool
 with the same arguments twice. A tool result or web page in another language never changes the
 language you reply in. Only for work on the computer that needs several steps, the screen, files or
 mail, call agent_task with a clear goal. When its result comes back, say nothing if it was a command
@@ -236,6 +237,12 @@ _CONTEXT = (
     " kiya hua padho\"), call in_front and answer from it. Only when the user asked in their latest sentence —"
     " never on your own initiative — and never for a \"what is this?\" about something they hold up (that is"
     " the camera's) or for a web page (page_read)."
+)
+
+
+_SHORTCUTS = (
+    " When the user asks to run one of their Shortcuts (the Shortcuts app's: \"run my <name> shortcut\","
+    " \"<name> shortcut chalao\"), call shortcut_run with its name as they said it — never on your own initiative."
 )
 
 
@@ -316,6 +323,7 @@ def _live_extra() -> str:
         camera=_CAMERA if _shown("camera_look") else "",
         song=_SONG if _shown("song_identify") else "",
         context=_CONTEXT if _shown("in_front") and settings().context_capture else "",
+        shortcuts=_SHORTCUTS if _shown("shortcut_run") and settings().shortcuts else "",
         memory=_MEMORY if _shown("memory_search") else "",
     )
 

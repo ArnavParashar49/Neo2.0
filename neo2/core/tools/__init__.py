@@ -23,8 +23,10 @@ _MODULES = [
     "neo2.core.tools.system", "neo2.core.tools.timers", "neo2.core.tools.web", "neo2.core.tools.weather", "neo2.core.tools.memory_tool", "neo2.core.tools.browser",
     "neo2.core.tools.browse",
 ]  # fmt: skip
+# (The user's Shortcuts come before play_music: "<name> shortcut chalao" naming one of theirs is that
+# shortcut, never a song called "<name> shortcut". Every other built-in fast path still comes first.)
 _MAC_ONLY = [
-    "neo2.core.tools.media", "neo2.core.tools.camera.tool", "neo2.core.tools.music.tool",
+    "neo2.core.tools.shortcuts", "neo2.core.tools.media", "neo2.core.tools.camera.tool", "neo2.core.tools.music.tool",
     "neo2.core.tools.routines", "neo2.core.tools.quality", "neo2.core.tools.context_now",
 ]
 _MAC_MODULES = ["neo2.core.tools.computer", "neo2.core.tools.selftest"]
@@ -123,6 +125,8 @@ REFUSED: dict[str, str] = {
     "Laya's routing), not an embedded agent's",
     "in_front": "in_front reads NEO.app's user's own selection and clipboard, on their own request: never an "
     "embedded agent's",
+    "shortcut_run": "the user's own Shortcuts are NEO.app's: run on its user's own words, or after their yes, "
+    "never an embedded agent's",
 }
 
 

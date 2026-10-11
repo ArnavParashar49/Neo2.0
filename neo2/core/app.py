@@ -513,6 +513,14 @@ async def run() -> None:
 
         decide.warm()  # scan the apps now, so "play …" doesn't wait for it the first time
         schedule.prune()  # calendar files an earlier run handed to a calendar app
+        try:
+            from neo2.core.tools import shortcuts
+
+            # The user's Shortcuts list, read in the background (RAM only), so "run my … shortcut" is
+            # known the first time; hidden from every model when NEO_SHORTCUTS is off.
+            shortcuts.start()
+        except Exception as e:  # noqa: BLE001 — NEO starts without them
+            print(f"[shortcuts] unavailable: {type(e).__name__}")
 
     # Text works from here on; voice comes up alongside (it may be downloading models).
     await bus().set_state(NeoState.IDLE)

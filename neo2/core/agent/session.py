@@ -109,6 +109,13 @@ _GAME_TOOLS = ("open_app", "activate_app")
 # What the user selected, copied or has in front of them (neo2.core.tools.context_now), and the page in
 # their browser: a request about "this" gets both, whatever its own words select.
 _CONTEXT_TOOLS = ("in_front", "page_read")
+# The fast paths that run even when Laya calls the sentence conversation: a chat model can only say it
+# will (the reliability report, routines, NEO's timers, the user's own Shortcuts).
+_MODEL_CANT = ("quality_report", "routine_manage", "routine_run", "timers", "shortcut_run")
+# A fast-path step whose failure is said as it is, never handed to the agent: no model may start the
+# camera or listening, and a shortcut the user ran would only be asked about again (and may have done
+# part of its work already).
+_SAID_AS_IS = (fastpath.CAMERA_TOOL, fastpath.SONG_TOOL, "shortcut_run")
 _job_ids = itertools.count(1)
 # The recent voice conversation, when a request comes from Gemini Live: the agent can't hear
 # it, so "open it on Amazon" needs it to know what "it" is. Per task (jobs run concurrently).
@@ -453,10 +460,11 @@ class Session:
         # the whole job — no model needed.) A plan covers the whole utterance or nothing.
         # (A memory write — "remember that …", "forget what I said about …" — runs here even when
         # the reflex calls the sentence chat: a chat model would only say it will. So does a question
-        # about NEO's timers — "how long is left on the pasta timer": a chat model can't see them.)
+        # about NEO's timers — "how long is left on the pasta timer": a chat model can't see them —
+        # and "run my <name> shortcut" naming one the user has: a chat model can't run it.)
         if settings().fast_paths and (steps := fastpath.plan(text, origin=origin)) and (
             d.intent != "chat" or _memory_write(steps)
-            or any(name in ("quality_report", "routine_manage", "routine_run", "timers") for name, _ in steps)
+            or any(name in _MODEL_CANT for name, _ in steps)
         ):
             return await self._quick(text, d, steps, job=job, origin=origin)
         # The by-utterance lane: the user's own words point at a control ("start wala button dabao",
@@ -665,8 +673,9 @@ class Session:
                 outcomes.step(job, tool, out.ok, halt=out.halt)
                 # e.g. weather for "the forecast for Q3 sales": the agent can do better. Never NEO's
                 # own question to the user: that is the user's to answer, not a model's.
-                if not out.ok and not out.halt and tool not in (fastpath.CAMERA_TOOL, fastpath.SONG_TOOL):
-                    # (never the camera or listening: no model may start them, so a failure is said as it is)
+                if not out.ok and not out.halt and tool not in _SAID_AS_IS:
+                    # (never the camera or listening: no model may start them, so a failure is said as it is;
+                    # nor a shortcut the user ran: a model's second try would only ask to run it again)
                     log.info(f"  ~ {tool} failed; handing to the agent")
                     ran = "; ".join(f"{tl}({', '.join(f'{k}={v!r}' for k, v in a.items())})" for tl, a in steps[:i])
                     note = f"\n[ALREADY DONE] These steps of the request already ran — don't repeat them: {ran}" if ran else ""
