@@ -164,6 +164,13 @@ class Settings(BaseSettings):
     # is summoned by hand (the summon keys, the orb, push-to-talk), until NEO is idle again. Switched
     # while NEO runs ({"cmd": "set", "name": "wake_word"}) and kept in ~/.neo/.env; see set_wake_word.
     wake_word: bool = True
+    # The microphone heals itself or says so (neo2.core.voice.audio): after the device watcher reopens a
+    # microphone NEO is using, sound has to come in (5 frames within 2 s). If none does, it tries again
+    # after 5, 10, 20, 40, then every 60 s, and on the 3rd silent try in a row (about half a minute) it
+    # tells you once — NEO's page and one macOS notification — until sound comes back. A microphone
+    # closed on purpose is never checked. Off: the watcher as before (a reopen that opened counts as
+    # working, a stall is retried every 30 s, nothing is said).
+    mic_escalate: bool = True
     # Gentle check-ins (opt-in): repeated coughs, sniffles, sneezes or a few seconds of crying make NEO
     # ask a short, kind question. Detection stays on-device (Apple's sound classifier hears only what
     # NEO's microphone captures while it is open anyway; it never opens or holds it, and nothing about

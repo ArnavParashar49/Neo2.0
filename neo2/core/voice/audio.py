@@ -31,9 +31,13 @@ class Mic:
         self._closed = False
         self._wanted = False  # started and not stopped: it should be capturing, stream or not
         self.last_frame = 0.0  # monotonic time of the latest callback
+        # Callbacks since the stream was last opened: the device watcher's proof that a reopen brought
+        # sound back, not just a stream that opened (see _Watcher).
+        self.frames_since_open = 0
 
     def _cb(self, indata, frames, time_info, status) -> None:  # noqa: ANN001
-        self.last_frame = time.monotonic()
+        self.last_frame = _clock()
+        self.frames_since_open += 1
         frame = bytes(indata)
         try:
             self.q.put_nowait(frame)
@@ -51,14 +55,15 @@ class Mic:
 
     def stalled(self) -> bool:
         # No stream at all (a reopen failed: the device vanished) counts too, so it's retried.
-        return self.active and (self._stream is None or time.monotonic() - self.last_frame > _STALL_S)
+        return self.active and (self._stream is None or _clock() - self.last_frame > _STALL_S)
 
     def _open_stream(self) -> None:
         effects.guard("audio", "open the microphone", via=sd.RawInputStream)
         self._stream = sd.RawInputStream(
             samplerate=self.rate, channels=1, dtype="int16", blocksize=FRAME, callback=self._cb
         )
-        self.last_frame = time.monotonic()
+        self.last_frame = _clock()
+        self.frames_since_open = 0
         self._stream.start()
 
     def _close_stream(self) -> None:
@@ -239,6 +244,23 @@ class Speaker:
 # ---- following the devices ---------------------------------------------------------------------
 _STALL_S = 3.0  # a running input stream delivers a frame every 20 ms; this long without one = dead
 _STALL_RETRY_S = 30.0  # don't reopen for a stall more often than this (a broken device stays broken)
+# NEO_MIC_ESCALATE (settings().mic_escalate): a reopen counts only when sound comes in after it. A
+# stream that opens can still deliver nothing: core.log 6002-6038 has 37 "reopened" in a row after a
+# restart, every one silent, about 18 minutes of a NEO that couldn't hear while every reopen looked
+# fine. So after a reopen each microphone the voice is using has to deliver _HEARD_FRAMES callbacks
+# within _HEARD_S; while one doesn't, the watcher tries again after each wait in _BACKOFF_S (the last
+# repeats: a broken device isn't hammered, and every try restarts PortAudio under the speaker too),
+# and on the _TELL_AT-th silent try in a row it tells the user, once (MIC_PROBLEM).
+_HEARD_FRAMES = 5  # 100 ms of sound
+_HEARD_S = 2.0
+_BACKOFF_S = (5.0, 10.0, 20.0, 40.0, 60.0)
+_TELL_AT = 3  # about half a minute without sound
+MIC_PROBLEM = (
+    "NEO can't hear your microphone right now. It keeps trying; if it doesn't come back, check "
+    "Sound → Input or restart NEO."
+)
+_clock = time.monotonic  # the watcher's clock and the microphone's (one, so a test can fake both)
+_sleep = time.sleep
 _streams: weakref.WeakSet = weakref.WeakSet()
 _reopen_lock = threading.Lock()
 _watcher: threading.Thread | None = None
@@ -346,37 +368,191 @@ def reopen_all(reason: str) -> bool:
 
 
 def _watch() -> None:
-    from neo2.core.voice import devices
-
-    last = (devices.default_input(), devices.default_output())
-    last_stall_fix = 0.0
-    broken = False  # the last reopen didn't bring everything back: keep trying
+    """The device watcher's thread: a poll a second, for as long as it is the registered watcher."""
+    w = _Watcher()
     while True:
-        time.sleep(1.0)
+        _sleep(1.0)
+        if _watcher is not threading.current_thread():
+            return  # another one took over (only ever a test's doing): one watcher at a time
         try:
-            if not any(o.active for o in list(_streams)):
-                continue
-            now_dev = (devices.default_input(), devices.default_output())
-            reason = ""
-            if now_dev[0] != last[0]:
-                reason = "the input device changed"
-            elif now_dev[1] != last[1]:
-                reason = "the output device changed"
-            elif (
-                broken
-                or any(
-                    (isinstance(o, Mic) and o.stalled()) or (isinstance(o, Speaker) and o.active and o._stream is None)
-                    for o in list(_streams)
-                )
-            ) and time.monotonic() - last_stall_fix > (_STALL_RETRY_S if not broken else 5.0):
-                reason, last_stall_fix = "the audio stopped working", time.monotonic()
-            last = now_dev
-            if reason:
-                time.sleep(0.4)  # let macOS finish switching (AirPods announce themselves in steps)
-                broken = not reopen_all(reason)
-                last = (devices.default_input(), devices.default_output())
+            w.step()
         except Exception as e:  # noqa: BLE001 — the watcher must outlive any one bad poll
             print(f"[audio] device watch hiccup: {e}")
+
+
+def _escalate() -> bool:
+    try:
+        return bool(settings().mic_escalate)
+    except Exception:  # noqa: BLE001 — settings it can't read: the watcher as it always was
+        return False
+
+
+def _count(name: str) -> None:
+    """Bump a daily counter (content-free: the quality report's microphone line reads these)."""
+    try:
+        from neo2.core.reflex import learn
+
+        learn.count(name)
+    except Exception:  # noqa: BLE001 — a counter's trouble never stops the watcher
+        pass
+
+
+def _notify(text: str) -> None:
+    """One macOS notification, not waited for (the watcher never blocks on it). The words go in as
+    the script's argument, never into the script itself."""
+    import subprocess
+
+    try:
+        subprocess.Popen(
+            [
+                "osascript",
+                "-e", "on run argv",
+                "-e", 'display notification (item 1 of argv) with title "NEO"',
+                "-e", "end run",
+                text,
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )  # fmt: skip
+    except Exception:  # noqa: BLE001 — the page still says it
+        pass
+
+
+def _proved(m: Mic) -> bool:
+    """Has this microphone's current stream brought sound since it opened?"""
+    return m._stream is not None and m.frames_since_open >= _HEARD_FRAMES
+
+
+def _delivering(m: Mic) -> bool:
+    """…and is it still bringing it?"""
+    return _proved(m) and not m.stalled()
+
+
+def _heard(mics: list[Mic]) -> bool:
+    """Right after a reopen: does every microphone in `mics` still in use deliver _HEARD_FRAMES frames
+    within _HEARD_S? Never inside _reopen_lock, so the voice can stop or start one meanwhile (a
+    stopped one has nothing to prove; a restarted one counts from its new stream)."""
+    deadline = _clock() + _HEARD_S
+    while True:
+        waiting = [m for m in mics if m.active and not _proved(m)]
+        if not waiting:
+            return True
+        if all(m._stream is None for m in waiting) or _clock() >= deadline:
+            return False  # (one that didn't even open has nothing to wait for)
+        _sleep(0.05)
+
+
+class _Watcher:
+    """What the device watcher knows between polls, and one poll (:meth:`step`). Every second: when a
+    default device changed, or a microphone stopped delivering (or a stream that should be running
+    isn't), close and reopen everything that should be running on the current devices.
+
+    With NEO_MIC_ESCALATE (settings().mic_escalate, on by default) it also checks that sound really
+    comes in after a reopen. A run of reopens that bring none is an episode: tried again after each
+    wait in _BACKOFF_S rather than every 30 s; on its _TELL_AT-th try the user is told, once (NEO's
+    page through neo2.core.health, and one macOS notification); frames coming back end it, said in the
+    log and taken off the page. Only microphones in use count: one closed on purpose (the wake word
+    off, NEO idle) is not `active`, so nothing is checked or tried for it, and an episode waits until
+    the voice opens it again. Off: exactly the watcher as it was. Logs and counters say what happened
+    and how often, never anything heard."""
+
+    def __init__(self) -> None:
+        from neo2.core.voice import devices
+
+        self.devices = devices
+        self.last = (devices.default_input(), devices.default_output())
+        self.last_stall_fix = 0.0
+        self.broken = False  # the last reopen didn't bring everything back: keep trying
+        self.silent = 0  # reopens in a row after which a microphone in use brought no sound (escalation)
+        self.told = False  # the user was told in this episode
+
+    def step(self) -> None:
+        streams = list(_streams)
+        if not any(o.active for o in streams):
+            return
+        devices = self.devices
+        mics = [o for o in streams if isinstance(o, Mic) and o.active]
+        now_dev = (devices.default_input(), devices.default_output())
+        reason = ""
+        if now_dev[0] != self.last[0]:
+            reason = "the input device changed"
+        elif now_dev[1] != self.last[1]:
+            reason = "the output device changed"
+        else:
+            if self.silent and mics and all(_delivering(m) for m in mics):
+                self._recovered()  # the sound came after the check (a slow Bluetooth start): no reopen
+            # (a microphone that stays silent after a reopen is stalled 3 s later, before any wait ends)
+            stalled = any(m.stalled() for m in mics)
+            if (
+                self.broken
+                or stalled
+                or any(isinstance(o, Speaker) and o.active and o._stream is None for o in streams)
+            ) and _clock() - self.last_stall_fix > self._wait(mics):
+                reason, self.last_stall_fix = "the audio stopped working", _clock()
+                if stalled and not (self.broken or self.silent):
+                    _count("mic_stall")  # a new stall, not a retry of one
+        self.last = now_dev
+        if reason:
+            _sleep(0.4)  # let macOS finish switching (AirPods announce themselves in steps)
+            self.broken = not reopen_all(reason)
+            self.last = (devices.default_input(), devices.default_output())
+            if _escalate():
+                self._check()
+
+    def _wait(self, mics: list[Mic]) -> float:
+        """How long after the last try for a stall to try again."""
+        if self.silent and mics:
+            return _BACKOFF_S[min(self.silent, len(_BACKOFF_S)) - 1]
+        return _STALL_RETRY_S if not self.broken else 5.0
+
+    def _check(self) -> None:
+        """After a reopen: did sound come in? Not: one more silent try (and the user told on the
+        _TELL_AT-th). Yes, after silent ones: the episode is over."""
+        mics = [o for o in list(_streams) if isinstance(o, Mic) and o.active]
+        if not mics:
+            return  # no microphone in use: nothing to hear, nothing to say
+        if _heard(mics):
+            if self.silent:
+                self._recovered()
+            return
+        self.silent += 1
+        self.last_stall_fix = _clock()  # the next try counts from the end of this one
+        _count("mic_reopen_silent")
+        what = (
+            "the microphone didn't open"
+            if any(m.active and m._stream is None for m in mics)
+            else "reopened, but no sound came in"
+        )
+        print(
+            f"[audio] {what} (try {self.silent}; next in {self._wait(mics):g}s; "
+            f"song tap: {'yes' if tapped() else 'no'}; check-in listener: {'yes' if _listeners else 'no'})"
+        )
+        if self.silent >= _TELL_AT and not self.told:
+            self._tell()
+
+    def _tell(self) -> None:
+        self.told = True  # first: whatever fails below, never a second notice this episode
+        print("[audio] told the user NEO can't hear the microphone")
+        _count("mic_notice")
+        try:
+            from neo2.core import health
+
+            health.report("mic", MIC_PROBLEM)  # off the event loop: the page gets it with health.watch
+        except Exception:  # noqa: BLE001 — the notification still says it
+            pass
+        _notify(MIC_PROBLEM)
+
+    def _recovered(self) -> None:
+        told, self.silent, self.told = self.told, 0, False
+        print("[audio] the microphone works again")
+        _count("mic_recovered")
+        if told:
+            try:
+                from neo2.core import health
+
+                health.report("mic", None)
+            except Exception:  # noqa: BLE001
+                pass
 
 
 class OnDemandMic:
