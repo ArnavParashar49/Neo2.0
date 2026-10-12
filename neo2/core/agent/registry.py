@@ -131,6 +131,12 @@ class ToolContext:
 # the user's sentence Live hands over — set by the Session alone (never a model's goal, a Live
 # relay's or anything an embedded agent is handed; a caller's extras never carry it through).
 USERS_WORDS = "users_words"
+# ToolContext.extras key: set on Gemini Live's own direct call of a tool alone (voice/live.py _run_tool),
+# whose user_text is the user's sentence the call answers. A request Live hands the Session with origin
+# "live" — agent_task's goal, in the model's own words — never carries it (the Session drops it from a
+# caller's extras, as it does USERS_WORDS): a tool that runs on the user's own sentence tells the two
+# apart by it, never by the origin alone.
+LIVE_CALL = "live_call"
 
 Handler = Callable[[dict[str, Any], ToolContext], Awaitable[str | ToolOutput] | str | ToolOutput]
 # (regex, args) or (regex, args, check): `check(filled_args)` runs on cached data only and says

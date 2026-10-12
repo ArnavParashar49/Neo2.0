@@ -56,6 +56,7 @@ def env(monkeypatch):
 
     monkeypatch.setattr(system, "osascript", fake_osa)
     system._timer_tasks.clear()
+    monkeypatch.setattr(timers_mod, "_asked", (0.0, ()))  # NEO asked no "which one?"
 
     class Env:
         pass
@@ -175,6 +176,18 @@ def test_cancel_with_several_and_no_name_asks_which(env):
         assert (await _timers(action="cancel", label="5 minute")).endswith("Which one should I cancel?")
         assert await _timers(action="cancel", label="tea") == "Cancelled the Tea timer."
         assert await _timers(action="cancel") == "Cancelled the Pasta timer."  # one left: that one
+
+    asyncio.run(run())
+
+
+def test_two_names_joined_by_and_cancel_both(env):
+    async def run():
+        await _set(10, "Pasta")
+        await _set(3, "eggs")
+        await _set(7, "Tea")
+        out = await _timers(action="cancel", label="pasta timer and the eggs")
+        assert out == "Cancelled the Pasta timer and the eggs timer."  # in the order they were named
+        assert [t["label"] for t in system._load_timers()] == ["Tea"]
 
     asyncio.run(run())
 
@@ -353,6 +366,51 @@ def test_the_fast_paths(env, text, args):
     assert _hit(text) == ("timers", args)
 
 
+@pytest.mark.parametrize(
+    ("text", "args"),
+    [
+        ("how long until the timer goes off", {"action": "left", "label": None}),
+        ("how long until my pasta timer is done?", {"action": "left", "label": "pasta"}),
+        ("how much longer", {"action": "left", "label": None}),
+        ("how much longer on the pasta timer", {"action": "left", "label": "pasta"}),
+        ("timer kitna bacha hai", {"action": "left", "label": None}),
+        ("pasta timer kitna time bacha hai", {"action": "left", "label": "pasta"}),
+        ("pasta timer band karo", {"action": "cancel", "label": "pasta"}),
+        ("cancel the timer for pasta", {"action": "cancel", "label": "pasta"}),
+    ],
+)  # fmt: skip
+def test_more_ways_to_ask_while_a_timer_runs(env, text, args):
+    system._save_timers([{"id": "t1", "label": "Pasta", "due": T0 + 60}])
+    assert _hit(text) == ("timers", args)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # another app's timer (Music's sleep timer, NotchHub's focus timer): never NEO's to cancel
+        "turn off the sleep timer", "stop the focus timer", "kill the timer", "cancel the timer", "stop the timer",
+        "how long is left on the timer", "how much longer", "sleep timer band karo", "timer band karo",
+        "cancel all my timers", "how long until the timer goes off",
+    ],
+)  # fmt: skip
+def test_with_no_neo_timer_running_the_words_go_on_as_before(env, text):
+    hit = _hit(text)
+    assert hit is None or hit[0] != "timers", hit
+
+
+@pytest.mark.parametrize("text", ["turn off the sleep timer", "stop the focus timer", "how long is left on the tea timer"])
+def test_a_name_that_isnt_one_of_neos_timers_goes_on_as_before(env, text):
+    system._save_timers([{"id": "t1", "label": "Pasta", "due": T0 + 60}])
+    hit = _hit(text)
+    assert hit is None or hit[0] != "timers", hit
+
+
+def test_kill_the_timer_with_none_running_is_what_it_was(env):
+    # (before the timers tool, "kill the timer" closed an app called that: it still goes there)
+    hit = _hit("kill the timer")
+    assert hit is not None and hit[0] != "timers"
+
+
 @pytest.mark.parametrize("text", ["how much time is left?", "how long left", "kitna time bacha hai", "कितना समय बचा है"])
 def test_a_bare_how_long_left_is_a_timers_question_only_while_one_runs(env, text):
     hit = _hit(text)
@@ -429,6 +487,43 @@ def test_a_bare_stop_still_cancels_everything(env, monkeypatch):
             r = await s.handle(text, from_user=True)
             assert r.route == "stop"
         assert stopped == [1, 1, 1] and len(system._load_timers()) == 1  # (and a timer isn't a job)
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    ("answer", "left"),
+    [("the pasta one", ["Tea"]), ("pasta", ["Tea"]), ("the second one", ["Tea"]), ("cancel the first one", ["Pasta"])],
+)
+def test_the_answer_to_which_one_cancels_it_even_when_laya_calls_it_chat(env, answer, left):
+    from neo2.core.agent.session import Session
+
+    async def run():
+        await _set(9, "Pasta")
+        await _set(4, "Tea")
+        s = Session(reflex=StopReflex("chat"))
+        r = await s.handle("cancel the timer", from_user=True)
+        assert r.route == "quick" and r.text.endswith("Which one should I cancel?")
+        r = await s.handle(answer, from_user=True)
+        assert r.route == "quick" and r.text.startswith("Cancelled the ")
+        assert [t["label"] for t in system._load_timers()] == left
+
+    asyncio.run(run())
+
+
+def test_which_one_is_answered_only_for_a_minute_and_only_with_a_timers_name(env):
+    async def run():
+        await _set(9, "Pasta")
+        await _set(4, "Tea")
+        await _timers(action="cancel")
+        assert _hit("open notes") is None or _hit("open notes")[0] != "timers"
+        assert _hit("the eggs one") is None
+        assert _hit("the pasta one") == ("timers", {"action": "cancel", "label": "pasta"})
+        env.clock.now += 61
+        assert _hit("the pasta one") is None
+        await _timers(action="cancel")  # asked again …
+        assert await _timers(action="cancel", label="tea") == "Cancelled the Tea timer."
+        assert _hit("the pasta one") is None  # … and answered: the question is closed
 
     asyncio.run(run())
 

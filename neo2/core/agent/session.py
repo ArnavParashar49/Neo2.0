@@ -22,7 +22,16 @@ from neo2.core import logger, runtime
 from neo2.core.agent import batch, camera_words, confirm, fastpath, grants, prefetch, replay, song_words
 from neo2.core.agent.loop import AgentResult, _supersede_observations, run_agent
 from neo2.core.agent.prompt import build as build_prompt
-from neo2.core.agent.registry import USERS_WORDS, Origin, ToolContext, ToolOutput, fence, registry, voiced
+from neo2.core.agent.registry import (
+    LIVE_CALL,
+    USERS_WORDS,
+    Origin,
+    ToolContext,
+    ToolOutput,
+    fence,
+    registry,
+    voiced,
+)
 from neo2.core.config import settings
 from neo2.core.events import NeoState, bus
 from neo2.core.providers import brain
@@ -290,7 +299,8 @@ class Session:
         own = runtime.library_bound()
         # The user's own words, marked for the tools (a blind brain may click numbers only they
         # gave): by NEO.app's Session alone, never on a caller's say-so.
-        request_extras = {k: v for k, v in (extras or {}).items() if k != USERS_WORDS}
+        # (Nor Live's direct-call mark: a request handed to the Session is never Live's own call.)
+        request_extras = {k: v for k, v in (extras or {}).items() if k not in (USERS_WORDS, LIVE_CALL)}
         if (from_user or origin == "user") and not (own or runtime.library_mode()):
             request_extras[USERS_WORDS] = text
         reset: list[tuple[contextvars.ContextVar[Any], contextvars.Token[Any]]] = [

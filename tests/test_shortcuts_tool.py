@@ -19,7 +19,7 @@ import numpy as np
 import pytest
 
 from neo2.core.agent import confirm
-from neo2.core.agent.registry import USERS_WORDS, ToolContext, catalog, registry
+from neo2.core.agent.registry import LIVE_CALL, USERS_WORDS, ToolContext, catalog, registry
 from neo2.core.reflex.schema import Decision
 
 LIST = (
@@ -295,12 +295,31 @@ def test_input_text_goes_in_a_private_file(sc):
 )
 def test_a_run_the_users_words_didnt_choose_asks_first(sc, origin, said, taint):
     _warm(sc)
-    out, _ = _call({"shortcut": "Send ETA"}, origin=origin, said=said, taint=taint)
+    extras = {LIVE_CALL: True} if origin == "live" else None  # (Live's own direct call, as live.py marks it)
+    out, _ = _call({"shortcut": "Send ETA"}, origin=origin, said=said, taint=taint, extras=extras)
     assert out.halt and out.text.startswith("NEEDS_CONFIRM: run your shortcut “Send ETA”")
     assert sc.r.runs == []
     p = confirm.peek()
     assert p is not None and p.tool == "shortcut_run" and p.params["_id"] == ETA_ID
     assert "Shortcut: Send ETA" in p.detail
+
+
+@pytest.mark.parametrize(
+    "origin, extras",
+    [
+        # A request Gemini Live handed the Session in its model's words (agent_task's goal, origin
+        # "live"): the words name the shortcut, but they are the model's — never Live's direct call.
+        ("live", {}),
+        ("live", {USERS_WORDS: "run my send eta shortcut"}),
+        # "user" only with the Session's own mark that these are the user's words.
+        ("user", {}),
+    ],
+)
+def test_words_that_name_it_but_arent_the_users_ask_first(sc, origin, extras):
+    _warm(sc)
+    out, _ = _call({"shortcut": "my send eta"}, origin=origin, said="run my send eta shortcut", extras=extras)
+    assert out.halt and out.text.startswith("NEEDS_CONFIRM: run your shortcut “Send ETA”")
+    assert sc.r.runs == [] and confirm.peek() is not None
 
 
 def test_the_users_yes_runs_exactly_what_the_card_showed(sc):
@@ -421,7 +440,8 @@ def test_a_cancelled_run_is_killed_too(sc):
     sc.r.hang = True
 
     async def go():
-        ctx = ToolContext(user_text="run my send eta shortcut", origin="user")
+        said = "run my send eta shortcut"
+        ctx = ToolContext(user_text=said, origin="user", extras={USERS_WORDS: said})
         task = asyncio.create_task(registry().invoke("shortcut_run", {"shortcut": "Send ETA"}, ctx))
         for _ in range(20):
             await asyncio.sleep(0)
@@ -631,6 +651,22 @@ def test_a_failed_run_is_said_not_handed_to_a_model(sc, session_env):
     r = asyncio.run(Session(reflex=_Reflex("agent")).handle("run my send eta shortcut", from_user=True))
     assert r.route == "quick" and "didn't work" in r.text and not r.silent
     assert session_env.calls == [] and len(sc.r.runs) == 1
+
+
+@pytest.mark.parametrize("intent", ["agent_task", "chat", "quick_action"])
+def test_a_goal_live_hands_over_in_its_models_words_asks_first(sc, session_env, intent):
+    # live.py's agent_task without the user's own sentence: Session.handle(goal, origin="live"). The
+    # shortcut fast path still claims "run my send eta shortcut" (whatever Laya says), but the words are
+    # the model's: the card is staged and nothing runs until the user says yes.
+    from neo2.core.agent.session import Session
+
+    r = asyncio.run(
+        Session(reflex=_Reflex(intent)).handle("run my send eta shortcut", origin="live", taint=[])
+    )
+    assert sc.r.runs == []
+    p = confirm.peek()
+    assert p is not None and p.tool == "shortcut_run" and p.params["_id"] == ETA_ID
+    assert "NEEDS_CONFIRM" in r.text or "Send ETA" in r.text
 
 
 def test_a_greeting_that_names_a_shortcut_keeps_its_route(sc, session_env):

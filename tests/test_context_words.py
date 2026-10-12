@@ -1,7 +1,9 @@
 """The user's words that point at what is in front of them (neo2.core.agent.context_words): "summarize
-what I copied", "translate the selected text", "ye copy kiya hua padho". Only those make NEO read the
-selection, the clipboard, the front window or the Finder selection (neo2.core.tools.context_now) — a bare
-"what is this?" / "ye kya hai" stays the camera's, and an ordinary sentence is nobody's."""
+what I copied", "translate the selected text", "ye copy kiya hua padho", "what does this say". Only those
+make NEO read the selection, the clipboard, the front window or the Finder selection
+(neo2.core.tools.context_now) — a bare "what is this?" / "ye kya hai" stays the camera's, a follow-up
+about the conversation ("explain this answer", "summarize this chat") stays the conversation's, a
+statement ("the selection was great") is no request, and an ordinary sentence is nobody's."""
 
 from __future__ import annotations
 
@@ -46,6 +48,17 @@ ASKS = [
     # this, into an app
     "add this to my calendar",
     "remind me about this",
+    # a question about the words in front of the user ("what does this say"): the selection, else the window
+    "what does this say",
+    "what does this mean",
+    "what does this error mean",
+    "what does this text say?",
+    "what's this error",
+    "what is this message saying",
+    "read this",
+    "read this to me",
+    "read this out loud",
+    "Neo, can you read this for me",
     # the Finder selection
     "summarize these files",
     "what are the selected files",
@@ -57,6 +70,23 @@ ASKS = [
     "isko translate karo",
     "is paragraph ko summarize karo",
     "clipboard mein kya hai",
+    "ye copy kiya hua padho",
+    "ye kya likha hai",
+    "isko padho",
+    # Hindi, as Gemini writes it (Devanagari)
+    "ये कॉपी किया हुआ पढ़ो",
+    "इसे ट्रांसलेट करो",
+    "मैंने जो कॉपी किया वो पढ़ो",
+    "इस पैराग्राफ का सारांश बताओ",
+    "ये सेलेक्ट किया हुआ समझाओ",
+    "क्लिपबोर्ड में क्या है",
+    "ये क्या लिखा है",
+    # a request that starts politely, or with the thing it is about
+    "can you translate this into Hindi",
+    "could you please summarize what I copied",
+    "help me proofread this paragraph",
+    "the selected text, translate it to Hindi",
+    "translate this into Brazilian Portuguese",
 ]
 
 NOT_ASKS = [
@@ -68,9 +98,8 @@ NOT_ASKS = [
     "yeh kya hai?",
     "what am I holding",
     "what does this label say",
-    # a bare question that could be about anything in view: never reads the selection
-    "what does this mean",
-    "read this",
+    "read this label",
+    "what does this sign say",
     # the page in the browser, a video, the screen: other tools'
     "summarize this page",
     "explain this video",
@@ -95,6 +124,51 @@ NOT_ASKS = [
     "send this message",
     "reply to this email",
     "close this document",
+    # "this" that is the conversation: NEO's answer, the chat, a plan or a step
+    "explain this answer",
+    "explain this in simpler words",
+    "can you explain this more simply",
+    "explain this again",
+    "explain this to me like I'm five",
+    "summarize this conversation",
+    "summarize this chat",
+    "explain this concept",
+    "explain this step",
+    "how can I improve this plan",
+    "improve this",
+    "polish this",
+    "simplify this",
+    "how do you spell this word",
+    "what does this mean for my exam",
+    # a statement about the selection, the clipboard or the files, not a request
+    "the selection was great",
+    "these files are too big",
+    "what I copied yesterday was wrong",
+    "that's correct this time",
+    "my clipboard manager isn't working",
+    "the copied files are on the desktop",
+    "this paragraph is too long",
+    "I wrote this paragraph myself",
+    "what's the selection process for IIT",
+    "maine jo copy kiya wo galat tha",
+    "मैंने जो कॉपी किया वो गलत था",
+    # the text to work on is in the sentence itself
+    "translate this to French: hello how are you",
+    "translate this to French hello how are you doing today",
+    "add this to my to-do list: buy milk",
+    "is this sentence correct: I has a apple",
+    'translate this "hola amigo"',
+    # editing the selection in its own app: nothing for NEO to read
+    "copy the selected text",
+    "paste what I copied",
+    "delete these files",
+    "copy this text",
+    "bold the selected text",
+    # Hindi commands and the camera's
+    "ये क्या है",
+    "ये फ़ाइल कॉपी करो",
+    "मैंने गलत चीज़ कॉपी की",
+    "copy karo",
     # ordinary sentences
     "what time is it",
     "open notes",
@@ -132,6 +206,11 @@ def test_the_camera_the_page_and_ordinary_sentences_are_not(text):
         ("ye select kiya hua padho", "selection"),
         ("summarize these files", "files"),
         ("what are the selected files", "files"),
+        ("ये कॉपी किया हुआ पढ़ो", "clipboard"),
+        ("क्लिपबोर्ड में क्या है", "clipboard"),
+        ("ये सेलेक्ट किया हुआ समझाओ", "selection"),
+        ("what does this say", ""),  # a question about what is in front: never the clipboard
+        ("read this", ""),
         ("translate this", ""),  # no word for where: the selection, else the window
         ("add this to my calendar", ""),
         ("", ""),

@@ -68,7 +68,7 @@ from google.genai import types as gt
 from neo2.core.agent import confirm
 from neo2.core.agent.early import early
 from neo2.core.agent.prompt import build as build_prompt
-from neo2.core.agent.registry import ToolContext, fence, registry, voiced
+from neo2.core.agent.registry import LIVE_CALL, ToolContext, fence, registry, voiced
 from neo2.core.agent.session import answer_of, wants_context
 from neo2.core.config import decide_mode, settings
 from neo2.core.events import NeoState, bus
@@ -234,10 +234,10 @@ _CAMERA = (
 
 _CONTEXT = (
     " When the user asks about what they selected, highlighted or copied, or about \"this\" text in front of"
-    " them (\"summarize what I copied\", \"translate the selected text\", \"explain this paragraph\", \"ye copy"
-    " kiya hua padho\"), call in_front and answer from it. Only when the user asked in their latest sentence —"
-    " never on your own initiative — and never for a \"what is this?\" about something they hold up (that is"
-    " the camera's) or for a web page (page_read)."
+    " them (\"summarize what I copied\", \"translate the selected text\", \"explain this paragraph\", \"what"
+    " does this say\", \"ye copy kiya hua padho\"), call in_front and answer from it. Only when the user asked"
+    " in their latest sentence — never on your own initiative — and never for a \"what is this?\" about"
+    " something they hold up (that is the camera's) or for a web page (page_read)."
 )
 
 
@@ -2121,9 +2121,12 @@ class LiveVoice(OnDemandMic):
                             # phrase ("time to" for "time to start working") never overrides the
                             # model, which heard the whole sentence too.
                             args = parsed
-                    out = await registry().invoke(
-                        fc.name, args, ToolContext(user_text=asked or str(args), taint=self._taint, origin="live")
+                    # (LIVE_CALL: this is Live's own call, whose user_text is the user's sentence —
+                    # never a goal Live hands the Session, which has origin "live" too.)
+                    ctx = ToolContext(
+                        user_text=asked or str(args), taint=self._taint, origin="live", extras={LIVE_CALL: True}
                     )
+                    out = await registry().invoke(fc.name, args, ctx)
                     await bus().tool_end(fc.name, out.ok, out.text, job=key)
                 outcomes.step("", fc.name, out.ok, halt=getattr(out, "halt", False))
                 result = out.text

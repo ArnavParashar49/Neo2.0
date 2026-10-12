@@ -521,6 +521,12 @@ async def run() -> None:
             shortcuts.start()
         except Exception as e:  # noqa: BLE001 — NEO starts without them
             print(f"[shortcuts] unavailable: {type(e).__name__}")
+        try:
+            from neo2.core.tools import context_now
+
+            context_now.start()  # in_front hidden from every model when NEO_CONTEXT_CAPTURE is off
+        except Exception as e:  # noqa: BLE001
+            print(f"[in_front] unavailable: {type(e).__name__}")
 
     # Text works from here on; voice comes up alongside (it may be downloading models).
     await bus().set_state(NeoState.IDLE)

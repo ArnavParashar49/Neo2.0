@@ -24,9 +24,10 @@ four places to look (``what``):
 selection, "these files" → Finder's); otherwise the selection when there is one, else the window.
 
 **Who may ask.** Only the user's own words, checked here whoever calls (neo2.core.agent.context_words):
-Gemini Live's direct call for the user's sentence; the agent's call in a request the Session marked as
-the user's own (USERS_WORDS); never a model's goal, an approval's replay, an embedded agent, or the
-call's own arguments. ``NEO_CONTEXT_CAPTURE=0`` turns it all off.
+Gemini Live's own direct call for the user's sentence (LIVE_CALL); the agent's call in a request the
+Session marked as the user's own (USERS_WORDS); never a model's goal (a request Live hands the Session),
+an approval's replay, an embedded agent, or the call's own arguments. ``NEO_CONTEXT_CAPTURE=0`` turns it
+all off (NEO.app hides the tool from every model at start: :func:`start`).
 
 **What happens to it.** The words are third-party content: fenced as data for the model (untrusted),
 and the request is tainted, so a send or a link that follows asks first and nothing is learned from the
@@ -44,7 +45,7 @@ from urllib.parse import unquote, urlparse
 
 from neo2.core import effects, runtime
 from neo2.core.agent import context_words
-from neo2.core.agent.registry import USERS_WORDS, ToolContext, ToolOutput, tool
+from neo2.core.agent.registry import LIVE_CALL, USERS_WORDS, ToolContext, ToolOutput, catalog, tool
 from neo2.core.config import settings
 from neo2.core.decide._objc import pooled
 from neo2.core.memory import redact
@@ -78,7 +79,12 @@ end tell
 set AppleScript's text item delimiters to linefeed
 return theNames as text"""
 
-_NOT_ASKED = "NEO reads your selection or clipboard only when you ask for it in your own words."
+# (Said when the words this call answers didn't read as a request about the selection or the clipboard:
+# the user may well have asked for something — just not, as far as NEO can tell, for that.)
+_NOT_ASKED = (
+    "That request didn't read as one about your selection or clipboard, so NEO didn't look: it reads them "
+    "only when you ask about them in so many words (“what I copied”, “the selected text”, “translate this”)."
+)
 _CLIPBOARD_ONLY = (
     'NEO reads the clipboard only when the user says so ("what I copied", "my clipboard"): call in_front '
     "with what=auto for what they selected or have in front of them."
@@ -94,12 +100,13 @@ class _No(Exception):
 
 def users_words(ctx: ToolContext) -> str:
     """The user's own sentence this call answers ("" = none): what the Session marked as theirs (a
-    fast path, an agent run for their request), or the sentence Gemini Live hands its direct call —
-    never a model's goal, an approval's replay, or the call's own arguments (context_words.wants never
-    reads those as a request)."""
+    fast path, an agent run for their request), or the sentence Gemini Live hands its own direct call
+    (LIVE_CALL) — never a model's goal (a request Live hands the Session has origin "live" but no
+    direct call), an approval's replay, or the call's own arguments (context_words.wants never reads
+    those as a request)."""
     if ctx.origin in ("user", "agent"):
         return str(ctx.get(USERS_WORDS, "") or "")
-    if ctx.origin == "live":
+    if ctx.origin == "live" and ctx.get(LIVE_CALL) is True:
         return str(ctx.user_text or "")
     return ""
 
@@ -107,6 +114,15 @@ def users_words(ctx: ToolContext) -> str:
 def enabled() -> bool:
     """NEO_CONTEXT_CAPTURE: on unless the user switched it off."""
     return bool(getattr(settings(), "context_capture", True))
+
+
+def start() -> None:
+    """NEO.app is starting: switched off, in_front is hidden from every model — Gemini Live's
+    declarations, the agent's tool selector, the Session's hook — so off is NEO as it was before it,
+    not a tool that is offered and only refuses. (Read at start, like the setting itself.)"""
+    t = catalog().get("in_front")
+    if t is not None:
+        t.hidden = not enabled()
 
 
 def refusal(ctx: ToolContext) -> str:

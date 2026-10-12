@@ -12,7 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from neo2.core.agent.registry import USERS_WORDS, ToolContext, catalog, registry
+from neo2.core.agent.registry import LIVE_CALL, USERS_WORDS, ToolContext, catalog, registry
 from neo2.core.reflex.schema import Decision
 
 ASKED = "summarize what I copied"
@@ -91,11 +91,15 @@ def world(monkeypatch):
 
 
 def _call(what="auto", words=ASKED, origin="agent", user_text=None, extras=None):
-    ctx = ToolContext(
-        user_text=words if user_text is None else user_text,
-        origin=origin,
-        extras={USERS_WORDS: words} if extras is None and origin in ("agent", "user") else (extras or {}),
-    )
+    if extras is None:  # what NEO itself marks: the Session the user's words, live.py its direct call
+        extras = (
+            {USERS_WORDS: words}
+            if origin in ("agent", "user")
+            else {LIVE_CALL: True}
+            if origin == "live"
+            else {}
+        )
+    ctx = ToolContext(user_text=words if user_text is None else user_text, origin=origin, extras=extras)
     out = asyncio.run(registry().invoke("in_front", {"what": what}, ctx))
     return out, ctx
 
@@ -115,7 +119,21 @@ def test_the_users_words_read_the_clipboard_fenced_and_tainting(world):
 def test_a_live_call_without_the_users_words_is_refused(world, asked):
     out, ctx = _call(origin="live", words=asked)
     assert not out.ok and "only when you ask" in out.text
+    # (it says the words didn't read as being about the selection — never that the user didn't ask)
+    assert "didn't read as one about your selection or clipboard" in out.text
     assert world.pb.read == [] and ctx.taint == []
+
+
+@pytest.mark.parametrize(
+    "asked", ["what does this say", "read this to me", "what's this error", "ये क्या लिखा है"]
+)
+def test_a_live_call_for_a_question_about_what_is_in_front_reads_it_never_the_clipboard(world, asked):
+    world.focused.sel = "Unexpected token in JSON at position 4"
+    out, _ = _call(what="clipboard", origin="live", words=asked)
+    assert not out.ok and world.pb.read == []  # the model asked for the clipboard: never on these words
+    out, ctx = _call(what="auto", origin="live", words=asked)
+    assert out.ok and "Unexpected token" in out.text and ctx.taint == ["in_front"]
+    assert world.pb.read == []
 
 
 def test_a_live_call_with_the_users_words_runs(world):
@@ -129,6 +147,13 @@ def test_a_live_call_whose_only_words_are_its_own_arguments_is_refused(world):
         origin="live", words="", user_text=str({"what": "clipboard", "why": "summarize what I copied"})
     )
     assert not out.ok and world.pb.read == []
+
+
+def test_a_request_live_hands_the_session_in_its_models_words_never_reads(world):
+    # Session.handle(goal, origin="live"): the words are the model's, even when they name the clipboard.
+    # Only live.py's own direct call (marked LIVE_CALL) carries the user's sentence.
+    out, _ = _call(origin="live", words=ASKED, extras={})
+    assert not out.ok and "only when you ask" in out.text and world.pb.read == []
 
 
 def test_an_agents_call_needs_the_users_own_words_marked_by_the_session(world):
@@ -466,12 +491,71 @@ def test_the_session_hook_also_takes_laya_s_one_tool_lane(session_env):
     assert r.route == "agent" and "in_front" in session_env.calls[0][1]
 
 
-@pytest.mark.parametrize("text", ["tell me a joke", "explain quantum physics"])
+@pytest.mark.parametrize(
+    "text",
+    ["what does this say", "read this to me", "what's this error", "ये कॉपी किया हुआ पढ़ो", "इसे ट्रांसलेट करो"],
+)
+def test_a_question_about_what_is_in_front_and_hindi_reach_in_front(session_env, text):
+    from neo2.core.agent.session import Session
+
+    r = asyncio.run(Session(reflex=_Reflex("chat")).handle(text, from_user=True))
+    assert r.route == "agent" and "in_front" in session_env.calls[0][1] and session_env.streamed == 0
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "tell me a joke",
+        "explain quantum physics",
+        # the conversation's "this", a statement, and text the sentence carries itself: as before P8
+        "explain this answer",
+        "explain this in simpler words",
+        "summarize this conversation",
+        "how can I improve this plan",
+        "the selection was great",
+        "what I copied yesterday was wrong",
+        "translate this to French: hello how are you",
+        "add this to my to-do list: buy milk",
+    ],
+)
 def test_other_words_take_their_old_route(session_env, text):
     from neo2.core.agent.session import Session
 
     r = asyncio.run(Session(reflex=_Reflex("chat")).handle(text, from_user=True))
     assert r.route == "chat" and session_env.streamed == 1 and session_env.calls == []
+
+
+@pytest.mark.parametrize(
+    "said, step",
+    [
+        ("search what I copied on youtube", "search_site"),
+        ("search the selected text on amazon", "search_site"),
+        ("play what I copied", "play_music"),
+        ("open what I copied", "open_app"),
+        ("google what I copied", "web_search"),
+    ],
+)
+def test_a_fast_path_never_runs_on_a_name_for_what_is_in_front(world, monkeypatch, said, step):
+    # The query would be the words "what I copied": the text is on the clipboard, so no fast path takes
+    # the sentence (the Session's hook, or Gemini Live's model, reads it first with in_front).
+    from neo2.core import config
+    from neo2.core.agent import fastpath
+    from neo2.core.voice import live as live_mod
+
+    assert fastpath.plan(said) is None and live_mod._command_steps(said) is None
+    assert fastpath.plan("search cat videos on youtube") is not None  # (a real query still runs)
+    monkeypatch.setenv("NEO_CONTEXT_CAPTURE", "0")  # switched off: the words run as they always did
+    monkeypatch.setattr(config, "_settings", None)
+    plan = fastpath.plan(said)
+    assert plan is not None and plan[0][0] == step
+
+
+@pytest.mark.parametrize("intent", ["quick_action", "agent_task"])
+def test_the_session_reads_what_was_copied_before_searching_for_it(session_env, intent):
+    from neo2.core.agent.session import Session
+
+    r = asyncio.run(Session(reflex=_Reflex(intent)).handle("search for what I copied", from_user=True))
+    assert r.route == "agent" and "in_front" in session_env.calls[0][1]
 
 
 def test_a_models_goal_never_takes_the_hook(session_env):
@@ -536,6 +620,35 @@ def test_live_declares_and_explains_in_front_only_while_it_is_there(world, monke
         catalog().register(prev)
 
 
+def test_switched_off_neo_app_hides_it_from_every_model(world, monkeypatch):
+    # NEO_CONTEXT_CAPTURE=0 is today's NEO: no in_front in Live's declarations or an agent's tool list
+    # (not a tool that is offered and only refuses). NEO.app hides it at start, as it does shortcut_run.
+    from neo2.core import config
+    from neo2.core.agent.session import wants_context
+    from neo2.core.agent.toolselect import ToolSelector
+    from neo2.core.tools import context_now as cn
+    from neo2.core.voice import live as live_mod
+
+    t = catalog().get("in_front")
+    before = t.hidden
+    try:
+        monkeypatch.setenv("NEO_CONTEXT_CAPTURE", "0")
+        monkeypatch.setattr(config, "_settings", None)
+        cn.start()
+        assert t.hidden
+        assert "in_front" not in [d.name for d in live_mod._declarations()]
+        assert "in_front" not in live_mod._live_extra()
+        specs = ToolSelector().select(ASKED, required=("in_front",)).specs(registry())
+        assert "in_front" not in [sp.name for sp in specs]
+        assert not wants_context(ASKED)
+        monkeypatch.delenv("NEO_CONTEXT_CAPTURE")
+        monkeypatch.setattr(config, "_settings", None)
+        cn.start()  # on (the default): there for every model, as before
+        assert not t.hidden and "in_front" in [d.name for d in live_mod._declarations()]
+    finally:
+        t.hidden = before
+
+
 def _live_voice(session=None):
     """A Gemini Live voice with no connection: tool responses land in `sent`."""
     import threading
@@ -586,6 +699,9 @@ def test_live_direct_call_on_the_models_own_idea_is_refused(world, monkeypatch):
     "said, handed",
     [
         ("summarize what I copied", ("summarize what I copied", "user")),  # the user's own words, as theirs
+        ("ये कॉपी किया हुआ पढ़ो", ("ये कॉपी किया हुआ पढ़ो", "user")),  # in Hindi, as Gemini writes it
+        ("what does this say", ("what does this say", "user")),
+        ("explain this answer", ("Summarize the clipboard", "live")),  # the conversation's: the model's goal
         ("tell me something nice", ("Summarize the clipboard", "live")),  # the model's goal, as before
     ],
 )

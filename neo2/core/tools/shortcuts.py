@@ -15,8 +15,10 @@ through a model, until the next refresh.
 the lights), so the user's own words are the only thing that runs one straight away:
 
 * the user's sentence names it — a fast path ("run my <name> shortcut", the name exactly as their list
-  has it), or the sentence Gemini Live hands its own direct call, which must name the same shortcut;
-* anything else — a model inside the agent loop, Live's model on its own idea, an approval replay of
+  has it) on the words the Session marked as theirs, or the sentence Gemini Live hands its own direct
+  call (marked LIVE_CALL), which must name the same shortcut;
+* anything else — a model inside the agent loop, Live's model on its own idea, a goal Live hands the
+  Session in its model's words (agent_task: origin "live", but no direct call), an approval replay of
   a card someone else staged, or a request that has read something untrusted (a page, a mail) — stages
   a card first, "Run your shortcut “<name>”?", whatever NEO's confirmation setting says.
 
@@ -55,7 +57,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from neo2.core import logger, runtime
-from neo2.core.agent.registry import ToolContext, ToolOutput, catalog, tool
+from neo2.core.agent.registry import LIVE_CALL, USERS_WORDS, ToolContext, ToolOutput, catalog, tool
 from neo2.core.config import settings
 
 log = logger(__name__)
@@ -328,11 +330,19 @@ def named_in(words: str, have: list[Shortcut]) -> Shortcut | None:
 
 
 def _users_pick(ctx: ToolContext, sc: Shortcut, have: list[Shortcut]) -> bool:
-    """Did the user's own words choose this shortcut — a fast path's sentence, or the one Gemini Live
-    hands its direct call — in a request that has read nothing untrusted?"""
-    if ctx.origin not in ("user", "live") or ctx.tainted():
+    """Did the user's own words choose this shortcut — a fast path's sentence the Session marked as
+    theirs (USERS_WORDS), or the sentence Gemini Live hands its own direct call (LIVE_CALL) — in a
+    request that has read nothing untrusted? A request Live hands the Session in its model's words
+    (agent_task's goal: origin "live", but no direct call) is a model's choice, however it is worded."""
+    if ctx.tainted():
         return False
-    return named_in(ctx.user_text, have) == sc
+    if ctx.origin == "user":
+        words = str(ctx.get(USERS_WORDS, "") or "")
+    elif ctx.origin == "live" and ctx.get(LIVE_CALL) is True:
+        words = ctx.user_text
+    else:
+        return False
+    return bool(words) and named_in(words, have) == sc
 
 
 # ---- running it ----------------------------------------------------------------------------------------

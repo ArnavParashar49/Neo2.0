@@ -65,8 +65,34 @@ def match(text: str) -> Step | None:
                     filled[k] = v
             if check and not _claims(check[0], filled):
                 continue
+            if _names_text_in_front(filled):
+                continue
             return t.name, filled
     return None
+
+
+def _names_text_in_front(filled: dict) -> bool:
+    """Is a capture only a name for what the user selected or copied ("search what I copied on
+    YouTube" → the query "what I copied", "play the selected text")? Its words are in front of the
+    user, not in the sentence: no fast path can run it, so it goes on to a model that reads them first
+    (in_front: neo2.core.agent.context_words, the Session's hook, Gemini Live's model). Only while NEO
+    can read them — in_front there and NEO_CONTEXT_CAPTURE on; otherwise the words run as they did."""
+    texts = [v for v in filled.values() if isinstance(v, str) and v.strip()]
+    if not texts:
+        return False
+    from neo2.core.agent import context_words
+
+    if not any(context_words.names_text(v) for v in texts):
+        return False
+    t = registry().get("in_front")
+    if t is None or t.hidden:
+        return False
+    try:
+        from neo2.core.config import settings
+
+        return bool(getattr(settings(), "context_capture", True))
+    except Exception:  # noqa: BLE001 — no settings to read (an embedding host): the words as they were
+        return False
 
 
 def _claims(check, filled: dict) -> bool:
