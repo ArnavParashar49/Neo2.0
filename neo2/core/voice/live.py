@@ -74,6 +74,7 @@ from neo2.core.config import decide_mode, settings
 from neo2.core.events import NeoState, bus
 from neo2.core.reflex import is_bare_stop, outcomes
 from neo2.core.reflex.schema import asks_something
+from neo2.core.voice import wakegate
 from neo2.core.voice.audio import Mic, OnDemandMic, Speaker, rms
 from neo2.core.voice.spoken import Asked, ok_line, speakable
 from neo2.core.voice.wake import WakeSpotter
@@ -721,6 +722,10 @@ class LiveVoice(OnDemandMic):
     _routine_claim: tuple[int, dict[int, str]] | None = None  # a routine being said: first sentence, all of them
     _reconnecting = False  # a dropped session that was listening is being reopened (see _lost)
     _woke_at = 0.0  # the latest wake (wake word / hotkey / push-to-talk)
+    # the wake gate (neo2.core.voice.wakegate; see _mic_loop): a spoken "Neo"'s, until its session closes
+    _wake_gate: wakegate.WakeGate | None = None
+    _gate_woke = 0.0  # when that wake began: words after it are words for it
+    _gate_held: list[bytes] | None = None  # (NEO_WAKE_GATE=on) the frames after it, until a voice confirms it
     _words_at = 0.0  # the user's latest words this session: transcribed by the server, or typed
     _last_voice_at = 0.0  # the local detector last heard a voice in the room (anyone's)
     _turn_audio = False  # the model's current turn has a voice in it (playing, or held by the gate)
@@ -823,8 +828,12 @@ class LiveVoice(OnDemandMic):
     async def wake(self, source: str = "ui", *, listen_timeout_s: float | None = None) -> None:
         """"Neo", the hotkey, the tray, push-to-talk: from now on the mic goes up to the model.
         A session that was answering typed words starts listening too; the clock for "nothing
-        said" starts here (or when the session is actually open, if connecting took a while)."""
+        said" starts here (or when the session is actually open, if connecting took a while).
+        A spoken "Neo" ("voice") that woke a session is counted, and gated (_arm_gate); a wake by
+        hand while one waits settles its gate — the user is there."""
         early().listening("wake")  # warm what the request will need while the user speaks (never waits)
+        if source != "voice" and self._wake_gate is not None:
+            self._wake_gate.confirm()
         self._listen_timeout_override = listen_timeout_s
         if source != "check-in":  # the user summoned NEO: what follows is their own request
             self._checkin_listening, self._checkin_until = False, 0.0
@@ -839,6 +848,8 @@ class LiveVoice(OnDemandMic):
         if self._live:
             if heard:
                 print(f"[voice] woke ({source})")
+                if source == "voice":
+                    self._arm_gate()
             await self._refresh_state()
         else:
             self._listening = False  # no session opened: nothing is listening
@@ -1139,6 +1150,7 @@ class LiveVoice(OnDemandMic):
         self._checkin_until = 0.0
         self._routine_claim = None  # (a collector still waiting has its parts; it returns them)
         self._gate, self._held = None, []
+        self._gate_done()  # (before anything awaits: a new "Neo" meanwhile gets a gate of its own)
         self._result_pending = self._result_speech = False
         self._lane_utt = -1
         if self._utterance:  # a sentence the model never finished answering is still what was said
@@ -1171,6 +1183,10 @@ class LiveVoice(OnDemandMic):
         mid_turn, listening = self._mid_turn(), self._listening
         # (A listening session that comes straight back keeps its microphone meanwhile.)
         self._reconnecting = mid_turn and listening and not self._closing
+        if self._reconnecting and self._wake_gate is not None:
+            # Mid-turn means words came: nothing is left to ask. The session coming back is no wake
+            # and isn't gated, and what this one held back never goes to it.
+            self._wake_gate.confirm()
         try:
             await self._close_session()
             if mid_turn and not self._closing:
@@ -1273,14 +1289,17 @@ class LiveVoice(OnDemandMic):
         pause in them is part of the sentence, not silence."""
         return self._turn_open and bool(self._words_at)
 
-    def _hear(self, frame: bytes) -> None:
+    def _hear(self, frame: bytes) -> int:
         """Feed the local VAD; remember when a voice was last heard in the room. It counts as the
         user speaking only mid-sentence (see _silence_watch) — the detector can't tell them
-        from the TV."""
+        from the TV. Returns how much of the audio was a voice, in samples — whole 32 ms windows,
+        or with the energy fallback the whole frame or nothing: the wake gate's measure."""
         if self._vad is None:
             if rms(frame) > 0.02:
                 self._voice_now()
-            return
+                return len(frame) // 2
+            return 0
+        voiced = 0
         self._vad_buf = np.concatenate(
             [self._vad_buf, np.frombuffer(frame, dtype=np.int16).astype(np.float32) / 32768.0]
         )
@@ -1291,8 +1310,10 @@ class LiveVoice(OnDemandMic):
 
                 if float(self._vad(torch.from_numpy(chunk.copy()), 16000).item()) > 0.5:
                     self._voice_now()
+                    voiced += _VAD_CHUNK
             except Exception:  # noqa: BLE001
                 pass
+        return voiced
 
     def _voice_now(self) -> None:
         now = time.time()
@@ -1356,13 +1377,88 @@ class LiveVoice(OnDemandMic):
                     except Exception as e:  # noqa: BLE001
                         print(f"[live] wake failed: {e}")
                 continue
-            self._hear(frame)
+            voiced = self._hear(frame)
+            if self._wake_gate is not None:  # a spoken "Neo" a moment ago: did a voice follow it?
+                self._wake_gate.feed(voiced, len(frame) // 2)
+                if self._wake_gate.mode == "on" and await self._held_back(frame):
+                    continue
             try:
                 await self._live.send_realtime_input(
                     audio=gt.Blob(data=frame, mime_type="audio/pcm;rate=16000")
                 )
             except Exception as e:  # noqa: BLE001
                 await self._lost(self._live, f"send failed: {str(e)[:100]}")
+
+    # ---- the wake gate (neo2.core.voice.wakegate) ------------------------------------------------
+    def _arm_gate(self) -> None:
+        """A spoken "Neo" woke a session: count it, and gate it unless NEO_WAKE_GATE is off. Its
+        deadline runs from the wake, or from the session opening if connecting took longer."""
+        wakegate.tally("wake_voice")
+        if self._wake_gate is not None:
+            self._gate_done()  # (one whose session never closed: its own line first)
+        self._wake_gate = wakegate.new_gate(opened_at=max(self._woke_at, self._session_open))
+        self._gate_woke, self._gate_held = self._woke_at, []
+
+    async def _held_back(self, frame: bytes) -> bool:
+        """NEO_WAKE_GATE=on, the frames after a spoken "Neo": is this one kept from the model?
+
+        Until a voice confirms the wake, every frame waits here, in RAM. Confirmed, everything that
+        waited goes up first, in order — exactly the audio that would have gone up by now — and the
+        frame goes on as usual. Rejected (nobody spoke after the wake): none of it ever leaves the
+        Mac. The session closes, as it would after listen_timeout_s with nothing said — unless it
+        is in use anyway (answering typed words, a tool running, NEO talking): then it only stops
+        listening, deaf again as before the wake, and the gate is done (a wake by hand after that
+        is the user's, never gated). True: the frame doesn't go on (also when the session ended
+        while what was held went up)."""
+        gate, live = self._wake_gate, self._live
+        if gate is None or live is None:
+            return False
+        if gate.pending():
+            if self._gate_held is None:
+                self._gate_held = []
+            self._gate_held.append(frame)
+            return True
+        if gate.passed:
+            held, self._gate_held = self._gate_held or [], []
+            for f in held:
+                if self._live is not live:
+                    return True  # (it closed meanwhile: the rest goes nowhere)
+                try:
+                    await live.send_realtime_input(audio=gt.Blob(data=f, mime_type="audio/pcm;rate=16000"))
+                except Exception as e:  # noqa: BLE001
+                    await self._lost(live, f"send failed: {str(e)[:100]}")
+                    return True
+            return self._live is not live
+        self._gate_held = None
+        in_use = (
+            bool(self._words_at)
+            or self._turn_open
+            or self._speaking
+            or self.spk.playing.is_set()
+            or any(not t.done() for t in self._tool_tasks.values())
+        )
+        if in_use:
+            print("[voice] wake without speech; not listening (gate)")
+            self._listening = False
+            self._gate_done()
+            await self._refresh_state()
+        else:
+            print("[voice] wake without speech; dropped (gate)")
+            self._closing = True
+            await self._close_session()
+        return True
+
+    def _gate_done(self) -> None:
+        """The session a spoken "Neo" woke is over: its gate's one line (numbers and fixed words)
+        and its daily counters. "Words" are the user's after the wake, transcribed or typed — with
+        a drop, in shadow, the gate was wrong."""
+        gate, self._wake_gate, self._gate_held = self._wake_gate, None, None
+        if gate is None:
+            return
+        words = self._words_at > self._gate_woke
+        print(gate.line(words=words))
+        for name in gate.counters(words=words):
+            wakegate.tally(name)
 
     # ---- server events ----------------------------------------------------------------
     async def _recv_loop(self, live) -> None:

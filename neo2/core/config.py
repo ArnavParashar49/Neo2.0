@@ -164,6 +164,17 @@ class Settings(BaseSettings):
     # is summoned by hand (the summon keys, the orb, push-to-talk), until NEO is idle again. Switched
     # while NEO runs ({"cmd": "set", "name": "wake_word"}) and kept in ~/.neo/.env; see set_wake_word.
     wake_word: bool = True
+    # The wake gate (neo2.core.voice.wakegate): after a spoken "Neo", does the Mac's own voice detector
+    # hear someone go on talking — wake_gate_speech_ms of voice (past the end of "Neo" itself) within
+    # wake_gate_s of the wake, or of the session opening if connecting took longer? "shadow" (the
+    # default) only measures: the audio goes up exactly as before, and each wake's verdict is logged
+    # and counted (numbers only) for the quality report. "on" holds the audio after a spoken "Neo"
+    # back until a voice confirms it — then sends all of it, in order — and closes a wake nobody
+    # spoke after without any of the room leaving the Mac. "off": no gate. A wake by hand (the
+    # summon keys, the orb, push-to-talk, a host) and a check-in are never gated.
+    wake_gate: Literal["off", "shadow", "on"] = "shadow"
+    wake_gate_s: float = 3.0
+    wake_gate_speech_ms: int = 300
     # The microphone heals itself or says so (neo2.core.voice.audio): after the device watcher reopens a
     # microphone NEO is using, sound has to come in (5 frames within 2 s). If none does, it tries again
     # after 5, 10, 20, 40, then every 60 s, and on the 3rd silent try in a row (about half a minute) it
@@ -185,6 +196,30 @@ class Settings(BaseSettings):
     tts_model: str = "mlx-community/Kokoro-82M-bf16"
     tts_voice: str = "af_heart"
     live_voice: str = "Charon"
+
+    @field_validator("wake_gate", mode="before")
+    @classmethod
+    def _wake_gate(cls, v):
+        """A typo must not stop NEO from starting, and never turns the gate on: anything but off,
+        shadow or on is shadow (it only measures)."""
+        s = str(v or "").strip().lower()
+        return s if s in ("off", "shadow", "on") else "shadow"
+
+    @field_validator("wake_gate_s", "wake_gate_speech_ms", mode="before")
+    @classmethod
+    def _wake_gate_numbers(cls, v, info):
+        """A number it can't read is the default, and one out of reason is brought back into it: a
+        gate of no time at all, switched on, would drop every spoken "Neo"."""
+        bounds = {"wake_gate_s": (1.0, 10.0, 3.0), "wake_gate_speech_ms": (100, 2000, 300)}
+        lo, hi, default = bounds[info.field_name]
+        try:
+            x = float(str(v).strip())
+        except (TypeError, ValueError):
+            return default
+        if x != x:  # NaN
+            return default
+        x = min(hi, max(lo, x))
+        return int(x) if info.field_name == "wake_gate_speech_ms" else x
 
     # ---- agent -----------------------------------------------------------------------
     max_steps: int = 24
