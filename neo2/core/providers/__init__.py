@@ -587,6 +587,8 @@ class Chain:
             self._demote(p.name, e)
         if self._alone():
             return  # no conversation to tell (and never NEO.app's)
+        if getattr(e, "kind", "") == "key":
+            _key_health(p.name, refused=True)
         from neo2.core.events import bus
 
         who = spoken_name(p.name)  # "Gemini Lite", "the local model"
@@ -602,6 +604,12 @@ class Chain:
             if (w := getattr(e, "retry_after", None)) is not None and 0 <= float(w) <= _WAIT_MAX_S
         ]
         return min(waits) if waits else None
+
+    def _answered(self, p: Provider) -> None:
+        """`p` answered: it's the one that did, and its key (NEO.app's) is known to work again."""
+        self.last_used, self.last_model = p.name, getattr(p, "model", "")
+        if not self._alone():
+            _key_health(p.name, refused=False)
 
     def level(self, messages: list[Message], asked: Any = "medium") -> Level:
         """This step's thinking level: the run's policy's, else what the caller asked for."""
@@ -659,7 +667,7 @@ class Chain:
                 continue
             try:
                 turn = _seen_by(await self._ask(p, messages, system, tools, level, max_tokens), p)
-                self.last_used, self.last_model = p.name, getattr(p, "model", "")
+                self._answered(p)
                 return turn
             except TooSlow as e:  # the run's time is up: no other brain could answer in none
                 failures.append((p.name, e))
@@ -683,7 +691,7 @@ class Chain:
             await asyncio.sleep(secs + 0.5)
             try:
                 turn = _seen_by(await self._ask(p, messages, system, tools, level, max_tokens), p)
-                self.last_used, self.last_model = p.name, getattr(p, "model", "")
+                self._answered(p)
                 return turn
             except TooSlow as e:
                 failures.append((p.name, e))
@@ -702,7 +710,7 @@ class Chain:
                 async for chunk in p.stream(messages, system=system, max_tokens=max_tokens):
                     produced = True
                     yield chunk
-                self.last_used, self.last_model = p.name, getattr(p, "model", "")
+                self._answered(p)
                 return
             except ProviderError as e:
                 if produced:  # can't restart a half-streamed answer
@@ -710,7 +718,29 @@ class Chain:
                 failures.append((p.name, e))
                 if self.sticky:
                     self._demote(p.name, e)
+                if getattr(e, "kind", "") == "key" and not self._alone():
+                    _key_health(p.name, refused=True)
         raise self._no_brain(failures)
+
+
+def _key_health(name: str, *, refused: bool) -> None:
+    """NEO.app's health list: "<provider> refused its API key" while a brain of it is refused (a 401,
+    or a 403 about the key — KeyRefused); cleared when one answers, or the key changes (forget). An
+    embedded agent's brains, and a host's own, never touch it."""
+    if not isinstance(name, str) or not runtime.process_wide_ok():
+        return
+    pid = catalog.provider_of(name)
+    if not pid:
+        return
+    from neo2.core import health
+
+    if refused:
+        health.report(
+            f"key:{pid}",
+            f"{catalog.provider_label(pid)} refused its API key. Open Brains & Keys to replace it.",
+        )
+    else:
+        health.report(f"key:{pid}", None)
 
 
 def _eyes_first(providers: list[Provider]) -> list[Provider]:
@@ -908,6 +938,15 @@ def forget(provider: str | None = None) -> list[str]:
 
         with cerebras_hooks._accounts_lock:
             cerebras_hooks._accounts.pop(_app_pool, None)
+    from neo2.core import health
+
+    # (what the health list said of its key or a model: a new key is asked afresh)
+    if provider:
+        health.report(f"key:{provider}", None)
+        health.clear(f"model:{provider}:")
+    else:
+        health.clear("key:")
+        health.clear("model:")
     try:
         from neo2.core.vision import answer
     except Exception:  # noqa: BLE001 — the camera's module isn't there (a core install): nothing kept

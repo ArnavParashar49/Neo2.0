@@ -117,6 +117,13 @@ def report(key: str, message: str | None) -> None:
         pass
 
 
+def clear(prefix: str) -> None:
+    """Clear every problem whose key starts with `prefix` ("key:anthropic", "model:anthropic:"): a
+    key just replaced or removed (neo2.core.providers.forget)."""
+    for key in [k for k in _live if k.startswith(prefix)]:
+        report(key, None)
+
+
 async def watch(every_s: float = 10.0) -> None:
     """Re-check now and then: permissions granted in System Settings, a key added to the settings
     file — the overlay's problem list follows without a restart."""

@@ -1,23 +1,42 @@
-"""Optional Claude brain (paid). Off unless ANTHROPIC_API_KEY is set and `brain=claude`.
+"""Optional Claude brain (paid). Off unless ANTHROPIC_API_KEY is set and a role names Claude
+(`brain=claude`, or a reference such as ``claude@claude-haiku-5-5``).
 
-Uses adaptive thinking, `output_config.effort`, and server-side refusal fallbacks
-(`fallbacks="default"`) so a policy decline re-runs on a fallback model in the same call.
+Uses adaptive thinking and `output_config.effort`, through the official anthropic SDK. What each
+request carries depends on the model (:data:`PROFILES`): server-side refusal fallbacks
+(`fallbacks="default"`), how NEO's three levels map to the API's effort, and the thinking-binding
+controls. claude-opus-5 sends exactly what it always did. On the 5.5 models and Fable 5.1 a thinking
+block replayed after NEO trimmed or rewrote an earlier turn (fit, the context diet) fails the API's
+conversation check — on every account made since 2026-08-31 a 400 on every multi-step run — so they
+ask the API to drop such a block instead (`prefix_mismatch_behavior: "drop_block"`), and the log
+says how many it dropped (never what was in them). Haiku 5.5 has no server-side fallback: it's
+never sent one. A model not in the table gets adaptive thinking and plain effort, nothing more
+(the Brains & Keys picker says it may not work with NEO).
+
+A refused key (401, 403) is KeyRefused — the chain benches the brain for an hour and the health
+list says so; a 429 says how long to wait (its retry-after); a 400 or 404 about the model puts
+"Claude rejected model X" in the health list.
 """
 
 from __future__ import annotations
 
 import base64
-from collections.abc import AsyncIterator
+import time
+from collections.abc import AsyncIterator, Mapping
+from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Any, Literal
 
 import anthropic
 
+from neo2.core import logger, runtime
 from neo2.core.config import Settings, settings
 from neo2.core.providers.base import (
     BadRequest,
+    KeyRefused,
     Message,
     Overloaded,
     ProviderError,
+    QuotaExhausted,
     RateLimited,
     RequestTooLarge,
     ToolCall,
@@ -29,8 +48,45 @@ from neo2.core.providers.base import (
 from neo2.core.providers.fit import fit
 from neo2.core.providers.history import normalize
 
-_EFFORT = {"low": "low", "medium": "medium", "high": "xhigh"}
+log = logger(__name__)
+
 _TOKEN_BUDGET = 200_000  # context window
+FALLBACK_BETA = "server-side-fallback-2026-07-01"  # (the "default" form of `fallbacks`)
+BINDING_BETA = "thinking-binding-controls-2026-08-01"
+_DROP_BLOCK = {"prefix_mismatch_behavior": "drop_block"}
+_NO_CREDIT_S = 3600.0  # a 402 (no credit): asked again after this long
+_LMH: Mapping[str, str] = MappingProxyType({"low": "low", "medium": "medium", "high": "high"})
+
+
+@dataclass(frozen=True)
+class Profile:
+    """What a request to one model carries. `fallbacks`: fallbacks="default" (server-side refusal
+    fallback). `effort`: NEO's level → the API's effort. `binding`: the thinking-binding controls
+    (drop a replayed block that fails the conversation check, rather than a 400). `known`: the model
+    is one NEO was built against."""
+
+    fallbacks: bool
+    effort: Mapping[str, str]
+    binding: bool
+    known: bool = True
+
+
+PROFILES: Mapping[str, Profile] = MappingProxyType(
+    {
+        # exactly the request NEO always sent: its effort "high" is the API's xhigh
+        "claude-opus-5": Profile(True, MappingProxyType({"low": "low", "medium": "medium", "high": "xhigh"}), False),
+        "claude-opus-5-5": Profile(True, _LMH, True),
+        "claude-sonnet-5-5": Profile(True, _LMH, True),  # ("default" fallbacks: the Claude API's form)
+        "claude-fable-5-1": Profile(True, _LMH, True),
+        "claude-haiku-5-5": Profile(False, _LMH, True),  # no server-side fallback for Haiku 5.5
+    }
+)
+UNKNOWN = Profile(False, _LMH, False, known=False)
+
+
+def profile(model: str) -> Profile:
+    """The request profile for `model` (an exact id; any other gets :data:`UNKNOWN`)."""
+    return PROFILES.get(model or "", UNKNOWN)
 
 
 def _img(im) -> dict[str, Any]:
@@ -50,7 +106,9 @@ def _to_messages(messages: list[Message]) -> list[dict[str, Any]]:
                 content.append({"type": "text", "text": m.text or "(empty)"})
             out.append({"role": "user", "content": content})
         elif m.role == "assistant":
-            if m.raw is not None:  # replay Claude's own blocks (incl. thinking + signatures) verbatim
+            # Claude's own blocks (incl. thinking + signatures), verbatim. Another brain's replay
+            # payload (OpenAI's output items) is never Claude's: its text and calls go as below.
+            if isinstance(m.raw, list):
                 out.append({"role": "assistant", "content": m.raw})
                 continue
             content = []
@@ -77,21 +135,69 @@ def _tools(specs: list[ToolSpec] | None) -> list[dict[str, Any]]:
     return [{"name": s.name, "description": s.description, "input_schema": s.parameters} for s in specs or []]
 
 
-def _error(e: Exception) -> ProviderError:
+def _retry_after(e: Exception) -> float | None:
+    """Seconds a 429 (or 529) asks us to wait: its retry-after header."""
+    resp = getattr(e, "response", None)
+    try:
+        h = resp.headers.get("retry-after") if resp is not None else None
+        return max(0.0, float(h)) if h else None
+    except (TypeError, ValueError, AttributeError):
+        return None
+
+
+def _message(e: Exception) -> str:
+    """The API's own error message (its body's error.message), else the exception's."""
+    body = getattr(e, "body", None)
+    if isinstance(body, dict):
+        err = body.get("error")
+        if isinstance(err, dict) and isinstance(err.get("message"), str):
+            return err["message"]
+    return str(getattr(e, "message", "") or e)
+
+
+def model_rejected(e: Exception, model: str) -> bool:
+    """A 400 or 404 about the model itself: a model id the API doesn't know, or this key may not use."""
+    code = getattr(e, "status_code", 0)
+    low = _message(e).lower()
+    if code == 404:
+        return "model" in low
+    if code == 400:
+        return low.startswith("model:") or (bool(model) and f"model: {model.lower()}" in low)
+    return False
+
+
+def _error(e: Exception, name: str = "claude") -> ProviderError:
     if isinstance(e, anthropic.RateLimitError):
-        return RateLimited(str(e))
+        return RateLimited(f"{name}: {e}", retry_after=_retry_after(e))
     if isinstance(e, anthropic.APIStatusError):
+        code = e.status_code
+        if code in (401, 403):  # fixed words: never the API's text, which may quote the key
+            return KeyRefused(f"{name}: Anthropic refused the API key (HTTP {code})")
+        if code == 402:
+            return QuotaExhausted(f"{name}: the Anthropic account has no credit (HTTP 402)", until=time.time() + _NO_CREDIT_S)
         low = str(e).lower()
-        if e.status_code == 413 or "prompt is too long" in low or "too many tokens" in low:
-            return RequestTooLarge(f"claude: {e}")
-        if e.status_code == 529 or e.status_code >= 500:
-            return Overloaded(f"claude: {e}")
-        if 400 <= e.status_code < 500:
-            return BadRequest(f"claude: {e}")
-        return ProviderError(f"claude: {e}")
+        if code == 413 or "prompt is too long" in low or "too many tokens" in low:
+            return RequestTooLarge(f"{name}: {e}")
+        if code == 529 or code >= 500:
+            return Overloaded(f"{name}: {e}", retry_after=_retry_after(e))
+        if 400 <= code < 500:
+            return BadRequest(f"{name}: {e}")
+        return ProviderError(f"{name}: {e}")
     if isinstance(e, anthropic.APIConnectionError):
-        return Unavailable(f"claude: connection error: {e}")
-    return ProviderError(f"claude: {e}")
+        return Unavailable(f"{name}: connection error: {e}")
+    return ProviderError(f"{name}: {e}")
+
+
+def _kept(blocks: list[Any]) -> list[int]:
+    """The reply's blocks to keep (indexes). After a server-side fallback (a `fallback` block marks
+    each switch) the thinking and tool calls of the model that declined, before the last switch,
+    are not the reply's; the marker itself is only an audit note."""
+    types = [getattr(b, "type", "") for b in blocks]
+    last = max((i for i, t in enumerate(types) if t == "fallback"), default=-1)
+    if last < 0:
+        return list(range(len(blocks)))
+    drop = {"thinking", "redacted_thinking", "tool_use", "server_tool_use"}
+    return [i for i, t in enumerate(types) if t != "fallback" and not (i < last and t in drop)]
 
 
 class ClaudeProvider:
@@ -114,6 +220,71 @@ class ClaudeProvider:
             raise Unavailable("ANTHROPIC_API_KEY is not set")
         self.model = model or (Settings.model_fields["claude_model"].default if own else settings().claude_model)
         self._client = client or anthropic.AsyncAnthropic(api_key=key)
+        self._own = own  # a host's: NEO.app's health list and spend caps are never touched by it
+        if own:
+            self._cap = None
+        else:
+            from neo2.core.providers import spend
+
+            self._cap = spend.cap_for("anthropic", settings())
+
+    @property
+    def profile(self) -> Profile:
+        return profile(self.model)
+
+    # ---- what each request carries -----------------------------------------------------------
+    def _extras(self, *, thinking: bool) -> dict[str, Any]:
+        """The model's own part of a request: its thinking config, betas and fallbacks."""
+        pr = self.profile
+        out: dict[str, Any] = {}
+        if pr.binding:
+            out["thinking"] = {"type": "adaptive", "block_binding": dict(_DROP_BLOCK)}
+        elif thinking:
+            out["thinking"] = {"type": "adaptive"}
+        betas = ([FALLBACK_BETA] if pr.fallbacks else []) + ([BINDING_BETA] if pr.binding else [])
+        if betas:
+            out["betas"] = betas
+        if pr.fallbacks:
+            out["fallbacks"] = "default"
+        return out
+
+    def _dropped(self, msg: Any) -> None:
+        """How many replayed thinking blocks the API dropped (the binding controls): a count only."""
+        try:
+            n = len(getattr(msg, "input_transformations", None) or [])
+        except TypeError:
+            return
+        if n:
+            log.info(f"[brain] {self.name}: the API dropped {n} earlier thinking block(s) (history was trimmed)")
+
+    def _rejected(self, e: Exception) -> None:
+        """A 400 or 404 about the model: one health problem (NEO.app's own brains only)."""
+        if self._own or not runtime.process_wide_ok() or not model_rejected(e, self.model):
+            return
+        from neo2.core import brainref, health
+
+        shown = brainref.shown(self.model) or "it was set to"
+        health.report(
+            f"model:anthropic:{self.model}",
+            f"Claude rejected model {shown} — pick a current one in Brains & Keys.",
+        )
+
+    def _works(self) -> None:
+        if not self._own and runtime.process_wide_ok():
+            from neo2.core import health
+
+            health.report(f"model:anthropic:{self.model}", None)
+
+    async def _admit(self) -> None:
+        if self._cap is not None and (refused := self._cap.refusal(self.name)) is not None:
+            await self._cap.tell()
+            raise refused
+
+    async def _count(self, usage: Any) -> None:
+        if self._cap is None or usage is None:
+            return
+        self._cap.add(self.model, int(getattr(usage, "input_tokens", 0) or 0), int(getattr(usage, "output_tokens", 0) or 0))
+        await self._cap.tell()
 
     async def complete(
         self,
@@ -124,6 +295,7 @@ class ClaudeProvider:
         effort: Literal["low", "medium", "high"] = "medium",
         max_tokens: int = 4096,
     ) -> Turn:
+        await self._admit()
         out = max(max_tokens, 16000)
         f = fit(
             messages,
@@ -134,6 +306,7 @@ class ClaudeProvider:
             vision=True,
             name=self.name,
         )
+        pr = self.profile
         try:
             resp = await self._client.beta.messages.create(
                 model=self.model,
@@ -141,18 +314,22 @@ class ClaudeProvider:
                 system=system or anthropic.NOT_GIVEN,
                 messages=_to_messages(f.messages),
                 tools=_tools(f.tools) or anthropic.NOT_GIVEN,
-                thinking={"type": "adaptive"},
-                output_config={"effort": _EFFORT[effort]},
-                betas=["server-side-fallback-2026-07-01"],
-                fallbacks="default",
+                output_config={"effort": pr.effort.get(effort, "medium")},
+                **self._extras(thinking=True),
             )
         except (anthropic.APIStatusError, anthropic.APIConnectionError) as e:
-            raise _error(e) from e
+            self._rejected(e)
+            raise _error(e, self.name) from e
 
+        if pr.binding:
+            self._dropped(resp)
+        self._works()
+        await self._count(getattr(resp, "usage", None))
         if resp.stop_reason == "refusal":
             return Turn(text="I can't help with that one.")
-        turn = Turn(raw=[b.model_dump(exclude_none=True) for b in resp.content])
-        for b in resp.content:
+        keep = _kept(resp.content)
+        turn = Turn(raw=[resp.content[i].model_dump(exclude_none=True) for i in keep])
+        for b in (resp.content[i] for i in keep):
             if b.type == "text":
                 turn.text += b.text
             elif b.type == "tool_use":
@@ -168,6 +345,7 @@ class ClaudeProvider:
     async def stream(
         self, messages: list[Message], *, system: str = "", max_tokens: int = 2048
     ) -> AsyncIterator[str]:
+        await self._admit()
         f = fit(
             messages,
             system=system,
@@ -176,17 +354,29 @@ class ClaudeProvider:
             vision=True,
             name=self.name,
         )
+        pr = self.profile
         try:
             async with self._client.beta.messages.stream(
                 model=self.model,
                 max_tokens=f.max_tokens,
                 system=system or anthropic.NOT_GIVEN,
                 messages=_to_messages(f.messages),
-                output_config={"effort": "low"},
-                betas=["server-side-fallback-2026-07-01"],
-                fallbacks="default",
+                output_config={"effort": pr.effort.get("low", "low")},
+                **self._extras(thinking=False),
             ) as st:
                 async for text in st.text_stream:
                     yield text
+                final = None
+                if pr.binding or self._cap is not None:
+                    try:
+                        final = st.current_message_snapshot
+                    except Exception:  # noqa: BLE001 — no snapshot to read: nothing to log or count
+                        final = None
         except (anthropic.APIStatusError, anthropic.APIConnectionError) as e:
-            raise _error(e) from e
+            self._rejected(e)
+            raise _error(e, self.name) from e
+        if final is not None:
+            if pr.binding:
+                self._dropped(final)
+            await self._count(getattr(final, "usage", None))
+        self._works()
