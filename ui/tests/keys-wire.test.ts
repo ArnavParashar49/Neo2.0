@@ -8,8 +8,9 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { KeysWire, RESULT_OF, type SocketLike, type WireDeps } from "../src/keys/wire.ts";
 import {
-  budgetRows, budgetsAfter, endpointBody, endpointProblem, errorText, formFrom, formFromTemplate, lightFor, modelOptions,
-  providerChoices, quickSetup, quickSetupWith, rolesChanges, shadowNote, sourceText, testText,
+  budgetRows, budgetsAfter, endpointBody, endpointProblem, errorText, formFrom, formFromEndpoint, formFromTemplate,
+  keyMustBeRetyped, lightFor, modelOptions, oldCopiesText, providerChoices, quickSetup, quickSetupWith, rolesChanges,
+  rolesErrorText, shadowNote, sourceText, testText,
 } from "../src/keys/model.ts";
 import type { BrainsDetail } from "../src/keys/types.ts";
 
@@ -331,4 +332,34 @@ test("an endpoint goes out with exactly the core's fields — never a key among 
     assert.match(endpointProblem({ ...f, ...patch }) ?? "", says, JSON.stringify(patch));
   }
   assert.equal(endpointProblem({ ...f, base_url: "http://127.0.0.1:1234/v1" }), null, "http on this Mac");
+});
+
+test("a key pasted as an endpoint's model or name is caught before anything is sent", () => {
+  const f = formFromTemplate({ id: "other", label: "Other endpoint", base_url: "", env: null, key_url: "", key_hint: "", models: {}, tools: true, vision: false, short_tool_ids: false, needs_key: true });
+  const ok = { ...f, label: "Proxy", base_url: "https://api.example.com/v1", model: "meta-llama/llama-4-maverick-17b-128e-instruct" };
+  assert.equal(endpointProblem(ok), null);
+  for (const patch of [{ model: "sk-or-v1-" + "ab12".repeat(16) }, { model: KEY }, { label: KEY }, { model: "a1B2".repeat(9) }]) {
+    assert.match(endpointProblem({ ...ok, ...patch }) ?? "", /looks like an API key/, JSON.stringify(patch).slice(0, 30));
+  }
+});
+
+test("an endpoint moved to another host asks for its key again; the core's refusals are said in its words", () => {
+  const d: BrainsDetail = {
+    ...DETAIL,
+    custom: [{ id: "custom:deepseek", label: "DeepSeek", template: "deepseek", base_url: "https://api.deepseek.com", model: "deepseek-v4-pro", tools: true, vision: false, context: 131072, saved: true }],
+    keys: { ...DETAIL.keys, "custom:deepseek": { set: true, source: "saved", last4: "dsk1" } },
+  };
+  const f = formFromEndpoint(d.custom[0]);
+  assert.equal(keyMustBeRetyped(f, d), false);
+  assert.equal(keyMustBeRetyped({ ...f, base_url: "https://api.deepseek.com/v1" }, d), false, "same host");
+  assert.equal(keyMustBeRetyped({ ...f, base_url: "https://elsewhere.example/v1" }, d), true);
+  assert.equal(keyMustBeRetyped({ ...f, base_url: "http://localhost:1234/v1" }, d), false, "to this Mac: the core drops the old key");
+  assert.equal(keyMustBeRetyped({ ...f, id: null, base_url: "https://elsewhere.example/v1" }, d), false, "a new endpoint");
+  assert.match(errorText("needs_key"), /paste the endpoint's key again/);
+  const said = "That looks like an Anthropic key, so NEO didn't send it to OpenRouter. Paste it where Anthropic keys go.";
+  assert.equal(errorText("wrong_provider", said), said);
+  assert.equal(rolesErrorText("invalid", "brain", "That looks like an API key — paste it under Providers, not as a brain or a name."),
+    "That looks like an API key — paste it under Providers, not as a brain or a name.");
+  assert.match(rolesErrorText("no_tools", "backup_brains"), /Backup answers tasks too/);
+  assert.match(oldCopiesText(2, "~/.neo/api_keys.json"), /^2 older copies of ~\/\.neo\/api_keys\.json .* may hold keys/);
 });

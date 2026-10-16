@@ -79,15 +79,32 @@ export function cleanKey(value: string): { ok: true; key: string } | { ok: false
   return { ok: true, key: s };
 }
 
+function keyWord(word: string): boolean {
+  for (const [prefix] of PREFIXES) {
+    if (word.startsWith(prefix)) return KEY_BODY.test(word.slice(prefix.length));
+  }
+  return word.startsWith("sk-") && OLD_OPENAI_BODY.test(word.slice(3));
+}
+
 /** Typed text that starts with an API key (the composer's guard: such a message goes to no model).
  *  Narrow on purpose — only the known prefixes, each followed by at least 16 key characters — so
  *  "sk-learn" or a long hash is still just text. */
 export function looksLikeKey(text: string): boolean {
   const first = (text ?? "").trim().split(/\s+/, 1)[0] ?? "";
   if (!first) return false;
-  const word = first.replace(/^["'`]+|["'`]+$/g, "");
-  for (const [prefix] of PREFIXES) {
-    if (word.startsWith(prefix)) return KEY_BODY.test(word.slice(prefix.length));
+  return keyWord(first.replace(/^["'`]+|["'`]+$/g, ""));
+}
+
+const PART = /[^/:@\s]+/g;
+const BARE_KEY = /^(?=[A-Za-z0-9]*\d)(?=[A-Za-z0-9]*[A-Za-z])[A-Za-z0-9]{32,}$/;
+
+/** Some part of `text` — a model id, an endpoint's name — is shaped like an API key (neo2/core/
+ *  keyshape.py's keyish): a known prefix with a key's body, or 32+ letters and digits with no
+ *  separator. Such text is never a model id or a name: it's a key pasted into the wrong field. */
+export function keyish(text: string): boolean {
+  for (const m of (text ?? "").matchAll(PART)) {
+    const p = m[0].replace(/^["'`.,;()[\]{}]+|["'`.,;()[\]{}]+$/g, "");
+    if (p && (keyWord(p) || BARE_KEY.test(p))) return true;
   }
-  return word.startsWith("sk-") && OLD_OPENAI_BODY.test(word.slice(3));
+  return false;
 }

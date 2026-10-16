@@ -5,7 +5,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { EXPECTED, KEY_TYPED, PREFIXES, cleanKey, guess, hint, looksLikeKey } from "../src/keys/keyshape.ts";
+import { EXPECTED, KEY_TYPED, PREFIXES, cleanKey, guess, hint, keyish, looksLikeKey } from "../src/keys/keyshape.ts";
 import { KEYED, PROVIDERS, QUICK, TEMPLATE_KEY_URLS, brainName, costBadge, keyPage, keyPages, modelOf, providerOf, refFor } from "../src/keys/catalog.ts";
 
 const ROOT = new URL("../../", import.meta.url);
@@ -113,4 +113,15 @@ test("brain references: the provider, the model after @, and back", () => {
   assert.equal(refFor("anthropic", "claude-haiku-5-5"), "claude@claude-haiku-5-5");
   assert.equal(refFor("openrouter", "x-ai/grok-4.7"), "openrouter@x-ai/grok-4.7");
   assert.equal(refFor("custom:deepseek", null), "custom:deepseek");
+});
+
+test("a model id or a name shaped like a key is caught as the core catches it (keyshape.keyish)", () => {
+  for (const text of ["sk-or-v1-" + "ab12".repeat(16), `custom:x@${KEYS.anthropic}`, "sk-" + "A1b2".repeat(10), "a1B2".repeat(9), `my ${KEYS.openrouter}`, `x/${KEYS.gemini}`]) {
+    assert.ok(keyish(text), text);
+  }
+  for (const text of ["meta-llama/llama-4-maverick-17b-128e-instruct", "qwen3:14b", "deepseek/deepseek-v4-pro", "x-ai/grok-4",
+    "mlx-community/gemma-4-12B-it-4bit", "ft:gpt-6-luna:my-org:custom:A1b2C3d4", "xai-org/grok-1", "Qwen/Qwen2.5-Coder-32B-Instruct",
+    "openai/gpt-oss-120b:free", "deadbeef".repeat(8), "Claude Opus 5.5", "DeepSeek", ""]) {
+    assert.ok(!keyish(text), text);
+  }
 });

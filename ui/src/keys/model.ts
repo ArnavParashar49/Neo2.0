@@ -4,6 +4,7 @@
 // would be refused.
 
 import { LEGACY, PROVIDERS, brainName, modelOf, providerOf, refFor, show } from "./catalog.ts";
+import { keyish } from "./keyshape.ts";
 import type { BrainsDetail, CatalogTemplate, CustomEndpoint, KeyEntry, KeyTestResult, ModelEntry, ModelsResult, Result } from "./types.ts";
 
 export type Role = "brain" | "quick" | "eyes";
@@ -56,7 +57,7 @@ export function testText(r: KeyTestResult | Result): string {
 
 /** A command that failed, in words (never anything it carried). */
 export function errorText(code: string, message?: string): string {
-  if (message && (code === "bad_key" || code === "no_access" || code === "no_credit")) return message;
+  if (message && (code === "bad_key" || code === "no_access" || code === "no_credit" || code === "wrong_provider")) return message;
   switch (code) {
     case "invalid": return "NEO can't use that as it is.";
     case "bad_key": return "The provider didn't accept that key.";
@@ -70,17 +71,22 @@ export function errorText(code: string, message?: string): string {
     case "not_found": return "NEO has no such endpoint saved.";
     case "too_many": return "NEO keeps at most 10 endpoints.";
     case "no_app": return "Only NEO.app can restart NEO. Restart it yourself.";
+    case "wrong_provider": return "That key looks like another provider's, so NEO didn't send it here.";
+    case "needs_key": return "The base URL moved to another host: paste the endpoint's key again (NEO never sends a saved key somewhere new).";
     default: return "That didn't work. Try again.";
   }
 }
 
-/** brains_set's refusal, said for the role it was about. */
-export function rolesErrorText(code: string, field?: string): string {
+/** brains_set's refusal, said for the role it was about (the core's own words when it gave some). */
+export function rolesErrorText(code: string, field?: string, message?: string): string {
+  if (message) return message;
   const who = ROLE_NAME[field ?? ""] ?? "That";
   switch (code) {
     case "invalid": return `${who}: that isn't a brain NEO knows.`;
     case "not_configured": return `${who}: that provider isn't set up yet. Add its key first (or start it, for a model on this Mac).`;
-    case "no_tools": return "The Brain has to call tools. Pick another model, or use this one for Quick replies.";
+    case "no_tools": return field === "backup_brains"
+      ? "A Backup answers tasks too, so it has to call tools. Pick another, or use this one for Quick replies."
+      : "The Brain has to call tools. Pick another model, or use this one for Quick replies.";
     case "cant_see": return "Eyes has to see pictures. Pick a model that sees.";
     default: return errorText(code);
   }
@@ -170,7 +176,8 @@ export function badges(provider: string, o: ModelOption | undefined, d: BrainsDe
 }
 
 /** One-step commands: Gemini Flash-Lite while Quick replies is Gemini; otherwise Quick replies' own
- *  brain ("") — a Claude user's commands don't quietly go to Gemini. */
+ *  brain ("") — a Claude user's commands don't quietly go to Gemini. (A Quick replies brain that
+ *  can't call tools is passed over for them by the core's chain: the Brain answers them.) */
 export function lightFor(fastRef: string): string {
   return providerOf(fastRef) === "gemini" ? "gemini_lite" : "";
 }
@@ -271,6 +278,13 @@ export function voiceChoice(value: string): "live" | "local" | "off" {
   return value === "local" ? "local" : value === "off" ? "off" : "live";
 }
 
+/** Copies of the key file NEO set aside (it couldn't read them) are still on disk, and may hold keys
+ *  that Remove here never touches: said, so the user can delete them. */
+export function oldCopiesText(n: number, path: string): string {
+  const what = n === 1 ? "An older copy" : `${n} older copies`;
+  return `${what} of ${path} (named …bad-<date>) ${n === 1 ? "is" : "are"} still in that folder and may hold keys. Delete ${n === 1 ? "it" : "them"} in Finder if you don't need ${n === 1 ? "it" : "them"}: removing a key here doesn't touch ${n === 1 ? "it" : "them"}.`;
+}
+
 /** What a terminal user runs instead, when no window can reach the core. */
 export function cliLines(provider = "gemini"): string[] {
   return [`python -m neo2 keys set ${provider}`, "python -m neo2 brain set --brain REF --quick REF --eyes REF"];
@@ -343,9 +357,28 @@ export function endpointProblem(f: EndpointForm): string | null {
   if (u.username || u.password) return "The base URL can't hold a user name or password.";
   if (u.search || u.hash || f.base_url.includes("?") || f.base_url.includes("#")) return "The base URL can't have a query.";
   if (f.base_url.trim().length > 300) return "The base URL is too long.";
+  if (keyish(f.model) || keyish(f.label)) return "That looks like an API key: paste it in the Key field, not as the name or the model.";
   if (!/^[A-Za-z0-9._:/+-]{1,160}$/.test(f.model.trim())) return "Pick or type a model id.";
   if (!Number.isInteger(f.context) || f.context < 4096 || f.context > 2_000_000) return "The context size is 4096 to 2,000,000 tokens.";
   return null;
+}
+
+/** Where a key sent to a base URL goes: its scheme, host and port (null: not a URL). */
+export function originOf(baseUrl: string): string | null {
+  try {
+    const u = new URL(baseUrl.trim());
+    return `${u.protocol}//${u.hostname.toLowerCase()}:${u.port || (u.protocol === "https:" ? "443" : "80")}`;
+  } catch { return null; }
+}
+
+/** An endpoint being edited whose base URL now points somewhere else than where it was saved: its
+ *  saved key isn't sent there (the core refuses), so the form asks for the key again. */
+export function keyMustBeRetyped(f: EndpointForm, d: BrainsDetail | null): boolean {
+  if (!f.id) return false;
+  const was = endpoint(d, f.id);
+  if (!was || !d?.keys[f.id]?.set || d.keys[f.id]?.source !== "saved") return false;
+  const a = originOf(was.base_url), b = originOf(f.base_url);
+  return !!a && !!b && a !== b && !onThisMac(f.base_url);
 }
 
 /** The endpoint as custom_save, key_test and models_list take it: exactly the core's fields. */

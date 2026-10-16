@@ -10,7 +10,8 @@ import { KEYED, QUICK, TEMPLATE_KEY_URLS, costBadge, keyPage, providerOf, show }
 import { cleanKey, hint } from "./keyshape";
 import {
   FIELD, badges, budgetRows, budgetsAfter, cliLines, configured, endpointBody, endpointProblem, errorText,
-  formFrom, formFromEndpoint, formFromTemplate, headline, modelOptions, onThisMac, providerChoices, providersInUse,
+  formFrom, formFromEndpoint, formFromTemplate, headline, keyMustBeRetyped, modelOptions, oldCopiesText, onThisMac,
+  providerChoices, providersInUse,
   quickSetup, quickSetupWith, refFor, rolesChanges, rolesErrorText, shadowNote, sourceText, templates, testText,
   voiceChoice, type EndpointForm, type Role, type RoleForm,
 } from "./model";
@@ -146,6 +147,11 @@ export function KeysApp() {
               : `NEO couldn't read ${detail.store.path}: it counts as empty, and is set aside (as .bad-…) the next time you save a key.`}
           </div>
         )}
+        {live && detail && (detail.store.old_copies ?? 0) > 0 && (
+          <div className="kx-banner warn" role="status">
+            {oldCopiesText(detail.store.old_copies ?? 0, detail.store.path)}
+          </div>
+        )}
         {live && problems.filter((p) => !(quick && /^NEO has no AI model yet\b/.test(p))).slice(0, 4).map((p) => <div key={p} className="kx-problem">{p}</div>)}
         {live && !detail && <div className="kx-loading">Reading NEO's brains…</div>}
         {live && detail && quick && <QuickStart detail={detail} ask={ask} refresh={refresh} loadModels={loadModels} onSkip={() => setMode("all")} />}
@@ -239,7 +245,7 @@ function QuickKey({ pid, ask, refresh, loadModels, onDone }: { pid: string; ask:
 
   const finish = async (plan: Record<string, unknown>) => {
     const r = await ask("brains_set", plan);
-    if (!r.ok) { setMsg({ tone: "bad", text: rolesErrorText(String(r.error ?? ""), r.field as string | undefined) }); return; }
+    if (!r.ok) { setMsg({ tone: "bad", text: rolesErrorText(String(r.error ?? ""), r.field as string | undefined, r.message as string | undefined) }); return; }
     await refresh();
     const warn = Array.isArray(r.warnings) && r.warnings.length ? ` ${(r.warnings as string[]).join(". ")}.` : "";
     onDone(`${p?.short ?? pid} is NEO's brain now.${warn}`);
@@ -343,7 +349,7 @@ function ThisMac({ detail, ask, refresh, onDone }: { detail: BrainsDetail; ask: 
       const r = await ask("custom_save", { endpoint: endpointBody(form) });
       if (!r.ok || typeof r.provider !== "string") { setMsg({ tone: "bad", text: errorText(String(r.error ?? "")) }); return; }
       const s = await ask("brains_set", quickSetupWith(r.provider, { id: model, sees: form.vision, tools: form.tools }));
-      if (!s.ok) { setMsg({ tone: "bad", text: rolesErrorText(String(s.error ?? ""), s.field as string | undefined) }); return; }
+      if (!s.ok) { setMsg({ tone: "bad", text: rolesErrorText(String(s.error ?? ""), s.field as string | undefined, s.message as string | undefined) }); return; }
       await refresh();
       onDone(`${label} on this Mac is NEO's brain now (${model}).`);
     } finally { setBusy(false); }
@@ -352,7 +358,7 @@ function ThisMac({ detail, ask, refresh, onDone }: { detail: BrainsDetail; ask: 
     setBusy(true);
     try {
       const s = await ask("brains_set", { brain: "local", fast_brain: "local", light_brain: "" });
-      if (!s.ok) { setMsg({ tone: "bad", text: rolesErrorText(String(s.error ?? ""), s.field as string | undefined) }); return; }
+      if (!s.ok) { setMsg({ tone: "bad", text: rolesErrorText(String(s.error ?? ""), s.field as string | undefined, s.message as string | undefined) }); return; }
       await refresh();
       onDone("NEO's own model on this Mac is its brain now.");
     } finally { setBusy(false); }
@@ -410,7 +416,7 @@ function Roles({ detail, summary, models, ask, loadModels, refresh }: {
     setBusy(true);
     try {
       const r = await ask("brains_set", changes);
-      if (!r.ok) { setMsg({ tone: "bad", text: rolesErrorText(String(r.error ?? ""), r.field as string | undefined) }); return; }
+      if (!r.ok) { setMsg({ tone: "bad", text: rolesErrorText(String(r.error ?? ""), r.field as string | undefined, r.message as string | undefined) }); return; }
       setEdits(null);
       const notes: string[] = [];
       if (Array.isArray(r.warnings)) notes.push(...(r.warnings as string[]));
@@ -703,6 +709,7 @@ function EndpointEditor({ start, detail, ask, refresh, loadModels, onClose }: { 
   const t = templates(detail).find((x) => x.id === f.template);
   const local = onThisMac(f.base_url);
   const problem = endpointProblem(f);
+  const retype = keyMustBeRetyped(f, detail) && !key.trim(); // (its saved key never follows a new host)
   const keyHintText = t?.key_hint ? hint(`custom:${t.id}`, key) : null;
   const edit = (patch: Partial<EndpointForm>) => { setF((x) => ({ ...x, ...patch })); setMsg(null); };
   const keyBody = (): { key?: string } | null => {
@@ -745,7 +752,7 @@ function EndpointEditor({ start, detail, ask, refresh, loadModels, onClose }: { 
     setBusy("save"); setMsg({ tone: "info", text: "Saving…" });
     try {
       const r = await ask("custom_save", { endpoint: endpointBody(f), ...k });
-      if (!r.ok) { setMsg({ tone: "bad", text: errorText(String(r.error ?? "")) }); return; }
+      if (!r.ok) { setMsg({ tone: "bad", text: errorText(String(r.error ?? ""), r.message as string | undefined) }); return; }
       await refresh();
       if (typeof r.provider === "string") void loadModels(r.provider, true);
       onClose();
@@ -767,13 +774,13 @@ function EndpointEditor({ start, detail, ask, refresh, loadModels, onClose }: { 
         <label className="kx-field"><span>Base URL</span><input value={f.base_url} onChange={(e) => edit({ base_url: e.target.value })} placeholder="https://…/v1" spellCheck={false} autoCapitalize="off" autoCorrect="off" /></label>
       </div>
       <label className="kx-field">
-        <span>{local ? "Key (usually none on this Mac)" : f.id && detail.keys[f.id]?.set ? `Key — ${sourceText(detail.keys[f.id])}; paste to replace` : "Key"}</span>
+        <span>{retype ? "Key — the base URL moved to another host: paste the key again" : local ? "Key (usually none on this Mac)" : f.id && detail.keys[f.id]?.set ? `Key — ${sourceText(detail.keys[f.id])}; paste to replace` : "Key"}</span>
         <input type="password" value={key} onChange={(e) => setKey(e.target.value)} placeholder={t?.key_hint ? `${t.key_hint}…` : local ? "" : "Paste the key"} {...SECRET_INPUT} />
       </label>
       <div className="kx-hintrow">
         <KeyLink url={TEMPLATE_KEY_URLS[f.template] ?? null} />
         {keyHintText && <span className="kx-shape">{keyHintText}</span>}
-        {t?.env && <span className="kx-dim">{t.env} in the environment wins over a key saved here.</span>}
+        {t?.env && <span className="kx-dim">{t.env} in the environment wins over a key saved here (only at {t.base_url.replace(/^https:\/\//, "").split("/")[0]}).</span>}
       </div>
       <div className="kx-grid2">
         <label className="kx-field">
@@ -792,7 +799,7 @@ function EndpointEditor({ start, detail, ask, refresh, loadModels, onClose }: { 
         <button type="button" className="kx-btn" onClick={() => void checkTools()} disabled={!!busy} title="Sends one tiny request with a dummy tool">{busy === "tools" ? "Checking…" : "Check tools · uses a few tokens"}</button>
         <span className="kx-spacer" />
         <button type="button" className="kx-btn" onClick={onClose} disabled={busy === "save"}>Cancel</button>
-        <button type="submit" className="kx-btn primary" disabled={!!busy || !!problem}>{busy === "save" ? "Saving…" : "Save"}</button>
+        <button type="submit" className="kx-btn primary" disabled={!!busy || !!problem || retype}>{busy === "save" ? "Saving…" : "Save"}</button>
       </div>
       {problem && !msg && <div className="kx-dim">{problem}</div>}
       <Line msg={msg} />
@@ -871,8 +878,11 @@ function Spending({ detail, ask, refresh }: { detail: BrainsDetail; ask: Ask; re
           {r.value === null && r.suggested !== null && edits[r.pid] === undefined && <span className="kx-dim">suggested</span>}
         </label>
       ))}
-      {rows.some((r) => r.pid === "openrouter" || r.pid.startsWith("custom:")) && (
-        <div className="kx-dim">NEO has no price list for OpenRouter or other endpoints: it counts their use at the highest price it knows, so the cap is reached early.</div>
+      {rows.some((r) => r.pid === "openrouter") && (
+        <div className="kx-dim">OpenRouter: each model is counted at the price OpenRouter lists for it; one NEO hasn't seen listed, at the highest price NEO knows.</div>
+      )}
+      {rows.some((r) => r.pid.startsWith("custom:")) && (
+        <div className="kx-dim">NEO has no price list for other endpoints: it counts their use at the highest price it knows ($10 in, $50 out per million tokens), so a cap there is reached early. It's only suggested until you save it.</div>
       )}
       {cerebras && <div className="kx-dim">Cerebras keeps its own daily budget (NEO_CEREBRAS_DAILY_BUDGET, $0.50 unless set).</div>}
       {detail.daily_budgets.source === "env" && <div className="kx-dim">NEO_DAILY_BUDGETS in the environment wins over this.</div>}

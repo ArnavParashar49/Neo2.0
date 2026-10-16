@@ -50,7 +50,7 @@ export interface BrainsDetail {
   voice: { value: string; source: string; live_possible: boolean };
   cloud_eyes: { value: string; source: string };
   daily_budgets: { value: Record<string, number>; source: string; prefill: Record<string, number> };
-  store: { path: string; ok: boolean; problem?: string | null };
+  store: { path: string; ok: boolean; problem?: string | null; old_copies?: number };
   summary?: BrainsSummary;
 }
 
