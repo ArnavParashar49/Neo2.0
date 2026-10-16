@@ -34,7 +34,8 @@ if [ ! -f "$HOME/.neo/.env" ] && [ -f "$ROOT/.env" ]; then
   install -m 600 "$ROOT/.env" "$HOME/.neo/.env"
   echo "  copied your keys to ~/.neo/.env (edit them there)"
 fi
-[ -f "$HOME/.neo/.env" ] || echo "  ! no API keys yet: put GEMINI_API_KEY=… in ~/.neo/.env (see README)"
+[ -f "$HOME/.neo/.env" ] || [ -f "$HOME/.neo/api_keys.json" ] ||
+  echo "  ! no API keys yet: once NEO.app starts, open its menu's Brains & Keys… (or put GEMINI_API_KEY=… in ~/.neo/.env; see README)"
 # The camera's object boxes: YOLOE-26s (Ultralytics, AGPL-3.0: THIRD_PARTY_NOTICES.md), a Core ML model
 # in ~/.neo/models. Made here once from Ultralytics' weights (40 MB, checked by size and SHA-256) by
 # scripts/get_yoloe.py, in a throwaway environment of its own (a minute or two, ~1 GB of memory);

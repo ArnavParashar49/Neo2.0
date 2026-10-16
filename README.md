@@ -4,7 +4,7 @@
 
 Say *"Neo"* (or press **⌥⌘**), ask for something, and NEO works your Mac the way a person would: reads the Accessibility tree, clicks and types, opens apps, runs shell commands, edits files, browses, sends mail, sets reminders — and asks before doing anything it can't undo.
 
-There is no subscription. The brains are Gemini and Groq free tiers, or Gemma 4 running on your own GPU; the decision layer, wake word, speech-to-text and text-to-speech all run on-device.
+There is no subscription. The brains are Gemini and Groq free tiers, or Gemma 4 running on your own GPU — or bring your own key for Claude, OpenAI, OpenRouter or any OpenAI-compatible endpoint, and pick which one does what in **Brains & Keys** (see [Choose your brain](#choose-your-brain)). The decision layer, wake word, speech-to-text and text-to-speech all run on-device.
 
 NEO's agent is also a Python library, `neo2`: other apps and AI frameworks (OpenAI, Anthropic, Gemini, LangChain, any MCP client) can embed it, with its safety rules and its confirmation gate — see [Use NEO from your own app](#use-neo-from-your-own-app).
 
@@ -63,7 +63,7 @@ Every tool is a plain Python function registered with a decorator; adding one is
 
 **Every call is kept small.** A request only ships the tools it plausibly needs — picked by embedding the request against each tool's description, then expanding families (`browser_*`, `mail_*`) and adding the screen tools when the reflex says so — typically 3–7 of its 52 plus a `more_tools` escape hatch the model can call mid-run. Tool results older than two turns are stubbed out of the history. Simple one-tool actions that miss the regex fast path go to Gemini Flash-Lite instead of the full model. Net effect: a day of use fits the free tiers, and Groq's 8K-TPM tier can run a whole agent turn as the fallback.
 
-**Brains are pluggable and fail over.** Gemini walks 3.8 → 3.7 → 3.5 Flash across every API key you give it (free-tier quota is per key *and* per model), backs off on overload, and hands text-only turns to Groq's `gpt-oss-120b` at ~700 tokens/s. `python -m neo2 --local` serves Gemma 4 12B on-device for offline use. An Anthropic key turns on Claude as an optional brain.
+**Brains are pluggable and fail over.** Gemini walks 3.8 → 3.7 → 3.5 Flash across every API key you give it (free-tier quota is per key *and* per model), backs off on overload, and hands text-only turns to Groq's `gpt-oss-120b` at ~700 tokens/s. `python -m neo2 --local` serves Gemma 4 12B on-device for offline use. Claude, OpenAI, OpenRouter and OpenAI-compatible endpoints (xAI, DeepSeek, Mistral, Together, Ollama, LM Studio…) take any role you give them: see [Choose your brain](#choose-your-brain).
 
 **It acts while you're still talking.** The voice layer feeds the live transcript — words as you say them — through Laya and the fast-path matcher every few hundred milliseconds. A quick command that has clearly finished ("open YouTube and…") runs *before the sentence ends*; what already ran is remembered so the model's own later call for it is a no-op. Slow tools and agent tasks are non-blocking in the Live session: NEO acknowledges, keeps listening, and reports when the result is in and you're not mid-sentence. Several requests can run at once — ask for the time while it's still reading your mail — and the orb shows the most important thing going on.
 
@@ -98,10 +98,12 @@ Requirements: macOS 13+ on Apple Silicon (built and tested on an M3 Pro, 18 GB),
 brew install uv rustup && rustup default stable
 git clone https://github.com/ArnavParashar49/Neo2.0 && cd Neo2.0
 uv venv --python 3.12 && uv pip install -r requirements.lock && uv pip install -e ".[app,dev]"
-cp .env.example .env        # paste your keys (both free, no card)
+cp .env.example .env        # keys here, or paste them later in Brains & Keys (menu)
 .venv/bin/python -m neo2 --doctor
 scripts/install-app.sh      # build NEO.app, install it to /Applications and start it
 ```
+
+Keys: NEO needs at least one model. The simplest is a free Gemini key; NEO.app's **Brains & Keys…** (in the menu) takes it, or any other provider's, and tests it before saving — see [Choose your brain](#choose-your-brain). In a `.env` file instead:
 
 - `GEMINI_API_KEY` — [aistudio.google.com/apikey](https://aistudio.google.com/apikey). Add more in `GEMINI_API_KEYS=key2,key3` for more free quota.
 - `GROQ_API_KEY` — [console.groq.com/keys](https://console.groq.com/keys) (optional; instant chat replies).
@@ -111,7 +113,7 @@ The browser tools need Chromium once: `.venv/bin/python -m playwright install ch
 
 **NEO.app** (recommended): run `scripts/install-app.sh` from the project folder. It installs NEO's Python runtime (exact versions from `requirements.lock`) in `~/Library/Application Support/NEO`, copies your `.env` to `~/.neo/.env`, builds and signs the app, puts it in `/Applications` (replacing any older copy) and starts it. Re-run it after pulling changes; `scripts/uninstall-app.sh` removes the app (`--purge` also moves `~/.neo` to the Trash).
 
-It lives in the menu bar (the dotted orb), with no Dock icon: it runs the core, restarts it if it crashes or hangs, stops it on quit, and opens at login (menu → *Open at Login*). **⌥⌘** — press Option and Command together and let go — shows NEO; ⌘⇧Space works too. The first launch asks for **Accessibility** and **Screen Recording** (and the microphone when you first talk to it); the menu shows what's still missing, with shortcuts to the right settings pane. The app is signed by its bundle id, so what you grant once stays granted across updates. The menu also has *Settings & API Keys…* (opens `~/.neo/.env`), *Open Logs*, *Restart NEO* and *Erase NEO's Memory…*.
+It lives in the menu bar (the dotted orb), with no Dock icon: it runs the core, restarts it if it crashes or hangs, stops it on quit, and opens at login (menu → *Open at Login*). **⌥⌘** — press Option and Command together and let go — shows NEO; ⌘⇧Space works too. The first launch asks for **Accessibility** and **Screen Recording** (and the microphone when you first talk to it); the menu shows what's still missing, with shortcuts to the right settings pane. The app is signed by its bundle id, so what you grant once stays granted across updates. The menu also has *Brains & Keys…* (pick each role's brain, paste and test keys, set daily caps), *Edit settings file…* (opens `~/.neo/.env` in TextEdit), *Open Logs*, *Restart NEO* and *Erase NEO's Memory…*. With no model set up yet, NEO's chat shows a *Give NEO a brain* card, and a request that needs a model opens Brains & Keys.
 
 Without the app: grant **Accessibility** and **Screen Recording** to the terminal you run `python -m neo2` from, in *System Settings → Privacy & Security*. macOS asks for the **Microphone** on the first voice run. Models (Laya, Parakeet, Kokoro, Vosk) download on first run; the wake-word model is checked against a pinned checksum.
 
@@ -256,16 +258,89 @@ When an older database is first opened by this version it is upgraded in place, 
 | `NEO_MEMORY_LIVE_INJECT` | `false` | Gemini Live: also send what memory has about a sentence as a note before the model answers. Off until measured on your connection: the log line `[memory] live recall: …` says, for each sentence, whether the note would have arrived in time — a late one would cut the answer short |
 | `NEO_CLOUD_MEMORY` | `full` | what of all this goes to cloud models: `full` · `profile` (only your profile facts ride along with requests) · `off` (nothing: no memory block, no search results; summaries are made locally, and no model reads the journal) |
 
+## Choose your brain
+
+NEO thinks with the provider you pick, on your own key. In NEO.app open **Brains & Keys…** from the menu (or NotchHub's Settings → NEO → *Brains & Keys…*): paste a key, test it (no tokens spent), and choose which brain does what. With no model set up yet it opens on a quick setup — pick a provider, paste its key, done — with Gemini preselected (free, no card).
+
+| Provider | Cost | Can be | Key | Defaults when set up in the window |
+|---|---|---|---|---|
+| **Google Gemini** | free tier, no card | Brain, Quick replies, Eyes, camera, and the Gemini Live voice | [aistudio.google.com/apikey](https://aistudio.google.com/apikey) | Brain and Eyes: Gemini 3.8 Flash (then 3.7, 3.5); Quick replies: 3.5 Flash-Lite |
+| **Anthropic (Claude)** | paid | Brain, Quick replies, Eyes, camera | [console.anthropic.com](https://console.anthropic.com/settings/keys) | Brain and Eyes: Claude Opus 5.5 ($4 / $20 per million tokens in / out); Quick replies: Claude Haiku 5.5 ($0.10 / $0.50). Also Sonnet 5.5, Fable 5.1 (needs 30-day data retention on the account), Opus 5 |
+| **OpenAI** | paid | Brain, Quick replies, Eyes, camera | [platform.openai.com/api-keys](https://platform.openai.com/api-keys) | Brain and Eyes: GPT-6.1 Sol ($2 / $10); Quick replies: GPT-6 Luna ($0.10 / $0.50); GPT-6 Astra is the most capable. Through the Responses API |
+| **Groq** | free | Brain (text only), Quick replies, Eyes (its vision model) | [console.groq.com/keys](https://console.groq.com/keys) | `gpt-oss-120b` for everything but pictures; `qwen/qwen3.8-27b` sees (a preview, with a small per-minute budget) |
+| **Cerebras** | paid, $0.50 a day unless you set a cap | Brain (text), Quick replies, Eyes, camera | [cloud.cerebras.ai](https://cloud.cerebras.ai) | `gpt-oss-120b`, and `qwen-3.8-27b` that sees; tried ahead of Groq |
+| **OpenRouter** | pay as you go (a few models are free) | whatever the model you pick can do | [openrouter.ai/keys](https://openrouter.ai/keys) | none: one key, hundreds of models, and you pick one (`deepseek/deepseek-v4-pro`, `anthropic/claude-opus-5.5`…) |
+| **Other endpoint** (OpenAI-compatible) | the endpoint's | Brain if it calls tools, Quick replies, Eyes if it sees | the provider's | templates for xAI, DeepSeek, Mistral, Together, Ollama and LM Studio (both on this Mac, no key), or any URL |
+| **NEO's model on this Mac** (Gemma 4) | free, offline | Brain (text only), Quick replies | — | runs while `python -m neo2 --local` runs |
+
+Prices are the catalogue's as of October 2026: check them at the provider. The model menus read each key's own live list; the defaults are only pre-selections.
+
+**The roles.** *Brain* does tasks with tools. *Quick replies* answers chat turns, writes conversation summaries and memory facts, and cleans up dictation. *Eyes* is the first brain asked for any step with a screenshot or a photo, and for camera questions (empty: the Brain if it sees, then the other brains that see). *Backups* (Automatic by default) are tried when those fail. *Screenshots* — *Only the brains I picked* (`NEO_CLOUD_EYES=off`) or *Other brains with a key may help* — decides whether a configured brain you didn't name may look at a picture when yours can't. *Voice*: with a Gemini key, Gemini Live stays the voice whatever the brain (it answers simple spoken questions itself and hands tasks to your brain); *On this Mac* lets your brain answer everything. NEO checks every choice again: a brain that can't call tools can't be the Brain or a Backup, and Eyes has to see.
+
+What a brain that lacks something means:
+
+- **No tool calling** (some endpoints and local models): Quick replies only; a step that offers tools passes it over.
+- **Text only** (Groq's or Cerebras's `gpt-oss`, DeepSeek, most local models): NEO works through the Accessibility tree; a step that must look at the screen goes to Eyes, and with no Eyes it stops and says no brain can see the screen.
+- **No Gemini key**: no Gemini Live — the on-device voice (Parakeet, your brain, Kokoro) takes over — and no Laya *lite* mode.
+- **A paid Quick replies brain** costs money on every summary and memory extraction: the window suggests the cheap tier (Haiku 5.5, GPT-6 Luna) and marks it *Paid*.
+
+**Where keys live.** A key you paste in Brains & Keys (or `python -m neo2 keys set`) goes to `~/.neo/api_keys.json`; your choices of brain, the endpoints you add and the daily caps go to `~/.neo/brains.json` (no keys in it). Both are mode 0600 in the 0700 `~/.neo`, written whole or not at all, and made only when you save something: NEO never copies a key from a `.env` file or your environment into them, and never writes a brain choice into `.env`. That's *readable only by your Mac account* — any program running as you can read it, just like `~/.neo/.env`; it isn't the Keychain. NEO's own tools never read either file, and a key goes only to the provider (or the endpoint's own host) it was saved for. The window shows a key's last four characters at most; every other client hears only whether one is set.
+
+**Which one wins**, setting by setting: an environment variable, then what was saved in NEO, then a checkout's `.env` (running from source), then `~/.neo/.env`, then the default. So a setup made with `.env` lines keeps working as it was, and the window says when an environment variable wins over what you save there (*Set by environment variable ANTHROPIC_API_KEY*). *Replace* on a key from `~/.neo/.env` saves the new one in NEO, which wins; the `.env` line stays. A brain setting NEO can't read (`NEO_BRAIN=claud`) never stops it from starting: that role is skipped, and the problem list says so. If `api_keys.json` can't be read, NEO treats it as empty and sets it aside as `api_keys.json.bad-<date>` when you next save; the window and `--doctor` say while such copies are there — delete them yourself, they may hold keys. An agent embedded in another app (the `neo2` library, the MCP server) never reads these files.
+
+**In a terminal** (a core you started yourself has no window):
+
+```bash
+python -m neo2 keys list                  # each provider: where its key comes from, its last 4
+python -m neo2 keys set anthropic         # typed without an echo, never an argument; tested first
+python -m neo2 keys test openai           # does it work? (no tokens spent)
+python -m neo2 keys remove anthropic
+python -m neo2 brain show
+python -m neo2 brain set --brain claude@claude-opus-5-5 --quick claude@claude-haiku-5-5 --eyes claude@claude-opus-5-5
+python -m neo2 brain set --budget anthropic=5
+```
+
+A running NEO picks the change up at once. `python -m neo2 --doctor` lists every provider with where its key comes from, the roles and whether each can answer; `--doctor --test` asks each provider.
+
+**Brain references.** A role holds `<brain>[@<model>]`: `gemini`, `gemini_lite`, `groq`, `groq_vision`, `cerebras`, `cerebras_vision`, `claude` (or `anthropic`), `openai`, `openrouter`, `local` or `custom:<name>`, and after `@` a model id — `claude@claude-haiku-5-5`, `openai@gpt-6-luna`, `openrouter@deepseek/deepseek-v4-pro`, `custom:ollama@qwen3:14b`. A bare name is exactly the brain it always was.
+
+**Daily caps.** Each paid provider can have one (the window's *Spending*, `brain set --budget`, or `NEO_DAILY_BUDGETS='{"anthropic": 2}'`). A paid key saved in Brains & Keys gets $2 a day on its own (Anthropic, OpenAI, OpenRouter); a key from an environment variable or a `.env` file stays uncapped. Each answer's token usage is counted at the catalogue's prices — OpenRouter's at the price its list gives each model — and a model with no known price at the dearest. At 80% NEO says so; once it's spent NEO skips that provider until midnight and says why. An endpoint you add has no price list, so its cap is only suggested (and counts at the dearest price NEO knows). Cerebras keeps its own budget (`NEO_CEREBRAS_DAILY_BUDGET`).
+
+**Other endpoints.** The base URL must be `https://` (`http://` only on this Mac: `localhost`, `127.0.0.1`, `[::1]`), with no user, password or query in it. Set whether it calls tools and whether it sees pictures; *Check tools* sends one tiny request to prove it (it uses a few tokens). A template's own variable (`XAI_API_KEY`, `DEEPSEEK_API_KEY`, `MISTRAL_API_KEY`, `TOGETHER_API_KEY`) wins over a key saved for it, but only at that template's own host; moving an endpoint to another host asks for its key again. A key whose shape names another provider (an `sk-ant-` key in OpenRouter's card) isn't sent at all. From a terminal: `NEO_CUSTOM_PROVIDERS` takes the same endpoints as JSON.
+
+**Claude as the brain.**
+
+1. Get a key at [console.anthropic.com](https://console.anthropic.com/settings/keys).
+2. Brains & Keys → *Claude* (or *Providers* → Anthropic → *Add key*) → paste → *Connect*. NEO tests the key, saves it, and makes Claude Opus 5.5 the Brain and Eyes and Claude Haiku 5.5 Quick replies, with a $2 a day cap.
+3. With a Gemini key too, Gemini Live stays the voice and Gemini can still look at a screenshot Claude can't take; *Voice → On this Mac* lets Claude answer everything, and *Screenshots → Only the brains I picked* keeps every picture with Claude.
+
+With `.env` lines instead: `ANTHROPIC_API_KEY=…` and `NEO_BRAIN=claude` (Claude Opus 5, or `NEO_CLAUDE_MODEL`; `NEO_FAST_BRAIN=claude@claude-haiku-5-5` and `NEO_EYES_BRAIN=claude@claude-opus-5-5` for the rest). As before, an Anthropic key alone only makes Claude a screenshot fallback.
+
+**OpenAI as the brain.**
+
+1. Get a key at [platform.openai.com/api-keys](https://platform.openai.com/api-keys).
+2. Brains & Keys → *OpenAI* → paste → *Connect*: GPT-6.1 Sol becomes the Brain and Eyes and GPT-6 Luna Quick replies, with a $2 a day cap.
+3. The voice and screenshots work as for Claude above.
+
+With `.env` lines: `OPENAI_API_KEY=…`, `NEO_BRAIN=openai@gpt-6.1-sol`, `NEO_FAST_BRAIN=openai@gpt-6-luna`, `NEO_EYES_BRAIN=openai@gpt-6.1-sol`. An OpenAI (or OpenRouter, or endpoint) key alone sends nothing anywhere: only the roles you give it.
+
 ## Configuration
 
 Everything is an environment variable with the `NEO_` prefix (or a line in `.env`). The useful ones:
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `NEO_BRAIN` | `gemini` | primary agentic brain: `gemini` · `groq` · `local` · `claude` · `cerebras` (its text model `gpt-oss-120b` for text steps, chat and single actions, ahead of Groq; steps that carry a screenshot go to Cerebras' own `qwen` first, then the other brains that see) · `cerebras_vision` |
-| `NEO_FAST_BRAIN` | `groq` | brain for chat-only turns |
+| `NEO_BRAIN` | `gemini` | the Brain, as a [brain reference](#choose-your-brain): `gemini` · `groq` · `local` · `claude` · `openai` · `openrouter` · `custom:<name>`, each with an optional `@<model>` · `cerebras` (its text model `gpt-oss-120b` for text steps, chat and single actions, ahead of Groq; steps that carry a screenshot go to Cerebras' own `qwen` first, then the other brains that see) · `cerebras_vision` |
+| `NEO_FAST_BRAIN` | `groq` | Quick replies: chat-only turns, summaries, memory facts, dictation |
+| `NEO_EYES_BRAIN` | — | Eyes: the first brain asked for a step with a screenshot or photo, and for the camera (empty: the Brain if it sees, then the other brains that see) |
+| `NEO_BACKUP_BRAINS` | automatic | up to four brains tried after the Brain (and Quick replies): `claude,groq`; `none` for none; automatic: Quick replies backs up the Brain |
+| `NEO_LIGHT_BRAIN` | `gemini_lite` | one-step commands that missed the regex fast path; empty: Quick replies' brain (the window empties it when Quick replies isn't Gemini) |
+| `OPENAI_API_KEY` · `OPENROUTER_API_KEY` | — | used only where a role names `openai` or `openrouter` (a key alone sends nothing) |
+| `NEO_CLAUDE_MODEL` · `NEO_OPENAI_MODEL` · `NEO_OPENROUTER_MODEL` | `claude-opus-5` · `gpt-6.1-sol` · — | the model a bare `claude`, `openai` or `openrouter` means |
+| `NEO_DAILY_BUDGETS` | — | dollars a day per provider (JSON or `anthropic=2,openai=1`): see [daily caps](#choose-your-brain) |
+| `NEO_CUSTOM_PROVIDERS` | — | OpenAI-compatible endpoints as JSON: `[{"id": "custom:ollama", "label": "Ollama", "template": "ollama", "base_url": "http://localhost:11434/v1", "model": "qwen3:14b"}]` (Brains & Keys saves them in `~/.neo/brains.json` instead) |
 | `NEO_GROQ_VISION_MODEL` | `qwen/qwen3.8-27b` | Groq's model that sees: with a Groq key, the last model a screenshot goes to when Gemini (and Flash-Lite, Claude) can't answer; empty turns it off |
-| `NEO_CLOUD_EYES` | `auto` | with `NEO_BRAIN=local` and no cloud brain that sees named, pictures never go to a cloud fallback (the step stops and says so); `on` lets them |
+| `NEO_CLOUD_EYES` | `auto` | whether a configured brain you didn't name may look at a picture yours can't (Gemini, Flash-Lite, Claude, Groq's vision model). `auto`: yes, except with `NEO_BRAIN=local` and no cloud brain that sees named (the step stops and says so); `on`: yes; `off`: never — only the brains you picked see a picture (before Brains & Keys, `off` read as `auto`) |
 | `CEREBRAS_API_KEY` | — | a paid [Cerebras](https://cloud.cerebras.ai) key: `gpt-oss-120b` takes chat and text-only steps wherever Groq would (tried just ahead of it); `qwen-3.8-27b` sees the screen when Gemini is overloaded (ahead of Groq). Never ahead of the local brain when you put it first; with only the local brain named (`NEO_BRAIN`/`NEO_FAST_BRAIN=local`) Cerebras isn't used, and your screenshots go to it only if you also named a cloud brain that sees. No key: nothing changes |
 | `NEO_CEREBRAS_DAILY_BUDGET` | `0.50` | dollars a day NEO may spend on Cerebras (usage × price, counted per answer). At 80% it says so; once spent it skips Cerebras until midnight and says why. `0` or `off` turns Cerebras off (no chain names it); so does a value that isn't a dollar amount (a negative number, a typo), with a warning in the log |
 | `NEO_CEREBRAS_MODEL` / `NEO_CEREBRAS_VISION_MODEL` | `gpt-oss-120b` / `qwen-3.8-27b` | the text and seeing models (one that `/v1/models` doesn't list for your key is skipped) |
@@ -292,7 +367,7 @@ Everything is an environment variable with the `NEO_` prefix (or a line in `.env
 | `NEO_DATA_DIR` | `~/.neo` | memory DB, audit log, models, trained reflex head |
 | `NEO_UI_HOST` | `window` | where NEO's UI lives: `window` (NEO.app's own orb and card) · `notch` (NotchHub hosts the same page in the notch; NEO.app keeps its window hidden and its hotkeys; its menu-bar item goes while NotchHub is connected, whose Settings carry the menu). Written by the core itself when NotchHub asks (`{"cmd": "ui_host"}`) and put back to `window` when NotchHub quits — nothing to set by hand |
 
-With NEO.app, settings live in `~/.neo/.env` (menu → *Settings & API Keys…*, then *Restart NEO*).
+With NEO.app, keys and brains are set in the menu's *Brains & Keys…* (they apply at once; a change to the Gemini key or the voice asks for a restart). The rest of the settings live in `~/.neo/.env` (menu → *Edit settings file…*, then *Restart NEO*).
 
 ### NEO in the notch
 
@@ -321,18 +396,24 @@ NEO keeps its data on this Mac, in `~/.neo` (readable only by you). What leaves 
 | **Google** (Gemini API, Gemini Live) | what you say and type, the recent conversation, NEO's memory about you (see `NEO_CLOUD_MEMORY`), tool results, and screenshots when a task needs to see the screen | every request that needs a model; voice sessions stream your microphone audio while listening; with gentle check-ins on (`NEO_WELLBEING_CHECKINS`), the check-in line and ~5 s of your reply audio (the sound detection itself stays on the Mac) |
 | **Groq** (optional key) | chat turns, and the conversation text when NEO writes a conversation summary or reads it for facts while idle (not with `NEO_CLOUD_MEMORY=off`); a screenshot only when no other model that sees can answer (its vision model, `NEO_GROQ_VISION_MODEL`) | quick answers and summaries; a screen step while Gemini is overloaded or out of quota |
 | **Cerebras** (optional paid key) | the same as a Gemini request (what you say and type, the conversation, NEO's memory per `NEO_CLOUD_MEMORY`, tool results); screenshots only to its seeing model, at most two per request | steps and chat turns it answers (ahead of Groq), and screen steps when Gemini is overloaded |
+| **Anthropic** (Claude, optional paid key) | the same as a Gemini request, and screenshots and camera stills when it has a role that sees | the roles you gave it; an Anthropic key alone (kept from before) makes Claude a screenshot fallback when no brain you named that sees can answer — *Screenshots → Only the brains I picked* turns that off |
+| **OpenAI** (optional paid key) | the same as a Gemini request, and screenshots and camera stills when it has a role that sees | only the roles you gave it |
+| **OpenRouter** (optional key) and the company behind the model you picked | the same as a Gemini request, and screenshots when that model sees; OpenRouter passes each request on to the model's own provider | only the roles you gave it |
+| **an endpoint you added** (xAI, DeepSeek, Mistral, Together, any URL) | the same as a Gemini request; screenshots only when you said it sees | only the roles you gave it; one on this Mac (Ollama, LM Studio) keeps it all on the Mac |
+| **the provider of a key you test** | the key (in a header), for its list of models — no conversation, no tokens; *Check tools* sends one tiny request | when you press *Test*, save a key, or open Brains & Keys (it lists each key's models, kept 10 minutes) |
 | **DuckDuckGo, Brave, Bing** | your search queries (raced for speed) | web searches |
 | **Open-Meteo**, and **ipinfo.io** if NEO doesn't know your city | the place, or your IP address to guess it | weather |
 | any website NEO opens or fetches for you | normal web requests | browsing tasks |
 
-The free tiers of Gemini and Groq allow those companies to use what you send to improve their products; use paid keys, `NEO_CLOUD_MEMORY=profile|off`, or the local brain (`--local`) if that matters for you. The wake word, speech-to-text and text-to-speech of the on-device voice, and Laya's decisions all run locally.
+The free tiers of Gemini and Groq allow those companies to use what you send to improve their products; use paid keys, `NEO_CLOUD_MEMORY=profile|off`, or the local brain (`--local`) if that matters for you. Each paid provider's own terms say what it keeps; OpenRouter's, and the provider's behind the model you pick, both apply there. The wake word, speech-to-text and text-to-speech of the on-device voice, and Laya's decisions all run locally.
 
 What NEO keeps, and for how long:
 
 - **Memory**: facts and preferences until you delete them ("forget …"); **the journal** of what was said — `NEO_MEMORY_RETENTION_DAYS` (a year), never passwords, codes, keys or card numbers; **conversation summaries** until you erase; **playbooks** (the path of past tasks, without message text) — the newest 300; **spoken routines** (the trigger phrase and app/site launch list) until you delete them. `NEO_MEMORY_JOURNAL=false` keeps no journal at all.
 - **Requests Laya learns from** (`reflex_extra.jsonl`: no dictated text, notes, memories, mail, or anything that looks like a code or password) — the latest 2,000 within 180 days; `NEO_LEARN=off` stops it.
 - **Logs** (`~/.neo/logs`) record which tools ran and whether they worked — never what you typed, said, sent or read. The **audit log** records confirmed actions (not the words of messages).
-- The overlay is hidden from screen sharing, recordings and screenshots.
+- **Your keys**: in `~/.neo/api_keys.json` (see [where keys live](#choose-your-brain)), never in a log — a loaded key that turns up in an error message or a provider's answer is written as `••••` and its last 4 — and never in memory: text you type that starts with a key is sent to no model ("That looks like an API key, so I didn't send it anywhere").
+- The overlay and the Brains & Keys window are hidden from screen sharing, recordings and screenshots.
 
 **Erase everything:** menu → *Erase NEO's Memory…* (or `python -m neo2 --forget-all`) deletes memories, the journal, conversation summaries (and the copy of the database kept from before an upgrade), playbooks, spoken routines, workflow-suggestion counters, learned requests and their cached features, logs, the audit log and the logins in NEO's own browser. Your settings and keys stay. No model or web page can trigger it.
 
@@ -613,7 +694,7 @@ For Claude Desktop (`claude_desktop_config.json`), Claude Code (`.mcp.json`) or 
 - **`--approve dialog`** (macOS) shows a native dialog from the server process. Cancel is the default button, and the dialog gives up before the card expires. The server adds `osascript` to `protected_apps`.
 - **`--approve elicit --trust-client NAME`** lets the MCP client ask its user (MCP elicitation), only for the client names you list. It approves only when the user accepts with `approve: true`. This trusts the client: a client names itself, and it may answer elicitations on its own. The client asks in its own window on your desktop, so with NEO's input tools (`--tools mac`: click, type, keys, and the task tools that act in an app's own window, `search_site` and `notes_create`) the server starts only with `--protect-app NAME` naming the client's app (for example `Claude` or `Cursor`); otherwise NEO's own clicks and keys could answer that question.
 - **`--protect-app NAME`** (repeatable) adds an app to `protected_apps`: NEO's input tools never click or type into it.
-- **`--env`** reads the API keys (`GEMINI_API_KEY`, `GEMINI_API_KEYS`, `GROQ_API_KEY`, `ANTHROPIC_API_KEY`) and `NEO_MCP_*` settings such as `NEO_MCP_DATA_DIR` and `NEO_MCP_BRAIN`. With only `ANTHROPIC_API_KEY` set, Claude is the brain. NEO.app's own `NEO_*` variables are never read. Without `--env`, `neo_task` has no model, though the individual tools still work.
+- **`--env`** reads the API keys (`GEMINI_API_KEY`, `GEMINI_API_KEYS`, `GROQ_API_KEY`, `ANTHROPIC_API_KEY`, `CEREBRAS_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`) and `NEO_MCP_*` settings such as `NEO_MCP_DATA_DIR` and `NEO_MCP_BRAIN`. With only `ANTHROPIC_API_KEY` set, Claude is the brain; with only `OPENAI_API_KEY`, OpenAI. NEO.app's key store (`~/.neo/api_keys.json`) is never read. NEO.app's own `NEO_*` variables are never read. Without `--env`, `neo_task` has no model, though the individual tools still work.
 
 As with the adapters, anything NEO wrote after reading third-party content (its answer, a question, an action's summary) comes back inside `<untrusted source="neo">`, and the server tells the client that such text is data, never instructions. The server speaks stdio only and opens no network listener. stdout carries nothing but the protocol, and audit lines go to stderr.
 
@@ -636,7 +717,8 @@ An agent with the Mac tools (`tools="mac"`) clicks and types on the real desktop
 neo2/           the package: `python -m neo2` is NEO.app's core
   core/         NEO itself (the top-level `neo` before 2.1)
     agent/      loop.py (the one agent loop) · session.py (routing) · confirm.py · registry.py · prompt.py
-    providers/  gemini.py · openai_compat.py (Groq, local) · cerebras.py + spend.py (paid, budgeted) · claude.py · base.py (neutral message format)
+    providers/  catalog.py (every provider, what each brain can do) · gemini.py · claude.py · openai_responses.py · openai_compat.py (Groq, OpenRouter, endpoints, local) · cerebras.py + spend.py (daily caps) · keycheck.py (key tests, model lists) · base.py (neutral message format)
+    keystore.py · brains.py · brainref.py · cli_keys.py    Brains & Keys: the key store, the roles, brain references, `neo2 keys` / `neo2 brain`
     reflex/     laya_reflex.py · features.py · finetune.py · generate.py · dataset.py · schema.py · templates_hi.py · hf_data.py + sources.py (public data)
     tools/      computer/ (gates: every check, frozen · tools_ax/pointer/keys/label/apps · ax, input, pointer, screen, apps, shell) · browser.py · browser_live.py (the chat's live card) · system.py · web.py · memory_tool.py · music/ (naming a song: capture, recognize, the song card)
     voice/      wake.py · local.py · live.py · audio.py · pipeline.py

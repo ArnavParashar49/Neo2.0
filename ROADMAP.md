@@ -24,7 +24,7 @@ mic ─► wake word (local) ─► voice backend
                        • Gemini 3 Flash   — agentic + vision (free tier: 10 RPM / 250K TPM / 1500 RPD)
                        • Groq gpt-oss-120b — fast text (free tier: 30 RPM / 8K TPM)
                        • Gemma 4 12B Q4 (MLX) — offline / private
-                       • Claude Opus 5 — optional paid slot, off by default
+                       • Claude, OpenAI, OpenRouter, OpenAI-compatible endpoints — your own key, the roles you pick (Brains & Keys)
                                         │
                                         ▼
                      Agent loop (one loop, no planner): tool use, step budget, thrash guard,
@@ -190,9 +190,19 @@ A 54-agent audit found 45 gaps across security, reliability, packaging, onboardi
 - `scripts/codemod_neo2.py` did the rewrite and runs again after merging a branch that predates it (idempotent; lists what it won't decide). A branch older than `c475799` merges that first, then main, so git follows the move; then the codemod and `ruff check --fix` (README → Development). A checkout's `neo` shim keeps old imports and the old `-m` entry points working, as the same modules, with one DeprecationWarning; the wheel has no `neo`. `scripts/install-app.sh` replaces the old `neo` distribution in NEO.app's runtime.
 - After pulling 2.1, run `scripts/install-app.sh` before `tauri dev`: a dev build uses the installed runtime when there is one, and a runtime from before 2.1 can't start `-m neo2`. The app then says so ("runtime older than the app") instead of crash-looping.
 
+### Brains & Keys (2026-10-17, branch `byok`)
+
+- Bring your own key, choose your brain: Gemini, Anthropic (Claude), OpenAI (a native Responses-API brain), Groq, Cerebras, OpenRouter and OpenAI-compatible endpoints (xAI, DeepSeek, Mistral, Together, Ollama, LM Studio, any URL) for the roles Brain, Quick replies and Eyes, plus Backups, the Screenshots switch and the voice. Each role is a brain reference, `<brain>[@<model>]`; one NEO can't read is skipped and reported, never a reason not to start (`NEO_BRAIN=openai` crash-looped the core before).
+- NEO.app's **Brains & Keys** window (made by the shell; its websocket client is admitted only with the shell's ticket): paste and test a key (no tokens spent), live model lists, a first-run quick setup, daily caps ($2 a day on its own for a paid key saved there, never for one from `.env` or the environment), Gemini Live kept as the voice whatever the brain. The chat page and the notch get a *Give NEO a brain* card; NotchHub shows a Brain row.
+- Keys in `~/.neo/api_keys.json` (0600), choices in `~/.neo/brains.json`; precedence environment → saved → checkout `.env` → `~/.neo/.env`; nothing migrated, a key never logged (the core's output is redacted) and never sent to a model when typed in the chat. `python -m neo2 keys …` / `brain …` in a terminal; `--doctor` shows each key's source and the roles.
+- Embedded agents (`neo2` library, MCP): `AgentConfig(openai_api_key=…, openrouter_api_key=…)`; the MCP server thinks with OpenAI when that's the only key `--env` finds. Neither ever reads NEO.app's key store.
+- Goldens of today's chains, settings, Claude requests and hello taken before the refactor stayed identical (the hello gains only `brains`). Two adversarial reviews (security, correctness) confirmed 20 distinct findings (3 high, 7 medium); all fixed with regression tests (`tests/test_brains_keys_review.py`) but one left for the manual check below, and `NEO_CLOUD_EYES=off` now meaning off is documented.
+- Still to check with real keys (after deploying): Claude 5.5's binding controls (`drop_block`) over a long run, OpenAI's Responses replay and pictures in tool results, OpenRouter's and DeepSeek's list and balance fields, the window's focus over NotchHub's panel.
+
 ### Next
 
 - Developer ID signing + notarization, so the app can be shared (bundle-id signing already keeps permissions across local rebuilds).
+- Brains & Keys: OpenRouter sign-in (OAuth PKCE) instead of pasting a key; an opt-in Keychain store (`/usr/bin/security`); the settings default `claude_model` to `claude-opus-5-5` once a long run on it has been checked.
 - Skills: a small curated set loaded on demand, replacing the v1 271-folder dump.
 
 ## Removed from v1 (and why)
