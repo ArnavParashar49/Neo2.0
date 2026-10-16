@@ -429,6 +429,15 @@ class Settings(BaseSettings):
     # selected text"), never on a model's initiative, and nothing of it is kept. False: in_front
     # refuses, the Session never hands such a request to it, and Gemini Live isn't told about it.
     context_capture: bool = True
+    # A web page's selection Accessibility doesn't give (Google Chrome, the Chromium browsers and
+    # Electron apps keep it to themselves) is copied: ⌘C to that app alone, the copy's plain text read,
+    # and the clipboard put back exactly as it was (every item, every type's bytes), whatever happens —
+    # and put back over a write that comes a second late. Only on a page whose focused element has no
+    # AXSelectedText (never a text view, a terminal or a password manager's list). Never while the
+    # clipboard holds a private copy (a password manager's), another device's, more than 32 MB or
+    # anything that can't be kept whole, never on a Mac that asks before apps read it, never in a
+    # password field. False: only what Accessibility gives ("Nothing is selected" in Chrome).
+    context_copy_fallback: bool = True
 
     # ---- the user's own Shortcuts as NEO verbs (neo2.core.tools.shortcuts) ----
     # "run my Send ETA shortcut" runs it; a run a model chose, or one after NEO read something untrusted,
