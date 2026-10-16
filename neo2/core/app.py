@@ -36,6 +36,8 @@ class App:
         self._wellbeing_speaking_until = 0.0
         self._wellbeing_reply_context: tuple[float, str] | None = None
         self._last_active = time.monotonic()  # (starting up counts as busy)
+        self.ui: UIServer | None = None  # the websocket server (set in run()): its link to NEO.app's shell
+        self._keys_opened_at: float | None = None  # monotonic: Brains & Keys last opened for a request
 
     async def handle_text(
         self, text: str, *, speak: bool = True, source: str = "typed", prompt_context: str = "", checkin: bool = False
@@ -44,6 +46,8 @@ class App:
         each works out its own memory context: neo2.core.agent.session). `source`: "typed", or
         "voice" for the on-device voice's transcription — what the journal records. `checkin`: the
         reply to a check-in NEO started itself (handle_speech): answered, never routed or kept."""
+        if await self._key_guard(text, speak=speak):
+            return
         task = asyncio.current_task()
         if task:
             self._tasks.add(task)
@@ -57,12 +61,51 @@ class App:
                 checkin=checkin,
             )
             if speak and self.voice and reply.text and not reply.silent:
-                await self.voice.speak(reply.text)
+                await self.voice.speak(reply.spoken or reply.text)
         except asyncio.CancelledError:
             await bus().say("Stopped.", final=True)
         finally:
             if task:
                 self._tasks.discard(task)
+
+    async def _key_guard(self, text: str, *, speak: bool = True) -> bool:
+        """Typed text that starts with an API key goes to no model, no journal and no transcript: NEO
+        says so instead (True: it was one). Narrow on purpose — the known key prefixes only
+        (neo2.core.keyshape.looks_like_key), so a long hash is still just text."""
+        from neo2.core.keyshape import looks_like_key
+
+        if not looks_like_key(text):
+            return False
+        from neo2.core.onboarding import KEY_TYPED
+
+        print("[keys] a message that starts with an API key was kept from every model")
+        await bus().say(KEY_TYPED, role="assistant", final=True)
+        voice = self.voice
+        if speak and voice is not None and not getattr(voice, "handles_text", False) and hasattr(voice, "speak"):
+            await voice.speak(KEY_TYPED)  # (the on-device voice: nothing leaves the Mac to say it)
+        return True
+
+    def open_keys(self, open_now: bool = True) -> str:
+        """Brains & Keys for a request that needs a model and has none (neo2.core.onboarding): opened —
+        at most once every 10 minutes — through NEO.app's shell. "opened", "busy" (not now) or
+        "no_app" (no NEO.app at the other end: a core started by hand)."""
+        ui = self.ui
+        if ui is None or not ui.has_shell():
+            return "no_app"
+        now = time.monotonic()
+        if not open_now or (self._keys_opened_at is not None and now - self._keys_opened_at < _KEYS_AGAIN_S):
+            return "busy"
+        if not ui.open_keys():
+            return "no_app"
+        self._keys_opened_at = now
+        return "opened"
+
+    def voice_kind(self) -> str | None:
+        """Which voice runs now: "live" (Gemini Live), "local" (on this Mac), None (none yet)."""
+        v = self.voice
+        if v is None:
+            return None
+        return "live" if hasattr(v, "_dialog") else "local"
 
     async def handle_speech(self, text: str) -> None:
         """What the on-device voice heard the user say. The first words it heard in a check-in's
@@ -161,6 +204,8 @@ class App:
         kind = cmd.get("cmd")
         if kind == "text":
             text = str(cmd.get("text", ""))
+            if await self._key_guard(text):
+                return  # (before Gemini Live too: it would be sent to Google)
             if confirm.peek() is not None and (ans := answer_of(text)) is not None:
                 await bus().say(text, role="user")
                 from neo2.core.memory import journal
@@ -372,6 +417,7 @@ class App:
 
 
 _CHECKIN_QUIET_S = 60.0  # a check-in waits this long after NEO was last busy (the user may go on)
+_KEYS_AGAIN_S = 600.0  # Brains & Keys opens by itself for a request at most this often
 
 
 def _other_media_playing() -> bool:
@@ -482,6 +528,12 @@ async def run() -> None:
     live.hooks.resume = app.resume_browsing
     live.hooks.decline = app.decline
     ui = UIServer(app.on_command)
+    app.ui = ui
+    from neo2.core import brains, onboarding
+
+    brains.started(s)  # what the voice starts with: a key changed later says "restart NEO"
+    brains.voice_now = app.voice_kind
+    onboarding.set_opener(app.open_keys)  # a request with no model to answer it opens Brains & Keys
     await ui.start()
     ui.shell_task = shell_link.start(ui, app_socket)  # the menu, the summon keys, the status: no page needed
     bus().subscribe(app._track_activity)

@@ -191,6 +191,26 @@ class Reply:
     # The untrusted sources this request read (web pages, mail, files): the caller counts them as
     # read too (Gemini Live's taint), so what they might ask for next is asked of the user first.
     taint: tuple[str, ...] = ()
+    # What the voice says when it isn't `text` (shown on screen): "see the message on screen" for a
+    # terminal command the screen shows (neo2.core.onboarding). "": the voice says `text`.
+    spoken: str = ""
+
+
+def brain_label(name: str, model: str = "") -> str:
+    """The brain that answered, as the user reads it ("Claude Opus 5.5", "GPT-OSS 120B on Groq"):
+    the `turn` event's label, so a page never guesses names from model ids. "" for none (a fast path),
+    and a host's own provider by its own name."""
+    if not name:
+        return ""
+    from neo2.core import brainref
+    from neo2.core.providers import catalog
+
+    try:
+        if brainref.parse(name).valid:
+            return catalog.label_for(name, model or None)[:60]
+    except Exception:  # noqa: BLE001 — a label is a nicety
+        pass
+    return (brainref.shown(name) or "")[:60]
 
 
 def _camera_on() -> bool:
@@ -626,6 +646,7 @@ class Session:
             route="chat",
             brain=getattr(chain, "last_used", ""),
             model=getattr(chain, "last_model", ""),
+            label=brain_label(getattr(chain, "last_used", ""), getattr(chain, "last_model", "")),
             ms=int((time.time() - t0) * 1000),
             tools=0,
         )
@@ -746,7 +767,7 @@ class Session:
         else:
             await bus().say(plain, final=True, job=job)
         await bus().publish(
-            "turn", job=job, route="quick", brain="", model="", ms=int((time.time() - t0) * 1000), tools=len(steps)
+            "turn", job=job, route="quick", brain="", model="", label="", ms=int((time.time() - t0) * 1000), tools=len(steps)
         )
         outcomes.end(job)
         if asked and (p := confirm.peek()) is not None and p.action_id == asked:
@@ -815,7 +836,7 @@ class Session:
         await self._remember(Message.user(text), Message.assistant("Done."))
         await bus().note("Done.")
         await bus().publish(
-            "turn", job=job, route="quick", brain="", model="", ms=int((time.time() - t0) * 1000), tools=len(got.ran)
+            "turn", job=job, route="quick", brain="", model="", label="", ms=int((time.time() - t0) * 1000), tools=len(got.ran)
         )
         outcomes.end(job)
         await bus().end_job(job)
@@ -952,6 +973,13 @@ class Session:
             raise
         finally:
             self.jobs.pop(job, None)
+        said = ""
+        if res.failure == "no_brain" and not runtime.library_bound():
+            # No model is set up at all: how to connect one, in words for the screen and the voice —
+            # and, for the user's own request just made, Brains & Keys opens (neo2.core.onboarding).
+            from neo2.core import onboarding
+
+            res.text, said = await onboarding.no_brain(user=_request_origin.get() == "user")
         prefetch.forget(res.messages[len(snapshot) :])  # the first look was for this run only
         await self._remember(*res.messages[len(snapshot) :])  # only this job's new turns
         _learn_from(job, res)
@@ -982,6 +1010,7 @@ class Session:
             route="agent",
             brain=getattr(chain, "last_used", ""),
             model=getattr(chain, "last_model", ""),
+            label=brain_label(getattr(chain, "last_used", ""), getattr(chain, "last_model", "")),
             ms=int((time.time() - t0) * 1000),
             tools=len(res.steps),
         )
@@ -989,6 +1018,7 @@ class Session:
         return Reply(
             reply_text, "agent", d, res, job=job, silent=silent, taint=tuple(ctx.taint),
             brain=getattr(chain, "last_used", ""), model=getattr(chain, "last_model", ""),
+            spoken=said if said and said != reply_text else "",
         )
 
     # ---- tool selection ---------------------------------------------------------------

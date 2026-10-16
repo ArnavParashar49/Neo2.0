@@ -312,7 +312,10 @@ async def test_a_refused_key_benches_the_brain_for_an_hour_and_says_so_until_the
     with pytest.raises(prov.AllBrainsFailed):
         await prov.Chain(["claude"]).complete([Message.user("hi")])
     assert prov._demoted["claude"] - time.time() > 3000
-    assert health._live["key:anthropic"] == "Claude refused its API key. Open Brains & Keys to replace it."
+    # (where the key comes from, never the key: this one is the environment's)
+    assert health._live["key:anthropic"] == (
+        "Claude refused the API key in the environment variable ANTHROPIC_API_KEY. Open Brains & Keys to replace it."
+    )
     assert KEY not in json.dumps(health._live)
     prov.forget("anthropic")  # (a key saved, replaced or removed)
     assert "key:anthropic" not in health._live and "claude" not in prov._demoted

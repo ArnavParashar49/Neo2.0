@@ -1,7 +1,10 @@
 """What stops NEO from working fully right now, in words the overlay can show.
 
 The overlay gets this list when it connects (the websocket hello) and again whenever it changes,
-so "no API key", "microphone blocked" or "voice is down" are visible instead of silent.
+so "no AI model", "microphone blocked" or "voice is down" are visible instead of silent. The words
+say what to do wherever NEO's UI lives (NEO.app's window, the notch): "Open Brains & Keys", never a
+menu-bar icon only one of them has. A problem reported while running passes through the log's
+redaction first (neo2.core.logredact): an error that quotes a key never reaches a client.
 """
 
 from __future__ import annotations
@@ -14,14 +17,17 @@ from neo2.core.config import settings
 _live: dict[str, str] = {}  # problems reported while running (voice down, …)
 
 
+NO_MODEL = "NEO has no AI model yet, so it can only do simple commands. Open Brains & Keys to connect one."
+NO_ROLE = (
+    "None of NEO's brains is set up (a key is, but no role uses it), so it can only do simple commands. "
+    "Open Brains & Keys to pick one."
+)
+
+
 def problems() -> list[str]:
     s = settings()
     out: list[str] = []
-    if not (s.gemini_api_key or s.gemini_api_keys):
-        out.append(
-            "NEO needs a free Gemini API key to understand you and to talk. Click the menu-bar icon → "
-            "Settings & API Keys…, paste the key, save, then choose Restart NEO."
-        )
+    out.extend(model_problems(s))
     out.extend(brain_problems(s))
     try:
         from neo2.core.voice import devices
@@ -38,7 +44,10 @@ def problems() -> list[str]:
 
         gaps = missing()
         if "Accessibility" in gaps:
-            out.append("NEO can't click or type in other apps until you allow Accessibility (menu-bar icon → Allow Accessibility…).")
+            out.append(
+                "NEO can't click or type in other apps until you allow Accessibility (System Settings → "
+                "Privacy & Security → Accessibility)."
+            )
         elif "Input events" in gaps:
             out.append(
                 "macOS isn't letting NEO send clicks or keystrokes — in System Settings → Privacy & Security → "
@@ -48,6 +57,24 @@ def problems() -> list[str]:
         pass
     out.extend(_live.values())
     return out
+
+
+def model_problems(s: Any) -> list[str]:
+    """NEO has no model it can ask (no key for its roles, nothing answering on this Mac), or its
+    brain can't see the screen and nothing else that sees is set up."""
+    from neo2.core import brains
+    from neo2.core.providers import catalog
+
+    try:
+        if not brains.ready(s):
+            return [NO_ROLE if catalog.any_key(s) else NO_MODEL]
+        first = brains.answering(s)
+        if first and not catalog.describe(first, s).sees and not getattr(s, "eyes_brain", "") and not brains.can_see(s):
+            who = catalog.provider_label(catalog.describe(first, s).provider, s)
+            return [f"{who[:1].upper()}{who[1:]} can't see the screen and no Eyes brain is set: tasks that need a look will stop."]
+    except Exception as e:  # noqa: BLE001 — health never fails for this
+        print(f"[health] brains not checked: {type(e).__name__}")
+    return []
 
 
 # A role's setting, as the user would have typed it.
@@ -102,6 +129,10 @@ def _store_problems() -> list[str]:
 
 def report(key: str, message: str | None) -> None:
     """Set (or clear, with None) a problem found while running, and tell the overlay."""
+    if message is not None:
+        from neo2.core.logredact import redact
+
+        message = redact(message)  # (a voice error may quote what it was given)
     if message is None:
         if _live.pop(key, None) is None:
             return
@@ -127,15 +158,23 @@ def clear(prefix: str) -> None:
 async def watch(every_s: float = 10.0) -> None:
     """Re-check now and then: permissions granted in System Settings, a key added to the settings
     file — the overlay's problem list follows without a restart."""
+    from neo2.core import brains
     from neo2.core.events import bus
 
     last: list[str] | None = None
+    said: dict[str, Any] | None = None
     while True:
         try:
+            # What answers on this Mac (NEO's own model, an endpoint here): asked every 30 s at most.
+            await brains.refresh_probes()
             items = await asyncio.to_thread(problems)
             if last is not None and items != last:
                 await bus().publish("problems", items=items)
             last = items
+            now = brains.summary()
+            if said is not None and now != said:
+                await bus().publish("brains", **now)  # (a model started here, a key added to a file)
+            said = now
         except Exception as e:  # noqa: BLE001
-            print(f"[health] check failed: {str(e)[:80]}")
+            print(f"[health] check failed: {type(e).__name__}")
         await asyncio.sleep(every_s)

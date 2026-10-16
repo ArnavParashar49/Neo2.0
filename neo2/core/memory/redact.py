@@ -3,9 +3,11 @@ goes through :func:`redact` first, and a secret's value is replaced by ``[secret
 
 What counts as a secret (the value, never the sentence around it):
 
-* a key or token by its shape — provider API keys (``sk-…``, ``AIza…``, ``gsk_…``, ``ghp_…``,
-  ``xoxb-…``, ``AKIA…``), JSON web tokens, ``Bearer …``, private-key blocks, and any long run of
-  letters and digits that looks generated (40+ characters, mixed);
+* a key or token by its shape — provider API keys (``sk-…``, ``sk-or-…``, ``AIza…``, ``gsk_…``,
+  ``xai-…``, ``ghp_…``, ``xoxb-…``, ``AKIA…``), JSON web tokens, ``Bearer …``, private-key blocks,
+  and any long run of letters and digits that looks generated (40+ characters, mixed);
+* the exact keys NEO has loaded (its settings' and the endpoints' — a Mistral key has no shape of
+  its own), read from neo2.core.logredact.secrets as the text is cleaned, never kept here;
 * what follows a word that names one — "my password is …", "pin 4321", "the OTP is 482913",
   "cvv 123", "api key: …", "mera password … hai" — the value only: "the wifi password is on the
   fridge" has none and is kept as said;
@@ -16,7 +18,7 @@ remember those, and it does. (Laya's learning log is stricter — it skips any r
 mentions a secret word or carries a long digit run: :data:`MENTIONS_SECRET`, which lived in
 neo2.core.reflex.learn before and is the one pattern both share.)
 
-Pure functions over text: no settings, no store, nothing kept.
+Functions over text: no store, nothing kept (the loaded keys are only read).
 """
 
 from __future__ import annotations
@@ -35,10 +37,11 @@ MENTIONS_SECRET = re.compile(
 # ---- by shape -------------------------------------------------------------------------------
 _SHAPES = re.compile(
     r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)"
-    r"|\bsk-(?:ant-|proj-|live-|test-)?[A-Za-z0-9_-]{16,}"  # OpenAI / Anthropic style
+    r"|\bsk-(?:ant-|proj-|or-|live-|test-)?[A-Za-z0-9_-]{16,}"  # OpenAI / Anthropic / OpenRouter style
     r"|\bAIza[0-9A-Za-z_-]{30,}"  # Google API keys
     r"|\bgsk_[A-Za-z0-9]{20,}"  # Groq
     r"|\bcsk-[A-Za-z0-9]{20,}"  # Cerebras
+    r"|\bxai-[A-Za-z0-9]{20,}"  # xAI
     r"|\bgh[pousr]_[A-Za-z0-9]{20,}|\bgithub_pat_[A-Za-z0-9_]{20,}"
     r"|\bxox[abprs]-[A-Za-z0-9-]{10,}"  # Slack
     r"|\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"  # AWS access key ids
@@ -120,9 +123,24 @@ def _is_value(v: str, *, bare: bool) -> bool:
 _GONE = "\x00"  # stands in for a mask already in the text while it is scanned again
 
 
+def _loaded() -> list[str]:
+    """The keys NEO has loaded now (neo2.core.logredact), longest first; none when it can't say."""
+    try:
+        from neo2.core.logredact import secrets
+
+        return secrets()
+    except Exception:  # noqa: BLE001 — the shapes still apply
+        return []
+
+
 def _spans(text: str) -> list[tuple[int, int]]:
     text = text.replace(MASK, _GONE * len(MASK))  # what is masked already is no secret (nor its words)
     out: list[tuple[int, int]] = [m.span() for m in _SHAPES.finditer(text)]
+    for key in _loaded():
+        at = text.find(key)
+        while at >= 0:
+            out.append((at, at + len(key)))
+            at = text.find(key, at + len(key))
     out += [m.span() for m in _LONG.finditer(text) if _generated(m.group())]
     for m in _NAMED.finditer(text):
         if _is_value(m.group("value"), bare=not m.group("sep").strip()):

@@ -39,6 +39,7 @@ from neo2.core.providers.base import (
     Blind,
     Level,
     Message,
+    NoBrain,
     NoEyes,
     OutOfTime,
     Provider,
@@ -573,9 +574,12 @@ class Chain:
         if pixels and any(n in seeing for n, _ in failures):
             return NoEyes(failures, seeing=seeing, photo=photo)  # a brain that sees couldn't answer
         if not pool().overrides and not catalog.any_key(settings()):
-            return ProviderError(
-                "no API key set — add GEMINI_API_KEY to .env (free at aistudio.google.com/apikey)"
-            )
+            # No key for any provider NEO may ask, and no model here answered: Brains & Keys is where
+            # that changes (the session says so and opens it: neo2.core.onboarding). An embedded
+            # agent has no such window: its words are the old ones.
+            if runtime.library_bound() or runtime.library_mode():
+                return NoBrain("no API key set — add GEMINI_API_KEY to .env (free at aistudio.google.com/apikey)")
+            return NoBrain("no AI model is set up — connect one in Brains & Keys (or: python -m neo2 keys set gemini)")
         if pixels:  # none that sees is set up: the words say so, not that one is busy
             return NoEyes(failures or self._missing, seeing=(), photo=photo)
         return AllBrainsFailed(failures + self._missing)
@@ -735,12 +739,33 @@ def _key_health(name: str, *, refused: bool) -> None:
     from neo2.core import health
 
     if refused:
-        health.report(
-            f"key:{pid}",
-            f"{catalog.provider_label(pid)} refused its API key. Open Brains & Keys to replace it.",
-        )
+        health.report(f"key:{pid}", f"{catalog.provider_label(pid)} refused {_key_from(pid)}. Open Brains & Keys to replace it.")
     else:
         health.report(f"key:{pid}", None)
+
+
+_KEY_FROM = {
+    "saved": "the API key saved in NEO",
+    "env": "the API key in the environment variable {env}",
+    "dotenv": "the API key in ~/.neo/.env",
+    "checkout_env": "the API key in the checkout's .env",
+}
+
+
+def _key_from(pid: str) -> str:
+    """Which of the user's keys a provider refused, in words: "the API key saved in NEO" (where it
+    comes from: keystore.sources — never the key)."""
+    try:
+        from neo2.core import keystore
+
+        s = settings()
+        src = keystore.sources(custom=list(getattr(s, "custom_providers", None) or ())).get(pid, {}).get("source", "")
+        p = catalog.provider(pid)
+        cp = catalog.custom_endpoint(pid, s) if pid.startswith("custom:") else None
+        env = (p.env if p is not None else None) or (cp.env if cp is not None else None) or "its variable"
+        return _KEY_FROM.get(src, "its API key").format(env=env)
+    except Exception:  # noqa: BLE001 — where it came from is a detail
+        return "its API key"
 
 
 def _eyes_first(providers: list[Provider]) -> list[Provider]:

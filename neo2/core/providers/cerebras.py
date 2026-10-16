@@ -469,7 +469,7 @@ class Account:
         if scope == "account" and self.ledger.path is not None and not runtime.library_mode():
             from neo2.core import health  # NEO.app's problem list: something only the user can fix
 
-            health.report("cerebras", f"{words}. NEO skips Cerebras until midnight (Settings & API Keys…).")
+            health.report("cerebras", f"{words}. NEO skips Cerebras until midnight (Brains & Keys).")
         log.warning(
             f"[brain] {name}: {words} (HTTP {getattr(e, 'status_code', '?')}); refused until midnight"
         )

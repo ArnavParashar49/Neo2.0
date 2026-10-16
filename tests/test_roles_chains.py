@@ -21,7 +21,6 @@ from neo2.core.providers.base import (
     KeyRefused,
     Message,
     NoBrain,
-    ProviderError,
     ToolCall,
     ToolResult,
     Turn,
@@ -309,7 +308,8 @@ def test_any_key_counts_for_the_no_key_message(monkeypatch):
         asyncio.run(prov.brain("agent").complete([Message.user("hi")]))
     _env(monkeypatch)
     _fakes(monkeypatch)
-    with pytest.raises(ProviderError, match="no API key set"):
+    # No key at all: NoBrain (Brains & Keys opens for it: tests/test_no_brain_onboarding.py).
+    with pytest.raises(NoBrain, match="no AI model is set up"):
         asyncio.run(prov.brain("agent").complete([Message.user("hi")]))
 
 

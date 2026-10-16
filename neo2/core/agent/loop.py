@@ -24,7 +24,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from typing import Any, Literal
 
-from neo2.core import logger
+from neo2.core import logger, runtime
 from neo2.core.agent import batch, failures
 from neo2.core.agent.confirm import NEEDS_CONFIRM, NEEDS_USER
 from neo2.core.agent.prompt import guidance as prompt_guidance
@@ -38,6 +38,7 @@ from neo2.core.providers.base import (
     AllBrainsFailed,
     Level,
     Message,
+    NoBrain,
     Provider,
     ToolCall,
     ToolResult,
@@ -91,6 +92,9 @@ class AgentResult:
     messages: list[Message] = field(default_factory=list)  # full transcript for continuation
     question: str = ""  # populated on needs_confirm / needs_user
     pending_action: str = ""  # confirm.Pending.action_id the question refers to
+    # Why an "error" stop happened, as its kind: "no_brain" — no model is set up at all (the session
+    # then says how to connect one and opens Brains & Keys: neo2.core.onboarding).
+    failure: str = ""
 
 
 def _truncate(text: str, limit: int) -> str:
@@ -112,6 +116,10 @@ def all_tools(reg: Registry) -> list[ToolSpec]:
 def _model_trouble(e: Exception, steps: list[Step]) -> str:
     """What the user hears when no brain could take the next step: which brain, and whether it's
     out of quota, can't take a request this long, isn't running — not a raw stack of errors."""
+    if isinstance(e, NoBrain) and not runtime.library_bound():
+        from neo2.core.onboarding import OPEN_IT
+
+        return OPEN_IT  # (NEO.app's session puts the words of what it did instead: neo2.core.onboarding)
     if not isinstance(e, AllBrainsFailed):
         return f"I hit a problem talking to the model: {e}"
     said = e.spoken()
@@ -421,7 +429,8 @@ async def run_agent(
                 turn: Turn = await provider.complete(messages, system=system, tools=tools, effort=effort)
         except Exception as e:  # noqa: BLE001
             await _settle(ev, idle_on_finish, job)
-            return end(AgentResult(_model_trouble(e, steps), "error", steps, messages))
+            failure = "no_brain" if isinstance(e, NoBrain) else ""
+            return end(AgentResult(_model_trouble(e, steps), "error", steps, messages, failure=failure))
 
         messages.append(Message.assistant(turn.text, turn.tool_calls, raw=turn.raw))
         sees = getattr(turn, "sees", True)

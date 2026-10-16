@@ -1,8 +1,13 @@
 """NEO entry point.
 
-python -m neo2            # full assistant: voice + overlay server
-python -m neo2 --text     # text REPL in the terminal (no voice, no UI)
-python -m neo2 --doctor   # check keys, permissions, models
+python -m neo2                   # full assistant: voice + overlay server
+python -m neo2 --text            # text REPL in the terminal (no voice, no UI)
+python -m neo2 --doctor [--test] # check keys and brains (--test: ask each provider), permissions, models
+python -m neo2 keys …            # the API keys NEO uses (neo2.core.cli_keys): list | set | remove | test
+python -m neo2 brain …           # which brain each role uses: show | set
+
+The core's stdout and stderr (NEO.app's core.log) go through neo2.core.logredact from the start: a
+key NEO has loaded never reaches the log whole.
 """
 
 from __future__ import annotations
@@ -74,7 +79,11 @@ async def text_repl(verbose: bool) -> None:
         print(f"[memory] session saved: {summary[:120]}", file=sys.stderr)
 
 
-def doctor() -> int:
+def doctor(test: bool = False) -> int:
+    """Keys (each provider: where its key comes from, its last 4), the roles and whether each can
+    answer, what runs on this Mac, the permissions and the local models. `test`: ask each provider
+    whose key is set whether it works (no tokens spent). Exit 1 when the Brain can't answer, NEO has
+    no model at all, or something it needs is missing — never for an optional provider left unset."""
     s = settings()
     ok = True
 
@@ -83,28 +92,77 @@ def doctor() -> int:
         ok &= good
         print(f"  {'✓' if good else '✗'} {label}{(' — ' + note) if note else ''}")
 
-    print("Keys")
-    row(
-        "GEMINI_API_KEY",
-        bool(s.gemini_api_key),
-        "free at aistudio.google.com" if not s.gemini_api_key else "",
-    )
-    row(
-        "GROQ_API_KEY (optional, fast chat)",
-        bool(s.groq_api_key),
-        "free at console.groq.com" if not s.groq_api_key else "",
-    )
-    if s.cerebras_api_key:  # (optional and paid: no key is no problem)
-        from neo2.core.providers import cerebras
+    def info(label: str, good: bool, note: str = "") -> None:  # (shown, never a reason to fail)
+        print(f"  {'✓' if good else '·'} {label}{(' — ' + note) if note else ''}")
 
-        st = cerebras.status()
-        row(
-            "CEREBRAS_API_KEY (optional, paid)",
-            not st.get("refused"),
-            st.get("refused") or f"${st.get('today_usd', 0):.4f} of ${st.get('budget_usd', 0):.2f} spent today",
-        )
-    else:
-        print("  · CEREBRAS_API_KEY (optional, paid) — not set")
+    from neo2.core import brainref, brains, health, keystore
+    from neo2.core.cli_keys import _where
+    from neo2.core.providers import catalog
+
+    customs = list(getattr(s, "custom_providers", None) or ())
+    try:
+        asyncio.run(brains.refresh_probes(s, force=True))  # (what answers on this Mac: loopback only)
+    except Exception as e:  # noqa: BLE001
+        print(f"  · couldn't look for models on this Mac ({type(e).__name__})")
+    print("Keys (Brains & Keys: the window, or python -m neo2 keys set <provider>)")
+    srcs = keystore.sources(custom=customs)
+    for pid, e in srcs.items():
+        p = catalog.provider(pid)
+        cp = catalog.custom_endpoint(pid, s) if pid.startswith(brainref.CUSTOM) else None
+        label = p.label if p is not None else (cp.label if cp is not None else pid)
+        if pid == "cerebras" and e.get("set"):
+            from neo2.core.providers import cerebras
+
+            st = cerebras.status()
+            row(f"{label} (paid)", not st.get("refused"), st.get("refused") or (
+                f"{_where(e, pid)}; ${st.get('today_usd', 0):.4f} of ${st.get('budget_usd', 0):.2f} spent today"))  # fmt: skip
+        elif e.get("set"):
+            info(label, True, _where(e, pid))
+        elif cp is not None and cp.on_device:
+            info(label, True, "on this Mac (no key needed)")
+        else:
+            info(label, False, "not set" + (f" ({p.key_url})" if p is not None and p.key_url else ""))
+    for problem in health._store_problems():
+        row(problem, False)
+    print("Brains")
+    now = brains.saved()
+    for title, f, role in (("Brain", "brain", "brain"), ("Quick replies", "fast_brain", "quick"), ("Eyes", "eyes_brain", "eyes")):
+        ref = str(getattr(s, f, "") or "")
+        src = {"env": "environment", "saved": "saved in NEO", "dotenv": "~/.neo/.env", "checkout_env": "checkout .env",
+               "default": "default"}.get(brains.setting_source(f, saved_now=now), "")  # fmt: skip
+        if not ref:
+            info(f"{title}: the Brain, then the seeing fallbacks", True, src)
+            continue
+        r = brainref.parse(ref)
+        if not r.valid:
+            typed = brainref.shown(ref)
+            row(f"{title}: {typed + ' is' if typed else 'it is'} not a brain NEO knows", False, src)
+            continue
+        got = brains._role(ref, role, s)
+        note = f"{r.text}, {src}" + ("" if got["ok"] else " — not set up")
+        (row if role == "brain" else info)(f"{title}: {got['label']}", got["ok"], note)
+    ready = brains.ready(s)
+    row("NEO has a model to ask", ready, "" if ready else "connect one in Brains & Keys")
+    if ready:
+        for line in health.model_problems(s):  # (its brain can't see, and nothing else that sees is set up)
+            info(line, False)
+    here = sorted({u for n in brains._named(s) if (u := brains._probe_url(n, s))})
+    if here:
+        print("On this Mac")
+        for u in here:
+            note = "answering" if brains.reachable(u) else (
+                "not running (python -m neo2 --local)" if u == brains.LOCAL_MODELS_URL else "not answering")  # fmt: skip
+            info(u.rsplit("/models", 1)[0], brains.reachable(u), note)
+    if test:
+        from neo2.core.providers import keycheck
+
+        print("Key checks (no tokens spent)")
+        for pid, e in srcs.items():
+            cp = catalog.custom_endpoint(pid, s) if pid.startswith(brainref.CUSTOM) else None
+            if not e.get("set") and not (cp is not None and cp.on_device):
+                continue
+            r = asyncio.run(keycheck.check(pid))
+            row(catalog.provider_label(pid, s), r.ok, r.message)
     print("macOS permissions (grant to the app that runs NEO: Terminal / the NEO app)")
     if sys.platform == "darwin":
         from neo2.core.tools.computer import ax, screen
@@ -176,12 +234,22 @@ async def _erase_everything() -> dict:
 
 def main() -> None:
     os.umask(0o077)  # everything NEO writes (memory, logs, learned examples) is private to this user
-    from neo2.core import log_to_stdout
+    from neo2.core import log_to_stdout, logredact
 
+    logredact.install()  # first: no key NEO loads ever reaches core.log whole
     log_to_stdout()  # NEO's status lines, as NEO.app's core.log and the terminal have always shown them
-    ap = argparse.ArgumentParser(prog="neo2")
+    if len(sys.argv) > 1 and sys.argv[1] in ("keys", "brain"):
+        from neo2.core.cli_keys import main as keys_main
+
+        sys.exit(keys_main(sys.argv[1:]))
+    ap = argparse.ArgumentParser(
+        prog="neo2",
+        epilog="Brains & Keys in a terminal: neo2 keys list | set <provider> | remove <provider> | test <provider>, "
+        "and neo2 brain show | set --brain REF --quick REF --eyes REF.",
+    )
     ap.add_argument("--text", action="store_true", help="text REPL, no voice/UI")
     ap.add_argument("--doctor", action="store_true", help="check setup")
+    ap.add_argument("--test", action="store_true", help="with --doctor: ask each provider whether its key works")
     ap.add_argument(
         "--local", action="store_true", help="download + serve the offline model (Gemma 4 12B, ~6.7 GB)"
     )
@@ -189,7 +257,7 @@ def main() -> None:
     ap.add_argument("--forget-all", action="store_true", help="erase everything NEO has kept about you")
     args = ap.parse_args()
     if args.doctor:
-        sys.exit(doctor())
+        sys.exit(doctor(test=args.test))
     if args.forget_all:
         if input("Erase NEO's memories, playbooks, history, learned requests, logs and browser logins? [y/N] ").strip().lower() != "y":
             print("Nothing erased.")
