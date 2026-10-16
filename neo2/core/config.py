@@ -1,7 +1,10 @@
 """NEO settings — environment-driven, with sane free/local-first defaults.
 
-Everything lives under ``~/.neo`` (data dir) unless overridden. API keys come from the
-environment or a ``.env`` file in the project root; nothing is written to Git.
+Everything lives under ``~/.neo`` (data dir) unless overridden. Each setting is decided on its own,
+first match wins: an environment variable; what was saved in NEO (the Brains & Keys window or
+``python -m neo2 keys``: the keys in ~/.neo/api_keys.json, the brains in ~/.neo/brains.json —
+neo2.core.keystore); the .env files (a checkout's own ``.env`` beats ``~/.neo/.env``); the default
+here. Nothing is ever copied from one into another, and nothing is written to Git.
 
 An agent embedded in another app (neo2.core.runtime) has :class:`LibrarySettings` instead: only what
 the host passes in — never the environment, ~/.neo/.env or ~/.neo itself — and
@@ -16,18 +19,24 @@ import re
 import unicodedata
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Annotated, Any, Literal, get_args
+from typing import Annotated, Any, ClassVar, Literal, get_args
 
-from pydantic import Field, ValidationError, field_validator, model_validator
+from pydantic import BeforeValidator, Field, ValidationError, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, PydanticBaseSettingsSource, SettingsConfigDict
 
-from neo2.core import effects, runtime
+from neo2.core import brainref, effects, runtime
+from neo2.core.brainref import CustomProvider
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]  # neo2/core/config.py → the checkout (or site-packages)
 # Keys and settings: ~/.neo/.env (where NEO.app's installed runtime looks), and a checkout's own
 # .env on top when running from source (a checkout has a pyproject.toml; installed as a package,
 # PROJECT_ROOT is site-packages, whose .env is nobody's).
 USER_ENV = Path.home() / ".neo" / ".env"
+# What the user saved in NEO itself (neo2.core.keystore): read after the environment, before the
+# .env files. None: not read at all (the suite's conftest; a path of a test's own is read even
+# with effects off, the real ones never are).
+KEY_STORE_PATH: Path | None = Path.home() / ".neo" / "api_keys.json"
+SAVED_PATH: Path | None = Path.home() / ".neo" / "brains.json"
 NOTES_DIR = Path.home() / "Documents" / "NEO Notes"  # where a note goes that no notes app could take
 
 
@@ -38,6 +47,10 @@ def _env_files(root: Path) -> tuple[Path, ...]:
 _ENV_FILES = _env_files(PROJECT_ROOT)
 
 BrainName = Literal["gemini", "gemini_lite", "groq", "local", "claude", "groq_vision", "cerebras", "cerebras_vision"]
+# A role's brain: "<brain>[@<model>]" (neo2.core.brainref) — any of BrainName, openai, openrouter or
+# custom:<slug>, "anthropic" for claude and "google" for gemini. One NEO can't read is kept as typed
+# (the chains skip it and the health list says so): never a reason not to start, never another brain.
+BrainRef = Annotated[str, BeforeValidator(brainref.normalize)]
 VoiceBackend = Literal["auto", "live", "local", "off"]
 DecideMode = Literal["legacy", "shadow", "on", "off"]
 # Where NEO's UI lives: NEO.app's own window, or the notch (NotchHub hosts the same page in its
@@ -54,15 +67,22 @@ class Settings(BaseSettings):
         hide_input_in_errors=True,  # a bad value's error never prints it (a key, say)
     )
 
+    # The environment's own template variables (an endpoint's XAI_API_KEY) are read: not by an
+    # embedded agent's settings (LibrarySettings), which take only what the host passes.
+    _reads_environ: ClassVar[bool] = True
+
     @classmethod
     def settings_customise_sources(
         cls, settings_cls, init_settings, env_settings, dotenv_settings, file_secret_settings
     ):  # pydantic-settings calls it with these, by name
-        """With effects off (a test, a scratch script run with NEO_NO_EFFECTS=1), never the .env
-        files: ~/.neo/.env holds the user's real API keys."""
+        """The environment, then what was saved in NEO (its key store, then its saved brains), then
+        the .env files. With effects off (a test, a scratch script run with NEO_NO_EFFECTS=1),
+        never the .env files nor NEO's own real files: ~/.neo holds the user's real API keys (a
+        test's own store path is read)."""
+        saved = _store_sources(settings_cls)
         if effects.why_off():
-            return init_settings, env_settings, file_secret_settings
-        return init_settings, env_settings, dotenv_settings, file_secret_settings
+            return init_settings, env_settings, *saved, file_secret_settings
+        return init_settings, env_settings, *saved, dotenv_settings, file_secret_settings
 
     # ---- keys (no prefix — read the conventional names) -------------------------------
     # repr=False: a logged or printed Settings never shows a key.
@@ -75,11 +95,34 @@ class Settings(BaseSettings):
     # A paid Cerebras key (the user adds it themselves): its brains join the chains only with it
     # set and a daily budget above 0 (neo2.core.providers.cerebras_hooks.enabled).
     cerebras_api_key: str = Field(default="", validation_alias="CEREBRAS_API_KEY", repr=False)
+    # Only used where the user assigned them a role (a key alone sends nothing anywhere new).
+    openai_api_key: str = Field(default="", validation_alias="OPENAI_API_KEY", repr=False)
+    openrouter_api_key: str = Field(default="", validation_alias="OPENROUTER_API_KEY", repr=False)
+    # The keys of the endpoints the user added (custom_providers), by id ("custom:deepseek"): from
+    # the key store, or an endpoint's own variable (its `env`, XAI_API_KEY) in the environment
+    # (which wins) or a .env file (which doesn't).
+    custom_keys: Annotated[dict[str, str], NoDecode] = Field(default_factory=dict, repr=False)
 
     # ---- brains ----------------------------------------------------------------------
-    brain: BrainName = "gemini"  # primary agentic brain
-    fast_brain: BrainName = "groq"  # chat-only turns; falls back to `brain` if no key
-    offline_brain: BrainName = "local"
+    # Each role is a brain reference (BrainRef). The defaults rebuild the chains NEO always had.
+    brain: BrainRef = "gemini"  # Brain: agent tasks with tools
+    fast_brain: BrainRef = "groq"  # Quick replies: chat-only turns; falls back to `brain` if no key
+    offline_brain: BrainRef = "local"
+    # Eyes: the first brain asked for any step with a screenshot or photo in it, and for camera
+    # questions. "": as before (the brain if it sees, then the seeing fallbacks).
+    eyes_brain: BrainRef = ""
+    # Backups: None is Automatic (as before: the agent's backup is fast_brain); a list (at most 4,
+    # NEO_BACKUP_BRAINS="claude,groq") gives agent = [brain, *backups, offline] and
+    # fast = [fast_brain, brain, *backups, offline].
+    backup_brains: Annotated[list[str] | None, NoDecode] = None
+    # One-tool actions that missed the regex fast path. "": fast_brain's.
+    light_brain: BrainRef = "gemini_lite"
+    # The endpoints the user added (brains.json, or NEO_CUSTOM_PROVIDERS as JSON): custom:<slug>
+    custom_providers: Annotated[list[CustomProvider], NoDecode] = []
+    # Dollars a day per provider id ({"anthropic": 2.0}); a provider without one has no NEO cap.
+    daily_budgets: Annotated[dict[str, float], NoDecode] = {}
+    openai_model: str = "gpt-6.1-sol"
+    openrouter_model: str = ""  # (no default: the user picks one; its ids are vendor-prefixed)
     gemini_model: str = "gemini-3.8-flash"
     gemini_fallback_models: list[str] = ["gemini-3.7-flash", "gemini-3.5-flash"]
     gemini_lite_model: str = "gemini-3.5-flash-lite"
@@ -91,8 +134,9 @@ class Settings(BaseSettings):
     # The seeing fallbacks (Flash-Lite, Claude, Groq's vision model) for a picture the chain's own
     # brains can't answer. "auto": they join — except for a user who put the local brain first and
     # named no cloud brain that sees (their pictures stayed on the Mac: a fallback doesn't change
-    # that on its own). "on": they join for that user too.
-    cloud_eyes: Literal["auto", "on"] = "auto"
+    # that on its own). "on": they join for that user too. "off": never — only the brains the user
+    # picked ever see a picture.
+    cloud_eyes: Literal["auto", "on", "off"] = "auto"
     local_model: str = "mlx-community/gemma-4-12B-it-4bit"
     claude_model: str = "claude-opus-5"
     # Cerebras (neo2.core.providers.cerebras): the fast text brain ahead of Groq, and a seeing one
@@ -288,9 +332,55 @@ class Settings(BaseSettings):
     @field_validator("cloud_eyes", mode="before")
     @classmethod
     def _cloud_eyes(cls, v):
-        """Only a clear yes sends a local-first user's pictures to a cloud fallback: anything else
-        (a typo too) is auto."""
-        return "on" if str(v or "").strip().lower() in ("on", "true", "yes", "1", "always") else "auto"
+        """Only a clear yes sends a local-first user's pictures to a cloud fallback, and only "off"
+        (or "never") keeps them from every fallback: anything else (a typo too) is auto."""
+        s = str(v or "").strip().lower()
+        if s in ("on", "true", "yes", "1", "always"):
+            return "on"
+        return "off" if s in ("off", "never") else "auto"
+
+    @field_validator("backup_brains", mode="before")
+    @classmethod
+    def _backup_brains(cls, v):
+        return brainref.backups(v)
+
+    @field_validator("custom_providers", mode="before")
+    @classmethod
+    def _custom_providers(cls, v):
+        return brainref.custom_list(v)
+
+    @field_validator("daily_budgets", mode="before")
+    @classmethod
+    def _daily_budgets(cls, v):
+        return brainref.budgets(v)
+
+    @field_validator("custom_keys", mode="before")
+    @classmethod
+    def _custom_keys(cls, v):
+        """{"custom:<slug>": key}, from a dict or its JSON; an entry that isn't one is dropped."""
+        return _custom_keys(v)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _endpoint_variables(cls, data: Any) -> Any:
+        """An endpoint's own variable (its `env`: XAI_API_KEY…) is its key too, in R1's order: the
+        environment beats a key saved in NEO, which beats a .env file's line. Only where the
+        environment is read at all (never an embedded agent's settings)."""
+        if not cls._reads_environ or not isinstance(data, dict) or not data.get("custom_providers"):
+            return data
+        named = [cp for cp in brainref.custom_list(data.get("custom_providers")) if cp.env]
+        if not named:
+            return data
+        keys = _custom_keys(data.get("custom_keys"))
+        for cp in named:
+            from_env = os.environ.get(cp.env or "", "").strip()
+            # (a .env file's line NEO has no field for: passed on by name, lower-cased)
+            from_file = data.get(cp.env or "", data.get((cp.env or "").lower()))
+            if from_env:
+                keys[cp.id] = from_env
+            elif cp.id not in keys and isinstance(from_file, str) and from_file.strip():
+                keys[cp.id] = from_file.strip()
+        return {**data, "custom_keys": keys}
 
     # ---- memory & prompt ---------------------------------------------------------------
     embeddings: Literal["local", "off"] = "local"  # off: keyword-only recall, no local model
@@ -512,6 +602,7 @@ class LibrarySettings(Settings):
     model_config = SettingsConfigDict(
         env_file=None, extra="forbid", populate_by_name=True, frozen=True, hide_input_in_errors=True
     )
+    _reads_environ: ClassVar[bool] = False  # only what the host passes
 
     data_dir: Path  # required: an embedded agent never defaults to ~/.neo
     # Embedders get the quiet defaults: no local models, no memory, no voice, a headless browser.
@@ -797,23 +888,54 @@ def _mkdirs_private(path: Path) -> None:
 _settings: Settings | None = None
 
 
+def _custom_keys(v: Any) -> dict[str, str]:
+    if isinstance(v, str):
+        try:
+            v = json.loads(v) if v.strip() else {}
+        except ValueError:
+            return {}
+    if not isinstance(v, dict):
+        return {}
+    out: dict[str, str] = {}
+    for k, key in v.items():
+        r = brainref.parse(k)
+        if r.custom and r.model is None and isinstance(key, str) and key.strip():
+            out[r.text] = key.strip()
+    return out
+
+
+def _store_sources(settings_cls: type[BaseSettings]) -> tuple[PydanticBaseSettingsSource, ...]:
+    """What the user saved in NEO, as settings sources (neo2.core.keystore): the key store, then the
+    saved brains. A path that is None isn't read; the real ones never while effects are off."""
+    from neo2.core import keystore
+
+    out: list[PydanticBaseSettingsSource] = []
+    if KEY_STORE_PATH is not None and not keystore.refused(KEY_STORE_PATH):
+        out.append(keystore.KeyStoreSource(settings_cls, KEY_STORE_PATH))
+    if SAVED_PATH is not None and not keystore.refused(SAVED_PATH):
+        out.append(keystore.SavedSource(settings_cls, SAVED_PATH))
+    return tuple(out)
+
+
 def _env_lines(env_path: Path | None, what: str) -> tuple[Path, list[str]]:
-    """The file a setting NEO writes itself goes to (~/.neo/.env, or a test's own), and its lines."""
+    """The file a setting NEO writes itself goes to (~/.neo/.env, or a test's own), and its lines.
+    No file yet is no lines; a file that is there but can't be read stops the write (it would
+    otherwise be replaced by the one setting, and the user's keys with it)."""
     path = env_path if env_path is not None else USER_ENV
     if env_path is None and effects.why_off():
         raise RuntimeError(f"{what}: effects are off, and ~/.neo/.env is the user's")
     try:
         return path, path.read_text().splitlines()
-    except OSError:
+    except FileNotFoundError:
         return path, []
 
 
 def _write_env(path: Path, lines: list[str]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as f:
-        f.write("\n".join(lines) + "\n")
-    os.chmod(path, 0o600)  # it holds the user's keys: theirs to read, nobody else's
+    """The file whole or not at all (neo2.core.keystore.atomic_write: a temporary file renamed over
+    it), mode 0600 — it holds the user's keys: theirs to read, nobody else's."""
+    from neo2.core.keystore import atomic_write
+
+    atomic_write(path, ("\n".join(lines) + "\n").encode("utf-8"))
 
 
 def set_ui_host(host: str, env_path: Path | None = None) -> None:

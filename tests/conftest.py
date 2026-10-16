@@ -33,9 +33,18 @@ __all__ = [
     "_no_task_grants",
 ]
 
-# Hermetic: no test may read the developer's real keys or settings (~/.neo/.env, ./.env).
+# Hermetic: no test may read the developer's real keys or settings (~/.neo/.env, ./.env, and what
+# was saved in NEO: ~/.neo/api_keys.json, ~/.neo/brains.json — a test passes paths of its own).
 Settings.model_config["env_file"] = None
-for _k in ("GEMINI_API_KEY", "GEMINI_API_KEYS", "GROQ_API_KEY", "ANTHROPIC_API_KEY", "CEREBRAS_API_KEY", "NEO_DECIDE_MODES"):
+from neo2.core import config as _config  # noqa: E402
+
+_config.KEY_STORE_PATH = None
+_config.SAVED_PATH = None
+for _k in (
+    "GEMINI_API_KEY", "GEMINI_API_KEYS", "GROQ_API_KEY", "ANTHROPIC_API_KEY", "CEREBRAS_API_KEY", "NEO_DECIDE_MODES",
+    "OPENAI_API_KEY", "OPENROUTER_API_KEY", "XAI_API_KEY", "DEEPSEEK_API_KEY", "MISTRAL_API_KEY", "TOGETHER_API_KEY",
+    "NEO_CUSTOM_PROVIDERS",
+):  # fmt: skip
     os.environ.pop(_k, None)
 
 from neo2.core.decide import shadow as _shadow  # noqa: E402

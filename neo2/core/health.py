@@ -7,6 +7,8 @@ so "no API key", "microphone blocked" or "voice is down" are visible instead of 
 from __future__ import annotations
 
 import asyncio
+import re
+from typing import Any
 
 from neo2.core.config import settings
 
@@ -21,6 +23,7 @@ def problems() -> list[str]:
             "NEO needs a free Gemini API key to understand you and to talk. Click the menu-bar icon → "
             "Settings & API Keys…, paste the key, save, then choose Restart NEO."
         )
+    out.extend(brain_problems(s))
     try:
         from neo2.core.voice import devices
 
@@ -45,6 +48,67 @@ def problems() -> list[str]:
     except Exception:  # noqa: BLE001
         pass
     out.extend(_live.values())
+    return out
+
+
+# A role's setting, as the user would have typed it.
+_ROLE_VARS = {
+    "brain": "NEO_BRAIN",
+    "fast_brain": "NEO_FAST_BRAIN",
+    "offline_brain": "NEO_OFFLINE_BRAIN",
+    "eyes_brain": "NEO_EYES_BRAIN",
+    "light_brain": "NEO_LIGHT_BRAIN",
+    "backup_brains": "NEO_BACKUP_BRAINS",
+}
+_SHOWN = re.compile(r"[A-Za-z0-9 _.:@/+-]{1,32}")
+_KEYISH = re.compile(r"(?i)^(sk-|aiza|gsk_|csk-|xai-)|[A-Za-z0-9_-]{24,}")
+
+
+def _shown(value: str) -> str | None:
+    """What was typed, when it's safe to show it back: short, plain, and nothing like a key (a key
+    pasted into the wrong line must never reach every client's hello)."""
+    v = value.strip()
+    return v if _SHOWN.fullmatch(v) and not _KEYISH.search(v) else None
+
+
+def brain_problems(s: Any) -> list[str]:
+    """A role set to something NEO can't read as a brain (it is skipped, never swapped for another),
+    and NEO's own saved files when they can't be read."""
+    from neo2.core import brainref
+
+    out: list[str] = []
+    for f, var in _ROLE_VARS.items():
+        v = getattr(s, f, None)
+        for one in v if isinstance(v, list) else [v]:
+            if not isinstance(one, str) or not one or brainref.parse(one).valid:
+                continue
+            shown = _shown(one)
+            out.append(
+                f"{var}={shown} isn't a brain NEO knows. Pick one in Brains & Keys."
+                if shown
+                else f"{var} isn't set to a brain NEO knows. Pick one in Brains & Keys."
+            )
+    out.extend(_store_problems())
+    return out
+
+
+def _store_problems() -> list[str]:
+    from neo2.core import config, keystore
+
+    out: list[str] = []
+    for path, cls in ((config.KEY_STORE_PATH, keystore.FileKeyStore), (config.SAVED_PATH, keystore.SavedConfig)):
+        if path is None or keystore.refused(path):
+            continue
+        try:
+            st = cls(path).state()
+        except Exception:  # noqa: BLE001 — health never fails for this
+            continue
+        if not st.ok:
+            what = "was made by a newer NEO" if st.problem == "newer" else "can't be read"
+            out.append(
+                f"NEO's {path.name} {what}, so what was saved there isn't used. Saving in Brains & Keys "
+                f"sets it aside as {path.name}.bad-… and starts a new one."
+            )
     return out
 
 
