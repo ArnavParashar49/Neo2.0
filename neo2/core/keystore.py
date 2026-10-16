@@ -469,7 +469,11 @@ class KeyStoreSource(PydanticBaseSettingsSource):
         return None, field_name, False  # (__call__ answers for all of them at once)
 
     def __call__(self) -> dict[str, Any]:
-        keys = self.store.list()
+        try:
+            keys = self.store.list()
+        except Exception as e:  # noqa: BLE001 — what was saved never stops NEO from starting
+            print(f"[keys] the key store couldn't be read ({type(e).__name__})")
+            return {}
         if not keys:
             return {}
         out: dict[str, Any] = {}
@@ -496,7 +500,11 @@ class SavedSource(PydanticBaseSettingsSource):
         return None, field_name, False
 
     def __call__(self) -> dict[str, Any]:
-        data, _ = self.saved.read()
+        try:
+            data, _ = self.saved.read()
+        except Exception as e:  # noqa: BLE001 — what was saved never stops NEO from starting
+            print(f"[keys] the saved brains couldn't be read ({type(e).__name__})")
+            return {}
         return {k: v for k, v in data.items() if k in self.settings_cls.model_fields}
 
 

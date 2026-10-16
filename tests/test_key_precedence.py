@@ -165,3 +165,17 @@ def test_a_corrupt_saved_file_never_stops_neo_from_starting(neo):
     s = neo.settings()
     assert s.brain == "claud" and s.voice == "auto" and s.custom_providers == []  # (reported in health)
     assert s.gemini_api_key == ""
+
+
+def test_a_store_that_fails_to_read_never_stops_neo_from_starting(neo, monkeypatch, capsys):
+    neo.store.put("anthropic", "sk-ant-TEST-saved-0000")
+    neo.saved.update({"brain": "claude"})
+
+    def broken(self):
+        raise OSError("I/O error")
+
+    monkeypatch.setattr(FileKeyStore, "list", broken)
+    monkeypatch.setattr(SavedConfig, "read", broken)
+    s = neo.settings(files=False)
+    assert s.anthropic_api_key == "" and s.brain == "gemini"  # (as if nothing were saved)
+    assert "TEST" not in capsys.readouterr().out
