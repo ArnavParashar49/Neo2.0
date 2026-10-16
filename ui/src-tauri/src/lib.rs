@@ -19,11 +19,16 @@
 //! sends the wake itself (`neo://wake`), it asks "Erase everything?" (`neo://erase`: the window
 //! comes up for it), and it passes on a `ui_host` it hears (`ui_host_changed` — the only word of
 //! where the UI lives when the core was started outside the app).
+//!
+//! "Brains & Keys…" (the menu's, and a host's or the core's "settings") opens NEO's own window
+//! for picking brains and pasting keys (keys.rs). The shell creates it, mints its ticket and hands
+//! that to the core; it never sees a key. "Edit settings file…" still opens ~/.neo/.env.
 
 mod chord;
 mod core;
 #[cfg(target_os = "macos")]
 mod frame;
+mod keys;
 #[cfg(target_os = "macos")]
 mod native;
 mod perms;
@@ -117,6 +122,7 @@ fn from_core(app: &AppHandle, msg: core::FromCore) {
             set_ui_host(app, notch);
             set_host_attached(app, Some(host_attached));
             tell_status(app, true); // a new core knows nothing of the menu yet
+            keys::core_said_hello(app); // …nor of an open Brains & Keys window's ticket
         }
         core::FromCore::HostAttached(attached) => set_host_attached(app, Some(attached)),
         core::FromCore::UiHost { notch } => set_ui_host(app, notch),
@@ -195,12 +201,12 @@ fn act(app: &AppHandle, action: &str, on: Option<bool>) {
         "open_logs" => {
             let _ = std::process::Command::new("open").arg(core::logs_dir()).spawn();
         }
-        "settings" => {
-            // TextEdit on ~/.neo/.env (created with every setting explained, mode 600).
-            if let Ok(path) = core::ensure_env_file() {
-                let _ = std::process::Command::new("open").arg("-e").arg(path).spawn();
-            }
-        }
+        // Brains & Keys: NEO's own window (keys.rs) — the menu's item, a host's Settings, and the
+        // core's `open_keys` (the chat's "Set up a brain", a request that needs a model) all end here.
+        "settings" => keys::open(app),
+        // The menu's "Edit settings file…": TextEdit on ~/.neo/.env (created with every setting
+        // explained, mode 600). Not one a host may ask for.
+        "edit_env" => keys::edit_env(),
         "erase_memory" => {
             // The overlay asks "Erase everything?" before anything is deleted — without
             // opening the microphone while the user reads it. In the notch too: this window
@@ -313,8 +319,13 @@ pub fn run() {
             ui_host_changed,
             frame::set_frame,
             native::clipboard_write,
-            native::show_quiet
+            native::show_quiet,
+            keys::keys_ticket,
+            keys::edit_env_file
         ])
+        // A Brains & Keys window the shell didn't create is closed as its page loads.
+        .on_page_load(|webview, _| keys::page_loaded(webview))
+        .manage(keys::Keys::default())
         .manage(core::Core::default())
         .manage(UiHost(Mutex::new(core::ui_host_is_notch())))
         .manage(HostAttached(Mutex::new((None, Instant::now()))))
@@ -370,7 +381,8 @@ pub fn run() {
             }
             // The ids are the actions' names (`act`): a host's `shell` command uses the same ones.
             let restart_item = MenuItem::with_id(app, "restart", "Restart NEO", true, None::<&str>)?;
-            let keys_item = MenuItem::with_id(app, "settings", "Settings & API Keys…", true, None::<&str>)?;
+            let keys_item = MenuItem::with_id(app, "settings", "Brains & Keys…", true, None::<&str>)?;
+            let env_item = MenuItem::with_id(app, "edit_env", "Edit settings file…", true, None::<&str>)?;
             let erase_item = MenuItem::with_id(app, "erase_memory", "Erase NEO's Memory…", true, None::<&str>)?;
             let logs_item = MenuItem::with_id(app, "open_logs", "Open Logs", true, None::<&str>)?;
             let login_item =
@@ -381,8 +393,8 @@ pub fn run() {
             let menu = Menu::with_items(
                 app,
                 &[
-                    &status_item, &ax_item, &sc_item, &show_item, &sep, &keys_item, &restart_item, &logs_item,
-                    &erase_item, &login_item, &sep2, &quit_item,
+                    &status_item, &ax_item, &sc_item, &show_item, &sep, &keys_item, &env_item, &restart_item,
+                    &logs_item, &erase_item, &login_item, &sep2, &quit_item,
                 ],
             )?;
             *app.state::<Tray>().login.lock().unwrap() = Some(login_item.clone());
@@ -486,5 +498,24 @@ mod tests {
         }
         // The panes of System Settings are the menu's own; a host opens them itself.
         assert!(!SHELL_ACTIONS.contains(&"allow_ax") && !SHELL_ACTIONS.contains(&"allow_sc"));
+    }
+
+    #[test]
+    fn brains_and_keys_is_the_window_and_the_settings_file_has_its_own_item() {
+        let src = include_str!("lib.rs");
+        let act = src.split("fn act(").nth(1).unwrap().split("\n}\n").next().unwrap();
+        // "settings" (the menu's item, a host's row, the core's open_keys) opens the window…
+        assert!(act.contains("\"settings\" => keys::open(app)"));
+        assert!(src.contains("with_id(app, \"settings\", \"Brains & Keys…\""));
+        // …and the old TextEdit door is the menu's alone: no host may ask for it.
+        assert!(act.contains("\"edit_env\" => keys::edit_env()"));
+        assert!(src.contains("with_id(app, \"edit_env\", \"Edit settings file…\""));
+        assert!(!SHELL_ACTIONS.contains(&"edit_env"));
+        assert!(!src.contains(concat!("\"Settings & API", " Keys…\"")), "the old item's name is gone");
+        // The window's two commands are registered, and the core hears its ticket after every hello.
+        assert!(src.contains("keys::keys_ticket,") && src.contains("keys::edit_env_file"));
+        let from_core = src.split("fn from_core(").nth(1).unwrap().split("\n}\n").next().unwrap();
+        let hello = from_core.split("core::FromCore::Hello {").nth(1).unwrap().split("core::FromCore::HostAttached").next().unwrap();
+        assert!(hello.contains("keys::core_said_hello(app)"));
     }
 }

@@ -1,0 +1,32 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "keys-window",
+  "description": "Brains & Keys: shows and focuses itself, closes, is dragged, and opens only the providers' key pages (the catalogue's key_url, ui/src/keys/catalog.ts) in the user's browser; no other powers (its ticket and the settings file are label-checked commands in keys.rs)",
+  "windows": [
+    "keys"
+  ],
+  "permissions": [
+    "core:default",
+    "core:event:default",
+    "core:window:allow-show",
+    "core:window:allow-set-focus",
+    "core:window:allow-close",
+    "core:window:allow-destroy",
+    "core:window:allow-start-dragging",
+    {
+      "identifier": "opener:allow-open-url",
+      "allow": [
+        { "url": "https://aistudio.google.com/apikey" },
+        { "url": "https://console.anthropic.com/settings/keys" },
+        { "url": "https://platform.openai.com/api-keys" },
+        { "url": "https://console.groq.com/keys" },
+        { "url": "https://cloud.cerebras.ai" },
+        { "url": "https://openrouter.ai/keys" },
+        { "url": "https://console.x.ai" },
+        { "url": "https://platform.deepseek.com/api_keys" },
+        { "url": "https://console.mistral.ai/api-keys" },
+        { "url": "https://api.together.ai/settings/api-keys" }
+      ]
+    }
+  ]
+}

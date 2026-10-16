@@ -41,6 +41,9 @@ const CORE_ARGS: [&str; 3] = ["-u", "-m", "neo2"];
 const LINK_ENV: &str = "NEO_APP_FD";
 /// Longer than anything the core says here (a line is under a hundred bytes): dropped.
 const LINK_MAX_LINE: usize = 4096;
+/// The supervisor's status while a core started some other way (a developer's `python -m neo2`) is the
+/// one on the port: this app has no socket to it (Brains & Keys then shows the terminal commands).
+pub const OUTSIDE: &str = "using a core started outside the app";
 
 #[derive(Clone, Default)]
 pub struct Core {
@@ -212,18 +215,41 @@ pub fn ensure_env_file() -> std::io::Result<PathBuf> {
 }
 
 const ENV_TEMPLATE: &str = "\
-# NEO settings. Save this file, then choose Restart NEO from the menu-bar icon.
+# Most people never edit this file: use the menu's Brains & Keys… (in the notch: NotchHub's
+# Settings → NEO → Brains & Keys…) to pick NEO's brain and paste a key.
+#
+# NEO's settings, for those who'd rather type them. What you save in Brains & Keys wins over this
+# file, and an environment variable wins over both. Save this file, then Restart NEO.
 
-# Required: a free Gemini API key from https://aistudio.google.com/apikey
+# Keys: set the ones you have. NEO needs at least one AI model to chat and do tasks.
+# Google Gemini has a free tier, no card needed: https://aistudio.google.com/apikey
 GEMINI_API_KEY=
-
-# Optional: a free Groq key (https://console.groq.com/keys) makes quick answers faster.
+# Groq, free (quick answers): https://console.groq.com/keys
 GROQ_API_KEY=
-
-# Optional, paid: a Cerebras key (https://cloud.cerebras.ai) — a very fast brain, tried ahead of Groq.
+# Anthropic (Claude), paid: https://console.anthropic.com/settings/keys
+ANTHROPIC_API_KEY=
+# OpenAI, paid: https://platform.openai.com/api-keys
+OPENAI_API_KEY=
+# OpenRouter, pay as you go (a few models are free): https://openrouter.ai/keys
+OPENROUTER_API_KEY=
+# Cerebras, paid (https://cloud.cerebras.ai): a very fast brain, tried ahead of Groq.
 # NEO spends at most this many dollars a day on it (it tells you at 80%, then skips it).
 CEREBRAS_API_KEY=
 NEO_CEREBRAS_DAILY_BUDGET=0.50
+
+# Which brain does what. A brain is one of gemini, gemini_lite, groq, groq_vision, cerebras,
+# cerebras_vision, claude, openai, openrouter, local (NEO's model on this Mac: python -m neo2 --local)
+# or custom:<name> (an endpoint added in Brains & Keys), with a model after \"@\" if you like:
+# claude@claude-opus-5-5, openai@gpt-6.1-sol, openrouter@deepseek/deepseek-v4-pro.
+# Leave these commented out for NEO's defaults (Gemini for tasks, Groq for quick replies).
+# NEO_BRAIN=claude@claude-opus-5-5          tasks (it must call tools)
+# NEO_FAST_BRAIN=claude@claude-haiku-5-5    quick replies: chat, summaries, memory
+# NEO_EYES_BRAIN=claude@claude-opus-5-5     steps that look at a screenshot or photo
+# NEO_BACKUP_BRAINS=groq,gemini             tried in turn when the brain can't answer (at most 4)
+# NEO_LIGHT_BRAIN=gemini_lite               one-step commands (empty: the quick-replies brain)
+# NEO_CLOUD_EYES=auto                       off: only the brains you picked ever see a screenshot
+# NEO_VOICE=auto                            auto (Gemini Live with a Gemini key) | live | local | off
+# NEO_DAILY_BUDGETS=anthropic=2,openai=2    dollars a day NEO may spend per paid provider
 
 # Where \"the weather\" means when you haven't told NEO your city, e.g. Dubai.
 NEO_HOME_LOCATION=
@@ -505,7 +531,7 @@ impl Core {
                 if self.restart_now.swap(false, Ordering::SeqCst) {
                     break;
                 }
-                if *self.status.lock().unwrap() == "using a core started outside the app" && !port_in_use() {
+                if *self.status.lock().unwrap() == OUTSIDE && !port_in_use() {
                     break; // that core went away: run our own
                 }
                 thread::sleep(Duration::from_millis(500));
@@ -516,7 +542,7 @@ impl Core {
     fn run_until_given_up(&self) {
         reclaim_orphan();
         if port_in_use() {
-            self.set_status("using a core started outside the app");
+            self.set_status(OUTSIDE);
             log("a core is already listening on 8765 (not ours) — using it");
             return;
         }
@@ -900,6 +926,35 @@ f.write(b"x" * 9000 + b'\nnot json\n{"t":"shell","action":"open_at_login","on":t
         );
         let status = Command::new(&python).args(["-c", &probe]).stdin(Stdio::null()).status().expect("python starts");
         assert!(status.success(), "another child inherited the socket");
+    }
+
+    /// A new ~/.neo/.env points at Brains & Keys first, marks no key "Required", names every
+    /// provider's key, and every setting it names (set or commented out) is one the core reads.
+    #[test]
+    fn the_settings_file_template_points_at_brains_and_keys() {
+        let t = ENV_TEMPLATE;
+        assert!(t.starts_with("# Most people never edit this file: use the menu's Brains & Keys…"), "{t}");
+        assert!(!t.contains("Required"));
+        assert!(!t.contains("menu-bar icon"), "the notch has none");
+        for key in ["GEMINI_API_KEY", "GROQ_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY", "CEREBRAS_API_KEY"] {
+            assert!(t.lines().any(|l| l == format!("{key}=")), "{key}");
+        }
+        // A role left empty would mean "no brain": they are only ever examples, commented out.
+        for l in t.lines().filter(|l| !l.starts_with('#')) {
+            assert!(!l.starts_with("NEO_") || !l.contains("BRAIN"), "{l}");
+        }
+        let config = include_str!("../../../neo2/core/config.py");
+        for l in t.lines() {
+            let name = l.trim_start_matches("# ").split('=').next().unwrap_or("");
+            if !l.contains('=') || name.is_empty() || !name.chars().all(|c| c.is_ascii_uppercase() || c == '_') {
+                continue;
+            }
+            let known = match name.strip_prefix("NEO_") {
+                Some(field) => config.contains(&format!("\n    {}:", field.to_lowercase())),
+                None => config.contains(&format!("validation_alias=\"{name}\"")),
+            };
+            assert!(known, "{name} isn't a setting NEO reads");
+        }
     }
 
     #[test]
