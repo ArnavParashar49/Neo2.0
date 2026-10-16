@@ -499,6 +499,11 @@ async def models_list(provider: str, key: str | None = None, endpoint: Any = Non
             seen.add(e["id"])
             entries.append(e)
     entries.sort(key=lambda e: ({"recommended": 0, "cheap": 1, "premium": 2}.get(e.get("tier", ""), 3)))
+    if pid == "openrouter":  # (what its list says is what the chains then read: catalog.describe)
+        from neo2.core.providers import catalog
+
+        for e in entries[:MAX_MODELS]:
+            catalog.learn(pid, e["id"], sees=e["sees"], tools=e["tools"])
     ids = {e["id"] for e in entries}
     out = {
         "provider": pid,

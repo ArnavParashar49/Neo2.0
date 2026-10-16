@@ -939,7 +939,9 @@ def forget(provider: str | None = None) -> list[str]:
         with cerebras_hooks._accounts_lock:
             cerebras_hooks._accounts.pop(_app_pool, None)
     from neo2.core import health
+    from neo2.core.providers import keycheck
 
+    keycheck.forget(provider)  # (the model lists kept for its key)
     # (what the health list said of its key or a model: a new key is asked afresh)
     if provider:
         health.report(f"key:{provider}", None)

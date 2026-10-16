@@ -20,7 +20,10 @@ KEY = "sk-proj-TEST-0000-abcdefghijkl"
 
 @pytest.fixture(autouse=True)
 def _fresh(monkeypatch):
+    from neo2.core.providers import catalog
+
     monkeypatch.setattr(kc, "_cache", {})
+    monkeypatch.setattr(catalog, "_LEARNED", {})
     for k in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "NEO_CUSTOM_PROVIDERS", "OPENROUTER_API_KEY"):
         monkeypatch.delenv(k, raising=False)
     monkeypatch.setattr(config, "_settings", None)
@@ -126,6 +129,13 @@ async def test_openrouter_reads_tools_and_pictures_from_its_list(http):
     assert by["deepseek/deepseek-v4-pro"]["price"] == [0.5, 1.5] and by["deepseek/deepseek-v4-pro"]["context"] == 131072
     assert by["anthropic/claude-opus-5.5"]["sees"] and not by["some/chat-only"]["tools"]
     assert r["defaults"] == {}  # (the user picks one)
+    # What the list said is what the chains read from then on.
+    from neo2.core.providers import catalog
+
+    assert catalog.describe("openrouter@some/chat-only").tools is False
+    assert catalog.describe("openrouter@deepseek/deepseek-v4-pro").sees is False
+    assert catalog.describe("openrouter@anthropic/claude-opus-5.5").sees is True
+    assert catalog.describe("openrouter@never/listed").tools is True  # (unknown: as before)
 
 
 async def test_gemini_keeps_only_the_models_that_answer(http, monkeypatch):

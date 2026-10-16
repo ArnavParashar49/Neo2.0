@@ -322,6 +322,15 @@ _LEGACY: dict[str, tuple[str, bool, bool, bool, bool, str]] = {
 }
 # OpenRouter ids NEO knows to see pictures (its live list says for the rest, in the window).
 _OPENROUTER_SEES = ("anthropic/claude", "openai/gpt-", "google/gemini", "x-ai/grok-4")
+# What a provider's live model list said a model can do — (sees, calls tools) — for the brains whose
+# entry here can't say (OpenRouter's), filled in by keycheck.models_list. In memory only.
+_LEARNED: dict[tuple[str, str], tuple[bool, bool]] = {}
+
+
+def learn(pid: str, model: str, *, sees: bool, tools: bool) -> None:
+    """Remember what `pid`'s live list said `model` can do (describe reads it)."""
+    if pid == "openrouter" and model:
+        _LEARNED[(pid, model)] = (bool(sees), bool(tools))
 
 
 def _settings(s: Any = None) -> Any:
@@ -376,8 +385,8 @@ def describe(ref: str, s: Any = None) -> BrainInfo:
         return BrainInfo(r.text, "openai", model, m.sees if m else model.startswith("gpt-"), True, paid=True)
     if r.brain == "openrouter":
         model = r.model or str(getattr(_settings(s), "openrouter_model", "") or "")
-        sees = model.startswith(_OPENROUTER_SEES)
-        return BrainInfo(r.text, "openrouter", model, sees, True, paid=not model.endswith(":free"), known=bool(model))
+        sees, tools = _LEARNED.get(("openrouter", model)) or (model.startswith(_OPENROUTER_SEES), True)
+        return BrainInfo(r.text, "openrouter", model, sees, tools, paid=not model.endswith(":free"), known=bool(model))
     cp = custom_endpoint(r.brain, s)
     if cp is None:
         return BrainInfo(r.text, r.brain, r.model or "", sees=False, tools=False, known=False)
