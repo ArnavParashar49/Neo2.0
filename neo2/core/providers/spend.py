@@ -7,6 +7,14 @@ budget is spent the brain is skipped until midnight (the caller says so and fail
 may overshoot the budget by the one request that crossed it: a request is admitted while
 anything is left, since its size is only known once it's answered.
 
+Cerebras keeps its own ledger (neo2.core.providers.cerebras). The other paid providers a user may
+cap ("Brains & Keys": settings.daily_budgets, dollars a day per provider id) share the same
+:class:`Ledger` through a :class:`Cap`, one file per provider, at the catalogue's prices
+(neo2.core.providers.catalog); a model with no known price is counted at that provider's dearest.
+A provider without an entry in daily_budgets has no NEO cap, as before. The window prefills $2 a
+day only for a paid key saved in it (:func:`prefill`); a key from .env or the environment stays
+uncapped (decision 4).
+
 A refusal that no retry can fix — an invalid key, an account out of credits — is kept here too,
 until midnight, so a restart doesn't pay the same failed round trip again. It is tied to the key
 it was for (a short fingerprint, never the key): a new key is tried at once.
@@ -266,3 +274,142 @@ class Ledger:
         except (TypeError, ValueError):
             return None
         return (str(r.get("words", "")), until) if until > self.clock() else None
+
+
+# ---- caps for the other paid providers ("Brains & Keys", decision 4) ---------------------------------
+
+# Dollars a day the window fills in for a paid key the user saves in it.
+DEFAULT_CAP = 2.0
+# The providers a daily_budgets entry caps here. Cerebras has its own ledger (its entry replaces
+# NEO_CEREBRAS_DAILY_BUDGET: cerebras_budget); Gemini and Groq are free tiers; NEO's local model is free.
+CAPPED = ("anthropic", "openai", "openrouter")
+# A model NEO knows no price for, at a provider whose catalogue lists none (OpenRouter, an endpoint
+# the user added): the dearest price the catalogue knows, so a cap never counts low.
+_NO_PRICE = "(unknown model)"
+
+
+def capped(pid: str) -> bool:
+    """`pid`'s spend is counted against its daily_budgets entry here (Cerebras: by its own ledger)."""
+    return pid in CAPPED or pid.startswith("custom:")
+
+
+def cerebras_budget(s: Any, default: float = 0.5) -> float:
+    """Cerebras' daily budget: daily_budgets["cerebras"] when the user set one in Brains & Keys,
+    else NEO_CEREBRAS_DAILY_BUDGET (as before)."""
+    caps = getattr(s, "daily_budgets", None) or {}
+    v = caps["cerebras"] if isinstance(caps, Mapping) and "cerebras" in caps else getattr(s, "cerebras_daily_budget", default)
+    return budget(v, default)
+
+
+def prefill(pid: str, source: str, *, on_device: bool = False) -> float | None:
+    """The daily cap the Brains & Keys window fills in when a key is saved: $2 (:data:`DEFAULT_CAP`)
+    for a paid provider whose key was saved in the window (`source` "saved"); None — no cap — for a
+    key from a .env file or the environment, a free provider, one on this Mac, and Cerebras (its
+    budget, NEO_CEREBRAS_DAILY_BUDGET, is $0.50 a day already)."""
+    if source != "saved" or not capped(pid):
+        return None
+    if pid.startswith("custom:"):
+        return None if on_device else DEFAULT_CAP
+    from neo2.core.providers import catalog
+
+    p = catalog.provider(pid)
+    return DEFAULT_CAP if p is not None and p.cost == "paid" else None
+
+
+def provider_prices(pid: str) -> dict[str, tuple[float, float]]:
+    """$/M tokens per model of `pid`, from the catalogue. A provider with none listed (OpenRouter, an
+    endpoint) counts every model at the dearest price the catalogue knows."""
+    from neo2.core.providers import catalog
+
+    p = catalog.provider(pid)
+    own = {m.id: m.price for m in (p.models if p else ()) if m.price}
+    if own:
+        return own
+    dearest = [m.price for q in catalog.PROVIDERS.values() for m in q.models if m.price]
+    return {_NO_PRICE: (max(x[0] for x in dearest), max(x[1] for x in dearest))} if dearest else {_NO_PRICE: (10.0, 50.0)}
+
+
+def _file(pid: str) -> str:
+    return "spend-" + "".join(c if c.isalnum() or c == "-" else "-" for c in pid) + ".json"
+
+
+class Cap:
+    """One paid provider's daily cap: its ledger, and what is said at 80% and once it's spent."""
+
+    def __init__(
+        self,
+        provider: str,
+        daily_budget: float,
+        *,
+        path: Path | None,
+        label: str,
+        price_table: Mapping[str, tuple[float, float]] | None = None,
+        clock: Callable[[], float] = time.time,
+    ) -> None:
+        self.provider = provider
+        self.label = label
+        self.ledger = Ledger(
+            path, daily_budget=daily_budget, price_table=price_table or provider_prices(provider), clock=clock
+        )
+        self._heard: list[str] = []
+
+    def words(self) -> str:
+        b = self.ledger.daily_budget
+        return f"{self.label}'s daily budget of {_usd(b)} is used up" if b > 0 else f"{self.label}'s daily budget is $0"
+
+    def refusal(self, name: str) -> Any:
+        """QuotaExhausted until midnight once today's budget is spent (None: it may be asked)."""
+        if not self.ledger.over():
+            return None
+        from neo2.core.providers.base import QuotaExhausted
+
+        e = QuotaExhausted(f"{name}: today's budget is spent", until=self.ledger.midnight())
+        e.words = self.words()  # type: ignore[attr-defined] — what the user hears (failure_words)
+        if self.ledger.daily_budget > 0 and self.ledger.mark_said("spent"):
+            self._heard.append(f"{self.words()}; I'll skip it until tomorrow")
+        return e
+
+    def add(self, model: str, tokens_in: int, tokens_out: int) -> None:
+        crossed = self.ledger.add(model, tokens_in, tokens_out)
+        b = self.ledger.daily_budget
+        if "warn" in crossed and "spent" not in crossed:
+            self._heard.append(f"{self.label} has used {_usd(self.ledger.today())} of today's {_usd(b)} budget")
+        if "spent" in crossed:
+            self.ledger.mark_said("spent")
+            self._heard.append(f"{self.words()}; I'll skip it until tomorrow")
+
+    async def tell(self) -> None:
+        """Show what's to be said (80% used, all of it) on the agent's own bus, once each."""
+        while self._heard:
+            text = self._heard.pop(0)
+            log.warning(f"[spend] {text}")
+            try:
+                from neo2.core.events import bus
+
+                await bus().note(text)
+            except Exception as e:  # noqa: BLE001 — a note must never fail the answer
+                log.info(f"[spend] couldn't show a note: {type(e).__name__}")
+
+
+def cap_for(pid: str, s: Any = None) -> Cap | None:
+    """`pid`'s cap from the settings' daily_budgets (None: no entry, or not a provider capped here).
+    The ledger lives in the settings' data dir, one file per provider."""
+    if not capped(pid):
+        return None
+    if s is None:
+        from neo2.core.config import settings
+
+        s = settings()
+    caps = getattr(s, "daily_budgets", None) or {}
+    if not isinstance(caps, Mapping) or pid not in caps:
+        return None
+    from neo2.core.providers import catalog
+
+    dd = getattr(s, "data_dir", None)
+    label = catalog.provider_label(pid, s)
+    return Cap(pid, budget(caps[pid], 0.0), path=Path(dd) / _file(pid) if dd else None, label=label)
+
+
+def _usd(x: float) -> str:
+    """Dollars as said: "$0.42" (a budget under a cent keeps its digits: "$0.0010")."""
+    return f"${x:.2f}" if x == 0 or x >= 0.01 else f"${x:.4f}"

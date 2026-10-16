@@ -436,6 +436,21 @@ def label_for(ref: str, model: str | None = None, s: Any = None) -> str:
     return f"{base} · {m}" if m else base
 
 
+_SHORT = {"anthropic": "Claude", "gemini": "Gemini", "local": "the local model"}
+
+
+def provider_label(pid: str, s: Any = None) -> str:
+    """A provider as NEO names it in a sentence ("Claude", "OpenAI", "OpenRouter", an endpoint's
+    own label): the health list, a spending note."""
+    if pid.startswith("custom:"):
+        cp = custom_endpoint(pid, s)
+        return cp.label if cp is not None else pid[len("custom:") :]
+    if pid in _SHORT:
+        return _SHORT[pid]
+    p = PROVIDERS.get(pid)
+    return p.label if p is not None else pid
+
+
 def spoken(ref: str, s: Any = None) -> str:
     """A brain reference as NEO says it ("Claude Haiku 5.5", "OpenAI", "DeepSeek"): a model's name
     when it's a known one, else the provider's (a long model id isn't said aloud)."""

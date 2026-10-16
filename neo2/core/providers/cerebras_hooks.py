@@ -40,7 +40,7 @@ def enabled(s: Any = None) -> bool:
 
             s = settings()
         key = str(getattr(s, "cerebras_api_key", "") or "").strip()
-        budget = spend.budget(getattr(s, "cerebras_daily_budget", DEFAULT_BUDGET), DEFAULT_BUDGET)
+        budget = spend.cerebras_budget(s, DEFAULT_BUDGET)  # (Brains & Keys' cap for it, else the .env one)
     except Exception:  # noqa: BLE001 — no agent bound in library mode: no settings, no Cerebras
         return False
     return bool(key) and budget > 0

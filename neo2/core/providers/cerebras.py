@@ -193,7 +193,7 @@ def conf(s: Any = None) -> Conf:
         api_key=str(getattr(s, "cerebras_api_key", "") or "").strip(),
         model=str(getattr(s, "cerebras_model", "") or TEXT_MODEL).strip(),
         vision_model=str(getattr(s, "cerebras_vision_model", "") or VISION_MODEL).strip(),
-        daily_budget=spend.budget(getattr(s, "cerebras_daily_budget", DEFAULT_BUDGET), DEFAULT_BUDGET),
+        daily_budget=spend.cerebras_budget(s, DEFAULT_BUDGET),
         prices=spend.prices(getattr(s, "cerebras_prices", None)),
         data_dir=Path(dd) if dd else None,
     )
