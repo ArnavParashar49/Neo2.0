@@ -48,11 +48,65 @@ def enabled(s: Any = None) -> bool:
 
 # ---- where the brains go in a chain ----------------------------------------------------------
 
+# The old names, as they always were (a brain reference, "claude@claude-opus-5-5", is read from the
+# catalogue instead: what it can do, never its name).
 _SEEING = frozenset({"gemini", "gemini_lite", "claude"})
 # Cloud brains that see, as a user may name them (NEO_BRAIN, NEO_FAST_BRAIN, NEO_OFFLINE_BRAIN).
 _SEES_IN_CLOUD = _SEEING | {"groq_vision", VISION_BRAIN}
-# Brains on this Mac: what the user says to one, and what it sees, stays here.
-_ON_THIS_MAC = frozenset({"local"})
+
+
+def _info(n: Any) -> Any:
+    from neo2.core.providers.catalog import describe
+
+    return describe(n) if isinstance(n, str) else None
+
+
+def _legacy(n: Any) -> bool:
+    from neo2.core.brainref import parse
+
+    return isinstance(n, str) and parse(n).legacy
+
+
+def _brain_of(n: Any) -> str:
+    """A reference's brain ("groq" for "groq@llama-3.3-70b-versatile"); "" for anything else."""
+    from neo2.core.brainref import parse
+
+    return parse(n).brain if isinstance(n, str) else ""
+
+
+def _here(n: Any) -> bool:
+    """A brain on this Mac (NEO's local model, an endpoint here): what the user says to one, and what
+    it sees, stays here."""
+    i = _info(n)
+    return bool(i and i.on_device)
+
+
+def _seeing(n: Any) -> bool:
+    """One of the leading seeing brains Cerebras's seeing one goes after."""
+    if _legacy(n):
+        return n in _SEEING
+    i = _info(n)
+    return bool(i and i.valid and i.sees and not i.eyes_only and not i.on_device)
+
+
+def _sees_in_cloud(n: Any) -> bool:
+    if _legacy(n):
+        return n in _SEES_IN_CLOUD
+    i = _info(n)
+    return bool(i and i.valid and i.sees and not i.on_device)
+
+
+def _groq_text(n: Any) -> bool:
+    """Groq's text brain, by any reference (groq, groq@<model>): Cerebras goes ahead of it."""
+    return _brain_of(n) == "groq"
+
+
+def _is_text(n: Any) -> bool:
+    return _brain_of(n) == TEXT_BRAIN
+
+
+def _is_vision(n: Any) -> bool:
+    return _brain_of(n) == VISION_BRAIN
 
 
 def _before_groq_vision(names: list[Any]) -> int:
@@ -61,14 +115,15 @@ def _before_groq_vision(names: list[Any]) -> int:
     if "groq_vision" in names:
         return names.index("groq_vision")
     at = 0
-    while at < len(names) and names[at] in _SEEING:
+    while at < len(names) and _seeing(names[at]):
         at += 1
     return at
 
 
 def _named(s: Any) -> tuple[Any, ...]:
-    """The brains the user named: NEO_BRAIN, NEO_FAST_BRAIN, NEO_OFFLINE_BRAIN."""
-    return tuple(getattr(s, k, None) for k in ("brain", "fast_brain", "offline_brain"))
+    """The brains the user named for the text chains: NEO_BRAIN, NEO_FAST_BRAIN, NEO_OFFLINE_BRAIN,
+    and their Backups."""
+    return (*(getattr(s, k, None) for k in ("brain", "fast_brain", "offline_brain")), *(getattr(s, "backup_brains", None) or ()))
 
 
 def _text_brain_at(names: list[Any], s: Any) -> int | None:
@@ -77,16 +132,17 @@ def _text_brain_at(names: list[Any], s: Any) -> int | None:
     fallbacks), else last. None when the user named only brains on this Mac: nothing they said
     ever left it, and neither a key nor an order's own cloud brains ("light"'s Flash-Lite,
     "vision"'s seeing ones) change that — NEO_BRAIN or NEO_FAST_BRAIN=cerebras does."""
-    if "groq" in names:
-        return names.index("groq")
-    theirs = {n for n in _named(s) if n is not None and n not in _ON_THIS_MAC}
+    at = next((i for i, n in enumerate(names) if _groq_text(n)), None)
+    if at is not None:
+        return at
+    theirs = {n for n in _named(s) if n and not _here(n)}
     if not theirs:
         return None
     after = False
     for i, n in enumerate(names):
         if n in theirs:
             after = True
-        elif after and n in _ON_THIS_MAC:
+        elif after and _here(n):
             return i
     return len(names)
 
@@ -96,10 +152,13 @@ def _cloud_may_see(s: Any) -> bool:
     this Mac first and named no cloud brain that sees: on main no picture of theirs ever left the
     Mac (a pixel step with no seeing brain stops and says so, DECISIONS 39), unless they opt in
     (NEO_CLOUD_EYES=on, brain-effort's setting). The same rule as brain-effort's _fallback_eyes."""
-    if str(getattr(s, "cloud_eyes", "auto") or "auto") == "on":
+    cloud_eyes = str(getattr(s, "cloud_eyes", "auto") or "auto")
+    if cloud_eyes == "off":  # only the brains the user picked see a picture
+        return False
+    if cloud_eyes == "on":
         return True
-    named = _named(s)
-    return named[0] not in _ON_THIS_MAC or any(n in _SEES_IN_CLOUD for n in named)
+    named = (*_named(s), getattr(s, "eyes_brain", "") or None)
+    return not _here(named[0]) or any(_sees_in_cloud(n) for n in named)
 
 
 def _bound(s: Any) -> Any:
@@ -118,7 +177,7 @@ def _theirs(s: Any) -> bool:
     """The user named Cerebras' text brain their brain (NEO_BRAIN=cerebras: gpt-oss): its seeing
     model is theirs too — the first a step working from a picture asks, ahead of the free seeing
     fallbacks, as a brain the user named that sees would be."""
-    return getattr(s, "brain", None) == TEXT_BRAIN
+    return _is_text(getattr(s, "brain", None))
 
 
 def with_cerebras(order: Sequence[str | None], purpose: str, s: Any = None) -> list[str | None]:
@@ -136,12 +195,12 @@ def with_cerebras(order: Sequence[str | None], purpose: str, s: Any = None) -> l
     s = _bound(s)
     if purpose == "offline" or s is None or not enabled(s):
         return out
-    if purpose == "vision" and VISION_BRAIN not in out and _cloud_may_see(s):
+    if purpose == "vision" and not any(_is_vision(n) for n in out) and _cloud_may_see(s):
         out.insert(_before_groq_vision(out), VISION_BRAIN)
-    if TEXT_BRAIN not in out and (at := _text_brain_at(out, s)) is not None:
+    if not any(_is_text(n) for n in out) and (at := _text_brain_at(out, s)) is not None:
         out.insert(at, TEXT_BRAIN)
     if purpose == "vision" and _theirs(s):
-        head = [n for n in (TEXT_BRAIN, VISION_BRAIN) if n in out]
+        head = [n for n in out if _is_text(n)][:1] + [n for n in out if _is_vision(n)][:1]
         out = head + [n for n in out if n not in head]
     elif _theirs(s):
         out = _ahead_of_groq(out)
@@ -153,16 +212,16 @@ def _ahead_of_groq(names: list[Any]) -> list[Any]:
     light orders put NEO_FAST_BRAIN, Groq by default, ahead of NEO_BRAIN): the user who named
     Cerebras their brain gets gpt-oss for chat and single actions too (DECISIONS 70) — never ahead
     of a brain on this Mac that comes before it (a local brain the user put first stays first)."""
-    if "groq" not in names or TEXT_BRAIN not in names:
-        return names
-    at, now = names.index("groq"), names.index(TEXT_BRAIN)
-    if now < at:
+    at = next((i for i, n in enumerate(names) if _groq_text(n)), None)
+    now = next((i for i, n in enumerate(names) if _is_text(n)), None)
+    if at is None or now is None or now < at:
         return names
     for i in range(at, now):  # (after the last brain on this Mac between them)
-        if names[i] in _ON_THIS_MAC:
+        if _here(names[i]):
             at = i + 1
-    out = [n for n in names if n != TEXT_BRAIN]
-    out.insert(at, TEXT_BRAIN)
+    text = names[now]
+    out = [n for n in names if n != text]
+    out.insert(at, text)
     return out
 
 
@@ -174,7 +233,7 @@ def with_cerebras_eyes(eyes: Sequence[str], s: Any = None) -> tuple[str, ...]:
     it is the first of them."""
     out = list(eyes)
     s = _bound(s)
-    if VISION_BRAIN not in out and s is not None and enabled(s) and _cloud_may_see(s):
+    if not any(_is_vision(n) for n in out) and s is not None and enabled(s) and _cloud_may_see(s):
         out.insert(0 if _theirs(s) else _before_groq_vision(out), VISION_BRAIN)
     return tuple(out)
 

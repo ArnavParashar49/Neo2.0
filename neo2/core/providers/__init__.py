@@ -8,6 +8,12 @@ The brains made so far, and which of them failed lately, live in a :class:`Brain
 (the module's `_cache` and `_demoted`), or an embedded agent's own (neo2.core.runtime) — built from
 that agent's keys, and with the host's own providers for any purpose it supplied them for.
 
+A brain is named by a reference, ``<brain>[@<model>]`` (neo2.core.brainref): a bare name NEO always
+had is built exactly as it always was; each other reference is its own brain (its own cache entry,
+demotion and cooldowns). What one can do — sees, calls tools, only looks, runs on this Mac — is read
+from the catalogue (neo2.core.providers.catalog.describe), never from a list of names. The roles
+(Brain, Quick replies, Eyes, Backups) order the chains: see :func:`brain`.
+
 A step that works from a picture (a screenshot the run took, a photo the user sent) goes only to
 brains that can see it: the chain's own, then the seeing fallbacks (:data:`EYES`) — never to a
 text-only cloud brain, which would act blind. When none can answer, the run stops and says so
@@ -24,9 +30,9 @@ from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from neo2.core import logger, runtime
+from neo2.core import brainref, logger, runtime
 from neo2.core.config import BrainName, settings
-from neo2.core.providers import budget
+from neo2.core.providers import budget, catalog
 from neo2.core.providers.base import (
     BLIND_REFUSAL,
     AllBrainsFailed,
@@ -42,6 +48,7 @@ from neo2.core.providers.base import (
     ToolSpec,
     TooSlow,
     Turn,
+    Unavailable,
     spoken_name,
 )
 from neo2.core.providers.effort import Effort, for_brain
@@ -58,6 +65,8 @@ __all__ = [
     "ProviderError",
     "RateLimited",
     "brain",
+    "camera_order",
+    "forget",
     "image_limit",
     "make",
     "pool",
@@ -73,6 +82,11 @@ _cache: dict[str, Provider] = {}
 _said_unavailable: set[tuple[str, str]] = set()
 
 
+def _shown(name: str) -> str:
+    """A brain's name as a log line may carry it: a placeholder that could be a pasted key never is."""
+    return name if brainref.parse(name).valid or brainref.shown(name) else "(a brain NEO doesn't know)"
+
+
 def _unavailable(name: str, e: BaseException) -> None:
     """Log that a brain isn't set up, once per process for each brain and kind of error (the chain
     still leaves it out every time, and keeps its reason for the "every brain failed" answer)."""
@@ -80,7 +94,7 @@ def _unavailable(name: str, e: BaseException) -> None:
     if key in _said_unavailable:
         return
     _said_unavailable.add(key)
-    log.info(f"[brain] {name} unavailable: {e}")
+    log.info(f"[brain] {_shown(str(name))} unavailable: {e}")
 
 
 class BrainPool:
@@ -104,7 +118,7 @@ class BrainPool:
     def demoted(self) -> dict[str, float]:
         return self._failed
 
-    def make(self, name: BrainName) -> Provider:
+    def make(self, name: str) -> Provider:
         c = self.cache()
         if name not in c:
             c[name] = _build(name)
@@ -133,11 +147,73 @@ def pool() -> BrainPool:
     return _app_pool
 
 
-def make(name: BrainName) -> Provider:
+def make(name: str) -> Provider:
     return pool().make(name)
 
 
-def _build(name: BrainName) -> Provider:
+def _build(name: str) -> Provider:
+    """The brain a reference names. A bare name NEO always had: exactly the code it always ran.
+    Another reference: its provider with that model, named by the reference. One that can't be read
+    (or an endpoint that isn't set up): Unavailable — skipped like a brain with no key, never
+    another brain in its place."""
+    r = brainref.parse(name)
+    if r.legacy:
+        return _build_legacy(r.brain)  # type: ignore[arg-type]
+    if not r.valid:
+        raise Unavailable(f"{_shown(r.text) if r.text else 'an empty name'} isn't a brain NEO knows")
+    p = _build_ref(r)
+    p.name = r.text  # the reference is the brain: its cache entry, demotion and cooldowns
+    return p
+
+
+def _build_ref(r: brainref.Ref) -> Provider:
+    s = settings()
+    m = r.model
+    if r.brain in ("gemini", "gemini_lite"):
+        from neo2.core.providers.gemini import GeminiProvider
+
+        return GeminiProvider(model=m, name=r.text)
+    if r.brain == "groq":
+        from neo2.core.providers.openai_compat import groq
+
+        return groq(m)
+    if r.brain == "groq_vision":
+        return _groq_vision(m)
+    if r.brain == "local":
+        from neo2.core.providers.openai_compat import local
+
+        return local(m)
+    if r.brain == "claude":
+        from neo2.core.providers.claude import ClaudeProvider
+
+        return ClaudeProvider(m)
+    if r.brain in ("cerebras", "cerebras_vision"):
+        from neo2.core.providers import cerebras
+
+        return (cerebras.cerebras if r.brain == "cerebras" else cerebras.cerebras_vision)(m)
+    if r.brain == "openai":
+        if not s.openai_api_key:
+            raise Unavailable("OPENAI_API_KEY is not set")
+        try:
+            from neo2.core.providers.openai_responses import openai as openai_brain
+        except ImportError:
+            raise Unavailable("OpenAI's brain isn't in this build of NEO") from None
+        return openai_brain(m)
+    if r.brain == "openrouter":
+        from neo2.core.providers.openai_compat import openrouter
+
+        return openrouter(m, name=r.text, vision=catalog.describe(r.text, s).sees)
+    if r.custom:
+        from neo2.core.providers.openai_compat import custom
+
+        cp = catalog.custom_endpoint(r.brain, s)
+        if cp is None:
+            raise Unavailable(f"{r.brain} isn't set up")
+        return custom(cp, s.custom_keys.get(cp.id, ""), model=m, name=r.text)
+    raise Unavailable(f"{r.text} isn't a brain NEO can build")
+
+
+def _build_legacy(name: BrainName) -> Provider:
     if name == "gemini":
         from neo2.core.providers.gemini import GeminiProvider
 
@@ -177,23 +253,22 @@ def _build(name: BrainName) -> Provider:
 _GROQ_VISION_TOKENS = 8000
 
 
-def _groq_vision() -> Provider:
-    """Groq's vision model (settings.groq_vision_model): the last seeing fallback. Its own brain —
-    its own rate limit and demotion — on the same key as the text one. It takes pictures (a few per
-    request, ~2K tokens each), so its budget is a per-minute rate every step pays back."""
-    from neo2.core.providers.base import Unavailable
+def _groq_vision(model: str | None = None) -> Provider:
+    """Groq's vision model (settings.groq_vision_model, or `model`): the last seeing fallback. Its
+    own brain — its own rate limit and demotion — on the same key as the text one. It takes pictures
+    (a few per request, ~2K tokens each), so its budget is a per-minute rate every step pays back."""
     from neo2.core.providers.openai_compat import OpenAICompatProvider
 
     s = settings()
     if not s.groq_api_key:
         raise Unavailable("GROQ_API_KEY is not set")
-    if not s.groq_vision_model:
+    if not (model or s.groq_vision_model):
         raise Unavailable("no Groq vision model is set (NEO_GROQ_VISION_MODEL)")
     return OpenAICompatProvider(
         name="groq_vision",
         base_url="https://api.groq.com/openai/v1",
         api_key=s.groq_api_key,
-        model=s.groq_vision_model,
+        model=model or s.groq_vision_model,
         supports_vision=True,
         # Not its reasoning switch: a vision model's values differ from gpt-oss's low/medium/high.
         reasoning_effort=False,
@@ -203,6 +278,7 @@ def _groq_vision() -> Provider:
 
 
 _DEMOTE_S = 300.0  # a brain that just failed goes to the back of the line for this long
+_KEY_REFUSED_S = 3600.0  # …one whose key was refused, this long (asking again only costs round trips)
 # Every brain failed but one only asked for a short wait: wait, then ask it again. A per-minute
 # limit is always clear within the minute, and on Groq's 8K a step of 4–6K tokens is ~30–45s of it:
 # the one brain left carries a long task through that wait rather than ending it.
@@ -298,21 +374,25 @@ class Chain:
 
     `eyes`: the seeing brains a step working from a picture may also ask, after the chain's own
     ones that see (an agent chain's screenshot while Gemini is overloaded goes to Flash-Lite or
-    Groq's vision model, not to Groq's text model). `effort`: the run's thinking policy — each
-    step's level is read from the transcript (neo2.core.providers.effort); without one, the level the
-    caller passes is used as it is."""
+    Groq's vision model, not to Groq's text model). `lead`: the user's Eyes (settings.eyes_brain),
+    the first a step working from a picture asks — ahead of the chain's own brains — and never one
+    without a picture unless it is among them too. `effort`: the run's thinking policy — each step's
+    level is read from the transcript (neo2.core.providers.effort); without one, the level the caller
+    passes is used as it is."""
 
     def __init__(
         self,
-        names: Sequence[BrainName | Provider],
+        names: Sequence[str | Provider],
         *,
         sticky: bool = True,
-        eyes: Sequence[BrainName] = (),
+        eyes: Sequence[str] = (),
         effort: Effort | None = None,
+        lead: Sequence[str] = (),
     ) -> None:
         self.names = list(names)  # brain names, or provider instances (a host's own), in order
         self.sticky = sticky
-        self.eyes = [n for n in eyes if n not in self.names]
+        self.lead = [n for n in dict.fromkeys(lead) if n]
+        self.eyes = [n for n in eyes if n not in self.names and n not in self.lead]
         self.effort = effort
         self.last_used: str = ""
         self.last_model: str = ""
@@ -343,7 +423,7 @@ class Chain:
                 out.append(make(n))
             except ProviderError as e:  # missing key → skip silently
                 _unavailable(n, e)
-                self._missing.append((n, e))
+                self._missing.append((_shown(n), e))  # (said in the stop message: never a pasted key)
         if self.sticky:
             # A brain that knows it's spent (all its quota) goes last: the next one is asked at once.
             now = _time.time()
@@ -364,16 +444,20 @@ class Chain:
         until = _time.time() + _DEMOTE_S
         if e is not None and getattr(e, "kind", "") == "quota":
             until = max(until, float(getattr(e, "until", 0.0) or 0.0))
+        if e is not None and getattr(e, "kind", "") == "key":
+            until = _time.time() + _KEY_REFUSED_S
         self._demotions()[name] = until
 
     @property
     def name(self) -> str:
-        return "+".join(_key(n) for n in self.names)
+        return "+".join(_shown(_key(n)) if isinstance(n, str) else _key(n) for n in self.names)
 
     @property
     def supports_vision(self) -> bool:
-        return any(p.supports_vision for p in self._providers()) or any(
-            getattr(p, "supports_vision", False) for p in self._eye_brains()
+        return (
+            any(p.supports_vision for p in self._providers())
+            or any(getattr(p, "supports_vision", False) for p in self._eye_brains())
+            or bool(self._lead_brains())
         )
 
     @property
@@ -392,10 +476,10 @@ class Chain:
 
     supports_tools = True
 
-    def _eye_brains(self) -> list[Provider]:
+    def _eye_brains(self, names: Sequence[str] | None = None) -> list[Provider]:
         """The seeing fallbacks that are set up (a missing key: skipped, as in _providers)."""
         out: list[Provider] = []
-        for n in self.eyes:
+        for n in self.eyes if names is None else names:
             try:
                 p = make(n)
             except Exception as e:  # noqa: BLE001 — not set up (no key, no package): it can't look
@@ -404,6 +488,10 @@ class Chain:
             if getattr(p, "supports_vision", False):
                 out.append(p)
         return out
+
+    def _lead_brains(self) -> list[Provider]:
+        """The user's Eyes that are set up and see (none: no Eyes brain named)."""
+        return self._eye_brains(self.lead) if self.lead else []
 
     def _for_pixels(self, providers: list[Provider], failures: list[tuple[str, ProviderError]]) -> list[Provider]:
         """Who may answer a step working from a picture: the brains that can see it — the chain's
@@ -414,7 +502,19 @@ class Chain:
         brains as the host gave them."""
         if self._hosts_only():
             return _eyes_first(providers)
-        have = {p.name for p in providers}
+        # The user's Eyes first (when they named one): their pick for every picture, wherever the
+        # rest of the chain is. The rest as before, without them.
+        lead = self._lead_brains()
+        if lead:
+            first = {p.name for p in lead}
+            providers = [p for p in providers if p.name not in first]
+            return lead + self._for_pixels_after(providers, failures, first)
+        return self._for_pixels_after(providers, failures, set())
+
+    def _for_pixels_after(
+        self, providers: list[Provider], failures: list[tuple[str, ProviderError]], first: set[str]
+    ) -> list[Provider]:
+        have = {p.name for p in providers} | first
         extra = [p for p in self._eye_brains() if p.name not in have]
 
         def cloud(q: Provider) -> bool:
@@ -472,10 +572,7 @@ class Chain:
             return AllBrainsFailed(failures + self._missing)
         if pixels and any(n in seeing for n, _ in failures):
             return NoEyes(failures, seeing=seeing, photo=photo)  # a brain that sees couldn't answer
-        s = settings()
-        if not pool().overrides and not (
-            s.gemini_api_key or s.groq_api_key or s.anthropic_api_key or getattr(s, "cerebras_api_key", "")
-        ):
+        if not pool().overrides and not catalog.any_key(settings()):
             return ProviderError(
                 "no API key set — add GEMINI_API_KEY to .env (free at aistudio.google.com/apikey)"
             )
@@ -669,31 +766,72 @@ def _needs_eyes(messages: list[Message]) -> bool:
 #    (neo2.core.providers.budget) stops it rather than let it run past the task's limit.
 # A local model joins only once it can see (supports_vision), wherever the user put it. A seeing
 # fallback faster than Groq's goes in before "groq_vision" (and, when it should answer only the
-# steps with a picture, into _EYES_ONLY too).
-EYES: tuple[BrainName, ...] = ("gemini", "gemini_lite", "claude", "groq_vision")
-# Brains that never see (a picture step never goes to them; they take the steps without one).
-_TEXT_ONLY: frozenset[str] = frozenset({"groq", "local", "cerebras"})
-# Seeing fallbacks that only ever answer a step with a picture, never one without (the vision chain
-# has them as eyes, not among its own brains): Groq's vision model's per-minute budget is kept for
-# the pixel steps — an AX-only step goes to a text brain instead.
-_EYES_ONLY: frozenset[str] = frozenset({"groq_vision"})
-# Brains on this Mac: a user who puts one first keeps their pictures here (see _fallback_eyes).
-_ON_THIS_MAC: frozenset[str] = frozenset({"local"})
+# steps with a picture, is eyes_only in the catalogue).
+# Which brains never see, only ever answer a step with a picture (Groq's vision model: its
+# per-minute budget is kept for the pixel steps) or run on this Mac is read from the catalogue
+# (catalog.describe: sees, eyes_only, on_device), never from a list of names here.
+EYES: tuple[str, ...] = catalog.IMPLICIT_EYES
 
 
-def _fallback_eyes(s: Any) -> tuple[BrainName, ...]:
+def _sees(n: str) -> bool:
+    return catalog.describe(n).sees
+
+
+def _eyes_only(n: str) -> bool:
+    return catalog.describe(n).eyes_only
+
+
+def _on_this_mac(n: Any) -> bool:
+    return isinstance(n, str) and catalog.describe(n).on_device
+
+
+def _cloud_seer(n: Any) -> bool:
+    """`n` is a cloud brain that sees, as the user may name one. A bare old name: one of EYES,
+    exactly as before."""
+    if not isinstance(n, str) or not n:
+        return False
+    r = brainref.parse(n)
+    if r.legacy:
+        return n in EYES
+    i = catalog.describe(n)
+    return i.valid and i.sees and not i.on_device
+
+
+def _backups(s: Any) -> list[str] | None:
+    """The user's Backups: None is Automatic (today's chains)."""
+    b = getattr(s, "backup_brains", None)
+    return None if b is None else [n for n in b if n]
+
+
+def _fallback_eyes(s: Any) -> tuple[str, ...]:
     """The seeing fallbacks the chains get: EYES — except for a user who put a brain on this Mac
     first and named no cloud brain that sees (NEO_BRAIN=local with only a Groq key: no picture ever
     left the Mac). A fallback in the cloud doesn't change that on its own: their picture steps stop
-    and say so (DECISIONS 39), unless they opt in (NEO_CLOUD_EYES=on) or name one that sees."""
-    named = (s.brain, s.fast_brain, getattr(s, "offline_brain", None))
-    if s.cloud_eyes == "on" or s.brain not in _ON_THIS_MAC or any(n in EYES for n in named):
+    and say so (DECISIONS 39), unless they opt in (NEO_CLOUD_EYES=on) or name one that sees (their
+    Eyes or a Backup too). NEO_CLOUD_EYES=off: never — only the brains the user picked see a picture."""
+    cloud_eyes = getattr(s, "cloud_eyes", "auto")
+    if cloud_eyes == "off":
+        return ()
+    named = (s.brain, s.fast_brain, getattr(s, "offline_brain", None), getattr(s, "eyes_brain", ""), *(_backups(s) or ()))
+    if cloud_eyes == "on" or not _on_this_mac(s.brain) or any(_cloud_seer(n) for n in named):
         return EYES
     return ()
 
 
 def brain(purpose: Purpose = "agent", *, effort: Effort | None = None) -> Chain:
-    """The chain for `purpose`. `effort`: the run's thinking policy (neo2.core.providers.effort)."""
+    """The chain for `purpose`, from the user's roles: Brain (settings.brain), Quick replies
+    (fast_brain), Eyes (eyes_brain), Backups (backup_brains; None: Automatic) and light_brain.
+
+    * agent: [brain, *backups, offline] — Automatic backups: [brain, fast_brain, offline], as before;
+    * fast: [fast_brain, brain, *backups, offline];
+    * light: [light_brain ("": fast_brain's), fast_brain, brain, *backups, offline];
+    * vision: the brains that see — [eyes_brain, brain, *backups, the seeing fallbacks] — then the
+      text ones, which take only the steps without a picture;
+    * offline: [offline_brain].
+
+    In every chain a step with a picture asks the user's Eyes first, then the chain's own brains
+    that see, then the seeing fallbacks (cloud_eyes: "off" none). `effort`: the run's thinking
+    policy (neo2.core.providers.effort). With the default settings, the chains NEO always had."""
     if own := _hosts(purpose):
         return Chain(own, sticky=purpose != "vision", effort=effort)
     from neo2.core.providers.cerebras_hooks import with_cerebras, with_cerebras_eyes
@@ -703,26 +841,81 @@ def brain(purpose: Purpose = "agent", *, effort: Effort | None = None) -> Chain:
     # Cerebras (a paid key, DECISIONS 49): its seeing brain ahead of Groq's among the seeing
     # fallbacks — only where cloud fallbacks may see at all (a local-first user's pictures stay here)
     eyes = with_cerebras_eyes(eyes, s) if eyes else eyes
+    look = getattr(s, "eyes_brain", "") or ""
+    lead = [look] if look and brainref.parse(look).valid else []
+    backups = _backups(s)
+    more = backups or []
     if purpose == "fast":
-        order: list[BrainName | None] = [s.fast_brain, s.brain, s.offline_brain]
+        order: list[str | None] = [s.fast_brain, s.brain, *more, s.offline_brain]
     elif purpose == "vision":
         # The brains that can see the screenshot come first; text-only ones take only the steps that
         # carry no picture (an AX-only step): given one, they would act blind. An eyes-only fallback
-        # is asked only for a picture, after these (a brain the user named is theirs to ask).
-        vision: list[BrainName | None] = [
-            n for n in (s.brain, *EYES) if n not in _TEXT_ONLY and (n == s.brain or n not in _EYES_ONLY)
+        # is asked only for a picture, after these (a brain the user named is theirs to ask) — and
+        # an eyes-only Eyes brain only as the chain's lead (for a picture).
+        implicit = EYES if getattr(s, "cloud_eyes", "auto") != "off" else ()
+        vision: list[str | None] = [
+            n
+            for n in dict.fromkeys((*lead, s.brain, *more, *implicit))
+            if n and _sees(n) and (n == s.brain or not _eyes_only(n))
         ]
-        order = vision + [n for n in (s.brain, s.fast_brain, s.offline_brain) if n not in vision]
+        order = vision + [n for n in (s.brain, s.fast_brain, *more, s.offline_brain) if n not in vision]
         # (Cerebras: its text brain ahead of Groq; its seeing one after the seeing brains, when enabled)
-        return Chain(_dedupe(with_cerebras(_dedupe(order), purpose, s)), sticky=False, eyes=eyes, effort=effort)
+        return Chain(
+            _dedupe(with_cerebras(_dedupe(order), purpose, s)), sticky=False, eyes=eyes, effort=effort, lead=lead
+        )
     elif purpose == "offline":
         return Chain(_dedupe([s.offline_brain]), effort=effort)  # (no cloud eyes: offline means here)
     elif purpose == "light":
         # One-tool actions that missed the regex fast path: cheapest capable brain first.
-        order = ["gemini_lite", s.fast_brain, s.brain, s.offline_brain]
+        order = [getattr(s, "light_brain", "gemini_lite") or s.fast_brain, s.fast_brain, s.brain, *more, s.offline_brain]
     else:
-        order = [s.brain, s.fast_brain, s.offline_brain]
-    return Chain(_dedupe(with_cerebras(_dedupe(order), purpose, s)), eyes=eyes, effort=effort)
+        order = [s.brain, *([s.fast_brain] if backups is None else backups), s.offline_brain]
+    return Chain(_dedupe(with_cerebras(_dedupe(order), purpose, s)), eyes=eyes, effort=effort, lead=lead)
+
+
+def camera_order(s: Any = None) -> list[str]:
+    """The brains a camera question's still may go to, in the user's order: Quick replies if it
+    sees, Eyes, Brain if it sees, then the camera's own fallbacks (Gemini, Cerebras's vision model) —
+    those only where cloud fallbacks may see (cloud_eyes "off": only the brains the user picked).
+    Default settings: Gemini, then Cerebras's vision model, as before."""
+    s = s if s is not None else settings()
+    roles = [getattr(s, "fast_brain", ""), getattr(s, "eyes_brain", ""), getattr(s, "brain", "")]
+    out = [n for n in dict.fromkeys(roles) if n and brainref.parse(n).valid and _sees(n)]
+    if getattr(s, "cloud_eyes", "auto") != "off":
+        out += [n for n in catalog.CAMERA_FALLBACKS if n not in out]
+    return out
+
+
+def forget(provider: str | None = None) -> list[str]:
+    """Drop what NEO.app's brains of `provider` (a provider id: "anthropic", "custom:deepseek"; None:
+    every one) have kept — the built clients, their demotions and "unavailable" notes, Cerebras's
+    account, the camera's rests — so the next chain builds them again from the settings as they are
+    now (a key just saved, replaced or removed). Returns the brains dropped. An embedded agent's
+    brains are its own, never touched here."""
+
+    def mine(name: str) -> bool:
+        return provider is None or catalog.provider_of(name) == provider
+
+    dropped = [k for k in list(_cache) if mine(k)]
+    for k in dropped:
+        _cache.pop(k, None)
+    for k in [k for k in list(_demoted) if mine(k)]:
+        _demoted.pop(k, None)
+    for key in [k for k in list(_said_unavailable) if mine(k[0])]:
+        _said_unavailable.discard(key)
+    if provider in (None, "cerebras"):
+        from neo2.core.providers import cerebras_hooks
+
+        with cerebras_hooks._accounts_lock:
+            cerebras_hooks._accounts.pop(_app_pool, None)
+    try:
+        from neo2.core.vision import answer
+    except Exception:  # noqa: BLE001 — the camera's module isn't there (a core install): nothing kept
+        return dropped
+    for rests in (answer._late_until, answer._late_seen):
+        for k in [k for k in list(rests) if mine(k)]:
+            rests.pop(k, None)
+    return dropped
 
 
 # ---- how big a picture may be --------------------------------------------------------------------
@@ -819,11 +1012,11 @@ def limit_of(p: Any) -> ImageLimit | None:
 
 def image_limit(purpose: Purpose = "vision") -> ImageLimit | None:
     """The strictest picture limit among the brains that may see a picture sent for `purpose`
-    (the chain's own seeing brains and its seeing fallbacks; a host's own providers included), so
+    (the user's Eyes, the chain's own seeing brains and its seeing fallbacks; a host's own providers included), so
     a screenshot is made to fit them all and no API shrinks it silently. None: no limit."""
     chain = brain(purpose)
     out: ImageLimit | None = None
-    for p in chain._providers() + chain._eye_brains():
+    for p in chain._providers() + chain._eye_brains() + chain._lead_brains():
         if not getattr(p, "supports_vision", False):
             continue
         lim = limit_of(p)
@@ -842,13 +1035,14 @@ def _hosts(purpose: Purpose) -> list[Provider]:
     return []
 
 
-def _key(n: BrainName | Provider) -> str:
+def _key(n: str | Provider) -> str:
     return n if isinstance(n, str) else str(getattr(n, "name", "") or type(n).__name__)
 
 
-def _dedupe(order: Sequence[BrainName | None]) -> list[BrainName]:
-    seen: list[BrainName] = []
+def _dedupe(order: Sequence[str | None]) -> list[str]:
+    seen: list[str] = []
     for n in order:
-        if n is not None and n not in seen:  # None: no such brain (an embedded agent's offline one)
+        # None / "": no such brain (an embedded agent's offline one, a role left empty)
+        if n and n not in seen:
             seen.append(n)
     return seen

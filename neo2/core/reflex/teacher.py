@@ -43,10 +43,19 @@ def mode() -> str:
 
 
 def provider_of(row: dict) -> str | None:
-    """The brain that already read this request's text, or None when that can't be known."""
+    """The brain that already read this request's text, or None when that can't be known. A bare
+    old name: one of _BRAINS, as before; another brain reference ("claude@claude-haiku-5-5",
+    "custom:deepseek") when its provider is set up (its key is still there)."""
     brain = row.get("brain")
     if brain in _BRAINS:
         return "gemini" if brain == "gemini_lite" else brain
+    if isinstance(brain, str) and brain:
+        from neo2.core.brainref import parse
+        from neo2.core.providers import catalog
+
+        r = parse(brain)
+        if r.valid and not r.legacy and r.text == brain and catalog.configured(catalog.provider_of(brain)):
+            return brain
     if row.get("source") == "live":  # Gemini Live heard it
         return "gemini"
     return None

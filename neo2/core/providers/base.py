@@ -207,6 +207,20 @@ class Unavailable(ProviderError):
     kind = "offline"
 
 
+class KeyRefused(Unavailable):
+    """The provider refused the API key (a 401, or a 403 about the key): asking again before the
+    user changes it only costs round trips. The chain demotes this brain for an hour."""
+
+    kind = "key"
+
+
+class NoBrain(ProviderError):
+    """No brain is set up that could answer: no key for any provider NEO may ask, and no model on
+    this Mac. Brains & Keys is where that changes."""
+
+    kind = "no_brain"
+
+
 class Blind(ProviderError):
     """Not asked: the step works from a picture and this brain has no vision (it would act blind)."""
 
@@ -241,6 +255,10 @@ def failure_words(name: str, e: ProviderError) -> str:
         return f"{who} is overloaded right now"
     if kind == "too_large":
         return f"{who} couldn't take a request this long"
+    if kind == "key":
+        return f"{who} refused its API key"
+    if kind == "no_brain":
+        return "no AI model is set up"
     if kind == "offline":
         return f"{who} isn't available ({str(e)[:60]})" if name != "local" else f"{who} isn't running"
     if kind == "bad_request":
@@ -265,8 +283,20 @@ _SPOKEN_NAME = {
 
 
 def spoken_name(name: str) -> str:
-    """A brain as the user hears it named ("gemini_lite" → "Gemini Lite")."""
-    return _SPOKEN_NAME.get(name, name.capitalize())
+    """A brain as the user hears it named ("gemini_lite" → "Gemini Lite"; a brain reference by its
+    model's or provider's name from the catalogue: "Claude Haiku 5.5", "OpenAI", an endpoint's label)."""
+    if name in _SPOKEN_NAME:
+        return _SPOKEN_NAME[name]
+    from neo2.core.brainref import parse
+
+    if parse(name).valid:
+        from neo2.core.providers.catalog import spoken
+
+        return spoken(name)
+    from neo2.core.brainref import shown
+
+    # (a host's own provider's name, as before; never what could be a key pasted as a brain)
+    return name.capitalize() if shown(name) or not name else "a brain NEO doesn't know"
 
 
 class AllBrainsFailed(ProviderError):

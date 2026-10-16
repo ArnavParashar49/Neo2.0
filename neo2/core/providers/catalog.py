@@ -276,3 +276,177 @@ def as_dict(p: ProviderInfo) -> dict[str, Any]:
         "env": p.env,
         "check": dict(p.check),
     }
+
+
+# ---- what a brain can do: attributes, never names -------------------------------------------------
+
+# The seeing fallbacks a step with a picture may ask when the chain's own brains can't (the order
+# neo2.core.providers.EYES keeps): Gemini Flash, Flash-Lite, Claude, then Groq's vision model. Kept
+# for compatibility — an Anthropic key alone still makes Claude one ("Screenshots: only the brains I
+# picked", cloud_eyes="off", turns it off). A provider added since never joins on its own: only
+# where the user gave it a role.
+IMPLICIT_EYES: tuple[str, ...] = ("gemini", "gemini_lite", "claude", "groq_vision")
+# The camera's own fallbacks (neo2.core.vision.answer), after the user's roles: as before.
+CAMERA_FALLBACKS: tuple[str, ...] = ("gemini", "cerebras_vision")
+
+
+@dataclass(frozen=True)
+class BrainInfo:
+    """What a brain reference can do, from this catalogue and the settings alone (no network, no
+    client built). `known`: the brain is defined (a custom endpoint that isn't set up, an OpenRouter
+    brain with no model, a placeholder: False)."""
+
+    ref: str
+    provider: str  # "gemini", "anthropic", "openai", "groq", "cerebras", "openrouter", "local", "custom:<slug>"
+    model: str
+    sees: bool
+    tools: bool
+    eyes_only: bool = False
+    on_device: bool = False
+    paid: bool = False
+    valid: bool = True
+    known: bool = True
+
+
+# The brains NEO had before references, exactly as their name-keyed sets said: (provider, sees,
+# eyes_only, on_device, paid, the Settings field of their model).
+_LEGACY: dict[str, tuple[str, bool, bool, bool, bool, str]] = {
+    "gemini": ("gemini", True, False, False, False, "gemini_model"),
+    "gemini_lite": ("gemini", True, False, False, False, "gemini_lite_model"),
+    "groq": ("groq", False, False, False, False, "groq_model"),
+    "groq_vision": ("groq", True, True, False, False, "groq_vision_model"),
+    "cerebras": ("cerebras", False, False, False, True, "cerebras_model"),
+    "cerebras_vision": ("cerebras", True, False, False, True, "cerebras_vision_model"),
+    "claude": ("anthropic", True, False, False, True, "claude_model"),
+    "local": ("local", False, False, True, False, "local_model"),
+}
+# OpenRouter ids NEO knows to see pictures (its live list says for the rest, in the window).
+_OPENROUTER_SEES = ("anthropic/claude", "openai/gpt-", "google/gemini", "x-ai/grok-4")
+
+
+def _settings(s: Any = None) -> Any:
+    if s is not None:
+        return s
+    try:
+        from neo2.core.config import settings
+
+        return settings()
+    except Exception:  # noqa: BLE001 — no agent bound in library mode: what a name alone says
+        return None
+
+
+def provider_of(ref: str) -> str:
+    """The provider a reference's brain is on ("" for one that can't be read). No settings needed."""
+    from neo2.core.brainref import parse
+
+    r = parse(ref)
+    if not r.valid or r.empty:
+        return ""
+    if r.brain in _LEGACY:
+        return _LEGACY[r.brain][0]
+    return r.brain  # openai, openrouter, custom:<slug>
+
+
+def custom_endpoint(ref_or_id: str, s: Any = None) -> Any:
+    """The CustomProvider a custom:<slug> reference names, from the settings (None: not set up)."""
+    from neo2.core.brainref import parse
+
+    r = parse(ref_or_id)
+    s = _settings(s)
+    if not r.custom or s is None:
+        return None
+    return next((cp for cp in getattr(s, "custom_providers", None) or () if cp.id == r.brain), None)
+
+
+def describe(ref: str, s: Any = None) -> BrainInfo:
+    """What `ref` can do. A bare legacy name says exactly what NEO's old name lists did."""
+    from neo2.core.brainref import parse
+
+    r = parse(ref)
+    if not r.valid or r.empty:
+        return BrainInfo(r.text, "", "", sees=False, tools=False, valid=False, known=False)
+    if r.brain in _LEGACY:
+        pid, sees, eyes_only, here, paid, model_field = _LEGACY[r.brain]
+        st = _settings(s) if r.model is None else None
+        model = r.model or str(getattr(st, model_field, "") or "")
+        return BrainInfo(r.text, pid, model, sees, True, eyes_only, here, paid)
+    if r.brain == "openai":
+        model = r.model or str(getattr(_settings(s), "openai_model", "") or "")
+        m = known_model("openai", model)
+        return BrainInfo(r.text, "openai", model, m.sees if m else model.startswith("gpt-"), True, paid=True)
+    if r.brain == "openrouter":
+        model = r.model or str(getattr(_settings(s), "openrouter_model", "") or "")
+        sees = model.startswith(_OPENROUTER_SEES)
+        return BrainInfo(r.text, "openrouter", model, sees, True, paid=not model.endswith(":free"), known=bool(model))
+    cp = custom_endpoint(r.brain, s)
+    if cp is None:
+        return BrainInfo(r.text, r.brain, r.model or "", sees=False, tools=False, known=False)
+    return BrainInfo(
+        r.text, r.brain, r.model or cp.model, cp.vision, cp.tools, on_device=cp.on_device, paid=not cp.on_device
+    )
+
+
+def configured(pid: str, s: Any = None) -> bool:
+    """`pid` can be asked: its key is set (Gemini: any of its keys), or it runs on this Mac (NEO's
+    local model; an endpoint here). Whether something is listening there is another question."""
+    s = _settings(s)
+    if s is None:
+        return False
+    if pid.startswith("custom:"):
+        cp = custom_endpoint(pid, s)
+        return cp is not None and (cp.on_device or bool((getattr(s, "custom_keys", None) or {}).get(cp.id)))
+    if pid == "gemini":
+        return bool(getattr(s, "gemini_keys", None))
+    p = PROVIDERS.get(pid)
+    if p is None:
+        return False
+    if p.key_field is None:
+        return True
+    return bool(str(getattr(s, p.key_field, "") or "").strip())
+
+
+def any_key(s: Any = None) -> bool:
+    """Some provider's key is set, or an endpoint the user added is: NEO has a model to ask beyond
+    its own local one."""
+    s = _settings(s)
+    if s is None:
+        return False
+    if any(configured(pid, s) for pid, p in PROVIDERS.items() if p.key_field):
+        return True
+    return any(configured(cp.id, s) for cp in getattr(s, "custom_providers", None) or ())
+
+
+def label_for(ref: str, model: str | None = None, s: Any = None) -> str:
+    """A brain as the user reads it: "Claude Opus 5.5", "GPT-6 Luna", "Gemini 3.8 Flash", an
+    endpoint's own label ("DeepSeek · deepseek-v4-pro")."""
+    info = describe(ref, s)
+    if not info.valid:
+        return "a brain NEO doesn't know"
+    m = model or info.model
+    if info.provider.startswith("custom:"):
+        cp = custom_endpoint(info.provider, s)
+        name = cp.label if cp is not None else info.provider
+        return f"{name} · {m}" if m else name
+    p = PROVIDERS.get(info.provider)
+    if (km := known_model(info.provider, m)) is not None:
+        return f"{km.label} on {p.label}" if p is not None and info.provider in ("groq", "cerebras") else km.label
+    if info.provider == "local":
+        return p.label if p else "NEO's model on this Mac"
+    base = "Claude" if info.provider == "anthropic" else (p.label if p else info.provider)
+    return f"{base} · {m}" if m else base
+
+
+def spoken(ref: str, s: Any = None) -> str:
+    """A brain reference as NEO says it ("Claude Haiku 5.5", "OpenAI", "DeepSeek"): a model's name
+    when it's a known one, else the provider's (a long model id isn't said aloud)."""
+    info = describe(ref, s)
+    if not info.valid:
+        return "an unknown brain"
+    if info.provider.startswith("custom:"):
+        cp = custom_endpoint(info.provider, s)
+        return cp.label if cp is not None else info.provider[len("custom:") :]
+    if (km := known_model(info.provider, info.model)) is not None:
+        return km.label
+    return {"anthropic": "Claude", "gemini": "Gemini", "local": "the local model"}.get(
+        info.provider, PROVIDERS[info.provider].label if info.provider in PROVIDERS else info.provider
+    )

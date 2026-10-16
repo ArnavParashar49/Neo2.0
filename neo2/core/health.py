@@ -7,7 +7,6 @@ so "no API key", "microphone blocked" or "voice is down" are visible instead of 
 from __future__ import annotations
 
 import asyncio
-import re
 from typing import Any
 
 from neo2.core.config import settings
@@ -60,17 +59,6 @@ _ROLE_VARS = {
     "light_brain": "NEO_LIGHT_BRAIN",
     "backup_brains": "NEO_BACKUP_BRAINS",
 }
-_SHOWN = re.compile(r"[A-Za-z0-9 _.:@/+-]{1,32}")
-_KEYISH = re.compile(r"(?i)^(sk-|aiza|gsk_|csk-|xai-)|[A-Za-z0-9_-]{24,}")
-
-
-def _shown(value: str) -> str | None:
-    """What was typed, when it's safe to show it back: short, plain, and nothing like a key (a key
-    pasted into the wrong line must never reach every client's hello)."""
-    v = value.strip()
-    return v if _SHOWN.fullmatch(v) and not _KEYISH.search(v) else None
-
-
 def brain_problems(s: Any) -> list[str]:
     """A role set to something NEO can't read as a brain (it is skipped, never swapped for another),
     and NEO's own saved files when they can't be read."""
@@ -82,7 +70,7 @@ def brain_problems(s: Any) -> list[str]:
         for one in v if isinstance(v, list) else [v]:
             if not isinstance(one, str) or not one or brainref.parse(one).valid:
                 continue
-            shown = _shown(one)
+            shown = brainref.shown(one)
             out.append(
                 f"{var}={shown} isn't a brain NEO knows. Pick one in Brains & Keys."
                 if shown

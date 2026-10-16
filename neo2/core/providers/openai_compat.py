@@ -1,4 +1,5 @@
-"""OpenAI-compatible brains: Groq (fast free tier) and the local mlx-lm server.
+"""OpenAI-compatible brains: Groq (fast free tier), the local mlx-lm server, OpenRouter, and the
+endpoints the user added (custom:<slug>: xAI, DeepSeek, Mistral, Together, Ollama, LM Studio…).
 
 One class, parameterised by ``base_url`` / ``model``. Both speak the chat-completions
 protocol with tool calling; Groq also honours ``reasoning_effort`` for gpt-oss models.
@@ -21,6 +22,7 @@ import time
 import uuid
 from collections.abc import AsyncIterator
 from typing import Any, Literal
+from urllib.parse import urlsplit
 
 from openai import APIConnectionError, APIStatusError, AsyncOpenAI, RateLimitError
 
@@ -214,7 +216,8 @@ class OpenAICompatProvider:
         if self._is_local:
             from neo2.core.providers.local_server import is_up
 
-            port = int(self._base_url.rsplit(":", 1)[1].split("/")[0])
+            parts = urlsplit(self._base_url)  # (a URL without a port: the scheme's own)
+            port = parts.port or (443 if parts.scheme == "https" else 80)
             if not await is_up(port):
                 raise Unavailable("local model server not running (start it with `python -m neo2 --local`)")
 
@@ -391,3 +394,49 @@ def local(model: str | None = None, port: int = 8080) -> OpenAICompatProvider:
         model=model or settings().local_model,
         token_budget=_LOCAL_CONTEXT_TOKENS,
     )
+
+
+_OPENROUTER_URL = "https://openrouter.ai/api/v1"
+# OpenRouter's optional app attribution (it shows which app made a request in the user's own
+# activity list): NEO, and its public repository.
+_OPENROUTER_HEADERS = {"HTTP-Referer": "https://github.com/ArnavParashar49/Neo2.0", "X-Title": "NEO"}
+
+
+def openrouter(model: str | None = None, *, name: str = "openrouter", vision: bool = False) -> OpenAICompatProvider:
+    """OpenRouter (one key, many vendors' models; ids are vendor-prefixed: "deepseek/deepseek-v4-pro").
+    `vision`: whether that model sees (the catalogue's, from what the window's live list said)."""
+    s = settings()
+    if not s.openrouter_api_key:
+        raise Unavailable("OPENROUTER_API_KEY is not set")
+    model = model or s.openrouter_model
+    if not model:
+        raise Unavailable("no OpenRouter model is picked (Brains & Keys)")
+    client = AsyncOpenAI(
+        base_url=_OPENROUTER_URL,
+        api_key=s.openrouter_api_key,
+        timeout=60.0,
+        max_retries=1,
+        default_headers=_OPENROUTER_HEADERS,
+    )
+    return OpenAICompatProvider(name=name, base_url=_OPENROUTER_URL, model=model, supports_vision=vision, client=client)
+
+
+def custom(cp: Any, key: str = "", *, model: str | None = None, name: str | None = None) -> OpenAICompatProvider:
+    """An endpoint the user added (neo2.core.brainref.CustomProvider): its base URL, model, whether it
+    sees and calls tools, and its context size. Its key: `key` (none needed on this Mac)."""
+    if not key and not cp.on_device:
+        raise Unavailable(f"{cp.id} has no API key (Brains & Keys)")
+    p = OpenAICompatProvider(
+        name=name or cp.id,
+        base_url=cp.base_url,
+        api_key=key or "none",
+        model=model or cp.model,
+        supports_vision=cp.vision,
+        reasoning_effort=cp.reasoning,
+        token_budget=cp.context,
+    )
+    if not cp.tools:
+        p.supports_tools = False  # (it can be Quick replies, never the Brain)
+    if cp.on_device:
+        p.on_device = True  # (whatever the host is called: localhost, 127.0.0.1, [::1])
+    return p

@@ -101,6 +101,18 @@ def parse(value: Any) -> Ref:
     return Ref(head + (f"@{m}" if m is not None else ""), head, m, True)
 
 
+_SHOWN = re.compile(r"[A-Za-z0-9 _.:@/+-]{1,32}")
+_KEYISH = re.compile(r"(?i)^(sk-|aiza|gsk_|csk-|xai-)|[A-Za-z0-9_-]{24,}")
+
+
+def shown(value: str) -> str | None:
+    """What was typed, when it's safe to say it back (the health list, a log line): short, plain,
+    and nothing like a key — a key pasted into the wrong line must never reach every client's hello
+    or core.log. None: it isn't."""
+    v = str(value or "").strip()
+    return v if _SHOWN.fullmatch(v) and not _KEYISH.search(v) else None
+
+
 def normalize(value: Any) -> str:
     """The settings' tolerant validator: a reference's normal form, or the placeholder."""
     return parse(value).text

@@ -1,10 +1,12 @@
 """The camera's answer ("a blue steel water bottle — it says Hydro Flask"), from NEO's cloud brains
-that see, as the user chose: Gemini first, then Cerebras's vision model (qwen-3.8-27b, their paid
-key) when Gemini is overloaded, out of quota, slow or failing.
+that see, as the user chose: the brains they gave a role that see (Quick replies, Eyes, Brain:
+neo2.core.providers.camera_order), then Gemini, then Cerebras's vision model (qwen-3.8-27b, their
+paid key) when Gemini is overloaded, out of quota, slow or failing. With the default settings:
+Gemini, then Cerebras's vision model.
 
 One still per question: the frame, scaled to at most :data:`MAX_EDGE` px and sent as a JPEG, with
 the question and short hints from the on-device layers (Apple Vision's labels and words, the
-detector's objects, the hand and what is by it). Only those two brains ever get it — never a text-only brain
+detector's objects, the hand and what is by it). Only those brains ever get it — never a text-only brain
 (one that doesn't declare vision is skipped), never a host's own provider, never another service.
 Their keys, quota tracking, demotions and Cerebras's daily spend cap are NEO's own
 (neo2.core.providers: the brains are made and ordered by a :class:`~neo2.core.providers.Chain`).
@@ -43,13 +45,28 @@ from neo2.core import logger
 
 log = logger(__name__)
 
-SEEING = ("gemini", "cerebras_vision")  # the camera's brains, in the user's order
+SEEING = ("gemini", "cerebras_vision")  # the camera's own fallbacks (after the user's roles: camera_order)
 MAX_EDGE = 1024
 JPEG_QUALITY = 85
 DETAIL = "medium"  # Gemini: 560 tokens a picture — enough for a label's words, quick to read
 # Each brain's thinking (neo2.core.providers.effort.for_brain): Gemini at its lowest (it is the
 # slow one); Cerebras's qwen at low — as fast as minimal there (~1 s), and it looks more carefully.
 EFFORT = {"gemini": "minimal", "cerebras_vision": "low"}
+# Any other brain the user gave a role, by its provider: low (Claude's and OpenAI's lowest that
+# still look with care; Gemini at its lowest, as above).
+_EFFORT_BY_PROVIDER = {"gemini": "minimal", "anthropic": "low", "openai": "low", "cerebras": "low"}
+
+
+def effort_for(name: str) -> str:
+    """The thinking level a camera question asks `name` at."""
+    if name in EFFORT:
+        return EFFORT[name]
+    try:
+        from neo2.core.providers.catalog import provider_of
+
+        return _EFFORT_BY_PROVIDER.get(provider_of(name), "low")
+    except Exception:  # noqa: BLE001
+        return "low"
 MAX_TOKENS = 384  # a sentence or two (~80 tokens), plus a little thinking
 GEMINI_S = 1.5  # how long the user's first brain's answer is waited for when another's is ready
 LATE_REST_S = 120.0  # a brain that missed that wait isn't asked again for this long (overloaded)
@@ -121,9 +138,17 @@ def _cerebras_on() -> bool:
 
 
 def brains() -> list[str]:
-    """The seeing brains a camera question may go to, in the user's order: Gemini, then Cerebras's
-    vision model when their Cerebras key is set and its budget isn't 0."""
-    return [n for n in SEEING if n != "cerebras_vision" or _cerebras_on()]
+    """The seeing brains a camera question may go to, in the user's order: their Quick replies brain
+    if it sees, their Eyes, their Brain if it sees (neo2.core.providers.camera_order) — then Gemini,
+    then Cerebras's vision model when their Cerebras key is set and its budget isn't 0. With the
+    default settings: Gemini, then Cerebras's vision model."""
+    try:
+        from neo2.core.providers import camera_order
+
+        order = camera_order()
+    except Exception:  # noqa: BLE001 — no agent bound (library mode): the fallbacks alone
+        order = list(SEEING)
+    return [n for n in order if n != "cerebras_vision" or _cerebras_on()]
 
 
 def prewarm() -> bool:
@@ -295,7 +320,7 @@ async def ask(img: Image.Image | bytes, question: str, hints: dict[str, Any] | s
     prefer_until = t_start if any(_unreliable(p.name) for p in seeing[:-1]) else t_start + GEMINI_S
     calls: dict[asyncio.Future[Any], Any] = {}
     for p in seeing:  # all at once: the user's order decides whose answer is taken, not who is asked
-        call = p.complete(msgs, system=SYSTEM, effort=for_brain(p, EFFORT.get(p.name, "minimal")), max_tokens=MAX_TOKENS)
+        call = p.complete(msgs, system=SYSTEM, effort=for_brain(p, effort_for(p.name)), max_tokens=MAX_TOKENS)
         calls[asyncio.ensure_future(asyncio.wait_for(call, timeout=TOTAL_S))] = p
     answers: dict[str, str] = {}
     failed: set[str] = set()
