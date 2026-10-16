@@ -20,6 +20,9 @@ import { CameraCard, CameraEndedRow, CameraPoppedRow, camIcon } from "./camera/C
 import { CAMERA_POPIN_EVENT, closeCameraWindow, openCameraWindow, showCameraWindow } from "./camera/popout";
 import { useSongShape } from "./song/hub";
 import { SongItem, noteIcon } from "./song/SongCard";
+import { Onboarding } from "./Onboarding";
+import { isNoModelProblem, needsBrain } from "./onboard";
+import { KEY_TYPED, looksLikeKey } from "./keys/keyshape";
 import "./App.css";
 import "./browser/browser.css";
 import "./notch.css";
@@ -71,24 +74,17 @@ const NOTCH_SONG: Size = { w: 340, h: 380 };
 const MORPH_MS = 280;
 type BMode = "docked" | "focus" | "mini" | "popped";
 
-function brainName(m: TurnMeta): string {
+/** Which brain answered, as the core names it ("Claude Opus 5.5", "GPT-OSS 120B on Groq"). An
+ *  older core sends no label: its model id as it is. */
+function brainLabel(m: TurnMeta): string {
   if (m.route === "quick") return "quick action · no model";
-  const model = m.model || m.brain;
-  // Cerebras names its models without a vendor prefix ("gpt-oss-120b" is Groq's only as openai/…)
-  if (m.brain?.startsWith("cerebras")) return "Cerebras " + model;
-  const pretty = model
-    .replace(/^openai\//, "")
-    .replace(/^gemini-(\d+\.\d+)-flash$/, "Gemini $1 Flash")
-    .replace(/^gpt-oss-120b$/, "Groq gpt-oss-120b")
-    .replace(/^mlx-community\//, "")
-    .replace(/^claude-/, "Claude ");
-  return pretty || m.brain || "local";
+  return m.label || m.model || m.brain || "local";
 }
 
 function Meta({ m }: { m: TurnMeta }) {
   const secs = (m.ms / 1000).toFixed(m.ms < 10_000 ? 1 : 0) + " s";
   const tools = m.route === "agent" && m.tools ? ` · ${m.tools} tool${m.tools === 1 ? "" : "s"}` : "";
-  return <div className="meta">{brainName(m)}{tools} · {secs}</div>;
+  return <div className="meta">{brainLabel(m)}{tools} · {secs}</div>;
 }
 
 function Tools({ tools }: { tools: ToolRun[] }) {
@@ -147,6 +143,8 @@ export default function App() {
   const shown = confirming ? "confirming" : neo.state;
   const orb = ORB[shown];
   const [text, setText] = useState("");
+  // Typed text that started with an API key: kept from every model (and from ↑), and said so here.
+  const [keyGuard, setKeyGuard] = useState(false);
   const [hover, setHover] = useState(false);
   // "Erase NEO's Memory…" from the menu bar: "ask" shows the question, "sent" waits for the
   // core to confirm (the dialog only closes once it has actually erased).
@@ -538,6 +536,7 @@ export default function App() {
     setErasing(false);
     lastInput.current = "";
     setText("");
+    setKeyGuard(false);
   }, [neo.erasedAt]);
 
   // Dismissed without an answer (collapsed, hidden): the question doesn't linger for next time.
@@ -604,6 +603,9 @@ export default function App() {
   const submit = (t = text) => {
     const v = t.trim();
     if (!v) return;
+    // A pasted key goes nowhere: not to the core, not into ↑'s history (the core checks again).
+    if (looksLikeKey(v)) { setText(""); setKeyGuard(true); return; }
+    setKeyGuard(false);
     lastInput.current = v;
     stickToBottom.current = true;
     neo.send({ cmd: "text", text: v });
@@ -640,6 +642,8 @@ export default function App() {
   }, [confirming, answer, offersTask]);
 
   const busy = !["idle", "listening"].includes(shown);
+  // No model to ask yet: the chat shows "Give NEO a brain" (the composer stays for simple commands).
+  const noBrain = needsBrain(neo.connected, neo.brains);
   const lastReply = [...neo.items].reverse().find((i) => i.kind === "msg" && i.role === "assistant") as Extract<Item, { kind: "msg" }> | undefined;
 
   // Replies while the page fills the card (focus, compact): a toast above the input — only replies
@@ -912,8 +916,9 @@ export default function App() {
             {layout === "chat" && camLive && csnap.popped && <CameraPoppedRow hub={cam} live={camLive} stopping={csnap.stopping} onShow={() => void showCameraWindow()} onBringBack={camBringBack} />}
             {layout === "chat" && live && bmode === "mini" && <MiniRow hub={hub} snap={live} onExpand={toggleMini} onStop={() => void hub.control("stop").then((r) => r.ok && hub.toast("Stopped. You're in control.", 2500))} />}
             {layout === "chat" && live && bmode === "popped" && <PoppedRow hub={hub} snap={live} onShow={showWindow} onBringBack={bringBack} />}
-            {neo.connected && !showStrip && neo.problems.map((p) => <div key={p} className="msg system problem" role="alert">{p}</div>)}
-            {visibleItems.length === 0 && !showStrip && !live && (
+            {neo.connected && !showStrip && neo.problems.filter((p) => !(noBrain && isNoModelProblem(p))).map((p) => <div key={p} className="msg system problem" role="alert">{p}</div>)}
+            {noBrain && !showStrip && !live && visibleItems.length === 0 && <Onboarding send={neo.send} openKeys={neo.openKeys} setup={neo.setup} />}
+            {!noBrain && visibleItems.length === 0 && !showStrip && !live && (
               <div className="empty">
                 <div className="empty-hint">Say <b>“Neo”</b>, or try one of these</div>
                 <div className="suggest">
@@ -922,6 +927,13 @@ export default function App() {
               </div>
             )}
             {neo.items.map((it, idx) => renderItem(it, idx, showStrip))}
+            {noBrain && !showStrip && !live && visibleItems.length > 0 && <Onboarding tail send={neo.send} openKeys={neo.openKeys} setup={neo.setup} />}
+            {keyGuard && !showStrip && (
+              <div className="msg system keyguard" role="status">
+                {KEY_TYPED}{" "}
+                <button className="keyguard-open" onClick={() => { neo.send({ cmd: "open_keys" }); setKeyGuard(false); }}>Open Brains &amp; Keys</button>
+              </div>
+            )}
             {neo.error && <div className="msg system">{neo.error}</div>}
           </div>
         )}

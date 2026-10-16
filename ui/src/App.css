@@ -191,6 +191,32 @@ kbd { font: 11px/1 -apple-system, system-ui; opacity: 0.7; margin-left: 6px; }
 .chip.running .dot { background: var(--accent); animation: pulse 1s ease-in-out infinite; }
 @keyframes pulse { 0%, 100% { opacity: 0.35; } 50% { opacity: 1; } }
 
+/* ---- "Give NEO a brain": the empty chat while NEO has no model to ask ------------------ */
+.onboard {
+  align-self: stretch; margin: auto 0; padding: 16px 16px 14px; border-radius: 16px;
+  background: var(--bg-2); border: 1px solid var(--edge); animation: fade 160ms ease-out;
+}
+.onboard.tail { margin: 2px 0 0; }
+.onboard-title { font-weight: 600; font-size: 14px; color: var(--fg); margin-bottom: 6px; }
+.onboard-body { margin: 0 0 12px; color: var(--muted); font-size: 12.5px; line-height: 1.45; }
+.onboard-btns { display: flex; flex-wrap: wrap; gap: 8px; }
+.onboard-btns button {
+  display: inline-flex; align-items: center; gap: 4px; padding: 8px 12px; border-radius: 11px;
+  border: 1px solid var(--edge); background: var(--bg-2); font-size: 12.5px; transition: background 120ms;
+}
+.onboard-btns button:hover { background: var(--bg-3); }
+.onboard-btns .primary { background: var(--solid-bg); color: var(--solid-fg); border-color: transparent; font-weight: 600; }
+.onboard-btns .primary:hover { background: var(--solid-hover); }
+.onboard-btns button:disabled { opacity: 0.6; cursor: default; }
+.onboard-note { margin-top: 10px; font-size: 12px; color: var(--fg); }
+.onboard-note code, .onboard-note.cli code {
+  font: 11.5px var(--mono); background: var(--bg-3); padding: 2px 6px; border-radius: 6px; user-select: text; -webkit-user-select: text;
+}
+.onboard-also { margin: 10px 0 0; color: var(--dim); font-size: 11.5px; line-height: 1.4; }
+/* The composer kept a pasted key from every model: said once, with the way to save it. */
+.msg.system.keyguard { align-self: stretch; color: var(--fg); text-align: left; border-left: 2px solid var(--accent); padding-left: 10px; line-height: 1.4; }
+.keyguard-open { color: var(--accent); text-decoration: underline; text-underline-offset: 2px; font-size: 12px; }
+
 /* ---- input --------------------------------------------------------------------------- */
 .input-row { display: flex; align-items: center; gap: 6px; padding: 10px 12px 12px; border-top: 1px solid var(--edge); }
 .input-row input {

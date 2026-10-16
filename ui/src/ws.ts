@@ -7,6 +7,7 @@ import { BrowserHub } from "./browser/hub";
 import { CameraHub } from "./camera/hub";
 import { isCameraFrame } from "./camera/frames";
 import { SongHub } from "./song/hub";
+import type { BrainsSummary, SetupNeeded } from "./keys/types";
 
 export type NeoState =
   | "idle" | "listening" | "thinking" | "working" | "searching" | "speaking" | "connecting" | "confirming";
@@ -14,7 +15,10 @@ export type OrbState =
   | "breathing" | "listening" | "solving" | "working" | "searching" | "composing" | "connecting" | "shaping" | "weaving";
 const MIN_DWELL_MS = 350; // a state must show at least this long before the next one replaces it
 
-export interface TurnMeta { route: string; brain: string; model: string; ms: number; tools: number }
+/** `label`: the brain as the user reads it ("Claude Opus 5.5"), from the core; older cores send none. */
+export interface TurnMeta { route: string; brain: string; model: string; label?: string; ms: number; tools: number }
+/** `open_keys`'s answer: the core asked NEO.app's shell to open Brains & Keys, or why not. */
+export interface OpenKeysResult { ok: boolean; error?: string; at: number }
 export interface ToolRun { name: string; args?: Record<string, unknown>; ok?: boolean; summary?: string; running: boolean }
 export type Item =
   | { kind: "msg"; id: number; role: "user" | "assistant" | "system"; text: string; final: boolean; ts: number; meta?: TurnMeta; job?: string }
@@ -85,6 +89,11 @@ export function useNeo(opts: { surface?: "overlay" | "window" } = {}) {
   const [note, setNote] = useState<string>("");
   const [ask, setAsk] = useState<ConfirmCard | null>(null);
   const [problems, setProblems] = useState<string[]>([]);
+  // NEO's brains as every client may know them (labels and booleans, never a key): the hello's
+  // "brains", then each `brains` event. Null: an older core that doesn't say.
+  const [brains, setBrains] = useState<BrainsSummary | null>(null);
+  const [setup, setSetup] = useState<SetupNeeded | null>(null); // a request needed a model NEO hasn't got
+  const [openKeys, setOpenKeys] = useState<OpenKeysResult | null>(null);
   const [erasedAt, setErasedAt] = useState(0); // bumps when the core confirms an erase
   // Where the core says NEO's UI lives: its own window, or the notch (NotchHub's panel). NEO.app's
   // shell follows it — with "notch" it keeps its window hidden and leaves the UI to the host.
@@ -139,6 +148,7 @@ export function useNeo(opts: { surface?: "overlay" | "window" } = {}) {
           for (const r of ev.data.recent ?? []) apply(r);
           setAsk(ev.data.confirm ?? null);
           setProblems(ev.data.problems ?? []);
+          setBrains(ev.data.brains && typeof ev.data.brains === "object" ? (ev.data.brains as BrainsSummary) : null);
           hub.endHello(ev.data.browser);
           cam.endHello(ev.data.camera);
           song.endHello();
@@ -155,6 +165,16 @@ export function useNeo(opts: { surface?: "overlay" | "window" } = {}) {
           break;
         case "problems":
           setProblems(ev.data.items ?? []);
+          break;
+        case "brains":
+          setBrains(ev.data as BrainsSummary);
+          if (ev.data?.ready) setSetup(null);
+          break;
+        case "setup_needed":
+          setSetup({ shell: !!ev.data.shell, opened: !!ev.data.opened, command: String(ev.data.command ?? "") });
+          break;
+        case "open_keys_result":
+          setOpenKeys({ ok: !!ev.data.ok, error: typeof ev.data.error === "string" ? ev.data.error : undefined, at: Date.now() });
           break;
         case "ui_host":
           if (ev.data.host === "window" || ev.data.host === "notch") { setUiHost(ev.data.host); void uiHostChanged(ev.data.host); }
@@ -325,5 +345,5 @@ export function useNeo(opts: { surface?: "overlay" | "window" } = {}) {
     song.clearEnded();
   }, [hub, cam, song]);
 
-  return { connected, state, items, error, note, ask, problems, erasedAt, helloAt, uiHost, send, clear, hub, cam, song };
+  return { connected, state, items, error, note, ask, problems, brains, setup, openKeys, erasedAt, helloAt, uiHost, send, clear, hub, cam, song };
 }
