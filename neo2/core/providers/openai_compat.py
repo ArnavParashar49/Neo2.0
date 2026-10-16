@@ -11,11 +11,19 @@ next one goes. When the server still says it's too large, it also says how large
 really was: the estimate is corrected from that and the request fitted again. The correction is
 capped, and every request that goes through reports its real size, so one odd refusal (a prompt of
 dense digits, a 413 with no numbers) doesn't leave every later request over-trimmed.
+
+What strict servers need, for every brain here: all the tool replies of one assistant turn come
+right after it, and the pictures they returned follow in one user message; the answer's room is sent
+as `max_tokens` or `max_completion_tokens` (an endpoint's `token_param`); an endpoint that wants short
+tool-call ids (Mistral: 9 letters and digits) gets them, the same one for a call and its reply. A
+refused key (401, or a 403 about the key) is KeyRefused, an account with no credit (402) is out for
+an hour — in NEO's own words, never the server's text, which may quote the key.
 """
 
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import re
 import time
@@ -31,8 +39,10 @@ from neo2.core.config import settings
 from neo2.core.providers.base import (
     BLIND_PICTURE,
     BadRequest,
+    KeyRefused,
     Message,
     ProviderError,
+    QuotaExhausted,
     RateLimited,
     RequestTooLarge,
     ToolCall,
@@ -58,11 +68,32 @@ _FOLLOW = 0.5  # a request that went through moves the correction this far towar
 _DRIFT = 0.1  # …or, when the server didn't say, this far back toward none
 _LIMIT_REQUESTED = re.compile(r"Limit\s+(\d+),\s*Requested\s+(\d+)", re.I)
 _TRY_AGAIN = re.compile(r"try again in\s+(?:(\d+)h)?(?:(\d+)m(?!s))?(?:([\d.]+)s)?", re.I)
+# A 403 that is about the key (not a model this key may not use): its code or its words say so.
+_ABOUT_KEY = re.compile(r"api[ _-]?key|invalid[_ ]key|incorrect[_ ]key|wrong[_ ]key|unauthori[sz]ed|revoked", re.I)
+_NO_CREDIT_S = 3600.0  # a 402: the account has no credit; asked again after this long
+_SHORT_ID = re.compile(r"[A-Za-z0-9]{9}")
+_B62 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 
 log = logger(__name__)
 
 
-def _to_messages(messages: list[Message], system: str, vision: bool) -> list[dict[str, Any]]:
+def short_id(call_id: str) -> str:
+    """A tool-call id as a server that takes only 9 letters and digits wants it (Mistral): one that
+    already is stays; any other becomes 9 characters of its hash — the same for a call and its reply."""
+    if _SHORT_ID.fullmatch(call_id or ""):
+        return call_id
+    n = int.from_bytes(hashlib.sha256((call_id or "").encode()).digest()[:8], "big")
+    out = ""
+    for _ in range(9):
+        n, r = divmod(n, 62)
+        out += _B62[r]
+    return out
+
+
+def _to_messages(
+    messages: list[Message], system: str, vision: bool, *, short_ids: bool = False
+) -> list[dict[str, Any]]:
+    ids = short_id if short_ids else (lambda i: i)
     out: list[dict[str, Any]] = []
     if system:
         out.append({"role": "system", "content": system})
@@ -86,7 +117,7 @@ def _to_messages(messages: list[Message], system: str, vision: bool) -> list[dic
             if m.tool_calls:
                 msg["tool_calls"] = [
                     {
-                        "id": c.id,
+                        "id": ids(c.id),
                         "type": "function",
                         "function": {"name": c.name, "arguments": json.dumps(c.args)},
                     }
@@ -94,17 +125,21 @@ def _to_messages(messages: list[Message], system: str, vision: bool) -> list[dic
                 ]
             out.append(msg)
         else:
+            # Every reply first (a strict server wants them right after the calls), then the pictures
+            # they returned, all in one user message.
+            pictures: list[dict[str, Any]] = []
             for r in m.tool_results:
                 text = r.content + ("\n" + BLIND_PICTURE if r.images and not vision else "")
-                out.append({"role": "tool", "tool_call_id": r.call_id, "content": text})
+                out.append({"role": "tool", "tool_call_id": ids(r.call_id), "content": text})
                 if r.images and vision:
-                    content = [{"type": "text", "text": f"Image from {r.name}:"}]
+                    pictures.append({"type": "text", "text": f"Image from {r.name}:"})
                     for im in r.images:
                         b64 = base64.b64encode(im.data).decode()
-                        content.append(
+                        pictures.append(
                             {"type": "image_url", "image_url": {"url": f"data:{im.mime};base64,{b64}"}}
                         )
-                    out.append({"role": "user", "content": content})
+            if pictures:
+                out.append({"role": "user", "content": pictures})
     return out
 
 
@@ -134,6 +169,14 @@ def _retry_after(e: Exception) -> float | None:
         return None
     h, mi, sec = m.groups()
     return int(h or 0) * 3600 + int(mi or 0) * 60 + float(sec or 0)
+
+
+def _about_key(e: APIStatusError) -> bool:
+    body = getattr(e, "body", None)
+    fields = [str(x) for x in (getattr(e, "code", None), getattr(e, "type", None)) if x]
+    if isinstance(body, dict):
+        fields += [str(body.get(k) or "") for k in ("code", "type", "message")]
+    return any(_ABOUT_KEY.search(f) for f in fields) or bool(_ABOUT_KEY.search(str(getattr(e, "message", ""))))
 
 
 def _too_large(e: APIStatusError) -> bool:
@@ -177,8 +220,18 @@ class OpenAICompatProvider:
         token_budget: int = _LOCAL_CONTEXT_TOKENS,
         per_minute: bool = False,
         client: AsyncOpenAI | None = None,
+        token_param: Literal["max_tokens", "max_completion_tokens"] = "max_tokens",
+        short_tool_ids: bool = False,
+        local: bool | None = None,
+        label: str = "",
     ) -> None:
-        """`client`: the host's own configured AsyncOpenAI (its base URL, key, retries…)."""
+        """`client`: the host's own configured AsyncOpenAI (its base URL, key, retries…). Without
+        one, a `base_url` is needed. `token_param`: the name the server takes the answer's room by.
+        `short_tool_ids`: it takes only 9-character tool-call ids (Mistral). `local`: a server on
+        this Mac, checked before each call (None: NEO's own local server, by its address). `label`:
+        what the user calls it, when it isn't answering."""
+        if client is None and not (base_url or "").strip():
+            raise Unavailable(f"{name}: no base URL is set for it")
         self.name = name
         self.model = model
         self.supports_vision = supports_vision
@@ -187,9 +240,16 @@ class OpenAICompatProvider:
         self._scale = 1.0  # real tokens / estimated, learned from the server's own 413
         self._cool_until = 0.0  # a 429 that said how long to wait
         self._reasoning = reasoning_effort
+        self._token_param = token_param if token_param in ("max_tokens", "max_completion_tokens") else "max_tokens"
+        self._short_ids = short_tool_ids
+        self._label = label
+        self._cap: Any = None  # a daily cap (neo2.core.providers.spend.Cap): an endpoint's, OpenRouter's
         self._base_url = base_url or str(getattr(client, "base_url", "") or "")
-        # NEO's own local server (mlx-lm): checked before each call. A host's client is theirs.
-        self._is_local = client is None and ("127.0.0.1" in base_url or "localhost" in base_url)
+        # A server on this Mac — NEO's own local server (mlx-lm), or an endpoint the user added
+        # there: checked before each call. A host's client is theirs.
+        if local is None:
+            local = "127.0.0.1" in base_url or "localhost" in base_url
+        self._is_local = client is None and local
         # nothing sent to it leaves the Mac (a host's own client may point at its local server too)
         self.on_device = "127.0.0.1" in self._base_url or "localhost" in self._base_url
         self._client = client or AsyncOpenAI(
@@ -209,17 +269,36 @@ class OpenAICompatProvider:
 
     def _spent(self, usage: Any, f: Fitted, text: str = "") -> None:
         """Every answer's token usage as the server reported it (None: it didn't — `text` is what
-        streamed). Nothing here: a paid brain counts it (neo2.core.providers.cerebras)."""
+        streamed). A capped brain (OpenRouter, an endpoint with a daily cap) counts it here; a paid
+        brain with its own ledger overrides this (neo2.core.providers.cerebras)."""
+        if self._cap is not None and usage is not None:
+            self._cap.add(self.model, int(getattr(usage, "prompt_tokens", 0) or 0), int(getattr(usage, "completion_tokens", 0) or 0))
+
+    async def _admit(self) -> None:
+        """A capped brain whose day's budget is spent isn't asked (QuotaExhausted until midnight)."""
+        if self._cap is not None and (refused := self._cap.refusal(self.name)) is not None:
+            await self._cap.tell()
+            raise refused
+
+    async def _told(self) -> None:
+        if self._cap is not None:
+            await self._cap.tell()
 
     async def _preflight(self) -> None:
-        """Fail fast when the local server isn't up instead of hanging on connect/retry."""
+        """Fail fast when a server on this Mac isn't up instead of hanging on connect/retry."""
         if self._is_local:
-            from neo2.core.providers.local_server import is_up
+            from neo2.core.providers import local_server
 
             parts = urlsplit(self._base_url)  # (a URL without a port: the scheme's own)
             port = parts.port or (443 if parts.scheme == "https" else 80)
-            if not await is_up(port):
-                raise Unavailable("local model server not running (start it with `python -m neo2 --local`)")
+            if parts.hostname in ("127.0.0.1", "localhost") and parts.path.rstrip("/") == "/v1":
+                up = await local_server.is_up(port)
+            else:  # (another path, or [::1]: ask that URL itself)
+                up = await local_server.reachable(self._base_url.rstrip("/") + "/models")
+            if not up:
+                if self.name == "local":
+                    raise Unavailable("local model server not running (start it with `python -m neo2 --local`)")
+                raise Unavailable(f"{self._label or self.name} isn't answering on this Mac (port {port})")
 
     def _fit(self, messages, system, tools, max_tokens) -> Fitted:
         return fit(
@@ -267,9 +346,17 @@ class OpenAICompatProvider:
                 self._cool_until = time.time() + wait
             return RateLimited(f"{self.name}: {e}", retry_after=wait)
         if isinstance(e, APIStatusError):
+            code = e.status_code
+            # (NEO's own words: a server's 401 text may quote the key)
+            if code == 401 or (code == 403 and _about_key(e)):
+                return KeyRefused(f"{self.name}: the server refused the API key (HTTP {code})")
+            if code == 402:
+                return QuotaExhausted(
+                    f"{self.name}: the account has no credit (HTTP 402)", until=time.time() + _NO_CREDIT_S
+                )
             if _too_large(e):
                 return RequestTooLarge(f"{self.name}: {e}")
-            if 400 <= e.status_code < 500:
+            if 400 <= code < 500:
                 return BadRequest(f"{self.name}: {e}")
             return ProviderError(f"{self.name}: {e}")
         if isinstance(e, APIConnectionError):
@@ -285,6 +372,7 @@ class OpenAICompatProvider:
         effort: Literal["low", "medium", "high"] = "medium",
         max_tokens: int = 4096,
     ) -> Turn:
+        await self._admit()
         await self._preflight()
         f = self._fit(messages, system, tools, max_tokens)
         tries = 3  # a 413 teaches the real size; a second one (the estimate still low) teaches more
@@ -297,10 +385,10 @@ class OpenAICompatProvider:
             if t:
                 kwargs["tools"] = t
             try:
+                kwargs[self._token_param] = f.max_tokens
                 resp = await self.client().chat.completions.create(
                     model=self.model,
-                    messages=_to_messages(f.messages, system, self.supports_vision),
-                    max_tokens=f.max_tokens,
+                    messages=_to_messages(f.messages, system, self.supports_vision, short_ids=self._short_ids),
                     **kwargs,
                 )
                 break
@@ -315,6 +403,7 @@ class OpenAICompatProvider:
 
         self._learn_real(f, resp.usage)
         self._spent(resp.usage, f)
+        await self._told()
         if self.raise_truncated and _ran_out(resp.choices[0]):
             raise Truncated(f"{self.name}: no room for the answer (reasoning used all {f.max_tokens} tokens)")
         choice = resp.choices[0].message
@@ -338,6 +427,7 @@ class OpenAICompatProvider:
     async def stream(
         self, messages: list[Message], *, system: str = "", max_tokens: int = 2048
     ) -> AsyncIterator[str]:
+        await self._admit()
         await self._preflight()
         f = self._fit(messages, system, None, max_tokens)
         said: list[str] = []
@@ -347,12 +437,12 @@ class OpenAICompatProvider:
             extra: dict[str, Any] = {}
             if self._reasoning and self.stream_effort:
                 extra["reasoning_effort"] = self.stream_effort
-            if self.stream_usage:
+            if self.stream_usage or self._cap is not None:  # (a capped brain counts it too)
                 extra["stream_options"] = {"include_usage": True}
+            extra[self._token_param] = f.max_tokens
             st = await self.client().chat.completions.create(
                 model=self.model,
-                messages=_to_messages(f.messages, system, self.supports_vision),
-                max_tokens=f.max_tokens,
+                messages=_to_messages(f.messages, system, self.supports_vision, short_ids=self._short_ids),
                 stream=True,
                 **extra,
             )
@@ -367,6 +457,7 @@ class OpenAICompatProvider:
         finally:
             if st is not None:  # accepted: paid for, even when it said nothing (its thinking used the room)
                 self._spent(usage, f, "".join(said))
+        await self._told()
 
 
 def groq(model: str | None = None) -> OpenAICompatProvider:
@@ -405,6 +496,8 @@ _OPENROUTER_HEADERS = {"HTTP-Referer": "https://github.com/ArnavParashar49/Neo2.
 def openrouter(model: str | None = None, *, name: str = "openrouter", vision: bool = False) -> OpenAICompatProvider:
     """OpenRouter (one key, many vendors' models; ids are vendor-prefixed: "deepseek/deepseek-v4-pro").
     `vision`: whether that model sees (the catalogue's, from what the window's live list said)."""
+    from neo2.core.providers import spend
+
     s = settings()
     if not s.openrouter_api_key:
         raise Unavailable("OPENROUTER_API_KEY is not set")
@@ -418,25 +511,48 @@ def openrouter(model: str | None = None, *, name: str = "openrouter", vision: bo
         max_retries=1,
         default_headers=_OPENROUTER_HEADERS,
     )
-    return OpenAICompatProvider(name=name, base_url=_OPENROUTER_URL, model=model, supports_vision=vision, client=client)
+    p = OpenAICompatProvider(
+        name=name, base_url=_OPENROUTER_URL, model=model, supports_vision=vision, client=client, label="OpenRouter"
+    )
+    p._cap = spend.cap_for("openrouter", s)
+    return p
 
 
 def custom(cp: Any, key: str = "", *, model: str | None = None, name: str | None = None) -> OpenAICompatProvider:
-    """An endpoint the user added (neo2.core.brainref.CustomProvider): its base URL, model, whether it
-    sees and calls tools, and its context size. Its key: `key` (none needed on this Mac)."""
+    """An endpoint the user added (neo2.core.brainref.CustomProvider): its base URL (checked again
+    here: https, or http only on this Mac; no user, password or query in it), model, whether it sees
+    and calls tools, its context size, the name it takes the answer's room by (`token_param`) and
+    whether it wants short tool-call ids. Its key: `key` (none needed on this Mac). One on this Mac
+    is checked before each call (is it answering?)."""
+    from neo2.core import brainref
+    from neo2.core.providers import spend
+
+    try:
+        base_url = brainref.check_base_url(cp.base_url)
+    except ValueError:
+        raise Unavailable(f"{cp.id}: its base URL isn't one NEO may use (Brains & Keys)") from None
     if not key and not cp.on_device:
         raise Unavailable(f"{cp.id} has no API key (Brains & Keys)")
     p = OpenAICompatProvider(
         name=name or cp.id,
-        base_url=cp.base_url,
+        base_url=base_url,
         api_key=key or "none",
         model=model or cp.model,
         supports_vision=cp.vision,
         reasoning_effort=cp.reasoning,
         token_budget=cp.context,
+        token_param=cp.token_param,
+        short_tool_ids=cp.short_tool_ids,
+        local=cp.on_device,
+        label=cp.label,
     )
     if not cp.tools:
         p.supports_tools = False  # (it can be Quick replies, never the Brain)
     if cp.on_device:
         p.on_device = True  # (whatever the host is called: localhost, 127.0.0.1, [::1])
+    else:
+        try:
+            p._cap = spend.cap_for(cp.id, settings())
+        except Exception:  # noqa: BLE001 — no settings bound (a host's): no NEO cap
+            p._cap = None
     return p

@@ -28,6 +28,17 @@ async def is_up(port: int = 8080) -> bool:
         return False
 
 
+async def reachable(url: str, timeout: float = 1.5) -> bool:
+    """Something on this Mac answers HTTP at `url` (any status: a server that wants a key, or has no
+    /models, is still up). For an endpoint the user added here (Ollama, LM Studio, their own)."""
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as c:
+            await c.get(url)
+            return True
+    except Exception:
+        return False
+
+
 async def ensure_running(port: int = 8080, model: str | None = None, wait_s: float = 120) -> bool:
     """Start the server if it isn't already serving. Returns True when ready."""
     global _proc
