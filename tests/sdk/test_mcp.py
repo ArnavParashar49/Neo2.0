@@ -756,6 +756,18 @@ def test_an_anthropic_key_alone_is_enough_with_env(monkeypatch, tmp_path):
     assert server.agent_config(ServerOptions(env=True)).brain == "gemini"  # the operator's choice stays
 
 
+def test_an_openai_key_alone_is_enough_with_env(monkeypatch):
+    """--env with only OPENAI_API_KEY: OpenAI is the brain (Claude still first when its key is set too)."""
+    from neo2.sdk.agent import _usable
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-proj-fake")
+    cfg = server.agent_config(ServerOptions(env=True))
+    assert cfg.brain == "openai" and _usable(cfg, cfg.brain)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-fake")
+    assert server.agent_config(ServerOptions(env=True)).brain == "claude"
+    assert "OPENAI_API_KEY" in server.NO_BRAIN and "OPENAI_API_KEY" in server.NO_BRAIN_AT_START
+
+
 def test_the_command_line():
     from neo2.mcp import _parser, _tools_arg
 

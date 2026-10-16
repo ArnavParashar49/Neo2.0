@@ -20,6 +20,10 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, m
 
 from neo2.core.config import BrainName
 
+# A brain an embedded agent may name: NEO's own (BrainName), OpenAI's (the Responses API, its
+# openai_api_key) and OpenRouter's (openrouter_api_key, with openrouter_model).
+AgentBrain = BrainName | Literal["openai", "openrouter"]
+
 __all__ = ["AgentConfig", "MemoryConfig"]
 
 _GATE_TTL_S = 120.0  # neo2.core.agent.confirm._TTL_S: an approval must come before the card lapses
@@ -51,12 +55,15 @@ class AgentConfig(BaseModel):
     data_dir: Path | None = None  # None: a private temp dir (0700), removed by aclose()
     tools: str | tuple[str, ...] = "web"  # presets, globs and names: ("web", "browser_*")
     exclude_tools: tuple[str, ...] = ()
-    brain: BrainName = "gemini"
-    fast_brain: BrainName = "groq"
+    brain: AgentBrain = "gemini"
+    fast_brain: AgentBrain = "groq"
     gemini_api_keys: tuple[SecretStr, ...] = ()
     groq_api_key: SecretStr | None = None
     anthropic_api_key: SecretStr | None = None
     cerebras_api_key: SecretStr | None = None  # paid: its brains join ahead of Groq's (budget: $0.50/day)
+    openai_api_key: SecretStr | None = None  # brain="openai" (GPT-6.1 Sol by default)
+    openrouter_api_key: SecretStr | None = None  # brain="openrouter", on openrouter_model
+    openrouter_model: str = ""  # an OpenRouter model id ("deepseek/deepseek-v4-pro"): no default
     # "laya" (NEO.app's local model) is one process-wide model: not for embedded agents yet.
     reflex: Literal["off", "lite", "laya"] = "off"
     embeddings: Literal["off", "local"] = "off"  # "local" downloads a small embedding model
@@ -159,6 +166,9 @@ class AgentConfig(BaseModel):
             "groq_api_key": self.groq_api_key.get_secret_value() if self.groq_api_key else "",
             "anthropic_api_key": self.anthropic_api_key.get_secret_value() if self.anthropic_api_key else "",
             "cerebras_api_key": self.cerebras_api_key.get_secret_value() if self.cerebras_api_key else "",
+            "openai_api_key": self.openai_api_key.get_secret_value() if self.openai_api_key else "",
+            "openrouter_api_key": self.openrouter_api_key.get_secret_value() if self.openrouter_api_key else "",
+            "openrouter_model": self.openrouter_model,
             "reflex": self.reflex,
             "embeddings": self.embeddings,
             "memory_enabled": mem is not None,
@@ -191,7 +201,8 @@ class AgentConfig(BaseModel):
     def from_env(
         cls, *, prefix: str = "NEO_", env_files: Sequence[str | Path] = (), **overrides: Any
     ) -> AgentConfig:
-        """Read keys (GEMINI_API_KEY, GEMINI_API_KEYS, GROQ_API_KEY, ANTHROPIC_API_KEY, CEREBRAS_API_KEY) and this
+        """Read keys (GEMINI_API_KEY, GEMINI_API_KEYS, GROQ_API_KEY, ANTHROPIC_API_KEY, CEREBRAS_API_KEY,
+        OPENAI_API_KEY, OPENROUTER_API_KEY) and this
         config's fields (`prefix` + FIELD, e.g. NEO_BRAIN, NEO_TOOLS) from `env_files` (later ones
         win), then the process environment, then `overrides`. Only when asked for: an AgentConfig
         built directly reads none of it. Confirmation isn't a field — nothing here turns it off —
@@ -212,11 +223,12 @@ class AgentConfig(BaseModel):
         keys = list(dict.fromkeys(k.strip() for k in keys if k.strip()))
         if keys:
             values["gemini_api_keys"] = tuple(keys)
-        for name in ("groq_api_key", "anthropic_api_key", "cerebras_api_key"):
+        named = ("groq_api_key", "anthropic_api_key", "cerebras_api_key", "openai_api_key", "openrouter_api_key")
+        for name in named:
             if env.get(name.upper(), "").strip():
                 values[name] = env[name.upper()].strip()
         for name, field in cls.model_fields.items():
-            if name in ("gemini_api_keys", "groq_api_key", "anthropic_api_key", "cerebras_api_key"):
+            if name == "gemini_api_keys" or name in named:
                 continue
             raw = env.get(f"{prefix}{name.upper()}")
             if raw is None or raw.strip() == "":

@@ -163,6 +163,33 @@ async def test_named_brains_come_from_the_configs_keys_only(monkeypatch):
             assert brain("agent").names[0] == "gemini"
 
 
+async def test_an_openai_or_openrouter_key_in_the_config_is_a_brain(monkeypatch, tmp_path):
+    """Brains & Keys for embedded agents: OpenAI's own brain and OpenRouter's, from the config's own
+    keys only (the environment's OPENAI_API_KEY is never read unless from_env asks)."""
+    from neo2.sdk.agent import _usable
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-proj-host-env-key")
+    c = neo2.AgentConfig(brain="openai", fast_brain="openai", openai_api_key="sk-proj-K3Y-cfg")
+    assert _usable(c, "openai") and "K3Y" not in repr(c)
+    s = c.library_settings(tmp_path / "d")
+    assert s.openai_api_key == "sk-proj-K3Y-cfg" and s.brain == "openai" and s.openrouter_api_key == ""
+    assert not _usable(neo2.AgentConfig(), "openai")
+    r = neo2.AgentConfig(brain="openrouter", openrouter_api_key="sk-or-K3Y", openrouter_model="deepseek/deepseek-v4-pro")
+    assert _usable(r, "openrouter") and r.library_settings(tmp_path / "e").openrouter_model == "deepseek/deepseek-v4-pro"
+    assert not _usable(neo2.AgentConfig(brain="openrouter", openrouter_api_key="sk-or-K3Y"), "openrouter")  # (no model)
+    async with neo2.AsyncAgent(c) as agent:
+        with runtime.bind(agent._rt.scope()):
+            from neo2.core.providers import make
+
+            p = make("openai")
+            assert p.name == "openai" and p._client.api_key == "sk-proj-K3Y-cfg"
+            assert str(p._client.base_url).rstrip("/") == "https://api.openai.com/v1"
+    monkeypatch.setenv("NEO_DATA_DIR", "")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-env")
+    e = neo2.AgentConfig.from_env(data_dir=tmp_path / "f")
+    assert e.openai_api_key.get_secret_value() == "sk-proj-host-env-key" and e.openrouter_api_key.get_secret_value() == "sk-or-env"
+
+
 async def test_host_providers_serve_every_purpose():
     main, fast = ScriptedBrain(name="main"), ScriptedBrain(name="fast")
     async with neo2.AsyncAgent(neo2.AgentConfig(), provider=[main], fast_provider=fast) as agent:

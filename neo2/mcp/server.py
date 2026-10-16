@@ -127,11 +127,11 @@ _TASK_SCHEMA: dict[str, Any] = {
 
 NO_BRAIN = (
     "NEO has no model to think with: start its MCP server with --env and GEMINI_API_KEY (or "
-    "GROQ_API_KEY / ANTHROPIC_API_KEY) set, or use --expose tools. Nothing was done."
+    "GROQ_API_KEY / ANTHROPIC_API_KEY / OPENAI_API_KEY) set, or use --expose tools. Nothing was done."
 )
 NO_BRAIN_AT_START = (
     f"{TASK_TOOL} has no model to think with: start the server with --env and GEMINI_API_KEY (or "
-    "GROQ_API_KEY / ANTHROPIC_API_KEY) set, or use --expose tools"
+    "GROQ_API_KEY / ANTHROPIC_API_KEY / OPENAI_API_KEY) set, or use --expose tools"
 )
 _DENIED = (
     "The user's OK is required and was not given: {summary}. Nothing was done; don't retry or work around it."
@@ -162,7 +162,8 @@ class ServerOptions:
 
 def agent_config(opts: ServerOptions) -> AgentConfig:
     """The agent's config: only what the options say, unless --env opts into the environment
-    (where an Anthropic key alone makes Claude the brain, unless NEO_MCP_BRAIN says otherwise)."""
+    (where an Anthropic key alone makes Claude the brain, an OpenAI key alone OpenAI, unless
+    NEO_MCP_BRAIN says otherwise)."""
     overrides: dict[str, Any] = {}
     if opts.tools is not None:
         overrides["tools"] = opts.tools
@@ -173,12 +174,12 @@ def agent_config(opts: ServerOptions) -> AgentConfig:
     changes: dict[str, Any] = {}
     if cfg.name == "default":
         changes["name"] = "mcp"
-    if (
-        "brain" not in cfg.model_fields_set  # NEO_MCP_BRAIN didn't choose one
-        and not (_usable(cfg, cfg.brain) or _usable(cfg, cfg.fast_brain))
-        and cfg.anthropic_api_key is not None
-    ):
-        changes["brain"] = "claude"  # --env found only an Anthropic key: think with Claude
+    if "brain" not in cfg.model_fields_set and not (_usable(cfg, cfg.brain) or _usable(cfg, cfg.fast_brain)):
+        # NEO_MCP_BRAIN didn't choose one, and --env found no key for the default brains
+        if cfg.anthropic_api_key is not None:
+            changes["brain"] = "claude"  # only an Anthropic key: think with Claude
+        elif cfg.openai_api_key is not None:
+            changes["brain"] = "openai"  # only an OpenAI key: think with OpenAI
     if opts.protect_apps:
         changes["protected_apps"] = tuple(dict.fromkeys((*cfg.protected_apps, *opts.protect_apps)))
     return _rebuilt(cfg, **changes) if changes else cfg

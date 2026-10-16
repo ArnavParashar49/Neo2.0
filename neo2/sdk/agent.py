@@ -1104,6 +1104,10 @@ def _usable(cfg: AgentConfig, name: str) -> bool:
         return cfg.anthropic_api_key is not None
     if name in ("cerebras", "cerebras_vision"):
         return cfg.cerebras_api_key is not None
+    if name == "openai":
+        return cfg.openai_api_key is not None
+    if name == "openrouter":
+        return cfg.openrouter_api_key is not None and bool(cfg.openrouter_model.strip())
     return name == "local"
 
 
