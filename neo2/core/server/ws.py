@@ -18,6 +18,9 @@ UI → Server  : {"cmd": "text", "text": "..."}      send a typed request
                {"cmd": "browser_*", …}             NEO's browser card (neo2/core/tools/browser_live.py)
                {"cmd": "camera_*", …}              the camera's card (neo2/core/tools/camera/live.py)
                {"cmd": "song_*", …}                the song card (neo2/core/tools/music/live.py)
+               {"cmd": "open_keys"}                open the Brains & Keys window (app, page, host)
+               {"cmd": "brains_reload"}            re-read NEO's key and brain files (anyone)
+               {"cmd": "key_save", "id": …, …}     Brains & Keys' own commands: see "Brains & Keys"
 
 NEO's browser card has its own lane: its commands go straight to the browser (never through the
 event bus, never logged — they carry what the user types), its JSON messages go out beside the
@@ -74,6 +77,7 @@ browser engine puts on every websocket a page opens, which the page can neither 
            NeoListener). `role=host` with any Origin is refused at the door (403), so no page —
            not even NEO's own — can ever be a host.
     tool   no Origin, no role: a local program that read the token.
+    keys   NEO.app's own page with the shell's ticket: the Brains & Keys window (see "Brains & Keys").
   - `shell` is the host's alone — every action of it, quit, restart, erase_memory and
     open_at_login among them. NEO's pages show what models and websites wrote; a page that was
     talked into something must not be able to quit NEO, restart it, or change what starts at
@@ -102,6 +106,35 @@ browser engine puts on every websocket a page opens, which the page can neither 
   lane; they are not a wall between the user's own programs. (Speaking for the shell is no longer
   among the things such a program can do: there is no token for that, only the inherited socket.)
 
+Brains & Keys. NEO.app's Brains & Keys window is the one client that may see or change NEO's keys
+and brains — kind `keys`. It connects with the token and a ticket beside it (`ticket=<64 hex>`),
+which NEO.app's shell made (32 random bytes) and handed the core over its own socket (shell_link.py:
+`keys_ticket`, again with each core hello while the window is open; `keys_closed` revokes it). It
+is a `keys` client only from NEO.app's own origin, with no role, and with that exact ticket
+(compared in constant time); a wrong ticket is refused at the door (403; the log says so, never the
+value), and there is one such client at a time (a second: 409). The path, which carries the
+ticket, is never logged.
+  - Its commands — brains_get, key_test, key_save, key_remove, models_list, brains_set, custom_save,
+    custom_remove, brains_restart (neo2/core/brains.py) — each carry an "id" (up to 32 characters),
+    echoed in the reply, which goes to that client alone: {"type": <result>, "data": {…}}. They are
+    routed here, by name, before anything else: never the generic handler (whose failures go to
+    every client), never the event bus, never the replay, never printed — a `[ui] keys:` line names
+    the command and how it went, nothing it carried. A result is fixed words and status codes,
+    never an exception's text.
+  - The same commands from anyone else get {"type": "keys_refused", "data": {"cmd", "error":
+    "forbidden"}}, to that client alone. NEO.app's overlay and the notch's page show what models and
+    websites wrote; a host's contract is a closed list; a tool is any program — none sets a key.
+  - The `keys` client sends nothing else: no request, no card's buttons. It hears the hello (state,
+    problems, brains, shell, ui_host) and of the bus only `brains`, `problems` and `state`.
+  - `open_keys`, from NEO.app's overlay, the notch's page or a host (one every 5 s): the core asks
+    NEO.app's shell for its "settings" action, which opens the window. {"type": "open_keys_result",
+    "data": {"ok", "error"?: no_app | busy | forbidden}}.
+  - `brains_reload`, from anyone: NEO re-reads its own files (the CLI sends it after `keys set`). It
+    carries no value; the sender hears {"type": "brains_reload_result", "data": {"ok"}}.
+  - Every client hears the `brains` event (and the hello's "brains"): whether NEO has a model to
+    ask, each role's label, the voice, and per provider whether a key is set — never a key, never
+    its last 4 (those go to the `keys` client alone, in brains_detail).
+
 The relay never blocks the event bus: each client has its own outbound queue drained by its
 own task, and a client that stops reading is dropped. (An inline `await send()` to a half-dead
 overlay once stalled the Gemini Live receive loop long enough to kill the voice session.)
@@ -115,6 +148,7 @@ import hmac
 import json
 import logging
 import os
+import re
 import secrets
 import sys
 import time
@@ -126,7 +160,7 @@ from urllib.parse import parse_qs, urlparse
 import websockets
 from websockets.asyncio.server import ServerConnection, serve
 
-from neo2.core import health
+from neo2.core import brains, health
 from neo2.core.agent import confirm
 from neo2.core.config import settings
 from neo2.core.events import bus
@@ -152,13 +186,23 @@ SHELL_ACTIONS = ("show", "settings", "restart", "open_logs", "erase_memory", "op
 # The settings a client may switch while NEO runs (`set`), each with the type its value must have…
 SETTABLE: dict[str, type] = {"wake_word": bool, "wellbeing_checkins": bool}
 _MAY_SET = ("host", "app")  # …and who may: a host, and NEO.app's own page
+# Brains & Keys (see the module's doc): the ticket NEO.app's shell makes, who may ask for the window,
+# how often, and what of the bus the window hears.
+_TICKET = re.compile(r"[0-9a-f]{64}")
+_MAY_OPEN_KEYS = ("app", "page", "host")
+_OPEN_KEYS_S = 5.0
+_KEYS_HEARS = frozenset({"brains", "problems", "state"})
+_LOGGABLE_CMD = re.compile(r"[a-z_]{1,32}")
 
 
-def client_kind(origin: str | None, role: str) -> str | None:
-    """Which kind of client a connection is — app | page | host | tool — or None for one that is
-    not admitted at all (see the module's "Who may say what")."""
+def client_kind(origin: str | None, role: str, *, keys: bool = False) -> str | None:
+    """Which kind of client a connection is — app | page | host | tool | keys — or None for one that
+    is not admitted at all (see the module's "Who may say what"). `keys`: it brought the shell's
+    ticket (checked by the caller) — only NEO.app's own page, with no role, is then `keys`."""
     if role not in ("", "host"):
         return None
+    if keys:
+        return "keys" if origin in _APP_ORIGINS and not role else None
     if origin is None:
         return "host" if role == "host" else "tool"
     if role:
@@ -168,6 +212,11 @@ def client_kind(origin: str | None, role: str) -> str | None:
     if origin == _NOTCH_ORIGIN:
         return "page"
     return None
+
+
+def _cmd_name(kind: str) -> str:
+    """A command's name as a log line may carry it (a client chooses it: never anything else)."""
+    return kind if _LOGGABLE_CMD.fullmatch(kind) else "a command"
 
 
 def ws_token() -> str:
@@ -228,7 +277,7 @@ class _Client:
         self.cam: bytes | None = None  # the camera card's latest preview frame
         self.wake = asyncio.Event()
         self.browser = False  # said browser_hello: gets the browser card's messages
-        self.kind = "tool"  # app | page | host | tool: who this is (client_kind)
+        self.kind = "tool"  # app | page | host | tool | keys: who this is (client_kind)
 
     def send_json(self, text: str) -> bool:
         if len(self.q) >= _QUEUE_MAX:
@@ -258,6 +307,8 @@ class UIServer:
         self._shell: dict[str, Any] | None = None  # what NEO.app's menu shows, as its shell reported
         self._link: Any = None  # the shell's socket (shell_link.ShellLink) while NEO.app is at its end
         self.shell_task: asyncio.Task | None = None  # …and the task reading it (kept: the loop holds it weakly)
+        self._keys_ticket: str | None = None  # the Brains & Keys window's ticket, as the shell made it
+        self._open_keys_at: float | None = None  # monotonic: the last `open_keys` a client asked for
 
     async def start(self) -> None:
         s = settings()
@@ -292,9 +343,110 @@ class UIServer:
         given = (query.get("token") or [""])[0]
         if not hmac.compare_digest(given.encode(), self._token.encode()):
             return connection.respond(401, "Missing or wrong token\n")
-        if client_kind(origin, (query.get("role") or [""])[0]) is None:
+        role = (query.get("role") or [""])[0]
+        ticket = (query.get("ticket") or [None])[0]
+        if ticket is not None:  # the Brains & Keys window, or something that says it is
+            if not self._ticket_ok(ticket):
+                print("[ui] a Brains & Keys connection was refused: its ticket isn't the shell's")
+                return connection.respond(403, "Forbidden ticket\n")
+            if client_kind(origin, role, keys=True) != "keys":
+                print("[ui] a Brains & Keys connection was refused: it isn't NEO.app's own page")
+                return connection.respond(403, "Forbidden\n")
+            if self._keys_client() is not None:
+                print("[ui] a second Brains & Keys connection was refused: one at a time")
+                return connection.respond(409, "Busy\n")
+            return None
+        if client_kind(origin, role) is None:
             return connection.respond(403, "Forbidden role\n")  # a page asking to be a host
         return None
+
+    # ---- Brains & Keys ---------------------------------------------------------------------------
+
+    def _ticket_ok(self, given: Any) -> bool:
+        """`given` is the ticket the shell made for the Brains & Keys window (constant-time)."""
+        want = self._keys_ticket
+        if want is None or not isinstance(given, str) or not _TICKET.fullmatch(given):
+            return False
+        return hmac.compare_digest(given.encode(), want.encode())
+
+    def _keys_client(self) -> _Client | None:
+        return next((cl for cl in self._clients.values() if cl.kind == "keys"), None)
+
+    def has_shell(self) -> bool:
+        """NEO.app's shell is at the other end of its socket (a core started by hand has none)."""
+        return self._link is not None
+
+    def open_keys(self) -> bool:
+        """Ask NEO.app's shell to open the Brains & Keys window (its "settings" action)."""
+        went = self._to_shell({"t": "shell", "action": "settings"})
+        if went:
+            print("[ui] shell: settings (Brains & Keys)")
+        return went
+
+    def restart(self) -> bool:
+        """Ask NEO.app's shell to restart NEO (brains_restart: a new Gemini key for the voice)."""
+        went = self._to_shell({"t": "shell", "action": "restart"})
+        if went:
+            print("[ui] shell: restart (Brains & Keys)")
+        return went
+
+    def _keys_ticket_said(self, msg: dict[str, Any]) -> None:
+        ticket = msg.get("ticket")
+        if not isinstance(ticket, str) or not _TICKET.fullmatch(ticket):
+            print("[ui] a Brains & Keys ticket was ignored: not one the shell makes")
+            return
+        if ticket != self._keys_ticket:
+            self._keys_ticket = ticket
+            print("[ui] Brains & Keys is open: its ticket came from NEO.app's shell")
+
+    def _keys_closed(self) -> None:
+        """The window is gone: its ticket is no good any more, and its connection ends."""
+        if self._keys_ticket is not None:
+            print("[ui] Brains & Keys closed: its ticket is revoked")
+        self._keys_ticket = None
+        for c, cl in list(self._clients.items()):
+            if cl.kind == "keys":
+                self._gone(c)
+
+    def _send_to(self, cl: _Client, type_: str, data: dict[str, Any]) -> None:
+        cl.send_json(json.dumps({"type": type_, "data": data, "ts": time.time()}, default=str))
+
+    async def _keys_ask(self, cl: _Client, cmd: dict[str, Any]) -> None:
+        """One of Brains & Keys' commands, from the window: its answer goes to it alone."""
+        name = str(cmd.get("cmd") or "")
+        type_, data = await brains.command(cmd, restart=self.restart)
+        self._send_to(cl, type_, data)
+        print(f"[ui] keys: {_cmd_name(name)} {brains.outcome(data)}")
+
+    def _keys_refused(self, cl: _Client, cmd: dict[str, Any]) -> None:
+        name = _cmd_name(str(cmd.get("cmd") or ""))
+        self._send_to(cl, "keys_refused", {"id": brains.request_id(cmd), "cmd": name, "error": "forbidden"})
+        print(f"[ui] keys: {name} refused: from a {cl.kind}, not Brains & Keys")
+
+    def _open_keys_ask(self, cl: _Client) -> None:
+        """`open_keys` from NEO.app's overlay, the notch's page or a host: one every 5 seconds."""
+        now = time.monotonic()
+        if cl.kind not in _MAY_OPEN_KEYS:
+            error = "forbidden"
+        elif self._open_keys_at is not None and now - self._open_keys_at < _OPEN_KEYS_S:
+            error = "busy"
+        else:
+            self._open_keys_at = now
+            error = "" if self.open_keys() else "no_app"
+        self._send_to(cl, "open_keys_result", {"ok": not error, **({"error": error} if error else {})})
+        if error:
+            print(f"[ui] open_keys: {error} (from a {cl.kind})")
+
+    async def _reload_ask(self, cl: _Client) -> None:
+        """`brains_reload`: NEO's own files read again (a key the CLI just saved)."""
+        try:
+            await brains.apply()
+            ok = True
+        except Exception as e:  # noqa: BLE001
+            print(f"[ui] brains_reload failed: {type(e).__name__}")
+            ok = False
+        self._send_to(cl, "brains_reload_result", {"ok": ok})
+        print(f"[ui] brains_reload: {'ok' if ok else 'failed'} (from a {cl.kind})")
 
     # ---- NEO.app's menu, for a host ---------------------------------------------------------
 
@@ -327,6 +479,10 @@ class UIServer:
         elif kind == "wake":
             # Summoned by hand while the notch shows NEO: the same command the orb's page sends.
             asyncio.create_task(self._safe({"cmd": "wake"}))
+        elif kind == "keys_ticket":
+            self._keys_ticket_said(msg)  # the Brains & Keys window is open (see "Brains & Keys")
+        elif kind == "keys_closed":
+            self._keys_closed()
 
     def shell_left(self, link: Any) -> None:
         """NEO.app is gone from its socket: nobody speaks for the shell, nobody runs the menu."""
@@ -430,7 +586,8 @@ class UIServer:
             self._recent = self._recent[-60:]
         if not self._clients:
             return
-        self._send_all(json.dumps(msg, default=str), lambda cl: True)
+        # (the Brains & Keys window hears what it shows: never a transcript)
+        self._send_all(json.dumps(msg, default=str), lambda cl: cl.kind != "keys" or ev.type in _KEYS_HEARS)
 
     def _send_all(self, data: str, who: Callable[[_Client], bool]) -> None:
         for c, cl in list(self._clients.items()):
@@ -469,7 +626,7 @@ class UIServer:
                 # In memory only, and not for long: the poster leaves the replay after ten minutes.
                 asyncio.get_running_loop().call_later(_POSTER_KEEP_S, lambda: kept.update(poster=None))
         if self._clients:
-            self._send_all(json.dumps(msg, default=str), lambda cl: recent or cl.browser)
+            self._send_all(json.dumps(msg, default=str), lambda cl: cl.kind != "keys" and (recent or cl.browser))
 
     def camera_send(self, type_: str, data: dict[str, Any], *, recent: bool = False) -> None:
         """A camera card message (neo2/core/tools/camera/live.py), to every overlay: its opening and
@@ -479,7 +636,7 @@ class UIServer:
             self._recent.append(msg)
             self._recent = self._recent[-60:]
         if self._clients:
-            self._send_all(json.dumps(msg, default=str), lambda cl: True)
+            self._send_all(json.dumps(msg, default=str), lambda cl: cl.kind != "keys")
 
     def song_send(self, type_: str, data: dict[str, Any], *, recent: bool = False) -> None:
         """A song card message (neo2/core/tools/music/live.py): the camera card's lane. Its opening, its
@@ -488,8 +645,9 @@ class UIServer:
         self.camera_send(type_, data, recent=recent)
 
     def viewers(self) -> int:
-        """Overlays connected now (the camera turns on only where its card can be seen)."""
-        return len(self._clients)
+        """Overlays connected now (the camera turns on only where its card can be seen: never in
+        Brains & Keys)."""
+        return sum(1 for cl in self._clients.values() if cl.kind != "keys")
 
     def camera_frame(self, payload: bytes, who: Callable[[_Client], bool]) -> None:
         """One camera preview frame, into the latest-frame slot of each client showing the card."""
@@ -516,6 +674,40 @@ class UIServer:
         finally:
             self._gone(c)
 
+    def _hello(self, cl: _Client) -> dict[str, Any]:
+        """What a client hears first. The Brains & Keys window: only what it shows."""
+        try:
+            summary: dict[str, Any] | None = brains.summary()  # NEO's brains: never a key, never its last 4
+        except Exception as e:  # noqa: BLE001 — a hello without the brains beats no hello
+            print(f"[ui] brains not in the hello: {type(e).__name__}")
+            summary = None
+        if cl.kind == "keys":
+            return {
+                "state": bus().state.value,
+                "problems": health.problems(),
+                "brains": summary,
+                "shell": self.shell_snapshot(),
+                "ui_host": settings().ui_host,
+            }
+        from neo2.core.tools.browser_live import live
+        from neo2.core.tools.camera.live import camera_live
+
+        return {
+            "state": bus().state.value,
+            "recent": self._recent,
+            "confirm": confirm.card(confirm.peek()),  # a question still waiting
+            "problems": health.problems(),  # no model yet, blocked mic, voice down…
+            "browser": live.hello_snapshot(),  # NEO's browser card, if one is live
+            "camera": camera_live.hello_snapshot(),  # the camera's card, while it is on
+            "ui_host": settings().ui_host,  # NEO.app's window, or the notch
+            "wake_word": settings().wake_word,  # "Listen for 'Neo'" (see `set`)
+            "wellbeing_checkins": settings().wellbeing_checkins,
+            "host_attached": cl.kind == "host" or self._host_attached(),
+            "shell": self.shell_snapshot(),  # what NEO.app's menu shows
+            "timers": _timers(),  # NEO's running timers (then `activity` events)
+            "brains": summary,  # NEO's brains (then `brains` events)
+        }
+
     async def _handle(self, c: ServerConnection) -> None:
         from neo2.core.tools.browser_live import live
         from neo2.core.tools.camera.live import camera_live
@@ -523,33 +715,24 @@ class UIServer:
 
         cl = _Client(c)
         request = getattr(c, "request", None)
-        if request is not None:  # admitted, so it is one of the four kinds
-            role = (parse_qs(urlparse(request.path).query).get("role") or [""])[0]
-            cl.kind = client_kind(request.headers.get("Origin"), role) or "tool"
+        if request is not None:  # admitted, so it is one of the five kinds
+            query = parse_qs(urlparse(request.path).query)
+            role, ticket = (query.get("role") or [""])[0], (query.get("ticket") or [None])[0]
+            origin = request.headers.get("Origin")
+            if ticket is not None:
+                # (checked at the door; checked again: the window may have closed since, or another
+                # one got in first)
+                if not (self._ticket_ok(ticket) and client_kind(origin, role, keys=True) == "keys") or self._keys_client():
+                    print("[ui] a Brains & Keys connection was closed: its ticket is no good now")
+                    with contextlib.suppress(Exception):
+                        await c.close(1008, "forbidden")
+                    return
+                cl.kind = "keys"
+            else:
+                cl.kind = client_kind(origin, role) or "tool"
         first_host = cl.kind == "host" and not self._host_attached()
         # The hello goes first, before anything the bus relays to this client.
-        cl.send_json(
-            json.dumps(
-                {
-                    "type": "hello",
-                    "data": {
-                        "state": bus().state.value,
-                        "recent": self._recent,
-                        "confirm": confirm.card(confirm.peek()),  # a question still waiting
-                        "problems": health.problems(),  # missing key, blocked mic, voice down…
-                        "browser": live.hello_snapshot(),  # NEO's browser card, if one is live
-                        "camera": camera_live.hello_snapshot(),  # the camera's card, while it is on
-                        "ui_host": settings().ui_host,  # NEO.app's window, or the notch
-                        "wake_word": settings().wake_word,  # "Listen for 'Neo'" (see `set`)
-                        "wellbeing_checkins": settings().wellbeing_checkins,
-                        "host_attached": cl.kind == "host" or self._host_attached(),
-                        "shell": self.shell_snapshot(),  # what NEO.app's menu shows
-                        "timers": _timers(),  # NEO's running timers (then `activity` events)
-                    },
-                },
-                default=str,
-            )
-        )
+        cl.send_json(json.dumps({"type": "hello", "data": self._hello(cl)}, default=str))
         if first_host:
             self._host_changed(True)  # NEO.app puts its menu-bar item away
         self._clients[c] = cl
@@ -565,6 +748,26 @@ class UIServer:
                 if not isinstance(cmd, dict):
                     continue
                 kind = str(cmd.get("cmd") or "")
+                # Brains & Keys first, by name: its commands never reach anything below (see the doc).
+                if cl.kind == "keys":
+                    if kind in brains.COMMANDS:
+                        asyncio.create_task(self._keys_ask(cl, cmd))
+                    elif kind == "brains_reload":
+                        asyncio.create_task(self._reload_ask(cl))
+                    elif kind == "state":
+                        cl.send_json(json.dumps({"type": "state", "data": {"state": bus().state.value}}))
+                    else:
+                        print(f"[ui] {_cmd_name(kind)} refused: Brains & Keys sends only its own commands")
+                    continue
+                if kind in brains.COMMANDS:
+                    self._keys_refused(cl, cmd)  # to that client alone; never the bus, never a value
+                    continue
+                if kind == "open_keys":
+                    self._open_keys_ask(cl)
+                    continue
+                if kind == "brains_reload":
+                    asyncio.create_task(self._reload_ask(cl))
+                    continue
                 if kind.startswith("browser_"):
                     # Straight to the browser: never the bus, never a log (it carries what the user types).
                     if kind == "browser_hello":
@@ -611,4 +814,6 @@ class UIServer:
         try:
             await self._on_command(cmd)
         except Exception as e:  # noqa: BLE001
-            await bus().publish("error", message=str(e))
+            from neo2.core.logredact import redact
+
+            await bus().publish("error", message=redact(str(e)))  # (every client hears it: no key in it)

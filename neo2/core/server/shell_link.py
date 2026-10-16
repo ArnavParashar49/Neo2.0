@@ -7,10 +7,17 @@ core → shell   {"t":"hello","ui_host":"notch","host_attached":false}   the web
                {"t":"host_attached","attached":true}    a host came or went: the menu-bar item follows
                {"t":"ui_host","host":"window"}          where NEO's UI lives now: the window follows
                {"t":"shell","action":"restart"}         a host asked for one of the menu's actions
-                                                        (+ "on": bool for open_at_login)
+                                                        (+ "on": bool for open_at_login); "settings"
+                                                        also for `open_keys` and a request that
+                                                        needs a model NEO hasn't got (Brains & Keys),
+                                                        "restart" for Brains & Keys' brains_restart
 shell → core   {"t":"status","accessibility":true,…}    what the menu shows (after the hello, and
                                                         whenever it changes)
                {"t":"wake"}                             the summon keys, while the notch shows NEO
+               {"t":"keys_ticket","ticket":"<64 hex>"}  the Brains & Keys window is open: the ticket
+                                                        it connects with (again after every hello
+                                                        while it is open; neo2/core/server/ws.py)
+               {"t":"keys_closed"}                      it closed: the ticket is no good any more
 
 Why not NEO.app's own page, which used to carry all of this over its websocket: with NEO in the
 notch that page's window is never on screen, and macOS suspends the process of a web page nobody
