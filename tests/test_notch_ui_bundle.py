@@ -9,9 +9,13 @@ from pathlib import Path
 UI = Path(__file__).resolve().parents[1] / "ui"
 SRC = UI / "src"
 
-# The only modules that may import Tauri: the shim, the window's own frame code, and the pop-out
-# windows (which exist only inside NEO.app — the notch has none).
-TAURI_ALLOWED = {"shell.ts", "win.ts", "browser/popout.ts", "camera/popout.ts", "browser/PopoutApp.tsx", "camera/CameraPopoutApp.tsx"}
+# The only modules that may import Tauri: the shim, the window's own frame code, the pop-out
+# windows and Brains & Keys (which exist only inside NEO.app — the notch has none; the keys window
+# loads Tauri lazily, only on its own route).
+TAURI_ALLOWED = {
+    "shell.ts", "win.ts", "browser/popout.ts", "camera/popout.ts", "browser/PopoutApp.tsx", "camera/CameraPopoutApp.tsx",
+    "keys/wire.ts", "keys/KeysApp.tsx",
+}  # fmt: skip
 
 
 def _sources():
@@ -91,7 +95,12 @@ def test_no_page_speaks_for_neo_apps_shell():
     lib = (UI / "src-tauri" / "src" / "lib.rs").read_text()
     handlers = lib.split("tauri::generate_handler![")[1].split("]")[0]
     names = {h.strip().split("::")[-1] for h in handlers.split(",") if h.strip()}
-    assert names == {"hide_window", "ws_token", "ui_host_changed", "set_frame", "clipboard_write", "show_quiet"}
+    assert names == {"hide_window", "ws_token", "ui_host_changed", "set_frame", "clipboard_write", "show_quiet", "keys_ticket", "edit_env_file"}
+    # (Brains & Keys' two answer only the window the shell itself created, at #/keys: keys.rs)
+    keys = (UI / "src-tauri" / "src" / "keys.rs").read_text()
+    for cmd in ("keys_ticket", "edit_env_file"):
+        body = keys.split(f"pub fn {cmd}(")[1].split("\n}\n")[0]
+        assert "may_get_ticket(window.label(), ours(&app)" in body.split("\n")[2], cmd
     for gone in ("fn shell_action", "fn shell_status", "fn host_attached", "neo://shell-status"):
         assert gone not in lib, gone
     # …and in the notch the summon keys go to the core, not to the hidden page.
