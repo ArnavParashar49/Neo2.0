@@ -325,7 +325,7 @@ class GeminiProvider:
         elif api_key:
             key_list = [api_key]
         else:
-            key_list = settings().gemini_keys if settings().gemini_api_key else []
+            key_list = settings().gemini_keys  # (GEMINI_API_KEYS alone counts too)
         if not key_list:
             raise Unavailable("GEMINI_API_KEY is not set")
         # The brain this is ("gemini", "gemini_lite"): what the chain demotes and the user hears.
