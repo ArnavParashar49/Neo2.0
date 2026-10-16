@@ -250,12 +250,19 @@ class ClaudeProvider:
 
     def _dropped(self, msg: Any) -> None:
         """How many replayed thinking blocks the API dropped (the binding controls): a count only."""
+        def field(x: Any, k: str) -> Any:
+            return x.get(k) if isinstance(x, dict) else getattr(x, k, None)
+
         try:
-            n = len(getattr(msg, "input_transformations", None) or [])
+            dropped = [x for x in getattr(msg, "input_transformations", None) or [] if field(x, "type") == "thinking_dropped"]
         except TypeError:
             return
-        if n:
-            log.info(f"[brain] {self.name}: the API dropped {n} earlier thinking block(s) (history was trimmed)")
+        if dropped:
+            trimmed = sum(1 for x in dropped if field(x, "reason") == "prefix_binding_mismatch")
+            log.info(
+                f"[brain] {self.name}: the API dropped {len(dropped)} earlier thinking block(s) "
+                f"({trimmed} after NEO trimmed the history, {len(dropped) - trimmed} for another reason)"
+            )
 
     def _rejected(self, e: Exception) -> None:
         """A 400 or 404 about the model: one health problem (NEO.app's own brains only)."""

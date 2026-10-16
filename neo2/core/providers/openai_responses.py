@@ -276,6 +276,8 @@ class OpenAIResponsesProvider:
         low = (_message(e) + " " + _code(e)).lower()
         if not self._app or not runtime.process_wide_ok() or code not in (403, 404) or "model" not in low:
             return
+        if code == 403 and _ABOUT_KEY.search(low):  # (the key's: KeyRefused says that one)
+            return
         from neo2.core import brainref, health
 
         shown = brainref.shown(self.model) or "it was set to"
