@@ -10,11 +10,15 @@ window may see and change, and applying a change while NEO runs.
   custom_save, custom_remove, brains_restart, brains_get). The websocket routes them here for the
   "keys" client only (neo2.core.server.ws); each answer is fixed words and status codes, never an
   error's own text, and a key handed in is masked in the log from then on (neo2.core.logredact).
+  A key whose own prefix names another provider is never sent to this one (:func:`wrong_provider`),
+  and an endpoint's saved key never follows its base URL to another host (it is asked for again).
 * :func:`apply` — re-read NEO's files (a fresh Settings), copy the brain and key fields onto the live
-  settings, forget the brains of each provider whose key or endpoint changed (neo2.core.providers.forget),
-  and tell every client (``brains``, ``problems``). Text brains, the camera and new tasks switch at
-  once; a task already running keeps its step's brain. Gemini Live, Laya's lite mode and the voice
-  probe read their key when they start: a change there says ``restart_needed``.
+  settings, forget the brains of each provider whose key, endpoint, daily cap or models' notes
+  changed (neo2.core.providers.forget), and tell every client (``brains``, ``problems``). Text
+  brains, the camera and new tasks switch at once; a task already running keeps its step's brain.
+  Gemini Live, Laya's lite mode and the voice probe read their key when they start: a change there
+  says ``restart_needed``. One reading at a time (an older one never lands over a newer one); the
+  window's changes run one at a time too, and :func:`reload` (brains_reload) is coalesced.
 * :func:`set_roles` — brains_set's rules (Brain calls tools and is set up, Eyes sees, …), then saved
   in brains.json and applied.
 
@@ -30,11 +34,13 @@ import hashlib
 import os
 import re
 import time
+import weakref
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
-from neo2.core import brainref, keystore, logger
+from neo2.core import brainref, keyshape, keystore, logger
 from neo2.core.providers import catalog
 
 log = logger(__name__)
@@ -51,7 +57,7 @@ KEY_FIELDS = (
 )  # fmt: skip
 ROLE_FIELDS = (
     "brain", "fast_brain", "offline_brain", "eyes_brain", "light_brain", "backup_brains", "cloud_eyes",
-    "custom_providers", "daily_budgets", "voice",
+    "custom_providers", "daily_budgets", "voice", "known_models",
 )  # fmt: skip
 # A model setting, and the provider whose brains it changes.
 MODEL_FIELDS = {
@@ -76,6 +82,28 @@ SETTABLE_ROLES = (
 )  # fmt: skip
 MAX_BUDGET = 1000.0  # dollars a day: more than that is a typo
 KEY_CONSOLE = "python -m neo2 keys set gemini"  # what a terminal user runs (no window without NEO.app)
+RELOAD_GAP_S = 1.0  # brains_reload: at most one reading of NEO's files this often (asked more: coalesced)
+# The window's commands that change NEO's files: one at a time (each reads, then writes).
+_CHANGES = frozenset({"key_save", "key_remove", "brains_set", "custom_save", "custom_remove"})
+
+
+class _PerLoop:
+    """One asyncio object per event loop (a test runs many loops; NEO.app runs one)."""
+
+    def __init__(self, make: Callable[[], Any]) -> None:
+        self._make = make
+        self._by: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, Any] = weakref.WeakKeyDictionary()
+
+    def get(self) -> Any:
+        loop = asyncio.get_running_loop()
+        got = self._by.get(loop)
+        if got is None:
+            got = self._by[loop] = self._make()
+        return got
+
+
+_change_lock = _PerLoop(asyncio.Lock)  # the window's changes, one at a time
+_apply_lock = _PerLoop(asyncio.Lock)  # apply(): the files read and put to work, one reading at a time
 
 
 def _settings(s: Any = None) -> Any:
@@ -228,7 +256,7 @@ def _label(ref: str, s: Any) -> str:
     try:
         return catalog.label_for(r.text, s=s)[:LABEL_MAX]
     except Exception:  # noqa: BLE001
-        return r.text[:LABEL_MAX]
+        return keyshape.scrub(r.text)[:LABEL_MAX]
 
 
 def _role(ref: str, role: str, s: Any) -> dict[str, Any]:
@@ -444,11 +472,12 @@ def _store_state() -> dict[str, Any]:
     shown = "~/.neo/api_keys.json" if p is None or Path(p) == real else str(p)  # (by name: nothing looked at)
     if p is None or keystore.refused(p):
         return {"path": shown, "ok": False, "problem": "unavailable"}
+    old = keystore.old_copies(p)  # (copies set aside may still hold keys: said, never read)
     try:
         st = keystore.FileKeyStore(p).state()
     except Exception:  # noqa: BLE001
-        return {"path": shown, "ok": False, "problem": "unreadable"}
-    return {"path": shown, "ok": st.ok, "problem": st.problem or None}
+        return {"path": shown, "ok": False, "problem": "unreadable", "old_copies": old}
+    return {"path": shown, "ok": st.ok, "problem": st.problem or None, "old_copies": old}
 
 
 # ---- applying a change while NEO runs ---------------------------------------------------------------------
@@ -475,20 +504,40 @@ def _changed_providers(old: Any, new: Any) -> list[str]:
     return out
 
 
+def _recapped(old: Any, new: Any) -> list[str]:
+    """The providers whose daily cap differs (each built brain holds its cap: rebuilt with the new
+    one, its rest after a spent budget dropped), or whose models' notes do (OpenRouter's: what its
+    list said they see and cost)."""
+    ob, nb = dict(getattr(old, "daily_budgets", None) or {}), dict(getattr(new, "daily_budgets", None) or {})
+    out = [pid for pid in sorted(set(ob) | set(nb)) if ob.get(pid) != nb.get(pid)]
+    on, nn = getattr(old, "known_models", None) or {}, getattr(new, "known_models", None) or {}
+    out += [pid for pid in sorted(set(on) | set(nn)) if on.get(pid) != nn.get(pid) and pid not in out]
+    return out
+
+
 async def apply(*, tell: bool = True) -> dict[str, Any]:
-    """NEO's files re-read and put to work now (see the module's doc). Returns the new summary."""
+    """NEO's files re-read and put to work now (see the module's doc). Returns the new summary. One
+    reading at a time: two applies never put an older reading over a newer one."""
+    async with _apply_lock.get():
+        return await _apply(tell=tell)
+
+
+async def _apply(*, tell: bool) -> dict[str, Any]:
     from neo2.core import config, health, providers
 
     live = config.settings()
     fresh = await asyncio.to_thread(config.Settings)
     changed = _changed_providers(live, fresh)
+    recapped = [pid for pid in _recapped(live, fresh) if pid not in changed]
     for f in (*KEY_FIELDS, *ROLE_FIELDS, *MODEL_FIELDS):
         if f in type(fresh).model_fields:
             setattr(live, f, getattr(fresh, f))
     for pid in changed:
         providers.forget(pid)
-    if changed:
-        log.info(f"[keys] applied: {', '.join(changed)}")
+    for pid in recapped:
+        providers.forget(pid, keys=False)  # (its cap or its models' notes: the brains, not its key's health)
+    if changed or recapped:
+        log.info(f"[keys] applied: {', '.join([*changed, *recapped])}")
     try:
         await refresh_probes(live, force=True)
     except Exception as e:  # noqa: BLE001
@@ -506,11 +555,12 @@ async def apply(*, tell: bool = True) -> dict[str, Any]:
 
 
 class Refused(Exception):
-    """A change the rules refuse: `error` (invalid | not_configured | no_tools | cant_see) and `field`."""
+    """A change the rules refuse: `error` (invalid | not_configured | no_tools | cant_see), `field`,
+    and fixed words for it when there are some (`message`)."""
 
-    def __init__(self, error: str, field: str = "") -> None:
+    def __init__(self, error: str, field: str = "", message: str = "") -> None:
         super().__init__(error)
-        self.error, self.field = error, field
+        self.error, self.field, self.message = error, field, message
 
 
 async def _set_up(ref: str, field: str, s: Any) -> None:
@@ -531,7 +581,7 @@ def _ref(value: Any, field: str, *, empty_ok: bool) -> str:
     if r.empty and empty_ok:
         return ""
     if not r.valid:
-        raise Refused("invalid", field)
+        raise Refused("invalid", field, brainref.KEY_IN_A_FIELD if keyshape.keyish(value) else "")
     return r.text
 
 
@@ -570,6 +620,9 @@ async def check_roles(changes: Mapping[str, Any], s: Any = None) -> tuple[dict[s
             out["backup_brains"] = None
         elif isinstance(b, list) and len(b) <= brainref.MAX_BACKUPS:
             out["backup_brains"] = list(dict.fromkeys(_ref(x, "backup_brains", empty_ok=False) for x in b))
+            # (a Backup answers the agent's steps too, which offer tools: one that can't call them never is one)
+            if any(not catalog.describe(x, s).tools for x in out["backup_brains"]):
+                raise Refused("no_tools", "backup_brains")
         else:
             raise Refused("invalid", "backup_brains")
     for f, choices in (("cloud_eyes", ("auto", "on", "off")), ("voice", ("auto", "live", "local", "off"))):
@@ -601,13 +654,31 @@ def _warnings(out: Mapping[str, Any], s: Any) -> list[str]:
     return said
 
 
+def _notes_for(out: Mapping[str, Any], s: Any) -> dict[str, Any] | None:
+    """known_models as it should be saved with these roles: what OpenRouter's list said of each
+    model a role (or a Backup) names — what it sees, calls and costs — so a restart still knows.
+    None: as saved already."""
+    refs = [out.get(f, getattr(s, f, "")) for f in ("brain", "fast_brain", "eyes_brain")]
+    refs += list(out.get("backup_brains", getattr(s, "backup_brains", None)) or [])
+    notes: dict[str, dict[str, Any]] = {}
+    for pid in catalog.LEARNS:
+        for r in refs:
+            if isinstance(r, str) and catalog.provider_of(r) == pid and (m := catalog.describe(r, s).model):
+                if (got := catalog.learned(pid, m, s)) is not None:
+                    notes.setdefault(pid, {})[m] = got.as_note()
+    return notes if notes != (saved().get("known_models") or {}) else None
+
+
 async def set_roles(changes: Mapping[str, Any]) -> dict[str, Any]:
     """brains_set: the rules, then brains.json, then :func:`apply`. {"ok", "error"?, "field"?,
-    "warnings", "restart_needed", "shadowed"}."""
+    "message"?, "warnings", "restart_needed", "shadowed"}."""
     try:
         out, warnings = await check_roles(changes)
     except Refused as r:
-        return {"ok": False, "error": r.error, **({"field": r.field} if r.field else {}), "warnings": [], "restart_needed": False, "shadowed": []}
+        return {"ok": False, "error": r.error, **({"field": r.field} if r.field else {}), **({"message": r.message} if r.message else {}),
+                "warnings": [], "restart_needed": False, "shadowed": []}  # fmt: skip
+    if out and (notes := _notes_for(out, _settings())) is not None:
+        out = {**out, "known_models": notes}
     if out:
         p = _saved_path()
         if p is None:
@@ -617,7 +688,7 @@ async def set_roles(changes: Mapping[str, Any]) -> dict[str, Any]:
         except Exception as e:  # noqa: BLE001 — said in fixed words
             log.info(f"[keys] brains.json not saved: {type(e).__name__}")
             return {"ok": False, "error": "store_failed", "warnings": warnings, "restart_needed": False, "shadowed": []}
-    shadowed = [f for f in out if _in_environ(_env_name(f))]
+    shadowed = [f for f in out if f != "known_models" and _in_environ(_env_name(f))]
     data = await apply()
     return {"ok": True, "warnings": warnings, "restart_needed": data["restart_needed"], "shadowed": shadowed}
 
@@ -682,6 +753,52 @@ def _key_state(pid: str, s: Any) -> dict[str, Any]:
     return keystore.sources(custom=customs).get(pid) or {"set": False, "source": "none", "last4": None}
 
 
+def _host(url: str) -> str:
+    try:
+        return (urlsplit(url).hostname or "").lower()
+    except ValueError:
+        return ""
+
+
+def wrong_provider(pid: str, key: str | None, endpoint: Any = None) -> str | None:
+    """Fixed words when `key`'s own prefix names another provider than the one it would be sent to
+    (an Anthropic key in OpenRouter's card, in an endpoint at some other host): it isn't sent at all.
+    An endpoint at that provider's own host (Anthropic's OpenAI-compatible address), one from its
+    template (xAI's), or one on this Mac (the user's own proxy) may take it. None: nothing wrong."""
+    g = keyshape.guess(key or "") if key else None
+    if g is None:
+        return None
+    if pid.startswith("custom:") or pid == "custom":
+        cp = endpoint
+        if cp is None:
+            return None
+        host = _host(cp.base_url)
+        own = catalog.provider(g)
+        own_host = _host(own.base_url) if own is not None else (brainref.TEMPLATE_KEYS.get(g, ("", ""))[1])
+        if cp.template == g or cp.on_device or (own_host and host == own_host):
+            return None
+        target = cp.label
+    else:
+        if g == pid:
+            return None
+        target = catalog.provider_label(pid)
+    name = keyshape.LABELS.get(g, g)
+    a = "an" if g in keyshape._AN else "a"
+    return f"That looks like {a} {name} key, so NEO didn't send it to {target}. Paste it where {name} keys go."
+
+
+def _endpoint_for(pid: str, endpoint: Any) -> Any:
+    """The endpoint a typed key would go to (the form's, else the saved one), or None."""
+    from neo2.core.providers import keycheck
+
+    if not (pid == "custom" or pid.startswith("custom:")):
+        return None
+    try:
+        return keycheck._endpoint(pid, _endpoint_arg(endpoint), _settings())
+    except Exception:  # noqa: BLE001 — a form that doesn't validate: the check itself says so
+        return None
+
+
 async def _key_test(cmd: Mapping[str, Any]) -> dict[str, Any]:
     from neo2.core.providers import keycheck
 
@@ -694,6 +811,8 @@ async def _key_test(cmd: Mapping[str, Any]) -> dict[str, Any]:
                 "models": None, "credit": None}  # fmt: skip
     if not pid:
         r = keycheck.KeyCheck(False, "error", None, "NEO doesn't know that provider.")
+    elif key is not None and (why := wrong_provider(pid, key, _endpoint_for(pid, cmd.get("endpoint")))):
+        r = keycheck.KeyCheck(False, "wrong_provider", None, why)
     elif cmd.get("check") == "tools":
         endpoint = _endpoint_arg(cmd.get("endpoint")) or (_custom_dict(pid) if pid.startswith("custom:") else None)
         if endpoint is None:
@@ -740,6 +859,8 @@ async def _key_save(cmd: Mapping[str, Any]) -> dict[str, Any]:
     from neo2.core import logredact
 
     logredact.remember(key, *extra)
+    if why := next((w for k in (key, *extra) if (w := wrong_provider(pid, k, _endpoint_for(pid, None)))), None):
+        return {**base, "error": "wrong_provider", "message": why}
     if cmd.get("test", True) is not False:
         r = await keycheck.check(pid, key)
         if r.status in _REFUSING:
@@ -752,7 +873,7 @@ async def _key_save(cmd: Mapping[str, Any]) -> dict[str, Any]:
     except Exception as e:  # noqa: BLE001 — said in fixed words
         log.info(f"[keys] key not saved: {type(e).__name__}")
         return {**base, "error": "store_failed"}
-    cap = await _prefill_cap(pid, s, spend)
+    cap = await _prefill_cap(pid, spend)
     data = await apply()
     now = _key_state(pid, _settings())
     return {
@@ -765,25 +886,40 @@ async def _key_save(cmd: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-async def _prefill_cap(pid: str, s: Any, spend: Any) -> float | None:
-    """A paid key just saved in NEO gets the $2 a day cap (decision 4) — unless its provider has a
-    cap already. Returns the provider's cap now (None: it has none)."""
-    budgets = dict(getattr(s, "daily_budgets", None) or {})
-    if pid in budgets:
-        return budgets[pid]
-    cp = catalog.custom_endpoint(pid, s) if pid.startswith("custom:") else None
-    cap = spend.prefill(pid, "saved", on_device=bool(cp and cp.on_device))
+def auto_cap(pid: str, s: Any = None) -> float | None:
+    """The daily cap a paid key just saved in NEO gets on its own (decision 4: $2 a day), or None:
+    its provider has a cap already, it isn't paid, it runs on this Mac, it has no price list NEO
+    could count by (an endpoint the user added: its $2 is only suggested, in Spending), or the key
+    NEO uses for it isn't the one saved here (an environment variable or a .env line wins, and
+    those stay uncapped)."""
+    from neo2.core.providers import spend
+
+    s = _settings(s)
+    if pid in (getattr(s, "daily_budgets", None) or {}) or not spend.has_prices(pid):
+        return None
+    cap = spend.prefill(pid, "saved")
+    if cap is None or _key_state(pid, s).get("source") != "saved":
+        return None
+    return cap
+
+
+async def _prefill_cap(pid: str, spend: Any) -> float | None:
+    """A paid key just saved in NEO gets its cap (:func:`auto_cap`), put into brains.json under its
+    lock (a cap saved at the same moment is kept). Returns the provider's cap now (None: none)."""
+    s = _settings()
+    have = (getattr(s, "daily_budgets", None) or {}).get(pid)
+    if have is not None:
+        return have
+    cap = await asyncio.to_thread(auto_cap, pid, s)  # (where the key NEO uses comes from: read from the files)
     p = _saved_path()
     if cap is None or p is None:
         return None
     try:
-        kept = dict(saved().get("daily_budgets") or {})
-        kept[pid] = cap
-        await asyncio.to_thread(keystore.SavedConfig(p).update, {"daily_budgets": kept})
+        now = await asyncio.to_thread(keystore.SavedConfig(p).update, {}, add_to={"daily_budgets": {pid: cap}})
     except Exception as e:  # noqa: BLE001
         log.info(f"[keys] the daily cap wasn't saved: {type(e).__name__}")
         return None
-    return cap
+    return (now.get("daily_budgets") or {}).get(pid, cap)
 
 
 async def _key_remove(cmd: Mapping[str, Any]) -> dict[str, Any]:
@@ -815,6 +951,8 @@ async def _models_list(cmd: Mapping[str, Any]) -> dict[str, Any]:
         return {"provider": pid, "ok": False, "models": [], "defaults": {}, "error": "error", "message": "That key can't be used as it is."}
     if not pid:
         return {"provider": "", "ok": False, "models": [], "defaults": {}, "error": "error", "message": "NEO doesn't know that provider."}
+    if key is not None and (why := wrong_provider(pid, key, _endpoint_for(pid, cmd.get("endpoint")))):
+        return {"provider": pid, "ok": False, "models": [], "defaults": {}, "error": "wrong_provider", "message": why}
     return await keycheck.models_list(pid, key, _endpoint_arg(cmd.get("endpoint")), refresh=cmd.get("refresh") is True)
 
 
@@ -843,9 +981,9 @@ async def _custom_save(cmd: Mapping[str, Any]) -> dict[str, Any]:
     data = dict(ep)
     if not data.get("id"):
         data["id"] = brainref.CUSTOM + _slug(str(data.get("template") or "") if data.get("template") not in (None, "", "other") else str(data.get("label") or ""), taken)
-    template = catalog.TEMPLATES.get(str(data.get("template") or "other"))
-    if template is not None and template.env and not data.get("env"):
-        data["env"] = template.env  # (its variable is honoured as an override: R1)
+    # Its variable is its template's own, whatever the form says (R1: honoured as an override, and
+    # only at the template's host — CustomProvider.key_env).
+    data["env"] = brainref.TEMPLATE_KEYS.get(str(data.get("template") or "other"), (None,))[0]
     try:
         cp = brainref.CustomProvider.model_validate(data)
     except Exception:  # noqa: BLE001 — never the form's own text back
@@ -857,16 +995,36 @@ async def _custom_save(cmd: Mapping[str, Any]) -> dict[str, Any]:
         key = _optional_key(cmd.get("key"))
     except ValueError:
         return {"ok": False, "provider": cp.id, "error": "invalid"}
+    if key is not None and (why := wrong_provider(cp.id, key, cp)):
+        return {"ok": False, "provider": cp.id, "error": "wrong_provider", "message": why}
     p = _saved_path()
     if p is None:
         return {"ok": False, "provider": cp.id, "error": "store_failed"}
+    # A saved key goes only where it was saved for: an endpoint moved to another scheme, host or port
+    # takes its key again (to this Mac: the old one is dropped — never sent to whatever listens here).
+    from neo2.core.providers import keycheck
+
+    was = next((c for c in getattr(s, "custom_providers", None) or () if c.id == cp.id), None)
+    sp = _store_path()
+    drop_key = False
+    if was is not None and key is None and not keycheck.same_origin(was.base_url, cp.base_url):
+        stored = None
+        try:
+            stored = keystore.FileKeyStore(sp).get(cp.id) if sp is not None else None
+        except Exception:  # noqa: BLE001
+            stored = None
+        if stored is not None:
+            if not cp.on_device:
+                return {"ok": False, "provider": cp.id, "error": "needs_key"}
+            drop_key = True
     try:
         await asyncio.to_thread(keystore.SavedConfig(p).update, {"custom_providers": [*rest, cp.model_dump(mode="json", exclude_none=True)]})
         if key is not None:
-            sp = _store_path()
             if sp is None:
                 raise RuntimeError("no key store")
             await asyncio.to_thread(keystore.FileKeyStore(sp).put, cp.id, key)
+        elif drop_key and sp is not None:
+            await asyncio.to_thread(keystore.FileKeyStore(sp).remove, cp.id)
     except Exception as e:  # noqa: BLE001
         log.info(f"[keys] endpoint not saved: {type(e).__name__}")
         return {"ok": False, "provider": cp.id, "error": "store_failed"}
@@ -901,8 +1059,16 @@ async def _custom_remove(cmd: Mapping[str, Any]) -> dict[str, Any]:
 
 async def command(cmd: Mapping[str, Any], *, restart: Callable[[], bool] | None = None) -> tuple[str, dict[str, Any]]:
     """One of the window's commands: (the result's type, its data). The data carries the command's
-    "id" back. Never raises: anything unexpected is {"ok": false, "error": "failed"}."""
+    "id" back. Never raises: anything unexpected is {"ok": false, "error": "failed"}. The ones that
+    change NEO's files run one at a time (each reads what it changes, then writes it)."""
     kind = str(cmd.get("cmd") or "")
+    if kind in _CHANGES:
+        async with _change_lock.get():
+            return await _command(kind, cmd, restart)
+    return await _command(kind, cmd, restart)
+
+
+async def _command(kind: str, cmd: Mapping[str, Any], restart: Callable[[], bool] | None) -> tuple[str, dict[str, Any]]:
     rid = request_id(cmd)
     out_type = RESULTS.get(kind, "keys_refused")
     try:
@@ -931,6 +1097,42 @@ async def command(cmd: Mapping[str, Any], *, restart: Callable[[], bool] | None 
         log.info(f"[keys] {kind} failed: {type(e).__name__}")
         data = {"ok": False, "error": "failed"}
     return out_type, {"id": rid, **data}
+
+
+class _Reloads:
+    """brains_reload's bookkeeping, per event loop: asked (a count), and how far applied."""
+
+    def __init__(self) -> None:
+        self.lock = asyncio.Lock()
+        self.asked = 0
+        self.covered = 0
+        self.last: dict[str, Any] = {}
+        self.at = 0.0
+
+
+_reloads = _PerLoop(_Reloads)
+
+
+async def reload() -> dict[str, Any]:
+    """brains_reload (the CLI after `keys set`; anyone may ask): NEO's files read again and put to
+    work. Coalesced: one reading at a time, at most one every :data:`RELOAD_GAP_S`, and a request
+    is answered by the first reading that began after it was made — never by an older one (a key
+    the CLI saved just before asking is always read)."""
+    r = _reloads.get()
+    r.asked += 1
+    mine = r.asked
+    async with r.lock:
+        if r.covered >= mine:
+            return r.last
+        start = r.asked
+        wait = RELOAD_GAP_S - (time.monotonic() - r.at)
+        if wait > 0:
+            await asyncio.sleep(wait)
+            start = r.asked  # (asked while it waited: this reading covers those too)
+        r.at = time.monotonic()
+        r.last = await apply()
+        r.covered = start
+        return r.last
 
 
 def outcome(data: Mapping[str, Any]) -> str:

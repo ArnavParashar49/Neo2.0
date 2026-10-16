@@ -166,9 +166,15 @@ def _settings() -> Any:
         return None
 
 
+# The id of a form that isn't saved yet: outside the slug grammar, so no endpoint is ever saved
+# under it, and no saved key is ever looked up for it.
+FORM_ID = "custom:__form__"
+
+
 def _endpoint(pid: str, endpoint: Any, s: Any) -> Any:
-    """The endpoint being checked: one not saved yet (`endpoint`, checked as it would be saved), or
-    the saved one `pid` names. None: neither."""
+    """The endpoint being checked: one as the window's form has it (`endpoint`, checked as it would
+    be saved — a form not saved yet gets :data:`FORM_ID`), or the saved one `pid` names. None:
+    neither."""
     from neo2.core import brainref
     from neo2.core.providers import catalog
 
@@ -176,10 +182,28 @@ def _endpoint(pid: str, endpoint: Any, s: Any) -> Any:
         if isinstance(endpoint, brainref.CustomProvider):
             return endpoint
         data = dict(endpoint)
-        if not data.get("id"):
-            data["id"] = pid if pid.startswith("custom:") else "custom:new"
-        return brainref.CustomProvider.model_validate(data)
+        data.pop("env", None)  # (the template's own variable, or none: never the form's say)
+        given = data.get("id") or (pid if pid.startswith("custom:") else None)
+        if given:
+            data["id"] = given
+            return brainref.CustomProvider.model_validate(data)
+        data["id"] = "custom:form"
+        return brainref.CustomProvider.model_validate(data).model_copy(update={"id": FORM_ID})
     return catalog.custom_endpoint(pid, s) if pid.startswith("custom:") else None
+
+
+def origin(url: str) -> tuple[str, str, int] | None:
+    """(scheme, host, port) of a base URL: where a key sent to it goes."""
+    try:
+        u = urlsplit(url)
+        return (u.scheme, (u.hostname or "").lower(), u.port or (443 if u.scheme == "https" else 80))
+    except ValueError:
+        return None
+
+
+def same_origin(a: str, b: str) -> bool:
+    oa = origin(a)
+    return oa is not None and oa == origin(b)
 
 
 def _effective_key(pid: str, cp: Any, s: Any) -> str:
@@ -223,6 +247,12 @@ def _target(provider: str, key: str | None, endpoint: Any) -> tuple[str, Any, st
             k = keystore.clean_key(key)
         except ValueError as e:
             raise _Failed(KeyCheck(False, "error", None, f"That key can't be used: {e}.")) from None
+    elif cp is not None:
+        # An endpoint's saved key goes only where it was saved for: the endpoint as saved, or as the
+        # form has it at the same scheme, host and port. A form not saved yet, or one whose base URL
+        # moved, has no key but the one typed.
+        saved = catalog.custom_endpoint(cp.id, s)
+        k = _effective_key(pid, saved, s) if saved is not None and same_origin(saved.base_url, cp.base_url) else ""
     else:
         k = _effective_key(pid, cp, s)
     local = pid == "local" or (cp is not None and cp.on_device)
@@ -499,11 +529,14 @@ async def models_list(provider: str, key: str | None = None, endpoint: Any = Non
             seen.add(e["id"])
             entries.append(e)
     entries.sort(key=lambda e: ({"recommended": 0, "cheap": 1, "premium": 2}.get(e.get("tier", ""), 3)))
-    if pid == "openrouter":  # (what its list says is what the chains then read: catalog.describe)
+    if pid == "openrouter":  # (what its list says is what the chains and the cap then read)
         from neo2.core.providers import catalog
 
-        for e in entries[:MAX_MODELS]:
-            catalog.learn(pid, e["id"], sees=e["sees"], tools=e["tools"])
+        changed = [e["id"] for e in entries[:MAX_MODELS] if catalog.learn(pid, e["id"], sees=e["sees"], tools=e["tools"], price=e.get("price"))]
+        if changed:
+            from neo2.core import providers
+
+            providers.rebuild(pid, changed)  # (a brain built on what was known before is built again)
     ids = {e["id"] for e in entries}
     out = {
         "provider": pid,

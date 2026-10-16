@@ -41,6 +41,7 @@ from neo2.core.providers.base import (
     Message,
     NoBrain,
     NoEyes,
+    NoTools,
     OutOfTime,
     Provider,
     ProviderError,
@@ -71,6 +72,7 @@ __all__ = [
     "image_limit",
     "make",
     "pool",
+    "rebuild",
 ]
 
 log = logger(__name__)
@@ -174,12 +176,14 @@ def _build_ref(r: brainref.Ref) -> Provider:
         from neo2.core.providers.gemini import GeminiProvider
 
         return GeminiProvider(model=m, name=r.text)
-    if r.brain == "groq":
+    if r.brain in ("groq", "groq_vision"):
+        # By what the model does, whichever name the reference starts with (catalog.describe):
+        # groq@qwen/qwen3.8-27b is Groq's seeing brain, with its per-minute budget.
+        if catalog.describe(r.text, s).sees:
+            return _groq_vision(m)
         from neo2.core.providers.openai_compat import groq
 
         return groq(m)
-    if r.brain == "groq_vision":
-        return _groq_vision(m)
     if r.brain == "local":
         from neo2.core.providers.openai_compat import local
 
@@ -191,7 +195,7 @@ def _build_ref(r: brainref.Ref) -> Provider:
     if r.brain in ("cerebras", "cerebras_vision"):
         from neo2.core.providers import cerebras
 
-        return (cerebras.cerebras if r.brain == "cerebras" else cerebras.cerebras_vision)(m)
+        return (cerebras.cerebras_vision if catalog.describe(r.text, s).sees else cerebras.cerebras)(m)
     if r.brain == "openai":
         if not s.openai_api_key:
             raise Unavailable("OPENAI_API_KEY is not set")
@@ -291,7 +295,7 @@ _WAIT_MAX_S = 65.0
 _demoted: dict[str, float] = {}
 
 # A request-shaped failure says nothing about the brain's health: the next request may be fine.
-_NO_DEMOTE = ("bad_request", "too_large")
+_NO_DEMOTE = ("bad_request", "too_large", "no_tools")
 
 
 def _cooling(p: Provider) -> float:
@@ -669,6 +673,12 @@ class Chain:
             if (late := _too_late(p)) is not None:
                 failures.append((p.name, late))
                 continue
+            if tools and getattr(p, "supports_tools", True) is False and not any(p is n for n in self.names):
+                # (an endpoint saved with Tools off: a step with tools would come back as text that
+                # only says it acted — the next brain takes it; it isn't demoted for chat turns. A
+                # host's own provider object is the host's to send what it likes.)
+                failures.append((p.name, NoTools(f"{p.name}: it can't call tools")))
+                continue
             try:
                 turn = _seen_by(await self._ask(p, messages, system, tools, level, max_tokens), p)
                 self._answered(p)
@@ -929,24 +939,46 @@ def brain(purpose: Purpose = "agent", *, effort: Effort | None = None) -> Chain:
 
 
 def camera_order(s: Any = None) -> list[str]:
-    """The brains a camera question's still may go to, in the user's order: Quick replies if it
-    sees, Eyes, Brain if it sees, then the camera's own fallbacks (Gemini, Cerebras's vision model) —
-    those only where cloud fallbacks may see (cloud_eyes "off": only the brains the user picked).
-    Default settings: Gemini, then Cerebras's vision model, as before."""
+    """The brains a camera question's still may go to (all asked at once: neo2.core.vision.answer),
+    in the user's order: Eyes (their pick for anything with a picture), Brain if it sees, Quick
+    replies if it sees, then the camera's own fallbacks (Gemini, Cerebras's vision model) — those
+    only where cloud fallbacks may see (cloud_eyes "off": only the brains the user picked). At most
+    one brain of each provider: a paid one is never paid twice for one question. Default
+    settings: Gemini, then Cerebras's vision model, as before."""
     s = s if s is not None else settings()
-    roles = [getattr(s, "fast_brain", ""), getattr(s, "eyes_brain", ""), getattr(s, "brain", "")]
-    out = [n for n in dict.fromkeys(roles) if n and brainref.parse(n).valid and _sees(n)]
+    roles = [getattr(s, "eyes_brain", ""), getattr(s, "brain", ""), getattr(s, "fast_brain", "")]
     if getattr(s, "cloud_eyes", "auto") != "off":
-        out += [n for n in catalog.CAMERA_FALLBACKS if n not in out]
+        roles += list(catalog.CAMERA_FALLBACKS)
+    out: list[str] = []
+    seen: set[str] = set()
+    for n in dict.fromkeys(roles):
+        if not n or not brainref.parse(n).valid or not catalog.describe(n, s).sees:
+            continue
+        pid = catalog.provider_of(n)
+        if pid not in seen:
+            seen.add(pid)
+            out.append(n)
     return out
 
 
-def forget(provider: str | None = None) -> list[str]:
+def rebuild(provider: str, models: Sequence[str]) -> list[str]:
+    """Drop NEO.app's built brains of `provider` on any of `models` (what its live list says of them
+    changed: whether they see, call tools, what they cost), so the next chain builds them from what
+    is known now. Their demotions and the health list stay. Returns the brains dropped."""
+    ms = set(models)
+    dropped = [k for k in list(_cache) if catalog.provider_of(k) == provider and catalog.describe(k).model in ms]
+    for k in dropped:
+        _cache.pop(k, None)
+    return dropped
+
+
+def forget(provider: str | None = None, *, keys: bool = True) -> list[str]:
     """Drop what NEO.app's brains of `provider` (a provider id: "anthropic", "custom:deepseek"; None:
     every one) have kept — the built clients, their demotions and "unavailable" notes, Cerebras's
     account, the camera's rests — so the next chain builds them again from the settings as they are
-    now (a key just saved, replaced or removed). Returns the brains dropped. An embedded agent's
-    brains are its own, never touched here."""
+    now (a key just saved, replaced or removed; a daily cap changed). `keys` False (only its cap
+    changed): what the health list says of its key, and the model lists kept for it, stay. Returns
+    the brains dropped. An embedded agent's brains are its own, never touched here."""
 
     def mine(name: str) -> bool:
         return provider is None or catalog.provider_of(name) == provider
@@ -966,14 +998,15 @@ def forget(provider: str | None = None) -> list[str]:
     from neo2.core import health
     from neo2.core.providers import keycheck
 
-    keycheck.forget(provider)  # (the model lists kept for its key)
-    # (what the health list said of its key or a model: a new key is asked afresh)
-    if provider:
-        health.report(f"key:{provider}", None)
-        health.clear(f"model:{provider}:")
-    else:
-        health.clear("key:")
-        health.clear("model:")
+    if keys:
+        keycheck.forget(provider)  # (the model lists kept for its key)
+        # (what the health list said of its key or a model: a new key is asked afresh)
+        if provider:
+            health.report(f"key:{provider}", None)
+            health.clear(f"model:{provider}:")
+        else:
+            health.clear("key:")
+            health.clear("model:")
     try:
         from neo2.core.vision import answer
     except Exception:  # noqa: BLE001 — the camera's module isn't there (a core install): nothing kept

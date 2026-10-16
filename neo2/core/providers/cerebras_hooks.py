@@ -97,8 +97,12 @@ def _sees_in_cloud(n: Any) -> bool:
 
 
 def _groq_text(n: Any) -> bool:
-    """Groq's text brain, by any reference (groq, groq@<model>): Cerebras goes ahead of it."""
-    return _brain_of(n) == "groq"
+    """Groq's text brain, by any reference (groq, groq@<model>): Cerebras goes ahead of it — not
+    ahead of groq@<a model that sees>, which is Groq's seeing brain by another name."""
+    if _brain_of(n) != "groq":
+        return False
+    i = _info(n)
+    return not (i is not None and i.sees)
 
 
 def _is_text(n: Any) -> bool:

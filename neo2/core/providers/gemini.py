@@ -49,6 +49,7 @@ from neo2.core import logger
 from neo2.core.config import Settings, settings
 from neo2.core.providers.base import (
     BadRequest,
+    KeyRefused,
     Level,
     Message,
     Overloaded,
@@ -455,6 +456,10 @@ class GeminiProvider:
         if quota:
             return QuotaExhausted("429 gemini: every key is out of quota", until=min(quota))
         if refused:
+            if all(self._bad_keys.get(self._kid(ki), 0.0) > now for ki in range(len(self._clients))):
+                # Every key refused: the key itself (the chain rests Gemini an hour, and the health list
+                # says which key: neo2.core.providers._key_health).
+                return KeyRefused("API key not valid")
             return Unavailable("API key not valid")
         if denied:
             return Unavailable("gemini: permission denied for these models")

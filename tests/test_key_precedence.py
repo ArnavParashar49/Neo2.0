@@ -132,7 +132,8 @@ def test_sources_say_where_each_key_comes_from_and_only_its_last_four(neo, monke
     neo.checkout_env.write_text("GEMINI_API_KEY=AIzaTEST-checkout-wxyz\n")
     neo.store.put("anthropic", "sk-ant-TEST-saved-x9Qa")
     neo.store.put("groq", "gsk_TEST-saved-sv34")
-    xai = CustomProvider(id="custom:xai", label="xAI", base_url="https://api.x.ai/v1", model="grok-4.7", env="XAI_API_KEY")
+    xai = CustomProvider(id="custom:xai", label="xAI", template="xai", base_url="https://api.x.ai/v1", model="grok-4.7",
+                         env="XAI_API_KEY")  # fmt: skip
     env = {"OPENAI_API_KEY": "sk-proj-TEST-env-op56", "XAI_API_KEY": "short"}
     files = [("dotenv", neo.user_env), ("checkout_env", neo.checkout_env)]
     got = keystore.sources(environ=env, store=neo.store, files=files, custom=[xai])

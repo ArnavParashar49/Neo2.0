@@ -279,10 +279,12 @@ def test_camera_order(monkeypatch):
     _env(monkeypatch, NEO_BRAIN="claude")
     assert prov.camera_order() == ["claude", "gemini", "cerebras_vision"]
     _env(monkeypatch, NEO_FAST_BRAIN="gemini_lite", NEO_EYES_BRAIN="openai@gpt-6-luna", NEO_BRAIN="groq")
-    assert prov.camera_order() == ["gemini_lite", "openai@gpt-6-luna", "gemini", "cerebras_vision"]
+    # Eyes first (the user's pick for pictures), then the Brain and Quick replies if they see — one brain
+    # per provider (Flash-Lite is the Gemini one here), then the fallbacks of the providers not asked yet.
+    assert prov.camera_order() == ["openai@gpt-6-luna", "gemini_lite", "cerebras_vision"]
     from neo2.core.vision import answer
 
-    assert answer.brains() == ["gemini_lite", "openai@gpt-6-luna", "gemini"]  # (Cerebras: no key)
+    assert answer.brains() == ["openai@gpt-6-luna", "gemini_lite"]  # (Cerebras: no key)
     assert answer.effort_for("gemini") == "minimal" and answer.effort_for("cerebras_vision") == "low"
     assert answer.effort_for("claude@claude-haiku-5-5") == "low" and answer.effort_for("openai@gpt-6-luna") == "low"
 

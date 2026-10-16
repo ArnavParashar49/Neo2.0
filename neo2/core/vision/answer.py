@@ -1,8 +1,8 @@
 """The camera's answer ("a blue steel water bottle — it says Hydro Flask"), from NEO's cloud brains
-that see, as the user chose: the brains they gave a role that see (Quick replies, Eyes, Brain:
-neo2.core.providers.camera_order), then Gemini, then Cerebras's vision model (qwen-3.8-27b, their
-paid key) when Gemini is overloaded, out of quota, slow or failing. With the default settings:
-Gemini, then Cerebras's vision model.
+that see, as the user chose: the brains they gave a role that see (Eyes, Brain, Quick replies — one
+per provider, so a paid one is never paid twice for a question: neo2.core.providers.camera_order),
+then Gemini, then Cerebras's vision model (qwen-3.8-27b, their paid key) when Gemini is overloaded,
+out of quota, slow or failing. With the default settings: Gemini, then Cerebras's vision model.
 
 One still per question: the frame, scaled to at most :data:`MAX_EDGE` px and sent as a JPEG, with
 the question and short hints from the on-device layers (Apple Vision's labels and words, the
@@ -138,10 +138,11 @@ def _cerebras_on() -> bool:
 
 
 def brains() -> list[str]:
-    """The seeing brains a camera question may go to, in the user's order: their Quick replies brain
-    if it sees, their Eyes, their Brain if it sees (neo2.core.providers.camera_order) — then Gemini,
-    then Cerebras's vision model when their Cerebras key is set and its budget isn't 0. With the
-    default settings: Gemini, then Cerebras's vision model."""
+    """The seeing brains a camera question may go to, in the user's order: their Eyes, their Brain if
+    it sees, their Quick replies brain if it sees, one per provider (neo2.core.providers.camera_order)
+    — then Gemini, then Cerebras's vision model when their Cerebras key is set and its budget isn't 0
+    (each unless a brain of its provider is asked already). With the default settings: Gemini, then
+    Cerebras's vision model."""
     try:
         from neo2.core.providers import camera_order
 

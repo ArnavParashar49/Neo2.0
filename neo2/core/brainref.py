@@ -23,7 +23,9 @@ from dataclasses import dataclass
 from typing import Any, Literal
 from urllib.parse import urlsplit
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
+
+from neo2.core.keyshape import keyish
 
 # The brains NEO knew before brain references (config.BrainName): bare, each resolves exactly as then.
 LEGACY: tuple[str, ...] = (
@@ -41,6 +43,18 @@ MAX_BACKUPS = 4
 MAX_CUSTOM = 10
 TEMPLATES = ("xai", "deepseek", "mistral", "together", "ollama", "lmstudio", "other")
 LOOPBACK = frozenset({"localhost", "127.0.0.1", "::1"})
+# The one environment variable an endpoint may take its key from — its template's own — and the only
+# host that key goes to (neo2.core.providers.catalog.TEMPLATES says the same: a test holds them
+# together). XAI_API_KEY is for api.x.ai: an endpoint moved to another host, or one from another
+# template, gets no key from the environment. None of these is a key NEO keeps itself
+# (ANTHROPIC_API_KEY…), so a saved key can never be read into an endpoint by its name.
+TEMPLATE_KEYS: dict[str, tuple[str, str]] = {
+    "xai": ("XAI_API_KEY", "api.x.ai"),
+    "deepseek": ("DEEPSEEK_API_KEY", "api.deepseek.com"),
+    "mistral": ("MISTRAL_API_KEY", "api.mistral.ai"),
+    "together": ("TOGETHER_API_KEY", "api.together.xyz"),
+}
+KEY_IN_A_FIELD = "That looks like an API key — paste it under Providers, not as a brain or a name."
 
 
 @dataclass(frozen=True)
@@ -91,7 +105,7 @@ def parse(value: Any) -> Ref:
     m: str | None = None
     if at:
         m = model.strip()
-        if not _MODEL.fullmatch(m):
+        if not valid_model(m):  # (a key pasted where a model id goes is never one: keyshape.keyish)
             return _placeholder(s)
     if head.startswith(CUSTOM):
         if not _SLUG.fullmatch(head[len(CUSTOM) :]):
@@ -119,7 +133,8 @@ def normalize(value: Any) -> str:
 
 
 def valid_model(model: str) -> bool:
-    return bool(_MODEL.fullmatch(model or ""))
+    """A model id NEO takes: its characters, and nothing shaped like an API key in it."""
+    return bool(_MODEL.fullmatch(model or "")) and not keyish(model)
 
 
 def backups(value: Any) -> list[str] | None:
@@ -184,6 +199,42 @@ def budgets(value: Any) -> dict[str, float]:
     return out
 
 
+MAX_NOTES = 50  # models a provider's notes keep (the roles use a handful)
+
+
+def model_notes(value: Any) -> dict[str, dict[str, dict[str, Any]]]:
+    """known_models (brains.json): what a provider's live list said of the models the roles use —
+    {"openrouter": {model id: {"sees": bool, "tools": bool, "price": [in, out] | None}}}. Tolerant:
+    an entry that can't be read is left out, never a reason not to start."""
+    if isinstance(value, str):
+        try:
+            value = json.loads(value) if value.strip() else {}
+        except ValueError:
+            return {}
+    if not isinstance(value, dict):
+        return {}
+    out: dict[str, dict[str, dict[str, Any]]] = {}
+    for pid, models in value.items():
+        if pid != "openrouter" or not isinstance(models, dict):
+            continue
+        kept: dict[str, dict[str, Any]] = {}
+        for mid, note in list(models.items())[:MAX_NOTES]:
+            if not isinstance(mid, str) or not valid_model(mid) or not isinstance(note, dict):
+                continue
+            price = note.get("price")
+            pr: list[float] | None = None
+            if isinstance(price, list | tuple) and len(price) == 2:
+                try:
+                    a, b = float(price[0]), float(price[1])
+                    pr = [a, b] if all(math.isfinite(x) and x >= 0 for x in (a, b)) else None
+                except (TypeError, ValueError):
+                    pr = None
+            kept[mid] = {"sees": bool(note.get("sees")), "tools": bool(note.get("tools", True)), "price": pr}
+        if kept:
+            out[pid] = kept
+    return out
+
+
 def loopback(base_url: str) -> bool:
     """The endpoint is on this Mac (localhost, 127.0.0.1 or [::1])."""
     try:
@@ -219,8 +270,9 @@ def check_base_url(url: str) -> str:
 
 class CustomProvider(BaseModel):
     """An OpenAI-compatible endpoint the user added (brains.json, or NEO_CUSTOM_PROVIDERS as JSON):
-    its brain is ``custom:<slug>``. Its key lives in the key store (or a template's environment
-    variable, `env`), never here."""
+    its brain is ``custom:<slug>``. Its key lives in the key store (or its template's environment
+    variable, `env` — only at that template's host: :attr:`key_env`), never here. A name or a model id
+    shaped like a key is refused: every client hears them."""
 
     model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
 
@@ -235,7 +287,20 @@ class CustomProvider(BaseModel):
     reasoning: bool = False  # send reasoning_effort
     token_param: Literal["max_tokens", "max_completion_tokens"] = "max_tokens"
     short_tool_ids: bool = False
-    env: str | None = None  # the environment variable its key may come from (a template's: XAI_API_KEY)
+    # The environment variable its key may come from: only its template's own (XAI_API_KEY for xai,
+    # TEMPLATE_KEYS), honoured only at that template's host (:attr:`key_env`). None: none.
+    env: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _templates_variable(cls, data: Any) -> Any:
+        """`env` names its template's own variable or nothing: never another provider's key
+        (ANTHROPIC_API_KEY), nor any other secret the environment holds (GITHUB_TOKEN)."""
+        if isinstance(data, dict) and data.get("env") not in (None, ""):
+            own = TEMPLATE_KEYS.get(str(data.get("template") or "other"), ("",))[0]
+            if str(data.get("env")).strip() != own:
+                raise ValueError("env can only be the template's own variable (XAI_API_KEY for xAI…)")
+        return data
 
     @field_validator("id", mode="before")
     @classmethod
@@ -251,6 +316,8 @@ class CustomProvider(BaseModel):
         s = " ".join(str(v or "").split())
         if not s.isprintable():
             raise ValueError("label must be plain text")
+        if keyish(s):  # (every client hears an endpoint's name: a key pasted there never is one)
+            raise ValueError("label can't be an API key")
         return s
 
     @field_validator("base_url", mode="before")
@@ -283,6 +350,22 @@ class CustomProvider(BaseModel):
     @property
     def on_device(self) -> bool:
         return loopback(self.base_url)
+
+    @property
+    def key_env(self) -> str | None:
+        """The environment variable its key comes from now: its template's own (`env`), and only
+        while its base URL is that template's host over https — XAI_API_KEY never goes anywhere
+        but api.x.ai."""
+        if not self.env:
+            return None
+        own = TEMPLATE_KEYS.get(self.template)
+        try:
+            u = urlsplit(self.base_url)
+        except ValueError:
+            return None
+        if own is None or own[0] != self.env or u.scheme != "https" or (u.hostname or "") != own[1] or u.port not in (None, 443):
+            return None
+        return self.env
 
 
 def custom_list(value: Any) -> list[CustomProvider]:

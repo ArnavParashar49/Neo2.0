@@ -10,10 +10,12 @@ anything is left, since its size is only known once it's answered.
 Cerebras keeps its own ledger (neo2.core.providers.cerebras). The other paid providers a user may
 cap ("Brains & Keys": settings.daily_budgets, dollars a day per provider id) share the same
 :class:`Ledger` through a :class:`Cap`, one file per provider, at the catalogue's prices
-(neo2.core.providers.catalog); a model with no known price is counted at that provider's dearest.
-A provider without an entry in daily_budgets has no NEO cap, as before. The window prefills $2 a
-day only for a paid key saved in it (:func:`prefill`); a key from .env or the environment stays
-uncapped (decision 4).
+(neo2.core.providers.catalog) — OpenRouter's at the prices its own list gives each model; a model
+with no known price is counted at that provider's dearest (an endpoint the user added: the dearest
+the catalogue knows). A provider without an entry in daily_budgets has no NEO cap, as before. The
+window prefills $2 a day only for a paid key saved in it (:func:`prefill`): saved on its own for a
+provider with a price list whose key NEO then uses (neo2.core.brains.auto_cap), only suggested for an
+endpoint; a key from .env or the environment stays uncapped (decision 4).
 
 A refusal that no retry can fix — an invalid key, an account out of credits — is kept here too,
 until midnight, so a restart doesn't pay the same failed round trip again. It is tied to the key
@@ -316,9 +318,11 @@ def prefill(pid: str, source: str, *, on_device: bool = False) -> float | None:
     return DEFAULT_CAP if p is not None and p.cost == "paid" else None
 
 
-def provider_prices(pid: str) -> dict[str, tuple[float, float]]:
-    """$/M tokens per model of `pid`, from the catalogue. A provider with none listed (OpenRouter, an
-    endpoint) counts every model at the dearest price the catalogue knows."""
+def provider_prices(pid: str, s: Any = None) -> dict[str, tuple[float, float]]:
+    """$/M tokens per model of `pid`, from the catalogue. OpenRouter's: what its live list gave for
+    each model (catalog.learned_prices — this run's, and what brains.json kept for the roles' models),
+    and every other model at the dearest price the catalogue knows. An endpoint the user added (no
+    price list at all): every model at that dearest price, so a cap never counts low."""
     from neo2.core.providers import catalog
 
     p = catalog.provider(pid)
@@ -326,7 +330,21 @@ def provider_prices(pid: str) -> dict[str, tuple[float, float]]:
     if own:
         return own
     dearest = [m.price for q in catalog.PROVIDERS.values() for m in q.models if m.price]
-    return {_NO_PRICE: (max(x[0] for x in dearest), max(x[1] for x in dearest))} if dearest else {_NO_PRICE: (10.0, 50.0)}
+    out = {_NO_PRICE: (max(x[0] for x in dearest), max(x[1] for x in dearest))} if dearest else {_NO_PRICE: (10.0, 50.0)}
+    try:
+        out.update(catalog.learned_prices(pid, s))
+    except Exception:  # noqa: BLE001 — a price list is a nicety: the dearest price stands
+        pass
+    return out
+
+
+def has_prices(pid: str) -> bool:
+    """`pid` has a price list NEO counts its cap by (the catalogue's, or OpenRouter's own list):
+    an endpoint the user added has none."""
+    from neo2.core.providers import catalog
+
+    p = catalog.provider(pid)
+    return p is not None and (any(m.price for m in p.models) or pid in catalog.LEARNS)
 
 
 def _file(pid: str) -> str:
@@ -407,7 +425,10 @@ def cap_for(pid: str, s: Any = None) -> Cap | None:
 
     dd = getattr(s, "data_dir", None)
     label = catalog.provider_label(pid, s)
-    return Cap(pid, budget(caps[pid], 0.0), path=Path(dd) / _file(pid) if dd else None, label=label)
+    return Cap(
+        pid, budget(caps[pid], 0.0), path=Path(dd) / _file(pid) if dd else None, label=label,
+        price_table=provider_prices(pid, s),
+    )  # fmt: skip
 
 
 def _usd(x: float) -> str:

@@ -173,7 +173,9 @@ async def test_an_endpoint_on_this_mac_is_checked_at_its_own_address(monkeypatch
     assert "Ollama isn't answering on this Mac (port 11434)" in str(e.value) and "neo2 --local" not in str(e.value)
     with pytest.raises(Unavailable, match="My server isn't answering"):
         await mine.complete([Message.user("hi")])
-    assert asked == [("is_up", 11434), ("reachable", "http://[::1]:8000/api/v1/models")]
+    # (an endpoint the user added is asked at its own address, where any answer means it's up — one that
+    # wants a key answers 401 without it; NEO's own server's /v1/models must answer 200)
+    assert asked == [("reachable", "http://localhost:11434/v1/models"), ("reachable", "http://[::1]:8000/api/v1/models")]
     with pytest.raises(Unavailable, match="neo2 --local"):
         await oc.local().complete([Message.user("hi")])  # NEO's own local server: as before
 

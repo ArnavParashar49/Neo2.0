@@ -90,10 +90,15 @@ def test_a_key_the_provider_refuses_isnt_saved_unless_asked(cli, capsys):
     assert keystore.FileKeyStore(config.KEY_STORE_PATH).get("anthropic") is not None
 
 
-def test_gemini_extras_and_a_hint_about_the_wrong_provider(cli, capsys):
-    cli.typed += [KEY]
+def test_gemini_extras_and_a_key_for_another_provider_refused(cli, capsys):
+    cli.typed += [KEY]  # (an Anthropic key typed for Gemini: never saved for it, nor sent to Google)
+    assert cli.run("keys", "set", "gemini", "--no-test") == 1
+    out = capsys.readouterr().out
+    assert "That looks like an Anthropic key, so NEO didn't send it to Gemini." in out and "Nothing saved." in out
+    assert KEY not in out and keystore.FileKeyStore(config.KEY_STORE_PATH).get("gemini") is None
+    cli.typed += ["nope-TEST-0000-abcdefghijklmnop"]  # (a shape NEO doesn't know: a soft hint only)
     assert cli.run("keys", "set", "gemini", "--no-test") == 0
-    assert "This looks like an Anthropic key — did you mean Anthropic?" in capsys.readouterr().out
+    assert "Gemini keys usually start with AIza." in capsys.readouterr().out
     cli.typed += [GEMINI, "AIzaTEST-extra-0000-abcdefghijklmn", ""]
     assert cli.run("keys", "set", "gemini", "--extra") == 0
     got = keystore.FileKeyStore(config.KEY_STORE_PATH).get("gemini")
@@ -180,5 +185,9 @@ def test_the_doctor_shows_sources_and_roles_and_no_longer_fails_for_groq(cli, ca
     assert code == 0  # (no Groq key is no failure any more)
     monkeypatch.delenv("GEMINI_API_KEY")
     monkeypatch.setattr(config, "_settings", None)
+    config.KEY_STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    (config.KEY_STORE_PATH.parent / "api_keys.json.bad-20261017T000000").write_text("{}")  # (a copy set aside)
     assert main_mod.doctor() == 1
-    assert "✗ NEO has a model to ask — connect one in Brains & Keys" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "✗ NEO has a model to ask — connect one in Brains & Keys" in out
+    assert "· 1 older copy of api_keys.json (…bad-<date>) still in" in out and "they may hold keys" in out

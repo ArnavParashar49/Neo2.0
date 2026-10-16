@@ -86,14 +86,44 @@ def problem(key: str) -> str | None:
     return None
 
 
+def _key_word(word: str) -> bool:
+    for prefix, _pid in PREFIXES:
+        if word.startswith(prefix):
+            return bool(_KEY_BODY.fullmatch(word[len(prefix) :]))
+    return word.startswith("sk-") and bool(re.fullmatch(r"[A-Za-z0-9_\-]{32,}", word[3:]))
+
+
 def looks_like_key(text: str) -> bool:
     """Typed text that starts with an API key (the composer's guard: such a message is never sent
     to a model). Only the known prefixes, each followed by at least 16 key characters."""
     first = (text or "").strip().split(maxsplit=1)
     if not first:
         return False
-    word = first[0].strip("\"'`")
-    for prefix, _pid in PREFIXES:
-        if word.startswith(prefix):
-            return bool(_KEY_BODY.fullmatch(word[len(prefix) :]))
-    return word.startswith("sk-") and bool(re.fullmatch(r"[A-Za-z0-9_\-]{32,}", word[3:]))
+    return _key_word(first[0].strip("\"'`"))
+
+
+# A part of a model id or a name (split at "/", ":", "@" and spaces)…
+_PART = re.compile(r"[^/:@\s]+")
+# …that is 32 or more letters and digits with no separator in it, both kinds: a key without a
+# prefix (Together's, Mistral's), never a model's name ("Qwen2.5-Coder-32B-Instruct" has dashes).
+_BARE_KEY = re.compile(r"(?=[A-Za-z0-9]*\d)(?=[A-Za-z0-9]*[A-Za-z])[A-Za-z0-9]{32,}")
+
+
+def keyish(text: str) -> bool:
+    """Some part of `text` — a model id, an endpoint's name, a label — is shaped like an API key: a
+    known prefix with a key's body, or a long run of letters and digits. Such text is never a model
+    id or a name NEO keeps or tells any client (it is a key pasted into the wrong field)."""
+    for part in _PART.findall(text or ""):
+        p = part.strip("\"'`.,;()[]{}")
+        if p and (_key_word(p) or _BARE_KEY.fullmatch(p)):
+            return True
+    return False
+
+
+_TOKEN = re.compile(r"[^\s·,;()\[\]{}\"'`]+")
+
+
+def scrub(text: str) -> str:
+    """`text` with every word shaped like a key (:func:`keyish`) shown as "••••": a label every
+    client hears, whatever a setting held."""
+    return _TOKEN.sub(lambda m: "••••" if keyish(m.group(0)) else m.group(0), text or "")

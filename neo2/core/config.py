@@ -121,6 +121,10 @@ class Settings(BaseSettings):
     custom_providers: Annotated[list[CustomProvider], NoDecode] = []
     # Dollars a day per provider id ({"anthropic": 2.0}); a provider without one has no NEO cap.
     daily_budgets: Annotated[dict[str, float], NoDecode] = {}
+    # What OpenRouter's live list said of the models the roles use — {"openrouter": {model: {"sees",
+    # "tools", "price": [in, out] $/M tokens}}} — kept in brains.json by brains_set, so a restart
+    # still knows the Eyes brain sees and what its cap should count (catalog.learned).
+    known_models: Annotated[dict[str, dict[str, dict[str, Any]]], NoDecode] = {}
     openai_model: str = "gpt-6.1-sol"
     openrouter_model: str = ""  # (no default: the user picks one; its ids are vendor-prefixed)
     gemini_model: str = "gemini-3.8-flash"
@@ -354,6 +358,11 @@ class Settings(BaseSettings):
     def _daily_budgets(cls, v):
         return brainref.budgets(v)
 
+    @field_validator("known_models", mode="before")
+    @classmethod
+    def _known_models(cls, v):
+        return brainref.model_notes(v)
+
     @field_validator("custom_keys", mode="before")
     @classmethod
     def _custom_keys(cls, v):
@@ -363,19 +372,23 @@ class Settings(BaseSettings):
     @model_validator(mode="before")
     @classmethod
     def _endpoint_variables(cls, data: Any) -> Any:
-        """An endpoint's own variable (its `env`: XAI_API_KEY…) is its key too, in R1's order: the
-        environment beats a key saved in NEO, which beats a .env file's line. Only where the
-        environment is read at all (never an embedded agent's settings)."""
+        """An endpoint's own variable is its key too, in R1's order: the environment beats a key
+        saved in NEO, which beats a .env file's line. Only its template's own variable, and only at
+        that template's host (CustomProvider.key_env: XAI_API_KEY for api.x.ai) — never another
+        provider's key nor any other secret the environment holds. Only where the environment is
+        read at all (never an embedded agent's settings)."""
         if not cls._reads_environ or not isinstance(data, dict) or not data.get("custom_providers"):
             return data
-        named = [cp for cp in brainref.custom_list(data.get("custom_providers")) if cp.env]
+        named = [(cp, v) for cp in brainref.custom_list(data.get("custom_providers")) if (v := cp.key_env)]
         if not named:
             return data
         keys = _custom_keys(data.get("custom_keys"))
-        for cp in named:
-            from_env = os.environ.get(cp.env or "", "").strip()
-            # (a .env file's line NEO has no field for: passed on by name, lower-cased)
-            from_file = data.get(cp.env or "", data.get((cp.env or "").lower()))
+        mine = _store_aliases()
+        for cp, var in named:
+            from_env = os.environ.get(var, "").strip()
+            # (a .env file's line NEO has no field for: passed on by name, lower-cased — never a name
+            # NEO's own key store fills, which a template's variable never is)
+            from_file = None if var in mine else data.get(var, data.get(var.lower()))
             if from_env:
                 keys[cp.id] = from_env
             elif cp.id not in keys and isinstance(from_file, str) and from_file.strip():
@@ -902,6 +915,16 @@ def _custom_keys(v: Any) -> dict[str, str]:
         if r.custom and r.model is None and isinstance(key, str) and key.strip():
             out[r.text] = key.strip()
     return out
+
+
+def _store_aliases() -> set[str]:
+    """The names NEO's key store fills settings by (GEMINI_API_KEY…, GEMINI_API_KEYS)."""
+    from neo2.core import keystore
+
+    try:
+        return {*keystore.key_aliases().values(), "GEMINI_API_KEYS"}
+    except Exception:  # noqa: BLE001
+        return {"GEMINI_API_KEYS"}
 
 
 def _store_sources(settings_cls: type[BaseSettings]) -> tuple[PydanticBaseSettingsSource, ...]:

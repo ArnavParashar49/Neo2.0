@@ -175,6 +175,10 @@ def keys_set(pid: str, *, extra: bool = False, test: bool = True, out: Any = Non
         print(f"That key can't be saved: {e}.", file=out)
         return 1
     logredact.remember(key)
+    cp = catalog.custom_endpoint(pid, _settings()) if pid.startswith("custom:") else None
+    if why := brains.wrong_provider(pid, key, cp):
+        print(f"{why} Nothing saved.", file=out)
+        return 1
     if hint := keyshape.hint(pid, key):
         print(hint, file=out)
     more: list[str] = []
@@ -211,14 +215,12 @@ def keys_set(pid: str, *, extra: bool = False, test: bool = True, out: Any = Non
         return 1
     print(f"Saved the {_label(pid)} key {keystore.mask(key)} in NEO.", file=out)
     s = _settings()
-    cap = spend.prefill(pid, "saved", on_device=bool((cp := catalog.custom_endpoint(pid, s)) and cp.on_device))
+    cap = brains.auto_cap(pid, s)  # (decision 4: a paid key saved here, and the one NEO uses)
     sc = _saved_config()
-    if cap is not None and sc is not None and pid not in (getattr(s, "daily_budgets", None) or {}):
+    if cap is not None and sc is not None:
         try:
-            kept = dict(sc.read()[0].get("daily_budgets") or {})
-            if pid not in kept:
-                kept[pid] = cap
-                sc.update({"daily_budgets": kept})
+            now = sc.update({}, add_to={"daily_budgets": {pid: cap}})
+            if (now.get("daily_budgets") or {}).get(pid) == cap:
                 print(
                     f"NEO stops using {catalog.provider_label(pid, s)} for the day at ${cap:.2f} "
                     f"(python -m neo2 brain set --budget {pid}=5 changes it).",
@@ -226,6 +228,8 @@ def keys_set(pid: str, *, extra: bool = False, test: bool = True, out: Any = Non
                 )
         except (OSError, RuntimeError, ValueError) as e:
             print(f"(The daily cap wasn't saved: {type(e).__name__}.)", file=out)
+    elif spend.prefill(pid, "saved", on_device=bool(cp and cp.on_device)) is not None and pid not in (getattr(s, "daily_budgets", None) or {}):
+        print(f"(No daily cap was set for it: python -m neo2 brain set --budget {pid}=2 sets one.)", file=out)
     env = _env_of(pid)
     if env and brains._in_environ(env):
         print(f"But {env} is set in your environment, and it wins over what's saved here.", file=out)

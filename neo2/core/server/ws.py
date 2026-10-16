@@ -130,7 +130,9 @@ ticket, is never logged.
     NEO.app's shell for its "settings" action, which opens the window. {"type": "open_keys_result",
     "data": {"ok", "error"?: no_app | busy | forbidden}}.
   - `brains_reload`, from anyone: NEO re-reads its own files (the CLI sends it after `keys set`). It
-    carries no value; the sender hears {"type": "brains_reload_result", "data": {"ok"}}.
+    carries no value; the sender hears {"type": "brains_reload_result", "data": {"ok"}}. Coalesced
+    (brains.reload): one reading at a time, at most one a second, each request answered by a
+    reading that began after it.
   - Every client hears the `brains` event (and the hello's "brains"): whether NEO has a model to
     ask, each role's label, the voice, and per provider whether a key is set — never a key, never
     its last 4 (those go to the `keys` client alone, in brains_detail).
@@ -438,9 +440,10 @@ class UIServer:
             print(f"[ui] open_keys: {error} (from a {cl.kind})")
 
     async def _reload_ask(self, cl: _Client) -> None:
-        """`brains_reload`: NEO's own files read again (a key the CLI just saved)."""
+        """`brains_reload`: NEO's own files read again (a key the CLI just saved) — coalesced, so a
+        client asking again and again costs one reading at a time, at most one a second."""
         try:
-            await brains.apply()
+            await brains.reload()
             ok = True
         except Exception as e:  # noqa: BLE001
             print(f"[ui] brains_reload failed: {type(e).__name__}")

@@ -207,10 +207,12 @@ def brain_label(name: str, model: str = "") -> str:
 
     try:
         if brainref.parse(name).valid:
-            return catalog.label_for(name, model or None)[:60]
+            return catalog.label_for(name, model or None)[:60]  # (a key a model setting held: "••••")
     except Exception:  # noqa: BLE001 — a label is a nicety
         pass
-    return (brainref.shown(name) or "")[:60]
+    from neo2.core.keyshape import scrub
+
+    return scrub(brainref.shown(name) or "")[:60]
 
 
 def _camera_on() -> bool:

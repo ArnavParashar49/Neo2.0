@@ -206,6 +206,7 @@ class OpenAIResponsesProvider:
         name: str = PROVIDER,
         vision: bool | None = None,
         cap: Any = None,
+        base_url: str | None = None,
     ) -> None:
         """`client`: the host's own configured AsyncOpenAI. Nothing here reads NEO's settings (the
         factory :func:`openai` does, for NEO.app's own brain); `cap`: its daily cap (spend.Cap)."""
@@ -214,7 +215,9 @@ class OpenAIResponsesProvider:
         self.name = name
         self.model = model
         self.supports_vision = _sees(model) if vision is None else bool(vision)
-        self._client = client or AsyncOpenAI(api_key=api_key, timeout=_TIMEOUT_S, max_retries=1)
+        # `base_url`: where requests go (NEO.app's own brain: OpenAI's, always — an OPENAI_BASE_URL
+        # set for other tools never sends its key and screenshots elsewhere). None: the SDK's own.
+        self._client = client or AsyncOpenAI(api_key=api_key, base_url=base_url, timeout=_TIMEOUT_S, max_retries=1)
         self._reasoning = True  # False once this model refused the reasoning parameter
         self._cool_until = 0.0
         self._cap = cap
@@ -418,6 +421,7 @@ def openai(model: str | None = None) -> OpenAIResponsesProvider:
         api_key=s.openai_api_key,
         vision=catalog.describe(f"openai@{model}", s).sees,
         cap=spend.cap_for(PROVIDER, s),
+        base_url=catalog.PROVIDERS["openai"].base_url,  # (where Brains & Keys tested the key, too)
     )
     p._app = True
     return p

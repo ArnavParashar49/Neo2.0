@@ -322,15 +322,66 @@ _LEGACY: dict[str, tuple[str, bool, bool, bool, bool, str]] = {
 }
 # OpenRouter ids NEO knows to see pictures (its live list says for the rest, in the window).
 _OPENROUTER_SEES = ("anthropic/claude", "openai/gpt-", "google/gemini", "x-ai/grok-4")
-# What a provider's live model list said a model can do — (sees, calls tools) — for the brains whose
-# entry here can't say (OpenRouter's), filled in by keycheck.models_list. In memory only.
-_LEARNED: dict[tuple[str, str], tuple[bool, bool]] = {}
+# What a provider's live model list said a model can do — (sees, calls tools, $/M tokens in and out
+# or None) — for the brains whose entry here can't say (OpenRouter's), filled in by
+# keycheck.models_list. In memory; what the roles use of it is kept in brains.json too
+# (settings.known_models, saved by brains_set), so a restart doesn't forget it.
+_LEARNED: dict[tuple[str, str], tuple[bool, bool, tuple[float, float] | None]] = {}
+LEARNS = ("openrouter",)
 
 
-def learn(pid: str, model: str, *, sees: bool, tools: bool) -> None:
-    """Remember what `pid`'s live list said `model` can do (describe reads it)."""
-    if pid == "openrouter" and model:
-        _LEARNED[(pid, model)] = (bool(sees), bool(tools))
+@dataclass(frozen=True)
+class Learned:
+    sees: bool
+    tools: bool
+    price: tuple[float, float] | None = None
+
+    def as_note(self) -> dict[str, Any]:
+        return {"sees": self.sees, "tools": self.tools, "price": list(self.price) if self.price else None}
+
+
+def learn(pid: str, model: str, *, sees: bool, tools: bool, price: Any = None) -> bool:
+    """Remember what `pid`'s live list said `model` can do and costs (describe and the caps read
+    it). True when that differs from what was known: a brain built on the old one is rebuilt."""
+    if pid not in LEARNS or not model:
+        return False
+    pr: tuple[float, float] | None = None
+    try:
+        if price is not None:
+            a, b = (float(x) for x in price)
+            pr = (a, b) if a >= 0 and b >= 0 else None
+    except (TypeError, ValueError):
+        pr = None
+    before = learned(pid, model)
+    _LEARNED[(pid, model)] = (bool(sees), bool(tools), pr)
+    return before != Learned(bool(sees), bool(tools), pr)
+
+
+def learned(pid: str, model: str, s: Any = None) -> Learned | None:
+    """What `pid`'s list said of `model`: this run's (keycheck.models_list), else what brains.json
+    kept for the roles (settings.known_models). None: nothing."""
+    got = _LEARNED.get((pid, model))
+    if got is not None:
+        return Learned(*got)
+    st = _settings(s)
+    note = ((getattr(st, "known_models", None) or {}).get(pid) or {}).get(model) if st is not None else None
+    if isinstance(note, dict):
+        pr = note.get("price")
+        return Learned(bool(note.get("sees")), bool(note.get("tools", True)), tuple(pr) if isinstance(pr, list | tuple) and len(pr) == 2 else None)  # type: ignore[arg-type]
+    return None
+
+
+def learned_prices(pid: str, s: Any = None) -> dict[str, tuple[float, float]]:
+    """$/M tokens per model, as `pid`'s list gave them (this run's, and those brains.json kept)."""
+    out: dict[str, tuple[float, float]] = {}
+    st = _settings(s)
+    for model, note in (((getattr(st, "known_models", None) or {}).get(pid) or {}) if st is not None else {}).items():
+        if (got := learned(pid, model, st)) is not None and got.price:
+            out[model] = got.price
+    for (p, model), (_sees, _tools, price) in _LEARNED.items():
+        if p == pid and price:
+            out[model] = price
+    return out
 
 
 def _settings(s: Any = None) -> Any:
@@ -378,6 +429,10 @@ def describe(ref: str, s: Any = None) -> BrainInfo:
         pid, sees, eyes_only, here, paid, model_field = _LEGACY[r.brain]
         st = _settings(s) if r.model is None else None
         model = r.model or str(getattr(st, model_field, "") or "")
+        if r.model is not None and (km := known_model(pid, r.model)) is not None:
+            # (a model named by the reference: what the catalogue knows of it — groq@qwen/qwen3.8-27b
+            # sees, as groq_vision does; groq_vision@<a text model> doesn't)
+            sees, eyes_only = km.sees, km.eyes_only
         return BrainInfo(r.text, pid, model, sees, True, eyes_only, here, paid)
     if r.brain == "openai":
         model = r.model or str(getattr(_settings(s), "openai_model", "") or "")
@@ -385,7 +440,8 @@ def describe(ref: str, s: Any = None) -> BrainInfo:
         return BrainInfo(r.text, "openai", model, m.sees if m else model.startswith("gpt-"), True, paid=True)
     if r.brain == "openrouter":
         model = r.model or str(getattr(_settings(s), "openrouter_model", "") or "")
-        sees, tools = _LEARNED.get(("openrouter", model)) or (model.startswith(_OPENROUTER_SEES), True)
+        got = learned("openrouter", model, s) if model else None
+        sees, tools = (got.sees, got.tools) if got is not None else (model.startswith(_OPENROUTER_SEES), True)
         return BrainInfo(r.text, "openrouter", model, sees, tools, paid=not model.endswith(":free"), known=bool(model))
     cp = custom_endpoint(r.brain, s)
     if cp is None:
@@ -427,7 +483,14 @@ def any_key(s: Any = None) -> bool:
 
 def label_for(ref: str, model: str | None = None, s: Any = None) -> str:
     """A brain as the user reads it: "Claude Opus 5.5", "GPT-6 Luna", "Gemini 3.8 Flash", an
-    endpoint's own label ("DeepSeek · deepseek-v4-pro")."""
+    endpoint's own label ("DeepSeek · deepseek-v4-pro"). Every client may hear it: a key a model
+    setting held by mistake shows as "••••" (keyshape.scrub)."""
+    from neo2.core.keyshape import scrub
+
+    return scrub(_label_for(ref, model, s))
+
+
+def _label_for(ref: str, model: str | None = None, s: Any = None) -> str:
     info = describe(ref, s)
     if not info.valid:
         return "a brain NEO doesn't know"

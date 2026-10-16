@@ -185,6 +185,13 @@ class BadRequest(ProviderError):
     kind = "bad_request"
 
 
+class NoTools(BadRequest):
+    """Not asked: the step offers tools and this brain can't call them (an endpoint saved with
+    Tools off). A chat turn without tools still goes to it."""
+
+    kind = "no_tools"
+
+
 class RequestTooLarge(BadRequest):
     """The request doesn't fit this brain's context or per-request token limit, even trimmed."""
 
@@ -265,6 +272,8 @@ def failure_words(name: str, e: ProviderError) -> str:
         return f"{who} rejected the request"
     if kind == "blind":
         return f"{who} can't see pictures"
+    if kind == "no_tools":
+        return f"{who} can't use tools"
     if kind == "budget":
         return f"{who} couldn't answer in the time left"
     return f"{who} failed ({str(e)[:60]})"

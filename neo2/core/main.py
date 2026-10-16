@@ -95,7 +95,7 @@ def doctor(test: bool = False) -> int:
     def info(label: str, good: bool, note: str = "") -> None:  # (shown, never a reason to fail)
         print(f"  {'✓' if good else '·'} {label}{(' — ' + note) if note else ''}")
 
-    from neo2.core import brainref, brains, health, keystore
+    from neo2.core import brainref, brains, config, health, keystore
     from neo2.core.cli_keys import _where
     from neo2.core.providers import catalog
 
@@ -124,6 +124,9 @@ def doctor(test: bool = False) -> int:
             info(label, False, "not set" + (f" ({p.key_url})" if p is not None and p.key_url else ""))
     for problem in health._store_problems():
         row(problem, False)
+    if config.KEY_STORE_PATH is not None and (old := keystore.old_copies(config.KEY_STORE_PATH)):
+        info(f"{old} older cop{'y' if old == 1 else 'ies'} of {config.KEY_STORE_PATH.name} (…bad-<date>) still in "
+             f"{config.KEY_STORE_PATH.parent}", False, "they may hold keys; delete them if you don't need them")  # fmt: skip
     print("Brains")
     now = brains.saved()
     for title, f, role in (("Brain", "brain", "brain"), ("Quick replies", "fast_brain", "quick"), ("Eyes", "eyes_brain", "eyes")):

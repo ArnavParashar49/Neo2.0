@@ -171,6 +171,18 @@ def _stamp() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
+def old_copies(path: str | os.PathLike) -> int:
+    """How many copies of `path` NEO set aside (<name>.bad-<time>) are still there: they may hold
+    keys a Remove here never touches, so the window and --doctor say so. Never their contents."""
+    p = Path(path)
+    if refused(p):
+        return 0
+    try:
+        return sum(1 for q in p.parent.glob(f"{p.name}.bad-*") if q.is_file())
+    except OSError:
+        return 0
+
+
 def _quarantine(path: Path) -> Path | None:
     """Set an unreadable file aside (<name>.bad-<time>) so a save never overwrites it silently."""
     bad = path.with_name(f"{path.name}.bad-{time.strftime('%Y%m%dT%H%M%S')}")
@@ -383,6 +395,7 @@ SAVED_FIELDS: dict[str, tuple[type, ...]] = {
     "voice": (str,),
     "custom_providers": (list,),
     "daily_budgets": (dict,),
+    "known_models": (dict,),
 }
 _CHOICES = {"cloud_eyes": ("auto", "on", "off"), "voice": ("auto", "live", "local", "off")}
 
@@ -415,16 +428,23 @@ class SavedConfig:
     def state(self) -> StoreState:
         return self.read()[1]
 
-    def update(self, changes: Mapping[str, Any], *, remove: Sequence[str] = ()) -> dict[str, Any]:
+    def update(
+        self, changes: Mapping[str, Any], *, remove: Sequence[str] = (), add_to: Mapping[str, Mapping[str, Any]] | None = None
+    ) -> dict[str, Any]:
         """Save `changes` (fields of :data:`SAVED_FIELDS`) over what was saved, and drop the fields
-        in `remove` (they fall back to the .env files and the defaults). Returns what is saved now.
-        A file that can't be read is set aside first."""
-        bad = [k for k in [*changes, *remove] if k not in SAVED_FIELDS]
+        in `remove` (they fall back to the .env files and the defaults). `add_to`: entries put into
+        a map field ("daily_budgets") only where it has none yet — read and written under the
+        store's lock, so a save at the same moment is never lost. Returns what is saved now. A file
+        that can't be read is set aside first."""
+        bad = [k for k in [*changes, *remove, *(add_to or {})] if k not in SAVED_FIELDS]
         if bad:
             raise ValueError(f"not a saved setting: {', '.join(sorted(bad))}")
         for k, v in changes.items():
             if not isinstance(v, SAVED_FIELDS[k]) or (k in _CHOICES and v not in _CHOICES[k]):
                 raise ValueError(f"{k}: not a value it takes")
+        for k in add_to or {}:
+            if dict not in SAVED_FIELDS[k]:
+                raise ValueError(f"{k}: not a map")
         _guard(self.path, "save the brains")
         with locked(self.path.parent):
             saved, st = self.read()
@@ -432,6 +452,11 @@ class SavedConfig:
                 _quarantine(self.path)
                 saved = {}
             saved.update(changes)
+            for k, entries in (add_to or {}).items():
+                merged = dict(saved.get(k) or {})
+                for name, v in entries.items():
+                    merged.setdefault(name, v)
+                saved[k] = merged
             for k in remove:
                 saved.pop(k, None)
             data = {"version": VERSION, **{k: saved[k] for k in SAVED_FIELDS if k in saved}}
@@ -595,6 +620,6 @@ def sources(
     for cp in custom:
         pid = str(getattr(cp, "id", "") or "")
         if pid:
-            # (no variable of its own: only a key saved under its id can be its)
-            out[pid] = entry(getattr(cp, "env", None) or "", None, pid)
+            # (its template's variable at its template's host, else only a key saved under its id)
+            out[pid] = entry(getattr(cp, "key_env", None) or "", None, pid)
     return out

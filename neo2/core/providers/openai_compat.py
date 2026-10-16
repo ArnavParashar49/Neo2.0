@@ -246,12 +246,18 @@ class OpenAICompatProvider:
         self._cap: Any = None  # a daily cap (neo2.core.providers.spend.Cap): an endpoint's, OpenRouter's
         self._base_url = base_url or str(getattr(client, "base_url", "") or "")
         # A server on this Mac — NEO's own local server (mlx-lm), or an endpoint the user added
-        # there: checked before each call. A host's client is theirs.
+        # there: checked before each call. A host's client is theirs. `local` given (an endpoint the
+        # user added): asked at its own address, where any answer means it's up (one that wants a
+        # key answers 401 without it); by the address (NEO's own server): its /v1/models answers 200.
+        self._own_server = local is None
         if local is None:
             local = "127.0.0.1" in base_url or "localhost" in base_url
         self._is_local = client is None and local
-        # nothing sent to it leaves the Mac (a host's own client may point at its local server too)
-        self.on_device = "127.0.0.1" in self._base_url or "localhost" in self._base_url
+        # Nothing sent to it leaves the Mac — by the URL's host, never a substring of it (a host's
+        # own client may point at its local server too; https://localhost.example.com is a cloud).
+        from neo2.core.brainref import loopback
+
+        self.on_device = loopback(self._base_url)
         self._client = client or AsyncOpenAI(
             base_url=base_url,
             api_key=api_key or "none",
@@ -291,7 +297,7 @@ class OpenAICompatProvider:
 
             parts = urlsplit(self._base_url)  # (a URL without a port: the scheme's own)
             port = parts.port or (443 if parts.scheme == "https" else 80)
-            if parts.hostname in ("127.0.0.1", "localhost") and parts.path.rstrip("/") == "/v1":
+            if self._own_server and parts.hostname in ("127.0.0.1", "localhost") and parts.path.rstrip("/") == "/v1":
                 up = await local_server.is_up(port)
             else:  # (another path, or [::1]: ask that URL itself)
                 up = await local_server.reachable(self._base_url.rstrip("/") + "/models")
@@ -547,10 +553,9 @@ def custom(cp: Any, key: str = "", *, model: str | None = None, name: str | None
         label=cp.label,
     )
     if not cp.tools:
-        p.supports_tools = False  # (it can be Quick replies, never the Brain)
-    if cp.on_device:
-        p.on_device = True  # (whatever the host is called: localhost, 127.0.0.1, [::1])
-    else:
+        p.supports_tools = False  # (it can be Quick replies, never the Brain: a chain skips it for steps with tools)
+    p.on_device = cp.on_device  # (by its host: localhost, 127.0.0.1, [::1] — never a name that only says so)
+    if not cp.on_device:
         try:
             p._cap = spend.cap_for(cp.id, settings())
         except Exception:  # noqa: BLE001 — no settings bound (a host's): no NEO cap
