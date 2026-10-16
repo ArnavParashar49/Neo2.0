@@ -42,6 +42,7 @@ __all__ = [
     "Groq",
     "ImagePart",
     "Message",
+    "OpenAI",
     "OpenAICompatible",
     "Provider",
     "ProviderError",
@@ -99,6 +100,27 @@ def OpenAICompatible(
         client=client,
         token_budget=token_budget,
     )
+
+
+def OpenAI(
+    model: str = "gpt-6.1-sol",
+    *,
+    api_key: str | None = None,
+    client: openai.AsyncOpenAI | None = None,
+    vision: bool | None = None,
+) -> Provider:
+    """OpenAI's own models on its Responses API (tool calls on every GPT-6 model, pictures inside
+    tool results, its reasoning kept between steps without storing anything at OpenAI). Pass
+    `api_key` or your own configured `client` (unset: the openai SDK's own default, its
+    OPENAI_API_KEY). `vision`: whether the model sees pictures (unset: GPT models do)."""
+    mod = _need("neo2.core.providers.openai_responses", "openai")
+    if client is None:
+        openai_mod = _need("openai", "openai")
+        try:
+            client = openai_mod.AsyncOpenAI(api_key=api_key)
+        except openai_mod.OpenAIError as e:
+            raise ProviderError(f"OpenAI needs an API key: pass api_key= ({type(e).__name__})") from None
+    return mod.OpenAIResponsesProvider(model, client=client, vision=vision)
 
 
 def Gemini(
