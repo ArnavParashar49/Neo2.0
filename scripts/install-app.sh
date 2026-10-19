@@ -103,6 +103,8 @@ if [ -f "$AGENT" ]; then
   /usr/libexec/PlistBuddy -c "Set :ProgramArguments:0 $DEST/Contents/MacOS/neo-ui" "$AGENT"
   launchctl bootstrap "gui/$(id -u)" "$AGENT"
 else
-  nohup "$DEST/Contents/MacOS/neo-ui" >/dev/null 2>&1 &
+  # Through LaunchServices, not as this shell's child: macOS then asks for Accessibility, Screen
+  # Recording and the microphone on NEO.app's behalf, not the Terminal's that ran this script.
+  open "$DEST"
 fi
 echo "NEO $(defaults read "$DEST/Contents/Info" CFBundleShortVersionString) is installed and running (menu bar: the dotted orb)."
