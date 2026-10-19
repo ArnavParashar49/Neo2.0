@@ -5,6 +5,17 @@
 /** One role as every client sees it: a brain reference and its label, and whether it can answer. */
 export interface RoleSummary { ref: string; provider: string; label: string; ok: boolean }
 
+/** The on-device voice (neo2/core/fetch.py `local_voice`): downloaded, missing, or how far its
+ *  download is. `size`: what it downloads, in bytes. */
+export interface LocalVoice {
+  state: "ready" | "missing" | "downloading" | "failed" | string;
+  size: number;
+  done?: number;
+  total?: number;
+  eta_s?: number | null;
+  code?: string | null;
+}
+
 /** The `brains` event and the hello's "brains". */
 export interface BrainsSummary {
   ready: boolean;
@@ -14,6 +25,8 @@ export interface BrainsSummary {
   voice: "live" | "local" | "off" | string;
   providers: Record<string, boolean>;
   restart_needed: boolean;
+  /** An older core doesn't say. */
+  local_voice?: LocalVoice | null;
 }
 
 /** `setup_needed`: a request needed a model NEO hasn't got (neo2/core/onboarding.py). */
@@ -47,7 +60,7 @@ export interface BrainsDetail {
   keys: Record<string, KeyEntry>;
   roles: Record<string, RoleDetail> & { backup_brains?: { refs: ShownRef[] | null; source: string } };
   custom: CustomEndpoint[];
-  voice: { value: string; source: string; live_possible: boolean };
+  voice: { value: string; source: string; live_possible: boolean; local?: LocalVoice | null };
   cloud_eyes: { value: string; source: string };
   daily_budgets: { value: Record<string, number>; source: string; prefill: Record<string, number> };
   store: { path: string; ok: boolean; problem?: string | null; old_copies?: number };

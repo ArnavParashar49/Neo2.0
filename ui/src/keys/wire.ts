@@ -8,7 +8,7 @@
 // the user didn't see), no command is remembered after it is sent, and nothing goes to storage.
 // The connection's URL carries the ticket: it is never logged.
 
-import type { BrainsSummary, Result } from "./types.ts";
+import type { BrainsSummary, LocalVoice, Result } from "./types.ts";
 
 export interface SocketLike {
   readyState: number;
@@ -46,6 +46,7 @@ export const RESULT_OF: Readonly<Record<string, string>> = {
   custom_save: "custom_save_result",
   custom_remove: "custom_remove_result",
   brains_restart: "brains_restart_result",
+  voice_download: "voice_download_result", // (not one of brains.py's: the core's download, ws.py)
 };
 
 export interface HelloData { state?: string; problems?: string[]; brains?: BrainsSummary | null; shell?: unknown; ui_host?: string }
@@ -55,6 +56,7 @@ type Events = {
   problems: string[];
   state: string;
   status: WireStatus;
+  local_voice: LocalVoice;
 };
 type Handler<K extends keyof Events> = (data: Events[K]) => void;
 
@@ -74,7 +76,7 @@ export class KeysWire {
   private seq = 0;
   private readonly pending = new Map<string, Pending>();
   private readonly handlers: { [K in keyof Events]: Set<Handler<K>> } = {
-    hello: new Set(), brains: new Set(), problems: new Set(), state: new Set(), status: new Set(),
+    hello: new Set(), brains: new Set(), problems: new Set(), state: new Set(), status: new Set(), local_voice: new Set(),
   };
   private retry: unknown = null;
   private stopped = false;
@@ -166,6 +168,7 @@ export class KeysWire {
       case "brains": this.emit("brains", data as unknown as BrainsSummary); return;
       case "problems": this.emit("problems", Array.isArray(data.items) ? (data.items as string[]) : []); return;
       case "state": if (typeof data.state === "string") this.emit("state", data.state); return;
+      case "local_voice": if (typeof data.state === "string") this.emit("local_voice", data as unknown as LocalVoice); return;
     }
     const id = typeof data.id === "string" ? data.id : "";
     const p = id ? this.pending.get(id) : undefined;

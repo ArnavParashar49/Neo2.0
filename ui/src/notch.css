@@ -138,6 +138,8 @@ html[data-host="notch"] .onboard-btns .primary:hover { background: #fff; }
 html[data-host="notch"] .onboard-note { margin-top: 7px; font-size: 11.5px; color: var(--n-ink-2); }
 html[data-host="notch"] .onboard-note code { background: var(--n-fill-2); color: var(--n-ink); }
 html[data-host="notch"] .onboard-also { margin-top: 7px; font-size: 11px; color: var(--n-ink-3); }
+html[data-host="notch"] .onboard-voice { margin-top: 9px; padding-top: 8px; border-top-color: var(--n-fill-2); }
+html[data-host="notch"] .onboard-voice .onboard-also { margin: 0 0 6px; }
 html[data-host="notch"] .msg.system.keyguard { border-left-color: var(--n-ink-3); color: var(--n-ink); font-size: 12px; }
 html[data-host="notch"] .keyguard-open { color: var(--n-ink); font-size: 11.5px; }
 

@@ -243,6 +243,44 @@ def _dfine_available() -> tuple[bool, str]:
     return False, _missing_words()
 
 
+def weights_here() -> bool:
+    """D-FINE's weights are on this Mac — a folder that holds them, or the Hugging Face cache in NEO's
+    models dir with a config and the weights in one snapshot. Loads nothing, asks no one."""
+    src, _ = source()
+    if Path(src).is_dir():
+        return (Path(src) / "config.json").is_file()
+    md = _models_dir()
+    if md is None:
+        return False
+    for snap in (md / "hf").glob(f"models--{src.replace('/', '--')}/snapshots/*"):
+        if (snap / "config.json").is_file() and any(
+            (snap / w).is_file() for w in ("model.safetensors", "pytorch_model.bin")
+        ):
+            return True
+    return False
+
+
+def download() -> str:
+    """Fetch D-FINE's weights into NEO's models dir, where the camera loads them from — because the
+    user asked for them (Setup's "camera boxes", ``python -m neo2 fetch --vision``, which then also
+    sets vision_download_ok). Through transformers' own loaders, as :class:`_DFine` loads them, so
+    what lands is exactly what a frame reads. Returns where they came from (a folder: nothing to do)."""
+    src, _ = source()
+    if Path(src).is_dir():
+        return src
+    effects.guard("model", "download the D-FINE object detector")
+    try:
+        import torch  # noqa: F401
+        from transformers import AutoImageProcessor, DFineForObjectDetection
+    except ImportError as e:
+        raise Unavailable("The object detector needs transformers and torch (NEO's vision extra)") from e
+    md = _models_dir()
+    kw: dict[str, Any] = {"cache_dir": str(md / "hf")} if md is not None else {}
+    AutoImageProcessor.from_pretrained(src, **kw)
+    DFineForObjectDetection.from_pretrained(src, **kw)
+    return src
+
+
 def engine() -> str:
     """The detector a frame goes to now: "test", "yoloe" or "dfine" (see :func:`mode`). "auto" goes
     to D-FINE only when YOLOE can't run (missing, or its model failed to load) and D-FINE's weights
@@ -331,6 +369,6 @@ def warm() -> bool:
 
 
 __all__ = [
-    "MAX_BOXES", "REPO", "Det", "Detector", "available", "detect", "engine", "loaded", "mode", "scores",
-    "set_engine", "source", "to_dets", "warm",
+    "MAX_BOXES", "REPO", "Det", "Detector", "available", "detect", "download", "engine", "loaded", "mode", "scores",
+    "set_engine", "source", "to_dets", "warm", "weights_here",
 ]  # fmt: skip

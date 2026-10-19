@@ -11,6 +11,10 @@ core → shell   {"t":"hello","ui_host":"notch","host_attached":false}   the web
                                                         also for `open_keys` and a request that
                                                         needs a model NEO hasn't got (Brains & Keys),
                                                         "restart" for Brains & Keys' brains_restart
+               {"t":"permission","what":"microphone",   what macOS says of the microphone or the
+                "status":"granted"}                     camera: granted | denied | restricted |
+                                                        not_determined | unknown — the answer to
+                                                        the shell's `permission` below
 shell → core   {"t":"status","accessibility":true,…}    what the menu shows (after the hello, and
                                                         whenever it changes)
                {"t":"wake"}                             the summon keys, while the notch shows NEO
@@ -18,6 +22,11 @@ shell → core   {"t":"status","accessibility":true,…}    what the menu shows 
                                                         it connects with (again after every hello
                                                         while it is open; neo2/core/server/ws.py)
                {"t":"keys_closed"}                      it closed: the ticket is no good any more
+               {"t":"permission","what":"camera",       Setup's checklist: what macOS says of the
+                "op":"status"|"ask"}                    microphone or the camera, or ("ask") its
+                                                        prompt — the core uses them, so the core asks
+                                                        (neo2.core.permissions.media); the answer
+                                                        comes back as `permission` above
 
 Why not NEO.app's own page, which used to carry all of this over its websocket: with NEO in the
 notch that page's window is never on screen, and macOS suspends the process of a web page nobody

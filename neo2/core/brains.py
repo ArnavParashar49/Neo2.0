@@ -21,6 +21,8 @@ window may see and change, and applying a change while NEO runs.
   window's changes run one at a time too, and :func:`reload` (brains_reload) is coalesced.
 * :func:`set_roles` — brains_set's rules (Brain calls tools and is set up, Eyes sees, …), then saved
   in brains.json and applied.
+* The summary's ``local_voice`` says whether the on-device voice is downloaded (and how far its
+  download is); the download itself is ``voice_download`` (neo2.core.server.ws), never automatic.
 
 What runs on this Mac (NEO's own model at 127.0.0.1:8080, an endpoint the user added here) counts as
 set up only while something answers there: :func:`refresh_probes` asks (health.watch, every 30 s),
@@ -279,6 +281,9 @@ def key_providers(s: Any = None) -> list[str]:
 
 _started: str | None = None  # what the running voice started with (a fingerprint, never a key)
 voice_now: Callable[[], str | None] | None = None  # the App's: which voice runs now ("live" | "local" | None)
+# The App's: NEO's files were applied — with no voice running yet (no key, the on-device voice not
+# downloaded), the voice tries again at once with what arrived.
+voice_kick: Callable[[], None] | None = None
 
 
 def _voice_print(s: Any) -> str:
@@ -328,7 +333,20 @@ def summary(s: Any = None) -> dict[str, Any]:
         "voice": voice(s),
         "providers": {pid: catalog.configured(pid, s) for pid in key_providers(s)},
         "restart_needed": restart_needed(s),
+        "local_voice": _local_voice(),
     }
+
+
+def _local_voice() -> dict[str, Any] | None:
+    """The on-device voice: downloaded, missing (Brains & Keys and the chat's card offer it), or
+    downloading — with how far (neo2.core.fetch.local_voice). None when it can't be told."""
+    try:
+        from neo2.core import fetch
+
+        return fetch.local_voice()
+    except Exception as e:  # noqa: BLE001 — a summary without it beats none
+        log.info(f"[keys] the on-device voice's state is unknown: {type(e).__name__}")
+        return None
 
 
 async def publish(s: Any = None) -> dict[str, Any]:
@@ -455,7 +473,7 @@ def detail(s: Any = None) -> dict[str, Any]:
             for cp in customs
         ],  # fmt: skip
         "voice": {"value": s.voice, "source": setting_source("voice", saved_now=now_saved),
-                  "live_possible": bool(getattr(s, "gemini_api_key", ""))},  # fmt: skip
+                  "live_possible": bool(getattr(s, "gemini_api_key", "")), "local": _local_voice()},  # fmt: skip
         "cloud_eyes": {"value": s.cloud_eyes, "source": setting_source("cloud_eyes", saved_now=now_saved)},
         "daily_budgets": {"value": dict(getattr(s, "daily_budgets", None) or {}),
                           "source": setting_source("daily_budgets", saved_now=now_saved), "prefill": prefill},  # fmt: skip
@@ -543,6 +561,11 @@ async def _apply(*, tell: bool) -> dict[str, Any]:
     except Exception as e:  # noqa: BLE001
         log.info(f"[keys] couldn't look for brains on this Mac: {type(e).__name__}")
     data = summary(live)
+    if voice_kick is not None:
+        try:
+            voice_kick()
+        except Exception as e:  # noqa: BLE001
+            log.info(f"[keys] the voice didn't hear of it: {type(e).__name__}")
     if tell:
         from neo2.core.events import bus
 

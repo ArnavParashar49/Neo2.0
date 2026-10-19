@@ -5,6 +5,8 @@ python -m neo2 --text            # text REPL in the terminal (no voice, no UI)
 python -m neo2 --doctor [--test] # check keys and brains (--test: ask each provider), permissions, models
 python -m neo2 keys …            # the API keys NEO uses (neo2.core.cli_keys): list | set | remove | test
 python -m neo2 brain …           # which brain each role uses: show | set
+python -m neo2 fetch [--essential|--local-voice|--browser|--vision] [--status] [--json]
+                                 # download what NEO needs, with progress (neo2.core.fetch)
 
 The core's stdout and stderr (NEO.app's core.log) go through neo2.core.logredact from the start: a
 key NEO has loaded never reaches the log whole.
@@ -196,6 +198,16 @@ def doctor(test: bool = False) -> int:
         row("mlx-audio (local voice)", True)
     except Exception as e:  # noqa: BLE001
         row("mlx-audio (local voice)", False, str(e))
+    print("Downloads (python -m neo2 fetch --essential | --local-voice | --browser | --vision)")
+    try:
+        from neo2.core import fetch
+
+        for it in fetch.items(s):  # (what's on this Mac: shown, never a reason to fail — NEO fetches it)
+            here = not it.skip and fetch._safe_here(it)
+            note = f"skipped: {it.skip}" if it.skip else "" if here else f"not downloaded ({fetch._gb(it.size)})"
+            info(f"{it.label} [{it.group.replace('_', '-')}]", here, note)
+    except Exception as e:  # noqa: BLE001
+        info("couldn't look at the downloads", False, type(e).__name__)
     print(f"Data dir: {s.data_dir}")
     return 0 if ok else 1
 
@@ -245,10 +257,15 @@ def main() -> None:
         from neo2.core.cli_keys import main as keys_main
 
         sys.exit(keys_main(sys.argv[1:]))
+    if len(sys.argv) > 1 and sys.argv[1] == "fetch":
+        from neo2.core.fetch import main as fetch_main
+
+        sys.exit(fetch_main(sys.argv[2:]))
     ap = argparse.ArgumentParser(
         prog="neo2",
         epilog="Brains & Keys in a terminal: neo2 keys list | set <provider> | remove <provider> | test <provider>, "
-        "and neo2 brain show | set --brain REF --quick REF --eyes REF.",
+        "and neo2 brain show | set --brain REF --quick REF --eyes REF. Downloads: neo2 fetch --essential | "
+        "--local-voice | --browser | --vision [--status] [--json].",
     )
     ap.add_argument("--text", action="store_true", help="text REPL, no voice/UI")
     ap.add_argument("--doctor", action="store_true", help="check setup")

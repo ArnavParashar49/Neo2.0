@@ -31,6 +31,7 @@ __all__ = [
     "_accessibility_on",
     "_no_real_screen",
     "_no_task_grants",
+    "_no_real_downloads",
 ]
 
 # Hermetic: no test may read the developer's real keys or settings (~/.neo/.env, ./.env, and what
@@ -239,6 +240,20 @@ def _no_task_grants():
     grants.reset()
     yield
     grants.reset()
+
+
+@pytest.fixture(autouse=True)
+def _no_real_downloads(monkeypatch):
+    """What NEO downloads on demand (neo2.core.fetch) never depends on this Mac's caches: NEO's
+    Chromium counts as installed and the on-device voice as not downloaded, and no download of one
+    test is still "running" in the next. A test that needs otherwise says so."""
+    from neo2.core import fetch
+    from neo2.core.voice import pipeline
+
+    monkeypatch.setattr(fetch, "chromium_here", lambda **kw: True)
+    monkeypatch.setattr(pipeline, "local_ready", lambda: False)
+    monkeypatch.setattr(fetch, "downloads", fetch.Downloads())
+    monkeypatch.setattr(fetch, "_ready", None)
 
 
 class FakeClock:

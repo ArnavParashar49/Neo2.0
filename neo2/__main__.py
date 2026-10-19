@@ -4,6 +4,7 @@
     python -m neo2 --text     # a text REPL in the terminal
     python -m neo2 --doctor   # check keys, permissions, models
     python -m neo2 --local    # download and serve the offline model
+    python -m neo2 fetch      # download what NEO needs (--local-voice, --browser, --vision; --json)
 
 Nothing is imported until it runs: ``import neo2`` stays the standard library only.
 """

@@ -213,6 +213,8 @@ kbd { font: 11px/1 -apple-system, system-ui; opacity: 0.7; margin-left: 6px; }
   font: 11.5px var(--mono); background: var(--bg-3); padding: 2px 6px; border-radius: 6px; user-select: text; -webkit-user-select: text;
 }
 .onboard-also { margin: 10px 0 0; color: var(--dim); font-size: 11.5px; line-height: 1.4; }
+.onboard-voice { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--edge); }
+.onboard-voice .onboard-also { margin: 0 0 8px; }
 /* The composer kept a pasted key from every model: said once, with the way to save it. */
 .msg.system.keyguard { align-self: stretch; color: var(--fg); text-align: left; border-left: 2px solid var(--accent); padding-left: 10px; line-height: 1.4; }
 .keyguard-open { color: var(--accent); text-decoration: underline; text-underline-offset: 2px; font-size: 12px; }

@@ -8,6 +8,7 @@ import { CameraHub } from "./camera/hub";
 import { isCameraFrame } from "./camera/frames";
 import { SongHub } from "./song/hub";
 import type { BrainsSummary, SetupNeeded } from "./keys/types";
+import { withLocalVoice } from "./keys/localvoice";
 
 export type NeoState =
   | "idle" | "listening" | "thinking" | "working" | "searching" | "speaking" | "connecting" | "confirming";
@@ -172,6 +173,12 @@ export function useNeo(opts: { surface?: "overlay" | "window" } = {}) {
           break;
         case "setup_needed":
           setSetup({ shell: !!ev.data.shell, opened: !!ev.data.opened, command: String(ev.data.command ?? "") });
+          break;
+        case "local_voice": // the on-device voice's download, as far as it is (the card shows it)
+          setBrains((prev) => withLocalVoice(prev, ev.data));
+          break;
+        case "voice_download_result":
+          setBrains((prev) => withLocalVoice(prev, ev.data?.local_voice));
           break;
         case "open_keys_result":
           setOpenKeys({ ok: !!ev.data.ok, error: typeof ev.data.error === "string" ? ev.data.error : undefined, at: Date.now() });

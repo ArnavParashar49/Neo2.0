@@ -9,6 +9,7 @@ import re
 import shutil
 import tempfile
 import zipfile
+from collections.abc import Callable
 from pathlib import Path
 
 from neo2.core.config import settings
@@ -40,10 +41,16 @@ def _complete(d: Path) -> bool:
     return all((d / m).is_file() for m in _MARKERS)
 
 
-def ensure_model() -> Path:
+def model_here() -> bool:
+    """The wake-word model is on this Mac, complete: :func:`ensure_model` needs no network."""
+    return _complete(settings().models_dir / _MODEL)
+
+
+def ensure_model(progress: Callable[[int, int | None], None] | None = None) -> Path:
     """The wake-word model, downloaded once. The download is checked against a pinned hash and
     unpacked into a temporary folder that only becomes the model once it's complete — quitting
-    halfway leaves nothing half-installed behind."""
+    halfway leaves nothing half-installed behind. `progress(done, total)`: the bytes so far, and the
+    size the server said (None when it didn't) — for ``python -m neo2 fetch``."""
     root = settings().models_dir
     d = root / _MODEL
     if _complete(d):
@@ -60,10 +67,16 @@ def ensure_model() -> Path:
         h = hashlib.sha256()
         with httpx.stream("GET", _URL, timeout=httpx.Timeout(30.0, read=60.0), follow_redirects=True) as r:
             r.raise_for_status()
+            size = str(getattr(r, "headers", {}).get("content-length") or "")
+            total = int(size) if size.isdigit() and int(size) > 0 else None
+            done = 0
             with zpath.open("wb") as f:
                 for chunk in r.iter_bytes(1 << 16):
                     h.update(chunk)
                     f.write(chunk)
+                    done += len(chunk)
+                    if progress is not None:
+                        progress(done, total)
         if h.hexdigest() != _SHA256:
             raise RuntimeError("the wake-word model download didn't match its checksum — not using it")
         out = Path(tmp) / "x"

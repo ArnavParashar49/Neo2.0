@@ -20,6 +20,13 @@ that carries data or reaches this Mac's own network.
 An agent embedded in another app (neo2.core.runtime) has a browser of its own, in its own data dir: no
 chat card (settings().browser_view is pinned to "window"), headless unless its host asked for a
 window, and web-only — nothing it loads may reach the machine it runs on or its network.
+
+Chromium comes when it is first needed. On a Mac that hasn't got it (a new install: it is about 160 MB
+to download, 360 MB on disk), NEO's first browser step asks the user — one confirmation card — and on
+their yes downloads it (``python -m neo2 fetch --browser``: Playwright's Chromium, without the
+headless shell) and carries on with the step. Headless or not, NEO starts the full Chromium (the
+"chromium" channel, Chromium's own headless mode); the headless shell is only a fallback for a Mac
+that has nothing else.
 """
 
 from __future__ import annotations
@@ -63,6 +70,19 @@ _TOOL_S = 120.0  # one browser tool's own work
 _HELD_S = 6 * 3600.0
 # Every tool here drives NEO's own Chromium (the playwright package, and `playwright install chromium`).
 tool = functools.partial(_register, requires=frozenset({"playwright"}))
+# The first browser step on a Mac without Chromium: the card's words, and what runs on a yes.
+_INSTALL_SUMMARY = "download NEO's browser first (Chromium from Playwright's servers, about 160 MB; 360 MB on disk)"
+_INSTALL_DETAIL = "python -m neo2 fetch --browser\n(playwright install chromium --no-shell, into ~/Library/Caches/ms-playwright)"
+
+
+class ChromiumMissing(RuntimeError):
+    """Playwright's Chromium isn't on this Mac (the browser's first step offers it)."""
+
+
+def _missing_browser(e: BaseException) -> bool:
+    """Playwright's own words for a browser that was never installed."""
+    text = str(e)
+    return "Executable doesn't exist" in text or "playwright install" in text
 
 
 def _in_chat() -> bool:
@@ -373,14 +393,22 @@ class _Browser:
                 except Exception:  # noqa: BLE001 — only the headless shell is installed
                     ctx = await pw.chromium.launch_persistent_context(str(profile), **kw)
             else:
-                ctx = await pw.chromium.launch_persistent_context(
-                    str(profile),
-                    headless=_headless(),
-                    viewport=_VIEWPORT,
-                    args=["--disable-blink-features=AutomationControlled"],
-                )
-        except Exception:
+                kw = {"headless": _headless(), "viewport": _VIEWPORT, "args": ["--disable-blink-features=AutomationControlled"]}
+                if kw["headless"]:
+                    # The full Chromium in its own headless mode (`--no-shell` installs no other).
+                    try:
+                        ctx = await pw.chromium.launch_persistent_context(str(profile), channel="chromium", **kw)
+                    except Exception:  # noqa: BLE001 — only the headless shell is installed
+                        ctx = await pw.chromium.launch_persistent_context(str(profile), **kw)
+                else:
+                    ctx = await pw.chromium.launch_persistent_context(str(profile), **kw)
+        except Exception as e:
             await pw.stop()
+            if _missing_browser(e):
+                raise ChromiumMissing(
+                    "NEO's browser (Chromium) isn't installed on this Mac. NEO offers to download it on the "
+                    "next browser step, or: python -m neo2 fetch --browser"
+                ) from None
             raise
         ctx.set_default_timeout(_TIMEOUT_MS)
         if self.web_only:
@@ -1260,6 +1288,55 @@ _USER_WAS_HERE = (
 _USER_READ = "The user used the browser while you waited (fields the user filled show as [filled by you])."
 
 
+async def _chromium_first(name: str, a: dict) -> str | None:
+    """NEO's browser isn't on this Mac yet (a new install): the user's OK to download Chromium — one
+    card, staged for this very step, so their yes runs it — then the download, and the step carries
+    on. None: it's here, it's running, or it isn't NEO.app's to fetch (an embedded agent's host
+    installs its own browsers)."""
+    if runtime.library_bound():
+        return None
+    cold = getattr(_browser(), "cold", None)  # (a browser that can't say so is one that runs)
+    if cold is None or not cold():
+        return None
+    from neo2.core import fetch
+
+    if await asyncio.to_thread(fetch.chromium_here, shell_ok=_headless()):
+        return None
+    gate = confirm.gated(name, a, _INSTALL_SUMMARY, detail=_INSTALL_DETAIL, always=True)
+    if isinstance(gate, str):
+        return gate
+    return await _install_chromium()
+
+
+async def _install_chromium() -> str | None:
+    """Download Chromium now (the user said yes): None once it's here, else what went wrong. Progress
+    goes to the chat as notes."""
+    from neo2.core import fetch
+    from neo2.core.events import bus
+
+    fetch.downloads.start("browser")  # (False: one is under way already — this waits for it)
+    await bus().note("Downloading NEO's browser (Chromium)…")
+    told = 0
+    while fetch.downloads.running("browser"):
+        st = fetch.downloads.state("browser")
+        pct = int(100 * st.done / st.total) if st.total else 0
+        if pct >= told + 20 and pct < 100:
+            told = pct - pct % 20
+            await bus().note(f"Downloading NEO's browser… {pct}%")
+        await asyncio.sleep(1.0)
+    st = await fetch.downloads.wait("browser")
+    if st.state == "done" and await asyncio.to_thread(fetch.chromium_here, shell_ok=_headless()):
+        await bus().note("NEO's browser is installed.")
+        return None
+    why = {
+        "offline": "NEO couldn't reach Playwright's servers (check the internet connection)",
+        "disk_full": "the disk is full",
+        "cancelled": "the download was stopped",
+    }.get(st.code or st.state, st.message or "the download didn't finish")
+    return (f"Error: NEO's browser (Chromium) couldn't be downloaded: {why}. The next browser step offers it "
+            "again; in a terminal: python -m neo2 fetch --browser")  # fmt: skip
+
+
 def _card(kind: str):
     """A NEO browser tool, as the chat's browser card sees it: the card opens for the job that
     calls it; while the user has the page the tool waits (then re-reads instead of acting on a page
@@ -1270,6 +1347,8 @@ def _card(kind: str):
         @functools.wraps(fn)
         async def run(a: dict, c: ToolContext):
             name = fn.__name__
+            if (first := await _chromium_first(name, a)) is not None:
+                return first  # the card asking to download Chromium, or why it couldn't be
             if not _in_chat():
                 return await _timed(fn(a, c), name)
             job = current_job.get()

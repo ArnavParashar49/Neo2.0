@@ -1024,6 +1024,30 @@ def set_wellbeing_checkins(on: bool, env_path: Path | None = None) -> None:
     settings().wellbeing_checkins = on
 
 
+def set_vision_download_ok(on: bool, env_path: Path | None = None) -> None:
+    """Record that the user asked for the camera's object detector (D-FINE, Setup's "camera boxes":
+    ``python -m neo2 fetch --vision``): the NEO_VISION_DOWNLOAD_OK line of ~/.neo/.env, replaced where
+    it stands or added at the end, every other line as the user wrote it — and the live settings."""
+    if not isinstance(on, bool):
+        raise ValueError(f"vision_download_ok must be true or false, not {on!r}")
+    path, lines = _env_lines(env_path, "set_vision_download_ok")
+    line = f"NEO_VISION_DOWNLOAD_OK={'true' if on else 'false'}"
+    out: list[str] = []
+    placed = False
+    for ln in lines:
+        if not ln.strip().startswith("NEO_VISION_DOWNLOAD_OK="):
+            out.append(ln)
+        elif not placed:
+            out.append(line)
+            placed = True
+    if not placed:
+        if out and out[-1].strip():
+            out.append("")
+        out.append(line)
+    _write_env(path, out)
+    settings().vision_download_ok = on
+
+
 def settings() -> Settings:
     """The bound agent's settings (neo2.core.runtime), else NEO.app's — built on first use."""
     rt = runtime.current_runtime()

@@ -20,6 +20,9 @@ UI → Server  : {"cmd": "text", "text": "..."}      send a typed request
                {"cmd": "song_*", …}                the song card (neo2/core/tools/music/live.py)
                {"cmd": "open_keys"}                open the Brains & Keys window (app, page, host)
                {"cmd": "brains_reload"}            re-read NEO's key and brain files (anyone)
+               {"cmd": "voice_download"}           download the on-device voice, which NEO never
+                                                   does by itself (+ "cancel": true to stop it):
+                                                   see "The on-device voice"
                {"cmd": "key_save", "id": …, …}     Brains & Keys' own commands: see "Brains & Keys"
 
 NEO's browser card has its own lane: its commands go straight to the browser (never through the
@@ -124,8 +127,9 @@ ticket, is never logged.
   - The same commands from anyone else get {"type": "keys_refused", "data": {"cmd", "error":
     "forbidden"}}, to that client alone. NEO.app's overlay and the notch's page show what models and
     websites wrote; a host's contract is a closed list; a tool is any program — none sets a key.
-  - The `keys` client sends nothing else: no request, no card's buttons. It hears the hello (state,
-    problems, brains, shell, ui_host) and of the bus only `brains`, `problems` and `state`.
+  - The `keys` client sends nothing else (but `brains_reload` and `voice_download`): no request, no
+    card's buttons. It hears the hello (state, problems, brains, shell, ui_host) and of the bus only
+    `brains`, `problems`, `state` and `local_voice`.
   - `open_keys`, from NEO.app's overlay, the notch's page or a host (one every 5 s): the core asks
     NEO.app's shell for its "settings" action, which opens the window. {"type": "open_keys_result",
     "data": {"ok", "error"?: no_app | busy | forbidden}}.
@@ -136,6 +140,20 @@ ticket, is never logged.
   - Every client hears the `brains` event (and the hello's "brains"): whether NEO has a model to
     ask, each role's label, the voice, and per provider whether a key is set — never a key, never
     its last 4 (those go to the `keys` client alone, in brains_detail).
+
+The on-device voice. Its models (Parakeet and Kokoro, about 2.9 GB) come down only when the user asks:
+`voice_download`, from Brains & Keys (with its "id", as its own commands), NEO.app's overlay or the
+notch's page (the chat's card) or a host — not a tool. The download runs in a child process
+(neo2.core.fetch: `python -m neo2 fetch --local-voice --json`), one at a time; the sender hears
+{"type": "voice_download_result", "data": {"ok", "error"?: ready | busy | not_running | forbidden,
+"local_voice"}}. Everyone hears how far it is: the `local_voice` event {state: ready | missing |
+downloading | failed, size, done, total, eta_s, code} — the Brains & Keys window too — and the
+`brains` summary's "local_voice" when it starts and ends. Once it is here, a core that had no voice
+starts it.
+
+NEO.app's shell asks about the microphone and the camera over its own socket (shell_link.py:
+`permission`): the core answers what macOS says, and asks macOS when the shell says so — the prompt
+is NEO.app's, as it is for any of the core's.
 
 The relay never blocks the event bus: each client has its own outbound queue drained by its
 own task, and a client that stops reading is dropped. (An inline `await send()` to a half-dead
@@ -193,7 +211,8 @@ _MAY_SET = ("host", "app")  # …and who may: a host, and NEO.app's own page
 _TICKET = re.compile(r"[0-9a-f]{64}")
 _MAY_OPEN_KEYS = ("app", "page", "host")
 _OPEN_KEYS_S = 5.0
-_KEYS_HEARS = frozenset({"brains", "problems", "state"})
+_KEYS_HEARS = frozenset({"brains", "problems", "state", "local_voice"})
+_MAY_DOWNLOAD = ("keys", "app", "page", "host")  # who may ask for the on-device voice (voice_download)
 _LOGGABLE_CMD = re.compile(r"[a-z_]{1,32}")
 
 
@@ -451,6 +470,23 @@ class UIServer:
         self._send_to(cl, "brains_reload_result", {"ok": ok})
         print(f"[ui] brains_reload: {'ok' if ok else 'failed'} (from a {cl.kind})")
 
+    def _voice_download_ask(self, cl: _Client, cmd: dict[str, Any]) -> None:
+        """`voice_download` (see "The on-device voice"): start it, or stop it ("cancel": true). The
+        answer goes to the sender alone; the progress goes to everyone (`local_voice`)."""
+        from neo2.core import fetch
+
+        if cl.kind not in _MAY_DOWNLOAD:
+            error = "forbidden"
+        elif cmd.get("cancel") is True:
+            error = "" if fetch.downloads.cancel("local_voice") else "not_running"
+        else:
+            error = fetch.start_local_voice()
+        data: dict[str, Any] = {"ok": not error, **({"error": error} if error else {}), "local_voice": fetch.local_voice()}
+        if cl.kind == "keys":
+            data["id"] = brains.request_id(cmd)
+        self._send_to(cl, "voice_download_result", data)
+        print(f"[ui] voice_download{' cancel' if cmd.get('cancel') is True else ''}: {error or 'ok'} (from a {cl.kind})")
+
     # ---- NEO.app's menu, for a host ---------------------------------------------------------
 
     def _host_attached(self) -> bool:
@@ -486,6 +522,26 @@ class UIServer:
             self._keys_ticket_said(msg)  # the Brains & Keys window is open (see "Brains & Keys")
         elif kind == "keys_closed":
             self._keys_closed()
+        elif kind == "permission":
+            asyncio.create_task(self._permission_said(msg))  # Setup's microphone and camera rows
+
+    async def _permission_said(self, msg: dict[str, Any]) -> None:
+        """The shell asks what macOS says of the microphone or the camera ("op": "status"), or to ask
+        macOS ("ask": its prompt, credited to NEO.app): the answer goes back over the same socket."""
+        from neo2.core import permissions
+
+        what, op = msg.get("what"), msg.get("op", "status")
+        if what not in permissions.MEDIA or op not in ("status", "ask"):
+            print("[app] a permission question the core doesn't know was ignored")
+            return
+        try:
+            status = await permissions.media(what, ask=op == "ask")
+        except Exception as e:  # noqa: BLE001
+            print(f"[app] couldn't ask macOS about the {what}: {type(e).__name__}")
+            status = "unknown"
+        self._to_shell({"t": "permission", "what": what, "status": status})
+        if op == "ask":
+            print(f"[app] {what}: {status} (asked for NEO.app's Setup)")
 
     def shell_left(self, link: Any) -> None:
         """NEO.app is gone from its socket: nobody speaks for the shell, nobody runs the menu."""
@@ -757,6 +813,8 @@ class UIServer:
                         asyncio.create_task(self._keys_ask(cl, cmd))
                     elif kind == "brains_reload":
                         asyncio.create_task(self._reload_ask(cl))
+                    elif kind == "voice_download":
+                        self._voice_download_ask(cl, cmd)
                     elif kind == "state":
                         cl.send_json(json.dumps({"type": "state", "data": {"state": bus().state.value}}))
                     else:
@@ -770,6 +828,9 @@ class UIServer:
                     continue
                 if kind == "brains_reload":
                     asyncio.create_task(self._reload_ask(cl))
+                    continue
+                if kind == "voice_download":
+                    self._voice_download_ask(cl, cmd)  # the user's own ask: never automatic
                     continue
                 if kind.startswith("browser_"):
                     # Straight to the browser: never the bus, never a log (it carries what the user types).

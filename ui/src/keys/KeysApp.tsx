@@ -15,6 +15,7 @@ import {
   quickSetup, quickSetupWith, refFor, rolesChanges, rolesErrorText, shadowNote, sourceText, templates, testText,
   voiceChoice, type EndpointForm, type Role, type RoleForm,
 } from "./model";
+import { DOWNLOAD_CMD, downloadErrorText, downloadLabel, localVoiceOf, percent, statusLine as voiceLine, withLocalVoice } from "./localvoice";
 import type { BrainsDetail, BrainsSummary, CustomEndpoint, ModelEntry, ModelsResult, Result } from "./types";
 import "./keys.css";
 
@@ -90,6 +91,7 @@ export function KeysApp() {
       }),
       w.on("brains", (b) => { setSummary(b); refreshSoon(); }),
       w.on("problems", setProblems),
+      w.on("local_voice", (lv) => setSummary((prev) => withLocalVoice(prev, lv))), // (its download's progress)
     ];
     w.start();
     return () => { offs.forEach((f) => f()); w.stop(); if (wireRef.current === w) wireRef.current = null; };
@@ -161,9 +163,11 @@ export function KeysApp() {
             <Providers detail={detail} ask={ask} refresh={refresh} loadModels={loadModels} />
             <Endpoints detail={detail} ask={ask} refresh={refresh} loadModels={loadModels} />
             {detail.voice.live_possible && <Voice detail={detail} ask={ask} refresh={refresh} />}
+            <OnDeviceVoice summary={summary} ask={ask} />
             <Spending detail={detail} ask={ask} refresh={refresh} />
           </>
         )}
+        {live && detail && quick && <OnDeviceVoice summary={summary} ask={ask} />}
         <footer className="kx-foot">
           <p>Keys are kept in ~/.neo/api_keys.json, readable only by your Mac account, and sent only to the provider you picked.</p>
           {inTauri && (
@@ -832,6 +836,43 @@ function Voice({ detail, ask, refresh }: { detail: BrainsDetail; ask: Ask; refre
       </div>
       {now === "off" && <div className="kx-dim">The voice is off (NEO_VOICE=off). Picking one turns it on.</div>}
       {detail.voice.source === "env" && <div className="kx-dim">NEO_VOICE in the environment wins over this.</div>}
+      <Line msg={msg} />
+    </section>
+  );
+}
+
+// ---- On-device voice ---------------------------------------------------------------------------
+
+/** The on-device voice: NEO downloads it only when this button asks (`voice_download`); its progress
+ *  comes as `local_voice` events, to every window. */
+function OnDeviceVoice({ summary, ask }: { summary: BrainsSummary | null; ask: Ask }) {
+  const [msg, setMsg] = useState<Msg>(null);
+  const [busy, setBusy] = useState(false);
+  const lv = localVoiceOf(summary);
+  if (!lv) return null; // an older core doesn't say
+  const go = async (cancel: boolean) => {
+    setBusy(true);
+    setMsg(null);
+    try {
+      const r = await ask(DOWNLOAD_CMD, cancel ? { cancel: true } : {});
+      if (!r.ok && r.error !== "ready") setMsg({ tone: "bad", text: downloadErrorText(String(r.error ?? "")) });
+    } finally { setBusy(false); }
+  };
+  const pct = percent(lv);
+  const line = voiceLine(lv);
+  return (
+    <section className="kx-section" aria-labelledby="kx-local-voice-h">
+      <h2 id="kx-local-voice-h">On-device voice</h2>
+      <p className="kx-lead">Parakeet listens and Kokoro speaks, right on this Mac: no key, and no internet once it's downloaded. NEO downloads it only when you ask.</p>
+      {pct !== null && <progress className="kx-progress" max={100} value={pct} aria-label="On-device voice download" />}
+      {line && <div className={"kx-dim" + (lv.state === "failed" ? " kx-bad" : "")} role="status">{line}</div>}
+      {lv.state !== "ready" && (
+        <div className="kx-row-btns">
+          {lv.state === "downloading"
+            ? <button className="kx-btn" disabled={busy} onClick={() => void go(true)}>Cancel</button>
+            : <button className="kx-btn primary" disabled={busy} onClick={() => void go(false)}>{lv.state === "failed" ? "Try again" : downloadLabel(lv)}</button>}
+        </div>
+      )}
       <Line msg={msg} />
     </section>
   );

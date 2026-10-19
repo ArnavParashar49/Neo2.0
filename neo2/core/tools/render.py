@@ -401,10 +401,14 @@ class _Renderer:
             try:
                 os.environ.pop(_LOOPBACK_ENV, None)
                 self._pw = await (self._start or _start_playwright)()
-                # Contexts each get their own proxy; anything outside one goes nowhere.
-                self._browser = await self._pw.chromium.launch(
-                    headless=True, args=_ARGS, proxy={"server": "http://per-context"}, timeout=20000
-                )
+                # Contexts each get their own proxy; anything outside one goes nowhere. The full Chromium
+                # in its own headless mode (NEO installs it with --no-shell); the headless shell only
+                # where nothing else is installed.
+                kw = {"headless": True, "args": _ARGS, "proxy": {"server": "http://per-context"}, "timeout": 20000}
+                try:
+                    self._browser = await self._pw.chromium.launch(channel="chromium", **kw)
+                except Exception:  # noqa: BLE001
+                    self._browser = await self._pw.chromium.launch(**kw)
                 self.launches += 1
             except Exception as e:  # noqa: BLE001 — not installed, or it wouldn't start
                 await self._stop_browser()

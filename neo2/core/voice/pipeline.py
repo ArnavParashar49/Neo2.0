@@ -3,6 +3,11 @@
 A failed check at startup is usually the network not being up yet (NEO starts at login) — that
 doesn't turn Live off: it connects on the next "Neo". Only a definite "this key can't use
 Live" falls back to the on-device voice for good.
+
+The on-device voice is the user's to ask for: its models are a 2.9 GB download (Parakeet and Kokoro),
+which NEO never starts by itself. With no Gemini key and those models not on this Mac, there is no
+voice yet (:class:`VoiceNotSetUp`): NEO says so and types meanwhile, and Brains & Keys and the chat's
+card offer the download (neo2.core.fetch; ``python -m neo2 fetch --local-voice``).
 """
 
 from __future__ import annotations
@@ -23,16 +28,45 @@ def live_refused(e: BaseException) -> bool:
     return any(k in msg for k in _REFUSED)
 
 
+class VoiceNotSetUp(RuntimeError):
+    """No voice can start yet, and NEO won't download one by itself: no Gemini key (or one Live
+    refused, or the voice is set to "On this Mac") and the on-device voice isn't downloaded."""
+
+    def __init__(self, why: str, problem: str) -> None:
+        super().__init__(why)
+        self.problem = problem  # what the overlay's problem list says
+
+
 def local_ready() -> bool:
-    """Are the on-device speech models already downloaded? (Never start a 2.6 GB download as a
-    fallback in the middle of a conversation.)"""
+    """Are the on-device speech models already downloaded, whole, at their pinned revisions? (Never
+    start a 2.9 GB download unasked: not at a first start, not as a fallback mid-conversation.)"""
     try:
-        from huggingface_hub import try_to_load_from_cache
+        from neo2.core import models
 
         s = settings()
-        return all(isinstance(try_to_load_from_cache(m, "config.json"), str) for m in (s.stt_model, s.tts_model))
+        return all(models.here(m) for m in (s.stt_model, s.tts_model))
     except Exception:  # noqa: BLE001
         return False
+
+
+def _size() -> str:
+    from neo2.core.fetch import LOCAL_VOICE_BYTES
+
+    return f"{LOCAL_VOICE_BYTES / 1e9:.1f} GB"
+
+
+def _not_set_up(why: str) -> VoiceNotSetUp:
+    s = settings()
+    if s.voice == "local":
+        problem = (f"The on-device voice isn't downloaded yet ({_size()}). Download it in Brains & Keys, or pick "
+                   "Gemini Live there. Typing works meanwhile.")  # fmt: skip
+    elif s.gemini_api_key:
+        problem = (f"Gemini Live refused this key, and the on-device voice isn't downloaded ({_size()}). Open Brains "
+                   "& Keys to download it or use another Gemini key. Typing works meanwhile.")  # fmt: skip
+    else:
+        problem = (f"NEO's voice needs a Gemini key or the on-device voice (a {_size()} download). Open Brains & "
+                   "Keys for either. Typing works meanwhile.")  # fmt: skip
+    return VoiceNotSetUp(why, problem)
 
 
 async def make_local(on_text: TextHandler):
@@ -70,4 +104,10 @@ async def make_voice(on_text: TextHandler, agent_session=None, *, on_speech: Tex
             await v.start()
             print(f"[voice] Gemini Live ({s.gemini_live_model})")
             return v
+    if not local_ready():  # (its download is the user's to start: VoiceNotSetUp says how)
+        if mode == "local":
+            raise _not_set_up("the on-device voice isn't downloaded")
+        if not s.gemini_api_key:
+            raise _not_set_up("no Gemini key, and the on-device voice isn't downloaded")
+        raise _not_set_up("Gemini Live refused the key, and the on-device voice isn't downloaded")
     return await make_local(on_speech or on_text)

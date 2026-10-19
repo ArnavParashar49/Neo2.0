@@ -13,6 +13,9 @@ export const SET_UP = "Set up a brain";
 export const GET_KEY = "Get a free Gemini key";
 export const GEMINI_KEY_URL = "https://aistudio.google.com/apikey";
 export const COMMAND = "python -m neo2 keys set gemini";
+/** Under the buttons while NEO has no voice it could use (no Gemini key, the on-device voice not
+ *  downloaded): the on-device voice, which NEO only downloads when asked (./keys/localvoice.ts). */
+export const VOICE_LINE = "No Gemini key? NEO can listen and talk on this Mac instead: a one-time download, then no key or internet needed.";
 
 /** The card shows while connected and the core says NEO has no model; an older core (no "brains"
  *  in its hello) never shows it. */
@@ -23,6 +26,12 @@ export function needsBrain(connected: boolean, brains: BrainsSummary | null | un
 /** The health line the card says better: hidden while the card is up. */
 export function isNoModelProblem(text: string): boolean {
   return /^NEO has no AI model yet\b/.test(text);
+}
+
+/** The voice's health line with no key and no on-device voice (neo2/core/voice/pipeline.py): hidden
+ *  while the card offers the on-device voice itself. */
+export function isVoiceSetupProblem(text: string): boolean {
+  return /^NEO's voice needs a Gemini key or the on-device voice\b/.test(text);
 }
 
 export type CardState = "idle" | "opening" | "opened" | "terminal" | "busy";

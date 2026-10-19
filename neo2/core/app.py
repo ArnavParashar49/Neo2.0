@@ -38,6 +38,40 @@ class App:
         self._last_active = time.monotonic()  # (starting up counts as busy)
         self.ui: UIServer | None = None  # the websocket server (set in run()): its link to NEO.app's shell
         self._keys_opened_at: float | None = None  # monotonic: Brains & Keys last opened for a request
+        # Wakes the voice supervisor while no voice runs: the on-device voice finished downloading,
+        # or a key arrived (Brains & Keys) — it tries again now rather than at its next minute.
+        self.voice_kick = asyncio.Event()
+        self._local_voice_told = 0.0  # monotonic: the last `local_voice` progress event
+
+    def kick_voice(self) -> None:
+        """Something a voice needs may have arrived: with none running, try again now."""
+        if self.voice is None:
+            self.voice_kick.set()
+
+    def download_changed(self, group: str, st) -> None:
+        """One of the user's downloads moved on (neo2.core.fetch.downloads): every client hears the
+        on-device voice's progress (`local_voice`, a few a second at most) and, when it starts, ends or
+        fails, the `brains` summary again; a voice that finished downloading is started."""
+        if group != "local_voice":
+            return
+        from neo2.core import brains, fetch
+
+        now = time.monotonic()
+        moving = st.state == "running"
+        if moving and now - self._local_voice_told < 0.5 and st.done < st.total:
+            return
+        self._local_voice_told = now
+        data = fetch.local_voice(fresh=not moving)
+        with contextlib.suppress(RuntimeError):  # (no loop: nobody to tell)
+            loop = asyncio.get_running_loop()
+            loop.create_task(bus().publish("local_voice", **data))
+            if not moving or st.done == 0:
+                loop.create_task(brains.publish())
+        if st.state == "done":
+            print("[voice] the on-device voice is downloaded")
+            self.kick_voice()
+        elif st.state == "failed":
+            print(f"[voice] the on-device voice's download failed ({st.code or 'failed'})")
 
     async def handle_text(
         self, text: str, *, speak: bool = True, source: str = "typed", prompt_context: str = "", checkin: bool = False
@@ -533,6 +567,10 @@ async def run() -> None:
 
     brains.started(s)  # what the voice starts with: a key changed later says "restart NEO"
     brains.voice_now = app.voice_kind
+    brains.voice_kick = app.kick_voice  # a key saved while no voice runs: it starts with it
+    from neo2.core import fetch
+
+    fetch.downloads.listen(app.download_changed)  # the on-device voice, when the user downloads it
     onboarding.set_opener(app.open_keys)  # a request with no model to answer it opens Brains & Keys
     await ui.start()
     ui.shell_task = shell_link.start(ui, app_socket)  # the menu, the summon keys, the status: no page needed
@@ -719,6 +757,27 @@ async def _memory_loop(app: App, is_idle, *, tick_s: float = _MEMORY_TICK_S) -> 
 _VOICE_RETRY_S = 60.0
 _LIVE_RETRY_S = {"quota": 3600.0, "network": 180.0, "other": 600.0}
 _MACOS_SYSTEM_VOICE = "com.apple.voice.Aman.premium"  # natural masculine Siri voice, stays on-device
+_say_voice: list[str] | None = None  # `say`'s -v arguments, once looked up
+
+
+def _installed_voices() -> set[str]:
+    """The identifiers of the voices macOS can speak with here (AppKit's list; nothing spoken)."""
+    try:
+        import AppKit
+
+        return {str(v) for v in AppKit.NSSpeechSynthesizer.availableVoices() or ()}
+    except Exception:  # noqa: BLE001 — not on a Mac, or AppKit isn't there: macOS's own default then
+        return set()
+
+
+def _say_args() -> list[str]:
+    """`say`'s voice: the premium Siri voice when this Mac has it (it is an optional download in
+    System Settings, so a new Mac usually doesn't), else none named — the user's own system voice,
+    which every Mac has. Looked up once."""
+    global _say_voice
+    if _say_voice is None:
+        _say_voice = ["-v", _MACOS_SYSTEM_VOICE] if _MACOS_SYSTEM_VOICE in _installed_voices() else []
+    return _say_voice
 
 
 def _say_aloud(text: str) -> None:
@@ -727,7 +786,7 @@ def _say_aloud(text: str) -> None:
 
     try:
         subprocess.Popen(
-            ["say", "-v", _MACOS_SYSTEM_VOICE, text],
+            ["say", *_say_args(), text],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
@@ -741,7 +800,7 @@ def _say_aloud_wait(text: str) -> None:
 
     try:
         subprocess.run(
-            ["say", "-v", _MACOS_SYSTEM_VOICE, text],
+            ["say", *_say_args(), text],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             timeout=30,
@@ -755,9 +814,9 @@ async def _voice_supervisor(app: App, stop: asyncio.Event) -> None:
     """Bring voice up, and keep it up: retry if it can't start, and when Gemini Live keeps
     failing (quota used up, network down) say so and switch to the on-device voice until Live
     works again."""
-    from neo2.core import health
+    from neo2.core import brains, health
     from neo2.core.voice import devices
-    from neo2.core.voice.pipeline import local_ready, make_local, make_voice
+    from neo2.core.voice.pipeline import VoiceNotSetUp, local_ready, make_local, make_voice
 
     if devices.mic_status() in (devices.DENIED, devices.RESTRICTED):
         print("[voice] microphone access is off for NEO")
@@ -766,15 +825,37 @@ async def _voice_supervisor(app: App, stop: asyncio.Event) -> None:
     async def on_down(kind: str, why: str) -> None:
         await down.put((kind, why))
 
+    async def until_kicked() -> None:
+        """The next try: in a minute, or as soon as something a voice needs arrived (kick_voice)."""
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(app.voice_kick.wait(), _VOICE_RETRY_S)
+        app.voice_kick.clear()
+
+    said = ""  # what the last try said (each reason is printed once, not every minute)
+    tried = False  # a try failed: the voice that comes up later is started with today's settings
     while not stop.is_set():
         if app.voice is None:
+            app.voice_kick.clear()
             try:
                 app.voice = await make_voice(app.handle_text, app.session, on_speech=app.handle_speech)
                 health.report("voice", None)
+                if tried:  # (a key that arrived meanwhile: the running voice uses it, no restart)
+                    brains.started(settings())
+                    asyncio.create_task(brains.publish())
+            except VoiceNotSetUp as e:
+                tried = True
+                if str(e) != said:
+                    said = str(e)
+                    print(f"[voice] no voice yet: {e} (Brains & Keys has both)")
+                health.report("voice", e.problem)
+                await until_kicked()
+                continue
             except Exception as e:  # noqa: BLE001
+                tried = True
+                said = ""
                 print(f"[voice] unavailable: {str(e)[:160]}")
                 health.report("voice", f"Voice is off ({str(e)[:80]}). You can type; NEO keeps trying.")
-                await asyncio.sleep(_VOICE_RETRY_S)
+                await until_kicked()
                 continue
             if hasattr(app.voice, "on_down"):
                 app.voice.on_down = on_down

@@ -135,6 +135,11 @@ fn from_core(app: &AppHandle, msg: core::FromCore) {
             let handle = app.clone();
             let _ = app.run_on_main_thread(move || act(&handle, &action, on));
         }
+        core::FromCore::Permission { what, status } => {
+            // Setup's checklist row for it follows (the core asked macOS, or said what it says).
+            core::log(&format!("the core says: {what} {status}"));
+            let _ = app.emit("permission_status", serde_json::json!({"what": what, "status": status}));
+        }
         core::FromCore::Gone => set_host_attached(app, None), // no core to say whether the host is there
     }
 }

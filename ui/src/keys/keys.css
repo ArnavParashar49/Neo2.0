@@ -174,3 +174,7 @@ html[data-surface="keys"], html[data-surface="keys"] body, html[data-surface="ke
   .kx-spend-t { width: auto; flex: 1; }
 }
 @media (prefers-reduced-motion: reduce) { .kx * { transition: none !important; } }
+
+/* The on-device voice's download */
+.kx-progress { width: 100%; height: 6px; accent-color: var(--solid-bg); }
+.kx-dim.kx-bad { color: var(--bad); }

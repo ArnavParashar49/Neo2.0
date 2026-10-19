@@ -128,7 +128,8 @@ def test_the_summary_carries_labels_and_booleans_never_a_key(monkeypatch):
     assert got["voice"] == "live" and got["restart_needed"] is False
     text = json.dumps(got)
     assert ANTHROPIC not in text and GEMINI not in text and ANTHROPIC[-4:] not in text and GEMINI[-4:] not in text
-    assert sorted(got) == ["brain", "eyes", "providers", "quick", "ready", "restart_needed", "voice"]
+    assert sorted(got) == ["brain", "eyes", "local_voice", "providers", "quick", "ready", "restart_needed", "voice"]
+    assert got["local_voice"]["state"] == "missing"  # (downloaded only when the user asks: neo2.core.fetch)
     del s
 
 

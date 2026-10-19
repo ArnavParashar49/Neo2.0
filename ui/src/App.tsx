@@ -21,7 +21,8 @@ import { CAMERA_POPIN_EVENT, closeCameraWindow, openCameraWindow, showCameraWind
 import { useSongShape } from "./song/hub";
 import { SongItem, noteIcon } from "./song/SongCard";
 import { Onboarding } from "./Onboarding";
-import { isNoModelProblem, needsBrain } from "./onboard";
+import { isNoModelProblem, isVoiceSetupProblem, needsBrain } from "./onboard";
+import { offerOnCard } from "./keys/localvoice";
 import { KEY_TYPED, looksLikeKey } from "./keys/keyshape";
 import "./App.css";
 import "./browser/browser.css";
@@ -916,8 +917,8 @@ export default function App() {
             {layout === "chat" && camLive && csnap.popped && <CameraPoppedRow hub={cam} live={camLive} stopping={csnap.stopping} onShow={() => void showCameraWindow()} onBringBack={camBringBack} />}
             {layout === "chat" && live && bmode === "mini" && <MiniRow hub={hub} snap={live} onExpand={toggleMini} onStop={() => void hub.control("stop").then((r) => r.ok && hub.toast("Stopped. You're in control.", 2500))} />}
             {layout === "chat" && live && bmode === "popped" && <PoppedRow hub={hub} snap={live} onShow={showWindow} onBringBack={bringBack} />}
-            {neo.connected && !showStrip && neo.problems.filter((p) => !(noBrain && isNoModelProblem(p))).map((p) => <div key={p} className="msg system problem" role="alert">{p}</div>)}
-            {noBrain && !showStrip && !live && visibleItems.length === 0 && <Onboarding send={neo.send} openKeys={neo.openKeys} setup={neo.setup} />}
+            {neo.connected && !showStrip && neo.problems.filter((p) => !(noBrain && isNoModelProblem(p))).filter((p) => !(noBrain && offerOnCard(neo.brains) && isVoiceSetupProblem(p))).map((p) => <div key={p} className="msg system problem" role="alert">{p}</div>)}
+            {noBrain && !showStrip && !live && visibleItems.length === 0 && <Onboarding send={neo.send} openKeys={neo.openKeys} setup={neo.setup} brains={neo.brains} />}
             {!noBrain && visibleItems.length === 0 && !showStrip && !live && (
               <div className="empty">
                 <div className="empty-hint">Say <b>“Neo”</b>, or try one of these</div>
@@ -927,7 +928,7 @@ export default function App() {
               </div>
             )}
             {neo.items.map((it, idx) => renderItem(it, idx, showStrip))}
-            {noBrain && !showStrip && !live && visibleItems.length > 0 && <Onboarding tail send={neo.send} openKeys={neo.openKeys} setup={neo.setup} />}
+            {noBrain && !showStrip && !live && visibleItems.length > 0 && <Onboarding tail send={neo.send} openKeys={neo.openKeys} setup={neo.setup} brains={neo.brains} />}
             {keyGuard && !showStrip && (
               <div className="msg system keyguard" role="status">
                 {KEY_TYPED}{" "}

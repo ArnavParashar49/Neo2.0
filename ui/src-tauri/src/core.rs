@@ -12,6 +12,8 @@
 //! what the menu shows, whether a host is there and where the UI lives all go this way — none of
 //! it through the window's page: macOS suspends the process of a page whose window is hidden
 //! (runningboardd: "Suspending task", seconds after), and in the notch that window always is.
+//! So do Setup's microphone and camera rows: the core uses them, so the core asks macOS
+//! (`Core::permission`), and says what macOS answered (`FromCore::Permission`).
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
@@ -41,6 +43,9 @@ const CORE_ARGS: [&str; 3] = ["-u", "-m", "neo2"];
 const LINK_ENV: &str = "NEO_APP_FD";
 /// Longer than anything the core says here (a line is under a hundred bytes): dropped.
 const LINK_MAX_LINE: usize = 4096;
+/// What the shell may ask the core about (`permission`), and the words the core answers with.
+pub const PERMISSION_WHATS: [&str; 2] = ["microphone", "camera"];
+const PERMISSION_STATUSES: [&str; 5] = ["granted", "denied", "restricted", "not_determined", "unknown"];
 /// The supervisor's status while a core started some other way (a developer's `python -m neo2`) is the
 /// one on the port: this app has no socket to it (Brains & Keys then shows the terminal commands).
 pub const OUTSIDE: &str = "using a core started outside the app";
@@ -78,6 +83,9 @@ pub enum FromCore {
     UiHost { notch: bool },
     /// A host asked for one of the menu's actions (the core checked who asked).
     Shell { action: String, on: Option<bool> },
+    /// What macOS says of the microphone or the camera (granted | denied | restricted |
+    /// not_determined | unknown): the answer to `Core::permission`.
+    Permission { what: String, status: String },
     /// The core at the other end is gone.
     Gone,
 }
@@ -97,8 +105,25 @@ fn parse_from_core(line: &str) -> Option<FromCore> {
             action: v.get("action")?.as_str()?.to_string(),
             on: v.get("on").and_then(|on| on.as_bool()),
         }),
+        "permission" => {
+            let what = v.get("what")?.as_str()?;
+            let status = v.get("status")?.as_str()?;
+            if !PERMISSION_WHATS.contains(&what) || !PERMISSION_STATUSES.contains(&status) {
+                return None;
+            }
+            Some(FromCore::Permission { what: what.to_string(), status: status.to_string() })
+        }
         _ => None,
     }
+}
+
+/// The line that asks the core about the microphone or the camera: what macOS says now, or (`ask`)
+/// its prompt. None for anything else — the core is asked about nothing but those two.
+fn permission_line(what: &str, ask: bool) -> Option<serde_json::Value> {
+    if !PERMISSION_WHATS.contains(&what) {
+        return None;
+    }
+    Some(serde_json::json!({"t": "permission", "what": what, "op": if ask { "ask" } else { "status" }}))
 }
 
 /// The next line of the core's (without its newline), `Some(None)` for one too long to be a
@@ -500,6 +525,14 @@ impl Core {
         stream.write_all(line.as_bytes()).is_ok()
     }
 
+    /// Ask the core about the microphone or the camera (Setup's checklist): what macOS says, or — `ask`
+    /// — macOS's prompt, credited to this app. The answer comes back as `FromCore::Permission`. False
+    /// when `what` is neither, or no core of this app's is listening.
+    #[allow(dead_code)] // (Setup's window asks through it)
+    pub fn permission(&self, what: &str, ask: bool) -> bool {
+        permission_line(what, ask).is_some_and(|line| self.tell(&line))
+    }
+
     /// Start the core (or use one that is already running) and supervise it.
     pub fn start(&self) {
         if self.supervising.swap(true, Ordering::SeqCst) {
@@ -837,8 +870,19 @@ mod tests {
             p(r#"{"t":"shell","action":"open_at_login","on":false}"#),
             Some(FromCore::Shell { action: "open_at_login".into(), on: Some(false) })
         );
+        assert_eq!(
+            p(r#"{"t":"permission","what":"microphone","status":"granted"}"#),
+            Some(FromCore::Permission { what: "microphone".into(), status: "granted".into() })
+        );
+        assert_eq!(
+            p(r#"{"t":"permission","what":"camera","status":"not_determined"}"#),
+            Some(FromCore::Permission { what: "camera".into(), status: "not_determined".into() })
+        );
         // Anything else is not a message: no guesses about where the UI lives or who is there.
         for bad in [
+            r#"{"t":"permission","what":"screen","status":"granted"}"#,
+            r#"{"t":"permission","what":"camera","status":"yes"}"#,
+            r#"{"t":"permission","what":"camera"}"#,
             "",
             "quit",
             "[]",
@@ -853,6 +897,18 @@ mod tests {
         ] {
             assert_eq!(p(bad), None, "{bad}");
         }
+    }
+
+    #[test]
+    fn the_core_is_asked_about_the_microphone_and_the_camera_only() {
+        assert_eq!(
+            permission_line("microphone", false),
+            Some(serde_json::json!({"t": "permission", "what": "microphone", "op": "status"}))
+        );
+        assert_eq!(permission_line("camera", true), Some(serde_json::json!({"t": "permission", "what": "camera", "op": "ask"})));
+        assert_eq!(permission_line("accessibility", true), None); // the app's own to ask (perms.rs)
+        assert_eq!(permission_line("", false), None);
+        assert!(!Core::default().permission("microphone", true)); // no core listening: nothing is sent
     }
 
     #[test]

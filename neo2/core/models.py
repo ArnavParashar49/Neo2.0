@@ -87,6 +87,56 @@ def _snapshot(repo: str, rev: str, ok: Callable[[str], bool], **kw: Any) -> str:
         raise
 
 
+def laya_patterns(encoder: str = "english") -> list[str]:
+    """The files of one Laya checkpoint in the pinned repo (what :func:`laya_dir` fetches)."""
+    sub = LAYA_SUBFOLDERS[encoder]
+    return [f"{sub}/{f}" if sub else f for f in LAYA_FILES]
+
+
+def _cached(repo: str, rev: str | None, ok: Callable[[str], bool], **kw: Any) -> str | None:
+    """`repo`'s snapshot folder when the cache alone already holds what its loader reads (`ok`) —
+    the folder :func:`_snapshot` would load from with no network — else None. Never the network."""
+    from huggingface_hub import snapshot_download
+
+    try:
+        root = snapshot_download(repo, revision=rev, local_files_only=True, **kw)
+    except Exception as e:  # noqa: BLE001 — not in the cache, or not all of the repo (still fine if `ok`)
+        root = getattr(e, "snapshot_path", None)
+    return root if root and ok(root) else None
+
+
+def laya_here(encoder: str = "english") -> bool:
+    """One Laya checkpoint is on this Mac, whole: :func:`laya_dir` needs no network for it."""
+    sub = LAYA_SUBFOLDERS[encoder]
+
+    def whole(root: str) -> bool:
+        return not _laya_missing(os.path.join(root, sub) if sub else root)
+
+    return _cached(LAYA, LAYA_REVISION, whole, allow_patterns=laya_patterns(encoder)) is not None
+
+
+def _loadable(root: str) -> bool:
+    """A model folder its loader can open as it is: whole (:func:`_whole`), with its config and its
+    weights. (The hub writes a file under a temporary name and renames it once complete, so a
+    weights file that is there is all there.)"""
+    if not _whole(root) or not os.path.isfile(os.path.join(root, "config.json")):
+        return False
+    try:
+        names = os.listdir(root)
+    except OSError:
+        return False
+    return any(n.endswith(".safetensors") and os.path.isfile(os.path.join(root, n)) for n in names)
+
+
+def here(repo: str, **kw: Any) -> bool:
+    """A model (a repo at its pinned revision, a repo the user chose, or a folder) is on this Mac fit
+    to load with no network: its config and its weights. Never downloads — the question the voice
+    asks before it would start a 2.6 GB download (neo2.core.voice.pipeline.local_ready)."""
+    if os.path.isdir(repo):
+        return _loadable(repo)
+    return _cached(repo, revision(repo), _loadable, **kw) is not None
+
+
 def laya_dir(encoder: str = "english") -> str:
     """One Laya checkpoint at the pinned revision (downloaded once; afterwards from the cache): only
     its own files, so the multilingual reflex never pulls the 1.7 GB English weights. The cache is
@@ -96,7 +146,7 @@ def laya_dir(encoder: str = "english") -> str:
     snapshot_download hands back the cached revision's folder even when this checkpoint was never
     fetched into it, and laya.load would then fail somewhere less clear."""
     sub = LAYA_SUBFOLDERS[encoder]
-    patterns = [f"{sub}/{f}" if sub else f for f in LAYA_FILES]
+    patterns = laya_patterns(encoder)
 
     def checkpoint(root: str) -> str:
         return os.path.join(root, sub) if sub else root
