@@ -9,6 +9,7 @@ import { isCameraFrame } from "./camera/frames";
 import { SongHub } from "./song/hub";
 import type { BrainsSummary, SetupNeeded } from "./keys/types";
 import { withLocalVoice } from "./keys/localvoice";
+import { CORE_WS } from "./port.ts";
 
 export type NeoState =
   | "idle" | "listening" | "thinking" | "working" | "searching" | "speaking" | "connecting" | "confirming";
@@ -43,7 +44,7 @@ export type ConfirmScope = "task";
 // and scratch token), so a dev tab never talks to the NEO the user is running. Release builds use NEO.app's.
 const DEV_URL = import.meta.env.DEV ? (import.meta.env.VITE_NEO_WS_URL as string | undefined) : undefined;
 const DEV_TOKEN = import.meta.env.DEV ? (import.meta.env.VITE_NEO_WS_TOKEN as string | undefined) : undefined;
-const URL = DEV_URL || "ws://127.0.0.1:8765";
+const URL = DEV_URL || CORE_WS;
 let nextId = 1;
 const MOCK_KIND = import.meta.env.DEV ? new URLSearchParams(location.search).get("mock") : null;
 /** `?mock=browser` (dev builds only): a scripted in-page core instead of the real socket. */

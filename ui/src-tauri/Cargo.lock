@@ -2180,6 +2180,7 @@ dependencies = [
  "objc2",
  "serde",
  "serde_json",
+ "sha2",
  "tauri",
  "tauri-build",
  "tauri-plugin-global-shortcut",

@@ -9,8 +9,15 @@ edition = "2021"
 name = "neo_ui_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[features]
+# NEO Sandbox: a test build beside the real NEO (its own home, port 18765, bundle id
+# com.arnav.neo.sandbox). Only with tauri.sandbox.conf.json — build.rs refuses a release build
+# otherwise. scripts/sandbox_build.sh builds it.
+sandbox = []
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+serde_json = "1"
 
 [dependencies]
 tauri = { version = "2", features = ["tray-icon", "macos-private-api", "image-png"] }
@@ -19,6 +26,7 @@ tauri-plugin-global-shortcut = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 libc = "0.2"
+sha2 = "0.10"  # the engine's SHA-256 (setup.rs); already in the lock through tauri
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-graphics = "0.25"

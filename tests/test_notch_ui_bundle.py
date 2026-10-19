@@ -10,12 +10,21 @@ UI = Path(__file__).resolve().parents[1] / "ui"
 SRC = UI / "src"
 
 # The only modules that may import Tauri: the shim, the window's own frame code, the pop-out
-# windows and Brains & Keys (which exist only inside NEO.app — the notch has none; the keys window
-# loads Tauri lazily, only on its own route).
+# windows, Brains & Keys and NEO Setup (which exist only inside NEO.app — the notch has none; the
+# keys and setup windows load Tauri lazily, only on their own routes).
 TAURI_ALLOWED = {
     "shell.ts", "win.ts", "browser/popout.ts", "camera/popout.ts", "browser/PopoutApp.tsx", "camera/CameraPopoutApp.tsx",
-    "keys/wire.ts", "keys/KeysApp.tsx",
+    "keys/wire.ts", "keys/KeysApp.tsx", "setup/wire.ts", "setup/SetupApp.tsx",
 }  # fmt: skip
+
+
+def test_setup_loads_tauri_lazily():
+    for name in ("setup/wire.ts", "setup/SetupApp.tsx"):
+        src = (SRC / name).read_text()
+        assert not re.search(r'^import .* from "@tauri-apps', src, re.M), name
+        for line in src.splitlines():
+            if "@tauri-apps" in line and not line.strip().startswith("//"):
+                assert "await import(" in line or "import(\"@tauri-apps" in line, line
 
 
 def _sources():
@@ -95,12 +104,20 @@ def test_no_page_speaks_for_neo_apps_shell():
     lib = (UI / "src-tauri" / "src" / "lib.rs").read_text()
     handlers = lib.split("tauri::generate_handler![")[1].split("]")[0]
     names = {h.strip().split("::")[-1] for h in handlers.split(",") if h.strip()}
-    assert names == {"hide_window", "ws_token", "ui_host_changed", "set_frame", "clipboard_write", "show_quiet", "keys_ticket", "edit_env_file"}
+    setup_cmds = {h.strip().split("::")[-1] for h in handlers.split(",") if h.strip().startswith("setupwin::")}
+    assert names - setup_cmds == {"hide_window", "ws_token", "ui_host_changed", "set_frame", "clipboard_write", "show_quiet", "keys_ticket", "edit_env_file"}
     # (Brains & Keys' two answer only the window the shell itself created, at #/keys: keys.rs)
     keys = (UI / "src-tauri" / "src" / "keys.rs").read_text()
     for cmd in ("keys_ticket", "edit_env_file"):
         body = keys.split(f"pub fn {cmd}(")[1].split("\n}\n")[0]
         assert "may_get_ticket(window.label(), ours(&app)" in body.split("\n")[2], cmd
+    # (and NEO Setup's, only the Setup window it created, at #/setup: setupwin.rs — none of them a
+    # menu action, a host's or the page's way to the menu)
+    setupwin = (UI / "src-tauri" / "src" / "setupwin.rs").read_text()
+    assert setup_cmds and all(c.startswith("setup_") for c in setup_cmds)
+    for cmd in setup_cmds:
+        body = setupwin.split(f"#[tauri::command]\npub fn {cmd}(")[1].split("\n}\n")[0]
+        assert body.split("\n")[1].strip() == "allowed(&app, &window)?;", cmd
     for gone in ("fn shell_action", "fn shell_status", "fn host_attached", "neo://shell-status"):
         assert gone not in lib, gone
     # …and in the notch the summon keys go to the core, not to the hidden page.

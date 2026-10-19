@@ -23,6 +23,13 @@
 //! "Brains & Keys…" (the menu's, and a host's or the core's "settings") opens NEO's own window
 //! for picking brains and pasting keys (keys.rs). The shell creates it, mints its ticket and hands
 //! that to the core; it never sees a key. "Edit settings file…" still opens ~/.neo/.env.
+//!
+//! On a new Mac the first launch is NEO Setup's (setupwin.rs, setup.rs): from a disk image or a
+//! translocated copy only the "move NEO to Applications" page opens — no core, no login item, no
+//! prompts. Otherwise, with no engine to run, Setup installs one; until it is done (its checklist
+//! closed) NEO asks macOS for nothing at launch and writes no login item. The menu has Setup
+//! checklist…, Repair NEO's engine…, Check for updates… (update.rs) and Uninstall NEO…
+//! (uninstall.rs).
 
 mod chord;
 mod core;
@@ -32,6 +39,10 @@ mod keys;
 #[cfg(target_os = "macos")]
 mod native;
 mod perms;
+mod setup;
+mod setupwin;
+mod uninstall;
+mod update;
 
 use tauri::image::Image;
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
@@ -123,6 +134,7 @@ fn from_core(app: &AppHandle, msg: core::FromCore) {
             set_host_attached(app, Some(host_attached));
             tell_status(app, true); // a new core knows nothing of the menu yet
             keys::core_said_hello(app); // …nor of an open Brains & Keys window's ticket
+            setupwin::core_said_hello(app); // (an engine an update replaced can go now)
         }
         core::FromCore::HostAttached(attached) => set_host_attached(app, Some(attached)),
         core::FromCore::UiHost { notch } => set_ui_host(app, notch),
@@ -138,6 +150,7 @@ fn from_core(app: &AppHandle, msg: core::FromCore) {
         core::FromCore::Permission { what, status } => {
             // Setup's checklist row for it follows (the core asked macOS, or said what it says).
             core::log(&format!("the core says: {what} {status}"));
+            setupwin::permission_said(app, &what, &status);
             let _ = app.emit("permission_status", serde_json::json!({"what": what, "status": status}));
         }
         core::FromCore::Gone => set_host_attached(app, None), // no core to say whether the host is there
@@ -148,6 +161,8 @@ fn from_core(app: &AppHandle, msg: core::FromCore) {
 struct Tray {
     visible: AtomicBool,
     login: Mutex<Option<CheckMenuItem<Wry>>>,
+    /// "Check for updates…", or "Update to NEO X…" once a newer one is known (update.rs).
+    updates: Mutex<Option<MenuItem<Wry>>>,
     /// ⌥⌘ works (it needs Accessibility); until then ⌘⇧Space is the way in.
     chord: AtomicBool,
     /// What the core was last told the menu shows (`tell_status`).
@@ -224,15 +239,35 @@ fn act(app: &AppHandle, action: &str, on: Option<bool>) {
             let on = on.unwrap_or_else(|| !core::launch_at_login());
             let _ = core::set_launch_at_login(on);
             core::remember_login_choice();
-            if let Ok(item) = app.state::<Tray>().login.lock() {
-                if let Some(item) = item.as_ref() {
-                    let _ = item.set_checked(core::launch_at_login());
-                }
-            }
-            tell_status(app, false); // the host's switch follows
+            login_item_changed(app);
         }
+        // NEO Setup's pages (setupwin.rs): the menu's only — a host has none of them.
+        "setup_checklist" | "repair_engine" | "updates" | "uninstall" => setupwin::from_menu(app, action),
         _ => {}
     }
+}
+
+/// The login item changed (the menu, a host, Setup's tickbox): the menu's tick and the host follow.
+pub fn login_item_changed(app: &AppHandle) {
+    if let Ok(item) = app.state::<Tray>().login.lock() {
+        if let Some(item) = item.as_ref() {
+            let _ = item.set_checked(core::launch_at_login());
+        }
+    }
+    tell_status(app, false); // the host's switch follows
+}
+
+/// What the update check found (None: nothing to offer): the menu's item says it.
+pub fn update_offer(app: &AppHandle, version: Option<String>) {
+    let item = app.state::<Tray>().updates.lock().ok().and_then(|i| i.clone());
+    let Some(item) = item else { return };
+    let text = match &version {
+        Some(v) => format!("Update to NEO {v}…"),
+        None => "Check for updates…".to_string(),
+    };
+    let _ = app.run_on_main_thread(move || {
+        let _ = item.set_text(text);
+    });
 }
 
 /// What a host may ask for (the core checks who is asking; see neo2/core/server/ws.py).
@@ -326,35 +361,89 @@ pub fn run() {
             native::clipboard_write,
             native::show_quiet,
             keys::keys_ticket,
-            keys::edit_env_file
+            keys::edit_env_file,
+            setupwin::setup_state,
+            setupwin::setup_start,
+            setupwin::setup_retry,
+            setupwin::setup_cancel,
+            setupwin::setup_use_file,
+            setupwin::setup_check,
+            setupwin::setup_optional,
+            setupwin::setup_models,
+            setupwin::setup_login,
+            setupwin::setup_permission,
+            setupwin::setup_open,
+            setupwin::setup_done,
+            setupwin::setup_quit,
+            setupwin::setup_update,
+            setupwin::setup_uninstall
         ])
-        // A Brains & Keys window the shell didn't create is closed as its page loads.
-        .on_page_load(|webview, _| keys::page_loaded(webview))
+        // A Brains & Keys or Setup window the shell didn't create is closed as its page loads.
+        .on_page_load(|webview, _| {
+            keys::page_loaded(webview);
+            setupwin::page_loaded(webview);
+        })
         .manage(keys::Keys::default())
+        .manage(setupwin::Setup::default())
         .manage(core::Core::default())
         .manage(UiHost(Mutex::new(core::ui_host_is_notch())))
         .manage(HostAttached(Mutex::new((None, Instant::now()))))
-        .manage(Tray { visible: AtomicBool::new(true), login: Mutex::new(None), chord: AtomicBool::new(false), told: Mutex::new(None) })
+        .manage(Tray {
+            visible: AtomicBool::new(true),
+            login: Mutex::new(None),
+            updates: Mutex::new(None),
+            chord: AtomicBool::new(false),
+            told: Mutex::new(None),
+        })
         .setup(|app| {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
-            // NEO's UI is in the notch (NotchHub): this window never shows.
-            if in_notch(app.handle()) {
+            // A sandbox build is NEO Sandbox, and only it is (build.rs checks the config too).
+            if app.config().identifier != core::BUNDLE_ID {
+                core::log(&format!("this build's identifier {} doesn't match its kind: quitting", app.config().identifier));
+                std::process::exit(1);
+            }
+
+            // From the disk image, or a translocated copy: only "move NEO to Applications".
+            if let Some(view) = setupwin::blocked_at_launch() {
+                core::log(&format!("not starting: {view:?} (running from {:?})", core::bundle_path()));
+                if let Some(w) = app.get_webview_window("main") {
+                    let _ = w.hide();
+                }
+                setupwin::open(app.handle(), view);
+                return Ok(());
+            }
+
+            // What an earlier setup left, NotchHub's page, and which engine this launch runs.
+            let decision = setupwin::prepare_launch();
+            let setup_done = decision == setup::Decision::Dev || setupwin::done();
+
+            // NEO's UI is in the notch (NotchHub): this window never shows. Nor while there is no
+            // core behind it (Setup shows it once the engine is in).
+            if in_notch(app.handle()) || decision.needs_setup() {
                 if let Some(w) = app.get_webview_window("main") {
                     let _ = w.hide();
                 }
             }
 
             // The brain: start NEO's Python core (or use one that's already running). What it
-            // says to the shell (a host's menu action, where the UI lives) is heard here.
+            // says to the shell (a host's menu action, where the UI lives) is heard here, and a
+            // launch with no engine opens Setup.
             let listener = app.handle().clone();
             app.state::<core::Core>().listen(move |msg| from_core(&listener, msg));
+            let setup_listener = app.handle().clone();
+            app.state::<core::Core>().on_setup(move |d| setupwin::needs(&setup_listener, d));
             app.state::<core::Core>().start();
-            core::sync_launch_at_login();
-            // Accessibility + Screen Recording belong to NEO.app: ask once per version, then the
-            // menu shows what's missing.
-            perms::ask_once(&app.package_info().version.to_string());
+            if setup_done {
+                core::sync_launch_at_login();
+                // Accessibility + Screen Recording belong to NEO.app: ask once per version, then
+                // the menu shows what's missing. (Before setup is done its checklist asks.)
+                perms::ask_once(&app.package_info().version.to_string());
+            } else if !decision.needs_setup() {
+                // The engine is in but the checklist was never finished: it opens again.
+                setupwin::open_checklist(app.handle());
+            }
             let ax_item = MenuItem::with_id(app, "allow_ax", "Allow Accessibility…", !perms::accessibility(), None::<&str>)?;
             let sc_item = MenuItem::with_id(app, "allow_sc", "Allow Screen Recording…", !perms::screen_recording(), None::<&str>)?;
 
@@ -392,17 +481,27 @@ pub fn run() {
             let logs_item = MenuItem::with_id(app, "open_logs", "Open Logs", true, None::<&str>)?;
             let login_item =
                 CheckMenuItem::with_id(app, "open_at_login", "Open at Login", true, core::launch_at_login(), None::<&str>)?;
+            let checklist_item = MenuItem::with_id(app, "setup_checklist", "Setup checklist…", true, None::<&str>)?;
+            let repair_item = MenuItem::with_id(app, "repair_engine", "Repair NEO's engine…", true, None::<&str>)?;
+            let updates_item = MenuItem::with_id(app, "updates", "Check for updates…", true, None::<&str>)?;
+            let uninstall_item = MenuItem::with_id(app, "uninstall", "Uninstall NEO…", true, None::<&str>)?;
             let quit_item = MenuItem::with_id(app, "quit", "Quit NEO", true, None::<&str>)?;
             let sep = PredefinedMenuItem::separator(app)?;
             let sep2 = PredefinedMenuItem::separator(app)?;
+            let sep3 = PredefinedMenuItem::separator(app)?;
             let menu = Menu::with_items(
                 app,
                 &[
                     &status_item, &ax_item, &sc_item, &show_item, &sep, &keys_item, &env_item, &restart_item,
-                    &logs_item, &erase_item, &login_item, &sep2, &quit_item,
+                    &logs_item, &erase_item, &login_item, &sep2, &checklist_item, &repair_item, &updates_item,
+                    &uninstall_item, &sep3, &quit_item,
                 ],
             )?;
             *app.state::<Tray>().login.lock().unwrap() = Some(login_item.clone());
+            *app.state::<Tray>().updates.lock().unwrap() = Some(updates_item.clone());
+            // Is there a newer NEO? Daily, installing nothing (update.rs).
+            let update_handle = app.handle().clone();
+            update::start(app.package_info().version.to_string(), move |v| update_offer(&update_handle, v));
             TrayIconBuilder::with_id("neo")
                 .icon(Image::from_bytes(include_bytes!("../icons/tray.png"))?)
                 .icon_as_template(true)
@@ -429,6 +528,7 @@ pub fn run() {
                     let (ax, sc) = (perms::accessibility(), perms::screen_recording());
                     tell_status(&handle, false); // the host shows the same things: the core hears when one changed
                     sync_tray(&handle); // a host that went away: the item comes back
+                    setupwin::tick(&handle); // Setup's checklist shows the permissions live
                     let core_status = core.status.lock().unwrap().clone();
                     let now = match (ax, sc) {
                         (false, _) => format!("{core_status} — needs Accessibility"),
@@ -466,6 +566,7 @@ pub fn run() {
     app.set_activation_policy(tauri::ActivationPolicy::Accessory);
     app.run(|app, event| {
             if let RunEvent::Exit = event {
+                setupwin::stop_all(app); // Setup's downloads too
                 app.state::<core::Core>().stop(); // the core leaves with the app
             }
         });

@@ -1,0 +1,17 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "setup-window",
+  "description": "NEO Setup: hears its progress, shows and focuses itself, closes, is dragged; no other powers (its commands are label-checked in setupwin.rs, and every link it opens is the shell's own)",
+  "windows": [
+    "setup"
+  ],
+  "permissions": [
+    "core:default",
+    "core:event:default",
+    "core:window:allow-show",
+    "core:window:allow-set-focus",
+    "core:window:allow-close",
+    "core:window:allow-destroy",
+    "core:window:allow-start-dragging"
+  ]
+}

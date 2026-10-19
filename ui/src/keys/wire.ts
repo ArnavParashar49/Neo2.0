@@ -9,6 +9,7 @@
 // The connection's URL carries the ticket: it is never logged.
 
 import type { BrainsSummary, LocalVoice, Result } from "./types.ts";
+import { CORE_WS } from "../port.ts";
 
 export interface SocketLike {
   readyState: number;
@@ -84,7 +85,7 @@ export class KeysWire {
   constructor(deps: WireDeps) {
     this.deps = {
       ...deps,
-      url: deps.url ?? "ws://127.0.0.1:8765",
+      url: deps.url ?? CORE_WS,
       later: deps.later ?? ((fn, ms) => setTimeout(fn, ms)),
       cancel: deps.cancel ?? ((h) => clearTimeout(h as ReturnType<typeof setTimeout>)),
     };

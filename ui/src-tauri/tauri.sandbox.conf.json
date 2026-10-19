@@ -1,0 +1,21 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "NEO Sandbox",
+  "identifier": "com.arnav.neo.sandbox",
+  "build": {
+    "beforeBuildCommand": "npm run build:sandbox",
+    "frontendDist": "../dist-sandbox"
+  },
+  "app": {
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost ws://127.0.0.1:18765"
+    }
+  },
+  "bundle": {
+    "resources": {
+      "resources-sandbox/engine/": "engine/",
+      "../dist-sandbox/": "ui/",
+      "resources-sandbox/Licenses/": "Licenses/"
+    }
+  }
+}

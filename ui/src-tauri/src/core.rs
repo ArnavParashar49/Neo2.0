@@ -14,6 +14,17 @@
 //! (runningboardd: "Suspending task", seconds after), and in the notch that window always is.
 //! So do Setup's microphone and camera rows: the core uses them, so the core asks macOS
 //! (`Core::permission`), and says what macOS answered (`FromCore::Permission`).
+//!
+//! Which Python runs the core is setup.rs's `decide`: the release engine NEO's Setup installed
+//! (`engines/<id>/bin/python3 -I -u -m neo2`), or scripts/install-app.sh's developer engine
+//! (`.venv/bin/python -u -m neo2`, exactly as before 2.2). With neither, the supervisor says "not set
+//! up — open NEO Setup" and waits for Setup to say the engine is in (`Core::restart`) instead of
+//! looking again every ten minutes.
+//!
+//! A `sandbox` build (NEO Sandbox, com.arnav.neo.sandbox: scripts/sandbox_build.sh) runs beside the
+//! real NEO without touching it: its home is the `home` folder next to the app (its own ~/.neo,
+//! Application Support, LaunchAgents and caches — and the core's HOME), and its core listens on
+//! 18765 (`NEO_WS_PORT`). A release build can't be one (build.rs, and `lib::run` checks the bundle id).
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
@@ -28,7 +39,11 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-const PORT: u16 = 8765;
+/// A test build that runs beside the real NEO (see the module's doc).
+pub const SANDBOX: bool = cfg!(feature = "sandbox");
+/// This build's bundle id: the LaunchAgent's label, what Uninstall resets.
+pub const BUNDLE_ID: &str = if SANDBOX { "com.arnav.neo.sandbox" } else { "com.arnav.neo" };
+const PORT: u16 = if SANDBOX { 18765 } else { 8765 };
 const MAX_RESTARTS: usize = 5; // within RESTART_WINDOW, then give up (a crash loop helps nobody)
 const RESTART_WINDOW: Duration = Duration::from_secs(300);
 const LOG_ROTATE_BYTES: u64 = 10 * 1024 * 1024;
@@ -36,8 +51,18 @@ const GRACE: Duration = Duration::from_secs(12); // the core saves its session s
 const STARTUP_GRACE: Duration = Duration::from_secs(120); // loading models can take this long
 const UNRESPONSIVE: Duration = Duration::from_secs(60); // websocket gone this long → hung
 const RETRY_AFTER_GIVING_UP: Duration = Duration::from_secs(600);
-/// How the core is started: `python -u -m neo2` (NEO's package was `neo` before 2.1).
+/// How the core is started from a developer engine: `python -u -m neo2` (NEO's package was `neo`
+/// before 2.1).
 const CORE_ARGS: [&str; 3] = ["-u", "-m", "neo2"];
+/// …and from a release engine: isolated (`-I`: no PYTHON* variables, no ~/.local site-packages,
+/// nothing from the current folder), so only the engine's own packages are imported.
+const RELEASE_ARGS: [&str; 4] = ["-I", "-u", "-m", "neo2"];
+/// The supervisor's status while there is no engine to run: Setup installs one.
+pub const NOT_SET_UP: &str = "not set up — open NEO Setup";
+/// …while the bundled neo2 goes into the engine (an update that kept the engine: seconds).
+pub const UPDATING: &str = "updating NEO…";
+/// …while Setup replaces the engine the core runs from.
+pub const HELD: &str = "setting up NEO's engine…";
 
 /// The core's end of the socket pair, by number, in the core's environment.
 const LINK_ENV: &str = "NEO_APP_FD";
@@ -59,6 +84,35 @@ pub struct Core {
     pub status: Arc<Mutex<String>>,
     link: Arc<Mutex<Link>>,
     listener: Arc<Mutex<Option<Listener>>>,
+    /// Setup is replacing the engine: no core starts until it lets go (`release`).
+    hold: Arc<AtomicBool>,
+    /// Who hears that a launch needs Setup (lib.rs opens its window).
+    on_setup: Arc<Mutex<Option<SetupListener>>>,
+}
+
+type SetupListener = Arc<dyn Fn(crate::setup::Decision) + Send + Sync>;
+
+/// How a core is started: which interpreter, with which arguments, from which folder.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Launch {
+    pub python: PathBuf,
+    pub args: Vec<&'static str>,
+    pub cwd: PathBuf,
+}
+
+impl Launch {
+    /// A developer engine: `<dir>/.venv/bin/python -u -m neo2`, from `dir`.
+    pub fn dev(dir: &std::path::Path) -> Launch {
+        Launch { python: dir.join(".venv").join("bin").join("python"), args: CORE_ARGS.to_vec(), cwd: dir.to_path_buf() }
+    }
+    /// A release engine: `engines/<id>/bin/python3 -I -u -m neo2`, from NEO's folder.
+    pub fn release(paths: &crate::setup::Paths, id: &str) -> Launch {
+        Launch { python: paths.python(id), args: RELEASE_ARGS.to_vec(), cwd: paths.root.clone() }
+    }
+    /// What `python -m neo2 fetch …` is run with beside this core (the same interpreter and flags).
+    pub fn module(&self) -> Vec<&'static str> {
+        self.args.iter().copied().filter(|a| *a != "-u").collect()
+    }
 }
 
 /// This app's end of the socket it shares with the core it started.
@@ -178,9 +232,22 @@ fn link_for(cmd: &mut Command) -> Option<(UnixStream, UnixStream)> {
     Some((ours, theirs))
 }
 
-fn home() -> PathBuf {
+/// The user's home — or, in a sandbox build, the `home` folder next to the app: everything NEO
+/// Sandbox writes (and its core's HOME) lives there, never in the real one.
+pub fn home() -> PathBuf {
+    if SANDBOX {
+        return sandbox_home();
+    }
     PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/tmp".into()))
 }
+
+fn sandbox_home() -> PathBuf {
+    match bundle_path().and_then(|app| app.parent().map(|d| d.join("home"))) {
+        Some(h) => h,
+        None => std::env::temp_dir().join("neo-sandbox-home"), // unbundled (a test): never the real home
+    }
+}
+
 
 pub fn logs_dir() -> PathBuf {
     home().join(".neo").join("logs")
@@ -287,27 +354,43 @@ NEO_CLOUD_MEMORY=full
 NEO_LEARN=on
 ";
 
-/// NEO's installed runtime (scripts/install-app.sh puts a Python environment with the core here).
+/// NEO's installed runtime: its engines (setup.rs), or scripts/install-app.sh's .venv.
 /// Outside ~/Documents on purpose: macOS guards that folder, and a background app reading it
 /// blocks on a "NEO would like to access your Documents" prompt before Python even starts.
-fn runtime_dir() -> PathBuf {
+pub fn runtime_dir() -> PathBuf {
     home().join("Library").join("Application Support").join("NEO")
 }
 
-/// Where the core runs from. A release build uses only the installed runtime — no environment
-/// variable or file can point NEO.app (and the permissions macOS gave it) at other code. A dev
-/// build (`tauri dev`) may use $NEO_HOME or the checkout it was built from.
+/// Where a developer engine runs from. A release build uses only the installed runtime — no
+/// environment variable or file can point NEO.app (and the permissions macOS gave it) at other
+/// code. A dev build (`tauri dev`) may use $NEO_HOME or the checkout it was built from.
 fn core_dir() -> PathBuf {
     if cfg!(debug_assertions) {
         if let Ok(p) = std::env::var("NEO_HOME") {
             return PathBuf::from(p);
         }
-        if !runtime_dir().join(".venv").join("bin").join("python").exists() {
+        if !runtime_dir().join(".venv").join("bin").join("python").exists() && crate::setup::current_release(&crate::setup::Paths::here()).is_none() {
             let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
             return dir.canonicalize().unwrap_or(dir);
         }
     }
     runtime_dir()
+}
+
+/// Which engine this launch runs, and how (None: Setup has to run first — the decision says why).
+pub fn launch_for(decision: &crate::setup::Decision) -> Option<Launch> {
+    use crate::setup::{Decision, Paths};
+    match decision {
+        Decision::Dev => Some(Launch::dev(&core_dir())),
+        Decision::Release { id } | Decision::UpdateWheel { id } => Some(Launch::release(&Paths::here(), id)),
+        _ => None,
+    }
+}
+
+/// What this launch finds (setup.rs's table), with this build's manifest and developer engine.
+pub fn decide_now() -> crate::setup::Decision {
+    let dev_ok = core_dir().join(".venv").join("bin").join("python").exists();
+    crate::setup::decide(&crate::setup::Paths::here(), crate::setup::manifest(), dev_ok)
 }
 
 /// A runtime installed before 2.1 (NEO's package was the top-level `neo`, and its `neo2` had no
@@ -420,18 +503,25 @@ impl RotatingLog {
     }
 }
 
-fn spawn(dir: &PathBuf, sink: Arc<Mutex<RotatingLog>>) -> std::io::Result<(Child, Option<UnixStream>)> {
+/// The environment a core (and the downloads Setup runs beside it) gets on top of the app's own.
+pub fn core_env(cmd: &mut Command) {
     // Apps started from Finder get a bare PATH; the core shells out to Homebrew tools too.
     let path = format!(
         "/opt/homebrew/bin:/usr/local/bin:{}",
         std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin:/usr/sbin:/sbin".into())
     );
-    let mut cmd = Command::new(dir.join(".venv").join("bin").join("python"));
-    cmd.args(CORE_ARGS)
-        .current_dir(dir)
-        .env("PATH", path)
-        .env("PYTHONUNBUFFERED", "1")
-        .env("NEO_LAUNCHED_BY_APP", "1") // the core exits if this app disappears
+    cmd.env("PATH", path).env("PYTHONUNBUFFERED", "1");
+    if SANDBOX {
+        // NEO Sandbox's core: its own home (keys, memory, models, caches) and its own port.
+        cmd.env("HOME", home()).env("NEO_WS_PORT", PORT.to_string());
+    }
+}
+
+fn spawn(launch: &Launch, sink: Arc<Mutex<RotatingLog>>) -> std::io::Result<(Child, Option<UnixStream>)> {
+    let mut cmd = Command::new(&launch.python);
+    cmd.args(&launch.args).current_dir(&launch.cwd);
+    core_env(&mut cmd);
+    cmd.env("NEO_LAUNCHED_BY_APP", "1") // the core exits if this app disappears
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -512,6 +602,11 @@ impl Core {
         });
     }
 
+    /// Whether a core of this app's is listening on the socket (it said hello).
+    pub fn listening(&self) -> bool {
+        self.link.lock().map(|l| l.ready && l.stream.is_some()).unwrap_or(false)
+    }
+
     /// One line to the core over the socket. False when there is no core of this app's that is
     /// listening (still starting, gone, or started outside the app) — the caller decides what then.
     pub fn tell(&self, msg: &serde_json::Value) -> bool {
@@ -528,7 +623,6 @@ impl Core {
     /// Ask the core about the microphone or the camera (Setup's checklist): what macOS says, or — `ask`
     /// — macOS's prompt, credited to this app. The answer comes back as `FromCore::Permission`. False
     /// when `what` is neither, or no core of this app's is listening.
-    #[allow(dead_code)] // (Setup's window asks through it)
     pub fn permission(&self, what: &str, ask: bool) -> bool {
         permission_line(what, ask).is_some_and(|line| self.tell(&line))
     }
@@ -554,51 +648,103 @@ impl Core {
             if self.stopping.load(Ordering::SeqCst) {
                 return;
             }
-            // Gave up (crash loop), found someone else's core, or NEO isn't installed: look again
-            // later instead of never — or at once if the user picks Restart NEO.
+            // Gave up (crash loop) or found someone else's core: look again later instead of never —
+            // or at once if the user picks Restart NEO. With no engine (or Setup replacing it) there
+            // is nothing to look for: wait for Setup to say it's done (`restart`).
             let until = Instant::now() + RETRY_AFTER_GIVING_UP;
-            while Instant::now() < until {
+            loop {
                 if self.stopping.load(Ordering::SeqCst) {
                     return;
                 }
                 if self.restart_now.swap(false, Ordering::SeqCst) {
                     break;
                 }
-                if *self.status.lock().unwrap() == OUTSIDE && !port_in_use() {
+                let status = self.status.lock().unwrap().clone();
+                if status == OUTSIDE && !port_in_use() {
                     break; // that core went away: run our own
+                }
+                let waits_for_setup = status == NOT_SET_UP || self.hold.load(Ordering::SeqCst);
+                if !waits_for_setup && Instant::now() >= until {
+                    break;
                 }
                 thread::sleep(Duration::from_millis(500));
             }
         }
     }
 
+    /// Who hears that this launch needs Setup (set once, before `start`).
+    pub fn on_setup(&self, listener: impl Fn(crate::setup::Decision) + Send + Sync + 'static) {
+        *self.on_setup.lock().unwrap() = Some(Arc::new(listener));
+    }
+
+    fn needs_setup(&self, decision: crate::setup::Decision) {
+        self.set_status(NOT_SET_UP);
+        let listener = self.on_setup.lock().unwrap().clone();
+        if let Some(listener) = listener {
+            listener(decision);
+        }
+    }
+
+    /// Setup is about to replace the engine the core runs from: stop the core, and start none until
+    /// `release`.
+    pub fn hold(&self) {
+        if !self.hold.swap(true, Ordering::SeqCst) {
+            log("Setup is replacing NEO's engine: the core stops until it's done");
+        }
+        self.set_status(HELD);
+        self.terminate();
+    }
+
+    /// Setup is done (the engine is in, or it gave up): run whatever engine there is now.
+    pub fn release(&self) {
+        self.hold.store(false, Ordering::SeqCst);
+        self.restart();
+    }
+
     fn run_until_given_up(&self) {
         reclaim_orphan();
         if port_in_use() {
             self.set_status(OUTSIDE);
-            log("a core is already listening on 8765 (not ours) — using it");
+            log(&format!("a core is already listening on {PORT} (not ours) — using it"));
             return;
         }
-        let dir = core_dir();
-        if !dir.join(".venv").join("bin").join("python").exists() {
-            let msg = "not installed — run scripts/install-app.sh".to_string();
-            self.set_status(&msg);
-            log(&format!("no NEO runtime in {}", dir.display()));
+        if self.hold.load(Ordering::SeqCst) {
+            self.set_status(HELD);
             return;
         }
-        if runtime_predates_app(&dir) {
+        let decision = decide_now();
+        let Some(launch) = launch_for(&decision) else {
+            log(&format!("no engine to run ({decision:?}): NEO's Setup installs one"));
+            self.needs_setup(decision);
+            return;
+        };
+        if let crate::setup::Decision::UpdateWheel { id } = &decision {
+            // The same engine, another neo2 (an app update that kept the engine): offline, seconds.
+            self.set_status(UPDATING);
+            let (paths, bundle) = (crate::setup::Paths::here(), crate::setup::bundle());
+            let done = match (crate::setup::manifest(), bundle.and_then(|b| b.wheel())) {
+                (Some(m), Some(wheel)) => crate::setup::update_wheel(&paths, m, &wheel, &crate::setup::Opts::here()),
+                _ => Err(crate::setup::Failure { code: "failed", message: "no wheel in this app".into() }),
+            };
+            if let Err(e) = done {
+                log(&format!("updating neo2 in engine {id} failed: {} — NEO's Setup repairs it", e.message));
+                self.needs_setup(crate::setup::Decision::Install);
+                return;
+            }
+        }
+        if decision == crate::setup::Decision::Dev && runtime_predates_app(&launch.cwd) {
             self.set_status("runtime older than the app — run scripts/install-app.sh");
-            log(&format!("the runtime in {} is from before 2.1 (no neo2/__main__.py): run scripts/install-app.sh", dir.display()));
+            log(&format!("the runtime in {} is from before 2.1 (no neo2/__main__.py): run scripts/install-app.sh", launch.cwd.display()));
             return;
         }
         let _ = fs::create_dir_all(logs_dir());
         let sink = Arc::new(Mutex::new(RotatingLog::new(logs_dir().join("core.log"))));
         let mut restarts: Vec<Instant> = Vec::new();
         loop {
-            if self.stopping.load(Ordering::SeqCst) {
+            if self.stopping.load(Ordering::SeqCst) || self.hold.load(Ordering::SeqCst) {
                 return;
             }
-            match spawn(&dir, sink.clone()) {
+            match spawn(&launch, sink.clone()) {
                 Ok((child, link)) => {
                     log(&format!("core started (pid {})", child.id()));
                     self.set_status("running");
@@ -654,12 +800,11 @@ impl Core {
                 }
             }
             let _ = fs::remove_file(pidfile());
-            if self.stopping.load(Ordering::SeqCst) {
+            if self.stopping.load(Ordering::SeqCst) || self.hold.load(Ordering::SeqCst) {
                 return;
             }
-            if self.restart_now.swap(false, Ordering::SeqCst) {
-                restarts.clear(); // asked for from the menu: not a crash
-                continue;
+            if self.restart_now.load(Ordering::SeqCst) {
+                return; // asked for (the menu, or Setup): `supervise` starts again at once, and the engine is chosen afresh
             }
             let now = Instant::now();
             restarts.retain(|t| now.duration_since(*t) < RESTART_WINDOW);
@@ -732,14 +877,28 @@ impl Core {
 
 // ---- launch at login ------------------------------------------------------------------------
 
+/// The login item: ~/Library/LaunchAgents/<bundle id>.plist (a sandbox build's is in its own home,
+/// which launchd never reads).
 fn agent_plist() -> PathBuf {
-    home().join("Library").join("LaunchAgents").join("com.arnav.neo.plist")
+    home().join("Library").join("LaunchAgents").join(format!("{BUNDLE_ID}.plist"))
 }
 
 /// The NEO.app bundle this binary runs from (None when running unbundled, e.g. `tauri dev`).
-fn bundle_path() -> Option<PathBuf> {
+pub fn bundle_path() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     exe.ancestors().find(|p| p.extension().map(|e| e == "app").unwrap_or(false)).map(|p| p.to_path_buf())
+}
+
+/// Whether this copy of NEO.app may be its own login item: it runs from /Applications or
+/// ~/Applications (never from the disk image, Downloads or a translocated copy — that path goes
+/// away). A sandbox build may anywhere it isn't on a disk image: its login item is its own home's.
+pub fn may_open_at_login() -> bool {
+    let Some(app) = bundle_path() else { return false };
+    if SANDBOX {
+        return crate::setup::placement_now() == crate::setup::Place::Ok;
+    }
+    let real_home = PathBuf::from(std::env::var("HOME").unwrap_or_default());
+    crate::setup::login_allowed(&app, &real_home)
 }
 
 pub fn launch_at_login() -> bool {
@@ -758,7 +917,7 @@ fn plist_for(exe: &std::path::Path) -> String {
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>Label</key><string>com.arnav.neo</string>
+  <key>Label</key><string>{BUNDLE_ID}</string>
   <key>ProgramArguments</key>
   <array><string>{}</string></array>
   <key>RunAtLoad</key><true/>
@@ -771,24 +930,28 @@ fn plist_for(exe: &std::path::Path) -> String {
     )
 }
 
+/// Turn the login item on or off. On is written only for a copy that may be one
+/// (`may_open_at_login`); off always works.
 pub fn set_launch_at_login(on: bool) -> std::io::Result<()> {
     if !on {
         let _ = fs::remove_file(agent_plist());
         return Ok(());
     }
-    let Some(app) = bundle_path() else {
-        return Ok(()); // a dev build has no .app to launch
-    };
+    if !may_open_at_login() {
+        log("not writing a login item: this copy of NEO isn't in Applications");
+        return Ok(());
+    }
     let Ok(exe) = std::env::current_exe() else { return Ok(()) };
-    let _ = app;
     fs::create_dir_all(agent_plist().parent().unwrap())?;
     fs::write(agent_plist(), plist_for(&exe))
 }
 
-/// Every bundled launch: on the first run, open at login by default; afterwards keep the login
-/// item pointing at *this* copy of NEO.app (it may have been moved or rebuilt), if it's on.
+/// Every bundled launch once setup is done: on the first run, open at login by default; afterwards
+/// keep the login item pointing at *this* copy of NEO.app (it may have been moved or rebuilt), if
+/// it's on. Nothing at all from a copy that may not be one (`may_open_at_login`), so a first launch
+/// from the disk image decides nothing.
 pub fn sync_launch_at_login() {
-    if bundle_path().is_none() {
+    if !may_open_at_login() {
         return;
     }
     let marker = home().join(".neo").join("app-login-decided");
@@ -825,11 +988,45 @@ mod tests {
         assert!(p.contains("<string>/Applications/NEO &amp; Co.app/Contents/MacOS/neo-ui</string>"));
         assert!(!p.contains("/usr/bin/open"));
         assert!(p.contains("LimitLoadToSessionType"));
+        assert!(p.contains(&format!("<key>Label</key><string>{BUNDLE_ID}</string>")));
+        assert!(agent_plist().ends_with(format!("Library/LaunchAgents/{BUNDLE_ID}.plist")));
+    }
+
+    #[test]
+    fn a_release_engine_runs_isolated_from_neos_folder_and_a_developer_engine_as_before() {
+        let paths = crate::setup::Paths::new("/Users/a/Library/Application Support/NEO");
+        let r = Launch::release(&paths, "0123456789abcdef");
+        assert_eq!(r.python, PathBuf::from("/Users/a/Library/Application Support/NEO/engines/0123456789abcdef/bin/python3"));
+        assert_eq!(r.args, ["-I", "-u", "-m", "neo2"]);
+        assert_eq!(r.cwd, paths.root);
+        assert_eq!(r.module(), ["-I", "-m", "neo2"]);
+        let d = Launch::dev(std::path::Path::new("/Users/a/Library/Application Support/NEO"));
+        assert_eq!(d.python, PathBuf::from("/Users/a/Library/Application Support/NEO/.venv/bin/python"));
+        assert_eq!(d.args, ["-u", "-m", "neo2"]);
+        assert_eq!(d.module(), ["-m", "neo2"]);
+        // Only those two shapes: Setup's own cases start nothing.
+        use crate::setup::Decision;
+        for d in [Decision::Install, Decision::NewEngine { from: "fedcba9876543210".into() }, Decision::NoEngine] {
+            assert_eq!(launch_for(&d), None, "{d:?}");
+        }
+        assert_eq!(launch_for(&Decision::UpdateWheel { id: "0123456789abcdef".into() }).unwrap().args, RELEASE_ARGS);
+        if SANDBOX {
+            assert_eq!((PORT, BUNDLE_ID), (18765, "com.arnav.neo.sandbox"));
+            // Never the real home: unbundled, a test's sandbox home is a scratch folder.
+            assert_ne!(home(), PathBuf::from(std::env::var("HOME").unwrap()));
+            assert!(home().starts_with(std::env::temp_dir()));
+        } else {
+            assert_eq!((PORT, BUNDLE_ID), (8765, "com.arnav.neo"));
+        }
     }
 
     #[test]
     fn the_core_is_started_as_neo2_and_an_orphan_is_known_by_either_name() {
         assert_eq!(CORE_ARGS, ["-u", "-m", "neo2"]);
+        assert_eq!(RELEASE_ARGS, ["-I", "-u", "-m", "neo2"]);
+        let release = "/Users/a/Library/Application Support/NEO/engines/0123456789abcdef/bin/python3";
+        assert!(is_core_command(&format!("1 {release} -I -u -m neo2")));
+        assert!(!is_core_command(&format!("1 {release} -I -m neo2.core.fetch")));
         let runtime = "/Users/a/Library/Application Support/NEO/.venv/bin/python";
         assert!(is_core_command(&format!("1 {runtime} -u -m neo2")));
         assert!(is_core_command(&format!("1 {runtime} -u -m neo"))); // an older NEO.app's core  neo2-codemod: keep

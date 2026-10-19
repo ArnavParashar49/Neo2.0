@@ -73,7 +73,7 @@ fn mint() -> Option<String> {
 }
 
 /// NEO's own page: the bundled app's origin, or (`dev`: a `tauri dev` build) its dev server.
-fn app_origin(url: &Url, dev: bool) -> bool {
+pub fn app_origin(url: &Url, dev: bool) -> bool {
     let host = url.host_str().unwrap_or("");
     match url.scheme() {
         "tauri" => host == "localhost",
@@ -98,12 +98,12 @@ pub fn may_navigate(url: &Url, dev: bool) -> bool {
 
 /// Why the page can't have its ticket yet, from what the supervisor says of the core: "no_link"
 /// (a core started outside the app: no socket to it, ever — the page shows the terminal
-/// commands), "not_ready" (starting or restarting: the page asks again), "no_core" (not
-/// installed, crashed, couldn't start).
+/// commands), "not_ready" (starting, restarting, or Setup updating the engine: the page asks
+/// again), "no_core" (not set up yet, crashed, couldn't start).
 pub fn ticket_error(core_status: &str) -> &'static str {
     match core_status {
         core::OUTSIDE => "no_link",
-        "" | "starting" | "running" | "restarting" | "not responding — restarting" => "not_ready",
+        "" | "starting" | "running" | "restarting" | "not responding — restarting" | core::UPDATING | core::HELD => "not_ready",
         _ => "no_core",
     }
 }
@@ -357,10 +357,10 @@ mod tests {
     #[test]
     fn why_the_page_cant_have_its_ticket_yet() {
         assert_eq!(ticket_error(core::OUTSIDE), "no_link");
-        for s in ["", "starting", "running", "restarting", "not responding — restarting"] {
+        for s in ["", "starting", "running", "restarting", "not responding — restarting", "updating NEO…", "setting up NEO's engine…"] {
             assert_eq!(ticket_error(s), "not_ready", "{s}");
         }
-        for s in ["not installed — run scripts/install-app.sh", "crashed repeatedly — see Open Logs; retrying in 10 min", "couldn't start: x"] {
+        for s in ["not set up — open NEO Setup", "crashed repeatedly — see Open Logs; retrying in 10 min", "couldn't start: x"] {
             assert_eq!(ticket_error(s), "no_core", "{s}");
         }
     }

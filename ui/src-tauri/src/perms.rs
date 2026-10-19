@@ -3,6 +3,9 @@
 //! NEO.app checks them itself, asks at most once per app version (never on every start — the
 //! system prompt is a nag, not a status), and shows what's missing in its menu with a shortcut to
 //! the right pane of System Settings. The core never prompts when the app launched it.
+//!
+//! On a new Mac nothing is asked at launch until Setup is done: its checklist has a button for each
+//! (`ask_accessibility`, `ask_screen_recording`), and once it's done this version counts as asked.
 
 use std::fs;
 use std::path::PathBuf;
@@ -33,9 +36,28 @@ pub fn screen_recording() -> bool {
 }
 
 fn marker() -> PathBuf {
-    PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/tmp".into()))
-        .join(".neo")
-        .join("permissions-asked")
+    crate::core::home().join(".neo").join("permissions-asked")
+}
+
+/// This version has asked (Setup's checklist did): `ask_once` won't again.
+pub fn mark_asked(version: &str) {
+    let _ = fs::create_dir_all(marker().parent().unwrap());
+    let _ = fs::write(marker(), version);
+}
+
+/// macOS's Accessibility prompt (it offers System Settings).
+pub fn ask_accessibility() {
+    let opts = CFDictionary::from_CFType_pairs(&[(CFString::new("AXTrustedCheckOptionPrompt"), CFBoolean::true_value().as_CFType())]);
+    unsafe {
+        AXIsProcessTrustedWithOptions(opts.as_concrete_TypeRef());
+    }
+}
+
+/// macOS's Screen Recording prompt (granting it asks to Quit & Reopen NEO).
+pub fn ask_screen_recording() {
+    unsafe {
+        CGRequestScreenCaptureAccess();
+    }
 }
 
 /// Show macOS's own prompts for whatever is missing — once per app version.
@@ -46,21 +68,12 @@ pub fn ask_once(version: &str) {
     if fs::read_to_string(marker()).map(|v| v.trim() == version).unwrap_or(false) {
         return; // asked for this version already: the menu shows what's still missing
     }
-    let _ = fs::create_dir_all(marker().parent().unwrap());
-    let _ = fs::write(marker(), version);
+    mark_asked(version);
     if !accessibility() {
-        let opts = CFDictionary::from_CFType_pairs(&[(
-            CFString::new("AXTrustedCheckOptionPrompt"),
-            CFBoolean::true_value().as_CFType(),
-        )]);
-        unsafe {
-            AXIsProcessTrustedWithOptions(opts.as_concrete_TypeRef());
-        }
+        ask_accessibility();
     }
     if !screen_recording() {
-        unsafe {
-            CGRequestScreenCaptureAccess();
-        }
+        ask_screen_recording();
     }
 }
 

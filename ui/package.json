@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "build:sandbox": "tsc && vite build --mode sandbox --outDir dist-sandbox",
     "preview": "vite preview",
     "test": "node --test \"tests/*.test.ts\"",
     "tauri": "tauri"

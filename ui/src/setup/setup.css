@@ -1,0 +1,111 @@
+/* NEO Setup (index.html#/setup): a plain Mac window in NEO's own language — App.css's tokens, the
+ * system font, the dark theme and the light one (main.tsx follows the Mac's appearance). Every rule
+ * is scoped: classes start with `sx-`, and the page's background applies only under
+ * html[data-surface="setup"] (one stylesheet serves every window). */
+
+html[data-surface="setup"] { --sx-bg: #111114; --sx-raise: rgba(255, 255, 255, 0.035); color-scheme: dark; }
+html[data-surface="setup"][data-theme="light"] { --sx-bg: #f4f4f6; --sx-raise: rgba(255, 255, 255, 0.85); color-scheme: light; }
+html[data-surface="setup"], html[data-surface="setup"] body, html[data-surface="setup"] #root { background: var(--sx-bg); }
+/* (`?mock=` in a plain browser tab: the page fills the tab, not the overlay's stand-in square) */
+html[data-sim][data-surface="setup"] #root { inset: 0; width: auto !important; height: auto !important; }
+
+.sx {
+  height: 100%; overflow-y: auto; overflow-x: hidden; color: var(--fg); cursor: default;
+  font: 13px/1.45 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+  -webkit-user-select: none; user-select: none;
+}
+.sx::-webkit-scrollbar { width: 8px; }
+.sx::-webkit-scrollbar-thumb { background: var(--edge-2); border-radius: 4px; }
+
+/* The title bar is the window's own (traffic lights at the left, drawn over the page). */
+.sx-head {
+  position: sticky; top: 0; z-index: 2; display: flex; align-items: center; gap: 10px; min-height: 52px;
+  padding: 14px 22px 10px 88px; background: var(--sx-bg); border-bottom: 1px solid var(--edge);
+}
+.sx-title { font-weight: 600; font-size: 14px; letter-spacing: 0.01em; }
+.sx-badge {
+  display: inline-flex; align-items: center; height: 18px; padding: 0 8px; border-radius: 999px; font-size: 10.5px; font-weight: 600;
+  color: var(--warn); background: var(--warn-bg);
+}
+
+.sx-main { max-width: 620px; margin: 0 auto; padding: 14px 24px 28px; display: flex; flex-direction: column; gap: 12px; }
+.sx-section { display: flex; flex-direction: column; gap: 10px; padding-top: 14px; border-top: 1px solid var(--edge); }
+.sx-section:first-of-type, .sx-alert + .sx-section { border-top: 0; padding-top: 2px; }
+.sx-section h2 { margin: 0; font-size: 13.5px; font-weight: 600; }
+.sx-lead { margin: 0; font-size: 13.5px; line-height: 1.5; }
+.sx-dim { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.45; }
+.sx-dim code, .sx-foot code, .sx-path { font: 11.5px var(--mono); }
+.sx-dim code, .sx-foot code { background: var(--bg-3); padding: 1px 5px; border-radius: 5px; -webkit-user-select: text; user-select: text; }
+.sx-foot { margin: 6px 0 0; color: var(--muted); font-size: 11.5px; line-height: 1.45; }
+.sx-warn { color: var(--warn); }
+.sx-bad { color: var(--bad); }
+.sx-ok { margin: 0; color: var(--ok); font-size: 12.5px; }
+.sx-small { font-size: 12px; white-space: nowrap; }
+.sx-status { margin: 0; font-size: 12.5px; font-variant-numeric: tabular-nums; }
+.sx-alert {
+  margin: 0; padding: 10px 12px; border-radius: 10px; font-size: 12.5px; line-height: 1.45;
+  background: var(--bad-bg); border: 1px solid var(--bad-edge); -webkit-user-select: text; user-select: text;
+}
+
+/* ---- the table of downloads ----------------------------------------------------------------- */
+.sx-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+.sx-table th { text-align: left; font-weight: 500; color: var(--muted); font-size: 11.5px; padding: 0 8px 6px 0; border-bottom: 1px solid var(--edge); }
+.sx-table td { padding: 8px 8px 8px 0; border-bottom: 1px solid var(--edge); vertical-align: top; }
+.sx-table td.n, .sx-table th:nth-child(n + 3) { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+
+/* ---- progress -------------------------------------------------------------------------------- */
+.sx-bar { position: relative; height: 6px; border-radius: 3px; background: var(--bg-3); overflow: hidden; }
+.sx-bar > div { height: 100%; border-radius: 3px; background: var(--accent); transition: width 240ms var(--ease-out); }
+.sx-bar.busy > div { width: 30%; animation: sx-busy 1.3s var(--ease-in-out) infinite; }
+@keyframes sx-busy { from { transform: translateX(-100%); } to { transform: translateX(340%); } }
+
+/* ---- controls -------------------------------------------------------------------------------- */
+.sx-btns { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.sx-btns.sx-end { justify-content: space-between; margin-top: 4px; padding-top: 14px; border-top: 1px solid var(--edge); }
+.sx-btns.sx-end .sx-dim { flex: 1 1 260px; }
+.sx-btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px; height: 30px; padding: 0 13px; border-radius: 9px;
+  border: 1px solid var(--edge); background: var(--bg-2); color: var(--fg); font: inherit; font-size: 12.5px; white-space: nowrap;
+  transition: background var(--t-fast), border-color var(--t-fast);
+}
+.sx-btn:hover:not(:disabled) { background: var(--bg-3); border-color: var(--edge-2); }
+.sx-btn:disabled { opacity: 0.5; cursor: default; }
+.sx-btn.primary { background: var(--solid-bg); color: var(--solid-fg); border-color: transparent; font-weight: 600; }
+.sx-btn.primary:hover:not(:disabled) { background: var(--solid-hover); }
+.sx-btn.danger { color: var(--bad); }
+.sx-btn.primary.danger { background: var(--bad); color: var(--sx-bg); }
+.sx-link { background: none; border: 0; padding: 0; color: var(--accent); font: inherit; font-size: 12.5px; cursor: pointer; }
+.sx-link:hover { text-decoration: underline; text-underline-offset: 2px; }
+.sx button:focus-visible, .sx input:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+.sx input[type="checkbox"] { accent-color: var(--accent); margin: 2px 0 0; flex: none; }
+.sx-check { display: flex; align-items: center; gap: 8px; font-size: 12.5px; cursor: pointer; }
+.sx-check.off { opacity: 0.6; cursor: default; }
+
+/* ---- rows (the checklist, Uninstall) --------------------------------------------------------- */
+.sx-rows { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
+.sx-row { display: flex; align-items: flex-start; gap: 10px; padding: 10px 0; border-bottom: 1px solid var(--edge); }
+.sx-row:last-child { border-bottom: 0; }
+.sx-row-t { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.sx-row-t strong { font-weight: 600; font-size: 12.5px; }
+.sx-row-t .sx-bar { margin-top: 4px; }
+.sx-row .sx-btn { flex: none; }
+.sx-path { color: var(--dim); overflow-wrap: anywhere; -webkit-user-select: text; user-select: text; }
+.sx-size { flex: none; min-width: 64px; text-align: right; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.sx-dot { flex: none; width: 9px; height: 9px; margin-top: 4px; border-radius: 50%; background: var(--dim); }
+.sx-dot.ok { background: var(--ok); }
+.sx-dot.todo { background: var(--warn); }
+.sx-dot.wait { background: var(--accent); }
+.sx-dot.note { background: var(--edge-2); }
+.sx-confirm {
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; padding: 11px 13px; border-radius: 11px;
+  background: var(--bad-bg); border: 1px solid var(--bad-edge); font-size: 12.5px;
+}
+
+@media (max-width: 540px) {
+  .sx-main { padding: 10px 16px 24px; }
+  .sx-table th:nth-child(4), .sx-table td:nth-child(4) { display: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .sx * { transition: none !important; }
+  .sx-bar.busy > div { animation: none; width: 100%; opacity: 0.5; }
+}
