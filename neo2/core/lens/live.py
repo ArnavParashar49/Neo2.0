@@ -807,6 +807,15 @@ class LensLive:
         task.add_done_callback(_quiet)
 
 
+def first_sentence(text: str, most: int = 240) -> str:
+    """The first sentence of an answer, for saying aloud (the sheet shows all of it)."""
+    t = " ".join(str(text or "").split())
+    for i, ch in enumerate(t):
+        if ch in ".!?" and (i + 1 == len(t) or t[i + 1] == " ") and i >= 12:
+            return t[: i + 1][:most]
+    return t[:most]
+
+
 def _quiet(t: asyncio.Task) -> None:
     if not t.cancelled() and (e := t.exception()) is not None:
         log.info(f"[lens] a task failed ({type(e).__name__})")
@@ -831,4 +840,4 @@ def reset() -> None:
     lens_live.channel, lens_live.hooks = channel, hooks
 
 
-__all__ = ["KIND_LENS", "Hooks", "LensLive", "copy_image", "copy_text", "lens_live", "reset"]
+__all__ = ["KIND_LENS", "Hooks", "LensLive", "copy_image", "copy_text", "first_sentence", "lens_live", "reset"]

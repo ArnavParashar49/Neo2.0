@@ -129,6 +129,16 @@ class App:
             if task:
                 self._tasks.discard(task)
 
+    async def _lens_heard(self, text: str) -> None:
+        """What the on-device voice heard while Search Screen holds it: answered in the sheet, the
+        answer's first sentence said aloud — never the chat's transcript, history or journal."""
+        from neo2.core.lens.live import first_sentence, lens_live
+
+        reply = await lens_live.hear(text)
+        voice = self.voice
+        if reply and voice is not None and not getattr(voice, "handles_text", False) and hasattr(voice, "speak"):
+            await voice.speak(first_sentence(reply))
+
     async def lens_listen(self) -> None:
         """Search Screen's mic button: the voice listens, as the summon keys make it, for a question
         about the area (the session's lens lane takes the sentence)."""
@@ -147,6 +157,11 @@ class App:
         """What the on-device voice heard the user say. The first words it heard in a check-in's
         reply window are the reply to it: the session answers them with the check-in's context and
         never runs or keeps them (Session._checkin_answer); later words are the user's own again."""
+        from neo2.core.agent import fastpath
+
+        if fastpath.lens_takes_voice():
+            await self._lens_heard(text)  # Search Screen holds the voice: a question about its area
+            return
         context = self._wellbeing_reply_context
         self._wellbeing_reply_context = None
         started = getattr(self.voice, "_last_utterance_started_at", None)

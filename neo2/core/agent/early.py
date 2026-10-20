@@ -146,11 +146,15 @@ class EarlyActor:
         """Run whatever may run now. Returns what ran during this call."""
         if not self._text or (not final and time.time() - self._changed < _STABLE_S):
             return []
+        if fastpath.lens_takes_voice():
+            return []  # Search Screen holds the voice: what the user says is about its area
         async with self._lock:
             utt, text, start = self._utt, self._text, self._consumed
             pending = text[start:]
             ran: list[Ran] = []
             if final:
+                if not self.executed and fastpath.lens(text, origin="user") is not None:
+                    return []  # "search my screen": the session's own lane opens Search Screen (fastpath.lens)
                 # The rest of the utterance, read as part of the whole ("open chess and play as
                 # white": with chess opened early, "play as white" is still no song).
                 steps = fastpath.plan(pending, first_index=len(self.executed), whole=text)

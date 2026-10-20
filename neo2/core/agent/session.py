@@ -124,7 +124,7 @@ _MODEL_CANT = ("quality_report", "routine_manage", "routine_run", "timers", "sho
 # A fast-path step whose failure is said as it is, never handed to the agent: no model may start the
 # camera or listening, and a shortcut the user ran would only be asked about again (and may have done
 # part of its work already).
-_SAID_AS_IS = (fastpath.CAMERA_TOOL, fastpath.SONG_TOOL, "shortcut_run")
+_SAID_AS_IS = (fastpath.CAMERA_TOOL, fastpath.SONG_TOOL, fastpath.LENS_TOOL, "shortcut_run")
 _job_ids = itertools.count(1)
 # The recent voice conversation, when a request comes from Gemini Live: the agent can't hear
 # it, so "open it on Amazon" needs it to know what "it" is. Per task (jobs run concurrently).
@@ -445,6 +445,16 @@ class Session:
             _song_off("stopped")
             await bus().end_job(job)
             return Reply("Okay, I stopped listening.", "stop", job=job)
+        # "search my screen", "screen pe search karo": the user's own words open Search Screen
+        # (fastpath.lens: never a model's words), ahead of the camera and the web — no model, no Laya.
+        if (lens := fastpath.lens(text, origin=origin)) is not None and not images:
+            if origin == "user":
+                from neo2.core.agent import retry_words
+
+                song_words.clear_retry()
+                retry_words.mark("other")
+            d = Decision("agent_task", 1.0, False, 0.0, True, 1.0, source="lane", reply=True, reply_p=1.0)
+            return await self._quick(text, d, [lens], job=job, origin=origin)
         # "what am I holding", "ye kya hai": the user's own words ask NEO to look through the camera
         # (fastpath.camera: never a model's words). Its answer's cloud brains warm while Laya reads it.
         look = fastpath.camera(text, origin=origin)

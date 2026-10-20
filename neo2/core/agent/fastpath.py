@@ -292,6 +292,47 @@ def _split_trailing_commands(text: str, whole: Step, first_index: int) -> list[S
     return [whole]
 
 
+# ---- the Search Screen lane -------------------------------------------------------------------
+# "search my screen", "circle to search", "screen pe search karo": the user's own words open Search
+# Screen (neo2.core.agent.lens_words decides by the words) — never a model's, never an approval
+# replay, never an embedding host's request. Checked before the camera's and the web's lanes.
+
+LENS_TOOL = "search_screen"
+
+
+def lens(text: str, *, origin: str) -> Step | None:
+    """Route a Search Screen ask, with the question "search my screen for X" carries."""
+    if origin != "user":
+        return None
+    raw = " ".join((text or "").split())
+    if not raw:
+        return None
+    from neo2.core import runtime
+    from neo2.core.agent import lens_words
+
+    if runtime.library_mode() or runtime.library_bound():
+        return None  # an embedded agent has no overlay
+    t = registry().get(LENS_TOOL)
+    if t is None:
+        return None
+    asked, question = lens_words.wants_lens(raw)
+    if not asked:
+        return None
+    return LENS_TOOL, ({"question": question} if question else {})
+
+
+def lens_takes_voice() -> bool:
+    """Is Search Screen open with an area picked, so what the user says now is about that area
+    (neo2.core.lens.live.takes_voice)? Never loads it: a core that never opened it has none."""
+    import sys
+
+    mod = sys.modules.get("neo2.core.lens.live")
+    try:
+        return bool(mod is not None and mod.lens_live.takes_voice())
+    except Exception:  # noqa: BLE001
+        return False
+
+
 # ---- the camera lane --------------------------------------------------------------------------
 # "what am I holding", "ye kya hai", "मेरे हाथ में क्या है": the user's own words ask NEO to look
 # through the camera (neo2.core.agent.camera_words decides by the words). The camera turns on only
