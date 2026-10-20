@@ -2,6 +2,6 @@
 "app": {"data":["brains","browser","camera","confirm","host_attached","problems","recent","shell","state","timers","ui_host","wake_word","wellbeing_checkins"],"shell":["accessibility","app","hotkey","open_at_login","running","screen_recording","version"],"top":["data","type"]},
 "host": {"data":["brains","browser","camera","confirm","host_attached","problems","recent","shell","state","timers","ui_host","wake_word","wellbeing_checkins"],"shell":["accessibility","app","hotkey","open_at_login","running","screen_recording","version"],"top":["data","type"]},
 "page": {"data":["brains","browser","camera","confirm","host_attached","problems","recent","shell","state","timers","ui_host","wake_word","wellbeing_checkins"],"shell":["accessibility","app","hotkey","open_at_login","running","screen_recording","version"],"top":["data","type"]},
-"shell link": ["host_attached","t","ui_host"],
+"shell link": ["host_attached","lens","t","ui_host"],
 "tool": {"data":["brains","browser","camera","confirm","host_attached","problems","recent","shell","state","timers","ui_host","wake_word","wellbeing_checkins"],"shell":["accessibility","app","hotkey","open_at_login","running","screen_recording","version"],"top":["data","type"]}
 }

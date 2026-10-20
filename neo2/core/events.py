@@ -163,8 +163,11 @@ class EventBus:
         await self.set_state(NeoState.IDLE, job=job)
 
     # Convenience wrappers used all over the codebase -----------------------------------
-    async def say(self, text: str, *, final: bool = True, role: str = "assistant", job: str = "") -> None:
-        await self.publish("transcript", role=role, text=text, final=final, job=job)
+    async def say(self, text: str, *, final: bool = True, role: str = "assistant", job: str = "", attach: str = "") -> None:
+        """`attach`: what the user's line shows beside their words ("screen": an area of the screen
+        went with them — never the picture itself). Only a line that has one carries it."""
+        extra = {"attach": attach} if attach else {}
+        await self.publish("transcript", role=role, text=text, final=final, job=job, **extra)
 
     async def note(self, text: str) -> None:
         """Short progress line for the UI while a turn is in flight (provider fallbacks etc.)."""

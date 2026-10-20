@@ -178,6 +178,7 @@ def test_every_catalog_tool_is_in_a_preset_with_its_module():
         "routine_manage", "routine_run", "quality_report",  # NEO.app's user's routines and counters
         "in_front",  # NEO.app's user's own selection and clipboard
         "shortcut_run",  # NEO.app's user's own Shortcuts
+        "search_screen",  # NEO.app's own Search Screen overlay
     } == set(REFUSED)
     assert set(PRESETS["all"]) <= set(MODULES_FOR)
     for n in PRESETS["all"]:
@@ -190,7 +191,9 @@ def test_requires_tags_match_the_presets():
 
     load_all()
     mac = {t.name for t in catalog().all() if "macos" in t.requires}
-    assert mac == MACOS_ONLY | {"play_music", "selftest_controls", "camera_look", "song_identify", "in_front", "shortcut_run"}
+    assert mac == MACOS_ONLY | {
+        "play_music", "selftest_controls", "camera_look", "song_identify", "in_front", "shortcut_run", "search_screen",
+    }  # fmt: skip
     assert {t.name for t in catalog().all() if "playwright" in t.requires} == set(PRESETS["browser"])
     for n in ("weather", "clock", "memory"):
         assert not catalog().get(n).requires

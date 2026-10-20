@@ -12,7 +12,7 @@ UI → Server  : {"cmd": "text", "text": "..."}      send a typed request
                                                    notch (NotchHub hosts the page; the app hides its window)
                {"cmd": "shell", "action": "restart"}   a host asks for one of NEO.app's menu actions
                    (host only): show | settings | restart | open_logs | erase_memory |
-                   open_at_login (+ "on": bool) | quit
+                   open_at_login (+ "on": bool) | quit | lens
                {"cmd": "set", "name": "wake_word", "value": false}   switch a setting while NEO
                    runs (a host, or NEO.app's own page): see "Settings a client may switch"
                {"cmd": "browser_*", …}             NEO's browser card (neo2/core/tools/browser_live.py)
@@ -21,6 +21,7 @@ UI → Server  : {"cmd": "text", "text": "..."}      send a typed request
                {"cmd": "open_keys"}                open the Brains & Keys window (app, page, host)
                {"cmd": "brains_reload"}            re-read NEO's key and brain files (anyone)
                {"cmd": "key_save", "id": …, …}     Brains & Keys' own commands: see "Brains & Keys"
+               {"cmd": "lens_select", "sel": …, …} Search Screen's own commands: see "Search Screen"
 
 NEO's browser card has its own lane: its commands go straight to the browser (never through the
 event bus, never logged — they carry what the user types), its JSON messages go out beside the
@@ -78,6 +79,7 @@ browser engine puts on every websocket a page opens, which the page can neither 
            not even NEO's own — can ever be a host.
     tool   no Origin, no role: a local program that read the token.
     keys   NEO.app's own page with the shell's ticket: the Brains & Keys window (see "Brains & Keys").
+    lens   NEO.app's own page with Search Screen's ticket: its overlay (see "Search Screen").
   - `shell` is the host's alone — every action of it, quit, restart, erase_memory and
     open_at_login among them. NEO's pages show what models and websites wrote; a page that was
     talked into something must not be able to quit NEO, restart it, or change what starts at
@@ -137,6 +139,26 @@ ticket, is never logged.
     ask, each role's label, the voice, and per provider whether a key is set — never a key, never
     its last 4 (those go to the `keys` client alone, in brains_detail).
 
+Search Screen. NEO.app's Search Screen overlay is the client kind `lens` (neo2/core/lens: the whole
+protocol and its privacy rules). It connects with the token and Search Screen's ticket beside it
+(`lens=<64 hex>`), which NEO.app's shell made and handed the core with `lens_freeze` over its own
+socket (shell_link.py; `lens_closed` revokes it). It is a `lens` client only from NEO.app's own origin,
+with no role, with that exact ticket (constant time) and without a Brains & Keys ticket beside it
+(403); one at a time (409). The path is never logged.
+  - It hears its own hello ({state, lens}) and its own answers: nothing of the event bus, the
+    transcript replay, the cards or the shell's status. It is no viewer (the camera never turns on
+    for it), and no card is "on screen" for it.
+  - It sends only its own commands (lens_hello, lens_select, lens_ask, lens_translate, lens_act,
+    lens_continue, lens_listen) and `state`: routed here by name, before anything else, to
+    neo2.core.lens.live — never the generic handler, the bus or the replay; a `[ui] lens:` line names
+    the command, nothing it carried. The same commands from anyone else get {"type": "lens_refused",
+    "data": {"cmd", "error": "forbidden"}}, to that client alone.
+  - Search Screen's still goes to it alone, as one binary NBF1 frame of kind 4: no other client ever
+    gets a frame of that kind.
+  - `shell` action `lens` (a host's Search Screen…; the core's own for the voice and the agent's
+    tool) is one every 1.5 s, and first publishes `lens_opening` (no payload: NEO's page in the notch
+    folds the host's panel away before the still is taken).
+
 The relay never blocks the event bus: each client has its own outbound queue drained by its
 own task, and a client that stops reading is dropped. (An inline `await send()` to a half-dead
 overlay once stalled the Gemini Live receive loop long enough to kill the voice session.)
@@ -184,7 +206,7 @@ _NOTCH_ORIGIN = "neo://app"
 _ALLOWED_ORIGINS = _APP_ORIGINS | {_NOTCH_ORIGIN}
 
 # NEO.app's menu actions a host may ask for (ui/src-tauri/src/lib.rs runs them: `act`).
-SHELL_ACTIONS = ("show", "settings", "restart", "open_logs", "erase_memory", "open_at_login", "quit")
+SHELL_ACTIONS = ("show", "settings", "restart", "open_logs", "erase_memory", "open_at_login", "quit", "lens")
 # The settings a client may switch while NEO runs (`set`), each with the type its value must have…
 SETTABLE: dict[str, type] = {"wake_word": bool, "wellbeing_checkins": bool}
 _MAY_SET = ("host", "app")  # …and who may: a host, and NEO.app's own page
@@ -195,16 +217,23 @@ _MAY_OPEN_KEYS = ("app", "page", "host")
 _OPEN_KEYS_S = 5.0
 _KEYS_HEARS = frozenset({"brains", "problems", "state"})
 _LOGGABLE_CMD = re.compile(r"[a-z_]{1,32}")
+# Search Screen (see the module's doc): its overlay is never a viewer, never hears the bus; opened at
+# most this often by a host or the core.
+_NOT_CARDS = ("keys", "lens")  # the windows that show no chat, no cards
+_OPEN_LENS_S = 1.5
 
 
-def client_kind(origin: str | None, role: str, *, keys: bool = False) -> str | None:
-    """Which kind of client a connection is — app | page | host | tool | keys — or None for one that
-    is not admitted at all (see the module's "Who may say what"). `keys`: it brought the shell's
-    ticket (checked by the caller) — only NEO.app's own page, with no role, is then `keys`."""
+def client_kind(origin: str | None, role: str, *, keys: bool = False, lens: bool = False) -> str | None:
+    """Which kind of client a connection is — app | page | host | tool | keys | lens — or None for one
+    that is not admitted at all (see the module's "Who may say what"). `keys` / `lens`: it brought
+    the shell's ticket for Brains & Keys / Search Screen (checked by the caller) — only NEO.app's own
+    page, with no role, is then that kind (never with both tickets)."""
     if role not in ("", "host"):
         return None
-    if keys:
-        return "keys" if origin in _APP_ORIGINS and not role else None
+    if keys and lens:
+        return None
+    if keys or lens:
+        return ("keys" if keys else "lens") if origin in _APP_ORIGINS and not role else None
     if origin is None:
         return "host" if role == "host" else "tool"
     if role:
@@ -214,6 +243,15 @@ def client_kind(origin: str | None, role: str, *, keys: bool = False) -> str | N
     if origin == _NOTCH_ORIGIN:
         return "page"
     return None
+
+
+def _lens() -> Any:
+    """Search Screen's session (neo2.core.lens.live) — None where it can't load (off macOS)."""
+    try:
+        from neo2.core.lens.live import lens_live
+    except ImportError:
+        return None
+    return lens_live
 
 
 def _cmd_name(kind: str) -> str:
@@ -274,17 +312,27 @@ class _Client:
 
     def __init__(self, conn: ServerConnection) -> None:
         self.conn = conn
-        self.q: deque[str] = deque()
+        self.q: deque[str | bytes] = deque()  # (bytes: Search Screen's still, in order with the JSON)
         self.frame: bytes | str | None = None
         self.cam: bytes | None = None  # the camera card's latest preview frame
         self.wake = asyncio.Event()
         self.browser = False  # said browser_hello: gets the browser card's messages
-        self.kind = "tool"  # app | page | host | tool | keys: who this is (client_kind)
+        self.kind = "tool"  # app | page | host | tool | keys | lens: who this is (client_kind)
+        self.closing = False  # Search Screen closed: its last answers go out, then the connection ends
 
     def send_json(self, text: str) -> bool:
         if len(self.q) >= _QUEUE_MAX:
             return False
         self.q.append(text)
+        self.wake.set()
+        return True
+
+    def send_bytes(self, payload: bytes) -> bool:
+        """A binary message in order with the JSON around it (Search Screen's still: its hello
+        first, then the picture, then lens_frozen)."""
+        if len(self.q) >= _QUEUE_MAX:
+            return False
+        self.q.append(payload)
         self.wake.set()
         return True
 
@@ -311,6 +359,7 @@ class UIServer:
         self.shell_task: asyncio.Task | None = None  # …and the task reading it (kept: the loop holds it weakly)
         self._keys_ticket: str | None = None  # the Brains & Keys window's ticket, as the shell made it
         self._open_keys_at: float | None = None  # monotonic: the last `open_keys` a client asked for
+        self._open_lens_at: float | None = None  # monotonic: Search Screen last asked for (a host, the core)
 
     async def start(self) -> None:
         s = settings()
@@ -324,6 +373,8 @@ class UIServer:
         from neo2.core.tools.music.live import song_live
 
         song_live.channel = self
+        if (lens_live := _lens()) is not None:
+            lens_live.channel = self
         self._token = ws_token()
         global _serving
         _serving = self
@@ -347,6 +398,22 @@ class UIServer:
             return connection.respond(401, "Missing or wrong token\n")
         role = (query.get("role") or [""])[0]
         ticket = (query.get("ticket") or [None])[0]
+        lens = (query.get("lens") or [None])[0]
+        if lens is not None:  # Search Screen's overlay, or something that says it is
+            lens_live = _lens()
+            if ticket is not None or lens_live is None:
+                print("[ui] a Search Screen connection was refused: it brought two tickets")
+                return connection.respond(403, "Forbidden\n")
+            if not lens_live.ticket_ok(lens):
+                print("[ui] a Search Screen connection was refused: its ticket isn't the shell's")
+                return connection.respond(403, "Forbidden ticket\n")
+            if client_kind(origin, role, lens=True) != "lens":
+                print("[ui] a Search Screen connection was refused: it isn't NEO.app's own page")
+                return connection.respond(403, "Forbidden\n")
+            if self._lens_client() is not None:
+                print("[ui] a second Search Screen connection was refused: one at a time")
+                return connection.respond(409, "Busy\n")
+            return None
         if ticket is not None:  # the Brains & Keys window, or something that says it is
             if not self._ticket_ok(ticket):
                 print("[ui] a Brains & Keys connection was refused: its ticket isn't the shell's")
@@ -373,6 +440,9 @@ class UIServer:
 
     def _keys_client(self) -> _Client | None:
         return next((cl for cl in self._clients.values() if cl.kind == "keys"), None)
+
+    def _lens_client(self) -> _Client | None:
+        return next((cl for cl in self._clients.values() if cl.kind == "lens" and not cl.closing), None)
 
     def has_shell(self) -> bool:
         """NEO.app's shell is at the other end of its socket (a core started by hand has none)."""
@@ -451,6 +521,73 @@ class UIServer:
         self._send_to(cl, "brains_reload_result", {"ok": ok})
         print(f"[ui] brains_reload: {'ok' if ok else 'failed'} (from a {cl.kind})")
 
+    # ---- Search Screen ---------------------------------------------------------------------------
+
+    def open_lens(self) -> str:
+        """Ask NEO.app's shell to open Search Screen (one every 1.5 s): "opened", "busy" or "no_app".
+        `lens_opening` goes first, with nothing in it: NEO's page in the notch folds the host's panel
+        away, so it isn't in the still."""
+        now = time.monotonic()
+        if self._open_lens_at is not None and now - self._open_lens_at < _OPEN_LENS_S:
+            return "busy"
+        if self._link is None:
+            return "no_app"
+        self._open_lens_at = now
+        with contextlib.suppress(RuntimeError):
+            asyncio.get_running_loop().create_task(bus().publish("lens_opening"))
+        if not self._to_shell({"t": "shell", "action": "lens"}):
+            return "no_app"
+        print("[ui] shell: lens (Search Screen)")
+        return "opened"
+
+    def lens_close(self, why: str) -> bool:
+        """Tell NEO.app's shell to close Search Screen (Erase, Stop, an action that opened something)."""
+        return self._to_shell({"t": "lens_close", "why": why})
+
+    def lens_send(self, cl: _Client, type_: str, data: dict[str, Any]) -> None:
+        """One of Search Screen's answers, to its overlay alone."""
+        if cl.kind == "lens":
+            self._send_to(cl, type_, data)
+
+    def lens_frame(self, cl: _Client, payload: bytes) -> None:
+        """Search Screen's still (NBF1 kind 4), to its overlay alone — never to any other kind."""
+        if cl.kind == "lens" and not cl.send_bytes(payload):
+            self._gone(cl.conn)
+
+    def lens_drop(self, cl: _Client) -> None:
+        """Search Screen closed: its overlay's connection ends (its ticket is no good any more) —
+        once what was sent to it last (the action's "done") has gone out, a second at most."""
+        if cl.kind != "lens" or cl.closing or cl.conn not in self._clients:
+            return
+        cl.closing = True
+
+        async def bye() -> None:
+            for _ in range(50):
+                if not cl.q:
+                    break
+                await asyncio.sleep(0.02)
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(cl.conn.close(1000, "closed"), 1.0)
+            self._gone(cl.conn)
+
+        try:
+            asyncio.get_running_loop().create_task(bye())
+        except RuntimeError:
+            self._gone(cl.conn)
+
+    async def _lens_ask(self, cl: _Client, cmd: dict[str, Any]) -> None:
+        from neo2.core.lens.live import lens_live
+
+        try:
+            await lens_live.command(cl, cmd)
+        except Exception as e:  # noqa: BLE001 — its name only: nothing it carried
+            print(f"[ui] lens: {_cmd_name(str(cmd.get('cmd') or ''))} failed: {type(e).__name__}")
+
+    def _lens_refused(self, cl: _Client, cmd: dict[str, Any]) -> None:
+        name = _cmd_name(str(cmd.get("cmd") or ""))
+        self._send_to(cl, "lens_refused", {"cmd": name, "error": "forbidden"})
+        print(f"[ui] lens: {name} refused: from a {cl.kind}, not Search Screen")
+
     # ---- NEO.app's menu, for a host ---------------------------------------------------------
 
     def _host_attached(self) -> bool:
@@ -465,14 +602,16 @@ class UIServer:
 
     def _tell(self, type_: str, data: dict[str, Any]) -> None:
         """To every client connected now — not the bus, not the replay."""
-        self._send_all(json.dumps({"type": type_, "data": data, "ts": time.time()}), lambda cl: True)
+        self._send_all(json.dumps({"type": type_, "data": data, "ts": time.time()}), lambda cl: cl.kind != "lens")
 
     # NEO.app's shell, at the other end of its socket (shell_link.py): the three calls it makes.
 
     def shell_hello(self, link: Any) -> dict[str, Any]:
         """The shell's socket is open: what the shell needs to know first."""
         self._link = link
-        return {"t": "hello", "ui_host": settings().ui_host, "host_attached": self._host_attached()}
+        s = settings()
+        lens = {"on": bool(getattr(s, "lens", False)), "hold_ms": int(getattr(s, "lens_hold_ms", 1000))}
+        return {"t": "hello", "ui_host": s.ui_host, "host_attached": self._host_attached(), "lens": lens}
 
     def shell_said(self, msg: dict[str, Any]) -> None:
         """One message of the shell's: what its menu shows, or the summon keys."""
@@ -486,12 +625,17 @@ class UIServer:
             self._keys_ticket_said(msg)  # the Brains & Keys window is open (see "Brains & Keys")
         elif kind == "keys_closed":
             self._keys_closed()
+        elif kind in ("lens_freeze", "lens_commit", "lens_closed"):
+            if (lens_live := _lens()) is not None:
+                lens_live.shell_said(msg)  # Search Screen (see its doc): the shell's alone to say
 
     def shell_left(self, link: Any) -> None:
         """NEO.app is gone from its socket: nobody speaks for the shell, nobody runs the menu."""
         if self._link is not link:
             return
         self._link = None
+        if (lens_live := _lens()) is not None:
+            lens_live.shell_gone()  # nobody shows the overlay any more
         if self._shell is not None:
             self._shell = None
             self._tell("shell_status", self.shell_snapshot())
@@ -531,6 +675,9 @@ class UIServer:
             return "forbidden"
         if action not in SHELL_ACTIONS:
             return "unknown"
+        if action == "lens":
+            got = self.open_lens()  # (one every 1.5 s, after `lens_opening`)
+            return "" if got == "opened" else got
         data: dict[str, Any] = {"action": action}  # the action and its switch: nothing else rides along
         if action == "open_at_login":
             if not isinstance(on, bool):
@@ -589,8 +736,11 @@ class UIServer:
             self._recent = self._recent[-60:]
         if not self._clients:
             return
-        # (the Brains & Keys window hears what it shows: never a transcript)
-        self._send_all(json.dumps(msg, default=str), lambda cl: cl.kind != "keys" or ev.type in _KEYS_HEARS)
+        # (the Brains & Keys window hears what it shows: never a transcript; Search Screen nothing)
+        self._send_all(
+            json.dumps(msg, default=str),
+            lambda cl: cl.kind not in _NOT_CARDS or (cl.kind == "keys" and ev.type in _KEYS_HEARS),
+        )
 
     def _send_all(self, data: str, who: Callable[[_Client], bool]) -> None:
         for c, cl in list(self._clients.items()):
@@ -601,6 +751,10 @@ class UIServer:
         if (cl := self._clients.pop(c, None)) is not None:
             if cl.kind == "host" and not self._host_attached():
                 self._host_changed(False)  # NEO.app's menu-bar item returns
+            if cl.kind == "lens":
+                from neo2.core.lens.live import lens_live
+
+                lens_live.client_gone(cl)
             from neo2.core.tools.browser_live import live
 
             live.viewer_gone(cl)
@@ -629,7 +783,7 @@ class UIServer:
                 # In memory only, and not for long: the poster leaves the replay after ten minutes.
                 asyncio.get_running_loop().call_later(_POSTER_KEEP_S, lambda: kept.update(poster=None))
         if self._clients:
-            self._send_all(json.dumps(msg, default=str), lambda cl: cl.kind != "keys" and (recent or cl.browser))
+            self._send_all(json.dumps(msg, default=str), lambda cl: cl.kind not in _NOT_CARDS and (recent or cl.browser))
 
     def camera_send(self, type_: str, data: dict[str, Any], *, recent: bool = False) -> None:
         """A camera card message (neo2/core/tools/camera/live.py), to every overlay: its opening and
@@ -639,7 +793,7 @@ class UIServer:
             self._recent.append(msg)
             self._recent = self._recent[-60:]
         if self._clients:
-            self._send_all(json.dumps(msg, default=str), lambda cl: cl.kind != "keys")
+            self._send_all(json.dumps(msg, default=str), lambda cl: cl.kind not in _NOT_CARDS)
 
     def song_send(self, type_: str, data: dict[str, Any], *, recent: bool = False) -> None:
         """A song card message (neo2/core/tools/music/live.py): the camera card's lane. Its opening, its
@@ -649,13 +803,13 @@ class UIServer:
 
     def viewers(self) -> int:
         """Overlays connected now (the camera turns on only where its card can be seen: never in
-        Brains & Keys)."""
-        return sum(1 for cl in self._clients.values() if cl.kind != "keys")
+        Brains & Keys or Search Screen)."""
+        return sum(1 for cl in self._clients.values() if cl.kind not in _NOT_CARDS)
 
     def camera_frame(self, payload: bytes, who: Callable[[_Client], bool]) -> None:
         """One camera preview frame, into the latest-frame slot of each client showing the card."""
         for cl in list(self._clients.values()):
-            if who(cl):
+            if cl.kind not in _NOT_CARDS and who(cl):
                 cl.offer_camera(payload)
 
     async def _drain(self, cl: _Client) -> None:
@@ -684,6 +838,10 @@ class UIServer:
         except Exception as e:  # noqa: BLE001 — a hello without the brains beats no hello
             print(f"[ui] brains not in the hello: {type(e).__name__}")
             summary = None
+        if cl.kind == "lens":
+            from neo2.core.lens.live import lens_live
+
+            return {"state": bus().state.value, "lens": lens_live.hello()}  # (nothing else: see "Search Screen")
         if cl.kind == "keys":
             return {
                 "state": bus().state.value,
@@ -721,8 +879,19 @@ class UIServer:
         if request is not None:  # admitted, so it is one of the five kinds
             query = parse_qs(urlparse(request.path).query)
             role, ticket = (query.get("role") or [""])[0], (query.get("ticket") or [None])[0]
+            lens = (query.get("lens") or [None])[0]
             origin = request.headers.get("Origin")
-            if ticket is not None:
+            if lens is not None:
+                lens_live = _lens()
+                # (checked at the door; checked again: Search Screen may have closed since)
+                ok = ticket is None and lens_live is not None and lens_live.ticket_ok(lens) and client_kind(origin, role, lens=True) == "lens"
+                if not ok or self._lens_client():
+                    print("[ui] a Search Screen connection was closed: its ticket is no good now")
+                    with contextlib.suppress(Exception):
+                        await c.close(1008, "forbidden")
+                    return
+                cl.kind = "lens"
+            elif ticket is not None:
                 # (checked at the door; checked again: the window may have closed since, or another
                 # one got in first)
                 if not (self._ticket_ok(ticket) and client_kind(origin, role, keys=True) == "keys") or self._keys_client():
@@ -739,6 +908,10 @@ class UIServer:
         if first_host:
             self._host_changed(True)  # NEO.app puts its menu-bar item away
         self._clients[c] = cl
+        if cl.kind == "lens":
+            from neo2.core.lens.live import lens_live
+
+            lens_live.attach(cl)
         drain = asyncio.create_task(self._drain(cl))
         try:
             async for raw in c:
@@ -751,6 +924,19 @@ class UIServer:
                 if not isinstance(cmd, dict):
                     continue
                 kind = str(cmd.get("cmd") or "")
+                # Search Screen first, by name: its overlay sends nothing else, and its commands never
+                # reach anything below (see "Search Screen").
+                if cl.kind == "lens":
+                    if kind.startswith("lens_"):
+                        asyncio.create_task(self._lens_ask(cl, cmd))
+                    elif kind == "state":
+                        cl.send_json(json.dumps({"type": "state", "data": {"state": bus().state.value}}))
+                    else:
+                        print(f"[ui] {_cmd_name(kind)} refused: Search Screen sends only its own commands")
+                    continue
+                if kind.startswith("lens_"):
+                    self._lens_refused(cl, cmd)  # to that client alone; never the bus
+                    continue
                 # Brains & Keys first, by name: its commands never reach anything below (see the doc).
                 if cl.kind == "keys":
                     if kind in brains.COMMANDS:
@@ -805,6 +991,8 @@ class UIServer:
                 if kind == "stop":
                     camera_live.close("stopped")  # the stop button turns the camera off too
                     song_live.stop("stopped")  # …and stops listening for a song
+                    if (lens_live := _lens()) is not None:
+                        lens_live.stop()  # …and closes Search Screen
                 if kind == "state":
                     cl.send_json(json.dumps({"type": "state", "data": {"state": bus().state.value}}))
                     continue

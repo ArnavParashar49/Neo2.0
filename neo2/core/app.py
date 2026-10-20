@@ -100,6 +100,42 @@ class App:
         self._keys_opened_at = now
         return "opened"
 
+    def open_lens(self, question: str = "") -> str:
+        """Search Screen, asked for by the voice or the agent's tool: NEO.app's shell opens its
+        overlay (neo2.core.lens.live: one every 1.5 s). "opened", "off", "no_app" or "busy"."""
+        from neo2.core.lens.live import lens_live
+
+        return lens_live.open_overlay(question)
+
+    async def handle_lens(self, text: str, image, context: str) -> None:
+        """Search Screen's "Continue in NEO": the user's words (or "Tell me more about this.") with the
+        area's picture, as their own request — tainted as screen content (what it shows is data,
+        never instructions), its title and questions so far as this turn's context only. The chat
+        line shows a "Screen area" chip; no pixels go into the transcript, the replay or the journal."""
+        said = text.strip() or "Tell me more about this."
+        task = asyncio.current_task()
+        if task:
+            self._tasks.add(task)
+        try:
+            reply = await self.session.handle(
+                said, images=[image] if image is not None else None, from_user=True, taint=("search_screen",),
+                prompt_context=context, source="typed", attach="screen",
+            )  # fmt: skip
+            if self.voice and reply.text and not reply.silent and not getattr(self.voice, "handles_text", False):
+                await self.voice.speak(reply.spoken or reply.text)
+        except asyncio.CancelledError:
+            await bus().say("Stopped.", final=True)
+        finally:
+            if task:
+                self._tasks.discard(task)
+
+    async def lens_listen(self) -> None:
+        """Search Screen's mic button: the voice listens, as the summon keys make it, for a question
+        about the area (the session's lens lane takes the sentence)."""
+        await bus().publish("woke", source="ui")
+        if self.voice:
+            await self.voice.wake("ui")
+
     def voice_kind(self) -> str | None:
         """Which voice runs now: "live" (Gemini Live), "local" (on this Mac), None (none yet)."""
         v = self.voice
@@ -534,6 +570,16 @@ async def run() -> None:
     brains.started(s)  # what the voice starts with: a key changed later says "restart NEO"
     brains.voice_now = app.voice_kind
     onboarding.set_opener(app.open_keys)  # a request with no model to answer it opens Brains & Keys
+    from neo2.core.lens import search as lens_search
+    from neo2.core.lens.live import lens_live
+    from neo2.core.tools import lens as lens_tool
+
+    lens_live.hooks.continue_ = app.handle_lens  # Search Screen's Continue in NEO, its Brains & Keys…, its mic
+    lens_live.hooks.open_keys = ui.open_keys
+    lens_live.hooks.listen = app.lens_listen
+    lens_tool.start(app_socket is not None)  # search_screen: hidden while it's off or no NEO.app runs us
+    with contextlib.suppress(OSError):
+        lens_search.sweep()  # an image search's page an earlier run left behind
     await ui.start()
     ui.shell_task = shell_link.start(ui, app_socket)  # the menu, the summon keys, the status: no page needed
     bus().subscribe(app._track_activity)

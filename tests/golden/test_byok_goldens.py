@@ -9,7 +9,8 @@ and kept byte-identical from then on.
   environment (only the fields that existed then: a field added later doesn't count).
 * claude_kwargs.json: what ClaudeProvider sends for claude-opus-5 (a fake client takes it).
 * hello.json: the keys of the websocket hello each kind of client gets, and the shell's. Rewritten
-  once, on purpose, when the hello gained "brains" (Brains & Keys' summary): only that key was added.
+  once, on purpose, when the hello gained "brains" (Brains & Keys' summary): only that key was added;
+  and once more when the shell's hello gained "lens" (Search Screen's switch and hold time): only that.
 
 Every key here is an obvious fake. Nothing reads ~/.neo, the real .env files or the network (the
 websocket server is this test's own, on a free port of this process).

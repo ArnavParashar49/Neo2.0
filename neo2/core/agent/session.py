@@ -141,6 +141,8 @@ _NO_EXTRAS: Mapping[str, Any] = types.MappingProxyType({})
 _request_extras: contextvars.ContextVar[Mapping[str, Any]] = contextvars.ContextVar("request_extras", default=_NO_EXTRAS)
 # Whose words the request is (Session.handle's origin): only the user's own start or teach a replay.
 _request_origin: contextvars.ContextVar[str] = contextvars.ContextVar("request_origin", default="")
+# What the user's chat line shows beside their words ("screen": Search Screen's area went with them).
+_request_attach: contextvars.ContextVar[str] = contextvars.ContextVar("request_attach", default="")
 # Short-lived context for one request (e.g. the answer to an ephemeral spoken check-in). It is
 # injected into that request's system prompt only; it is not user text, history, or memory.
 _request_prompt_context: contextvars.ContextVar[str] = contextvars.ContextVar(
@@ -297,6 +299,7 @@ class Session:
         source: Literal["typed", "voice"] = "typed",
         prompt_context: str = "",
         checkin: bool = False,
+        attach: str = "",
     ) -> Reply:
         """Handle one request. `from_user` = these are the user's own words (typed, or their
         transcribed speech) — only then can they answer a pending confirmation. Text a model wrote
@@ -313,7 +316,9 @@ class Session:
 
         `checkin`: these are the words the on-device voice heard right after a check-in NEO started
         itself (neo2.core.voice.wellbeing; App.handle_speech). They are answered, never routed or
-        kept: see _checkin_answer."""
+        kept: see _checkin_answer. `attach`: what the user's chat line shows beside their words
+        ("screen": an area of the screen went with them — Search Screen's Continue in NEO), never
+        the picture itself."""
         origin = origin or ("user" if from_user else "live")
         # This request's taint and extras hold while it runs and are put back when it returns: the
         # caller's next call from the same task (approving another agent's card, say) never gets
@@ -331,6 +336,7 @@ class Session:
             (_request_origin, _request_origin.set(origin)),
             (_memory_ctx, _memory_ctx.set(None)),  # this request's own memory block, worked out in it
             (_request_prompt_context, _request_prompt_context.set(prompt_context.strip())),
+            (_request_attach, _request_attach.set(attach if attach in ("screen",) else "")),
         ]
         # The user's own words: typed or spoken to NEO.app, or what an embedding host says is its
         # user's (an agent whose host turned the journal on).
@@ -414,7 +420,7 @@ class Session:
         job = f"j{next(_job_ids)}"
         if from_user:
             bus().new_user_turn()
-            await bus().say(text, role="user", job=job)
+            await bus().say(text, role="user", job=job, attach=_request_attach.get())
 
         if (p := confirm.peek()) is not None:
             if from_user:

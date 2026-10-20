@@ -27,7 +27,7 @@ _MODULES = [
 # shortcut, never a song called "<name> shortcut". Every other built-in fast path still comes first.)
 _MAC_ONLY = [
     "neo2.core.tools.shortcuts", "neo2.core.tools.media", "neo2.core.tools.camera.tool", "neo2.core.tools.music.tool",
-    "neo2.core.tools.routines", "neo2.core.tools.quality", "neo2.core.tools.context_now",
+    "neo2.core.tools.routines", "neo2.core.tools.quality", "neo2.core.tools.context_now", "neo2.core.tools.lens",
 ]
 _MAC_MODULES = ["neo2.core.tools.computer", "neo2.core.tools.selftest"]
 
@@ -127,6 +127,7 @@ REFUSED: dict[str, str] = {
     "embedded agent's",
     "shortcut_run": "the user's own Shortcuts are NEO.app's: run on its user's own words, or after their yes, "
     "never an embedded agent's",
+    "search_screen": "search_screen opens NEO.app's own Search Screen overlay, which an embedded agent doesn't have",
 }
 
 

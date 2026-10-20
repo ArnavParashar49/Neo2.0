@@ -317,7 +317,9 @@ def test_a_host_reaches_the_menu_through_neo_apps_shell(monkeypatch):
 
     async def body(srv, port, seen):
         async with _Shell(srv, monkeypatch) as shell, _Peer(port, role="host") as host:
-            assert shell.hello == {"t": "hello", "ui_host": "window", "host_attached": False}
+            assert shell.hello == {
+                "t": "hello", "ui_host": "window", "host_attached": False, "lens": {"on": True, "hold_ms": 1000},
+            }  # fmt: skip
             assert await shell.read() == {"t": "host_attached", "attached": True}
             await shell.say(t="status", **STATUS)
             assert (await host.next("shell_status"))["data"] == {"running": True, "app": True, **STATUS}
