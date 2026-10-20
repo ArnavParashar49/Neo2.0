@@ -70,6 +70,7 @@ __all__ = [
     "camera_order",
     "forget",
     "image_limit",
+    "lens_order",
     "make",
     "pool",
     "rebuild",
@@ -952,6 +953,32 @@ def camera_order(s: Any = None) -> list[str]:
     out: list[str] = []
     seen: set[str] = set()
     for n in dict.fromkeys(roles):
+        if not n or not brainref.parse(n).valid or not catalog.describe(n, s).sees:
+            continue
+        pid = catalog.provider_of(n)
+        if pid not in seen:
+            seen.add(pid)
+            out.append(n)
+    return out
+
+
+def lens_order(s: Any = None) -> list[str]:
+    """The brains a Search Screen area may go to (neo2.core.lens.ask: asked one after another, the
+    next only when the one before is slow), in the user's order: Eyes, Brain, Quick replies, then
+    the Backups — each only if it sees — then the seeing fallbacks every chain gets (with Cerebras's
+    seeing brain where it is enabled), at most one brain of each provider (a paid one is never paid
+    twice for one area). A user who keeps their brains on this Mac and named no cloud brain that
+    sees gets no cloud fallback (`_fallback_eyes`): their area stays on the Mac. camera_order is
+    the camera's own and is not this."""
+    s = s if s is not None else settings()
+    roles = [getattr(s, "eyes_brain", ""), getattr(s, "brain", ""), getattr(s, "fast_brain", ""), *(_backups(s) or ())]
+    from neo2.core.providers.cerebras_hooks import with_cerebras_eyes
+
+    eyes = _fallback_eyes(s)
+    eyes = with_cerebras_eyes(eyes, s) if eyes else eyes
+    out: list[str] = []
+    seen: set[str] = set()
+    for n in dict.fromkeys((*roles, *eyes)):
         if not n or not brainref.parse(n).valid or not catalog.describe(n, s).sees:
             continue
         pid = catalog.provider_of(n)

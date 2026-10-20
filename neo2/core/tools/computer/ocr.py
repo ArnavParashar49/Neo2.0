@@ -195,7 +195,7 @@ class _Vision:
                 self._langs[fast] = [str(x) for x in (got or [])]
         return list(self._langs[fast])
 
-    def recognize(self, image, *, fast, languages, auto, ranges) -> list[Raw]:
+    def recognize(self, image, *, fast, languages, auto, ranges, prose=False) -> list[Raw]:
         effects.guard("model", "run Apple Vision's on-device text recognition")
         from neo2.core.decide._objc import pool
 
@@ -207,7 +207,8 @@ class _Vision:
                 cg, data = _cgimage(image)
                 req = ns["VNRecognizeTextRequest"].alloc().init()
                 req.setRecognitionLevel_(1 if fast else 0)
-                req.setUsesLanguageCorrection_(False)  # UI words, not prose: faster, and no "fixing" of labels
+                # UI words, not prose: faster, and no "fixing" of labels (Plan.prose: a person's sentences)
+                req.setUsesLanguageCorrection_(bool(prose))
                 if languages:
                     req.setRecognitionLanguages_(list(languages))
                 if auto and not fast and hasattr(req, "setAutomaticallyDetectsLanguage_"):
@@ -434,11 +435,15 @@ def _pick(supported: list[str], wanted: Iterable[str]) -> list[str]:
 
 @dataclass(frozen=True)
 class Plan:
-    """How to read: fast or accurate, in which languages, with Vision guessing the language."""
+    """How to read: fast or accurate, in which languages, with Vision guessing the language.
+    ``prose``: Vision's language correction on — for sentences and paragraphs a person wrote
+    (Search Screen's area: neo2.core.lens.local), never for the screen's controls, whose labels it
+    would "fix". Off for every other reader; an engine is handed the keyword only when it is on."""
 
     fast: bool
     languages: tuple[str, ...]
     auto: bool = False
+    prose: bool = False
 
 
 def plan_for(text: str = "", *, want_fast: bool = True) -> Plan | None:
@@ -644,7 +649,10 @@ def read(
                 return x0 + x * kx, y0 + y * ky, w * kx, h * ky
 
             try:
-                raws = e.recognize(piece, fast=plan.fast, languages=list(plan.languages), auto=plan.auto, ranges=ranges)
+                raws = e.recognize(
+                    piece, fast=plan.fast, languages=list(plan.languages), auto=plan.auto, ranges=ranges,
+                    **({"prose": True} if plan.prose else {}),
+                )  # fmt: skip
             except (Failed, effects.EffectRefused):
                 raise
             except Exception as ex:  # noqa: BLE001 - an engine error is a failed read, never a crash of the tool
