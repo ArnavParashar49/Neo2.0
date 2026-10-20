@@ -26,6 +26,13 @@ _VAGUE_QUERY = (
 _VAGUE_QUERY_AFTER_FOR = r"(?!(?:for\s+)?(?:it|this|that|these|those|them|one|(?:the|this|that)\s+(?:\w+\s+)?one)\s*[.!?]*\s*$)"
 # a site as the user says it: a name or a domain, up to three words ("<brand> maps")
 _SITE = r"(?P<site>[\w.+-]+(?:\s+[\w.+-]+){0,2})"
+# "search my screen", "search the screen for …", "search what's on my screen": Search Screen's words
+# (neo2.core.agent.lens_words), never a web search for "my screen". "search the screen protector
+# deals" is still one.
+_NOT_THE_SCREEN = (
+    r"(?!(?:(?:on|in)\s+)?(?:what(?:'s|s|\s+is)\s+on\s+)?(?:my|the|this)\s+(?:screen|display|monitor)\b"
+    r"(?:\s+(?:for|about)\b|\s*[?.!]*\s*$))"
+)
 
 log = logger(__name__)
 
@@ -150,6 +157,7 @@ def _news(query: str, n: int) -> str:
             # "search for X", "google X", "look up X" — but not "search for X in Notes"
             r"^\s*(?:please\s+)?(?:search(?:\s+the\s+(?:web|internet))?(?:\s+for)?|google|look\s+up|"
             r"web\s+search(?:\s+for)?|find\s+(?:me\s+)?(?:info(?:rmation)?\s+(?:on|about)|out\s+about))\s+"
+            rf"{_NOT_THE_SCREEN}"
             rf"(?!.*\b(?:in|on)\s+(?:notes|spotify|finder|mail|messages|slack|my\s+\w+|the\s+\w+\s+app|{_SITE_RE})\b)"
             rf"(?!(?:{_SITE_RE})\s+for\b)"  # "search amazon for X" opens the site's search
             r"(?P<query>.{3,}?)\s*[?.!]*\s*$",
@@ -160,7 +168,7 @@ def _news(query: str, n: int) -> str:
             # the same verbs; what the query ends with ("in <W>", "on <W>") is judged by evidence
             r"^\s*(?:please\s+)?(?:search(?:\s+the\s+(?:web|internet))?(?:\s+for)?|google|look\s+up|"
             r"web\s+search(?:\s+for)?|find\s+(?:me\s+)?(?:info(?:rmation)?\s+(?:on|about)|out\s+about))\s+"
-            r"(?P<query>.{3,}?)\s*[?.!]*\s*$",
+            rf"{_NOT_THE_SCREEN}(?P<query>.{{3,}}?)\s*[?.!]*\s*$",
             {"query": "<query>"},
             _claims_web,
         ),
@@ -396,17 +404,13 @@ def _site(url: str) -> str:
     requires=frozenset({"macos"}),  # opens the Mac's own browser
 )
 async def search_site(a: dict, c: ToolContext):
-    from neo2.core.tools.computer import apps
-
     site, query = str(a["site"]).strip(), str(a["query"]).strip()
     q = " ".join(query.lower().split()).removeprefix("for ").strip(" .!?")
     if not q or q in ("it", "this", "that", "them", "those", "these", "one", "the same") or q.endswith(" one"):
         return "Error: search for what? Name the thing to search for."
     query = query.strip()[4:].strip() if query.lower().startswith("for ") else query
-    m = decide_mode("web_search")
-    if m == "on":
+    if decide_mode("web_search") == "on":
         from neo2.core.agent import confirm
-        from neo2.core.decide import run
         from neo2.core.decide.kinds import site as sk
 
         if c.tainted() and sk.carries_data(site, query):
@@ -418,7 +422,23 @@ async def search_site(a: dict, c: ToolContext):
             )
             if isinstance(gate, str):
                 return gate
-        return run.to_output(await sk.search(site, query, browser=str(a.get("browser") or "")))
+    return await open_search(site, query, browser=str(a.get("browser") or ""))
+
+
+async def open_search(site: str, query: str, *, browser: str = ""):
+    """Open a search for ``query`` on ``site`` in the browser — search_site's own way, after its
+    checks: with web_search on, the site and the browser evidence chose; otherwise the site's search
+    page (sites_legacy) in the default browser, and in shadow mode the evidence's choice worked out
+    beside it. Search Screen's "Search “…”" calls it on the user's click (the click is the consent:
+    no taint gate there). Returns what search_site returns."""
+    from neo2.core.tools.computer import apps
+
+    m = decide_mode("web_search")
+    if m == "on":
+        from neo2.core.decide import run
+        from neo2.core.decide.kinds import site as sk
+
+        return run.to_output(await sk.search(site, query, browser=browser))
     url = site_search_url(site, query)
     out = await apps.open_app(url)
     if m == "shadow":
