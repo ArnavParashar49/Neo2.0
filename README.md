@@ -92,12 +92,12 @@ Every staged, confirmed or cancelled action is appended to `~/.neo/audit.log` (t
 
 ## Install
 
-Requirements: macOS 13+ on Apple Silicon (built and tested on an M3 Pro, 18 GB), Python 3.12, and — for the overlay — Node 20+ and Rust.
+Requirements: macOS 14+ on Apple Silicon (built and tested on an M3 Pro, 18 GB), Python 3.12, and — for the overlay — Node 22.12+ (22.18+ for `npm test`) and Rust.
 
 ```bash
 brew install uv rustup && rustup default stable
 git clone https://github.com/ArnavParashar49/Neo2.0 && cd Neo2.0
-uv venv --python 3.12 && uv pip install -r requirements.lock && uv pip install -e ".[app,dev]"
+uv venv --python 3.12 && uv pip install -r requirements-dev.lock && uv pip install -e ".[app,dev]"
 cp .env.example .env        # keys here, or paste them later in Brains & Keys (menu)
 .venv/bin/python -m neo2 --doctor
 scripts/install-app.sh      # build NEO.app, install it to /Applications and start it
@@ -111,7 +111,7 @@ Keys: NEO needs at least one model. The simplest is a free Gemini key; NEO.app's
 
 The browser tools need Chromium once: `.venv/bin/python -m playwright install chromium`.
 
-**NEO.app** (recommended): run `scripts/install-app.sh` from the project folder. It installs NEO's Python runtime (exact versions from `requirements.lock`) in `~/Library/Application Support/NEO`, copies your `.env` to `~/.neo/.env`, builds and signs the app, puts it in `/Applications` (replacing any older copy) and starts it. Re-run it after pulling changes; `scripts/uninstall-app.sh` removes the app (`--purge` also moves `~/.neo` to the Trash).
+**NEO.app** (recommended): run `scripts/install-app.sh` from the project folder. It installs NEO's Python runtime (exact versions from `requirements.lock`: what the app needs; `requirements-dev.lock` adds the tests and Laya's training rows) in `~/Library/Application Support/NEO`, copies your `.env` to `~/.neo/.env`, builds and signs the app, puts it in `/Applications` (replacing any older copy) and starts it. Re-run it after pulling changes; `scripts/uninstall-app.sh` removes the app (`--purge` also moves `~/.neo` to the Trash).
 
 It lives in the menu bar (the dotted orb), with no Dock icon: it runs the core, restarts it if it crashes or hangs, stops it on quit, and opens at login (menu → *Open at Login*). **⌥⌘** — press Option and Command together and let go — shows NEO; ⌘⇧Space works too. The first launch asks for **Accessibility** and **Screen Recording** (and the microphone when you first talk to it); the menu shows what's still missing, with shortcuts to the right settings pane. The app is signed by its bundle id, so what you grant once stays granted across updates. The menu also has *Brains & Keys…* (pick each role's brain, paste and test keys, set daily caps), *Edit settings file…* (opens `~/.neo/.env` in TextEdit), *Open Logs*, *Restart NEO* and *Erase NEO's Memory…*. With no model set up yet, NEO's chat shows a *Give NEO a brain* card, and a request that needs a model opens Brains & Keys.
 

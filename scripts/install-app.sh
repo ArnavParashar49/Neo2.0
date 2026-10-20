@@ -13,7 +13,7 @@ for d in "$HOME/.cargo/bin" "$HOME"/.rustup/toolchains/stable-*/bin; do
   [ -x "$d/cargo" ] && PATH="$d:$PATH" && break
 done
 command -v cargo >/dev/null || { echo "Rust isn't installed (https://rustup.rs)"; exit 1; }
-[ -x "$ROOT/.venv/bin/python" ] || { echo "No Python environment at $ROOT/.venv — see README (uv sync)"; exit 1; }
+[ -x "$ROOT/.venv/bin/python" ] || { echo "No Python environment at $ROOT/.venv — see README (Install: uv venv, requirements-dev.lock)"; exit 1; }
 
 RUNTIME="$HOME/Library/Application Support/NEO"
 echo "→ installing NEO's runtime in $RUNTIME"

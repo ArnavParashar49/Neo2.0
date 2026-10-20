@@ -1,0 +1,16 @@
+# What scripts/build_engine.sh removes from the release engine before packing it: nothing NEO runs,
+# only what's there to build or test other code. One rule a line:
+#   name <glob>   any file or folder of that name, anywhere in the engine
+#   path <glob>   that path, relative to the engine's root
+# scripts/engine_id.py hashes this file: a change here is a new engine.
+
+# Bytecode: the installer compiles it on the user's Mac (paths of their own, files of their own).
+name __pycache__
+# Static libraries, only for linking other C code (numpy's npymath and npyrandom).
+name *.a
+# torch's C++ headers (62 MB), for building extensions.
+path lib/python3.12/site-packages/torch/include
+# pyobjc's own test suite (16 MB), installed as a top-level package.
+path lib/python3.12/site-packages/PyObjCTest
+# Debug symbols beside two of pyobjc's modules (dSYM bundles): only a debugger reads them.
+name *.dSYM

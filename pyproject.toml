@@ -1,6 +1,6 @@
 [project]
 name = "neo2"
-version = "2.1.0"
+version = "2.2.0"
 description = "NEO — a free, local-first AI agent for your Mac"
 requires-python = ">=3.12,<3.13"  # neo2/core/decide uses 3.12 syntax (PEP 695)
 license = "MIT"

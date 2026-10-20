@@ -52,7 +52,7 @@ if TYPE_CHECKING:  # the names below, for type checkers and IDEs (nothing is imp
     from neo2.sdk.sync import Agent as Agent
     from neo2.sdk.tools_api import ToolTurn as ToolTurn
 
-__version__ = "2.1.0"
+__version__ = "2.2.0"
 
 # name -> (module, attribute)
 _EXPORTS: dict[str, tuple[str, str]] = {

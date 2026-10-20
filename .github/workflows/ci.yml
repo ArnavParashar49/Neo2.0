@@ -1,6 +1,8 @@
 # Every push and pull request: lint, the Python tests, and the overlay (TypeScript, Vite build,
-# Rust tests). macOS runners, because NEO drives macOS APIs (pyobjc, CoreGraphics). The sdk-core
-# job checks NEO as a library other apps install (neo2): the wheel with no extras, on Linux too.
+# its unit tests, Rust tests). macOS runners, because NEO drives macOS APIs (pyobjc, CoreGraphics).
+# The sdk-core job checks NEO as a library other apps install (neo2): the wheel with no extras, on
+# Linux too. release-files: one version everywhere and the release engine's inputs; app-bundle:
+# NEO.app itself builds (tauri build, the app bundle only) for macOS 14.
 name: CI
 
 on:
@@ -27,12 +29,12 @@ jobs:
       - uses: astral-sh/setup-uv@v6
         with:
           python-version: "3.12"
-      - name: Install (exact versions from requirements.lock)
+      - name: Install (exact versions from requirements-dev.lock, the app's lock and the tests')
         run: |
           uv venv --python 3.12
-          uv pip install -r requirements.lock
+          uv pip install -r requirements-dev.lock
           uv pip install --no-deps -e .
-          uv pip install pytest pytest-asyncio ruff
+          uv pip install ruff
       - name: Lint
         run: .venv/bin/ruff check neo neo2 tests scripts   # neo: the checkout's compatibility shim  neo2-codemod: keep
       - name: Compile
@@ -92,7 +94,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22  # Vite 8: 22.12+; npm test runs .ts files directly (type stripping: 22.18+)
           cache: npm
           cache-dependency-path: ui/package-lock.json
       - uses: dtolnay/rust-toolchain@stable
@@ -102,8 +104,55 @@ jobs:
       - run: npm ci
       - name: Typecheck
         run: npx tsc --noEmit
+      - name: Unit tests (node --test)
+        run: npm test
       - name: Build the web part
         run: npm run build
       - name: Rust tests
         working-directory: ui/src-tauri
         run: cargo test --quiet
+
+  release-files:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: One version in every file (pyproject, neo2, tauri.conf.json, Cargo, package.json)
+        run: python3 scripts/version.py check
+      - name: The release engine's inputs (scripts/engine.env, requirements.release.txt, the prune list)
+        run: python3 scripts/engine_id.py --explain
+      - name: The release scripts parse
+        run: bash -n scripts/build_engine.sh scripts/lock-deps.sh
+
+  app-bundle:
+    # NEO.app as a release builds it (scripts/build_release.sh): tauri build, the app bundle only, for
+    # macOS 14 (LSMinimumSystemVersion). Ad-hoc signed here; no DMG, no engine, nothing published.
+    runs-on: macos-14
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: ui
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ui/src-tauri
+          key: app-bundle  # the release profile's own cache (LTO), apart from the tests' debug one
+      - run: npm ci
+      - name: tauri build --bundles app
+        run: npm run tauri build -- --bundles app
+      - name: The bundle (signature, macOS floor, version)
+        run: |
+          app=src-tauri/target/release/bundle/macos/NEO.app
+          codesign --verify --strict "$app"
+          floor=$(plutil -extract LSMinimumSystemVersion raw "$app/Contents/Info.plist")
+          version=$(plutil -extract CFBundleShortVersionString raw "$app/Contents/Info.plist")
+          echo "NEO.app $version, macOS $floor+"
+          test "$floor" = "14.0"
+          python3 ../scripts/version.py check "$version"

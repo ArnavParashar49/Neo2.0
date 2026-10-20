@@ -1,0 +1,14 @@
+# The dev environment: NEO.app's runtime (requirements.lock), plus the tests and Laya's
+# training rows (the train extra). uv pip install -r requirements-dev.lock && uv pip install
+# -e ".[app,dev]". Regenerate: scripts/lock-deps.sh
+-r requirements.lock
+datasets==5.0.1
+dill==0.4.1
+iniconfig==2.3.0
+multiprocess==0.70.19
+pandas==3.0.6
+pluggy==1.6.0
+pyarrow==25.0.1
+pytest==9.1.1
+pytest-asyncio==1.4.0
+xxhash==4.0.1
