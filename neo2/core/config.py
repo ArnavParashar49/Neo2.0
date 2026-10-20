@@ -520,6 +520,48 @@ class Settings(BaseSettings):
     camera: bool = True  # False: NEO never turns the camera on
     camera_follow_s: float = 20.0  # it stays on this long after an answer, for "and now?"
 
+    # ---- Search Screen (neo2.core.lens) ------------------------------------------------
+    # Hold ⌥⌘ about a second and let go (or the menu's Search Screen…, or "search my screen"): a
+    # glowing overlay over the display under the pointer; circle or drag over anything to search
+    # it. The quick ⌥⌘ tap is unaffected. Only the area the user selects ever leaves the Mac, and
+    # only to their own brains (the Eyes first) — or, when they click "Search with …", to that site
+    # through their browser. NEO.app's shell reads `lens` and `lens_hold_ms` from the core's hello.
+    lens: bool = True  # False: holding ⌥⌘ does nothing, the menu item is off, the voice says so
+    lens_hold_ms: int = 1000  # how long ⌥⌘ is held: 600–3000 (under 1000 the quick tap's window is hold − 100)
+    # "Search with …": google (Google Lens, the default) | bing | off | any other site word (a text
+    # search there for the answer's query; no picture is uploaded)
+    lens_search: str = "google"
+    lens_ask: bool = True  # False: on-device results only, until the user presses Ask
+
+    @field_validator("lens", "lens_ask", mode="before")
+    @classmethod
+    def _lens_switch(cls, v):
+        """A typo must not stop NEO from starting: only a clear "off" turns these off."""
+        if isinstance(v, bool):
+            return v
+        return str(v).strip().lower() not in ("0", "false", "no", "off", "never", "n", "f")
+
+    @field_validator("lens_hold_ms", mode="before")
+    @classmethod
+    def _lens_hold(cls, v):
+        """600–3000 ms; anything NEO can't read is the default (1000)."""
+        try:
+            ms = int(float(str(v).strip().lower().removesuffix("ms").strip()))
+        except (TypeError, ValueError):
+            return 1000
+        return max(600, min(3000, ms))
+
+    @field_validator("lens_search", mode="before")
+    @classmethod
+    def _lens_search(cls, v):
+        """A site word (google, bing, duckduckgo, a domain) or "off"; anything else is google."""
+        s = str(v if v is not None else "").strip().lower()
+        if s in ("", "on", "true", "yes", "default", "lens", "google lens"):
+            return "google"
+        if s in ("false", "no", "none", "never", "0"):
+            return "off"
+        return s if len(s) <= 40 and re.fullmatch(r"[a-z0-9.-]+", s) else "google"
+
     # ---- naming a song (neo2.core.tools.music) ----------------------------------------
     # "What song is this?": NEO listens to the room (the microphone) and to the Mac's own sound
     # (while something plays) for up to song_listen_s, only on the user's own request, with its card
@@ -639,6 +681,7 @@ class LibrarySettings(Settings):
     browser_view: Literal["chat", "window"] = "window"  # no chat card: that's NEO.app's overlay
     camera: bool = False  # the camera only for a host that turns it on (camera=True)
     song_id: bool = False  # nor does it listen for a song unless the host turns that on (song_id=True)
+    lens: bool = False  # Search Screen is NEO.app's own overlay: an embedded agent has none
     include_username: bool = False
     # No early first look at the host's screen unless the host asks for it (neo2.core.agent.prefetch).
     prefetch_look: bool = False
