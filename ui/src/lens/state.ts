@@ -5,10 +5,15 @@
 
 import { atLeast, box, iou, nudge, toRect, type Box, type Pt } from "./geometry.ts";
 import { DOUBLE_MS, pick, regionAt, tabStops, windowAt } from "./pick.ts";
-import { doneText } from "./chips.ts";
 import { FLY_RESET_MS, FLY_RESET_REDUCED_MS, flyPlan, type FlyPlan } from "./fly.ts";
-import { send, type AnswerData, type CoreMsg, type How, type LensHello, type LinkRow, type LocalData, type Regions, type Sent } from "./wire.ts";
+import {
+  answerProblem, emptyResult, MAX_THREAD, NOTE_MS, privacyLine as resultPrivacyLine, replyProblem, resultAction, resultMsg,
+  type Result, type ResultAction, type ResultOp, type Turn,
+} from "./result.ts";
+import { send, type CoreMsg, type How, type LensHello, type Regions } from "./wire.ts";
 import type { PhaseEvent, ShellHello } from "./door.ts";
+
+export { answerProblem, MAX_THREAD, NOTE_MS, replyProblem, type Turn };
 
 export type Phase = "idle" | "warm" | "preview" | "armed" | "open" | "cancel" | "closing";
 /** A card in place of the selection: no Screen Recording, no core yet, the core went, no line to it. */
@@ -16,10 +21,9 @@ export type Card = null | "permission" | "starting" | "restarted" | "unreachable
 
 export interface Flags { reduceMotion: boolean; reduceTransparency: boolean; increaseContrast: boolean; voiceover: boolean }
 
-export interface Turn { qid: number; q: string; state: "thinking" | "done" | "failed"; text?: string; error?: string; brain?: string }
-
-export interface Sel {
-  n: number;
+/** An area on the overlay: its results (./result.ts, shared with the card in the notch) and where
+ *  it is and how far along. */
+export interface Sel extends Result {
   box: Box;
   how: How;
   /** The box the core was last asked about (an adjustment re-asks only when it moved enough). */
@@ -35,19 +39,6 @@ export interface Sel {
   handoff: Handoff;
   /** Hand off without waiting for a double-click (it was one, or it isn't a pick). */
   quick: boolean;
-  local: LocalData | null;
-  answer: AnswerData | null;
-  links: LinkRow[];
-  thread: Turn[];
-  translation: { to: string; text?: string; error?: string; pending: boolean } | null;
-  /** What a chip says for a moment after its action (by action id; "…" while it runs). */
-  notes: Record<string, string>;
-  /** "search my screen for X": X, asked with this area. */
-  question: string | null;
-  /** The area went to the search provider too (the privacy line says so). */
-  searchedWeb: boolean;
-  /** Every brain (and the web search) the core says the area or what it holds went to. */
-  sentTo: Sent[];
 }
 
 export type Handoff = "none" | "due" | "waiting" | "ok" | "no";
@@ -172,8 +163,6 @@ export const HANDOFF_PICK_MS = DOUBLE_MS + 20;
 /** No answer to `lens_handoff` this long (the core waits at most ~4.3 s): the sheet, here. */
 export const HANDOFF_GIVE_UP_MS = 5000;
 export const CARD_CLOSE_MS = 3000;
-export const NOTE_MS = 1200;
-export const MAX_THREAD = 12;
 
 const NO_FLAGS: Flags = { reduceMotion: false, reduceTransparency: false, increaseContrast: false, voiceover: false };
 
@@ -289,9 +278,8 @@ function newSel(s: LensState, b: Box, how: How, double = false): [LensState, Eff
   const area = atLeast(b, s.W, s.H);
   const first = s.nextSel === 1;
   const sel: Sel = {
-    n: s.nextSel, box: area, how, searched: area, sent: false, live: false, captured: "none", handoff: "none", quick: how !== "pick" || double,
-    local: null, answer: null, links: [], thread: [], translation: null, notes: {},
-    question: first ? s.prefill : null, searchedWeb: false, sentTo: [],
+    ...emptyResult(s.nextSel, first ? s.prefill : null),
+    box: area, how, searched: area, sent: false, live: false, captured: "none", handoff: "none", quick: how !== "pick" || double,
   };
   return flush({ ...s, sel, nextSel: s.nextSel + 1, candidate: -1, pendingPick: null });
 }
@@ -300,12 +288,25 @@ function withSel(s: LensState, n: number, f: (sel: Sel) => Sel): LensState {
   return s.sel && s.sel.n === n ? { ...s, sel: f(s.sel) } : s;
 }
 
-/** Where the area went, as the core said in a message, added to what it said before. */
-function went(sel: Sel, more: Sent[] | undefined): Sel {
-  if (!more?.length) return sel;
-  const all = [...sel.sentTo];
-  for (const w of more) if (!all.some((x) => x.label === w.label && x.what === w.what)) all.push(w);
-  return { ...sel, sentTo: all.slice(0, 24) };
+/** The overlay's command for one of the results' ops (the card in the notch sends its own). */
+function opCmd(n: number, o: ResultOp): Record<string, unknown> {
+  switch (o.op) {
+    case "ask": return send.ask(n, o.qid, o.q);
+    case "ask_again": return send.ask(n, 0, "");
+    case "translate": return send.translate(n, o.to);
+    case "act": return send.act(n, o.id);
+    case "continue": return send.cont(n, o.text);
+    case "listen": return send.listen(n);
+  }
+}
+
+/** A click or key on the sheet's results (./result.ts), as the overlay's commands. */
+function onResult(s: LensState, a: ResultAction): [LensState, Effect[]] {
+  const sel = s.sel;
+  if (!sel) return a.t === "translate_to" ? [{ ...s, translateTo: a.to }, []] : [s, []];
+  const out = resultAction(sel, a, s.nextQid);
+  const fx: Effect[] = out.ops.map((o) => ({ t: "send", cmd: opCmd(sel.n, o) }));
+  return [{ ...s, sel: out.r, nextQid: out.nextQid, translateTo: out.translateTo ?? s.translateTo }, fx];
 }
 
 function onMsg(s: LensState, m: CoreMsg): [LensState, Effect[]] {
@@ -345,30 +346,16 @@ function onMsg(s: LensState, m: CoreMsg): [LensState, Effect[]] {
       return [{ ...s, sel: { ...sel, handoff: "ok" }, fly }, [{ t: "close", why: "notch" }]];
     }
     case "lens_local":
-      return [withSel(s, m.data.sel, (x) => ({ ...x, local: m.data })), []];
     case "lens_answer":
-      return [withSel(s, m.data.sel, (x) => went({ ...x, answer: m.data }, m.data.sentTo)), []];
     case "lens_links":
-      return [withSel(s, m.data.sel, (x) => went({ ...x, links: m.data.rows }, m.data.sentTo)), []];
-    case "lens_reply": {
-      const r = m.data;
-      return [withSel(s, r.sel, (x) => {
-        const turn: Turn = { qid: r.qid, q: "", state: r.state, text: r.text, error: r.error, brain: r.brain?.label };
-        const i = x.thread.findIndex((t) => t.qid === r.qid);
-        // A question asked by voice arrives with its answer only (its words went to the voice).
-        const thread = i >= 0 ? x.thread.map((t, k) => (k === i ? { ...t, ...turn, q: t.q } : t)) : [...x.thread, turn];
-        return went({ ...x, thread: thread.slice(-MAX_THREAD) }, r.sentTo);
-      }), []];
-    }
-    case "lens_translation": {
-      const tr = m.data;
-      return [withSel(s, tr.sel, (x) => went({ ...x, translation: { to: tr.to, text: tr.text, error: tr.error, pending: false } }, tr.sentTo)), []];
-    }
+    case "lens_reply":
+    case "lens_translation":
+      return [withSel(s, m.data.sel, (x) => resultMsg(x, m).r), []];
     case "lens_done": {
       const d = m.data;
       if (!s.sel || s.sel.n !== d.sel) return [s, []];
-      const st = withSel(s, d.sel, (x) => ({ ...x, notes: { ...x.notes, [d.id]: doneText(d.note, d.ok) } }));
-      return [st, d.close ? [] : [{ t: "later", ms: NOTE_MS, action: { t: "note_clear", n: d.sel, id: d.id } }]];
+      const { r, noteClear } = resultMsg(s.sel, m);
+      return [{ ...s, sel: r }, noteClear ? [{ t: "later", ms: noteClear.ms, action: { t: "note_clear", n: d.sel, id: noteClear.id } }] : []];
     }
     case "state":
       return [{ ...s, coreState: m.data.state }, []];
@@ -534,43 +521,15 @@ function step(s: LensState, a: Action): [LensState, Effect[]] {
     }
     case "key":
       return onKey(s, a.key);
-    case "chip": {
-      const sel = s.sel;
-      if (!sel) return [s, []];
-      if (a.kind === "translate" && a.to) {
-        return [withSel(s, sel.n, (x) => ({ ...x, translation: { to: a.to as string, pending: true } })), [{ t: "send", cmd: send.translate(sel.n, a.to) }]];
-      }
-      if (!a.id) return [s, []];
-      const id = a.id;
-      const st = withSel(s, sel.n, (x) => ({ ...x, notes: { ...x.notes, [id]: "…" }, searchedWeb: x.searchedWeb || a.kind === "image_search" }));
-      return [st, [{ t: "send", cmd: send.act(sel.n, id) }]];
-    }
-    case "translate_to": {
-      const st = { ...s, translateTo: a.to };
-      return s.sel ? step(st, { t: "chip", kind: "translate", to: a.to }) : [st, []];
-    }
-    case "ask": {
-      const q = a.q.replace(/\s+/g, " ").trim().slice(0, 500);
-      if (!q || !s.sel) return [s, []];
-      const qid = s.nextQid;
-      const st = withSel({ ...s, nextQid: qid + 1 }, s.sel.n, (x) => ({ ...x, thread: [...x.thread, { qid, q, state: "thinking" as const }].slice(-MAX_THREAD) }));
-      return [st, [{ t: "send", cmd: send.ask(s.sel.n, qid, q) }]];
-    }
-    case "ask_again": {
-      if (!s.sel) return [s, []];
-      const st = withSel(s, s.sel.n, (x) => ({ ...x, answer: { sel: x.n, state: "thinking", actions: [] } }));
-      return [st, [{ t: "send", cmd: send.ask(s.sel.n, 0, "") }]];
-    }
+    case "chip":
+    case "translate_to":
+    case "ask":
+    case "ask_again":
     case "continue":
-      return s.sel ? [s, [{ t: "send", cmd: send.cont(s.sel.n, a.text) }]] : [s, []];
     case "listen":
-      return s.sel ? [s, [{ t: "send", cmd: send.listen(s.sel.n) }]] : [s, []];
+      return onResult(s, a);
     case "note_clear":
-      return [withSel(s, a.n, (x) => {
-        const notes = { ...x.notes };
-        delete notes[a.id];
-        return { ...x, notes };
-      }), []];
+      return [withSel(s, a.n, (x) => resultAction(x, { t: "note_clear", id: a.id }, s.nextQid).r), []];
     case "close":
       return [s, [{ t: "close", why: a.why }]];
     case "allow_sc":
@@ -586,59 +545,8 @@ export function hint(s: LensState): string | null {
   return "Circle or drag over anything · Click to pick · Esc to close";
 }
 
-/** "A", "A and B", "A, B and C". */
-const listed = (xs: string[]) => (xs.length < 2 ? xs.join("") : `${xs.slice(0, -1).join(", ")} and ${xs[xs.length - 1]}`);
-
-/** The privacy line under the sheet: every place the area, its text or a search phrase from it
- *  went (the core says each brain as it is asked, the ones that lost the race or failed too) —
- *  "Stayed on this Mac" only when nothing left it. */
+/** The privacy line under the sheet (./result.ts): every place the area, its text or a search
+ *  phrase from it went — "Stayed on this Mac" only when nothing left it. */
 export function privacyLine(s: LensState): string {
-  const sel = s.sel;
-  if (!sel) return "Stayed on this Mac";
-  const all: Sent[] = [...sel.sentTo];
-  const add = (label: string | undefined, local: boolean, what: Sent["what"]) => {
-    if (label && !all.some((w) => w.label === label && w.what === what)) all.push({ label, local, what });
-  };
-  const a = sel.answer;
-  if (a?.brain && a.state !== "thinking") add(a.brain.label, a.brain.local, "picture");
-  // Asked, not answered yet: the brain it goes to first (its own message names it once it's asked).
-  if (a?.state === "thinking" && s.hello?.eyes) add(s.hello.eyes.label, s.hello.eyes.local, "picture");
-  if (sel.searchedWeb) add(s.hello?.search?.label ?? "the search provider", false, "picture");
-  const cloud = all.filter((w) => !w.local);
-  const names = (what: Sent["what"]) => [...new Set(cloud.filter((w) => w.what === what).map((w) => w.label))];
-  const pics = names("picture");
-  const texts = names("text").filter((l) => !pics.includes(l));
-  const parts: string[] = [];
-  if (pics.length) parts.push(`Sent to ${listed(pics)}: only this area`);
-  if (texts.length) parts.push(parts.length ? `its text to ${listed(texts)}` : `Its text went to ${listed(texts)}`);
-  if (cloud.some((w) => w.what === "query")) parts.push(parts.length ? "a search phrase to the web" : "A search phrase went to the web");
-  return parts.length ? parts.join(" · ") : "Stayed on this Mac";
-}
-
-/** A follow-up's words when it got no answer (lens_reply's error). */
-export function replyProblem(error = ""): string {
-  switch (error) {
-    case "key": return "A brain's key was refused — Brains & Keys can fix that.";
-    case "busy": return "Busy — try again in a minute.";
-    case "offline": return "You're offline.";
-    case "no_brain":
-    case "local_only": return "No brain here can see pictures.";
-    default: return "No answer this time.";
-  }
-}
-
-/** The answer slot's words for a failed answer (design §13). */
-export function answerProblem(a: AnswerData | null, eyesWhy = ""): string | null {
-  if (!a || a.state !== "failed") return null;
-  switch (a.error) {
-    case "no_brain": return "On-device results only. To get answers, give NEO a brain that can see pictures.";
-    case "local_only": return "Your brains stay on this Mac and none of them can see pictures.";
-    case "offline": return "You're offline — here's what NEO found on this Mac.";
-    case "dark": return "This area came out black — protected video can't be captured.";
-    case "refused": return `${a.brain?.label ?? "The brain"} wouldn't answer about this.`;
-    case "key": return `${a.brain?.label ?? "A brain"}'s key was refused — Brains & Keys can fix that.`;
-    case "busy": return a.brain ? `${a.brain.label} is busy — try again in a minute.` : "The brains are busy — try again in a minute.";
-    case "off": return eyesWhy ? "On-device results only." : "Ask NEO about this area when you're ready.";
-    default: return "No answer this time.";
-  }
+  return resultPrivacyLine(s.sel, s.hello);
 }

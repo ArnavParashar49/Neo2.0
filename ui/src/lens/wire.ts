@@ -166,10 +166,10 @@ function actions(v: unknown): Action[] {
   return v.slice(0, 40).map(action).filter((a): a is Action => a !== null);
 }
 
-export function hello(v: unknown): LensHello {
+/** What the results need of a hello (the overlay's lens_hello, a card's snapshot): the brain an
+ *  area goes to first, Ask, the search provider, the Translate menu. */
+export function resultHello(v: unknown): Pick<LensHello, "eyes" | "eyesWhy" | "ask" | "search" | "langs"> {
   const o = obj(v);
-  const d = obj(o.display);
-  const w = num(d.w), h = num(d.h), scale = num(d.scale);
   const s = obj(o.search);
   const label = str(s.label, 40).trim();
   const why = o.eyes_why === "no_brain" || o.eyes_why === "local_only" ? o.eyes_why : "";
@@ -181,6 +181,19 @@ export function hello(v: unknown): LensHello {
       if (code && name) langs.push({ code, name });
     }
   }
+  return {
+    eyes: brain(o.eyes),
+    eyesWhy: why,
+    ask: o.ask !== false,
+    search: label ? { word: str(s.word, 40), label, image: bool(s.image), text: bool(s.text) } : null,
+    langs,
+  };
+}
+
+export function hello(v: unknown): LensHello {
+  const o = obj(v);
+  const d = obj(o.display);
+  const w = num(d.w), h = num(d.h), scale = num(d.scale);
   const prefill = str(o.prefill, MAX.q).trim();
   return {
     v: int(o.v) ?? 1,
@@ -189,11 +202,7 @@ export function hello(v: unknown): LensHello {
     display: w && h && scale ? { w, h, scale } : null,
     via: str(o.via, 10),
     perms: { screen: obj(o.perms).screen !== false },
-    eyes: brain(o.eyes),
-    eyesWhy: why,
-    ask: o.ask !== false,
-    search: label ? { word: str(s.word, 40), label, image: bool(s.image), text: bool(s.text) } : null,
-    langs,
+    ...resultHello(o),
     prefill: prefill || null,
     notch: o.notch === true,
   };
@@ -222,8 +231,13 @@ export function parseMsg(text: string): CoreMsg | null {
   let raw: unknown;
   try { raw = JSON.parse(text); } catch { return null; }
   const m = obj(raw);
-  const type = typeof m.type === "string" ? m.type : "";
-  const d = obj(m.data);
+  return parseLens(typeof m.type === "string" ? m.type : "", m.data);
+}
+
+/** One of Search Screen's messages (its type and data, already JSON), checked; null for anything
+ *  else. The card in the notch reads the same ones (./card.ts), with its `cid` beside. */
+export function parseLens(type: string, data: unknown): CoreMsg | null {
+  const d = obj(data);
   const sel = int(d.sel);
   switch (type) {
     case "hello": // the websocket's own hello carries the same lens_hello
@@ -316,6 +330,76 @@ export function parseMsg(text: string): CoreMsg | null {
   return null;
 }
 
+// ---- the card in the notch ------------------------------------------------------------------------
+
+/** A card's id: 32 lowercase hex, the core's own. */
+export const CID = /^[0-9a-f]{32}$/;
+export const CARD_WHYS = ["esc", "x", "away", "fold", "unshown", "timeout", "action", "continue", "chat", "stop", "erased", "replaced", "idle", "gone", "done"] as const;
+
+/** Everything a card shows when it opens (or when the page asks again): lens_card's `card`. */
+export interface CardData {
+  sel: number;
+  thumb: string | null;
+  question: string | null;
+  translateTo: string;
+  hello: Pick<LensHello, "eyes" | "eyesWhy" | "ask" | "search" | "langs">;
+  local: LocalData | null;
+  answer: AnswerData | null;
+  links: LinkRow[];
+  thread: (ReplyData & { q: string })[];
+  translation: TranslationData | null;
+  sentTo: Sent[];
+}
+export type CardMsg = { cid: string; open: true; card: CardData | null } | { cid: string; open: false; why: string };
+
+const thumbOf = (v: unknown): string | null =>
+  typeof v === "string" && v.startsWith("data:image/jpeg;base64,") && v.length < 200_000 ? v : null;
+
+/** `lens_card`, checked: a card opening (with what it shows), or closing (and why); null for a
+ *  malformed one. */
+export function parseCard(data: unknown): CardMsg | null {
+  const d = obj(data);
+  const cid = typeof d.cid === "string" && CID.test(d.cid) ? d.cid : null;
+  if (!cid) return null;
+  if (d.open !== true) {
+    const why = (CARD_WHYS as readonly string[]).includes(d.why as string) ? (d.why as string) : "done";
+    return { cid, open: false, why };
+  }
+  if (!d.card || typeof d.card !== "object") return { cid, open: true, card: null };
+  const c = obj(d.card);
+  const sel = int(c.sel);
+  if (sel === null) return null;
+  const as = <T extends CoreMsg["t"]>(t: T, v: unknown) => {
+    if (!v || typeof v !== "object") return null;
+    const m = parseLens(t, { ...obj(v), sel });
+    return m && m.t === t ? (m.data as Extract<CoreMsg, { t: T }>["data"]) : null;
+  };
+  const thread: (ReplyData & { q: string })[] = [];
+  if (Array.isArray(c.thread)) {
+    for (const t of c.thread.slice(-12)) {
+      const r = as("lens_reply", t);
+      if (r) thread.push({ ...r, q: str(obj(t).q, MAX.q) });
+    }
+  }
+  return {
+    cid, open: true,
+    card: {
+      sel,
+      thumb: thumbOf(c.thumb),
+      question: str(c.question, MAX.q).trim() || null,
+      translateTo: str(c.translate_to, MAX.lang),
+      hello: resultHello(c.hello),
+      local: as("lens_local", c.local),
+      answer: as("lens_answer", c.answer),
+      links: as("lens_links", c.links)?.rows ?? [],
+      thread,
+      translation: as("lens_translation", c.translation),
+      sentTo: sentTo(c.sent_to) ?? [],
+    },
+  };
+}
+
+
 // ---- the still: one binary NBF1 frame of kind 4 ------------------------------------------------
 
 export const KIND_LENS = 4;
@@ -354,4 +438,15 @@ export const send = {
   listen: (sel: number) => ({ cmd: "lens_listen", sel }),
   /** Show this area's results in the notch instead of the sheet (`to`: the language Translate uses). */
   handoff: (sel: number, to: string | null) => ({ cmd: "lens_handoff", sel, to: /^[A-Za-z0-9_-]{1,16}$/.test(to ?? "") ? (to as string) : "" }),
+};
+
+/** What NEO's page in the notch sends about a card: each names its cid. */
+export const cardSend = {
+  hello: () => ({ cmd: "lens_card_hello" }),
+  ask: (cid: string, qid: number, q: string) => ({ cmd: "lens_card_ask", cid, qid, q: cut(q, MAX.q) }),
+  translate: (cid: string, to: string) => ({ cmd: "lens_card_translate", cid, to: to.slice(0, MAX.lang) }),
+  act: (cid: string, id: string) => ({ cmd: "lens_card_act", cid, id }),
+  cont: (cid: string, text: string) => ({ cmd: "lens_card_continue", cid, text: cut(text, MAX.cont) }),
+  listen: (cid: string) => ({ cmd: "lens_card_listen", cid }),
+  close: (cid: string, why: "esc" | "x" | "chat") => ({ cmd: "lens_card_close", cid, why }),
 };

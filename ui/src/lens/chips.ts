@@ -55,7 +55,7 @@ export function translateTarget(local: LocalData | null, chosen: string | null):
 export function chipsFor(
   local: LocalData | null,
   answer: AnswerData | null,
-  hello: LensHello | null,
+  hello: Pick<LensHello, "search" | "langs"> | null,
   chosen: string | null = null,
 ): { shown: Chip[]; more: Chip[] } {
   const all: Chip[] = [];
