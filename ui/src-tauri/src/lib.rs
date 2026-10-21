@@ -118,7 +118,7 @@ fn set_ui_host(app: &AppHandle, notch: bool) {
 /// What the core says over the socket it shares with the app (off the main thread).
 fn from_core(app: &AppHandle, msg: core::FromCore) {
     match msg {
-        core::FromCore::Hello { notch, host_attached } => {
+        core::FromCore::Hello { notch, host_attached, .. } => {
             set_ui_host(app, notch);
             set_host_attached(app, Some(host_attached));
             tell_status(app, true); // a new core knows nothing of the menu yet
@@ -135,6 +135,7 @@ fn from_core(app: &AppHandle, msg: core::FromCore) {
             let handle = app.clone();
             let _ = app.run_on_main_thread(move || act(&handle, &action, on));
         }
+        core::FromCore::LensClose { .. } => {} // (no overlay yet)
         core::FromCore::Gone => set_host_attached(app, None), // no core to say whether the host is there
     }
 }

@@ -72,14 +72,33 @@ type Listener = Arc<dyn Fn(FromCore) + Send + Sync>;
 /// What the core says to the app over their socket (shell_link.py lists the lines).
 #[derive(Debug, PartialEq)]
 pub enum FromCore {
-    /// The core is up and reading: where the UI lives, and whether a host is connected.
-    Hello { notch: bool, host_attached: bool },
+    /// The core is up and reading: where the UI lives, whether a host is connected, and Search
+    /// Screen's settings (`None`: a core from before Search Screen — no hold, no overlay).
+    Hello { notch: bool, host_attached: bool, lens: Option<LensCfg> },
     HostAttached(bool),
     UiHost { notch: bool },
     /// A host asked for one of the menu's actions (the core checked who asked).
     Shell { action: String, on: Option<bool> },
+    /// Close Search Screen's overlay (Erase, Stop, an action that opened something, its time ran out).
+    LensClose { why: String },
     /// The core at the other end is gone.
     Gone,
+}
+
+/// Search Screen's settings, as the core's hello gives them (NEO_LENS, NEO_LENS_HOLD_MS).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LensCfg {
+    pub on: bool,
+    pub hold_ms: u32,
+}
+
+/// Why the core closes Search Screen, as a word of its own (anything else: "done").
+const LENS_CLOSE_WHYS: [&str; 6] = ["erased", "stop", "action", "continue", "idle", "done"];
+
+fn lens_cfg(v: &serde_json::Value) -> Option<LensCfg> {
+    let l = v.get("lens")?;
+    let hold = l.get("hold_ms")?.as_u64()?;
+    Some(LensCfg { on: l.get("on")?.as_bool()?, hold_ms: hold.clamp(600, 3000) as u32 })
 }
 
 fn parse_from_core(line: &str) -> Option<FromCore> {
@@ -90,7 +109,16 @@ fn parse_from_core(line: &str) -> Option<FromCore> {
         _ => None,
     };
     match v.get("t")?.as_str()? {
-        "hello" => Some(FromCore::Hello { notch: notch("ui_host")?, host_attached: v.get("host_attached")?.as_bool()? }),
+        "hello" => Some(FromCore::Hello {
+            notch: notch("ui_host")?,
+            host_attached: v.get("host_attached")?.as_bool()?,
+            lens: lens_cfg(&v),
+        }),
+        "lens_close" => {
+            let why = v.get("why").and_then(|w| w.as_str()).unwrap_or("");
+            let why = LENS_CLOSE_WHYS.iter().find(|w| **w == why).copied().unwrap_or("done");
+            Some(FromCore::LensClose { why: why.into() })
+        }
         "host_attached" => Some(FromCore::HostAttached(v.get("attached")?.as_bool()?)),
         "ui_host" => Some(FromCore::UiHost { notch: notch("host")? }),
         "shell" => Some(FromCore::Shell {
@@ -260,6 +288,12 @@ NEO_CLOUD_MEMORY=full
 
 # on | off — whether Laya (the on-device reflex) learns from the requests you make.
 NEO_LEARN=on
+
+# Search Screen: hold ⌥⌘ for about a second, let go, then circle or drag over anything on screen.
+# NEO_LENS=on                  off: holding ⌥⌘ does nothing (a quick tap still summons NEO)
+# NEO_LENS_HOLD_MS=1000        how long to hold, 600–3000 (under 1000 also shortens the quick tap)
+# NEO_LENS_SEARCH=google       \"Search with…\": google | bing | off, or a site for a text search
+# NEO_LENS_ASK=on              off: on-device results only, until you press Ask
 ";
 
 /// NEO's installed runtime (scripts/install-app.sh puts a Python environment with the core here).
@@ -485,6 +519,12 @@ impl Core {
             }
             me.hear(FromCore::Gone);
         });
+    }
+
+    /// A core of this app's has said hello on the socket and is still there (Search Screen's hold
+    /// needs one: the overlay is nothing without the core).
+    pub fn linked(&self) -> bool {
+        self.link.lock().map(|l| l.ready && l.stream.is_some()).unwrap_or(false)
     }
 
     /// One line to the core over the socket. False when there is no core of this app's that is
@@ -828,8 +868,8 @@ mod tests {
     #[test]
     fn what_the_core_says_over_the_socket() {
         let p = parse_from_core;
-        assert_eq!(p(r#"{"t":"hello","ui_host":"notch","host_attached":false}"#), Some(FromCore::Hello { notch: true, host_attached: false }));
-        assert_eq!(p(r#"{"t":"hello","ui_host":"window","host_attached":true}"#), Some(FromCore::Hello { notch: false, host_attached: true }));
+        assert_eq!(p(r#"{"t":"hello","ui_host":"notch","host_attached":false}"#), Some(FromCore::Hello { notch: true, host_attached: false, lens: None }));
+        assert_eq!(p(r#"{"t":"hello","ui_host":"window","host_attached":true}"#), Some(FromCore::Hello { notch: false, host_attached: true, lens: None }));
         assert_eq!(p(r#"{"t":"host_attached","attached":true}"#), Some(FromCore::HostAttached(true)));
         assert_eq!(p(r#"{"t":"ui_host","host":"window"}"#), Some(FromCore::UiHost { notch: false }));
         assert_eq!(p(r#"{"t":"shell","action":"restart"}"#), Some(FromCore::Shell { action: "restart".into(), on: None }));
@@ -853,6 +893,30 @@ mod tests {
         ] {
             assert_eq!(p(bad), None, "{bad}");
         }
+    }
+
+    #[test]
+    fn the_hello_says_whether_search_screen_is_on_and_the_core_can_close_it() {
+        let p = parse_from_core;
+        let hello = |lens: &str| p(&format!(r#"{{"t":"hello","ui_host":"window","host_attached":false{lens}}}"#));
+        let with = |on, hold_ms| Some(FromCore::Hello { notch: false, host_attached: false, lens: Some(LensCfg { on, hold_ms }) });
+        assert_eq!(hello(r#","lens":{"on":true,"hold_ms":1000}"#), with(true, 1000));
+        assert_eq!(hello(r#","lens":{"on":false,"hold_ms":1200}"#), with(false, 1200));
+        assert_eq!(hello(r#","lens":{"on":true,"hold_ms":50}"#), with(true, 600)); // clamped here too
+        assert_eq!(hello(r#","lens":{"on":true,"hold_ms":99999}"#), with(true, 3000));
+        // An older core says nothing of it; a shape that isn't one counts as nothing said, and the
+        // hello itself still counts.
+        let none = Some(FromCore::Hello { notch: false, host_attached: false, lens: None });
+        for bad in ["", r#","lens":true"#, r#","lens":{"on":"yes","hold_ms":1000}"#, r#","lens":{"on":true}"#, r#","lens":{"on":true,"hold_ms":-5}"#] {
+            assert_eq!(hello(bad), none, "{bad}");
+        }
+        assert_eq!(p(r#"{"t":"lens_close","why":"erased"}"#), Some(FromCore::LensClose { why: "erased".into() }));
+        assert_eq!(p(r#"{"t":"lens_close","why":"stop"}"#), Some(FromCore::LensClose { why: "stop".into() }));
+        assert_eq!(p(r#"{"t":"lens_close"}"#), Some(FromCore::LensClose { why: "done".into() }));
+        assert_eq!(p(r#"{"t":"lens_close","why":"<script>"}"#), Some(FromCore::LensClose { why: "done".into() }));
+        assert_eq!(p(r#"{"t":"lens_freeze","ticket":"x"}"#), None); // the shell's to say, never the core's
+        // No core, nothing linked.
+        assert!(!Core::default().linked());
     }
 
     #[test]
@@ -908,7 +972,7 @@ f.write(b"x" * 9000 + b'\nnot json\n{"t":"shell","action":"open_at_login","on":t
         // Before the hello nothing is written: this wake is dropped, not kept for later.
         assert!(!core.tell(&serde_json::json!({"t": "wake", "early": true})));
         let wait = Duration::from_secs(20);
-        assert_eq!(rx.recv_timeout(wait), Ok(FromCore::Hello { notch: true, host_attached: true }));
+        assert_eq!(rx.recv_timeout(wait), Ok(FromCore::Hello { notch: true, host_attached: true, lens: None }));
         assert!(core.tell(&serde_json::json!({"t": "wake"})));
         assert_eq!(rx.recv_timeout(wait), Ok(FromCore::Shell { action: "open_at_login".into(), on: Some(true) }));
         assert_eq!(rx.recv_timeout(wait), Ok(FromCore::Gone)); // it exited: the socket says so
