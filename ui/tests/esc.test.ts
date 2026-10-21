@@ -112,6 +112,19 @@ test("App.tsx: one window-level Esc for the page, the input's own gone, the shel
   assert.equal(app.split('title="Collapse (Esc)" aria-label="Collapse" onClick={collapse}').length - 1, 3);
 });
 
+test("the browser card's tabs menu has its own Esc: it closes, the chat stays (a question still hears it)", () => {
+  const tabs = src("browser/BrowserCard.tsx").split("function Tabs(")[1].split("\n}\n")[0];
+  // While it is open, on the window in the capture phase: before the chat's Esc, whichever came first.
+  const open = tabs.split("if (!open) return;")[1].split("}, [open]);")[0];
+  assert.match(open, /window\.addEventListener\("keydown", k, true\);/);
+  assert.match(open, /window\.removeEventListener\("keydown", k, true\);/);
+  // The key's default is prevented (escFolds leaves it alone); it is not stopped, so a question's
+  // own Esc on the window still says No as it did with the menu open.
+  assert.match(open, /const k = \(e: KeyboardEvent\) => \{ if \(e\.key === "Escape"\) \{ e\.preventDefault\(\); setOpen\(false\); \} \};/);
+  assert.ok(!open.includes("stopPropagation"));
+  assert.equal(escFolds(key({ defaultPrevented: true }), chat()), false);
+});
+
 test("ws.ts: the core's `esc` reaches the page as escAt", () => {
   const ws = src("ws.ts");
   assert.match(ws, /case "esc":\s+setEscAt\(Date\.now\(\)\);\s+break;/);

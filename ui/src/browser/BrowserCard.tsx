@@ -212,8 +212,12 @@ function Tabs({ st, onPick }: { st: BrowserState; onPick: (i: number) => void })
   useEffect(() => {
     if (!open) return;
     const h = (e: PointerEvent) => { if (!ref.current?.contains(e.target as Node)) setOpen(false); };
+    // Esc closes the menu, not the chat around it (src/esc.ts leaves a prevented key alone); not
+    // stopped, so a question's own Esc still says No as it did with the menu open.
+    const k = (e: KeyboardEvent) => { if (e.key === "Escape") { e.preventDefault(); setOpen(false); } };
     window.addEventListener("pointerdown", h, true);
-    return () => window.removeEventListener("pointerdown", h, true);
+    window.addEventListener("keydown", k, true);
+    return () => { window.removeEventListener("pointerdown", h, true); window.removeEventListener("keydown", k, true); };
   }, [open]);
   if (st.tabs.count <= 1) return null;
   return (
