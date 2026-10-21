@@ -23,12 +23,18 @@
 //! "Brains & Keys…" (the menu's, and a host's or the core's "settings") opens NEO's own window
 //! for picking brains and pasting keys (keys.rs). The shell creates it, mints its ticket and hands
 //! that to the core; it never sees a key. "Edit settings file…" still opens ~/.neo/.env.
+//!
+//! Search Screen (lens.rs): holding ⌥⌘ a little longer than the tap (chord.rs), the menu's
+//! "Search Screen…", the voice and a host open an overlay above everything for circling or dragging
+//! over anything on screen. While it is open a summon (the ⌥⌘ tap, ⌘⇧Space, the menu-bar icon)
+//! closes it and does nothing else.
 
 mod chord;
 mod core;
 #[cfg(target_os = "macos")]
 mod frame;
 mod keys;
+mod lens;
 #[cfg(target_os = "macos")]
 mod native;
 mod perms;
@@ -118,11 +124,17 @@ fn set_ui_host(app: &AppHandle, notch: bool) {
 /// What the core says over the socket it shares with the app (off the main thread).
 fn from_core(app: &AppHandle, msg: core::FromCore) {
     match msg {
-        core::FromCore::Hello { notch, host_attached, .. } => {
+        core::FromCore::Hello { notch, host_attached, lens: cfg } => {
             set_ui_host(app, notch);
             set_host_attached(app, Some(host_attached));
             tell_status(app, true); // a new core knows nothing of the menu yet
             keys::core_said_hello(app); // …nor of an open Brains & Keys window's ticket
+            // Search Screen: on or off, its hold time, the menu's item (an older core: no lens).
+            let handle = app.clone();
+            let _ = app.run_on_main_thread(move || {
+                lens::core_hello(&handle, cfg);
+                sync_lens_item(&handle);
+            });
         }
         core::FromCore::HostAttached(attached) => set_host_attached(app, Some(attached)),
         core::FromCore::UiHost { notch } => set_ui_host(app, notch),
@@ -133,10 +145,25 @@ fn from_core(app: &AppHandle, msg: core::FromCore) {
             }
             core::log(&format!("a host asked for: {action}"));
             let handle = app.clone();
+            if action == "lens" {
+                // The voice, the agent's search_screen tool or a host: the core can't say which.
+                let _ = app.run_on_main_thread(move || lens::open(&handle, lens::Via::Voice));
+                return;
+            }
             let _ = app.run_on_main_thread(move || act(&handle, &action, on));
         }
-        core::FromCore::LensClose { .. } => {} // (no overlay yet)
-        core::FromCore::Gone => set_host_attached(app, None), // no core to say whether the host is there
+        core::FromCore::LensClose { why } => {
+            let handle = app.clone();
+            let _ = app.run_on_main_thread(move || lens::close(&handle, &why));
+        }
+        core::FromCore::Gone => {
+            set_host_attached(app, None); // no core to say whether the host is there
+            let handle = app.clone();
+            let _ = app.run_on_main_thread(move || {
+                lens::core_gone(&handle); // no hold without a core; an open overlay says so, then closes
+                sync_lens_item(&handle);
+            });
+        }
     }
 }
 
@@ -146,6 +173,8 @@ struct Tray {
     login: Mutex<Option<CheckMenuItem<Wry>>>,
     /// ⌥⌘ works (it needs Accessibility); until then ⌘⇧Space is the way in.
     chord: AtomicBool,
+    /// "Search Screen…": its text and whether it can be chosen follow the core and the tap.
+    lens: Mutex<Option<MenuItem<Wry>>>,
     /// What the core was last told the menu shows (`tell_status`).
     told: Mutex<Option<ShellStatus>>,
 }
@@ -186,12 +215,26 @@ fn tell_status(app: &AppHandle, anyway: bool) {
     *told = if app.state::<core::Core>().tell(&msg) { Some(status) } else { None };
 }
 
+/// The menu's "Search Screen…" item, as the core and the tap say (lens::menu_item).
+fn sync_lens_item(app: &AppHandle) {
+    let chord = app.state::<Tray>().chord.load(Ordering::SeqCst);
+    let (text, enabled) = lens::menu_item(chord, lens::known(app));
+    if let Ok(item) = app.state::<Tray>().lens.lock() {
+        if let Some(item) = item.as_ref() {
+            let _ = item.set_text(text);
+            let _ = item.set_enabled(enabled);
+        }
+    }
+}
+
 /// Everything NEO's menu does, by name — the menu's own items and a host's `shell` command
 /// (`from_core`) both end here. On the main thread.
 fn act(app: &AppHandle, action: &str, on: Option<bool>) {
     match action {
         "quit" => app.exit(0),
         "show" => show(app),
+        // Search Screen… (the menu's item, a host's): the overlay, after the menu has gone.
+        "lens" => lens::open(app, lens::Via::Menu),
         "allow_ax" => perms::open_settings("Privacy_Accessibility"),
         "allow_sc" => perms::open_settings("Privacy_ScreenCapture"),
         "restart" => {
@@ -232,7 +275,7 @@ fn act(app: &AppHandle, action: &str, on: Option<bool>) {
 }
 
 /// What a host may ask for (the core checks who is asking; see neo2/core/server/ws.py).
-const SHELL_ACTIONS: [&str; 7] = ["show", "settings", "restart", "open_logs", "erase_memory", "open_at_login", "quit"];
+const SHELL_ACTIONS: [&str; 8] = ["show", "settings", "restart", "open_logs", "erase_memory", "open_at_login", "quit", "lens"];
 
 fn show(app: &AppHandle) {
     if in_notch(app) {
@@ -263,6 +306,11 @@ fn reveal(app: &AppHandle) -> bool {
 }
 
 fn toggle(app: &AppHandle) {
+    // Summon wins: while Search Screen is open, ⌥⌘, ⌘⇧Space and the menu-bar icon close it.
+    if lens::is_open(app) {
+        lens::close(app, "summon");
+        return;
+    }
     if in_notch(app) {
         show(app);
         return;
@@ -322,15 +370,30 @@ pub fn run() {
             native::clipboard_write,
             native::show_quiet,
             keys::keys_ticket,
-            keys::edit_env_file
+            keys::edit_env_file,
+            lens::lens_hello,
+            lens::lens_painted,
+            lens::lens_close,
+            lens::lens_peek,
+            lens::lens_allow_sc
         ])
-        // A Brains & Keys window the shell didn't create is closed as its page loads.
-        .on_page_load(|webview, _| keys::page_loaded(webview))
+        // A Brains & Keys or Search Screen window the shell didn't create is closed as its page loads.
+        .on_page_load(|webview, _| {
+            keys::page_loaded(webview);
+            lens::page_loaded(webview);
+        })
         .manage(keys::Keys::default())
+        .manage(lens::Lens::default())
         .manage(core::Core::default())
         .manage(UiHost(Mutex::new(core::ui_host_is_notch())))
         .manage(HostAttached(Mutex::new((None, Instant::now()))))
-        .manage(Tray { visible: AtomicBool::new(true), login: Mutex::new(None), chord: AtomicBool::new(false), told: Mutex::new(None) })
+        .manage(Tray {
+            visible: AtomicBool::new(true),
+            login: Mutex::new(None),
+            chord: AtomicBool::new(false),
+            lens: Mutex::new(None),
+            told: Mutex::new(None),
+        })
         .setup(|app| {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
@@ -357,11 +420,15 @@ pub fn run() {
             let summon = Shortcut::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::Space);
             app.global_shortcut().register(summon)?;
             let show_item = MenuItem::with_id(app, "show", "Show NEO   ⌘⇧Space", true, None::<&str>)?;
+            let lens_item = MenuItem::with_id(app, "lens", "Search Screen…", true, None::<&str>)?;
+            *app.state::<Tray>().lens.lock().unwrap() = Some(lens_item.clone());
             let status_item = MenuItem::with_id(app, "status", "NEO: starting…", false, None::<&str>)?;
 
-            // ⌥⌘ (pressed together and released) summons NEO. It needs Accessibility: until
-            // that's granted it keeps retrying, and ⌘⇧Space works meanwhile.
+            // ⌥⌘ (pressed together and released) summons NEO; held a little longer it opens Search
+            // Screen. It needs Accessibility: until that's granted it keeps retrying, and ⌘⇧Space
+            // (and the menu's Search Screen…) work meanwhile.
             let handle = app.handle().clone();
+            let hold_handle = app.handle().clone();
             let (ready_handle, ready_item) = (app.handle().clone(), show_item.clone());
             let chord_ok = chord::watch(
                 move || {
@@ -371,17 +438,23 @@ pub fn run() {
                 move || {
                     let item = ready_item.clone();
                     ready_handle.state::<Tray>().chord.store(true, Ordering::SeqCst);
+                    let h = ready_handle.clone();
                     let _ = ready_handle.run_on_main_thread(move || {
                         let _ = item.set_text("Show NEO   ⌥⌘");
+                        sync_lens_item(&h);
                     });
                 },
-                |_| {}, // no hold yet: its gate stays off, so the tap is all there is
-                std::sync::Arc::new(chord::LensGate::default()),
+                move |ev| {
+                    let h = hold_handle.clone();
+                    let _ = hold_handle.run_on_main_thread(move || lens::on_hold(&h, ev));
+                },
+                app.state::<lens::Lens>().gate.clone(),
             );
             if chord_ok {
                 app.state::<Tray>().chord.store(true, Ordering::SeqCst);
                 show_item.set_text("Show NEO   ⌥⌘")?;
             }
+            sync_lens_item(app.handle());
             // The ids are the actions' names (`act`): a host's `shell` command uses the same ones.
             let restart_item = MenuItem::with_id(app, "restart", "Restart NEO", true, None::<&str>)?;
             let keys_item = MenuItem::with_id(app, "settings", "Brains & Keys…", true, None::<&str>)?;
@@ -396,7 +469,7 @@ pub fn run() {
             let menu = Menu::with_items(
                 app,
                 &[
-                    &status_item, &ax_item, &sc_item, &show_item, &sep, &keys_item, &env_item, &restart_item,
+                    &status_item, &ax_item, &sc_item, &show_item, &lens_item, &sep, &keys_item, &env_item, &restart_item,
                     &logs_item, &erase_item, &login_item, &sep2, &quit_item,
                 ],
             )?;
@@ -501,6 +574,33 @@ mod tests {
         }
         // The panes of System Settings are the menu's own; a host opens them itself.
         assert!(!SHELL_ACTIONS.contains(&"allow_ax") && !SHELL_ACTIONS.contains(&"allow_sc"));
+    }
+
+    #[test]
+    fn search_screen_is_in_the_menu_and_its_commands_are_registered() {
+        let src = include_str!("lib.rs");
+        let act = src.split("fn act(").nth(1).unwrap().split("\n}\n").next().unwrap();
+        assert!(act.contains("\"lens\" => lens::open(app, lens::Via::Menu)"));
+        assert_eq!(SHELL_ACTIONS.len(), 8);
+        assert!(SHELL_ACTIONS.contains(&"lens"));
+        // Right after "Show NEO" in the menu.
+        assert!(src.contains("&show_item, &lens_item,"));
+        for cmd in ["lens_hello", "lens_painted", "lens_close", "lens_peek", "lens_allow_sc"] {
+            assert!(src.contains(&format!("lens::{cmd}")), "{cmd}");
+        }
+        // A lens window the shell didn't create goes as its page loads.
+        let load = src.split(".on_page_load(").nth(1).unwrap().split("})").next().unwrap();
+        assert!(load.contains("lens::page_loaded(webview)") && load.contains("keys::page_loaded(webview)"));
+        // Summon wins: toggle (⌥⌘, ⌘⇧Space, the menu-bar icon) closes an open overlay first.
+        let toggle = src.split("fn toggle(").nth(1).unwrap().split("\n}\n").next().unwrap();
+        let first = toggle.find("lens::is_open(app)").unwrap();
+        assert!(first < toggle.find("in_notch(app)").unwrap());
+        assert!(toggle.contains("lens::close(app, \"summon\")"));
+        // The hold reaches the shell, and the core's hello and its going set the gate.
+        assert!(src.contains("lens::on_hold(&h, ev)"));
+        let from_core = src.split("fn from_core(").nth(1).unwrap().split("\n}\n").next().unwrap();
+        assert!(from_core.contains("lens::core_hello(&handle, cfg)") && from_core.contains("lens::core_gone(&handle)"));
+        assert!(from_core.contains("core::FromCore::LensClose"));
     }
 
     #[test]

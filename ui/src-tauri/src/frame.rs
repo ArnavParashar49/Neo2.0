@@ -40,7 +40,7 @@ unsafe impl Encode for Rect {
 ///
 /// # Safety
 /// `ns_window` must be a live `NSWindow*`, and this must run on the main thread.
-unsafe fn apply(ns_window: *mut AnyObject, x: f64, y: f64, w: f64, h: f64) -> Result<(), String> {
+pub(crate) unsafe fn apply(ns_window: *mut AnyObject, x: f64, y: f64, w: f64, h: f64) -> Result<(), String> {
     let screens: *mut AnyObject = msg_send![class!(NSScreen), screens];
     if screens.is_null() {
         return Err("no screens".into());

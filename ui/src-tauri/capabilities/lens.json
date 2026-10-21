@@ -1,0 +1,12 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "lens-window",
+  "description": "Search Screen's overlay: hears its own phase events; no window, webview or opener powers (the shell places, shows and hides it; links open through the core; its ticket and its few commands are label-checked in lens.rs)",
+  "windows": [
+    "lens"
+  ],
+  "permissions": [
+    "core:default",
+    "core:event:default"
+  ]
+}

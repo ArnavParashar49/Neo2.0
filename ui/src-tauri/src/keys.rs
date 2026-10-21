@@ -63,7 +63,7 @@ pub fn hex(bytes: &[u8]) -> String {
 
 /// A fresh ticket, or None when the system's randomness can't be read (then no window opens:
 /// a guessable ticket would be no ticket).
-fn mint() -> Option<String> {
+pub(crate) fn mint() -> Option<String> {
     let mut bytes = [0u8; TICKET_BYTES];
     File::open("/dev/urandom").ok()?.read_exact(&mut bytes).ok()?;
     if bytes.iter().all(|b| *b == 0) {
@@ -73,7 +73,7 @@ fn mint() -> Option<String> {
 }
 
 /// NEO's own page: the bundled app's origin, or (`dev`: a `tauri dev` build) its dev server.
-fn app_origin(url: &Url, dev: bool) -> bool {
+pub(crate) fn app_origin(url: &Url, dev: bool) -> bool {
     let host = url.host_str().unwrap_or("");
     match url.scheme() {
         "tauri" => host == "localhost",
