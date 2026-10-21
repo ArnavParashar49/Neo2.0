@@ -26,7 +26,7 @@ const msg = (m: CoreMsg): Action => ({ t: "msg", msg: m });
 const hello = (over: Partial<LensHello> = {}): LensHello => ({
   v: 1, open: true, frozen: "pending", display: { w: W, h: H, scale: 2 }, via: "hold", perms: { screen: true },
   eyes: { label: "Gemini", local: false }, eyesWhy: "", ask: true, search: { word: "google", label: "Google", image: true, text: true },
-  langs: [], prefill: null, ...over,
+  langs: [], prefill: null, notch: false, ...over,
 });
 const sends = (fx: Effect[]) => fx.filter((e): e is Extract<Effect, { t: "send" | "send_live" }> => e.t === "send" || e.t === "send_live").map((e) => e.cmd);
 

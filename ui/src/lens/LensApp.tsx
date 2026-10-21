@@ -14,19 +14,20 @@
 // alive every second (`painted`) — the shell closes one that falls silent, and the panel's own Esc
 // works with no page at all (lens.rs).
 
-import { Component, memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Component, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { EdgeGlow } from "./EdgeGlow";
 import { Trail, type TrailHandle } from "./Trail";
 import { SelectionView, type SelectionHandle } from "./Selection";
 import { Sheet } from "./Sheet";
 import { makeHover, type Hover } from "./hover";
+import { flyFrames, type FlyPlan } from "./fly";
 import { Card } from "./Cards";
 import { tauriDoor, type Door } from "./door";
 import { LensSocket, type SocketLike } from "./socket";
 import { CURSOR, classify, dragBox, hitTest, type Box, type Hit, type Pt } from "./geometry";
 import { isDouble, regionAt, tabStops } from "./pick";
 import type { PhaseEvent } from "./door";
-import { hint, initial, reduce, showsWebGlow, type Action, type Effect, type LensState } from "./state";
+import { handingOff, hint, initial, reduce, showsWebGlow, type Action, type Effect, type LensState } from "./state";
 import type { Still } from "./wire";
 import { wsToken } from "../shell";
 import "./lens.css";
@@ -86,6 +87,65 @@ const Still = memo(function Still({ src, shown, leaving }: { src: string; shown:
   return <img className={"lx-still" + (shown ? " on" : "") + (leaving ? " leaving" : "")} src={src} alt="" draggable={false} decoding="sync" />;
 });
 
+/** The area as a small canvas cut from the still (at most 960 px on its long side), with the hole's
+ *  rounded corners and a hairline: what flies into the notch. Cut when the hand-off is asked for. */
+function cropOf(img: HTMLImageElement | null, b: Box, W: number, H: number): HTMLCanvasElement | null {
+  if (!img || !img.naturalWidth || !img.naturalHeight || !(W > 0) || !(H > 0) || !(b.w > 0) || !(b.h > 0)) return null;
+  const kx = img.naturalWidth / W, ky = img.naturalHeight / H;
+  const f = Math.min(1, 960 / Math.max(b.w * kx, b.h * ky));
+  const c = document.createElement("canvas");
+  c.width = Math.max(1, Math.round(b.w * kx * f));
+  c.height = Math.max(1, Math.round(b.h * ky * f));
+  const ctx = c.getContext("2d");
+  if (!ctx) return null;
+  const k = c.width / b.w; // canvas pixels per point
+  const round = (inset: number) => {
+    ctx.beginPath();
+    const r = Math.max(0, Math.min(14 * k, c.width / 2, c.height / 2) - inset);
+    if (typeof ctx.roundRect === "function") ctx.roundRect(inset, inset, c.width - 2 * inset, c.height - 2 * inset, r);
+    else ctx.rect(inset, inset, c.width - 2 * inset, c.height - 2 * inset);
+  };
+  round(0);
+  ctx.save();
+  ctx.clip();
+  ctx.drawImage(img, b.x * kx, b.y * ky, b.w * kx, b.h * ky, 0, 0, c.width, c.height);
+  ctx.restore();
+  ctx.lineWidth = Math.max(1, k);
+  ctx.strokeStyle = "rgba(255, 255, 255, 0.45)";
+  round(ctx.lineWidth / 2);
+  ctx.stroke();
+  return c;
+}
+
+/** The area flying into the notch (./fly.ts): three nested layers the size of the area — sideways,
+ *  up, and smaller and fainter — so the path is an arc. */
+function Fly({ plan, crop }: { plan: FlyPlan; crop: HTMLCanvasElement | null }) {
+  const x = useRef<HTMLDivElement>(null);
+  const y = useRef<HTMLDivElement>(null);
+  const sc = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    const f = flyFrames(plan);
+    const anims: Animation[] = [];
+    const run = (el: HTMLDivElement | null, frames: Keyframe[], easing: string) => {
+      if (el && frames.length && typeof el.animate === "function") anims.push(el.animate(frames, { duration: plan.ms, easing, fill: "forwards" }));
+    };
+    if (crop && sc.current && crop.parentNode !== sc.current) sc.current.appendChild(crop);
+    run(x.current, f.x, f.easing.x);
+    run(y.current, f.y, f.easing.y);
+    run(sc.current, f.s, f.easing.s);
+    run(sc.current, f.o, f.easing.o);
+    return () => anims.forEach((a) => a.cancel());
+  }, [plan, crop]);
+  const b = plan.box;
+  return (
+    <div className="lx-fly" ref={x} style={{ left: b.x, top: b.y, width: b.w, height: b.h }} aria-hidden="true">
+      <div className="lx-fly-y" ref={y}>
+        <div className={"lx-fly-s" + (crop ? "" : " empty")} ref={sc} />
+      </div>
+    </div>
+  );
+}
+
 /** The hint pill's top: below the notch, and below the glow's band (36 pt open) on any display. */
 const pillTop = (safeTop: number) => Math.max(safeTop + 14, 48);
 
@@ -104,6 +164,8 @@ function Overlay() {
   const hoverEl = useRef<HTMLDivElement>(null);
   const hover = useRef<Hover | null>(null);
   const composer = useRef<HTMLInputElement>(null);
+  /** The crop that flies into the notch (cut when the hand-off was asked for). */
+  const crop = useRef<HTMLCanvasElement | null>(null);
   const drag = useRef<Drag | null>(null);
   const space = useRef(false);
   const pointer = useRef<Pt>({ x: window.innerWidth / 2, y: window.innerHeight / 2 });
@@ -170,6 +232,11 @@ function Overlay() {
       case "later": later(() => dispatch(e.action), e.ms); break;
       case "revoke": try { URL.revokeObjectURL(e.url); } catch { /* gone */ } break;
       case "glow": void door.current?.glow(e.selected); break;
+      case "fly_prep": {
+        const st = sref.current;
+        crop.current = cropOf(document.querySelector<HTMLImageElement>("img.lx-still"), e.box, st.W, st.H);
+        break;
+      }
       case "focus_composer": {
         const el = composer.current;
         if (!el) break;
@@ -253,6 +320,8 @@ function Overlay() {
 
   // A new session starts with an empty question box.
   useEffect(() => { setQ(""); }, [s.g]);
+  // The flown crop goes with the session.
+  useEffect(() => { if (s.phase === "idle") crop.current = null; }, [s.phase]);
 
   // Three minutes untouched: it closes by itself.
   useEffect(() => {
@@ -341,7 +410,7 @@ function Overlay() {
     frame.current = undefined;
     const d = drag.current;
     const st = sref.current;
-    if (!d) { setCursor(st.sel ? CURSOR[hitTest(st.sel.box, pointer.current)] : "crosshair"); return; }
+    if (!d) { setCursor(st.sel && !handingOff(st.sel) ? CURSOR[hitTest(st.sel.box, pointer.current)] : "crosshair"); return; }
     if (d.mode === "draw") { trail.current?.draw(d.pts); return; }
     selView.current?.place(d.box); // (the veil and brackets follow; React hears of it on release)
   };
@@ -366,6 +435,8 @@ function Overlay() {
     }
     if (sel) {
       const hit = hitTest(sel.box, p);
+      // On its way to the notch: the area takes no adjusting (a new one may still be drawn outside it).
+      if (hit !== "outside" && (handingOff(sel) || sel.handoff === "ok")) return;
       if (hit !== "outside") {
         drag.current = { mode: "adjust", hit, start: sel.box, p0: p, box: sel.box };
         if (hit === "inside") setCursor("grabbing");
@@ -441,7 +512,7 @@ function Overlay() {
 
   return (
     <div className={"lx" + (s.phase === "closing" ? " closing" : "")} data-phase={s.phase}>
-      {s.still && <Still src={s.still} shown={showStill} leaving={false} />}
+      {s.still && <Still src={s.still} shown={showStill} leaving={!!s.fly} />}
       <div className={"lx-layer lx-scrim" + (open && !s.sel && !s.card ? " on" : "")} />
       {showsWebGlow(s) && (
         <EdgeGlow phase={glowPhase} phaseAt={s.phaseAt} toArmMs={s.toArmMs} via={s.via} reduced={reduced} selected={!!s.sel} notch={s.why === "notch"} W={s.W} H={s.H} />
@@ -471,9 +542,10 @@ function Overlay() {
           </button>
         </div>
       )}
-      {s.sel && (open || s.phase === "closing") && !s.card && (
+      {s.sel && (open || s.phase === "closing") && !s.card && !handingOff(s.sel) && s.sel.handoff !== "ok" && (
         <Sheet s={s} sel={s.sel} dispatch={dispatch} composer={composer} q={q} setQ={setQ} />
       )}
+      {s.fly && <Fly key={`fly${s.sel?.n ?? 0}`} plan={s.fly} crop={crop.current} />}
       {s.card && (open || s.phase === "closing") && <Card kind={s.card} dispatch={dispatch} />}
     </div>
   );

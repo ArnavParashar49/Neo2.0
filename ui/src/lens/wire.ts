@@ -26,6 +26,8 @@ export interface LensHello {
   search: SearchProvider | null;
   langs: Lang[];
   prefill: string | null;
+  /** A hint from the core: NotchHub hosts NEO and could show the results (a hand-off may work now). */
+  notch: boolean;
 }
 
 export interface Regions {
@@ -89,7 +91,13 @@ export type CoreMsg =
   | { t: "lens_done"; data: DoneData }
   | { t: "lens_refused"; data: { cmd: string; error: string } }
   | { t: "lens_listening"; data: { on: boolean } }
+  | { t: "lens_handoff"; data: HandoffData }
   | { t: "state"; data: { state: string } };
+
+/** The core's answer to `lens_handoff`: NotchHub shows the area's results (`display`: its island's
+ *  display, when known), or it won't (`why`), and the sheet shows here as before. */
+export interface HandoffData { sel: number; ok: boolean; display: number | null; why: string }
+export const HANDOFF_WHYS = ["no_notch", "unshown", "timeout", "stale"] as const;
 
 // Lengths the page never goes past, whatever arrives.
 export const MAX = { label: 90, detail: 120, title: 60, answer: 1200, text: 8000, reply: 2000, host: 120, q: 500, cont: 2000, lang: 16 } as const;
@@ -187,6 +195,7 @@ export function hello(v: unknown): LensHello {
     search: label ? { word: str(s.word, 40), label, image: bool(s.image), text: bool(s.text) } : null,
     langs,
     prefill: prefill || null,
+    notch: o.notch === true,
   };
 }
 
@@ -298,6 +307,11 @@ export function parseMsg(text: string): CoreMsg | null {
       return { t: "lens_translation", data: { sel, to: str(d.to, MAX.lang), text: typeof d.text === "string" ? d.text.slice(0, MAX.text) : undefined, error: str(d.error, 20) || undefined, ...sent(d.sent_to) } };
     case "lens_done":
       return { t: "lens_done", data: { sel, id: str(d.id, 8), ok: bool(d.ok), note: str(d.note, 20), close: bool(d.close) } };
+    case "lens_handoff": {
+      const disp = int(d.display);
+      const why = (HANDOFF_WHYS as readonly string[]).includes(d.why as string) ? (d.why as string) : "";
+      return { t: "lens_handoff", data: { sel, ok: bool(d.ok), display: disp !== null && disp >= 0 && disp <= 0xffffffff ? disp : null, why } };
+    }
   }
   return null;
 }
@@ -338,4 +352,6 @@ export const send = {
   act: (sel: number, id: string) => ({ cmd: "lens_act", sel, id }),
   cont: (sel: number, text: string) => ({ cmd: "lens_continue", sel, text: cut(text, MAX.cont) }),
   listen: (sel: number) => ({ cmd: "lens_listen", sel }),
+  /** Show this area's results in the notch instead of the sheet (`to`: the language Translate uses). */
+  handoff: (sel: number, to: string | null) => ({ cmd: "lens_handoff", sel, to: /^[A-Za-z0-9_-]{1,16}$/.test(to ?? "") ? (to as string) : "" }),
 };

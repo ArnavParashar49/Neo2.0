@@ -4,8 +4,9 @@
 // never comes here (LensApp writes a corner being dragged and smart pick's outline directly).
 
 import { atLeast, box, iou, nudge, toRect, type Box, type Pt } from "./geometry.ts";
-import { pick, regionAt, tabStops, windowAt } from "./pick.ts";
+import { DOUBLE_MS, pick, regionAt, tabStops, windowAt } from "./pick.ts";
 import { doneText } from "./chips.ts";
+import { FLY_RESET_MS, FLY_RESET_REDUCED_MS, flyPlan, type FlyPlan } from "./fly.ts";
 import { send, type AnswerData, type CoreMsg, type How, type LensHello, type LinkRow, type LocalData, type Regions, type Sent } from "./wire.ts";
 import type { PhaseEvent, ShellHello } from "./door.ts";
 
@@ -28,6 +29,12 @@ export interface Sel {
   /** No still: the core captures the area live, with the overlay out of the way. */
   live: boolean;
   captured: "none" | "pending" | "ok" | "failed";
+  /** Handed to the notch (NotchHub shows the results instead of the sheet): `due` — not asked yet (a
+   *  pick waits for a double-click, live mode for the capture); `waiting` — asked; `ok` — it flies;
+   *  `no` — the sheet shows here as before. */
+  handoff: Handoff;
+  /** Hand off without waiting for a double-click (it was one, or it isn't a pick). */
+  quick: boolean;
   local: LocalData | null;
   answer: AnswerData | null;
   links: LinkRow[];
@@ -42,6 +49,10 @@ export interface Sel {
   /** Every brain (and the web search) the core says the area or what it holds went to. */
   sentTo: Sent[];
 }
+
+export type Handoff = "none" | "due" | "waiting" | "ok" | "no";
+/** An area on its way to the notch: no sheet, no adjusting, no nudging. */
+export const handingOff = (sel: Sel | null): boolean => !!sel && (sel.handoff === "due" || sel.handoff === "waiting");
 
 export interface LensState {
   g: number;
@@ -59,6 +70,11 @@ export interface LensState {
   glow: "native" | "web";
   /** The overlay's display (CGDirectDisplayID), when the shell says. */
   displayId: number | null;
+  /** The area flying into the notch (the overlay is closing). */
+  fly: FlyPlan | null;
+  /** The notch said no this session (its camera or Allow / Cancel hold the island): the areas after
+   *  it — an adjustment, a new drag — stay here with the sheet rather than ask again. */
+  notchRefused: boolean;
   ticket: string | null;
   /** The core heard the ticket (null: not known yet). */
   core: boolean | null;
@@ -113,6 +129,8 @@ export type Action =
   | { t: "pick_now"; g: number }
   | { t: "adjusted"; box: Box }
   | { t: "move_due"; v: number }
+  | { t: "handoff_due"; n: number }
+  | { t: "handoff_late"; n: number }
   | { t: "key"; key: KeyInfo }
   | { t: "chip"; kind: string; id?: string; to?: string }
   | { t: "translate_to"; to: string }
@@ -138,7 +156,9 @@ export type Effect =
   | { t: "revoke"; url: string }
   | { t: "focus_composer"; text: string }
   /** The shell's glow: an area is selected now (narrow and dim), or not. */
-  | { t: "glow"; selected: boolean };
+  | { t: "glow"; selected: boolean }
+  /** The area's crop, cut from the still now, ready to fly the moment the notch says yes. */
+  | { t: "fly_prep"; box: Box };
 
 /** An adjusted area is asked about again only when it changed this much. */
 export const REASK_IOU = 0.92;
@@ -147,6 +167,10 @@ export const NUDGE_WAIT_MS = 400;
 /** A click waits this long at most for smart pick's regions (they come as soon as the still is in). */
 export const PICK_WAIT_MS = 3000;
 export const FADE_MS = 220;
+/** A pick hands off once a double-click can no longer make it a paragraph. */
+export const HANDOFF_PICK_MS = DOUBLE_MS + 20;
+/** No answer to `lens_handoff` this long (the core waits at most ~4.3 s): the sheet, here. */
+export const HANDOFF_GIVE_UP_MS = 5000;
 export const CARD_CLOSE_MS = 3000;
 export const NOTE_MS = 1200;
 export const MAX_THREAD = 12;
@@ -155,7 +179,7 @@ const NO_FLAGS: Flags = { reduceMotion: false, reduceTransparency: false, increa
 
 export function initial(W = 0, H = 0, translateTo: string | null = null): LensState {
   return {
-    g: 0, phase: "idle", phaseAt: 0, toArmMs: 0, via: "hold", why: "", flags: NO_FLAGS, safeTop: 0, W, H, glow: "web", displayId: null,
+    g: 0, phase: "idle", phaseAt: 0, toArmMs: 0, via: "hold", why: "", flags: NO_FLAGS, safeTop: 0, W, H, glow: "web", displayId: null, fly: null, notchRefused: false,
     ticket: null, core: null, sc: true, socket: "idle", hello: null, frozen: "pending", frozenWhy: "", still: null,
     regions: null, sel: null, nextSel: 1, nextQid: 1, card: null, prefill: null, candidate: -1, pendingPick: null,
     moveV: 0, translateTo, coreState: "",
@@ -215,27 +239,57 @@ function onPhase(s: LensState, ev: PhaseEvent, now: number, sinceMs = 0): [LensS
   if (changed && (phase === "cancel" || phase === "closing")) {
     if (st.socket !== "idle") fx.push({ t: "disconnect" });
     st = { ...st, socket: "idle" };
-    fx.push({ t: "later", ms: FADE_MS, action: { t: "reset", g: st.g } });
+    // Closing into the notch: the page stays for the flight (the shell orders it out at 440 ms).
+    const notch = phase === "closing" && st.why === "notch";
+    const ms = notch ? (st.flags.reduceMotion ? FLY_RESET_REDUCED_MS : FLY_RESET_MS) : FADE_MS;
+    fx.push({ t: "later", ms, action: { t: "reset", g: st.g } });
   }
   return [st, fx];
 }
 
-/** The pending area goes out once there is a line and the still is known (taken, or not: live). */
+/** The pending area goes out once there is a line and the still is known (taken, or not: live).
+ *  With NotchHub able to show the results (the core's hello says `notch`), it is handed off too:
+ *  at once, or — a pick — once a double-click can't make it a paragraph, or — live — once it is
+ *  captured. */
 function flush(s: LensState): [LensState, Effect[]] {
   const sel = s.sel;
   if (!sel || sel.sent || s.socket !== "open" || s.frozen === "pending" || s.card) return [s, []];
   const live = s.frozen === "no";
   const cmd = send.select(sel.n, toRect(sel.box), sel.how, live);
-  const next: Sel = { ...sel, sent: true, live, captured: live ? "pending" : "none" };
-  return [{ ...s, sel: next }, [live ? { t: "send_live", cmd } : { t: "send", cmd }]];
+  const fx: Effect[] = [live ? { t: "send_live", cmd } : { t: "send", cmd }];
+  let next: Sel = { ...sel, sent: true, live, captured: live ? "pending" : "none" };
+  if (s.hello?.notch && !s.notchRefused) {
+    next = { ...next, handoff: "due" };
+    if (live) fx.push({ t: "later", ms: HANDOFF_GIVE_UP_MS, action: { t: "handoff_late", n: sel.n } });
+    else if (!sel.quick) fx.push({ t: "later", ms: HANDOFF_PICK_MS, action: { t: "handoff_due", n: sel.n } });
+    else return askHandoff({ ...s, sel: next }, fx);
+  }
+  return [{ ...s, sel: next }, fx];
 }
 
-function newSel(s: LensState, b: Box, how: How): [LensState, Effect[]] {
+/** Ask the core to show the area in the notch (the crop is cut now, so it can fly the moment it may). */
+function askHandoff(s: LensState, fx: Effect[] = []): [LensState, Effect[]] {
+  const sel = s.sel;
+  if (!sel || sel.handoff !== "due") return [s, fx];
+  const out: Effect[] = [...fx, { t: "send", cmd: send.handoff(sel.n, s.translateTo) }];
+  if (!sel.live) out.push({ t: "fly_prep", box: sel.box });
+  out.push({ t: "later", ms: HANDOFF_GIVE_UP_MS, action: { t: "handoff_late", n: sel.n } });
+  return [{ ...s, sel: { ...sel, handoff: "waiting" } }, out];
+}
+
+/** The notch won't (or didn't say): the sheet, here — and in live mode the overlay comes back. */
+function noHandoff(s: LensState, n: number): [LensState, Effect[]] {
+  const sel = s.sel;
+  if (!sel || sel.n !== n || !handingOff(sel)) return [s, []];
+  return [{ ...s, sel: { ...sel, handoff: "no" }, notchRefused: true }, sel.live ? [{ t: "peek", hidden: false }] : []];
+}
+
+function newSel(s: LensState, b: Box, how: How, double = false): [LensState, Effect[]] {
   if (s.phase !== "open" || s.card || !s.W || !s.H) return [s, []];
   const area = atLeast(b, s.W, s.H);
   const first = s.nextSel === 1;
   const sel: Sel = {
-    n: s.nextSel, box: area, how, searched: area, sent: false, live: false, captured: "none",
+    n: s.nextSel, box: area, how, searched: area, sent: false, live: false, captured: "none", handoff: "none", quick: how !== "pick" || double,
     local: null, answer: null, links: [], thread: [], translation: null, notes: {},
     question: first ? s.prefill : null, searchedWeb: false, sentTo: [],
   };
@@ -277,7 +331,18 @@ function onMsg(s: LensState, m: CoreMsg): [LensState, Effect[]] {
     }
     case "lens_captured": {
       if (!s.sel || s.sel.n !== m.data.sel) return [s, []];
-      return [withSel(s, m.data.sel, (x) => ({ ...x, captured: m.data.ok ? "ok" : "failed" })), [{ t: "peek", hidden: false }]];
+      const st = withSel(s, m.data.sel, (x) => ({ ...x, captured: m.data.ok ? "ok" : "failed" }));
+      // Into the notch: the overlay stays out of the way (no sheet will show here).
+      if (st.sel?.handoff === "due") return m.data.ok ? askHandoff(st) : [{ ...st, sel: { ...st.sel, handoff: "no" } }, [{ t: "peek", hidden: false }]];
+      return [st, [{ t: "peek", hidden: false }]];
+    }
+    case "lens_handoff": {
+      const h = m.data, sel = s.sel;
+      if (!sel || sel.n !== h.sel || sel.handoff !== "waiting" || s.phase !== "open") return [s, []]; // an older area's, or closing anyway
+      if (!h.ok) return noHandoff(s, sel.n);
+      const same = h.display === null || s.displayId === null || h.display === s.displayId;
+      const fly = sel.live ? null : flyPlan(sel.box, s.W, s.H, s.safeTop, same, s.flags.reduceMotion);
+      return [{ ...s, sel: { ...sel, handoff: "ok" }, fly }, [{ t: "close", why: "notch" }]];
     }
     case "lens_local":
       return [withSel(s, m.data.sel, (x) => ({ ...x, local: m.data })), []];
@@ -328,7 +393,7 @@ function doPick(s: LensState): [LensState, Effect[]] {
   const pp = s.pendingPick;
   if (!pp) return [s, []];
   const p = pick(s.regions, pp.at, s.W, s.H, pp.double);
-  return newSel({ ...s, pendingPick: null }, p.box, "pick");
+  return newSel({ ...s, pendingPick: null }, p.box, "pick", pp.double);
 }
 
 /** Whether the keys are the sheet's or the page's: a printable key with an area goes to the question box. */
@@ -365,6 +430,7 @@ function onKey(s: LensState, k: KeyInfo): [LensState, Effect[]] {
     return [withSel(s, s.sel.n, (x) => ({ ...x, notes: { ...x.notes, [copy.id]: "…" } })), [{ t: "send", cmd: send.act(s.sel.n, copy.id) }]];
   }
   const arrows: Record<string, [number, number]> = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] };
+  if (handingOff(s.sel) || s.sel?.handoff === "ok") return [s, []]; // on its way to the notch
   if (arrows[k.key] && s.sel) {
     const step = k.shift ? 10 : 1;
     const [dx, dy] = arrows[k.key];
@@ -447,18 +513,22 @@ function step(s: LensState, a: Action): [LensState, Effect[]] {
         // Smart pick waits for what the core found in the still (a pulsing dot shows), at most PICK_WAIT_MS.
         return [{ ...s, pendingPick: { at: a.at, double: a.double } }, [{ t: "later", ms: PICK_WAIT_MS, action: { t: "pick_now", g: s.g } }]];
       }
-      return newSel(s, pick(s.regions, a.at, s.W, s.H, a.double).box, "pick");
+      return newSel(s, pick(s.regions, a.at, s.W, s.H, a.double).box, "pick", a.double);
     }
     case "pick_now":
       return a.g === s.g ? doPick(s) : [s, []];
     case "adjusted": {
-      if (!s.sel) return [s, []];
+      if (!s.sel || handingOff(s.sel) || s.sel.handoff === "ok") return [s, []];
       const v = s.moveV + 1;
       const st = { ...withSel(s, s.sel.n, (x) => ({ ...x, box: atLeast(a.box, s.W, s.H) })), moveV: v };
       return [st, [{ t: "later", ms: ADJUST_WAIT_MS, action: { t: "move_due", v } }]];
     }
+    case "handoff_due":
+      return s.sel && s.sel.n === a.n && !s.sel.live ? askHandoff(s) : [s, []];
+    case "handoff_late":
+      return noHandoff(s, a.n);
     case "move_due": {
-      if (a.v !== s.moveV || !s.sel) return [s, []];
+      if (a.v !== s.moveV || !s.sel || handingOff(s.sel)) return [s, []];
       if (iou(s.sel.box, s.sel.searched) >= REASK_IOU) return [s, []];
       return newSel(s, s.sel.box, "adjust");
     }

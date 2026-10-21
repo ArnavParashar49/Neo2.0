@@ -71,3 +71,13 @@ test("lens.css: nothing display-sized repaints when something moves", () => {
   // The trail is not displayed between drags.
   assert.ok(blocks(".lx-trail").some((b) => /display:\s*none/.test(b)));
 });
+
+test("an area on its way to the notch shows no sheet, takes no adjusting, and flies on transforms alone", () => {
+  const sheet = app.split("<Sheet ")[0].split("\n").slice(-2).join("\n");
+  assert.ok(sheet.includes("!handingOff(s.sel)") && sheet.includes('s.sel.handoff !== "ok"'), sheet);
+  const down = app.split("const onDown")[1]?.split("const onMove")[0] ?? "";
+  assert.ok(down.indexOf("isDouble(") < down.indexOf("handingOff(sel)"), "a double-click still makes a picked line its paragraph");
+  assert.ok(app.includes("<Still src={s.still} shown={showStill} leaving={!!s.fly} />"), "the still fades as the area flies");
+  for (const b of blocks(".lx-fly").concat(blocks(".lx-fly-y"), blocks(".lx-fly-s"))) assert.ok(!/transition|animation|filter/.test(b), b);
+  assert.ok(blocks(".lx-still").some((b) => /transition:\s*opacity 200ms/.test(b)), "the still's 200 ms fade");
+});

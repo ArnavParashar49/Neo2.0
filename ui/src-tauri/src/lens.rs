@@ -63,6 +63,9 @@ const PAGE: &str = "index.html#/lens";
 const EVENT: &str = "neo://lens-phase";
 /// The page fades out in 160 ms; the window orders out just after.
 const FADE: Duration = Duration::from_millis(170);
+/// Closing because the area went into the notch (NotchHub shows the results): the crop's flight
+/// (380 ms) plays out first.
+const FADE_NOTCH: Duration = Duration::from_millis(440);
 /// Opened from the menu: its own fade-out first (it must not be in the still). Voice and hosts:
 /// the notch's panel folds away first (the core published `lens_opening`).
 const OPEN_WAIT_MENU: Duration = Duration::from_millis(220);
@@ -77,8 +80,9 @@ const PAGE_SILENT: Duration = Duration::from_secs(5);
 const WATCH_EVERY: Duration = Duration::from_millis(500);
 /// The core went while the overlay was open: the page says so, then it closes.
 const GONE_CLOSE: Duration = Duration::from_secs(3);
-/// What `lens_closed` may say (the core logs anything else as "closed").
-const WHYS: [&str; 12] = ["esc", "cancel", "summon", "action", "lock", "display", "idle", "gone", "continue", "done", "erased", "stop"];
+/// What `lens_closed` may say (the core logs anything else as "closed"). "notch": the area was handed
+/// to NotchHub — the overlay is done, the area isn't.
+const WHYS: [&str; 13] = ["esc", "cancel", "summon", "action", "lock", "display", "idle", "gone", "continue", "done", "erased", "stop", "notch"];
 const ANNOUNCE: &str = "Search Screen. Drag over an area, or press Return to search the window under the pointer. Escape closes.";
 
 /// The app, for the panel's own Esc (native.rs calls `native_escape` from AppKit, which has no handle).
@@ -611,7 +615,7 @@ fn cancel(app: &AppHandle, g: Option<u64>, why: &'static str) {
     if let Some(t) = ticket {
         tell_closed(app, &t, "cancel");
     }
-    after_fade(app, sid);
+    after_fade(app, sid, FADE);
 }
 
 /// Search Screen closes (Esc, a summon, the core, the watchdog…). On the main thread.
@@ -639,17 +643,17 @@ pub fn close(app: &AppHandle, why: &str) {
             if let Some(t) = ticket {
                 tell_closed(app, &t, why);
             }
-            after_fade(app, sid);
+            after_fade(app, sid, if why == "notch" { FADE_NOTCH } else { FADE });
         }
     }
 }
 
-/// Once the page has faded: the window orders out (keys back to the user's app), and is destroyed
-/// a minute later if nothing used it again.
-fn after_fade(app: &AppHandle, sid: u64) {
+/// Once the page has faded (`fade`: FADE, or FADE_NOTCH for the flight into the notch): the window
+/// orders out (keys back to the user's app), and is destroyed a minute later if nothing used it again.
+fn after_fade(app: &AppHandle, sid: u64, fade: Duration) {
     let handle = app.clone();
     std::thread::spawn(move || {
-        std::thread::sleep(FADE);
+        std::thread::sleep(fade);
         let h = handle.clone();
         let _ = handle.run_on_main_thread(move || {
             let gone = match lock(&h) {
@@ -1139,9 +1143,28 @@ mod tests {
     #[test]
     fn the_core_hears_only_the_words_it_knows() {
         assert!(WHYS.contains(&"esc") && WHYS.contains(&"summon") && WHYS.contains(&"lock"));
+        assert!(WHYS.contains(&"notch"), "an area handed to the notch");
         let src = include_str!("lens.rs");
         let body = src.split("#[cfg(test)]").next().unwrap();
         let closed = body.split("fn tell_closed(").nth(1).unwrap().split("\n}\n").next().unwrap();
         assert!(closed.contains("unwrap_or(\"done\")"));
+        // The page's `close("notch")` keeps its word all the way to the core.
+        let close = body.split("pub fn close(").nth(1).unwrap().split("\n}\n").next().unwrap();
+        assert!(close.contains("WHYS.iter().find(|w| **w == why)"));
+    }
+
+    #[test]
+    fn closing_into_the_notch_waits_for_the_flight() {
+        assert_eq!(FADE, Duration::from_millis(170));
+        assert_eq!(FADE_NOTCH, Duration::from_millis(440));
+        let src = include_str!("lens.rs");
+        let body = src.split("#[cfg(test)]").next().unwrap();
+        let close = body.split("pub fn close(").nth(1).unwrap().split("\n}\n").next().unwrap();
+        assert!(close.contains("after_fade(app, sid, if why == \"notch\" { FADE_NOTCH } else { FADE })"));
+        assert!(close.contains("notch: why == \"notch\""), "the glow's 200 ms fade");
+        let cancel = body.split("fn cancel(").nth(1).unwrap().split("\n}\n").next().unwrap();
+        assert!(cancel.contains("after_fade(app, sid, FADE)"));
+        let after = body.split("fn after_fade(").nth(1).unwrap().split("\n}\n").next().unwrap();
+        assert!(after.contains("std::thread::sleep(fade)"));
     }
 }

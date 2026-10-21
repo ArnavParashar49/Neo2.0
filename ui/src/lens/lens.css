@@ -263,6 +263,14 @@ html[data-rt] .lx-pill, html[data-rt] .lx-sheet, html[data-rt] .lx-card { -webki
 .lx-card .lx-row-actions { margin-top: 16px; }
 .lx-card .foot { margin-top: 12px; font-size: 11.5px; color: var(--dim); }
 
+/* The area flying into the notch (fly.ts): three nested layers the size of the area, each moved by
+ * one transform (sideways, up, smaller and fainter), the crop inside. */
+.lx-fly { position: fixed; pointer-events: none; will-change: transform; }
+.lx-fly-y, .lx-fly-s { position: absolute; inset: 0; pointer-events: none; will-change: transform; }
+.lx-fly-s { will-change: transform, opacity; border-radius: 14px; box-shadow: 0 12px 36px rgba(0, 0, 0, 0.35); }
+.lx-fly-s.empty { box-shadow: none; }
+.lx-fly-s canvas { display: block; width: 100%; height: 100%; }
+
 /* Closing: everything but the still fades (each piece on its own: no group of them is faded as one);
  * the still stays until the window is gone. */
 .lx.closing .lx-sheet, .lx.closing .lx-veil, .lx.closing .lx-cap, .lx.closing .lx-hair, .lx.closing .lx-bracket, .lx.closing .lx-pill, .lx.closing .lx-card,
