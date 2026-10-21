@@ -374,6 +374,8 @@ pub fn run() {
                         let _ = item.set_text("Show NEO   ⌥⌘");
                     });
                 },
+                |_| {}, // no hold yet: its gate stays off, so the tap is all there is
+                std::sync::Arc::new(chord::LensGate::default()),
             );
             if chord_ok {
                 app.state::<Tray>().chord.store(true, Ordering::SeqCst);
