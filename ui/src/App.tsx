@@ -557,6 +557,15 @@ export default function App() {
     return () => { un.then((f) => f()).catch(() => {}); };
   }, [expand, neo.lensCard]);
 
+  // The host's panel opened any way at all (NEO summoned, the page's own show, a card) — no keys with
+  // it: a Search Screen card it was still folding away (opened again before the page went off screen)
+  // gives way to the chat now, not in the open panel FOLD_HOLD_MS later.
+  useEffect(() => {
+    if (!inNotch) return;
+    const un = listen("neo://opened", () => neo.lensCard.panelShown());
+    return () => { un.then((f) => f()).catch(() => {}); };
+  }, [neo.lensCard]);
+
   // A confirmation request always surfaces the card.
   useEffect(() => { if (confirming) expand(); }, [confirming, expand]);
 

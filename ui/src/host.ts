@@ -14,8 +14,9 @@ declare global {
     __NEO_WS_TOKEN__?: string;
     /** The largest panel the host will give the page, in CSS pixels. */
     __NEO_HOST_AREA__?: { w: number; h: number };
-    /** The host calls this (by evaluating JavaScript) to deliver an event such as `neo://wake`, or
-     *  `neo://show` — the host opened its panel at the user's hand, so the input should take the keys. */
+    /** The host calls this (by evaluating JavaScript) to deliver an event such as `neo://wake`;
+     *  `neo://show` — the host opened its panel at the user's hand, so the input should take the keys;
+     *  or `neo://opened` — the host's panel opened, whichever way (no keys with it). */
     __neoHostEmit?: (event: string, payload?: unknown) => void;
     webkit?: { messageHandlers?: { neo?: { postMessage(message: unknown): void } } };
   }

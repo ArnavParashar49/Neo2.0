@@ -205,7 +205,19 @@ test("folding away: the panel opened again gives the page to the chat; a new car
   again.h.handle("lens_card", snapshot());
   again.h.close("esc");
   again.h.panelShown();
-  assert.equal(again.h.snap(), null, "neo://show: the chat, at once");
+  assert.equal(again.h.snap(), null, "neo://show / neo://opened: the chat, at once");
+  // Opened again before NotchHub took the page off screen (NEO summoned a moment after Esc): the page
+  // never went hidden, so only the panel's opening can take the closed card off it — never a dead card
+  // in the open panel until the fallback, then the chat swapped in and the panel resized under the user.
+  const summoned = hub(true, true);
+  summoned.h.handle("lens_card", snapshot());
+  summoned.h.close("esc");
+  summoned.advance(120);
+  assert.equal(summoned.h.folding, true);
+  summoned.h.panelShown();
+  assert.equal(summoned.h.snap(), null);
+  assert.equal(summoned.h.folding, false);
+  assert.equal(summoned.pending(), 0, "no fallback left behind");
   again.h.handle("lens_card", snapshot());
   again.h.panelShown();
   assert.equal(again.h.snap()?.cid, CID, "a live card's own panel opening keeps it");
@@ -253,6 +265,8 @@ test("LensCard: closed, it acts on nothing and measures nothing; Esc and the × 
   assert.ok(card.includes("if (hub.folding || !copiesArea(composer.current)) return;"));
   assert.match(app, /neo\.lensCard\.visibilityChanged\(\)/);
   assert.match(app, /listen\("neo:\/\/show", \(\) => \{ neo\.lensCard\.panelShown\(\); expand\(\); \}\)/);
+  // NotchHub's panel opening any other way (NEO summoned, the page's own show, a card): the same.
+  assert.match(app, /listen\("neo:\/\/opened", \(\) => neo\.lensCard\.panelShown\(\)\)/);
 });
 
 test("a chat turn takes the panel back: the user's own words, a browser or a song card", () => {

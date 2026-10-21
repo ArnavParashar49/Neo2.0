@@ -117,8 +117,9 @@ export class LensCardHub {
     if (this.foldHold !== null && !this.visible()) this.set(null);
   }
 
-  /** NotchHub opened its panel (`neo://show`): a card it was folding away gives the page back to the
-   *  chat (the user opened it again at once). A new card has replaced it already. */
+  /** NotchHub opened its panel (`neo://opened`, whichever way; `neo://show`, at the user's hand): a
+   *  card it was folding away gives the page back to the chat (opened again at once — before the page
+   *  ever went off screen, so nothing else would). A new card has replaced it already. */
   panelShown() {
     if (this.foldHold !== null) this.set(null);
   }
