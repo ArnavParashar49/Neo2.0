@@ -4,11 +4,16 @@ few hundred milliseconds, and the actions it offers for it.
 * text — Apple Vision's accurate text recognition, guessing the language, with its language
   correction on (ocr.Plan(prose=True): words a person wrote, not a toolbar's labels);
 * language — NaturalLanguage's recogniser over that text (at least 8 characters, 3 for Chinese,
-  Japanese and Korean; 60% sure), so "Translate to …" can offer the user's own language;
+  Japanese and Korean; 60% sure), so "Translate to …" can offer the user's own language — and for a
+  text too short or unsure for that ("Merci", "出口"), its best guess, so a foreign word still gets
+  Translate unless the guess is one of the user's own languages;
 * links, e-mail addresses, phone numbers — Foundation's data detector over the text;
 * QR codes and barcodes — Vision's barcode detector over the area itself;
-* dark — at least 97% of the area nearly black: protected video, which captures as black. No brain
-  is asked about such an area.
+* dark — the last verdict, never the first: only when no code and no text was found, and the area
+  is almost uniformly black (99.5% of it at luma ≤ 8, and its brightest 0.1% under 24): protected
+  video, which captures as flat black. A black terminal's error, a dark theme's code or black
+  clothing on a black page is read like any other area. The brain isn't asked about a dark area
+  until the user presses "Ask anyway".
 
 Which actions are offered is decided here, never by the page: only http(s) links open (at most 2048
 characters; one with a user name or password in it opens without them, and says so; a host in
@@ -41,7 +46,7 @@ log = logger(__name__)
 MAX_TEXT = 8000  # characters of the area's text the page gets
 MAX_ACTIONS = 12
 MAX_URL = 2048
-DARK_LUMA, DARK_SHARE = 8, 0.97
+DARK_LUMA, DARK_SHARE, DARK_PEAK = 8, 0.995, 24  # (DRM video captures as flat 0,0,0)
 LANG_MIN, LANG_MIN_CJK, LANG_CONF = 8, 3, 0.6
 _NL = "/System/Library/Frameworks/NaturalLanguage.framework"
 _VISION = "/System/Library/Frameworks/Vision.framework"
@@ -76,6 +81,7 @@ class Local:
     text: str = ""
     lines: int = 0
     lang: dict[str, Any] | None = None  # {code, name, conf}
+    guess: str = ""  # no sure language (too short, too unsure): the best guess at it, for Translate
     dark: bool = False
     actions: list[Action] = field(default_factory=list)
     ms: float = 0.0
@@ -306,13 +312,21 @@ def wifi(s: str) -> Action | None:
 
 
 def is_dark(img: Image.Image) -> bool:
-    """At least DARK_SHARE of the area nearly black (protected video captures as black)."""
+    """Almost uniformly black: at least DARK_SHARE of the area at luma ≤ DARK_LUMA, and its brightest
+    0.1% under DARK_PEAK (protected video captures as flat black; text on black never is that)."""
     g = img.convert("L")
-    if max(g.size) > 256:
-        g.thumbnail((256, 256))
+    if max(g.size) > 512:
+        g.thumbnail((512, 512))  # (averaged down: a thin bright stroke still lifts the pixels it lands in)
     hist = g.histogram()
     total = sum(hist) or 1
-    return sum(hist[:DARK_LUMA]) >= DARK_SHARE * total
+    if sum(hist[: DARK_LUMA + 1]) < DARK_SHARE * total:
+        return False
+    above, top = 0, total * 0.001
+    for luma in range(255, -1, -1):
+        above += hist[luma]
+        if above > top:
+            return luma < DARK_PEAK
+    return True
 
 
 def _cjk(text: str) -> bool:
@@ -377,11 +391,29 @@ def preferred() -> list[str]:
     return [c for c in ocr._preferred_languages() if valid_code(c)]
 
 
-def translate_to(lang: dict[str, Any] | None) -> str:
-    """The language "Translate to …" offers first: the first preferred one whose base language isn't
-    the text's ("" when the text is in all of them, or there is no language to go by)."""
-    if not lang:
+def guess(text: str) -> str:
+    """The best guess at the language of a text too short or too unsure for :func:`language`
+    ("Merci", "出口", "Ausfahrt"), however unsure — "" for none."""
+    t = " ".join(text.split())
+    if not any(c.isalpha() for c in t) or len(t) > 200:
         return ""
+    got = engine().language(t)
+    code = str(got[0]) if got else ""
+    return "" if code in ("und", "") or not valid_code(code) else code
+
+
+def translate_to(lang: dict[str, Any] | None, guessed: str = "") -> str:
+    """The language "Translate to …" offers first: the first preferred one whose base language isn't
+    the text's ("" when the text is in all of them). A short text with no sure language (``guessed``:
+    :func:`guess`'s) is offered the first preferred language, unless the guess is one of them — most
+    likely the user's own words ("Cancel")."""
+    if not lang:
+        if not guessed:
+            return ""
+        prefs = preferred() or ["en"]
+        if base(guessed) in {base(c) for c in prefs}:
+            return ""
+        return base(prefs[0]) if base(prefs[0]) in _NAMES else prefs[0]
     have = base(lang.get("code", ""))
     for c in [*preferred(), "en"]:
         if base(c) != have:
@@ -413,14 +445,11 @@ def _read(img_frame: Any) -> tuple[str, int]:
 
 def analyse(crop: Any) -> Local:
     """The on-device pass over an area (a screen.Frame cut from the still). Parts that can't run are
-    left out and named in ``notes``; a refused effect (a test that faked nothing) goes through."""
+    left out and named in ``notes``; a refused effect (a test that faked nothing) goes through. Dark
+    is decided last: an area with a code or any text in it never is."""
     t0 = time.perf_counter()
     out = Local()
     img = crop.image
-    if is_dark(img):
-        out.dark = True
-        out.ms = (time.perf_counter() - t0) * 1000
-        return out
     acts: list[Action] = []
     try:
         for payload, _sym in engine().codes(img)[:4]:
@@ -438,6 +467,8 @@ def analyse(crop: Any) -> Local:
     if out.text:
         try:
             out.lang = language(out.text)
+            if out.lang is None:
+                out.guess = guess(out.text)
         except Exception as e:  # noqa: BLE001
             out.notes.append("language")
             log.info(f"[lens] the text's language not told ({type(e).__name__})")
@@ -450,6 +481,10 @@ def analyse(crop: Any) -> Local:
             out.notes.append("links")
             log.info(f"[lens] the text's links not found ({type(e).__name__})")
         acts.insert(0, Action("copy_text", "Copy text", out.text))
+    if not acts and not out.text.strip() and is_dark(img):
+        out.dark = True  # protected video: nothing to copy, nothing read
+        out.ms = (time.perf_counter() - t0) * 1000
+        return out
     acts.append(Action("copy_image", "Copy image", ""))
     seen: set[tuple[str, str]] = set()
     for a in acts:
@@ -463,6 +498,6 @@ def analyse(crop: Any) -> Local:
 
 
 __all__ = [
-    "Action", "Local", "analyse", "detect_plain", "is_dark", "language", "language_name", "languages", "link",
+    "Action", "Local", "analyse", "detect_plain", "guess", "is_dark", "language", "language_name", "languages", "link",
     "preferred", "set_engine", "translate_to", "valid_code", "wifi",
 ]  # fmt: skip

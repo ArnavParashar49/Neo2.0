@@ -95,6 +95,22 @@ def test_a_black_area_is_protected_video():
     assert not local.is_dark(almost)
 
 
+def _terminal(size, lines):
+    img = Image.new("RGB", size, (0, 0, 0))
+    d = ImageDraw.Draw(img)
+    for i, line in enumerate(lines):
+        d.text((16, 16 + 22 * i), line, fill=(230, 230, 230))
+    return img
+
+
+def test_text_on_black_is_never_protected_video():
+    # A black terminal's error (iTerm2's default, Terminal's "Pro"): a few lines in a big black area,
+    # about 97-98% of it black — the user's "explain this error", never "came out black".
+    assert not local.is_dark(_terminal((1200, 400), ["Traceback (most recent call last):", "KeyError: 'id'"]))
+    assert not local.is_dark(_terminal((1000, 300), ["zsh: command not found: pyhton"]))
+    assert not local.is_dark(_terminal((900, 500), ["def main():", "    return 0", "", "main()"]))
+
+
 class FakeEngine:
     def __init__(self, *, codes=(), lang=("fr", 0.98), detect=None):
         self._codes, self._lang, self._detect = list(codes), lang, detect
@@ -125,6 +141,25 @@ def test_translate_to_the_users_first_language_that_isnt_the_texts():
     assert local.translate_to({"code": "fr"}) == "en"
     assert local.translate_to({"code": "en-GB"}) == "hi"  # (English and Hindi on this Mac)
     assert local.translate_to(None) == ""
+
+
+def test_a_short_foreign_word_still_gets_translate():
+    local.set_engine(FakeEngine(lang=("fr", 0.35)))
+    assert local.language("Merci") is None and local.guess("Merci") == "fr"  # too short to be sure
+    assert local.translate_to(None, "fr") == "en"
+    assert local.translate_to(None, "zh-Hans") == "en"  # 出口 on a sign
+    assert local.translate_to(None, "en") == "" and local.translate_to(None, "hi") == ""  # the user's own ("Cancel")
+    assert local.translate_to(None, "") == ""
+    assert local.guess("1234 5678") == ""  # no letters, no guess asked for
+    local.set_engine(FakeEngine(lang=None))
+    assert local.guess("出口") == ""
+    local.set_engine(FakeEngine(lang=("und", 0.2)))
+    assert local.guess("xq") == ""
+    # Through the pass: no sure language, the guess kept for Translate.
+    ocr.set_engine(Words("Merci"))
+    local.set_engine(FakeEngine(lang=("fr", 0.35)))
+    got = local.analyse(_crop())
+    assert got.lang is None and got.guess == "fr"
     menu = [x["code"] for x in local.languages()]
     assert menu[:2] == ["en", "hi"] and "ja" in menu and len(menu) == len(set(menu))
 
@@ -166,12 +201,31 @@ def test_the_area_is_read_as_prose_and_only_it(monkeypatch):
     assert "prose" not in eng.calls[0]
 
 
-def test_a_black_area_gets_nothing_read(monkeypatch):
-    eng = Words("never read")
-    ocr.set_engine(eng)
+class NoWords(Words):
+    def __init__(self):
+        super().__init__("")
+
+    def recognize(self, image, **kw):
+        self.calls.append(kw)
+        return []
+
+
+def test_an_area_is_dark_only_when_nothing_was_found_on_it(monkeypatch):
+    ocr.set_engine(NoWords())
     local.set_engine(FakeEngine())
     got = local.analyse(_crop((0, 0, 0)))
-    assert got.dark and got.actions == [] and eng.calls == []
+    assert got.dark and got.actions == [] and got.text == ""  # (protected video: nothing to copy)
+    # One short error in a big black terminal: read like any other area (dark is the last verdict).
+    eng = Words("zsh: command not found: pyhton")
+    ocr.set_engine(eng)
+    got = local.analyse(screen.Frame(_terminal((1600, 900), ["zsh: command not found: pyhton"]), 0.0, 0.0, 0.5))
+    assert not got.dark and got.text.startswith("zsh") and len(eng.calls) == 1
+    assert [a.kind for a in got.actions] == ["copy_text", "copy_image"]
+    # A code on black (a QR on a dark page) is never dark either.
+    ocr.set_engine(NoWords())
+    local.set_engine(FakeEngine(codes=[("https://example.com/x", "QR")]))
+    got = local.analyse(_crop((0, 0, 0)))
+    assert not got.dark and [a.kind for a in got.actions] == ["open", "copy_image"]
 
 
 def test_a_part_that_cant_run_is_left_out(monkeypatch):
