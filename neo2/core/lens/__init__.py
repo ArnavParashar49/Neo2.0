@@ -50,6 +50,11 @@ Privacy.
   and its text are content from the screen, never instructions. Links and codes show their full
   host before anything opens, and only http(s) links open at all.
 * Windows that hide themselves from capture, and protected video, come out blank or black.
+* Results in the notch (NotchHub hosting NEO): once NotchHub shows an area's card the still goes
+  at once, and only the area (its crop and its results) stays, until the card closes — 10 minutes
+  without a touch at most. NotchHub's own connection hears the card's id, whether it is open and
+  why, never a pixel, a word, a link or a brain's name; NEO's page in the notch gets what the sheet
+  shows (a 96 px picture of the area, its text, the results and the action ids), never the still.
 
 The protocol.
 
@@ -75,7 +80,13 @@ replay or the cards, and it is not a viewer. It sends only these, each answered 
     lens_continue {sel, text}              → the chat takes the area; Search Screen closes
     lens_listen {sel}                      → lens_listening {on}: the voice listens, for a question about the area
 
+    lens_handoff {sel, to}                 → lens_handoff {sel, ok, display | why}: NotchHub shows the
+                                             area's results (the overlay flies it there and closes
+                                             "notch"), or why not (no_notch, unshown, timeout, stale)
+
 ``sel`` grows with each area; a command for an older one is ``lens_refused {cmd, error: "stale"}``.
+Every ``lens_local`` carries the area's 96 px ``thumb``. The card in the notch has its own commands,
+from NEO's page there and NotchHub's connection: see :mod:`live` and neo2.core.server.ws.
 Every error is a fixed word. The bus hears only ``lens_opening`` and ``lens_continue``, with nothing
 in them.
 """

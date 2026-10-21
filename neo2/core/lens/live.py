@@ -24,6 +24,20 @@ Where an area went: every brain the picture or its text was sent to (as it was a
 one that answered), and a search phrase sent to NEO's web search for its links, rides each answer
 the page gets as ``sent_to`` — the privacy line names all of them, "Stayed on this Mac" only when
 nothing left.
+
+Results in the notch. When NotchHub hosts NEO's UI and both its connection and NEO's page in it
+said ``lens_card_hello``, the overlay asks ``lens_handoff`` for an area instead of showing its
+sheet: the core makes the area a card with an id of its own (``cid``, 32 random hex), offers it —
+the results to NEO's page in the notch, only ``{cid, open, why}`` to NotchHub's connection — and
+waits :data:`HANDOFF_WAIT_S` for NotchHub to say it shows it (``lens_card_shown``). Until then
+every result goes to the overlay too, so a refusal (NotchHub's camera or Allow / Cancel hold the
+island) or no answer leaves the sheet complete. Shown, the overlay flies the area into the notch and
+closes (``lens_closed`` why "notch"): its still, regions and ticket go at once, and the area alone
+(its crop and results) stays until the card closes — Esc, a click elsewhere, an action that opens
+something, Continue in NEO, Stop, Erase, a new Search Screen, :data:`CARD_IDLE_S` without a
+command, or nobody left to show it. The card's own commands (``lens_card_*``, naming the live cid)
+drive the same internals as the overlay's; nothing of a card goes on the bus, the replay or a log
+line beyond a command's name.
 """
 
 from __future__ import annotations
@@ -35,6 +49,7 @@ import hashlib
 import hmac
 import io
 import re
+import secrets
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -60,10 +75,26 @@ PREFILL_S = 10.0  # "search my screen for X": X waits this long for the overlay 
 MAX_Q, MAX_CONTINUE = 500, 2000
 VIAS = ("hold", "menu", "voice", "host")
 HOWS = ("drag", "lasso", "pick", "key", "adjust", "all")
-WHYS = ("esc", "cancel", "summon", "action", "lock", "display", "idle", "gone", "continue", "done", "erased", "stop")
+# (notch: the area was handed to NotchHub, and flew there)
+WHYS = ("esc", "cancel", "summon", "action", "lock", "display", "idle", "gone", "continue", "done", "erased", "stop", "notch")
 _TICKET = re.compile(r"[0-9a-f]{64}")
 _ACT_ID = re.compile(r"a\d{1,3}")
 _CLOSING = ("open", "mail", "call", "image_search", "text_search", "brains")
+
+# Results in the notch (see the module's doc).
+HANDOFF_WAIT_S = 0.8  # NotchHub says it shows the card within this, or the sheet shows by the area
+HANDOFF_AREA_S = FREEZE_WAIT_S + 1.0  # a hand-off waits this long at most for its area to be cut
+CARD_IDLE_S = 600.0  # the card closes after this long without a command of its own
+CARD_PAGE_WAIT_S = 8.0  # …or when no page that can show it came within this
+# Why a card closed: what NotchHub and NEO's page hear (anything else is "done").
+CARD_WHYS = ("esc", "x", "away", "fold", "unshown", "timeout", "action", "continue", "chat", "stop", "erased", "replaced",
+             "idle", "gone", "done")  # fmt: skip
+_PAGE_CLOSES = ("esc", "x", "chat")  # what NEO's page may say closed it
+_HOST_CLOSES = ("fold", "away", "unshown", "esc")  # …and NotchHub
+_CID = re.compile(r"[0-9a-f]{32}")
+# The messages about an area that a card shows (tagged with its cid for NEO's page in the notch).
+_CARD_TYPES = frozenset({"lens_local", "lens_answer", "lens_links", "lens_reply", "lens_translation", "lens_done", "lens_listening"})
+MAX_REPLIES = 12
 
 
 @dataclass
@@ -94,6 +125,10 @@ class _Area:
     shown_local: dict[str, Any] | None = None
     shown_answer: dict[str, Any] | None = None
     shown_links: dict[str, Any] | None = None
+    shown_translation: dict[str, Any] | None = None
+    # the follow-ups answered so far, as the page was told them (with the question): a card's snapshot
+    replies: list[dict[str, Any]] = field(default_factory=list)
+    thumb: str = ""  # the area at 96 px (a JPEG data URI), made off the loop with the on-device pass
     tasks: set[asyncio.Task] = field(default_factory=set)
     # where the area (or what it holds) went: (label, what) → {label, local, what}; what: picture | text | query
     went: dict[tuple[str, str], dict[str, Any]] = field(default_factory=dict)
@@ -108,6 +143,21 @@ class _Area:
 
     def sent_to(self) -> list[dict[str, Any]]:
         return list(self.went.values())[:12]
+
+
+@dataclass
+class _Card:
+    """An area handed to the notch: NotchHub shows its results instead of the overlay's sheet."""
+
+    cid: str  # 32 random hex: the card's commands name it
+    area: _Area
+    ticket: str  # the overlay session it came from
+    state: str = "offered"  # offered (NotchHub hasn't said yet) | shown
+    shown: asyncio.Event = field(default_factory=asyncio.Event)  # (set too when it closes while offered)
+    refused: bool = False
+    translate_to: str = ""
+    idle: asyncio.TimerHandle | None = None
+    page_wait: asyncio.TimerHandle | None = None
 
 
 def _jpeg(img: Any, quality: int) -> bytes:
@@ -128,6 +178,21 @@ def _thumb(img: Any) -> str:
     t = img.convert("RGB")
     t.thumbnail((96, 96))
     return "data:image/jpeg;base64," + base64.b64encode(_jpeg(t, 80)).decode("ascii")
+
+
+def _analyse(crop: Any) -> tuple[local.Local | None, str]:
+    """The on-device pass over an area and its 96 px picture (the sheet's and the card's thumbnail),
+    in one trip off the event loop. None for a pass that failed (its kind is logged, nothing else)."""
+    try:
+        thumb = _thumb(crop.image)
+    except Exception as e:  # noqa: BLE001 — no thumbnail: an empty tile
+        log.info(f"[lens] no thumbnail ({type(e).__name__})")
+        thumb = ""
+    try:
+        return local.analyse(crop), thumb
+    except Exception as e:  # noqa: BLE001 — nothing read on this Mac: the brain's answer still comes
+        log.info(f"[lens] the on-device pass failed ({type(e).__name__})")
+        return None, thumb
 
 
 # ---- the clipboard (NEO.app's own write: the user pressed Copy) -----------------------------------
@@ -203,6 +268,7 @@ class LensLive:
         self._hello_owed: Any = None  # a client that got its hello before the eyes were known
         self._gone_timer: asyncio.TimerHandle | None = None
         self._listen_timer: asyncio.TimerHandle | None = None
+        self._card: _Card | None = None  # the area handed to the notch (see the module's doc)
 
     # ---- the ticket ----------------------------------------------------------------------------
 
@@ -231,7 +297,14 @@ class LensLive:
         elif kind == "lens_closed":
             if ticket == self.ticket:
                 why = str(msg.get("why") or "")
-                self._drop(why if why in WHYS else "closed")
+                why = why if why in WHYS else "closed"
+                card = self._card
+                if card is not None and card.ticket == ticket and card.state == "shown":
+                    # Handed to the notch: the overlay's things go, the area stays with the card —
+                    # nothing the overlay does any more can end it.
+                    self._release_overlay(why)
+                else:
+                    self._drop(why)
 
     def _freeze(self, ticket: str, raw: Any, via: str) -> None:
         sp = capture.spot(raw)
@@ -240,8 +313,9 @@ class LensLive:
             return
         if ticket == self.ticket:
             return  # (said again: the same session)
-        if self.ticket is not None:
-            self._drop("replaced")
+        self._close_card("replaced")  # a new Search Screen: the card in the notch folds
+        # (also after a hand-off, with no ticket left: the last session's numbers go)
+        self._drop("replaced")
         self.ticket, self.spot, self.via = ticket, sp, via if via in VIAS else "hold"
         self.frozen, self.why, self.committed = "pending", "", False
         self._sid = hashlib.blake2b(ticket.encode(), digest_size=16).digest()
@@ -374,10 +448,13 @@ class LensLive:
     # ---- closing ---------------------------------------------------------------------------------
 
     def close(self, why: str = "done") -> bool:
-        """The core closes Search Screen: the shell is told (it orders the overlay out), and
-        everything is dropped now. False: nothing was open."""
+        """The core closes Search Screen: the card in the notch (if there is one) closes for NotchHub
+        and NEO's page, the shell is told (it orders the overlay out), and everything is dropped
+        now. False: nothing was open."""
+        had = self._card is not None
+        self._close_card(why)
         if self.ticket is None:
-            return False
+            return had
         ch = self.channel
         if ch is not None:
             with contextlib.suppress(Exception):
@@ -387,6 +464,10 @@ class LensLive:
 
     def _drop(self, why: str) -> None:
         was = self.ticket is not None
+        card = self._card
+        if card is not None and card.state == "offered" and card.ticket == self.ticket:
+            # The overlay went before NotchHub said it shows its area: there is no card after all.
+            self._close_card(why if why in CARD_WHYS else "gone")
         self._gen += 1
         for t in list(self._tasks):
             if not t.done():
@@ -421,8 +502,288 @@ class LensLive:
         self.close("erased")
 
     def shell_gone(self) -> None:
-        """NEO.app's shell is gone: nobody shows the overlay any more."""
+        """NEO.app's shell is gone: nobody shows the overlay any more (and the core is going too)."""
         self._drop("gone")
+        self._close_card("gone")
+
+    # ---- the card in the notch -----------------------------------------------------------------
+
+    def _handoff_possible(self) -> bool:
+        """Whether NotchHub could show an area's results now (the hello's `notch`: a hint — the
+        hand-off itself asks again)."""
+        ch = self.channel
+        try:
+            return bool(ch is not None and ch.can_host_lens_card())
+        except Exception:  # noqa: BLE001 — an older channel: no hand-off, the sheet
+            return False
+
+    async def _handoff(self, cl: Any, cmd: dict[str, Any]) -> None:
+        """`lens_handoff {sel, to}` from the overlay: offer the area to the notch, and say whether
+        NotchHub shows it (`ok`, with its island's display) or why not — then the sheet shows."""
+        sel = cmd.get("sel")
+
+        def reply(ok: bool, **extra: Any) -> None:
+            self._send("lens_handoff", {"sel": sel, "ok": ok, **extra}, cl)
+
+        if isinstance(sel, bool) or not isinstance(sel, int) or sel != self._last_n:
+            reply(False, why="stale")
+            return
+        gen, loop = self._gen, asyncio.get_running_loop()
+        until = loop.time() + HANDOFF_AREA_S
+        while self._area is None or self._area.n != sel:  # (the area is still being cut)
+            if gen != self._gen or sel != self._last_n or loop.time() >= until:
+                reply(False, why="stale")
+                return
+            await asyncio.sleep(0.02)
+        a, ch = self._area, self.channel
+        if ch is None or not self._handoff_possible():
+            reply(False, why="no_notch")
+            return
+        self._close_card("replaced")
+        to = cmd.get("to")
+        card = _Card(secrets.token_hex(16), a, self.ticket or "", translate_to=str(to) if local.valid_code(to) else "")
+        self._card = card
+        log.info(f"[lens] area {a.n} offered to the notch")
+        # NEO's page first (it lays the card out before NotchHub opens for it), then NotchHub's own
+        # connection, which hears only the card's id.
+        with contextlib.suppress(Exception):
+            ch.lens_card_send("lens_card", self._card_snapshot(card))
+        with contextlib.suppress(Exception):
+            ch.lens_card_host({"cid": card.cid, "open": True})
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(card.shown.wait(), HANDOFF_WAIT_S)
+        if self._card is not card:  # refused, replaced or closed meanwhile
+            reply(False, why="unshown" if card.refused else "stale")
+            return
+        if not card.shown.is_set():
+            self._close_card("timeout")
+            reply(False, why="timeout")
+            return
+        card.state = "shown"
+        display = None
+        with contextlib.suppress(Exception):
+            d = ch.host_display()
+            display = d if isinstance(d, int) and not isinstance(d, bool) and 0 <= d <= 0xFFFFFFFF else None
+        log.info(f"[lens] area {a.n} is shown in the notch")
+        reply(True, display=display)
+        self._card_touch()
+        with contextlib.suppress(Exception):
+            if not ch.has_lens_card_page():
+                self._card_page_wait()  # (NotchHub makes its page as the panel opens)
+
+    def _release_overlay(self, why: str) -> None:
+        """The overlay closed after its area went to the notch: its still, regions, ticket and line
+        go now; the area — its crop, its results and the work still running on it — stays with the
+        card."""
+        card = self._card
+        keep = card.area.tasks if card is not None else set()
+        self._gen += 1
+        for t in list(self._tasks):
+            if t not in keep and not t.done():
+                t.cancel()
+        if self._ttl is not None:
+            self._ttl.cancel()
+        self._ttl = self._freezing = self._regioning = None
+        for timer in (self._gone_timer, self._listen_timer):
+            if timer is not None:
+                timer.cancel()
+        self._gone_timer = self._listen_timer = None
+        self.listening = False
+        self.ticket, self.spot, self.frame, self._still, self.regions = None, None, None, None, None
+        self.frozen, self.why, self.committed, self.texts = "none", "", False, False
+        self._sent_still, self._partial, self._hello_owed, self._prefill, self._ask = None, None, None, None, ""
+        cl, self.client = self.client, None
+        ch = self.channel
+        if cl is not None and ch is not None:
+            with contextlib.suppress(Exception):
+                ch.lens_drop(cl)
+        log.info(f"[lens] the overlay closed ({why}): the still is gone, the area is in the notch")
+
+    def _close_card(self, why: str) -> None:
+        """The card closes, for NotchHub and NEO's page alike; an area the overlay no longer owns
+        goes with it (and whatever still ran on it)."""
+        card = self._card
+        if card is None:
+            return
+        self._card = None
+        why = why if why in CARD_WHYS else "done"
+        for timer in (card.idle, card.page_wait):
+            if timer is not None:
+                timer.cancel()
+        card.idle = card.page_wait = None
+        card.shown.set()  # (a hand-off still waiting for NotchHub hears it at once)
+        ch = self.channel
+        if ch is not None:
+            msg = {"cid": card.cid, "open": False, "why": why}
+            with contextlib.suppress(Exception):
+                ch.lens_card_send("lens_card", msg)
+            with contextlib.suppress(Exception):
+                ch.lens_card_host(msg)
+        if (self.ticket is None or self.ticket != card.ticket) and self._area is card.area:
+            for t in list(card.area.tasks):
+                t.cancel()
+            self._area = None
+            self.listening = False
+            if self._listen_timer is not None:
+                self._listen_timer.cancel()
+                self._listen_timer = None
+        log.info(f"[lens] the card in the notch closed ({why})")
+
+    def _card_snapshot(self, card: _Card) -> dict[str, Any]:
+        """`lens_card` with everything a card shows, for NEO's page in the notch: the area's 96 px
+        picture, its results so far and what the footer and the chips need — never the still, the
+        crop, a link, a code or a key."""
+        from neo2.core.config import settings
+
+        a = card.area
+        eyes, why = self._eyes if self._eyes is not None else (None, "")
+        hello = {
+            "eyes": eyes,
+            "eyes_why": "" if eyes else why,
+            "ask": bool(settings().lens_ask),
+            "search": search.provider(),
+            "langs": local.languages(),
+        }
+        return {
+            "cid": card.cid,
+            "open": True,
+            "card": {
+                "sel": a.n,
+                "thumb": a.thumb or None,
+                "question": a.question or None,
+                "translate_to": card.translate_to,
+                "hello": hello,
+                "local": a.shown_local,
+                "answer": a.shown_answer,
+                "links": a.shown_links,
+                "thread": list(a.replies),
+                "translation": a.shown_translation,
+                "sent_to": a.sent_to(),
+            },
+        }
+
+    def _card_touch(self) -> None:
+        """A command of the card's own: its idle clock starts again."""
+        card = self._card
+        if card is None:
+            return
+        if card.idle is not None:
+            card.idle.cancel()
+        with contextlib.suppress(RuntimeError):
+            card.idle = asyncio.get_running_loop().call_later(CARD_IDLE_S, self._card_idle, card)
+
+    def _card_idle(self, card: _Card) -> None:
+        card.idle = None
+        if self._card is card:
+            log.info("[lens] the card in the notch was left alone for 10 minutes: it closes")
+            self._close_card("idle")
+
+    def _card_page_wait(self) -> None:
+        card = self._card
+        if card is None or card.page_wait is not None:
+            return
+        with contextlib.suppress(RuntimeError):
+            card.page_wait = asyncio.get_running_loop().call_later(CARD_PAGE_WAIT_S, self._card_no_page, card)
+
+    def _card_no_page(self, card: _Card) -> None:
+        card.page_wait = None
+        ch = self.channel
+        has_page = False
+        with contextlib.suppress(Exception):
+            has_page = bool(ch is not None and ch.has_lens_card_page())
+        if self._card is card and not has_page:
+            log.info("[lens] no page in the notch to show the card: it closes")
+            self._close_card("gone")
+
+    def card_host_gone(self) -> None:
+        """No connection of NotchHub's that shows cards is left."""
+        self._close_card("gone")
+
+    def card_page_gone(self) -> None:
+        """No NEO page in the notch that shows cards is left: one has a moment to come back."""
+        if self._card is not None and self._card.state == "shown":
+            self._card_page_wait()
+
+    def _card_refuse(self, cl: Any, cmd: str, error: str) -> None:
+        ch = self.channel
+        if ch is not None:
+            with contextlib.suppress(Exception):
+                ch.lens_card_reply(cl, "lens_refused", {"cmd": cmd if re.fullmatch(r"[a-z_]{1,32}", cmd) else "a command", "error": error})
+
+    async def card_command(self, cl: Any, cmd: dict[str, Any]) -> None:
+        """One of a card's commands (`lens_card_*`), from NEO's page in the notch or NotchHub's
+        connection — the websocket has already checked which kind may send which. Every one but the
+        hello names the live card's id."""
+        name = str(cmd.get("cmd") or "")
+        kind = str(getattr(cl, "kind", ""))
+        try:
+            card = self._card
+            if name == "lens_card_hello":
+                if kind == "page" and card is not None:
+                    if card.page_wait is not None:
+                        card.page_wait.cancel()  # (a page that can show it is here)
+                        card.page_wait = None
+                    ch = self.channel
+                    if ch is not None:
+                        with contextlib.suppress(Exception):
+                            ch.lens_card_reply(cl, "lens_card", self._card_snapshot(card))
+                return
+            cid = cmd.get("cid")
+            if not isinstance(cid, str) or not _CID.fullmatch(cid):
+                self._card_refuse(cl, name, "unknown")
+                return
+            if card is None or not hmac.compare_digest(cid.encode(), card.cid.encode()):
+                self._card_refuse(cl, name, "stale")
+                return
+            if name == "lens_card_shown":
+                if card.state == "offered":
+                    card.shown.set()
+                return
+            if name == "lens_card_close":
+                why = str(cmd.get("why") or "")
+                why = why if why in (_HOST_CLOSES if kind == "host" else _PAGE_CLOSES) else "done"
+                if why == "unshown" and card.state == "offered":
+                    card.refused = True  # (NotchHub can't show it: the sheet, by the area)
+                self._close_card(why)
+                return
+            a = card.area
+            self._card_touch()
+            if name == "lens_card_ask":
+                q, qid = cmd.get("q", ""), cmd.get("qid", 0)
+                if not isinstance(q, str) or isinstance(qid, bool) or not isinstance(qid, int):
+                    self._card_refuse(cl, name, "unknown")
+                    return
+                q = " ".join(q.split())[:MAX_Q]
+                self._area_task(a, self._answer(a) if not q else self._follow(a, qid, q))
+            elif name == "lens_card_translate":
+                to = cmd.get("to")
+                if not local.valid_code(to):
+                    self._card_refuse(cl, name, "unknown")
+                    return
+                card.translate_to = str(to)
+                self._area_task(a, self._translate(a, str(to)))
+            elif name == "lens_card_act":
+                aid = cmd.get("id")
+                if not isinstance(aid, str) or not _ACT_ID.fullmatch(aid) or aid not in a.acts:
+                    self._card_refuse(cl, name, "stale")
+                    return
+                await self._act(a, aid)
+            elif name == "lens_card_continue":
+                text = cmd.get("text", "")
+                if not isinstance(text, str):
+                    self._card_refuse(cl, name, "unknown")
+                    return
+                await self._continue(a, " ".join(text.split())[:MAX_CONTINUE])
+            elif name == "lens_card_listen":
+                if self.hooks.listen is None:
+                    self._card_refuse(cl, name, "unknown")
+                    return
+                self._listening(True)
+                await self.hooks.listen()
+            else:
+                self._card_refuse(cl, name, "unknown")
+        finally:
+            log.info(f"[lens] {name if re.fullmatch(r'[a-z_]{1,32}', name) else 'a command'}")  # (its name only)
 
     # ---- the page's connection ----------------------------------------------------------------
 
@@ -455,9 +816,20 @@ class LensLive:
             self.close("gone")
 
     def _send(self, type_: str, data: dict[str, Any], cl: Any = None) -> None:
-        cl = cl if cl is not None else self.client
+        """To `cl` alone; else to the overlay — and, for an area handed to the notch, to NEO's page
+        there with the card's id (and to the overlay as well only while NotchHub hasn't said it
+        shows it, so a refusal leaves the sheet complete)."""
         ch = self.channel
-        if cl is None or ch is None:
+        if ch is None:
+            return
+        card = self._card
+        if cl is None and card is not None and type_ in _CARD_TYPES and data.get("sel", card.area.n) == card.area.n:
+            with contextlib.suppress(Exception):
+                ch.lens_card_send(type_, {**data, "cid": card.cid})
+            if card.state != "offered":
+                return
+        cl = cl if cl is not None else self.client
+        if cl is None:
             return
         with contextlib.suppress(Exception):
             ch.lens_send(cl, type_, data)
@@ -491,6 +863,7 @@ class LensLive:
             "search": search.provider(),
             "langs": local.languages(),
             "prefill": self._ask or None,
+            "notch": self._handoff_possible(),  # (NotchHub could show the results: lens_handoff)
         }
         return data
 
@@ -536,8 +909,13 @@ class LensLive:
     # ---- the voice, while it is open --------------------------------------------------------------
 
     def takes_voice(self) -> bool:
-        """Is what the user says now about the area (open, a page connected, an area picked)?"""
-        return self.ticket is not None and self.client is not None and self._area is not None
+        """Is what the user says now about the area (open, a page connected, an area picked)? In the
+        notch only one sentence, and only after the card's mic button: once the overlay is gone,
+        the user's next "Neo, …" is about anything."""
+        if self.ticket is not None and self.client is not None and self._area is not None:
+            return True
+        card = self._card
+        return card is not None and card.state == "shown" and self.listening and self._area is card.area
 
     async def hear(self, text: str) -> str:
         """A sentence the user said while Search Screen is open with an area: "close" closes it,
@@ -585,6 +963,9 @@ class LensLive:
                 return
             if name == "lens_select":
                 await self._select(cl, cmd)
+                return
+            if name == "lens_handoff":
+                await self._handoff(cl, cmd)  # (it waits for its area itself)
                 return
             a = self._area
             sel = cmd.get("sel")
@@ -664,7 +1045,10 @@ class LensLive:
         return t
 
     def _current(self, a: _Area) -> bool:
-        return self._area is a and self.ticket is not None
+        """The area is the one being worked on: the overlay's, or the card's in the notch."""
+        if self._area is not a:
+            return False
+        return self.ticket is not None or (self._card is not None and self._card.area is a)
 
     async def _select(self, cl: Any, cmd: dict[str, Any]) -> None:
         sel, how = cmd.get("sel"), str(cmd.get("how") or "drag")
@@ -682,6 +1066,8 @@ class LensLive:
             return
         self._last_n = sel
         old, gen = self._area, self._gen
+        if self._card is not None and self._card.state == "offered":
+            self._close_card("replaced")  # (a new area before NotchHub said: that one stays here)
         if old is not None:
             for t in list(old.tasks):
                 t.cancel()  # (the older area's answer is no longer wanted)
@@ -720,7 +1106,7 @@ class LensLive:
 
     def _reuse(self, old: _Area, a: _Area) -> None:
         a.part, a.found, a.answer, a.acts, a.thread = old.part, old.found, old.answer, old.acts, list(old.thread)
-        a.went = dict(old.went)
+        a.went, a.thumb = dict(old.went), old.thumb
         a.shown_local = {**old.shown_local, "sel": a.n} if old.shown_local else None
         a.shown_answer = {**old.shown_answer, "sel": a.n} if old.shown_answer else None
         a.shown_links = {**old.shown_links, "sel": a.n} if old.shown_links else None
@@ -752,9 +1138,8 @@ class LensLive:
             "dark": found.dark,
             "actions": [a.acts[i].shown(i) for i in shown_acts],
         }
-        if live:
-            with contextlib.suppress(Exception):
-                data["thumb"] = _thumb(a.crop.image)
+        if a.thumb:
+            data["thumb"] = a.thumb  # (always: the sheet's and the card's; made with the on-device pass)
         a.shown_local = data
         self._send("lens_local", data)
 
@@ -763,7 +1148,7 @@ class LensLive:
         the area, without the text); a dark area is never asked about."""
         from neo2.core.config import settings
 
-        lt = asyncio.ensure_future(asyncio.to_thread(local.analyse, a.crop))
+        lt = asyncio.ensure_future(asyncio.to_thread(_analyse, a.crop))
         at: asyncio.Future[Any] | None = None
         try:
             with contextlib.suppress(TimeoutError):
@@ -789,7 +1174,7 @@ class LensLive:
     def _local_done(self, a: _Area, lt: Any, live: bool) -> bool:
         """The on-device pass is in: shown. False when nothing more is to be done for the area (it
         isn't the current one any more, or it came out black)."""
-        found = self._local_result(lt)
+        found = self._local_result(a, lt)
         if not self._current(a):
             return False
         self._found(a, found, live)
@@ -799,12 +1184,13 @@ class LensLive:
         return True
 
     @staticmethod
-    def _local_result(t: Any) -> local.Local:
+    def _local_result(a: _Area, t: Any) -> local.Local:
+        found = None
         try:
-            return t.result()
+            found, a.thumb = t.result()
         except Exception as e:  # noqa: BLE001 — nothing read on this Mac: the brain's answer still comes
             log.info(f"[lens] the on-device pass failed ({type(e).__name__})")
-            return local.Local(actions=[local.Action("copy_image", "Copy image", "")])
+        return found if found is not None else local.Local(actions=[local.Action("copy_image", "Copy image", "")])
 
     async def _picture(self, a: _Area) -> Any:
         if a.part is None:
@@ -820,6 +1206,8 @@ class LensLive:
         self._send("lens_answer", data)
 
     async def _answer(self, a: _Area, text: str | None = None) -> None:
+        if a.shown_answer is not None:
+            a.shown_answer = {"sel": a.n, "state": "thinking"}  # (asked again: a card's snapshot says so)
         self._send("lens_answer", {"sel": a.n, "state": "thinking"})
         part = await self._picture(a)
         if not self._current(a):
@@ -867,11 +1255,13 @@ class LensLive:
         if text:
             a.thread.append((q, text))
             del a.thread[: -ask.HISTORY]
-            self._send("lens_reply", {"sel": a.n, "qid": qid, "state": "done", "text": text,
-                                      "brain": {"label": who.label, "local": who.local}, "sent_to": a.sent_to()})  # fmt: skip
+            data = {"sel": a.n, "qid": qid, "state": "done", "text": text, "brain": {"label": who.label, "local": who.local},
+                    "sent_to": a.sent_to()}  # fmt: skip
         else:
-            self._send("lens_reply", {"sel": a.n, "qid": qid, "state": "failed", "error": who.error or "failed",
-                                      "sent_to": a.sent_to()})  # fmt: skip
+            data = {"sel": a.n, "qid": qid, "state": "failed", "error": who.error or "failed", "sent_to": a.sent_to()}
+        a.replies.append({**{k: v for k, v in data.items() if k != "sent_to"}, "q": q})  # (a card's snapshot)
+        del a.replies[:-MAX_REPLIES]
+        self._send("lens_reply", data)
         return text
 
     async def _translate(self, a: _Area, to: str) -> None:
@@ -884,8 +1274,8 @@ class LensLive:
         if not self._current(a):
             return
         log.info(f"[lens] translation: {'done' if out else err}")
-        self._send("lens_translation", {"sel": a.n, "to": to, **({"text": out} if out else {"error": err or "failed"}),
-                                        "sent_to": a.sent_to()})  # fmt: skip
+        a.shown_translation = {"sel": a.n, "to": to, **({"text": out} if out else {"error": err or "failed"}), "sent_to": a.sent_to()}
+        self._send("lens_translation", a.shown_translation)
 
     async def _act(self, a: _Area, aid: str) -> None:
         act = a.acts[aid]
@@ -991,6 +1381,7 @@ app_bus().subscribe(_on_event)
 def reset() -> None:
     """A fresh session (tests)."""
     channel, hooks = lens_live.channel, lens_live.hooks
+    lens_live._close_card("gone")
     lens_live._drop("reset")
     lens_live.__dict__.update(LensLive().__dict__)
     lens_live.channel, lens_live.hooks = channel, hooks

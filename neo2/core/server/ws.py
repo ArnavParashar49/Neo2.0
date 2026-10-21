@@ -160,6 +160,26 @@ with no role, with that exact ticket (constant time) and without a Brains & Keys
     folds the host's panel away before the still is taken). The session publishes it again at every
     `lens_freeze`, a hold's and the menu's too (neo2.core.lens.live).
 
+Search Screen in the notch. When NotchHub hosts NEO's UI, the results of an area show in its panel
+instead of the overlay's sheet (neo2.core.lens.live: the hand-off, the card and its lifetime).
+  - NotchHub's connection (a host) and NEO's page in its panel (a page) each say `lens_card_hello`
+    — the host with its island's display, `{"display": <CGDirectDisplayID>}` — on every
+    connection. Only then is a card ever theirs, and only then does the overlay's hello say
+    `notch` (NEO in the notch, such a host connected, and NEO's page there showing cards too, or no
+    page yet: an older page still loaded in NotchHub keeps the sheet).
+  - A card has an id of its own (`cid`, 32 random hex). The host hears `lens_card {cid, open,
+    why}` and nothing else of it: never a pixel, a word, a link or a brain's name. The page hears
+    `lens_card {cid, open: true, card: {…}}` (the 96 px thumbnail, the area's text and results, the
+    action ids, the Translate languages, the brains it went to) and every result after it as the
+    overlay's own messages with `cid` added; never the still, the crop, a link or a key.
+  - Who may say what: `lens_card_hello` and `lens_card_close {cid, why}` the page and the host;
+    `lens_card_shown {cid}` the host alone; `lens_card_ask {cid, qid, q}`, `lens_card_translate
+    {cid, to}`, `lens_card_act {cid, id}`, `lens_card_continue {cid, text}` and `lens_card_listen
+    {cid}` the page alone. From anyone else (NEO.app's own window, a tool, Brains & Keys) each is
+    `lens_refused {cmd, error: "forbidden"}` to that client alone; a cid that isn't the live one is
+    "stale" (malformed: "unknown"). Like the overlay's, they are routed here by name — never the
+    generic handler, the bus or the replay — and a log line names the command, nothing it carried.
+
 The relay never blocks the event bus: each client has its own outbound queue drained by its
 own task, and a client that stops reading is dropped. (An inline `await send()` to a half-dead
 overlay once stalled the Gemini Live receive loop long enough to kill the voice session.)
@@ -222,6 +242,9 @@ _LOGGABLE_CMD = re.compile(r"[a-z_]{1,32}")
 # most this often by a host or the core.
 _NOT_CARDS = ("keys", "lens")  # the windows that show no chat, no cards
 _OPEN_LENS_S = 1.5
+# Search Screen in the notch: who may say a card's commands at all, and the page's own ones.
+_CARD_KINDS = ("page", "host")
+_CARD_PAGE_CMDS = frozenset({"lens_card_ask", "lens_card_translate", "lens_card_act", "lens_card_continue", "lens_card_listen"})
 
 
 def client_kind(origin: str | None, role: str, *, keys: bool = False, lens: bool = False) -> str | None:
@@ -320,6 +343,11 @@ class _Client:
         self.browser = False  # said browser_hello: gets the browser card's messages
         self.kind = "tool"  # app | page | host | tool | keys | lens: who this is (client_kind)
         self.closing = False  # Search Screen closed: its last answers go out, then the connection ends
+        # Said lens_card_hello (NEO's page in the notch, or NotchHub's connection): hears Search
+        # Screen's cards — the page their results, the host only {cid, open, why} — and, a host, on
+        # which display its island is (see "Search Screen in the notch").
+        self.lens_cards = False
+        self.lens_display: int | None = None
 
     def send_json(self, text: str) -> bool:
         if len(self.q) >= _QUEUE_MAX:
@@ -589,6 +617,84 @@ class UIServer:
         self._send_to(cl, "lens_refused", {"cmd": name, "error": "forbidden"})
         print(f"[ui] lens: {name} refused: from a {cl.kind}, not Search Screen")
 
+    # ---- Search Screen in the notch ----------------------------------------------------------------
+
+    def _lens_card_may(self, cl: _Client, name: str) -> str:
+        """Why a card's command from `cl` is refused ("" when it may send it): see "Search Screen
+        in the notch" — the page and the host each have their own, nobody else any."""
+        if cl.kind not in _CARD_KINDS:
+            return "forbidden"
+        if name == "lens_card_hello":
+            return ""
+        if name == "lens_card_close":
+            return ""
+        if name == "lens_card_shown":
+            return "" if cl.kind == "host" else "forbidden"
+        if name in _CARD_PAGE_CMDS:
+            return "" if cl.kind == "page" else "forbidden"
+        return "unknown"
+
+    async def _lens_card_ask(self, cl: _Client, cmd: dict[str, Any]) -> None:
+        """A card's command (`lens_card_*`): checked by who sent it, then handed to Search Screen's
+        session. Its name alone is ever logged."""
+        name = _cmd_name(str(cmd.get("cmd") or ""))
+        error = self._lens_card_may(cl, name)
+        if error:
+            self._send_to(cl, "lens_refused", {"cmd": name, "error": error})
+            print(f"[ui] lens: {name} refused: from a {cl.kind}")
+            return
+        if name == "lens_card_hello":
+            cl.lens_cards = True
+            if cl.kind == "host":
+                d = cmd.get("display")
+                cl.lens_display = d if isinstance(d, int) and not isinstance(d, bool) and 0 <= d <= 0xFFFFFFFF else None
+        lens_live = _lens()
+        if lens_live is None:
+            return
+        try:
+            await lens_live.card_command(cl, cmd)
+        except Exception as e:  # noqa: BLE001 — its name only: nothing it carried
+            print(f"[ui] lens: {name} failed: {type(e).__name__}")
+
+    def lens_card_send(self, type_: str, data: dict[str, Any]) -> None:
+        """A card's results, to NEO's pages in the notch that show cards — never NEO.app's own
+        window, a tool, the bus or the replay."""
+        for cl in list(self._clients.values()):
+            if cl.kind == "page" and cl.lens_cards:
+                self._send_to(cl, type_, data)
+
+    def lens_card_host(self, data: dict[str, Any]) -> None:
+        """A card opening or closing, to NotchHub's connections that show cards: its id, whether it
+        is open and why — nothing it shows."""
+        msg = {k: data[k] for k in ("cid", "open", "why") if k in data}
+        for cl in list(self._clients.values()):
+            if cl.kind == "host" and cl.lens_cards:
+                self._send_to(cl, "lens_card", msg)
+
+    def lens_card_reply(self, cl: _Client, type_: str, data: dict[str, Any]) -> None:
+        """To the one page or host that asked (its snapshot, a refusal)."""
+        if cl.kind in _CARD_KINDS and cl.conn in self._clients:
+            self._send_to(cl, type_, data)
+
+    def can_host_lens_card(self) -> bool:
+        """Whether NotchHub could show an area's results now: NEO lives in the notch, a host that
+        shows cards is connected, and NEO's page there shows them too — or there is no page yet
+        (NotchHub makes this install's page as its panel first opens)."""
+        if settings().ui_host != "notch":
+            return False
+        clients = list(self._clients.values())
+        if not any(cl.kind == "host" and cl.lens_cards for cl in clients):
+            return False
+        pages = [cl for cl in clients if cl.kind == "page"]
+        return not pages or any(cl.lens_cards for cl in pages)
+
+    def has_lens_card_page(self) -> bool:
+        return any(cl.kind == "page" and cl.lens_cards for cl in self._clients.values())
+
+    def host_display(self) -> int | None:
+        """The display NotchHub's island is on (its CGDirectDisplayID), when it said."""
+        return next((cl.lens_display for cl in self._clients.values() if cl.kind == "host" and cl.lens_cards), None)
+
     # ---- NEO.app's menu, for a host ---------------------------------------------------------
 
     def _host_attached(self) -> bool:
@@ -756,6 +862,12 @@ class UIServer:
                 from neo2.core.lens.live import lens_live
 
                 lens_live.client_gone(cl)
+            if cl.lens_cards and (lens_live := _lens()) is not None:
+                # The last of NotchHub's connections that show cards, or of NEO's pages there.
+                if cl.kind == "host" and not any(c.kind == "host" and c.lens_cards for c in self._clients.values()):
+                    lens_live.card_host_gone()
+                elif cl.kind == "page" and not self.has_lens_card_page():
+                    lens_live.card_page_gone()
             from neo2.core.tools.browser_live import live
 
             live.viewer_gone(cl)
@@ -934,6 +1046,10 @@ class UIServer:
                         cl.send_json(json.dumps({"type": "state", "data": {"state": bus().state.value}}))
                     else:
                         print(f"[ui] {_cmd_name(kind)} refused: Search Screen sends only its own commands")
+                    continue
+                if kind.startswith("lens_card_"):
+                    # A card in the notch: NEO's page there and NotchHub's connection, each its own.
+                    asyncio.create_task(self._lens_card_ask(cl, cmd))
                     continue
                 if kind.startswith("lens_"):
                     self._lens_refused(cl, cmd)  # to that client alone; never the bus

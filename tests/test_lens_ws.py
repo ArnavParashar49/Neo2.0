@@ -750,3 +750,113 @@ def test_a_hold_folds_the_notch_before_its_still(monkeypatch, _world):
 
     (early_published, early_frozen), frozen = _with_server(monkeypatch, body)
     assert "lens_opening" in early_published and early_frozen == 0 and frozen == 1
+
+
+# ---- Search Screen in the notch: who may say a card's commands, who hears a card -----------------------
+
+
+def test_card_commands_from_the_wrong_kind_are_refused(monkeypatch, capsys):
+    from tests.test_ws_keys import TICKET as KEYS_TICKET, _Keys
+
+    page_only = ("lens_card_ask", "lens_card_translate", "lens_card_act", "lens_card_continue", "lens_card_listen")
+    every = ("lens_card_hello", "lens_card_shown", "lens_card_close", *page_only)
+
+    async def body(srv, port, seen):
+        out: dict[str, dict] = {}
+        async with _Shell(srv, monkeypatch) as shell:
+            await shell.say(t="keys_ticket", ticket=KEYS_TICKET)
+            await asyncio.sleep(0.02)
+            for name, kw in {"app": {"origin": APP}, "tool": {}}.items():
+                async with _Peer(port, **kw) as p:
+                    for cmd in every:
+                        await p.send(cmd=cmd, cid="0" * 32)
+                        out[f"{name} {cmd}"] = (await p.next("lens_refused"))["data"]
+            async with _Keys(port) as k:
+                for cmd in every:
+                    await k.send(cmd=cmd, cid="0" * 32)
+                    out[f"keys {cmd}"] = (await k.next("lens_refused"))["data"]
+            async with _Peer(port, role="host") as host:
+                for cmd in page_only:
+                    await host.send(cmd=cmd, cid="0" * 32)
+                    out[f"host {cmd}"] = (await host.next("lens_refused"))["data"]
+                await host.send(cmd="lens_card_wink", cid="0" * 32)
+                out["host lens_card_wink"] = (await host.next("lens_refused"))["data"]
+            async with _Peer(port, origin=PAGE) as page:
+                await page.send(cmd="lens_card_shown", cid="0" * 32)
+                out["page lens_card_shown"] = (await page.next("lens_refused"))["data"]
+                await page.send(cmd="lens_card_close", cid="0" * 32, why="esc")  # (its own: only stale)
+                out["page lens_card_close"] = (await page.next("lens_refused"))["data"]
+        return out, seen
+
+    out, seen = _with_server(monkeypatch, body)
+    for who in ("app", "tool", "keys"):
+        for cmd in every:
+            assert out[f"{who} {cmd}"]["error"] == "forbidden", (who, cmd)
+    for cmd in page_only:
+        assert out[f"host {cmd}"] == {"cmd": cmd, "error": "forbidden"}
+    assert out["host lens_card_wink"] == {"cmd": "lens_card_wink", "error": "unknown"}
+    assert out["page lens_card_shown"] == {"cmd": "lens_card_shown", "error": "forbidden"}
+    assert out["page lens_card_close"] == {"cmd": "lens_card_close", "error": "stale"}
+    assert seen == []  # never the command handler, never the bus
+    assert "lens: lens_card_ask refused: from a host" in capsys.readouterr().out
+
+
+def test_card_messages_never_reach_app_tool_keys_the_bus_or_the_replay(monkeypatch, _world):
+    from tests.test_ws_keys import TICKET as KEYS_TICKET, _Keys
+
+    monkeypatch.setenv("NEO_UI_HOST", "notch")
+    monkeypatch.setattr(config, "_settings", None)
+    published: list[str] = []
+    events.bus().subscribe(lambda ev: published.append(ev.type))
+
+    async def body(srv, port, seen):
+        async with _Shell(srv, monkeypatch) as shell:
+            await shell.say(t="keys_ticket", ticket=KEYS_TICKET)
+            async with _Peer(port, origin=APP) as app, _Peer(port) as tool, _Keys(port) as keys, \
+                    _Peer(port, role="host") as host, _Peer(port, origin=PAGE) as page:  # fmt: skip
+                for p in (app, tool):
+                    await p.send(cmd="lens_card_hello")  # (refused: never marked)
+                await host.send(cmd="lens_card_hello", display=7)
+                await page.send(cmd="lens_card_hello")
+                await asyncio.sleep(0.05)
+                await _open(shell)
+                async with _Lens(port) as ov:
+                    await ov.send(cmd="lens_hello", v=1)
+                    await ov.next("lens_frozen")
+                    await ov.send(cmd="lens_select", sel=1, rect=[0, 0, 300, 200], how="drag")
+                    await ov.send(cmd="lens_handoff", sel=1, to="")
+                    cid = (await host.next("lens_card"))["data"]["cid"]
+                    await host.send(cmd="lens_card_shown", cid=cid)
+                    assert (await ov.next("lens_handoff"))["data"]["ok"] is True
+                    await page.next("lens_card")  # (its snapshot)
+                    await asyncio.sleep(0.2)  # (the area's results come to the page)
+                    await shell.say(t="lens_closed", ticket=TICKET, why="notch")
+                await page.send(cmd="lens_card_close", cid=cid, why="x")
+                await page.next("lens_card")
+                await asyncio.sleep(0.1)
+                heard = {"app": await app.quiet(), "tool": await tool.quiet()}
+                keys_heard = [m["type"] for m in keys.heard]
+                await keys.ask(cmd="brains_get", id="1")
+                heard["keys"] = keys_heard + [m["type"] for m in keys.heard]
+        return heard, list(srv._recent)
+
+    heard, recent = _with_server(monkeypatch, body)
+    for who, types in heard.items():
+        assert not [t for t in types if t.startswith("lens_") and t not in ("lens_opening", "lens_refused")], (who, types)
+    assert not [t for t in published if t.startswith("lens_card") or t in ("lens_local", "lens_answer", "lens_links")]
+    assert not [m for m in recent if str(m.get("type", "")).startswith("lens_")]
+
+
+def test_lens_card_hello_marks_the_client_and_its_display(monkeypatch):
+    async def body(srv, port, seen):
+        async with _Peer(port, role="host") as h1, _Peer(port, role="host") as h2, _Peer(port, origin=PAGE) as page:
+            await h1.send(cmd="lens_card_hello", display=69734208)
+            await h2.send(cmd="lens_card_hello", display="the big one")
+            await page.send(cmd="lens_card_hello", display=5)
+            await asyncio.sleep(0.05)
+            got = sorted(((cl.kind, cl.lens_cards, cl.lens_display) for cl in srv._clients.values()), key=lambda c: (c[0], c[2] or 0))
+            return got, srv.host_display(), srv.has_lens_card_page()
+
+    got, display, page = _with_server(monkeypatch, body)
+    assert got == [("host", True, None), ("host", True, 69734208), ("page", True, None)]  # (a page has no display)
+    assert display in (69734208, None) and page is True
