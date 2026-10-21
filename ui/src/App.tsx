@@ -19,6 +19,8 @@ import { useCamera } from "./camera/hub";
 import { CameraCard, CameraEndedRow, CameraPoppedRow, camIcon } from "./camera/CameraCard";
 import { CAMERA_POPIN_EVENT, closeCameraWindow, openCameraWindow, showCameraWindow } from "./camera/popout";
 import { useSongShape } from "./song/hub";
+import { cardHeight, cardWidth, settleHeight, useLensCard } from "./lens/card";
+import { LensCard } from "./lens/LensCard";
 import { SongItem, noteIcon } from "./song/SongCard";
 import { Onboarding } from "./Onboarding";
 import { isNoModelProblem, needsBrain } from "./onboard";
@@ -133,6 +135,9 @@ export default function App() {
   const song = neo.song;
   const sshape = useSongShape(song); // which song card is live and its face — not its level
   const songHearing = sshape.hearing;
+  // Search Screen's card: in the notch, an area's results take the panel in place of the chat.
+  const lcard = useLensCard(neo.lensCard);
+  const lensLive = inNotch && !!lcard;
   const reduced = useReducedMotion();
   // In the notch the page is always the open chat: NotchHub's panel is what expands and collapses.
   const [expanded, setExpanded] = useState(inNotch);
@@ -187,7 +192,27 @@ export default function App() {
   const compact = sizes.compact && layout === "docked";
   // In the notch the chat is compact; a live camera or song card on it asks a little taller.
   const notchChat: Size = camLive && !csnap.popped ? NOTCH_CAMERA : sshape.liveSid ? NOTCH_SONG : NOTCH_CARD;
-  const target: Size = !expanded ? PILL : layout === "docked" ? sizes.browse : layout === "focus" ? sizes.focus : inNotch ? notchChat : CARD;
+  // The card asks for 372 × its content (lens/card.ts: 160–560, in steps of 8, never bouncing) once
+  // it has measured itself; until then the panel's size stays as it was.
+  const [lensNatural, setLensNatural] = useState(0);
+  const [lensH, setLensH] = useState<number | null>(null);
+  const lensSince = useRef<number | null>(null);
+  const [lensRecheck, setLensRecheck] = useState(0);
+  useEffect(() => {
+    if (!lensLive || lensNatural <= 0) {
+      if (!lensLive) { setLensH(null); setLensNatural(0); lensSince.current = null; }
+      return;
+    }
+    const out = settleHeight(lensH, cardHeight(lensNatural, area?.h), lensSince.current, Date.now());
+    lensSince.current = out.since;
+    if (out.h !== lensH) setLensH(out.h);
+    if (out.recheck === undefined) return;
+    const t = window.setTimeout(() => setLensRecheck((n) => n + 1), out.recheck);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lensLive, lensNatural, area?.h, lensRecheck]);
+  const lensTarget: Size | null = lensLive && lensNatural > 0 ? { w: cardWidth(area?.w), h: lensH ?? cardHeight(lensNatural, area?.h) } : null;
+  const target: Size = lensTarget ?? (!expanded ? PILL : layout === "docked" ? sizes.browse : layout === "focus" ? sizes.focus : inNotch ? notchChat : CARD);
 
   // A window drag ends with a click event whose client coords match the press (the window moved
   // with the cursor), so compare *screen* coords to tell a drag from a click.
@@ -717,6 +742,18 @@ export default function App() {
           <ThinkingOrb state={orb} size={64} theme="dark" speed={ORB_SPEED} {...({ "data-tauri-drag-region": true } as object)} />
           {!neo.connected && <span className="offline-dot" />}
           {neo.connected && orbBadge}
+        </div>
+        {devLayer}
+      </>
+    );
+  }
+
+  if (lensLive && lcard) {
+    // Search Screen's card fills the panel; the chat comes back as it closes.
+    return (
+      <>
+        <div className="card layout-lens snap" style={{ width: cardSize.w, height: cardSize.h }}>
+          <LensCard hub={neo.lensCard} snap={lcard} onNatural={setLensNatural} />
         </div>
         {devLayer}
       </>

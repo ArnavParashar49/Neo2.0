@@ -84,3 +84,26 @@ test("no page speaks for NEO.app's shell: the shim has no door to its menu", () 
   for (const name of ["shellAction", "shellStatus", "hostAttached"]) assert.equal(name in shell, false, name);
   assert.equal(tauriTouched, 0);
 });
+
+test("Search Screen's card: opening it posts nothing to the host; its Esc and × fold the panel", async () => {
+  const { LensCardHub } = await import("../src/lens/card.ts");
+  const { readFileSync } = await import("node:fs");
+  posted.length = 0;
+  const sent: unknown[] = [];
+  const h = new LensCardHub(true);
+  h.setSender((cmd) => { sent.push(cmd); return true; });
+  h.endHello();
+  h.handle("lens_card", { cid: "e".repeat(32), open: true, card: { sel: 1, hello: {}, local: null, answer: null } });
+  assert.ok(h.snap(), "the card is up");
+  assert.deepEqual(posted, [], "NotchHub opens its panel for it on its own (its connection heard the card)");
+  assert.deepEqual(sent, [{ cmd: "lens_card_hello" }]);
+  // Esc and the ×: the card closes (the core tells NotchHub) and the page folds the panel — through
+  // hideWindow, which in the notch is the host's `collapse` (checked above).
+  const card = readFileSync(new URL("../src/lens/LensCard.tsx", import.meta.url), "utf8");
+  const esc = card.split('if (e.key === "Escape")')[1]?.split("return;")[0] ?? "";
+  assert.ok(esc.includes('hub.close("esc")') && esc.includes("hideWindow()"), esc);
+  assert.match(card, /onClose=\{\(\) => \{ hub\.close\("x"\); void hideWindow\(\); \}\}/);
+  assert.equal(tauriTouched, 0);
+  await shell.hideWindow();
+  assert.deepEqual(posted, [{ type: "collapse" }]);
+});

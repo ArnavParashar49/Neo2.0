@@ -4,9 +4,12 @@
  * with `lx-`, and the page's own surface rules apply only under html[data-surface="lens"].
  * Everything that moves moves on the compositor (transform, opacity); nothing repaints per frame,
  * and nothing display-sized repaints when the pointer moves: no filters, no display-sized shadows,
- * no animated backgrounds; the still has its own layer. */
+ * no animated backgrounds; the still has its own layer.
+ *
+ * The results also show in NotchHub's panel (LensCard.tsx: the card in the notch, root `.lxc`): the
+ * tokens below are the overlay's and the card's; the card's own dress is at the end. */
 
-html[data-surface="lens"] {
+:where(html[data-surface="lens"], .lxc) {
   --lens-1: #6fb6ff; /* sky      (NEO's --glow-1, brighter) */
   --lens-2: #a58bff; /* lavender (--glow-2) */
   --lens-3: #ff7ac3; /* rose */
@@ -26,9 +29,8 @@ html[data-surface="lens"] {
   --lens-chip: rgba(255, 255, 255, 0.07);
   --lens-chip-hover: rgba(255, 255, 255, 0.13);
   --lens-ease-spring: cubic-bezier(0.34, 1.4, 0.64, 1);
-  color-scheme: dark;
-  cursor: crosshair;
 }
+html[data-surface="lens"] { color-scheme: dark; cursor: crosshair; }
 html[data-surface="lens"][data-theme="light"] {
   --lens-sheet: rgba(250, 250, 252, 0.88);
   --lens-sheet-edge: rgba(0, 0, 0, 0.08);
@@ -287,3 +289,28 @@ html[data-rm] .lx-snap.enter, html[data-rm] .lx-pill, html[data-rm] .lx-sheet, h
 html[data-rm] .lx-shimmer, html[data-rm] .lx-skel i::after { animation: none; }
 html[data-rm] .lx-sheet { transition: opacity 120ms ease-out; }
 html[data-rm] .lx-sheet-at { transition: none; }
+
+/* 8. The card in the notch (LensCard.tsx): the same results on the island's black — no glass, no
+ *    border, no shadow; the Translate menu opens inline (the panel never clips it). Nothing fades in:
+ *    the island springs open, and WebKit may hold the panel's page hidden until it does (an entrance
+ *    from opacity 0 could stay there); only the thumbnail settles, by transform. */
+.lxc { --lens-chip: rgba(255, 255, 255, 0.08); --lens-chip-hover: rgba(255, 255, 255, 0.14); --lens-sheet: #0b0b0d;
+  --lens-sheet-edge: rgba(255, 255, 255, 0.10); --lens-sheet-shadow: none; --edge: rgba(255, 255, 255, 0.10);
+  flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; color: var(--fg); background: #000; overflow: hidden;
+  -webkit-user-select: none; user-select: none; cursor: default; }
+.lxc .lx-sheet-scroll { flex: 1 1 auto; padding: 14px 16px 10px; scrollbar-width: thin; }
+.lxc .lx-sheet-scroll::-webkit-scrollbar { width: 4px; }
+.lxc .lx-sheet-scroll::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.16); border-radius: 2px; }
+.lxc .lx-compose { flex: none; padding: 8px 12px; border-top: 1px solid rgba(255, 255, 255, 0.08); }
+.lxc .lx-compose input { background: rgba(255, 255, 255, 0.06); border-color: transparent; }
+.lxc .lx-compose input:focus { background: rgba(255, 255, 255, 0.10); border-color: rgba(255, 255, 255, 0.24); }
+.lxc .lx-foot { flex: none; padding: 6px 16px 12px; }
+.lxc .lx-privacy { color: rgba(255, 255, 255, 0.4); white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; line-height: 1.3; }
+.lxc .lx-sheet-scroll > * { flex: none; }
+.lxc .lx-chip { border-color: transparent; }
+.lxc .lx-menu-list.inline { position: static; display: grid; grid-template-columns: 1fr 1fr; gap: 2px; min-width: 0; max-height: 200px;
+  margin-top: -4px; background: rgba(255, 255, 255, 0.05); border: 0; box-shadow: none; overscroll-behavior: contain; }
+.lxc .lx-thumb { animation: lxc-thumb 260ms var(--lens-ease-spring) backwards; }
+@keyframes lxc-thumb { from { transform: scale(0.6); } to { transform: none; } }
+.lxc button:focus-visible, .lxc input:focus-visible { outline: 2px solid rgba(255, 255, 255, 0.6); outline-offset: 2px; }
+@media (prefers-reduced-motion: reduce) { .lxc .lx-thumb, .lxc .lx-shimmer, .lxc .lx-skel i::after { animation: none; } }

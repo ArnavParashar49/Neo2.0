@@ -2,7 +2,8 @@
 // user bubbles, tool-activity groups, and assistant replies (streamed partials merge in place).
 import { useCallback, useEffect, useRef, useState } from "react";
 import { uiHostChanged, wsToken } from "./shell";
-import { type UiHost } from "./host";
+import { inNotch, type UiHost } from "./host";
+import { LensCardHub } from "./lens/card";
 import { BrowserHub } from "./browser/hub";
 import { CameraHub } from "./camera/hub";
 import { isCameraFrame } from "./camera/frames";
@@ -74,6 +75,10 @@ export function useNeo(opts: { surface?: "overlay" | "window" } = {}) {
     if (import.meta.env.DEV && SONG_MOCK) ((window as unknown as { neoSongs?: SongHub[] }).neoSongs ??= []).push(songRef.current);
   }
   const song = songRef.current;
+  // Search Screen's card: in the notch, an area's results show here instead of the overlay's sheet.
+  const lensRef = useRef<LensCardHub | null>(null);
+  if (!lensRef.current) lensRef.current = new LensCardHub(inNotch);
+  const lensCard = lensRef.current;
   const [connected, setConnected] = useState(false);
   const [state, setStateNow] = useState<NeoState>("idle");
   const lastChange = useRef(0);
@@ -112,6 +117,10 @@ export function useNeo(opts: { surface?: "overlay" | "window" } = {}) {
     let alive = true;
     let timer: number | undefined;
     const apply = (ev: NeoEvent) => {
+      // Search Screen's card in the notch: its opening and closing, and every result naming its cid.
+      if (ev.type.startsWith("lens_") && lensCard.handle(ev.type, ev.data)) return;
+      // A chat turn (the user's own words, a browser or a song card) takes the panel back from it.
+      if (ev.type === "transcript" || ev.type === "browser_open" || ev.type === "song_open") lensCard.chat(ev.type, ev.data);
       if (ev.type.startsWith("song_")) {
         // Its place in the transcript: where it opened, or (joined late) where its state first came.
         const opened = song.handle(ev.type, ev.data);
@@ -148,6 +157,7 @@ export function useNeo(opts: { surface?: "overlay" | "window" } = {}) {
         case "hello":
           hub.beginHello();
           cam.beginHello();
+          lensCard.beginHello();
           setState(ev.data.state);
           if (ev.data.ui_host === "window" || ev.data.ui_host === "notch") { setUiHost(ev.data.ui_host); void uiHostChanged(ev.data.ui_host); }
           setItems([]);
@@ -158,6 +168,7 @@ export function useNeo(opts: { surface?: "overlay" | "window" } = {}) {
           hub.endHello(ev.data.browser);
           cam.endHello(ev.data.camera);
           song.endHello();
+          lensCard.endHello(); // (in the notch: lens_card_hello — the live card comes back, if any)
           setHelloAt(Date.now());
           {
             // A live session whose browser_open fell out of the replay still needs its anchor.
@@ -329,6 +340,7 @@ export function useNeo(opts: { surface?: "overlay" | "window" } = {}) {
         hub.setConnected(false);
         cam.setConnected(false);
         song.setConnected(false);
+        lensCard.setConnected(false);
         setAsk(null); // the next hello says whether it's still waiting
         sock.current = null;
         timer = window.setTimeout(connect, 1500);
@@ -348,6 +360,7 @@ export function useNeo(opts: { surface?: "overlay" | "window" } = {}) {
   hub.setSender(send);
   cam.setSender(send);
   song.setSender(send);
+  lensCard.setSender(send);
 
   // Clear transcript: rows, posters and thumbnails go too — but a live session keeps its anchor.
   const clear = useCallback(() => {
@@ -358,5 +371,5 @@ export function useNeo(opts: { surface?: "overlay" | "window" } = {}) {
     song.clearEnded();
   }, [hub, cam, song]);
 
-  return { connected, state, items, error, note, ask, problems, brains, setup, openKeys, erasedAt, helloAt, lensContinueAt, lensOpeningAt, uiHost, send, clear, hub, cam, song };
+  return { connected, state, items, error, note, ask, problems, brains, setup, openKeys, erasedAt, helloAt, lensContinueAt, lensOpeningAt, uiHost, send, clear, hub, cam, song, lensCard };
 }

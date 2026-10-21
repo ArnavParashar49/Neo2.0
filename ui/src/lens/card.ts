@@ -1,0 +1,212 @@
+// Search Screen's card in the notch, on NEO's page there: when NotchHub hosts NEO, the overlay
+// hands an area to the core instead of showing its sheet, and the core sends this page the area's
+// results (`lens_card`, then every result tagged with the card's `cid`). This hub keeps the one
+// live card — the same results as the sheet (./result.ts) — and sends the card's own commands
+// (`lens_card_*`, each naming its cid). React reads it with useSyncExternalStore (useLensCard).
+//
+// Only in the notch: the page says `lens_card_hello` after each hello there, and nowhere else (NEO's
+// own window never shows a card). A chat turn takes the panel back: the user speaking to NEO (but not
+// the one sentence the card's mic asked for), a browser or a song card opening.
+
+import { useSyncExternalStore } from "react";
+import { emptyResult, resultAction, resultMsg, type Result, type ResultAction, type ResultHello, type ResultOp } from "./result.ts";
+import { cardSend, CID, parseCard, parseLens, type CardData } from "./wire.ts";
+
+export interface CardSnap {
+  cid: string;
+  r: Result;
+  hello: ResultHello;
+  thumb: string | null;
+  translateTo: string | null;
+  /** The card's mic is armed: the next sentence is a question about the area. */
+  listening: boolean;
+  nextQid: number;
+  /** Bumped by every change (the card measures itself again). */
+  v: number;
+}
+
+type Send = (cmd: Record<string, unknown>) => boolean;
+export interface Clock { now(): number; set(cb: () => void, ms: number): number; clear(id: number): void }
+const realClock: Clock = {
+  now: () => Date.now(),
+  set: (cb, ms) => setTimeout(cb, ms) as unknown as number,
+  clear: (id) => clearTimeout(id),
+};
+
+/** A user's sentence within this long after the mic stopped listening is still the card's own. */
+export const LISTEN_GRACE_MS = 2000;
+
+export class LensCardHub {
+  private s: CardSnap | null = null;
+  private listeners = new Set<() => void>();
+  private sendFn: Send = () => false;
+  private replaying = false;
+  private listenOffAt = -Infinity;
+  private notes = new Map<string, number>();
+  readonly inNotch: boolean;
+  private clock: Clock;
+
+  constructor(inNotch: boolean, clock: Clock = realClock) {
+    this.inNotch = inNotch;
+    this.clock = clock;
+  }
+
+  // ---- store ----------------------------------------------------------------------------------
+  snap = (): CardSnap | null => this.s;
+  getSnapshot = (): CardSnap | null => this.s;
+  subscribe = (fn: () => void) => { this.listeners.add(fn); return () => { this.listeners.delete(fn); }; };
+  private set(next: CardSnap | null) {
+    this.s = next ? { ...next, v: (this.s?.v ?? 0) + 1 } : null;
+    if (!next) this.clearNotes();
+    for (const l of this.listeners) l();
+  }
+  private clearNotes() {
+    for (const id of this.notes.values()) this.clock.clear(id);
+    this.notes.clear();
+  }
+
+  get cid(): string | null { return this.s?.cid ?? null; }
+
+  // ---- the connection ---------------------------------------------------------------------------
+  setSender(fn: Send) { this.sendFn = fn; }
+
+  /** The line to the core went: whatever card was up is gone with it (a reconnect asks again). */
+  setConnected(on: boolean) {
+    if (!on && this.s) this.set(null);
+  }
+
+  /** The hello's replay of old events is running: nothing in it is a chat turn now. */
+  beginHello() { this.replaying = true; }
+  /** …and it is over: in the notch, the page says it shows cards (the core answers with the live
+   *  one, if there is one). */
+  endHello() {
+    this.replaying = false;
+    if (this.inNotch) this.sendFn(cardSend.hello());
+  }
+
+  // ---- what the core says ------------------------------------------------------------------------
+  /** `lens_card`, or a lens_* message carrying a cid. Returns whether it was the card's. */
+  handle(type: string, data: unknown): boolean {
+    if (type === "lens_card") {
+      const m = parseCard(data);
+      if (!m) return true;
+      if (!m.open) {
+        if (this.s?.cid === m.cid) this.set(null);
+        return true;
+      }
+      if (m.card) this.set(this.fromCard(m.cid, m.card));
+      return true;
+    }
+    const d = data && typeof data === "object" ? (data as Record<string, unknown>) : {};
+    const s = this.s;
+    if (!this.inNotch || typeof d.cid !== "string" || !CID.test(d.cid)) return false;
+    if (!s || d.cid !== s.cid) return true; // (another card's: dropped)
+    const m = parseLens(type, data);
+    if (!m) return true;
+    if (m.t === "lens_listening") {
+      if (!m.data.on && s.listening) this.listenOffAt = this.clock.now();
+      this.set({ ...s, listening: m.data.on });
+      return true;
+    }
+    const { r, noteClear } = resultMsg(s.r, m);
+    if (r !== s.r) this.set({ ...s, r });
+    if (noteClear) this.later(noteClear.id, noteClear.ms);
+    return true;
+  }
+
+  private fromCard(cid: string, c: CardData): CardSnap {
+    let r: Result = { ...emptyResult(c.sel, c.question), local: c.local, answer: c.answer, links: c.links, sentTo: c.sentTo };
+    if (c.translation) r = { ...r, translation: { to: c.translation.to, text: c.translation.text, error: c.translation.error, pending: false } };
+    r = { ...r, thread: c.thread.map((t) => ({ qid: t.qid, q: t.q, state: t.state, text: t.text, error: t.error, brain: t.brain?.label })) };
+    const keep = this.s?.cid === cid ? this.s : null; // (asked again: the questions in flight stay numbered)
+    return {
+      cid, r, hello: c.hello, thumb: c.thumb ?? c.local?.thumb ?? null,
+      translateTo: keep?.translateTo ?? (c.translateTo || null),
+      listening: keep?.listening ?? false,
+      nextQid: Math.max(keep?.nextQid ?? 1, ...c.thread.map((t) => (t.qid < 100_000 ? t.qid + 1 : 1))),
+      v: 0,
+    };
+  }
+
+  private later(id: string, ms: number) {
+    const old = this.notes.get(id);
+    if (old !== undefined) this.clock.clear(old);
+    this.notes.set(id, this.clock.set(() => {
+      this.notes.delete(id);
+      const s = this.s;
+      if (s) this.set({ ...s, r: resultAction(s.r, { t: "note_clear", id }, s.nextQid).r });
+    }, ms));
+  }
+
+  // ---- what the user does --------------------------------------------------------------------------
+  /** A click or key on the card's results: as the card's own commands. */
+  op(a: ResultAction) {
+    const s = this.s;
+    if (!s) return;
+    const out = resultAction(s.r, a, s.nextQid);
+    this.set({ ...s, r: out.r, nextQid: out.nextQid, translateTo: out.translateTo ?? s.translateTo });
+    for (const o of out.ops) this.sendFn(cardCmd(s.cid, o));
+  }
+
+  /** Esc, the ×, or a chat turn: the card closes now (the core tells NotchHub). */
+  close(why: "esc" | "x" | "chat") {
+    const s = this.s;
+    if (!s) return;
+    this.sendFn(cardSend.close(s.cid, why));
+    this.set(null);
+  }
+
+  /** An event of the chat: a turn of the user's own, a browser or a song card, takes the panel back. */
+  chat(type: string, data: Record<string, unknown> | undefined) {
+    if (!this.s || this.replaying) return;
+    if (type === "browser_open" || type === "song_open") { this.close("chat"); return; }
+    if (type !== "transcript" || data?.role !== "user" || data?.final !== true || data?.attach === "screen") return;
+    // The sentence the card's mic asked for (a voice that also says it aloud as a transcript).
+    if (this.s.listening || this.clock.now() - this.listenOffAt < LISTEN_GRACE_MS) return;
+    this.close("chat");
+  }
+}
+
+/** The card's command for one of the results' ops (the overlay sends its own: ./state.ts). */
+export function cardCmd(cid: string, o: ResultOp): Record<string, unknown> {
+  switch (o.op) {
+    case "ask": return cardSend.ask(cid, o.qid, o.q);
+    case "ask_again": return cardSend.ask(cid, 0, "");
+    case "translate": return cardSend.translate(cid, o.to);
+    case "act": return cardSend.act(cid, o.id);
+    case "continue": return cardSend.cont(cid, o.text);
+    case "listen": return cardSend.listen(cid);
+  }
+}
+
+export function useLensCard(hub: LensCardHub): CardSnap | null {
+  return useSyncExternalStore(hub.subscribe, hub.getSnapshot);
+}
+
+// ---- the card's size in the notch ---------------------------------------------------------------------
+
+/** 372 wide (320 on a narrow screen), as tall as its content within 160–560 (and the host's room),
+ *  in steps of 8; it grows at once, and shrinks only by more than 32 pt held for 300 ms, so the
+ *  island never bounces. */
+export const CARD_SIZE = { w: 372, narrowW: 320, minH: 160, maxH: 560, step: 8, shrinkPt: 32, shrinkMs: 300 } as const;
+
+export function cardWidth(areaW?: number): number {
+  if (!areaW || !Number.isFinite(areaW) || areaW >= CARD_SIZE.w) return CARD_SIZE.w;
+  return Math.max(1, Math.min(CARD_SIZE.narrowW, Math.floor(areaW)));
+}
+
+export function cardHeight(natural: number, areaH?: number): number {
+  const top = Math.min(CARD_SIZE.maxH, areaH && Number.isFinite(areaH) ? areaH : CARD_SIZE.maxH);
+  const h = Math.ceil((Number.isFinite(natural) ? natural : 0) / CARD_SIZE.step) * CARD_SIZE.step;
+  return Math.max(Math.min(CARD_SIZE.minH, top), Math.min(top, h));
+}
+
+/** The height to show now: `cur` (null: none yet) for content that wants `want`; `since` is when a
+ *  shrink began waiting. `recheck`: come back in this many ms to apply it. */
+export function settleHeight(cur: number | null, want: number, since: number | null, now: number): { h: number; since: number | null; recheck?: number } {
+  if (cur === null || want >= cur) return { h: want, since: null };
+  if (cur - want <= CARD_SIZE.shrinkPt) return { h: cur, since: null };
+  if (since === null) return { h: cur, since: now, recheck: CARD_SIZE.shrinkMs };
+  if (now - since >= CARD_SIZE.shrinkMs) return { h: want, since: null };
+  return { h: cur, since, recheck: CARD_SIZE.shrinkMs - (now - since) };
+}
