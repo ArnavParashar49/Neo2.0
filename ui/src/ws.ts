@@ -21,7 +21,9 @@ export interface TurnMeta { route: string; brain: string; model: string; label?:
 export interface OpenKeysResult { ok: boolean; error?: string; at: number }
 export interface ToolRun { name: string; args?: Record<string, unknown>; ok?: boolean; summary?: string; running: boolean }
 export type Item =
-  | { kind: "msg"; id: number; role: "user" | "assistant" | "system"; text: string; final: boolean; ts: number; meta?: TurnMeta; job?: string }
+  /** `attach`: what the user's line carried besides their words — "screen": an area of the screen,
+   *  from Search Screen's "Continue in NEO" (its pixels are never in the transcript). */
+  | { kind: "msg"; id: number; role: "user" | "assistant" | "system"; text: string; final: boolean; ts: number; meta?: TurnMeta; job?: string; attach?: "screen" }
   | { kind: "tools"; id: number; tools: ToolRun[]; job?: string }
   /** Where a browser session began: its card, its live row, or (once ended) its summary row. */
   | { kind: "browser"; id: number; sid: string; job?: string; ts: number }
@@ -99,6 +101,10 @@ export function useNeo(opts: { surface?: "overlay" | "window" } = {}) {
   // shell follows it — with "notch" it keeps its window hidden and leaves the UI to the host.
   const [uiHost, setUiHost] = useState<UiHost>("window");
   const [helloAt, setHelloAt] = useState(0); // bumps when a (re)connect's replay has landed
+  // Search Screen: "Continue in NEO" handed an area to the chat (the chat comes forward), and the
+  // overlay is about to take its still (in the notch, the host's panel folds away first).
+  const [lensContinueAt, setLensContinueAt] = useState(0);
+  const [lensOpeningAt, setLensOpeningAt] = useState(0);
   const sock = useRef<WebSocket | null>(null);
   const noteTimer = useRef<number | undefined>(undefined);
 
@@ -207,6 +213,7 @@ export function useNeo(opts: { surface?: "overlay" | "window" } = {}) {
           break;
         case "transcript": {
           const { role, text, final, job } = ev.data;
+          const attach = ev.data.attach === "screen" ? ("screen" as const) : undefined;
           setItems((prev) => {
             // Replace the most recent still-open line of this role *and job* — several jobs (and
             // the voice session) can be streaming at the same time.
@@ -218,12 +225,12 @@ export function useNeo(opts: { surface?: "overlay" | "window" } = {}) {
             }
             if (i >= 0) {
               const next = [...prev];
-              next[i] = { ...(prev[i] as Extract<Item, { kind: "msg" }>), text, final, ts: ev.ts };
+              next[i] = { ...(prev[i] as Extract<Item, { kind: "msg" }>), text, final, ts: ev.ts, ...(attach ? { attach } : {}) };
               return next;
             }
             // Trim old lines, but never a browser, camera or song session's anchor (its row lives there).
             const keep = prev.length > 120 ? prev.filter((it, k) => k >= prev.length - 120 || it.kind === "browser" || it.kind === "camera" || it.kind === "song") : prev;
-            return [...keep, { kind: "msg", id: nextId++, role, text, final, ts: ev.ts, job }];
+            return [...keep, { kind: "msg", id: nextId++, role, text, final, ts: ev.ts, job, ...(attach ? { attach } : {}) }];
           });
           break;
         }
@@ -275,6 +282,12 @@ export function useNeo(opts: { surface?: "overlay" | "window" } = {}) {
           break;
         case "error":
           setError(String(ev.data.message ?? ""));
+          break;
+        case "lens_continue":
+          setLensContinueAt(Date.now());
+          break;
+        case "lens_opening":
+          setLensOpeningAt(Date.now());
           break;
       }
     };
@@ -345,5 +358,5 @@ export function useNeo(opts: { surface?: "overlay" | "window" } = {}) {
     song.clearEnded();
   }, [hub, cam, song]);
 
-  return { connected, state, items, error, note, ask, problems, brains, setup, openKeys, erasedAt, helloAt, uiHost, send, clear, hub, cam, song };
+  return { connected, state, items, error, note, ask, problems, brains, setup, openKeys, erasedAt, helloAt, lensContinueAt, lensOpeningAt, uiHost, send, clear, hub, cam, song };
 }

@@ -306,6 +306,19 @@ export default function App() {
     setViewFocus((n) => n + 1);
   }, [needUser]);
 
+  // ---- Search Screen ---------------------------------------------------------------------------
+  // "Continue in NEO": the area went to the chat — it comes forward (without taking the keys from the
+  // app the user is in; in the notch the host opens its panel). Opening it from the voice or a host
+  // in the notch: the host's panel folds away first, so it isn't in the still.
+  useEffect(() => {
+    if (!neo.lensContinueAt) return;
+    if (hasShell) void showQuiet();
+    setExpanded(true);
+  }, [neo.lensContinueAt]);
+  useEffect(() => {
+    if (neo.lensOpeningAt && inNotch) void hideWindow();
+  }, [neo.lensOpeningAt]);
+
   // ---- camera: while it is on, its preview is always in sight ----------------------------------
   // The camera only turns on at the user's own request; its card opens with it — shown without
   // stealing focus from other apps — and the overlay stays open until the camera is off.
@@ -730,7 +743,14 @@ export default function App() {
       const tools = it.job && browserJobs.has(it.job) ? it.tools.filter((t) => !t.name.startsWith("browser")) : it.tools;
       return tools.length ? <Tools key={it.id} tools={tools} /> : null;
     }
-    if (it.role === "user") return <div key={it.id} className={"msg user" + (it.final ? "" : " partial")}>{it.text}</div>;
+    if (it.role === "user") {
+      return (
+        <div key={it.id} className={"msg user" + (it.final ? "" : " partial")}>
+          {it.attach === "screen" && <span className="attach-chip" title="An area of your screen, from Search Screen">Screen area</span>}
+          {it.text}
+        </div>
+      );
+    }
     return (
       <div key={it.id} id={`msg-${it.id}`} className={"msg assistant" + (it.final ? "" : " partial")}>
         <Md text={it.text} />
