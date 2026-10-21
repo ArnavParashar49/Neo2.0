@@ -263,10 +263,44 @@ pub unsafe fn lens_make_key(ns: *mut AnyObject, panel: bool) {
     }
     let _: () = msg_send![ns, setIgnoresMouseEvents: false];
     let _: () = msg_send![ns, makeKeyAndOrderFront: std::ptr::null_mut::<AnyObject>()];
+    // The page takes the keys at once (Esc, Return, typing), not after a first click.
+    let content: *mut AnyObject = msg_send![ns, contentView];
+    let web = find_web_view(content, 0);
+    if !web.is_null() {
+        let _: Bool = msg_send![ns, makeFirstResponder: web];
+    }
     let cursor: *mut AnyObject = msg_send![class!(NSCursor), crosshairCursor];
     if !cursor.is_null() {
         let _: () = msg_send![cursor, set];
     }
+}
+
+/// The window's WKWebView (its page), searched for under `view` (null: none).
+///
+/// # Safety
+/// `view` must be a live `NSView*` (or null); main thread.
+unsafe fn find_web_view(view: *mut AnyObject, depth: usize) -> *mut AnyObject {
+    let Some(wk) = AnyClass::get(c"WKWebView") else { return std::ptr::null_mut() };
+    if view.is_null() || depth > 6 {
+        return std::ptr::null_mut();
+    }
+    let is_web: Bool = msg_send![view, isKindOfClass: wk];
+    if is_web.as_bool() {
+        return view;
+    }
+    let subs: *mut AnyObject = msg_send![view, subviews];
+    if subs.is_null() {
+        return std::ptr::null_mut();
+    }
+    let n: usize = msg_send![subs, count];
+    for i in 0..n {
+        let v: *mut AnyObject = msg_send![subs, objectAtIndex: i];
+        let found = find_web_view(v, depth + 1);
+        if !found.is_null() {
+            return found;
+        }
+    }
+    std::ptr::null_mut()
 }
 
 /// Off screen, keys given back (the fallback re-activates the app that had them).
