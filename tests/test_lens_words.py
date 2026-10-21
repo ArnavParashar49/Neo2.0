@@ -49,6 +49,14 @@ NEVER = [
     "remind me to search my screen later",
     "take a screenshot",
     "my screen is too dim",
+    # a web search for a thing, never the screen in front of the user
+    "search a monitor",
+    "search a monitor for gaming",
+    "search a display for my mac",
+    "search a display for my macbook",
+    "search the monitor for deals",
+    "search the display",
+    "search your screen",
     "",
 ]
 

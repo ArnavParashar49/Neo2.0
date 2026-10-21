@@ -60,6 +60,30 @@ def test_web_search_never_takes_search_screens_words(opened):
     assert fastpath.plan("search cats") == [("web_search", {"query": "cats"})]
 
 
+@pytest.mark.parametrize(
+    "said,query",
+    [
+        # Search Screen doesn't take these: the web's fast path runs them exactly as before it existed.
+        ("search a monitor for gaming", "a monitor for gaming"),
+        ("search a monitor", "a monitor"),
+        ("search a display for my macbook", "a display for my macbook"),
+        ("search the monitor for deals", "the monitor for deals"),
+        ("search the web for the monitor", "the monitor"),
+        ("search for the display", "the display"),
+        ("search for the monitor for gaming", "the monitor for gaming"),
+        ("google the display", "the display"),
+        ("look up the monitor", "the monitor"),
+        ("search for my screen", "my screen"),
+    ],
+)
+def test_the_webs_fast_path_is_unchanged_for_everything_search_screen_doesnt_take(opened, said, query):
+    from neo2.core.agent import lens_words
+
+    assert lens_words.wants_lens(said) == (False, ""), said
+    assert fastpath.match(said) == ("web_search", {"query": query}), said
+    assert fastpath.matching() == ""  # (only while a match runs)
+
+
 # ---- the session routes it --------------------------------------------------------------------------
 
 

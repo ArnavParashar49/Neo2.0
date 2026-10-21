@@ -26,13 +26,6 @@ _VAGUE_QUERY = (
 _VAGUE_QUERY_AFTER_FOR = r"(?!(?:for\s+)?(?:it|this|that|these|those|them|one|(?:the|this|that)\s+(?:\w+\s+)?one)\s*[.!?]*\s*$)"
 # a site as the user says it: a name or a domain, up to three words ("<brand> maps")
 _SITE = r"(?P<site>[\w.+-]+(?:\s+[\w.+-]+){0,2})"
-# "search my screen", "search the screen for …", "search what's on my screen": Search Screen's words
-# (neo2.core.agent.lens_words), never a web search for "my screen". "search the screen protector
-# deals" is still one.
-_NOT_THE_SCREEN = (
-    r"(?!(?:(?:on|in)\s+)?(?:what(?:'s|s|\s+is)\s+on\s+)?(?:my|the|this)\s+(?:screen|display|monitor)\b"
-    r"(?:\s+(?:for|about)\b|\s*[?.!]*\s*$))"
-)
 
 log = logger(__name__)
 
@@ -41,6 +34,25 @@ log = logger(__name__)
 # the patterns with a site table give way to generic ones whose checks claim known sites only.
 def _legacy_fp(filled: dict) -> bool:
     return decide_mode("web_search") != "on"
+
+
+def _not_search_screen() -> bool:
+    """"search my screen", "search the screen for …", "search what's on my screen" are Search
+    Screen's words (neo2.core.agent.lens_words decides, on the whole sentence being matched) — never a
+    web search for "my screen", whatever routes them. Every other sentence is matched exactly as it
+    always was: "search the screen protector deals", "search the web for the monitor"."""
+    from neo2.core.agent import fastpath, lens_words
+
+    text = fastpath.matching()
+    return not (text and lens_words.wants_lens(text)[0])
+
+
+def _legacy_web_fp(filled: dict) -> bool:
+    return _legacy_fp(filled) and _not_search_screen()
+
+
+def _claims_web_search(filled: dict) -> bool:
+    return _not_search_screen() and _claims_web(filled)
 
 
 def _claims_web(filled: dict) -> bool:
@@ -157,20 +169,19 @@ def _news(query: str, n: int) -> str:
             # "search for X", "google X", "look up X" — but not "search for X in Notes"
             r"^\s*(?:please\s+)?(?:search(?:\s+the\s+(?:web|internet))?(?:\s+for)?|google|look\s+up|"
             r"web\s+search(?:\s+for)?|find\s+(?:me\s+)?(?:info(?:rmation)?\s+(?:on|about)|out\s+about))\s+"
-            rf"{_NOT_THE_SCREEN}"
             rf"(?!.*\b(?:in|on)\s+(?:notes|spotify|finder|mail|messages|slack|my\s+\w+|the\s+\w+\s+app|{_SITE_RE})\b)"
             rf"(?!(?:{_SITE_RE})\s+for\b)"  # "search amazon for X" opens the site's search
             r"(?P<query>.{3,}?)\s*[?.!]*\s*$",
             {"query": "<query>"},
-            _legacy_fp,
+            _legacy_web_fp,
         ),
         (
             # the same verbs; what the query ends with ("in <W>", "on <W>") is judged by evidence
             r"^\s*(?:please\s+)?(?:search(?:\s+the\s+(?:web|internet))?(?:\s+for)?|google|look\s+up|"
             r"web\s+search(?:\s+for)?|find\s+(?:me\s+)?(?:info(?:rmation)?\s+(?:on|about)|out\s+about))\s+"
-            rf"{_NOT_THE_SCREEN}(?P<query>.{{3,}}?)\s*[?.!]*\s*$",
+            r"(?P<query>.{3,}?)\s*[?.!]*\s*$",
             {"query": "<query>"},
-            _claims_web,
+            _claims_web_search,
         ),
     ],
     payload=True,

@@ -3,7 +3,7 @@
 Tools declare `fast_path=[(regex, args)]`, or `(regex, args, check)` when the words alone can't
 tell ("search X on <W>" is a site search only if W is a site NEO knows). A check may also read
 :func:`utterance`, the whole request a plan is covering ("as white" is no song in "open chess and
-play as white"). `match()` finds the tool whose pattern accepts a text. `plan()` covers a whole
+play as white"), and :func:`matching`, the text its pattern is being matched against. `match()` finds the tool whose pattern accepts a text. `plan()` covers a whole
 utterance with fast-path steps — "open notes and type salt and pepper" → open_app(notes),
 type_text("salt and pepper") — or returns None so the utterance goes to a model. The rules that
 make it safe:
@@ -32,12 +32,18 @@ SPLIT = re.compile(r"\s*(?:,|;|\band then\b|\bthen\b|\band\b|\bafter that\b)\s*"
 _EDGE = " ,.;!?"
 _QUOTED = re.compile(r"""^(["“'])([^"“”']*)(["”'])$""")
 _utterance: ContextVar[str] = ContextVar("fastpath_utterance", default="")
+_matching: ContextVar[str] = ContextVar("fastpath_matching", default="")
 
 
 def utterance() -> str:
     """The whole request :func:`plan` is covering while its checks run ("" for a lone
     :func:`match`)."""
     return _utterance.get()
+
+
+def matching() -> str:
+    """The text :func:`match` is matching while its checks run ("" outside it)."""
+    return _matching.get()
 
 
 def strip_quotes(v):
@@ -51,6 +57,14 @@ def match(text: str) -> Step | None:
     """The first tool whose fast-path regex accepts the text. System tools (volume,
     brightness, timer, clock) come first so a broad pattern can never shadow a specific one."""
     tools = sorted(registry().all(), key=lambda t: 0 if t.category == "system" else 1)
+    token = _matching.set(text)
+    try:
+        return _match(tools, text)
+    finally:
+        _matching.reset(token)
+
+
+def _match(tools: list[RegisteredTool], text: str) -> Step | None:
     for t in tools:
         for pattern, args, *check in t.fast_path:
             m = re.search(pattern, text, re.I)

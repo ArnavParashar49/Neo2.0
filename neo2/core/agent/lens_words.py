@@ -7,7 +7,9 @@ karo", "स्क्रीन पर सर्च करो") — never a model'
   screen", "search this on my screen", in English, Hinglish and Hindi. "search my screen for <X>"
   opens it with X as the question for the first area the user picks. Never "what's on my screen"
   (the agent's own look), "search the web for screen protectors", "screen recording settings" or
-  "search X on google".
+  "search X on google" — and never a web search for a thing: "search a monitor for gaming", "search
+  the monitor for deals", "search a display for my macbook" (only *my*/*this* screen, display or
+  monitor, or *the screen*, is the one in front of the user).
 * :func:`control` — while Search Screen is open with an area picked, a sentence that closes it
   ("close", "never mind", "band karo") or hands the area to NEO's chat ("continue in chat").
 
@@ -31,21 +33,23 @@ _LEAD = re.compile(
 )
 _TAIL = re.compile(r"[\s,]*(?:please|pls|neo|now|right\s+now|for\s+me|quickly|yaar|yar|bhai|na|zara|ji)$", re.I)
 
-_MY = r"(?:my|the|this|your|a)"
 _SCREEN = r"(?:screen|display|monitor)"
+# The screen in front of the user: "my/this screen|display|monitor", or "the screen" — never "a
+# monitor", "the display", "your screen" (a thing to search the web for).
+_MINE = rf"(?:(?:my|this)\s+{_SCREEN}|the\s+screen)"
 _ENGLISH = [
-    rf"(?:search|scan)\s+(?:on\s+|in\s+|across\s+|through\s+)?{_MY}\s+{_SCREEN}",
-    rf"search\s+(?:what(?:'s|s|\s+is)|whatever(?:'s|\s+is)?|something|anything|stuff|things)\s+on\s+{_MY}\s+{_SCREEN}",
-    rf"search\s+(?:this|that|it)\s+on\s+{_MY}\s+{_SCREEN}",
+    rf"(?:search|scan)\s+(?:on\s+|in\s+|across\s+|through\s+)?{_MINE}",
+    rf"search\s+(?:what(?:'s|s|\s+is)|whatever(?:'s|\s+is)?|something|anything|stuff|things)\s+on\s+{_MINE}",
+    rf"search\s+(?:this|that|it)\s+on\s+{_MINE}",
     rf"{_SCREEN}\s+search",
     r"search\s+screen",
     r"circle\s+(?:to|and)\s+search",
     rf"(?:open|start|use|show|do|launch|turn\s+on)\s+(?:the\s+)?(?:search\s+screen|{_SCREEN}\s+search|circle\s+to\s+search)",
-    rf"(?:let\s+me\s+)?circle\s+(?:something|what\s+i\s+want|it|this)\s+on\s+{_MY}\s+{_SCREEN}(?:\s+to\s+search)?",
+    rf"(?:let\s+me\s+)?circle\s+(?:something|what\s+i\s+want|it|this)\s+on\s+{_MINE}(?:\s+to\s+search)?",
 ]
 # "search my screen for <question>": the question is what comes after "for".
 _FOR = re.compile(
-    rf"^(?:search|scan)\s+(?:on\s+|in\s+|across\s+)?{_MY}\s+{_SCREEN}\s+(?:for|about)\s+(?P<ask>.{{2,200}})$", re.I
+    rf"^(?:search|scan)\s+(?:on\s+|in\s+|across\s+)?{_MINE}\s+(?:for|about)\s+(?P<ask>.{{2,200}})$", re.I
 )
 
 # Hinglish, as the transcript writes it
