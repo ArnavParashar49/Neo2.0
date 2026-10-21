@@ -135,9 +135,13 @@ export default function App() {
   const song = neo.song;
   const sshape = useSongShape(song); // which song card is live and its face — not its level
   const songHearing = sshape.hearing;
-  // Search Screen's card: in the notch, an area's results take the panel in place of the chat.
+  // Search Screen's card: in the notch, an area's results take the panel in place of the chat —
+  // never while the chat has something that must be seen (a question waiting for an OK, a browser
+  // session's turn for the user): the chat shows it, and the card gives the panel back (below).
   const lcard = useLensCard(neo.lensCard);
-  const lensLive = inNotch && !!lcard;
+  const chatMustShow = !!neo.ask || bsnap.live?.status === "need_user" || bsnap.live?.status === "waiting";
+  const lensLive = inNotch && !!lcard && !chatMustShow;
+  useEffect(() => { neo.lensCard.needChat(chatMustShow); }, [chatMustShow, neo.lensCard]);
   const reduced = useReducedMotion();
   // In the notch the page is always the open chat: NotchHub's panel is what expands and collapses.
   const [expanded, setExpanded] = useState(inNotch);
@@ -663,8 +667,9 @@ export default function App() {
   const answer = useCallback((yes: boolean, scope?: ConfirmScope) => {
     if (neo.ask) neo.send({ cmd: "confirm", yes, action_id: neo.ask.action_id, ...(scope ? { scope } : {}) });
   }, [neo.ask, neo.send]);
+  // Only while the confirm card is on the page: never under Search Screen's card in the notch.
   useEffect(() => {
-    if (!confirming) return;
+    if (!confirming || lensLive) return;
     const h = (e: KeyboardEvent) => {
       if (e.key === "Enter" && e.metaKey && e.shiftKey) {
         // Never a plain yes in its place: without the offer, this key does nothing.
@@ -677,7 +682,7 @@ export default function App() {
     };
     window.addEventListener("keydown", h);
     return () => window.removeEventListener("keydown", h);
-  }, [confirming, answer, offersTask]);
+  }, [confirming, lensLive, answer, offersTask]);
 
   const busy = !["idle", "listening"].includes(shown);
   // No model to ask yet: the chat shows "Give NEO a brain" (the composer stays for simple commands).

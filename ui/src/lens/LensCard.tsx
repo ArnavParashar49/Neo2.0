@@ -6,19 +6,35 @@
 //
 // Keys (NotchHub gives the panel the keyboard without taking it from the user's app): the question
 // box takes them when the panel opens; Return asks, ⌘Return continues in NEO; ⌘C copies the area's
-// text unless something is selected or the box has the keys; a printable key goes into the box;
-// Esc closes the card and folds the panel (NotchHub folds on Esc too).
+// text unless something is selected or the box has the keys (as the key, or — when a host sends the
+// key straight to WebKit as its Copy command — as the copy that follows); a printable key goes into
+// the box; Esc closes the card and folds the panel (NotchHub folds on Esc too).
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { SheetBody } from "./Sheet";
-import type { CardSnap, LensCardHub } from "./card";
+import { naturalHeight, type CardSnap, type LensCardHub } from "./card";
 import { hideWindow, listen } from "../shell";
 import "./lens.css";
 
-/** How tall the card's content would be with room for all of it: the fixed rows (question box,
- *  footer) plus the scrolling column's whole height. */
+/** How tall the card's content would be with room for all of it (./card.ts naturalHeight): the
+ *  fixed rows (question box, footer) plus the scrolling column's children — measured themselves, as
+ *  the column flexes to whatever room the panel gives it now. */
 function natural(root: HTMLElement, scroll: HTMLElement): number {
-  return root.offsetHeight - scroll.offsetHeight + scroll.scrollHeight;
+  let bottom: number | null = null;
+  for (const el of Array.from(scroll.children)) {
+    const b = el.getBoundingClientRect().bottom;
+    if (bottom === null || b > bottom) bottom = b;
+  }
+  const cs = getComputedStyle(scroll);
+  return naturalHeight({
+    rootH: root.offsetHeight, scrollH: scroll.offsetHeight, scrollTop: scroll.getBoundingClientRect().top, scrolled: scroll.scrollTop,
+    padTop: parseFloat(cs.paddingTop) || 0, padBottom: parseFloat(cs.paddingBottom) || 0, contentBottom: bottom,
+  });
+}
+
+/** ⌘C's own copy: the area's text, when nothing is selected and the question box hasn't the keys. */
+function copiesArea(composer: HTMLInputElement | null): boolean {
+  return !(composer && document.activeElement === composer) && !window.getSelection()?.toString();
 }
 
 export function LensCard({ hub, snap, onNatural }: { hub: LensCardHub; snap: CardSnap; onNatural: (h: number) => void }) {
@@ -31,14 +47,23 @@ export function LensCard({ hub, snap, onNatural }: { hub: LensCardHub; snap: Car
     if (root.current && scroll.current) onNatural(natural(root.current, scroll.current));
   }, [onNatural]);
   // Every change of the results, measured before it paints (the size request reaches NotchHub
-  // before its panel opens); later changes of size (a section unfolded, a font in) by observing.
+  // before its panel opens); later changes of size (a section unfolded, a font in) by observing the
+  // column's children — and a child coming or going (the inline language list) re-observes them.
   useLayoutEffect(measure, [measure, snap.v, q]);
   useEffect(() => {
-    if (typeof ResizeObserver === "undefined" || !scroll.current) return;
-    const ro = new ResizeObserver(() => measure());
-    ro.observe(scroll.current);
-    for (const el of Array.from(scroll.current.children)) ro.observe(el);
-    return () => ro.disconnect();
+    const sc = scroll.current;
+    if (!sc) return;
+    const ro = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(() => measure());
+    const watch = () => {
+      if (!ro) return;
+      ro.disconnect();
+      ro.observe(sc);
+      for (const el of Array.from(sc.children)) ro.observe(el);
+    };
+    watch();
+    const mo = typeof MutationObserver === "undefined" ? null : new MutationObserver(() => { watch(); measure(); });
+    mo?.observe(sc, { childList: true });
+    return () => { ro?.disconnect(); mo?.disconnect(); };
   }, [measure, snap.v]);
 
   // A new card starts with an empty question box.
@@ -60,7 +85,7 @@ export function LensCard({ hub, snap, onNatural }: { hub: LensCardHub; snap: Car
         void hideWindow(); // (NotchHub folds its panel on Esc as well)
         return;
       }
-      if (e.metaKey && !e.shiftKey && !e.altKey && !e.ctrlKey && e.key.toLowerCase() === "c" && !inBox && !window.getSelection()?.toString()) {
+      if (e.metaKey && !e.shiftKey && !e.altKey && !e.ctrlKey && e.key.toLowerCase() === "c" && copiesArea(composer.current)) {
         const copy = hub.snap()?.r.local?.actions.find((a) => a.kind === "copy_text");
         if (copy) { e.preventDefault(); hub.op({ t: "chip", kind: "copy_text", id: copy.id }); }
         return;
@@ -72,8 +97,25 @@ export function LensCard({ hub, snap, onNatural }: { hub: LensCardHub; snap: Car
         setQ((v) => (v + e.key).slice(0, 500));
       }
     };
+    // A host that sends ⌘C to WebKit as its Copy command (no keydown reaches the page): with nothing
+    // selected the command is enabled only when the page says it copies (beforecopy), and the copy
+    // itself is the area's text.
+    const beforeCopy = (e: Event) => { if (copiesArea(composer.current)) e.preventDefault(); };
+    const copy = (e: Event) => {
+      if (!copiesArea(composer.current)) return;
+      const act = hub.snap()?.r.local?.actions.find((a) => a.kind === "copy_text");
+      if (!act) return;
+      e.preventDefault();
+      hub.op({ t: "chip", kind: "copy_text", id: act.id });
+    };
     window.addEventListener("keydown", down);
-    return () => window.removeEventListener("keydown", down);
+    document.addEventListener("beforecopy", beforeCopy);
+    document.addEventListener("copy", copy);
+    return () => {
+      window.removeEventListener("keydown", down);
+      document.removeEventListener("beforecopy", beforeCopy);
+      document.removeEventListener("copy", copy);
+    };
   }, [hub]);
 
   return (

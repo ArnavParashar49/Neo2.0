@@ -5,7 +5,8 @@
 // sheet and the card ask the core for the same things — and the card's size never bounces.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { CARD_SIZE, LISTEN_GRACE_MS, LensCardHub, cardHeight, cardWidth, settleHeight, type Clock } from "../src/lens/card.ts";
+import { CARD_SIZE, LISTEN_GRACE_MS, LensCardHub, cardHeight, cardWidth, naturalHeight, settleHeight, type Clock } from "../src/lens/card.ts";
+import { readFileSync } from "node:fs";
 import { initial, reduce, type Action, type Effect, type LensState } from "../src/lens/state.ts";
 import type { CoreMsg, LensHello } from "../src/lens/wire.ts";
 
@@ -144,6 +145,38 @@ test("a chat turn takes the panel back: the user's own words, a browser or a son
   assert.deepEqual(sent, []);
 });
 
+test("a question waiting for an OK (or a browser's turn) gives the panel back: no card hides it", () => {
+  // Live when NEO asks: the card closes as a chat turn (NotchHub keeps the panel, as the chat).
+  const { h, sent } = hub();
+  h.handle("lens_card", snapshot());
+  h.needChat(true);
+  assert.deepEqual(sent, [{ cmd: "lens_card_close", cid: CID, why: "chat" }]);
+  assert.equal(h.snap(), null);
+  // Offered while the question waits (or the core sends the live card again after a reconnect): it
+  // never shows, and the core hears it closed.
+  h.handle("lens_card", snapshot({ sel: 8 }));
+  assert.equal(h.snap(), null);
+  assert.deepEqual(sent.slice(1), [{ cmd: "lens_card_close", cid: CID, why: "chat" }]);
+  // Answered: cards show again.
+  h.needChat(false);
+  h.handle("lens_card", snapshot());
+  assert.equal(h.snap()?.cid, CID);
+  assert.equal(sent.length, 2);
+  h.needChat(false);
+  assert.ok(h.snap(), "nothing to give back: it stays");
+});
+
+test("App: the card never covers the confirm card, and the confirm keys act only while it shows", () => {
+  const app = readFileSync(new URL("../src/App.tsx", import.meta.url), "utf8");
+  assert.match(app, /const chatMustShow = !!neo\.ask \|\| bsnap\.live\?\.status === "need_user"/);
+  assert.match(app, /const lensLive = inNotch && !!lcard && !chatMustShow;/);
+  assert.match(app, /neo\.lensCard\.needChat\(chatMustShow\)/);
+  // ⌘Return (approve), ⌘⇧Return and Esc (decline) are attached only when the question is on the page.
+  const keys = app.split("const offersTask")[1]?.split("const busy")[0] ?? "";
+  assert.ok(keys.includes("if (!confirming || lensLive) return;"), keys.slice(0, 400));
+  assert.ok(keys.includes("[confirming, lensLive, answer, offersTask]"));
+});
+
 test("the sentence the card's mic asked for never closes it (while listening, or just after)", () => {
   const { h, sent, advance } = hub();
   h.handle("lens_card", snapshot());
@@ -248,4 +281,42 @@ test("it grows at once, and shrinks only by more than 32 pt held for 300 ms", ()
   assert.deepEqual(settleHeight(320, 248, a.since, 1100), { h: 320, since: 1000, recheck: 200 });
   assert.deepEqual(settleHeight(320, 240, a.since, 1300), { h: 240, since: null });
   assert.deepEqual(settleHeight(320, 400, a.since, 1100), { h: 400, since: null }, "a rise in between: at once, and the wait is over");
+});
+
+test("its natural height is its content's, not the room the panel gives it now — so it can shrink", () => {
+  // A card in a 560 pt panel (the column flexes to fill it) whose content is 180 pt: 72 pt of fixed
+  // rows (question box, footer) + 14 + 150 + 10 of column.
+  const tall = { rootH: 560, scrollH: 488, scrollTop: 0, scrolled: 0, padTop: 14, padBottom: 10, contentBottom: 164 };
+  assert.equal(naturalHeight(tall), 72 + 164 + 10);
+  assert.equal(cardHeight(naturalHeight(tall)), 248);
+  // The same content measured in the chat's 300 pt (or a 160 pt) panel: the same height.
+  assert.equal(naturalHeight({ ...tall, rootH: 300, scrollH: 228 }), 246);
+  assert.equal(naturalHeight({ ...tall, rootH: 160, scrollH: 88 }), 246);
+  // Scrolled (the content runs past a short panel): where its bottom really is.
+  assert.equal(naturalHeight({ ...tall, rootH: 160, scrollH: 88, contentBottom: 400, scrolled: 300 }), 72 + 700 + 10);
+  // The column offset in the page (its top at 40 px): measured from its own top.
+  assert.equal(naturalHeight({ ...tall, scrollTop: 40, contentBottom: 204 }), 246);
+  // Nothing in it yet: its padding; never below the floor once sized.
+  assert.equal(naturalHeight({ ...tall, contentBottom: null }), 72 + 24);
+  assert.equal(cardHeight(naturalHeight({ ...tall, contentBottom: null })), CARD_SIZE.minH);
+  // Then the inline language list closes (200 pt less): the card shrinks after its wait.
+  const open = naturalHeight({ ...tall, contentBottom: 364 });
+  const shut = naturalHeight(tall);
+  assert.deepEqual(settleHeight(cardHeight(open), cardHeight(shut), null, 0), { h: cardHeight(open), since: 0, recheck: CARD_SIZE.shrinkMs });
+  assert.deepEqual(settleHeight(cardHeight(open), cardHeight(shut), 0, CARD_SIZE.shrinkMs), { h: 248, since: null });
+  // LensCard measures the column's children, not its scrollHeight.
+  const card = readFileSync(new URL("../src/lens/LensCard.tsx", import.meta.url), "utf8");
+  const fn = card.split("function natural(")[1]?.split("\n}\n")[0] ?? "";
+  assert.ok(fn.includes("scroll.children") && fn.includes("naturalHeight("), fn);
+  assert.ok(!fn.includes("scrollHeight"), "never the column's scrollHeight");
+  // A child coming or going (the inline language list opening, closing) is measured too.
+  assert.ok(card.includes("new MutationObserver(") && card.includes("{ childList: true }"));
+});
+
+test("⌘C copies the area's text however the host delivers it: the key, or WebKit's own Copy", () => {
+  const card = readFileSync(new URL("../src/lens/LensCard.tsx", import.meta.url), "utf8");
+  assert.ok(card.includes('document.addEventListener("beforecopy", beforeCopy)') && card.includes('document.addEventListener("copy", copy)'));
+  const copy = card.split("const copy = (e: Event) => {")[1]?.split("};")[0] ?? "";
+  assert.ok(copy.includes("copiesArea(composer.current)") && copy.includes("e.preventDefault()") && copy.includes('kind: "copy_text"'), copy);
+  assert.ok(card.includes('document.removeEventListener("copy", copy)'));
 });

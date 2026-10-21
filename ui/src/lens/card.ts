@@ -6,7 +6,9 @@
 //
 // Only in the notch: the page says `lens_card_hello` after each hello there, and nowhere else (NEO's
 // own window never shows a card). A chat turn takes the panel back: the user speaking to NEO (but not
-// the one sentence the card's mic asked for), a browser or a song card opening.
+// the one sentence the card's mic asked for), a browser or a song card opening — and so does anything
+// of the chat's own that must be seen (`needChat`: NEO asking for an OK, a browser's turn for the
+// user), which no card ever hides.
 
 import { useSyncExternalStore } from "react";
 import { emptyResult, resultAction, resultMsg, type Result, type ResultAction, type ResultHello, type ResultOp } from "./result.ts";
@@ -43,6 +45,7 @@ export class LensCardHub {
   private replaying = false;
   private listenOffAt = -Infinity;
   private notes = new Map<string, number>();
+  private chatNeeded = false;
   readonly inNotch: boolean;
   private clock: Clock;
 
@@ -94,7 +97,15 @@ export class LensCardHub {
         if (this.s?.cid === m.cid) this.set(null);
         return true;
       }
-      if (m.card) this.set(this.fromCard(m.cid, m.card));
+      if (!m.card) return true;
+      if (this.chatNeeded) {
+        // The chat must be seen now (a question waits for an OK): this card never shows — the core
+        // hears it closed as a chat turn, and NotchHub keeps (or opens) nothing for it.
+        this.sendFn(cardSend.close(m.cid, "chat"));
+        if (this.s) this.set(null);
+        return true;
+      }
+      this.set(this.fromCard(m.cid, m.card));
       return true;
     }
     const d = data && typeof data === "object" ? (data as Record<string, unknown>) : {};
@@ -156,6 +167,15 @@ export class LensCardHub {
     this.set(null);
   }
 
+  /** Something of the chat's own must be seen while `on` — NEO asking for an OK (its confirm card),
+   *  a browser session's turn for the user: a live card gives the panel back now, as a chat turn
+   *  (NotchHub keeps the panel, as the chat, which shows it), and a card offered meanwhile closes the
+   *  moment it comes. The card's keys (Esc, ⌘Return) never act on a question the user can't see. */
+  needChat(on: boolean) {
+    this.chatNeeded = on;
+    if (on && this.s) this.close("chat");
+  }
+
   /** An event of the chat: a turn of the user's own, a browser or a song card, takes the panel back. */
   chat(type: string, data: Record<string, unknown> | undefined) {
     if (!this.s || this.replaying) return;
@@ -199,6 +219,24 @@ export function cardHeight(natural: number, areaH?: number): number {
   const top = Math.min(CARD_SIZE.maxH, areaH && Number.isFinite(areaH) ? areaH : CARD_SIZE.maxH);
   const h = Math.ceil((Number.isFinite(natural) ? natural : 0) / CARD_SIZE.step) * CARD_SIZE.step;
   return Math.max(Math.min(CARD_SIZE.minH, top), Math.min(top, h));
+}
+
+/** What LensCard reads off the page to size itself (client px): the card's height and its scrolling
+ *  column's, the column's top edge, how far it is scrolled, its padding, and the lowest bottom edge of
+ *  the column's children (null: none). */
+export interface CardMetrics { rootH: number; scrollH: number; scrollTop: number; scrolled: number; padTop: number; padBottom: number; contentBottom: number | null }
+
+/** How tall the card would be with room for all of it: the fixed rows (the question box, the footer)
+ *  plus the column's own content — never the room the panel gives the column now (it flexes to fill
+ *  the panel, so its scrollHeight is at least the panel's height, and a card measured that way could
+ *  only ever grow). */
+export function naturalHeight(m: CardMetrics): number {
+  const n = (v: number) => (Number.isFinite(v) ? v : 0);
+  const fixed = Math.max(0, n(m.rootH) - n(m.scrollH));
+  const content = m.contentBottom === null || !Number.isFinite(m.contentBottom)
+    ? n(m.padTop) + n(m.padBottom)
+    : Math.max(n(m.padTop), m.contentBottom - n(m.scrollTop) + n(m.scrolled)) + n(m.padBottom);
+  return fixed + content;
 }
 
 /** The height to show now: `cur` (null: none yet) for content that wants `want`; `since` is when a
