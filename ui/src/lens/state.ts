@@ -312,6 +312,7 @@ function onKey(s: LensState, k: KeyInfo): [LensState, Effect[]] {
   const { W, H } = s;
   const stops = () => tabStops(s.regions, W, H);
   if (k.key === "Tab") {
+    if (s.sel) return [s, []]; // with an area, Tab walks the sheet's controls
     const all = stops();
     if (!all.length) return [s, []];
     const n = all.length;

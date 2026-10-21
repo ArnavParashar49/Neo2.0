@@ -181,6 +181,7 @@ test("the keyboard: Return takes the window under the pointer, Tab walks regions
   assert.deepEqual(sends(reduce(s, { t: "key", key: { key: "c", meta: true } })[1]), [{ cmd: "lens_act", sel: 1, id: "a1" }]);
   assert.deepEqual(reduce(s, { t: "key", key: { key: "c", meta: true, domSelection: true } })[1], []); // selected text copies as usual
   assert.deepEqual(reduce(s, { t: "key", key: { key: "w" } })[1], [{ t: "focus_composer", text: "w" }]);
+  assert.equal(reduce(s, { t: "key", key: { key: "Tab" } })[0].candidate, -1); // with an area, Tab is the sheet's
   assert.deepEqual(reduce(s, { t: "key", key: { key: "w", inComposer: true } })[1], []);
   assert.equal(reduce(s, { t: "key", key: { key: "ArrowRight", shift: true } })[0].sel?.box.x, 0); // the whole screen: nowhere to go
   const [small] = run(opened(), { t: "select", box: box(0, 0, 100, 100), how: "drag" });

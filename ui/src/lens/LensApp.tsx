@@ -143,8 +143,9 @@ export function LensApp() {
       );
       off = await d.onPhase((ev) => dispatch({ t: "phase", ev, now: Date.now() }));
       await askShell();
-      // Painted once (nothing to see yet): the shell may bring the window up.
-      requestAnimationFrame(() => requestAnimationFrame(() => void d.painted()));
+      // Loaded, drawing nothing yet: the shell may bring the window up. (A timer, not a frame: the
+      // window is still hidden, and a hidden page gets no frames.)
+      later(() => { if (alive) void d.painted(); }, 30);
     })();
     const t = timers.current;
     return () => {
@@ -202,7 +203,7 @@ export function LensApp() {
       if (st.phase === "open" && !composing) {
         const arrows = e.key.startsWith("Arrow");
         if (e.key === "Escape") e.preventDefault();
-        if (!inComposer && !inSheet && (e.key === "Tab" || (e.key === "Enter" && !e.metaKey) || (e.metaKey && e.key.toLowerCase() === "a") || (arrows && st.sel))) e.preventDefault();
+        if (!inComposer && !inSheet && ((e.key === "Tab" && !st.sel) || (e.key === "Enter" && !e.metaKey) || (e.metaKey && e.key.toLowerCase() === "a") || (arrows && st.sel))) e.preventDefault();
         if (!inComposer && st.sel && e.key.length === 1 && !e.metaKey && !e.ctrlKey && e.key !== " ") e.preventDefault(); // typed into the question box instead
         if (inSheet && !inComposer && (e.key === "Enter" || e.key === " " || e.key === "Tab")) return; // the sheet's own buttons
       }
