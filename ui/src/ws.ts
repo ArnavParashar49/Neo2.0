@@ -110,6 +110,9 @@ export function useNeo(opts: { surface?: "overlay" | "window" } = {}) {
   // overlay is about to take its still (in the notch, the host's panel folds away first).
   const [lensContinueAt, setLensContinueAt] = useState(0);
   const [lensOpeningAt, setLensOpeningAt] = useState(0);
+  // Esc, pressed in another app while NEO's page in the notch said it is on screen without the
+  // keys (`esc_watch`): NEO.app's shell saw it go by, and the core passed it on (src/esc.ts).
+  const [escAt, setEscAt] = useState(0);
   const sock = useRef<WebSocket | null>(null);
   const noteTimer = useRef<number | undefined>(undefined);
 
@@ -300,6 +303,9 @@ export function useNeo(opts: { surface?: "overlay" | "window" } = {}) {
         case "lens_opening":
           setLensOpeningAt(Date.now());
           break;
+        case "esc":
+          setEscAt(Date.now());
+          break;
       }
     };
 
@@ -371,5 +377,5 @@ export function useNeo(opts: { surface?: "overlay" | "window" } = {}) {
     song.clearEnded();
   }, [hub, cam, song]);
 
-  return { connected, state, items, error, note, ask, problems, brains, setup, openKeys, erasedAt, helloAt, lensContinueAt, lensOpeningAt, uiHost, send, clear, hub, cam, song, lensCard };
+  return { connected, state, items, error, note, ask, problems, brains, setup, openKeys, erasedAt, helloAt, lensContinueAt, lensOpeningAt, escAt, uiHost, send, clear, hub, cam, song, lensCard };
 }

@@ -22,6 +22,8 @@ UI → Server  : {"cmd": "text", "text": "..."}      send a typed request
                {"cmd": "brains_reload"}            re-read NEO's key and brain files (anyone)
                {"cmd": "key_save", "id": …, …}     Brains & Keys' own commands: see "Brains & Keys"
                {"cmd": "lens_select", "sel": …, …} Search Screen's own commands: see "Search Screen"
+               {"cmd": "esc_watch", "on": true}    NEO's page in the notch is on screen without the
+                                                   keys: see "Esc pressed elsewhere"
 
 NEO's browser card has its own lane: its commands go straight to the browser (never through the
 event bus, never logged — they carry what the user types), its JSON messages go out beside the
@@ -179,6 +181,17 @@ instead of the overlay's sheet (neo2.core.lens.live: the hand-off, the card and 
     `lens_refused {cmd, error: "forbidden"}` to that client alone; a cid that isn't the live one is
     "stale" (malformed: "unknown"). Like the overlay's, they are routed here by name — never the
     generic handler, the bus or the replay — and a log line names the command, nothing it carried.
+
+Esc pressed elsewhere. Esc folds NEO's chat; but in the notch the chat is often on screen while the
+user's app has the keyboard (it opened by itself, or the user clicked back into their app), and that
+Esc never reaches the page or NotchHub. NEO.app's shell sees a plain Esc go by (its ⌥⌘ tap; the app
+gets the key all the same) and can pass it on — only while NEO's page there asked for it.
+  - `esc_watch {on: bool}` is the notch's page's alone (a page): on while its panel is on screen and
+    the keys are not its own, off otherwise. From anyone else it is refused (a log line, no answer).
+  - The shell hears `{"t": "esc_watch", "on": …}` on its socket whenever whether any such page
+    wants it changes (and after its hello, when one does): it passes nothing on otherwise.
+  - The shell's `{"t": "esc"}` goes to the pages that asked, as `esc` (no payload) — never the bus,
+    the replay, a log, a host or a tool. The page decides whether it folds (ui/src/esc.ts).
 
 The relay never blocks the event bus: each client has its own outbound queue drained by its
 own task, and a client that stops reading is dropped. (An inline `await send()` to a half-dead
@@ -348,6 +361,9 @@ class _Client:
         # which display its island is (see "Search Screen in the notch").
         self.lens_cards = False
         self.lens_display: int | None = None
+        # NEO's page in the notch, on screen without the keys: hears an Esc pressed elsewhere
+        # (see "Esc pressed elsewhere").
+        self.esc_watch = False
 
     def send_json(self, text: str) -> bool:
         if len(self.q) >= _QUEUE_MAX:
@@ -389,6 +405,7 @@ class UIServer:
         self._keys_ticket: str | None = None  # the Brains & Keys window's ticket, as the shell made it
         self._open_keys_at: float | None = None  # monotonic: the last `open_keys` a client asked for
         self._open_lens_at: float | None = None  # monotonic: Search Screen last asked for (a host, the core)
+        self._esc_told = False  # what the shell last heard of `esc_watch` (it starts at off)
 
     async def start(self) -> None:
         s = settings()
@@ -718,6 +735,10 @@ class UIServer:
         self._link = link
         s = settings()
         lens = {"on": bool(getattr(s, "lens", False)), "hold_ms": int(getattr(s, "lens_hold_ms", 1000))}
+        # A new shell watches no Esc: a page that wants it is said right after this hello.
+        self._esc_told = False
+        with contextlib.suppress(RuntimeError):  # (no running loop: nothing to say yet)
+            asyncio.get_running_loop().call_soon(self._esc_watch_sync)
         return {"t": "hello", "ui_host": s.ui_host, "host_attached": self._host_attached(), "lens": lens}
 
     def shell_said(self, msg: dict[str, Any]) -> None:
@@ -735,12 +756,15 @@ class UIServer:
         elif kind in ("lens_freeze", "lens_commit", "lens_closed"):
             if (lens_live := _lens()) is not None:
                 lens_live.shell_said(msg)  # Search Screen (see its doc): the shell's alone to say
+        elif kind == "esc":
+            self._esc_pressed()  # (see "Esc pressed elsewhere")
 
     def shell_left(self, link: Any) -> None:
         """NEO.app is gone from its socket: nobody speaks for the shell, nobody runs the menu."""
         if self._link is not link:
             return
         self._link = None
+        self._esc_told = False
         if (lens_live := _lens()) is not None:
             lens_live.shell_gone()  # nobody shows the overlay any more
         if self._shell is not None:
@@ -750,6 +774,30 @@ class UIServer:
     def _to_shell(self, msg: dict[str, Any]) -> bool:
         link = self._link
         return link is not None and bool(link.send(msg))
+
+    # Esc pressed elsewhere (see the module's doc): NEO's page in the notch asks, the shell passes it on.
+
+    def _esc_watch_said(self, cl: _Client, cmd: dict[str, Any]) -> None:
+        on = cmd.get("on")
+        if not isinstance(on, bool):
+            return
+        if cl.kind != "page":
+            print(f"[ui] esc_watch refused: from a {cl.kind}, not NEO's page in the notch")
+            return
+        cl.esc_watch = on
+        self._esc_watch_sync()
+
+    def _esc_watch_sync(self) -> None:
+        """Tells the shell whether any page wants an Esc pressed elsewhere, when that changed (and
+        again until a shell is there to hear it)."""
+        want = any(cl.kind == "page" and cl.esc_watch for cl in self._clients.values())
+        if want != self._esc_told and self._to_shell({"t": "esc_watch", "on": want}):
+            self._esc_told = want
+
+    def _esc_pressed(self) -> None:
+        """The shell's Esc: to the pages that asked for it, and nobody else."""
+        data = json.dumps({"type": "esc", "data": {}, "ts": time.time()})
+        self._send_all(data, lambda cl: cl.kind == "page" and cl.esc_watch)
 
     def _shell_report(self, msg: dict[str, Any]) -> None:
         """What the menu shows, from the shell: kept, and told to everyone when it changed."""
@@ -858,6 +906,8 @@ class UIServer:
         if (cl := self._clients.pop(c, None)) is not None:
             if cl.kind == "host" and not self._host_attached():
                 self._host_changed(False)  # NEO.app's menu-bar item returns
+            if cl.esc_watch:
+                self._esc_watch_sync()  # the page that wanted Esc pressed elsewhere is gone
             if cl.kind == "lens":
                 from neo2.core.lens.live import lens_live
 
@@ -1097,6 +1147,9 @@ class UIServer:
                     continue
                 if kind == "shell":
                     self._shell_ask(cl, cmd)  # a host's alone; never the bus
+                    continue
+                if kind == "esc_watch":
+                    self._esc_watch_said(cl, cmd)  # NEO's page in the notch alone; never the bus
                     continue
                 if kind == "set":
                     asyncio.create_task(self._set_ask(cl, cmd))  # a host's, or NEO.app's page's

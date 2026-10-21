@@ -81,6 +81,9 @@ pub enum FromCore {
     Shell { action: String, on: Option<bool> },
     /// Close Search Screen's overlay (Erase, Stop, an action that opened something, its time ran out).
     LensClose { why: String },
+    /// NEO's page in the notch is on screen without the keys, and wants an Esc pressed elsewhere —
+    /// or no longer does (esc.rs).
+    EscWatch(bool),
     /// The core at the other end is gone.
     Gone,
 }
@@ -121,6 +124,7 @@ fn parse_from_core(line: &str) -> Option<FromCore> {
             Some(FromCore::LensClose { why: why.into() })
         }
         "host_attached" => Some(FromCore::HostAttached(v.get("attached")?.as_bool()?)),
+        "esc_watch" => Some(FromCore::EscWatch(v.get("on")?.as_bool()?)),
         "ui_host" => Some(FromCore::UiHost { notch: notch("host")? }),
         "shell" => Some(FromCore::Shell {
             action: v.get("action")?.as_str()?.to_string(),
@@ -891,9 +895,15 @@ mod tests {
             r#"{"t":"hello","ui_host":"notch"}"#,
             r#"{"t":"host_attached","attached":"yes"}"#,
             r#"{"t":"ui_host","host":"elsewhere"}"#,
+            r#"{"t":"esc_watch"}"#,
+            r#"{"t":"esc_watch","on":"yes"}"#,
+            r#"{"t":"esc","on":true}"#,
         ] {
             assert_eq!(p(bad), None, "{bad}");
         }
+        // NEO's page in the notch wants an Esc pressed elsewhere, or not (esc.rs).
+        assert_eq!(p(r#"{"t":"esc_watch","on":true}"#), Some(FromCore::EscWatch(true)));
+        assert_eq!(p(r#"{"t":"esc_watch","on":false}"#), Some(FromCore::EscWatch(false)));
     }
 
     #[test]

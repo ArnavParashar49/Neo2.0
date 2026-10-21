@@ -26,6 +26,11 @@
 //! open) or Cancel (and why). Time-based steps come from a second thread (`chord-hold`) that sleeps
 //! until the next deadline; the tap's callback only takes a lock, steps the state and wakes it.
 //! It never says which key was pressed, only that something happened.
+//!
+//! One more reading of the same events, for esc.rs: a plain Esc going down — no modifier, not a
+//! repeat (`plain_escape`) — is said as just that (`on_escape`), and nothing of any other key. Like
+//! every event here it goes on untouched: the app with the keyboard gets its Esc as it always did.
+//! The chord and the hold never see a difference.
 
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, Ordering};
@@ -36,7 +41,7 @@ use std::time::{Duration, Instant};
 use core_foundation::base::TCFType;
 use core_foundation::runloop::{kCFRunLoopCommonModes, CFRunLoop};
 use core_graphics::event::{
-    CGEventFlags, CGEventTap, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement, CGEventType, CallbackResult,
+    CGEventFlags, CGEventTap, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement, CGEventType, CallbackResult, EventField,
 };
 
 const MAX_HOLD: Duration = Duration::from_millis(900); // a longer hold is something else
@@ -371,6 +376,20 @@ fn next_deadline(st: &State) -> Option<Instant> {
     }
 }
 
+/// Esc's key code (kVK_Escape).
+const KEY_ESCAPE: i64 = 53;
+
+/// A key-down that is a plain Esc: Esc itself, not held down (an auto-repeat), with no ⌘, ⌥, ⌃ or ⇧
+/// (⌥⌘Esc is Force Quit; the others are someone's shortcuts). Caps Lock, Fn and the keypad flag are
+/// states, not modifiers someone is pressing.
+pub fn plain_escape(keycode: i64, autorepeat: i64, flags: CGEventFlags) -> bool {
+    let held = CGEventFlags::CGEventFlagCommand
+        | CGEventFlags::CGEventFlagAlternate
+        | CGEventFlags::CGEventFlagControl
+        | CGEventFlags::CGEventFlagShift;
+    keycode == KEY_ESCAPE && autorepeat == 0 && !flags.intersects(held)
+}
+
 /// macOS paused the tap: events may have been missed, so a hold that was showing is called off.
 fn paused(st: &mut State) -> Option<HoldEvent> {
     if st.active {
@@ -410,8 +429,15 @@ fn physically_down() -> bool {
 
 type Shared = Arc<(Mutex<State>, Condvar)>;
 type OnHold = Arc<dyn Fn(HoldEvent) + Send + Sync>;
+type OnEscape = Arc<dyn Fn() + Send + Sync>;
 
-fn install(shared: Shared, gate: Arc<LensGate>, on_chord: Arc<dyn Fn() + Send + Sync>, on_hold: OnHold) -> Option<CGEventTap<'static>> {
+fn install(
+    shared: Shared,
+    gate: Arc<LensGate>,
+    on_chord: Arc<dyn Fn() + Send + Sync>,
+    on_hold: OnHold,
+    on_escape: OnEscape,
+) -> Option<CGEventTap<'static>> {
     let port: Arc<AtomicPtr<c_void>> = Arc::new(AtomicPtr::new(std::ptr::null_mut()));
     let port_cb = port.clone();
     let tap = CGEventTap::new(
@@ -465,6 +491,16 @@ fn install(shared: Shared, gate: Arc<LensGate>, on_chord: Arc<dyn Fn() + Send + 
                         if next_deadline(&st) != before {
                             wake.notify_one();
                         }
+                    }
+                    // (After the chord's own reading, with its lock let go: esc.rs only posts.)
+                    if matches!(kind, CGEventType::KeyDown)
+                        && plain_escape(
+                            event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE),
+                            event.get_integer_value_field(EventField::KEYBOARD_EVENT_AUTOREPEAT),
+                            event.get_flags(),
+                        )
+                    {
+                        on_escape();
                     }
                 }
             }
@@ -525,18 +561,21 @@ fn timer(shared: Shared, gate: Arc<LensGate>, on_hold: OnHold) {
 }
 
 /// Watch for ⌥⌘ on its own thread. `on_chord` runs each time it completes, `on_hold` with each step
-/// of a hold (Search Screen; `gate` says whether one may happen). If the tap can't be created yet
+/// of a hold (Search Screen; `gate` says whether one may happen), `on_escape` for each plain Esc going
+/// down (esc.rs; on the tap's thread, so it only posts). If the tap can't be created yet
 /// (no Accessibility), it keeps retrying and calls `on_ready` once it works. Returns whether it is
 /// working right away.
 pub fn watch(
     on_chord: impl Fn() + Send + Sync + 'static,
     on_ready: impl Fn() + Send + 'static,
     on_hold: impl Fn(HoldEvent) + Send + Sync + 'static,
+    on_escape: impl Fn() + Send + Sync + 'static,
     gate: Arc<LensGate>,
 ) -> bool {
     let (tx, rx) = std::sync::mpsc::channel::<bool>();
     let on_chord: Arc<dyn Fn() + Send + Sync> = Arc::new(on_chord);
     let on_hold: OnHold = Arc::new(on_hold);
+    let on_escape: OnEscape = Arc::new(on_escape);
     let shared: Shared = Arc::new((Mutex::new(State::default()), Condvar::new()));
     {
         let (shared, gate, on_hold) = (shared.clone(), gate.clone(), on_hold.clone());
@@ -548,7 +587,7 @@ pub fn watch(
             // Only once Accessibility is granted: creating a tap without it can make macOS prompt,
             // and this loop must never nag.
             if crate::perms::accessibility() {
-                if let Some(tap) = install(shared.clone(), gate.clone(), on_chord.clone(), on_hold.clone()) {
+                if let Some(tap) = install(shared.clone(), gate.clone(), on_chord.clone(), on_hold.clone(), on_escape.clone()) {
                     break tap;
                 }
             }
@@ -945,5 +984,29 @@ mod tests {
         tick(&mut st, t0 + MS(300), &ON);
         tick(&mut st, t0 + MS(500), &ON);
         assert_eq!(tick(&mut st, t0 + MS(1000), &Gate { on: false, ..ON }), Some(Cancel(1, Why::Paused)));
+    }
+
+    #[test]
+    fn only_a_plain_escape_is_said_and_the_chord_reads_it_as_before() {
+        const FN: u64 = 0x0080_0000; // (the function key's flag: a state, like Caps Lock)
+        assert!(plain_escape(53, 0, f(0)));
+        assert!(plain_escape(53, 0, f(CAPS)) && plain_escape(53, 0, f(FN)));
+        // Held down, another key, or a shortcut with it (⌥⌘Esc is Force Quit): nothing is said.
+        assert!(!plain_escape(53, 1, f(0)));
+        for code in [0, 36, 48, 52, 54, 76] {
+            assert!(!plain_escape(code, 0, f(0)), "{code}");
+        }
+        for m in [CMD, ALT, CTRL, SHIFT, ALT | CMD] {
+            assert!(!plain_escape(53, 0, f(m)), "{m:#x}");
+        }
+        // The chord and the hold read an Esc exactly as any other key: during the gesture it makes
+        // it a shortcut (⌥⌘Esc never summons), outside it nothing at all.
+        assert_eq!(run(&[(K, 0, 0), (F, ALT | CMD, 10), (F, 0, 100)]), [false, false, true]);
+        assert_eq!(run(&[(F, ALT | CMD, 0), (K, ALT | CMD, 20), (F, 0, 100)]), [false, false, false]);
+        // The tap's callback hands it on after the chord's reading, and keeps every event.
+        let src = include_str!("chord.rs");
+        let cb = src.split("move |_proxy, kind, event| {").nth(1).unwrap().split(".ok()?;").next().unwrap();
+        let (chord_at, esc_at) = (cb.find("step_hold(").unwrap(), cb.find("on_escape();").unwrap());
+        assert!(chord_at < esc_at && cb.contains("CallbackResult::Keep") && !cb.contains("CallbackResult::Drop"));
     }
 }

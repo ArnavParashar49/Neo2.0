@@ -28,9 +28,15 @@
 //! "Search Screen…", the voice and a host open an overlay above everything for circling or dragging
 //! over anything on screen. While it is open a summon (the ⌥⌘ tap, ⌘⇧Space, the menu-bar icon)
 //! closes it and does nothing else.
+//!
+//! Esc (esc.rs): the ⌥⌘ tap also says when a plain Esc went by — never taking it from the app that
+//! has the keys. With NEO's chat up while the keys are the user's app's, that Esc goes to the page
+//! showing the chat (this window's, or the notch's through the core, while it asks), which folds the
+//! chat as its "−" does.
 
 mod chord;
 mod core;
+mod esc;
 #[cfg(target_os = "macos")]
 mod frame;
 #[cfg(target_os = "macos")]
@@ -127,6 +133,7 @@ fn set_ui_host(app: &AppHandle, notch: bool) {
 fn from_core(app: &AppHandle, msg: core::FromCore) {
     match msg {
         core::FromCore::Hello { notch, host_attached, lens: cfg } => {
+            esc::set_watch(app, false); // a new core: NEO's page in the notch says it again
             set_ui_host(app, notch);
             set_host_attached(app, Some(host_attached));
             tell_status(app, true); // a new core knows nothing of the menu yet
@@ -154,12 +161,14 @@ fn from_core(app: &AppHandle, msg: core::FromCore) {
             }
             let _ = app.run_on_main_thread(move || act(&handle, &action, on));
         }
+        core::FromCore::EscWatch(on) => esc::set_watch(app, on),
         core::FromCore::LensClose { why } => {
             let handle = app.clone();
             let _ = app.run_on_main_thread(move || lens::close(&handle, &why));
         }
         core::FromCore::Gone => {
             set_host_attached(app, None); // no core to say whether the host is there
+            esc::set_watch(app, false); // …nor any page of the notch's to pass an Esc to
             let handle = app.clone();
             let _ = app.run_on_main_thread(move || {
                 lens::core_gone(&handle); // no hold without a core; an open overlay says so, then closes
@@ -387,6 +396,7 @@ pub fn run() {
         })
         .manage(keys::Keys::default())
         .manage(lens::Lens::default())
+        .manage(esc::EscWatch::default())
         .manage(core::Core::default())
         .manage(UiHost(Mutex::new(core::ui_host_is_notch())))
         .manage(HostAttached(Mutex::new((None, Instant::now()))))
@@ -432,6 +442,7 @@ pub fn run() {
             // (and the menu's Search Screen…) work meanwhile.
             let handle = app.handle().clone();
             let hold_handle = app.handle().clone();
+            let esc_handle = app.handle().clone();
             let (ready_handle, ready_item) = (app.handle().clone(), show_item.clone());
             let chord_ok = chord::watch(
                 move || {
@@ -451,6 +462,8 @@ pub fn run() {
                     let h = hold_handle.clone();
                     let _ = hold_handle.run_on_main_thread(move || lens::on_hold(&h, ev));
                 },
+                // A plain Esc went by (never taken): for NEO's chat when it is up without the keys.
+                move || esc::pressed(&esc_handle),
                 app.state::<lens::Lens>().gate.clone(),
             );
             if chord_ok {
@@ -604,6 +617,24 @@ mod tests {
         let from_core = src.split("fn from_core(").nth(1).unwrap().split("\n}\n").next().unwrap();
         assert!(from_core.contains("lens::core_hello(&handle, cfg)") && from_core.contains("lens::core_gone(&handle)"));
         assert!(from_core.contains("core::FromCore::LensClose"));
+    }
+
+    #[test]
+    fn the_taps_esc_reaches_esc_rs_and_the_core_says_whether_the_notch_wants_it() {
+        let src = include_str!("lib.rs");
+        // The tap's Esc goes to esc.rs (which only posts from the tap's thread).
+        assert!(src.contains("move || esc::pressed(&esc_handle),"));
+        assert!(src.contains(".manage(esc::EscWatch::default())"));
+        // The core arms it for NEO's page in the notch; a new core, or none, disarms it.
+        let from_core = src.split("fn from_core(").nth(1).unwrap().split("\n}\n").next().unwrap();
+        assert!(from_core.contains("core::FromCore::EscWatch(on) => esc::set_watch(app, on)"));
+        let hello = from_core.split("core::FromCore::Hello {").nth(1).unwrap().split("core::FromCore::HostAttached").next().unwrap();
+        assert!(hello.contains("esc::set_watch(app, false)"));
+        let gone = from_core.split("core::FromCore::Gone =>").nth(1).unwrap();
+        assert!(gone.contains("esc::set_watch(app, false)"));
+        // ⌘⇧Space, the ⌥⌘ chord and Search Screen's hold are wired as they were.
+        assert!(src.contains("let _ = handle.run_on_main_thread(move || toggle(&h));"));
+        assert!(src.contains("lens::on_hold(&h, ev)"));
     }
 
     #[test]

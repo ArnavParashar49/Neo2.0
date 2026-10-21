@@ -216,6 +216,12 @@ pub fn is_open(app: &AppHandle) -> bool {
     lock(app).map(|s| s.phase == Phase::Open).unwrap_or(false)
 }
 
+/// Search Screen is anywhere between warming and fading out (esc.rs: an Esc then is its own). With
+/// its state unreadable it counts as up: the careful answer.
+pub fn up(app: &AppHandle) -> bool {
+    lock(app).map(|s| s.phase != Phase::Hidden).unwrap_or(true)
+}
+
 /// What the core said of Search Screen (for the menu's item).
 pub fn known(app: &AppHandle) -> Known {
     lock(app).map(|s| s.known).unwrap_or_default()

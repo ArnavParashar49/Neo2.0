@@ -11,6 +11,9 @@ core → shell   {"t":"hello","ui_host":"notch","host_attached":false}   the web
                                                         also for `open_keys` and a request that
                                                         needs a model NEO hasn't got (Brains & Keys),
                                                         "restart" for Brains & Keys' brains_restart
+               {"t":"esc_watch","on":true}              NEO's page in the notch is on screen without
+                                                        the keys: an Esc pressed elsewhere is wanted
+                                                        (ws.py: "Esc pressed elsewhere"); off again
 shell → core   {"t":"status","accessibility":true,…}    what the menu shows (after the hello, and
                                                         whenever it changes)
                {"t":"wake"}                             the summon keys, while the notch shows NEO
@@ -18,6 +21,8 @@ shell → core   {"t":"status","accessibility":true,…}    what the menu shows 
                                                         it connects with (again after every hello
                                                         while it is open; neo2/core/server/ws.py)
                {"t":"keys_closed"}                      it closed: the ticket is no good any more
+               {"t":"esc"}                              a plain Esc went by in another app, while
+                                                        `esc_watch` was on (to that page alone)
 
 Why not NEO.app's own page, which used to carry all of this over its websocket: with NEO in the
 notch that page's window is never on screen, and macOS suspends the process of a web page nobody

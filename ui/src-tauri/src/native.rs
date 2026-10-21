@@ -90,6 +90,22 @@ pub fn show_quiet(app: tauri::AppHandle, window: tauri::WebviewWindow) -> Result
         .map_err(|e| e.to_string())
 }
 
+/// NEO.app is the active app: one of its windows has the keys (esc.rs). Off the main thread it says
+/// so too — the careful answer: nothing is passed on.
+pub fn app_active() -> bool {
+    if MainThreadMarker::new().is_none() {
+        return true;
+    }
+    unsafe {
+        let app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
+        if app.is_null() {
+            return true;
+        }
+        let active: Bool = msg_send![app, isActive];
+        active.as_bool()
+    }
+}
+
 // ---- Search Screen's overlay (lens.rs) ---------------------------------------------------------
 
 /// NSWindowStyleMaskNonactivatingPanel: keys without activating the app (NSPanel only).

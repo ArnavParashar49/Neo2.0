@@ -25,6 +25,7 @@ import { SongItem, noteIcon } from "./song/SongCard";
 import { Onboarding } from "./Onboarding";
 import { isNoModelProblem, needsBrain } from "./onboard";
 import { KEY_TYPED, looksLikeKey } from "./keys/keyshape";
+import { awayEscFolds, escFolds, wantsAwayEsc } from "./esc";
 import "./App.css";
 import "./browser/browser.css";
 import "./notch.css";
@@ -164,6 +165,8 @@ export default function App() {
   const lastInput = useRef("");
   const init = useRef<Promise<void> | null>(null);
   const press = useRef<{ x: number; y: number } | null>(null);
+  // When the chat last came on screen (an Esc pressed elsewhere just then wasn't meant for it).
+  const shownAt = useRef(0);
 
   // ---- the browser session's place in the overlay -------------------------------------------
   const [bmode, setBmode] = useState<BMode>("docked");
@@ -229,6 +232,7 @@ export default function App() {
   };
 
   const expand = useCallback(() => {
+    shownAt.current = performance.now();
     setExpanded(true);
     if (inNotch) void showQuiet(); // the host opens its panel
     // Into the chat input — unless something in the card (a page prompt, a dialog) already has focus.
@@ -342,6 +346,7 @@ export default function App() {
   useEffect(() => {
     if (!neo.lensContinueAt) return;
     if (hasShell) void showQuiet();
+    shownAt.current = performance.now(); // (brought forward, though it may have been open already)
     setExpanded(true);
   }, [neo.lensContinueAt]);
   useEffect(() => {
@@ -665,9 +670,9 @@ export default function App() {
     setText("");
   };
 
+  // (Esc in the input folds the chat as it does anywhere on the page: see "Esc" below.)
   const onKey = (e: React.KeyboardEvent) => {
     if (e.key === "Enter") submit();
-    else if (e.key === "Escape") { collapse(); }
     else if (e.key === "ArrowUp" && !text) setText(lastInput.current);
   };
 
@@ -694,6 +699,76 @@ export default function App() {
     window.addEventListener("keydown", h);
     return () => window.removeEventListener("keydown", h);
   }, [confirming, lensLive, answer, offersTask]);
+
+  // ---- Esc (src/esc.ts) ----------------------------------------------------------------------------
+  // The page has the keys: Esc folds the chat wherever its focus is, as "−" does — once the confirm
+  // card, the erase dialog, Search Screen's card, the browser card's own dialogs, menus and lists, and
+  // an input method have had theirs (on the window, bubbling: whatever stops the key or prevents its
+  // default keeps it; the confirm card and the dialog are named, whichever listener runs first).
+  useEffect(() => {
+    const h = (e: KeyboardEvent) => {
+      if (!escFolds(e, { open: expanded, confirming, erasing: erasing !== false, lensCard: lensLive })) return;
+      e.preventDefault();
+      collapse();
+    };
+    window.addEventListener("keydown", h);
+    return () => window.removeEventListener("keydown", h);
+  }, [expanded, confirming, erasing, lensLive, collapse]);
+
+  // The user's app has the keys: NEO.app's shell passes on a plain Esc it saw go by (the app got it
+  // too) — in NEO's window straight to this page (`neo://esc`), in the notch through the core (`esc`,
+  // only while this page asked for it, below). Judged on the page as it is when the key comes.
+  const awayEsc = useRef<() => void>(() => {});
+  awayEsc.current = () => {
+    const folds = awayEscFolds({
+      open: inNotch ? document.visibilityState === "visible" : expanded,
+      focused: document.hasFocus(),
+      confirming,
+      erasing: erasing !== false,
+      lensCard: lensLive,
+      pinned,
+      holds: chatMustShow || (!!camLive && !csnap.popped) || songHearing || browsingHolds,
+      openForMs: performance.now() - shownAt.current,
+    });
+    if (folds) collapse();
+  };
+  useEffect(() => {
+    if (!hasShell || inNotch) return;
+    const un = listen("neo://esc", () => awayEsc.current());
+    return () => { un.then((f) => f()).catch(() => {}); };
+  }, []);
+  useEffect(() => { if (neo.escAt) awayEsc.current(); }, [neo.escAt]);
+  // When the chat came on screen: NEO's window unfolding from the orb, however it was asked to (and
+  // `expand`, which also brings it forward)…
+  useEffect(() => { if (expanded) shownAt.current = performance.now(); }, [expanded]);
+  // …in the notch, its panel opening, whichever way it opened…
+  useEffect(() => {
+    if (!inNotch) return;
+    const seen = () => { if (document.visibilityState === "visible") shownAt.current = performance.now(); };
+    const un = listen("neo://opened", seen);
+    document.addEventListener("visibilitychange", seen);
+    return () => { un.then((f) => f()).catch(() => {}); document.removeEventListener("visibilitychange", seen); };
+  }, []);
+  // …and whether this page wants an Esc pressed elsewhere: while it is on screen without the keys.
+  // The core hears each change, and the state again after every (re)connect.
+  useEffect(() => {
+    if (!inNotch) return;
+    let told: boolean | null = null;
+    const sync = () => {
+      const on = wantsAwayEsc({ visible: document.visibilityState === "visible", focused: document.hasFocus() });
+      if (on !== told && neo.send({ cmd: "esc_watch", on })) told = on;
+    };
+    const soon = () => { window.setTimeout(sync, 0); }; // (hasFocus() follows focus / blur a moment later)
+    sync();
+    window.addEventListener("focus", soon);
+    window.addEventListener("blur", soon);
+    document.addEventListener("visibilitychange", sync);
+    return () => {
+      window.removeEventListener("focus", soon);
+      window.removeEventListener("blur", soon);
+      document.removeEventListener("visibilitychange", sync);
+    };
+  }, [neo.helloAt, neo.send]);
 
   const busy = !["idle", "listening"].includes(shown);
   // No model to ask yet: the chat shows "Give NEO a brain" (the composer stays for simple commands).
