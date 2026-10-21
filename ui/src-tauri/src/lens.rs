@@ -14,11 +14,20 @@
 //!   tool and a host (all `shell` action `lens` from the core): `open`, after a moment for the menu
 //!   (or the notch's panel) to get out of the way.
 //!
+//! The window is made ahead of time, hidden, a moment after the core says Search Screen is on, and
+//! kept while it is on: a hold never builds a web view on the main thread, where a slow ⌥⌘ tap's
+//! summon would wait behind it. (Not made yet — the core has only just said hello — it is made at
+//! Preview, never at Warm.)
+//!
 //! Open, the window is a non-activating panel (native.rs) above everything, the menu bar too, on
 //! every Space: it takes the keys while the user's app stays the active one. It closes on Esc and
 //! the page's other ways out (`lens_close`), on a summon (⌥⌘ tap, ⌘⇧Space, the menu-bar icon:
 //! lib.rs `toggle`), when the core says so (`lens_close`: Erase, Stop, an action that opened
 //! something), when the screen locks or its display changes (the watchdog), and when the core goes.
+//! Its page may die (a script error, a stuck page): then nothing inside could close a window that
+//! covers the display and takes every click, so the shell doesn't rely on it — the panel's own Esc
+//! (a key the page didn't take) closes it, and so does the page falling silent (it says
+//! `lens_painted` every second while open; silent for PAGE_SILENT, the watchdog closes it).
 //!
 //! The ticket (32 bytes from /dev/urandom, 64 lowercase hex) admits the page to the core's websocket
 //! as its one `lens` client. The core hears it over the socket only the two of them share
@@ -28,6 +37,7 @@
 //! only which phase the overlay is in.
 
 use std::sync::Mutex;
+use std::sync::OnceLock;
 use std::sync::{atomic::Ordering, Arc};
 use std::time::{Duration, Instant};
 
@@ -51,14 +61,22 @@ const FADE: Duration = Duration::from_millis(170);
 /// the notch's panel folds away first (the core published `lens_opening`).
 const OPEN_WAIT_MENU: Duration = Duration::from_millis(220);
 const OPEN_WAIT: Duration = Duration::from_millis(150);
-/// A window nobody used for this long is destroyed (its web process with it).
+/// With Search Screen off (or no core), a window nobody used for this long is destroyed (its web
+/// process with it). While it is on the window is kept, ready for the next hold.
 const DESTROY_AFTER: Duration = Duration::from_secs(60);
+/// The window is made this long after the core said Search Screen is on (NEO has just started).
+const PREPARE_AFTER: Duration = Duration::from_secs(2);
+/// Open, the page says it is alive every second (lens_painted); silent this long, it is closed.
+const PAGE_SILENT: Duration = Duration::from_secs(5);
 const WATCH_EVERY: Duration = Duration::from_millis(500);
 /// The core went while the overlay was open: the page says so, then it closes.
 const GONE_CLOSE: Duration = Duration::from_secs(3);
 /// What `lens_closed` may say (the core logs anything else as "closed").
 const WHYS: [&str; 12] = ["esc", "cancel", "summon", "action", "lock", "display", "idle", "gone", "continue", "done", "erased", "stop"];
 const ANNOUNCE: &str = "Search Screen. Drag over an area, or press Return to search the window under the pointer. Escape closes.";
+
+/// The app, for the panel's own Esc (native.rs calls `native_escape` from AppKit, which has no handle).
+static APP: OnceLock<AppHandle> = OnceLock::new();
 
 /// A display, in global points with a top-left origin on the primary display.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
@@ -169,6 +187,10 @@ struct St {
     since: Option<Instant>,
     why: &'static str,
     known: Known,
+    /// Open: when the page last said it is alive (lens_painted).
+    alive: Option<Instant>,
+    /// Where the pointer was on the display (display-local points): Return picks the window under it.
+    pointer: Option<(f64, f64)>,
 }
 
 fn ns(w: &WebviewWindow) -> Option<*mut AnyObject> {
@@ -235,6 +257,7 @@ fn extras(s: &St) -> serde_json::Value {
         "voiceover": voiceover,
         "safe_top": s.display.map(|d| d.safe_top).unwrap_or(0.0),
         "display": s.display.map(|d| serde_json::json!({"x": d.x, "y": d.y, "w": d.w, "h": d.h, "scale": d.scale})),
+        "pointer": s.pointer.map(|(x, y)| serde_json::json!({"x": x, "y": y})),
     })
 }
 
@@ -259,10 +282,17 @@ fn tell_closed(app: &AppHandle, ticket: &str, why: &str) {
     app.state::<core::Core>().tell(&serde_json::json!({"t": "lens_closed", "ticket": ticket, "why": why}));
 }
 
-/// The display under the pointer (main thread).
-fn display_now() -> Option<Display> {
+/// The display under the pointer, and where the pointer is on it (display-local points, inside it).
+/// Main thread.
+fn display_now() -> Option<(Display, (f64, f64))> {
     let (displays, pointer) = unsafe { native::displays_and_pointer() };
-    display_for_point(&displays, pointer).copied()
+    display_for_point(&displays, pointer).copied().map(|d| (d, local_point(&d, pointer)))
+}
+
+/// A global point as a point on the display `d`, kept inside it.
+pub fn local_point(d: &Display, (x, y): (f64, f64)) -> (f64, f64) {
+    let inside = |v: f64, size: f64| if v.is_finite() { v.clamp(0.0, size.max(0.0)) } else { size / 2.0 };
+    (inside(x - d.x, d.w), inside(y - d.y, d.h))
 }
 
 fn place(w: &WebviewWindow, d: &Display) {
@@ -290,6 +320,7 @@ fn window(app: &AppHandle) -> Option<WebviewWindow> {
         s.panel = false;
         s.made
     };
+    let _ = APP.set(app.clone());
     let dev = cfg!(debug_assertions);
     let built = WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App(PAGE.into()))
         .title("NEO Search Screen")
@@ -391,32 +422,13 @@ fn end_fade(app: &AppHandle) {
     }
 }
 
-fn warm(app: &AppHandle, g: u64) {
-    if lock(app).map(|s| s.phase != Phase::Hidden && s.phase != Phase::Closing).unwrap_or(true) {
-        return; // open (the gate keeps a hold from warming then), or another session is starting
-    }
-    end_fade(app);
-    let Some(w) = window(app) else { return };
-    let d = display_now();
-    let painted = {
-        let Some(mut s) = lock(app) else { return };
-        s.sid += 1;
-        s.hold = Some(g);
-        s.phase = Phase::Warm;
-        s.via = Via::Hold;
-        s.ticket = None;
-        s.told = false;
-        s.display = d;
-        s.to_arm_ms = 0;
-        s.why = "";
-        s.since = Some(Instant::now());
-        emit(app, &s, "warm");
-        s.painted
-    };
+/// The window, ready on the display under the pointer: click-through, and on screen once its page
+/// has painted (main thread).
+fn ready(w: &WebviewWindow, d: Option<Display>, painted: bool) {
     if let Some(d) = d {
-        place(&w, &d);
+        place(w, &d);
     }
-    if let Some(ns) = ns(&w) {
+    if let Some(ns) = ns(w) {
         unsafe {
             native::lens_set_click_through(ns, true);
             if painted {
@@ -426,15 +438,61 @@ fn warm(app: &AppHandle, g: u64) {
     }
 }
 
-fn preview(app: &AppHandle, g: u64, to_arm_ms: u32) {
-    let Some(mut s) = lock(app) else { return };
-    if s.hold != Some(g) || s.phase != Phase::Warm {
-        return;
+/// This shell's own overlay window, if it has been made (never made here).
+fn made(app: &AppHandle) -> Option<WebviewWindow> {
+    app.get_webview_window(LABEL).filter(|_| ours(app))
+}
+
+fn warm(app: &AppHandle, g: u64) {
+    if lock(app).map(|s| s.phase != Phase::Hidden && s.phase != Phase::Closing).unwrap_or(true) {
+        return; // open (the gate keeps a hold from warming then), or another session is starting
     }
-    s.phase = Phase::Preview;
-    s.to_arm_ms = to_arm_ms;
-    s.since = Some(Instant::now());
-    emit(app, &s, "preview");
+    end_fade(app);
+    // The window was made ahead (`prepare_soon`). Never made here: a slow tap let go of now still
+    // summons NEO, and that summon must not wait behind a web view being built. (None yet: Preview.)
+    let w = made(app);
+    let d = display_now();
+    let painted = {
+        let Some(mut s) = lock(app) else { return };
+        s.sid += 1;
+        s.hold = Some(g);
+        s.phase = Phase::Warm;
+        s.via = Via::Hold;
+        s.ticket = None;
+        s.told = false;
+        s.display = d.map(|x| x.0);
+        s.pointer = d.map(|x| x.1);
+        s.to_arm_ms = 0;
+        s.why = "";
+        s.since = Some(Instant::now());
+        s.alive = None;
+        emit(app, &s, "warm");
+        s.painted
+    };
+    if let Some(w) = w {
+        ready(&w, d.map(|x| x.0), painted);
+    }
+}
+
+fn preview(app: &AppHandle, g: u64, to_arm_ms: u32) {
+    let display = {
+        let Some(mut s) = lock(app) else { return };
+        if s.hold != Some(g) || s.phase != Phase::Warm {
+            return;
+        }
+        s.phase = Phase::Preview;
+        s.to_arm_ms = to_arm_ms;
+        s.since = Some(Instant::now());
+        emit(app, &s, "preview");
+        s.display
+    };
+    if made(app).is_none() {
+        // Not made ahead (the core has only just said hello): made now. Its page catches up with
+        // lens_hello (the phase, and how long it has been on).
+        if let Some(w) = window(app) {
+            ready(&w, display, false);
+        }
+    }
 }
 
 fn arm(app: &AppHandle, g: u64) {
@@ -443,8 +501,7 @@ fn arm(app: &AppHandle, g: u64) {
         return;
     }
     // The pointer may have moved to another display while the keys were held.
-    let d = display_now();
-    let Some(d) = d else {
+    let Some((d, pointer)) = display_now() else {
         cancel(app, Some(g), "paused");
         return;
     };
@@ -457,6 +514,7 @@ fn arm(app: &AppHandle, g: u64) {
         let Some(mut s) = lock(app) else { return };
         let moved = s.display != Some(d);
         s.display = Some(d);
+        s.pointer = Some(pointer);
         s.told = tell_freeze(app, &ticket, &d, Via::Hold);
         s.ticket = Some(ticket);
         s.phase = Phase::Armed;
@@ -489,6 +547,7 @@ fn show_open(app: &AppHandle) {
         let Some(mut s) = lock(app) else { return };
         s.phase = Phase::Open;
         s.since = Some(Instant::now());
+        s.alive = Some(Instant::now()); // (the page's first "alive" is due within PAGE_SILENT)
         (s.sid, s.panel, s.ticket.clone())
     };
     app.state::<Lens>().gate.open.store(true, Ordering::SeqCst);
@@ -583,7 +642,9 @@ fn after_fade(app: &AppHandle, sid: u64) {
         let h = handle.clone();
         let _ = handle.run_on_main_thread(move || {
             let unused = lock(&h).map(|s| s.sid == sid && s.phase == Phase::Hidden).unwrap_or(false);
-            if unused {
+            // While Search Screen is on the window stays, ready for the next hold (prepare_soon).
+            let wanted = h.state::<Lens>().gate.on.load(Ordering::SeqCst);
+            if unused && !wanted {
                 if let Some(w) = h.get_webview_window(LABEL) {
                     let _ = w.destroy();
                 }
@@ -609,7 +670,8 @@ pub fn open(app: &AppHandle, via: Via) {
         Phase::Hidden => {}
     }
     let Some(w) = window(app) else { return };
-    let d = display_now();
+    let dp = display_now();
+    let d = dp.map(|x| x.0);
     let sid = {
         let Some(mut s) = lock(app) else { return };
         s.sid += 1;
@@ -619,6 +681,8 @@ pub fn open(app: &AppHandle, via: Via) {
         s.ticket = None;
         s.told = false;
         s.display = d;
+        s.pointer = dp.map(|x| x.1);
+        s.alive = None;
         s.to_arm_ms = 0;
         s.why = "";
         s.since = Some(Instant::now());
@@ -644,7 +708,7 @@ fn open_now(app: &AppHandle, sid: u64) {
         Some(s) if s.sid == sid && s.phase == Phase::Armed && s.hold.is_none() => (s.display, s.via),
         _ => return,
     };
-    let Some(d) = display.or_else(display_now) else {
+    let Some(d) = display.or_else(|| display_now().map(|x| x.0)) else {
         cancel(app, None, "display");
         return;
     };
@@ -661,18 +725,26 @@ fn open_now(app: &AppHandle, sid: u64) {
     show_open(app);
 }
 
-/// While it is open: the screen locking or its display changing closes it.
+/// Whether an open overlay's page has been silent too long (it says it is alive every second).
+pub fn page_silent(alive: Option<Instant>, now: Instant) -> bool {
+    alive.map(|t| now.saturating_duration_since(t) > PAGE_SILENT).unwrap_or(false)
+}
+
+/// While it is open: the screen locking, its display changing, or its page falling silent closes it.
 fn watch(app: AppHandle, sid: u64) {
     std::thread::spawn(move || loop {
         std::thread::sleep(WATCH_EVERY);
-        let display = match lock(&app) {
-            Some(s) if s.sid == sid && s.phase == Phase::Open => s.display,
+        let (display, alive) = match lock(&app) {
+            Some(s) if s.sid == sid && s.phase == Phase::Open => (s.display, s.alive),
             _ => return,
         };
         let why = if native::screen_locked() {
             Some("lock")
         } else if display.map(|d| !display_still_there(&d)).unwrap_or(false) {
             Some("display")
+        } else if page_silent(alive, Instant::now()) {
+            core::log("lens: the overlay's page went silent — closed");
+            Some("gone")
         } else {
             None
         };
@@ -704,7 +776,11 @@ fn display_still_there(d: &Display) -> bool {
 /// old core knew of is over (the new one never heard its ticket). On the main thread.
 pub fn core_hello(app: &AppHandle, cfg: Option<core::LensCfg>) {
     let gate = app.state::<Lens>().gate.clone();
-    gate.on.store(cfg.map(|c| c.on).unwrap_or(false), Ordering::SeqCst);
+    let on = cfg.map(|c| c.on).unwrap_or(false);
+    gate.on.store(on, Ordering::SeqCst);
+    if on {
+        prepare_soon(app);
+    }
     if let Some(c) = cfg {
         gate.hold_ms.store(c.hold_ms, Ordering::SeqCst);
     }
@@ -719,6 +795,33 @@ pub fn core_hello(app: &AppHandle, cfg: Option<core::LensCfg>) {
     };
     if stale {
         close(app, "gone");
+    }
+}
+
+/// Search Screen is on: its window is made a moment from now, hidden — its page loads and waits — so
+/// the first hold never builds one (see the top).
+fn prepare_soon(app: &AppHandle) {
+    let handle = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(PREPARE_AFTER);
+        let h = handle.clone();
+        let _ = handle.run_on_main_thread(move || {
+            let idle = lock(&h).map(|s| s.phase == Phase::Hidden).unwrap_or(false);
+            if idle && h.state::<Lens>().gate.on.load(Ordering::SeqCst) && h.get_webview_window(LABEL).is_none() {
+                let _ = window(&h);
+            }
+        });
+    });
+}
+
+/// The panel's own Esc (native.rs): a key the page didn't take — its script died or is stuck —
+/// still closes an open overlay. On the main thread (AppKit's keyDown:).
+pub fn native_escape() {
+    if let Some(app) = APP.get() {
+        if is_open(app) {
+            core::log("lens: Esc reached the panel itself — closed");
+            close(app, "esc");
+        }
     }
 }
 
@@ -780,12 +883,16 @@ pub fn lens_hello(app: AppHandle, window: WebviewWindow) -> Result<serde_json::V
 }
 
 /// The page painted (it draws nothing until a phase asks): a window that is warming can come up.
+/// Open, the page says it every second: it is alive (the watchdog closes a silent one).
 #[tauri::command]
 pub fn lens_painted(app: AppHandle, window: WebviewWindow) -> Result<(), String> {
     check(&app, &window)?;
     let phase = {
         let mut s = lock(&app).ok_or("forbidden")?;
         s.painted = true;
+        if s.phase == Phase::Open {
+            s.alive = Some(Instant::now());
+        }
         s.phase
     };
     if matches!(phase, Phase::Warm | Phase::Preview | Phase::Armed) {
@@ -854,7 +961,7 @@ mod tests {
         let ds = [d(1, 0.0, 0.0, 1440.0, 900.0, 2.0), d(3, -200.0, -1080.0, 1920.0, 1080.0, 1.0), d(4, -1920.0, 0.0, 1920.0, 1080.0, 1.0)];
         assert_eq!(display_for_point(&ds, (10.0, -10.0)).map(|d| d.id), Some(3));
         assert_eq!(display_for_point(&ds, (-10.0, 10.0)).map(|d| d.id), Some(4));
-        assert_eq!(display_for_point(&ds, (f64::NAN, 10.0)).map(|d| d.id).is_some(), true);
+        assert!(display_for_point(&ds, (f64::NAN, 10.0)).is_some());
         assert_eq!(display_for_point(&[], (0.0, 0.0)), None);
     }
 
@@ -925,6 +1032,34 @@ mod tests {
         assert!(!emit.contains("ticket"));
         let extras = body.split("fn extras(").nth(1).unwrap().split("\n}\n").next().unwrap();
         assert!(!extras.contains("ticket"));
+    }
+
+    #[test]
+    fn the_pointer_is_a_point_on_its_display() {
+        let laptop = d(1, 0.0, 0.0, 1512.0, 982.0, 2.0);
+        let right = d(2, 1512.0, -200.0, 2560.0, 1440.0, 1.0);
+        assert_eq!(local_point(&laptop, (100.0, 50.0)), (100.0, 50.0));
+        assert_eq!(local_point(&right, (1600.0, -100.0)), (88.0, 100.0));
+        assert_eq!(local_point(&laptop, (2000.0, 1200.0)), (1512.0, 982.0)); // (on no display: kept inside)
+        assert_eq!(local_point(&laptop, (f64::NAN, -5.0)), (756.0, 0.0));
+    }
+
+    #[test]
+    fn a_silent_page_is_closed_and_no_web_view_is_built_at_warm() {
+        let now = Instant::now();
+        assert!(!page_silent(None, now));
+        assert!(!page_silent(Some(now), now + Duration::from_secs(4)));
+        assert!(page_silent(Some(now), now + Duration::from_secs(6)));
+        let src = include_str!("lens.rs");
+        let body = src.split("#[cfg(test)]").next().unwrap();
+        let warm = body.split("fn warm(").nth(1).unwrap().split("\n}\n").next().unwrap();
+        assert!(!warm.contains("window(app)"), "warm must never build the window");
+        let after = body.split("fn after_fade(").nth(1).unwrap().split("\n}\n").next().unwrap();
+        assert!(after.contains("gate.on.load") && after.contains("!wanted"), "kept while Search Screen is on");
+        let hello = body.split("fn core_hello(").nth(1).unwrap().split("\n}\n").next().unwrap();
+        assert!(hello.contains("prepare_soon(app)"));
+        let painted = body.split("fn lens_painted(").nth(1).unwrap().split("\n}\n").next().unwrap();
+        assert!(painted.contains("s.alive = Some(Instant::now())"));
     }
 
     #[test]

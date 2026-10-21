@@ -18,6 +18,8 @@ export interface PhaseEvent {
   voiceover?: boolean;
   safe_top?: number;
   display?: { x: number; y: number; w: number; h: number; scale: number } | null;
+  /** Where the pointer was on the display (display-local points): Return picks the window under it. */
+  pointer?: { x: number; y: number } | null;
 }
 
 /** lens_hello: the phase as it is now, and the ticket once the hold has armed (or it opened). */

@@ -3,7 +3,7 @@
 // then paragraphs, then windows, in reading order.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { DEFAULT_BOX, LINE_PAD, around, pick, readingOrder, regionAt, tabStops, windowAt } from "../src/lens/pick.ts";
+import { DEFAULT_BOX, DOUBLE_MS, LINE_PAD, around, isDouble, pick, readingOrder, regionAt, tabStops, windowAt } from "../src/lens/pick.ts";
 import { box } from "../src/lens/geometry.ts";
 import type { Regions } from "../src/lens/wire.ts";
 
@@ -27,6 +27,15 @@ test("a double-click on a line takes its paragraph", () => {
   const p = pick(R, { x: 150, y: 130 }, W, H, true);
   assert.equal(p.source, "block");
   assert.deepEqual(p.box, box(96, 96, 308, 52));
+});
+
+test("a double-click is a second click soon after the first, and near it", () => {
+  const first = { t: 1000, p: { x: 150, y: 110 } };
+  assert.ok(isDouble(first, 1200, { x: 153, y: 113 }));
+  assert.ok(!isDouble(first, 1000 + DOUBLE_MS, { x: 150, y: 110 })); // too late
+  assert.ok(!isDouble(first, 1100, { x: 170, y: 110 })); // too far
+  assert.ok(!isDouble(null, 1100, { x: 150, y: 110 }));
+  assert.ok(!isDouble(first, 900, { x: 150, y: 110 })); // (a clock that went back)
 });
 
 test("then the smallest thing, an instance before a salient object", () => {

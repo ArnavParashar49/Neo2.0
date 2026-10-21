@@ -3,8 +3,13 @@
 // the core as its one `lens` client (./socket.ts) with the ticket the shell hands it. Everything it
 // decides is ./state.ts's reducer; this file wires the reducer to the shell, the socket, the
 // pointer and the keys, and draws: the still, the glow, the trail, the brackets, the sheet.
+//
+// Open, the window covers the display and takes every click, so a page that broke must never stay
+// up: a render error (the boundary) or an uncaught one closes it, and the page tells the shell it is
+// alive every second (`painted`) — the shell closes one that falls silent, and the panel's own Esc
+// works with no page at all (lens.rs).
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Component, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { EdgeGlow } from "./EdgeGlow";
 import { Trail, type TrailHandle } from "./Trail";
 import { Hover, Selection } from "./Selection";
@@ -13,7 +18,8 @@ import { Card } from "./Cards";
 import { tauriDoor, type Door } from "./door";
 import { LensSocket, type SocketLike } from "./socket";
 import { CURSOR, classify, dragBox, hitTest, type Box, type Hit, type Pt } from "./geometry";
-import { regionAt, tabStops } from "./pick";
+import { isDouble, regionAt, tabStops } from "./pick";
+import type { PhaseEvent } from "./door";
 import { hint, initial, reduce, type Action, type Effect, type LensState } from "./state";
 import type { Still } from "./wire";
 import { wsToken } from "../shell";
@@ -21,7 +27,7 @@ import "./lens.css";
 
 const IDLE_MS = 3 * 60_000;
 const HOVER_REST_MS = 150;
-const DOUBLE_MS = 350;
+const ALIVE_MS = 1000; // open: "still here" to the shell this often (it closes a page silent for 5 s)
 const LIVE_SETTLE_MS = 70;
 const LIVE_GIVE_BACK_MS = 2500;
 const TRANSLATE_KEY = "neo.lens.translateTo";
@@ -49,7 +55,26 @@ function useMedia(q: string): boolean {
   return on;
 }
 
+/** A render error unmounts the overlay's page, and with it every way to close it from inside: the
+ *  overlay closes instead (the shell's own door, asked afresh). */
+class LensBoundary extends Component<{ children: ReactNode }, { broken: boolean }> {
+  state = { broken: false };
+  static getDerivedStateFromError() {
+    return { broken: true };
+  }
+  componentDidCatch() {
+    void tauriDoor().then((d) => d?.close("cancel")).catch(() => { /* no shell: nothing to close */ });
+  }
+  render() {
+    return this.state.broken ? null : this.props.children;
+  }
+}
+
 export function LensApp() {
+  return <LensBoundary><Overlay /></LensBoundary>;
+}
+
+function Overlay() {
   const [s, setS] = useState<LensState>(() => initial(window.innerWidth, window.innerHeight, readTranslateTo()));
   const sref = useRef(s);
   const door = useRef<Door | null>(null);
@@ -62,6 +87,8 @@ export function LensApp() {
   const drag = useRef<Drag | null>(null);
   const space = useRef(false);
   const pointer = useRef<Pt>({ x: window.innerWidth / 2, y: window.innerHeight / 2 });
+  /** The session (g) the pointer was last seeded for, and whether it has moved since. */
+  const seeded = useRef<{ g: number; moved: boolean }>({ g: -1, moved: false });
   const lastClick = useRef<{ t: number; p: Pt } | null>(null);
   const hoverTimer = useRef<number | undefined>(undefined);
   const raf = useRef<number | undefined>(undefined);
@@ -84,10 +111,20 @@ export function LensApp() {
     timers.current.add(id);
   };
 
+  /** Where the shell saw the pointer (until it moves over the page): Return's "window under the pointer". */
+  const seed = useCallback((ev: PhaseEvent) => {
+    if (seeded.current.g !== ev.g) seeded.current = { g: ev.g, moved: false };
+    const p = ev.pointer;
+    if (!seeded.current.moved && p && Number.isFinite(p.x) && Number.isFinite(p.y)) pointer.current = { x: p.x, y: p.y };
+  }, []);
+
   const askShell = useCallback(async () => {
     const h = await door.current?.hello();
-    if (h) dispatch({ t: "shell", hello: h, now: Date.now() });
-  }, [dispatch]);
+    if (h) {
+      seed(h);
+      dispatch({ t: "shell", hello: h, now: Date.now() });
+    }
+  }, [dispatch, seed]);
 
   /** Live mode (no still): out of the way, a moment for the screen to show what's under, then the area. */
   const liveSend = useCallback(async (cmd: Record<string, unknown>) => {
@@ -141,21 +178,35 @@ export function LensApp() {
         { token: wsToken, socket: (url) => new WebSocket(url) as unknown as SocketLike },
         { msg: (m) => dispatch({ t: "msg", msg: m }), still: onStill, status: (status) => dispatch({ t: "socket", status }) },
       );
-      off = await d.onPhase((ev) => dispatch({ t: "phase", ev, now: Date.now() }));
+      off = await d.onPhase((ev) => {
+        seed(ev);
+        dispatch({ t: "phase", ev, now: Date.now() });
+      });
       await askShell();
       // Loaded, drawing nothing yet: the shell may bring the window up. (A timer, not a frame: the
       // window is still hidden, and a hidden page gets no frames.)
       later(() => { if (alive) void d.painted(); }, 30);
     })();
+    // An error nothing caught, while open: the overlay closes rather than stay up half-working.
+    const broke = () => { if (sref.current.phase === "open") void door.current?.close("cancel"); };
+    window.addEventListener("error", broke);
     const t = timers.current;
     return () => {
       alive = false;
       off?.();
+      window.removeEventListener("error", broke);
       sock.current?.close();
       t.forEach((id) => clearTimeout(id));
       t.clear();
     };
-  }, [askShell, dispatch, onStill]);
+  }, [askShell, dispatch, onStill, seed]);
+
+  // Open: alive, every second (the shell closes an overlay whose page fell silent).
+  useEffect(() => {
+    if (s.phase !== "open") return;
+    const id = window.setInterval(() => { void door.current?.painted(); }, ALIVE_MS);
+    return () => clearInterval(id);
+  }, [s.phase]);
 
   // The window is the display: its size, kept.
   useEffect(() => {
@@ -241,6 +292,14 @@ export function LensApp() {
     if (st.hover) dispatch({ t: "hover", box: null });
     composer.current?.blur();
     const sel = st.sel;
+    // The second click of a double-click on what a click just picked (a line): its paragraph —
+    // never an adjustment of the line's box.
+    if (sel && sel.how === "pick" && isDouble(lastClick.current, performance.now(), p)) {
+      lastClick.current = null;
+      drag.current = null;
+      dispatch({ t: "click", at: p, double: true });
+      return;
+    }
     if (sel) {
       const hit = hitTest(sel.box, p);
       if (hit !== "outside") {
@@ -257,6 +316,7 @@ export function LensApp() {
     const p = { x: e.clientX, y: e.clientY };
     const moved = Math.hypot(p.x - pointer.current.x, p.y - pointer.current.y);
     pointer.current = p;
+    seeded.current.moved = true;
     const d = drag.current;
     const st = sref.current;
     if (!d) {
@@ -313,8 +373,7 @@ export function LensApp() {
     const g = classify(d.pts, st.W, st.H);
     if (g.kind === "box") { dispatch({ t: "select", box: g.box, how: g.how }); return; }
     const now = performance.now();
-    const prev = lastClick.current;
-    const double = !!prev && now - prev.t < DOUBLE_MS && Math.hypot(prev.p.x - g.at.x, prev.p.y - g.at.y) < 6;
+    const double = isDouble(lastClick.current, now, g.at);
     lastClick.current = double ? null : { t: now, p: g.at };
     dispatch({ t: "click", at: g.at, double });
   };

@@ -152,6 +152,32 @@ extern "C" fn panel_key_equivalent(this: &AnyObject, _sel: Sel, event: *mut AnyO
     }
 }
 
+/// Esc's key code (kVK_Escape).
+const KEY_ESCAPE: u16 = 53;
+
+/// A key the page didn't take reaches the panel itself (WebKit passes up what its page left alone):
+/// Esc closes Search Screen even when the page's script is dead or stuck. Anything else goes on as
+/// it would.
+extern "C" fn panel_key_down(this: &AnyObject, _sel: Sel, event: *mut AnyObject) {
+    unsafe {
+        if !event.is_null() && LENS_KEYABLE.load(Ordering::SeqCst) {
+            let code: u16 = msg_send![event, keyCode];
+            if code == KEY_ESCAPE {
+                crate::lens::native_escape();
+                return;
+            }
+        }
+        let _: () = msg_send![super(this, class!(NSPanel)), keyDown: event];
+    }
+}
+
+/// Esc as AppKit's own "cancel" (what the key bindings make of it on the way up): the same.
+extern "C" fn panel_cancel(_this: &AnyObject, _sel: Sel, _sender: *mut AnyObject) {
+    if LENS_KEYABLE.load(Ordering::SeqCst) {
+        crate::lens::native_escape();
+    }
+}
+
 /// An NSString's text (empty for nil).
 unsafe fn rust_string(s: *mut AnyObject) -> String {
     if s.is_null() {
@@ -164,7 +190,7 @@ unsafe fn rust_string(s: *mut AnyObject) -> String {
     std::ffi::CStr::from_ptr(p).to_string_lossy().into_owned()
 }
 
-/// `NeoLensPanel : NSPanel`, made once: no ivars of its own, three methods.
+/// `NeoLensPanel : NSPanel`, made once: no ivars of its own, five methods.
 fn panel_class() -> Option<&'static AnyClass> {
     static CLASS: OnceLock<usize> = OnceLock::new();
     let ptr = *CLASS.get_or_init(|| {
@@ -177,6 +203,8 @@ fn panel_class() -> Option<&'static AnyClass> {
             b.add_method(sel!(canBecomeKeyWindow), panel_can_become_key as extern "C" fn(_, _) -> _);
             b.add_method(sel!(canBecomeMainWindow), panel_can_become_main as extern "C" fn(_, _) -> _);
             b.add_method(sel!(performKeyEquivalent:), panel_key_equivalent as extern "C" fn(_, _, _) -> _);
+            b.add_method(sel!(keyDown:), panel_key_down as extern "C" fn(_, _, _));
+            b.add_method(sel!(cancelOperation:), panel_cancel as extern "C" fn(_, _, _));
         }
         b.register() as *const AnyClass as usize
     });

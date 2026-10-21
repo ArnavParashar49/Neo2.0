@@ -9,6 +9,15 @@ import type { Regions } from "./wire.ts";
 export type Source = "line" | "block" | "instance" | "object" | "window" | "default";
 export interface Picked { box: Box; source: Source }
 
+/** A second click this soon, this near the first, is a double-click (a line's paragraph). */
+export const DOUBLE_MS = 350;
+export const DOUBLE_PT = 6;
+
+/** Whether a click at `p` (at `now`, ms) is the second of a double-click after `prev`. */
+export function isDouble(prev: { t: number; p: Pt } | null, now: number, p: Pt): boolean {
+  return !!prev && now - prev.t >= 0 && now - prev.t < DOUBLE_MS && Math.hypot(prev.p.x - p.x, prev.p.y - p.y) < DOUBLE_PT;
+}
+
 /** A line's box grows this much (its letters' tops and tails). */
 export const LINE_PAD = 4;
 /** An instance covering more of the display than this is the background, not a thing. */

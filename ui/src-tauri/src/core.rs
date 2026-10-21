@@ -92,8 +92,9 @@ pub struct LensCfg {
     pub hold_ms: u32,
 }
 
-/// Why the core closes Search Screen, as a word of its own (anything else: "done").
-const LENS_CLOSE_WHYS: [&str; 6] = ["erased", "stop", "action", "continue", "idle", "done"];
+/// Why the core closes Search Screen, as a word of its own (anything else: "done"). "gone": the
+/// overlay's page went and didn't come back.
+const LENS_CLOSE_WHYS: [&str; 7] = ["erased", "stop", "action", "continue", "idle", "done", "gone"];
 
 fn lens_cfg(v: &serde_json::Value) -> Option<LensCfg> {
     let l = v.get("lens")?;
@@ -913,6 +914,7 @@ mod tests {
         assert_eq!(p(r#"{"t":"lens_close","why":"erased"}"#), Some(FromCore::LensClose { why: "erased".into() }));
         assert_eq!(p(r#"{"t":"lens_close","why":"stop"}"#), Some(FromCore::LensClose { why: "stop".into() }));
         assert_eq!(p(r#"{"t":"lens_close"}"#), Some(FromCore::LensClose { why: "done".into() }));
+        assert_eq!(p(r#"{"t":"lens_close","why":"gone"}"#), Some(FromCore::LensClose { why: "gone".into() }));
         assert_eq!(p(r#"{"t":"lens_close","why":"<script>"}"#), Some(FromCore::LensClose { why: "done".into() }));
         assert_eq!(p(r#"{"t":"lens_freeze","ticket":"x"}"#), None); // the shell's to say, never the core's
         // No core, nothing linked.
