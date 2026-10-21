@@ -1157,6 +1157,7 @@ pub fn hide(app: &AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use objc2::runtime::Sel;
 
     #[derive(serde::Deserialize)]
     struct FixCtx {
@@ -1432,6 +1433,27 @@ mod tests {
             assert_eq!(n.baked, Some((2560, 1440)));
             drop(n);
         });
+    }
+
+    #[test]
+    fn the_glows_view_never_takes_a_click() {
+        let cls = crate::native::glow_view_class().expect("NeoLensGlowView");
+        assert_eq!(cls.name().to_str().unwrap(), "NeoLensGlowView");
+        assert_eq!(cls.superclass().map(|c| c.name().to_str().unwrap().to_string()), Some("NSView".into()));
+        let own = |name: Sel| cls.instance_methods().iter().any(|m| m.name() == name);
+        for sel in [sel!(hitTest:), sel!(isOpaque), sel!(acceptsFirstResponder)] {
+            assert!(own(sel), "{sel:?} is its own");
+        }
+        // hitTest: keeps NSView's signature: a point in, an object (always nil) out.
+        let m = cls.instance_method(sel!(hitTest:)).unwrap();
+        assert_eq!(m.return_type().to_str().unwrap(), "@");
+        assert!(m.argument_type(2).unwrap().to_str().unwrap().starts_with("{CGPoint="));
+        let src = include_str!("native.rs");
+        let hit = src.split("extern \"C\" fn glow_hit_test(").nth(1).unwrap().split("\n}\n").next().unwrap();
+        assert!(hit.contains("std::ptr::null_mut()"));
+        let attach = src.split("pub unsafe fn lens_glow_attach(").nth(1).unwrap().split("\n}\n").next().unwrap();
+        assert!(attach.find("setLayer: layer").unwrap() < attach.find("setWantsLayer: true").unwrap(), "layer-hosting");
+        assert!(attach.contains("positioned: NS_WINDOW_ABOVE, relativeTo: web"), "above the page");
     }
 
     #[test]

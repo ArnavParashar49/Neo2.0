@@ -343,7 +343,7 @@ extern "C" fn glow_no(_this: &AnyObject, _sel: Sel) -> Bool {
 }
 
 /// `NeoLensGlowView : NSView`, made once: a layer-hosting view that draws nothing itself.
-fn glow_view_class() -> Option<&'static AnyClass> {
+pub(crate) fn glow_view_class() -> Option<&'static AnyClass> {
     static CLASS: OnceLock<usize> = OnceLock::new();
     let ptr = *CLASS.get_or_init(|| {
         let name = c"NeoLensGlowView";
