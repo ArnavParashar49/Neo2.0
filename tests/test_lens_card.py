@@ -477,7 +477,7 @@ def test_continue_from_the_card(monkeypatch, _world, held):
     assert ("lens_continue", {}) in published  # (nothing in it)
 
 
-@pytest.mark.parametrize("how", ["stop", "erased", "replaced", "idle", "gone", "no page"])
+@pytest.mark.parametrize("how", ["stop", "erased", "replaced", "idle", "gone", "no page", "confirm"])
 def test_the_card_closes_on_stop_erase_a_new_freeze_idle_host_gone_and_no_page(monkeypatch, _world, how, held):
     monkeypatch.setattr(live, "CARD_IDLE_S", 0.2 if how == "idle" else 600.0)
     monkeypatch.setattr(live, "CARD_PAGE_WAIT_S", 0.2)
@@ -500,6 +500,8 @@ def test_the_card_closes_on_stop_erase_a_new_freeze_idle_host_gone_and_no_page(m
                     await asyncio.sleep(0.1)
             elif how == "erased":
                 await events.app_bus().publish("erased", counts={})
+            elif how == "confirm":  # NEO asks for an OK: the chat (its confirm card) takes the panel back
+                await events.app_bus().publish("confirm", action_id="act1", summary="send the mail", tool="mail")
             elif how == "replaced":
                 await shell.say(t="lens_freeze", ticket="ef" * 32, display=DISPLAY, via="hold")
             elif how == "gone":
@@ -518,7 +520,7 @@ def test_the_card_closes_on_stop_erase_a_new_freeze_idle_host_gone_and_no_page(m
     if how == "no page":
         assert got == (True, True)
     else:
-        assert got == ({"gone": "gone"}.get(how, how), True)
+        assert got == ({"gone": "gone", "confirm": "chat"}.get(how, how), True)
 
 
 def test_no_page_in_eight_seconds_closes_a_card_shown_before_the_page_came(monkeypatch, _world):
@@ -650,3 +652,82 @@ def test_nothing_of_a_card_in_the_log(monkeypatch, _world, capsys, caplog, held)
         assert word not in logs, word
     assert "[lens] lens_card_ask" in logs and "the card in the notch closed (x)" in logs
     assert "the overlay closed (notch): the still is gone, the area is in the notch" in logs
+
+
+def test_an_overlay_closed_another_way_once_the_card_was_shown_closes_the_card(monkeypatch, _world):
+    """Esc (or the pill's ×, a right-click) a moment before NotchHub's "yes" reached the overlay: it
+    closes without flying — and the card goes too, never opening in the notch by itself after."""
+
+    async def body(srv, port, seen):
+        async with _Shell(srv, monkeypatch) as shell, contextlib.AsyncExitStack() as stack:
+            host = await _host(stack, port)
+            page = await _page(stack, port)
+            ov = await _overlay(stack, port, shell)
+            cid, _snap, ok = await _shown(ov, host, page)
+            await shell.say(t="lens_closed", ticket=TICKET, why="esc")
+            on_host = (await host.next("lens_card", open=False))["data"]
+            on_page = (await page.next("lens_card", open=False))["data"]
+            lv = live.lens_live
+            return ok, cid, on_host, on_page, (lv._card, lv._area, lv.ticket, lv.client)
+
+    ok, cid, on_host, on_page, left = _with_server(monkeypatch, body)
+    assert ok["ok"] is True
+    assert on_host == {"cid": cid, "open": False, "why": "esc"} and on_page == on_host
+    assert left == (None, None, None, None)
+
+
+def test_an_overlay_that_gave_up_waiting_keeps_its_area_and_gets_its_results_again(monkeypatch, _world, held):
+    """The overlay's own clock ran out (it shows the sheet now): `lens_handoff {sel, cancel}` closes the
+    card made of that area — offered, or already shown — and whatever only the card heard comes to the
+    overlay again, so the sheet is complete and nothing shows in two places."""
+
+    async def body(srv, port, seen):
+        out = {}
+        async with _Shell(srv, monkeypatch) as shell, contextlib.AsyncExitStack() as stack:
+            host = await _host(stack, port)
+            page = await _page(stack, port)
+            ov = await _overlay(stack, port, shell)
+            # Offered, NotchHub silent: given up before the core's own wait is over.
+            cid = await _offer(ov, host)
+            await ov.send(cmd="lens_handoff", sel=1, cancel=True)
+            out["offered_host"] = (await host.next("lens_card", open=False, cid=cid))["data"]
+            out["offered_reply"] = (await ov.next("lens_handoff", sel=1))["data"]
+            # Shown, the answer heard by the card alone, then given up on (a late "yes" was ignored).
+            cid2, _snap, ok = await _shown(ov, host, page, sel=2, release=held)
+            out["ok"] = ok
+            out["card_answer"] = (await page.next("lens_answer", cid=cid2, state="done"))["data"]["title"]
+            out["overlay_before"] = [m for m in await ov.drain() if m["type"] == "lens_answer"]
+            await ov.send(cmd="lens_handoff", sel=2, cancel=True)
+            out["shown_host"] = (await host.next("lens_card", open=False, cid=cid2))["data"]
+            out["again"] = (await ov.next("lens_answer", sel=2, state="done"))["data"]["title"]
+            lv = live.lens_live
+            out["left"] = (lv._card, lv._area is not None and lv._area.n == 2, lv.ticket == TICKET)
+            # Nothing to cancel (no card, an older area): nothing happens, and no reply.
+            await ov.send(cmd="lens_handoff", sel=2, cancel=True)
+            out["quiet"] = [m["type"] for m in await ov.drain() if m["type"] in ("lens_handoff", "lens_refused")]
+        return out
+
+    out = _with_server(monkeypatch, body)
+    assert out["offered_host"]["why"] == "timeout" and out["offered_reply"]["ok"] is False
+    assert out["ok"]["ok"] is True and out["card_answer"] == "Blue bag"
+    assert out["overlay_before"] == []  # (shown: the results went to the card alone)
+    assert out["shown_host"]["why"] == "timeout" and out["again"] == "Blue bag"
+    assert out["left"] == (None, True, True)  # the overlay keeps its area and its ticket
+    assert out["quiet"] == []
+
+
+def test_a_confirmation_while_a_card_is_only_offered_leaves_the_sheet(monkeypatch, _world):
+    """NEO asks for an OK while NotchHub hasn't answered yet: no card, the sheet by the area."""
+
+    async def body(srv, port, seen):
+        async with _Shell(srv, monkeypatch) as shell, contextlib.AsyncExitStack() as stack:
+            host = await _host(stack, port)
+            ov = await _overlay(stack, port, shell)
+            cid = await _offer(ov, host)
+            await events.app_bus().publish("confirm", action_id="act1", summary="send the mail", tool="mail")
+            closed = (await host.next("lens_card", open=False, cid=cid))["data"]
+            reply = (await ov.next("lens_handoff", sel=1))["data"]
+            return closed, reply, live.lens_live._card, live.lens_live._area is not None
+
+    closed, reply, card, kept = _with_server(monkeypatch, body)
+    assert closed["why"] == "chat" and reply["ok"] is False and card is None and kept

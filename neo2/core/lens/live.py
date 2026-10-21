@@ -35,7 +35,10 @@ island) or no answer leaves the sheet complete. Shown, the overlay flies the are
 closes (``lens_closed`` why "notch"): its still, regions and ticket go at once, and the area alone
 (its crop and results) stays until the card closes — Esc, a click elsewhere, an action that opens
 something, Continue in NEO, Stop, Erase, a new Search Screen, :data:`CARD_IDLE_S` without a
-command, or nobody left to show it. The card's own commands (``lens_card_*``, naming the live cid)
+command, or nobody left to show it. The overlay closing for anything but "notch" after NotchHub said
+it shows the card (Esc a moment before the answer) closes the card too; an overlay that gave up
+waiting says so (``lens_handoff {sel, cancel: true}``) and keeps its area; and NEO asking for an OK
+gives the panel back to the chat (the card closes as a chat turn), whose confirm card no card hides. The card's own commands (``lens_card_*``, naming the live cid)
 drive the same internals as the overlay's; nothing of a card goes on the bus, the replay or a log
 line beyond a command's name.
 """
@@ -299,11 +302,17 @@ class LensLive:
                 why = str(msg.get("why") or "")
                 why = why if why in WHYS else "closed"
                 card = self._card
-                if card is not None and card.ticket == ticket and card.state == "shown":
+                shown = card is not None and card.ticket == ticket and card.state == "shown"
+                if shown and why == "notch":
                     # Handed to the notch: the overlay's things go, the area stays with the card —
                     # nothing the overlay does any more can end it.
                     self._release_overlay(why)
                 else:
+                    if shown:
+                        # Closed some other way (Esc, the pill's ×, a right-click just before NotchHub's
+                        # answer reached it): the user left — the card goes too, and never opens by
+                        # itself after. (One only offered goes with the overlay: _drop.)
+                        self._close_card(why if why in CARD_WHYS else "done")
                     self._drop(why)
 
     def _freeze(self, ticket: str, raw: Any, via: str) -> None:
@@ -528,6 +537,9 @@ class LensLive:
         if isinstance(sel, bool) or not isinstance(sel, int) or sel != self._last_n:
             reply(False, why="stale")
             return
+        if cmd.get("cancel") is True:
+            self._handoff_cancel(sel)
+            return
         gen, loop = self._gen, asyncio.get_running_loop()
         until = loop.time() + HANDOFF_AREA_S
         while self._area is None or self._area.n != sel:  # (the area is still being cut)
@@ -570,6 +582,26 @@ class LensLive:
         with contextlib.suppress(Exception):
             if not ch.has_lens_card_page():
                 self._card_page_wait()  # (NotchHub makes its page as the panel opens)
+
+    def _handoff_cancel(self, sel: int) -> None:
+        """The overlay gave up waiting for the answer to its hand-off (it shows the sheet now): a card
+        made of that area closes — offered or already shown — and the area's results so far go to the
+        overlay again, whatever only the card heard meanwhile. No reply: the overlay isn't waiting."""
+        card = self._card
+        if card is None or card.ticket != self.ticket or card.area.n != sel:
+            return
+        was = card.state
+        self._close_card("timeout")
+        log.info(f"[lens] the overlay gave up on the notch: the card closes ({was})")
+        if self._area is card.area:
+            self._resend(card.area)
+
+    def chat_needed(self) -> None:
+        """NEO asks for an OK (its ``confirm``): the chat must be seen, so a card in the notch gives the
+        panel back as a chat turn (NotchHub keeps the panel, as the chat, which shows the confirm card);
+        one only offered closes, and the sheet shows by the area."""
+        if self._card is not None:
+            self._close_card("chat")
 
     def _release_overlay(self, why: str) -> None:
         """The overlay closed after its area went to the notch: its still, regions, ticket and line
@@ -1373,6 +1405,8 @@ lens_live = LensLive()
 def _on_event(ev) -> None:
     if ev.type == "erased":
         lens_live.erased()
+    elif ev.type == "confirm":
+        lens_live.chat_needed()  # (NEO asks for an OK: no card hides the question)
 
 
 app_bus().subscribe(_on_event)
