@@ -100,10 +100,13 @@ html[data-hc] .lx-rim { --r: 4px; }
 .lx-band.top .lx-flow, .lx-rim.top .lx-flow, .lx-band.bottom .lx-flow, .lx-rim.bottom .lx-flow { top: 0; bottom: 0; }
 .lx-band.left .lx-flow, .lx-rim.left .lx-flow, .lx-band.right .lx-flow, .lx-rim.right .lx-flow { left: 0; right: 0; }
 
-/* 4. The trail while drawing (not displayed at all between drags). */
-.lx-trail { position: fixed; inset: 0; width: 100vw; height: 100vh; pointer-events: none; overflow: visible; transition: opacity 200ms var(--ease-out); display: none; }
-.lx-trail.on { display: block; }
-.lx-trail.fading { opacity: 0; }
+/* 4. The trail while drawing: on a layer of its own that stays for the overlay's life, hidden between
+ *    drags — a press or a release changes its opacity and visibility only (no layout, no layer made
+ *    or dropped, nothing display-sized painted as the selection appears); the fade is the
+ *    compositor's. */
+.lx-trail { position: fixed; inset: 0; width: 100vw; height: 100vh; pointer-events: none; overflow: visible; will-change: opacity; opacity: 0; visibility: hidden; }
+.lx-trail.on { opacity: 1; visibility: visible; }
+.lx-trail.on.fading { opacity: 0; transition: opacity 200ms var(--ease-out); }
 .lx-trail .halo { stroke-width: 18; opacity: 0.25; }
 .lx-trail .body { stroke-width: 6; }
 .lx-trail .core { stroke-width: 2; stroke: #fff; opacity: 0.9; }
@@ -266,12 +269,13 @@ html[data-rt] .lx-pill, html[data-rt] .lx-sheet, html[data-rt] .lx-card { -webki
 .lx-card .foot { margin-top: 12px; font-size: 11.5px; color: var(--dim); }
 
 /* The area flying into the notch (fly.ts): three nested layers the size of the area, each moved by
- * one transform (sideways, up, smaller and fainter), the crop inside. */
+ * one transform (sideways, up, smaller and fainter), the crop inside — its rounded corners, hairline
+ * and shadow drawn into its canvas (LensApp's cropOf), which hangs past the layer by the shadow's
+ * room. No CSS shadow: nothing the area's size is painted as it starts. */
 .lx-fly { position: fixed; pointer-events: none; will-change: transform; }
 .lx-fly-y, .lx-fly-s { position: absolute; inset: 0; pointer-events: none; will-change: transform; }
-.lx-fly-s { will-change: transform, opacity; border-radius: 14px; box-shadow: 0 12px 36px rgba(0, 0, 0, 0.35); }
-.lx-fly-s.empty { box-shadow: none; }
-.lx-fly-s canvas { display: block; width: 100%; height: 100%; }
+.lx-fly-s { will-change: transform, opacity; }
+.lx-fly-s canvas { position: absolute; display: block; }
 
 /* Closing: everything but the still fades (each piece on its own: no group of them is faded as one);
  * the still stays until the window is gone. */

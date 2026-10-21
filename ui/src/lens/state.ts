@@ -61,6 +61,10 @@ export interface LensState {
   glow: "native" | "web";
   /** The overlay's display (CGDirectDisplayID), when the shell says. */
   displayId: number | null;
+  /** The overlay is the non-activating panel (the user's app stays active). False: the shell's
+   *  fallback window, which activated NEO and gives the keys back to that app as it goes — it would
+   *  take them from the card in the notch a moment after it opened, so it never hands off. */
+  panel: boolean;
   /** The area flying into the notch (the overlay is closing). */
   fly: FlyPlan | null;
   /** The notch said no this session (its camera or Allow / Cancel hold the island): the areas after
@@ -121,7 +125,11 @@ export type Action =
   | { t: "adjusted"; box: Box }
   | { t: "move_due"; v: number }
   | { t: "handoff_due"; n: number }
-  | { t: "handoff_late"; n: number }
+  /** No answer in time. `whileDue`: live mode's capture timer — it gives up only on an area not
+   *  asked about yet (once asked, the ask's own timer counts). */
+  | { t: "handoff_late"; n: number; whileDue?: boolean }
+  /** After a "yes": the overlay must be closing by now (`tries`: the checks so far). */
+  | { t: "notch_check"; n: number; tries: number }
   | { t: "key"; key: KeyInfo }
   | { t: "chip"; kind: string; id?: string; to?: string }
   | { t: "translate_to"; to: string }
@@ -162,13 +170,17 @@ export const FADE_MS = 220;
 export const HANDOFF_PICK_MS = DOUBLE_MS + 20;
 /** No answer to `lens_handoff` this long (the core waits at most ~4.3 s): the sheet, here. */
 export const HANDOFF_GIVE_UP_MS = 5000;
+/** After a "yes" the shell starts closing at once (and orders the overlay out at 440 ms): not closing
+ *  this long after asking, it is asked again — and then closed plainly, so a full-screen overlay that
+ *  catches every click never stays up over a card already in the notch. */
+export const NOTCH_CHECK_MS = 600;
 export const CARD_CLOSE_MS = 3000;
 
 const NO_FLAGS: Flags = { reduceMotion: false, reduceTransparency: false, increaseContrast: false, voiceover: false };
 
 export function initial(W = 0, H = 0, translateTo: string | null = null): LensState {
   return {
-    g: 0, phase: "idle", phaseAt: 0, toArmMs: 0, via: "hold", why: "", flags: NO_FLAGS, safeTop: 0, W, H, glow: "web", displayId: null, fly: null, notchRefused: false,
+    g: 0, phase: "idle", phaseAt: 0, toArmMs: 0, via: "hold", why: "", flags: NO_FLAGS, safeTop: 0, W, H, glow: "web", displayId: null, panel: true, fly: null, notchRefused: false,
     ticket: null, core: null, sc: true, socket: "idle", hello: null, frozen: "pending", frozenWhy: "", still: null,
     regions: null, sel: null, nextSel: 1, nextQid: 1, card: null, prefill: null, candidate: -1, pendingPick: null,
     moveV: 0, translateTo, coreState: "",
@@ -177,7 +189,7 @@ export function initial(W = 0, H = 0, translateTo: string | null = null): LensSt
 
 /** A session's own things gone (its still, its line, its areas); the page's own kept. */
 function fresh(s: LensState, g: number): LensState {
-  return { ...initial(s.W, s.H, s.translateTo), g, flags: s.flags, safeTop: s.safeTop, glow: s.glow, displayId: s.displayId };
+  return { ...initial(s.W, s.H, s.translateTo), g, flags: s.flags, safeTop: s.safeTop, glow: s.glow, displayId: s.displayId, panel: s.panel };
 }
 
 function teardown(s: LensState): Effect[] {
@@ -223,6 +235,7 @@ function onPhase(s: LensState, ev: PhaseEvent, now: number, sinceMs = 0): [LensS
     safeTop: typeof ev.safe_top === "number" && Number.isFinite(ev.safe_top) ? ev.safe_top : st.safeTop,
     glow: ev.glow === "native" || ev.glow === "web" ? ev.glow : st.glow,
     displayId: typeof ev.display?.id === "number" && Number.isInteger(ev.display.id) && ev.display.id >= 0 ? ev.display.id : st.displayId,
+    panel: typeof ev.panel === "boolean" ? ev.panel : st.panel,
   };
   if ((phase === "armed" || phase === "open") && !st.ticket) fx.push({ t: "shell_hello" });
   if (changed && (phase === "cancel" || phase === "closing")) {
@@ -237,7 +250,9 @@ function onPhase(s: LensState, ev: PhaseEvent, now: number, sinceMs = 0): [LensS
 }
 
 /** The pending area goes out once there is a line and the still is known (taken, or not: live).
- *  With NotchHub able to show the results (the core's hello says `notch`), it is handed off too:
+ *  With NotchHub able to show the results (the core's hello says `notch`) and the overlay the
+ *  non-activating panel (the fallback window would take the keys back from the card), it is handed
+ *  off too:
  *  at once, or — a pick — once a double-click can't make it a paragraph, or — live — once it is
  *  captured. */
 function flush(s: LensState): [LensState, Effect[]] {
@@ -247,9 +262,9 @@ function flush(s: LensState): [LensState, Effect[]] {
   const cmd = send.select(sel.n, toRect(sel.box), sel.how, live);
   const fx: Effect[] = [live ? { t: "send_live", cmd } : { t: "send", cmd }];
   let next: Sel = { ...sel, sent: true, live, captured: live ? "pending" : "none" };
-  if (s.hello?.notch && !s.notchRefused) {
+  if (s.hello?.notch && !s.notchRefused && s.panel) {
     next = { ...next, handoff: "due" };
-    if (live) fx.push({ t: "later", ms: HANDOFF_GIVE_UP_MS, action: { t: "handoff_late", n: sel.n } });
+    if (live) fx.push({ t: "later", ms: HANDOFF_GIVE_UP_MS, action: { t: "handoff_late", n: sel.n, whileDue: true } });
     else if (!sel.quick) fx.push({ t: "later", ms: HANDOFF_PICK_MS, action: { t: "handoff_due", n: sel.n } });
     else return askHandoff({ ...s, sel: next }, fx);
   }
@@ -266,11 +281,15 @@ function askHandoff(s: LensState, fx: Effect[] = []): [LensState, Effect[]] {
   return [{ ...s, sel: { ...sel, handoff: "waiting" } }, out];
 }
 
-/** The notch won't (or didn't say): the sheet, here — and in live mode the overlay comes back. */
-function noHandoff(s: LensState, n: number): [LensState, Effect[]] {
+/** The notch won't (or didn't say): the sheet, here — and in live mode the overlay comes back. Given
+ *  up on while asked (`late`), the core is told: a card it offered or showed meanwhile closes, and
+ *  the area's results come here again — never two places at once, never a sheet left unfed. */
+function noHandoff(s: LensState, n: number, late = false): [LensState, Effect[]] {
   const sel = s.sel;
   if (!sel || sel.n !== n || !handingOff(sel)) return [s, []];
-  return [{ ...s, sel: { ...sel, handoff: "no" }, notchRefused: true }, sel.live ? [{ t: "peek", hidden: false }] : []];
+  const fx: Effect[] = late && sel.handoff === "waiting" ? [{ t: "send", cmd: send.handoffCancel(sel.n) }] : [];
+  if (sel.live) fx.push({ t: "peek", hidden: false });
+  return [{ ...s, sel: { ...sel, handoff: "no" }, notchRefused: true }, fx];
 }
 
 function newSel(s: LensState, b: Box, how: How, double = false): [LensState, Effect[]] {
@@ -343,7 +362,7 @@ function onMsg(s: LensState, m: CoreMsg): [LensState, Effect[]] {
       if (!h.ok) return noHandoff(s, sel.n);
       const same = h.display === null || s.displayId === null || h.display === s.displayId;
       const fly = sel.live ? null : flyPlan(sel.box, s.W, s.H, s.safeTop, same, s.flags.reduceMotion);
-      return [{ ...s, sel: { ...sel, handoff: "ok" }, fly }, [{ t: "close", why: "notch" }]];
+      return [{ ...s, sel: { ...sel, handoff: "ok" }, fly }, [{ t: "close", why: "notch" }, { t: "later", ms: NOTCH_CHECK_MS, action: { t: "notch_check", n: sel.n, tries: 1 } }]];
     }
     case "lens_local":
     case "lens_answer":
@@ -513,7 +532,14 @@ function step(s: LensState, a: Action): [LensState, Effect[]] {
     case "handoff_due":
       return s.sel && s.sel.n === a.n && !s.sel.live ? askHandoff(s) : [s, []];
     case "handoff_late":
-      return noHandoff(s, a.n);
+      if (a.whileDue && s.sel?.handoff !== "due") return [s, []];
+      return noHandoff(s, a.n, true);
+    case "notch_check": {
+      // Still open after a "yes" (the shell's close was lost or refused): ask again, then plainly.
+      if (s.phase !== "open" || !s.sel || s.sel.n !== a.n || s.sel.handoff !== "ok") return [s, []];
+      if (a.tries < 2) return [s, [{ t: "close", why: "notch" }, { t: "later", ms: NOTCH_CHECK_MS, action: { t: "notch_check", n: a.n, tries: a.tries + 1 } }]];
+      return [s, [{ t: "close", why: "cancel" }]];
+    }
     case "move_due": {
       if (a.v !== s.moveV || !s.sel || handingOff(s.sel)) return [s, []];
       if (iou(s.sel.box, s.sel.searched) >= REASK_IOU) return [s, []];

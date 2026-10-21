@@ -21,6 +21,8 @@ export interface PhaseEvent {
   display?: { id?: number; x: number; y: number; w: number; h: number; scale: number } | null;
   /** Who draws the glow: the shell ("native", Core Animation) or this page ("web": the shell couldn't). */
   glow?: "native" | "web";
+  /** The window is the non-activating panel (false: the fallback, which activates NEO). */
+  panel?: boolean;
   /** Where the pointer was on the display (display-local points): Return picks the window under it. */
   pointer?: { x: number; y: number } | null;
 }

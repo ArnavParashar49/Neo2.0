@@ -268,6 +268,9 @@ fn extras(s: &St) -> serde_json::Value {
         "safe_top": s.display.map(|d| d.safe_top).unwrap_or(0.0),
         "display": s.display.map(|d| serde_json::json!({"id": d.id, "x": d.x, "y": d.y, "w": d.w, "h": d.h, "scale": d.scale})),
         "glow": glow::mode(),
+        // The non-activating panel (false: the fallback window, which activates NEO and gives the keys
+        // back to the user's app as it goes — the page never hands an area to the notch from it).
+        "panel": s.panel,
         "pointer": s.pointer.map(|(x, y)| serde_json::json!({"x": x, "y": y})),
     })
 }
@@ -1080,6 +1083,8 @@ mod tests {
         assert!(!emit.contains("ticket"));
         let extras = body.split("fn extras(").nth(1).unwrap().split("\n}\n").next().unwrap();
         assert!(!extras.contains("ticket"));
+        // The page hears whether it is the non-activating panel (the fallback never hands off).
+        assert!(extras.contains("\"panel\": s.panel"));
     }
 
     #[test]

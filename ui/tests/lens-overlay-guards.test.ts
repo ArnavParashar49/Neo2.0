@@ -68,8 +68,16 @@ test("lens.css: nothing display-sized repaints when something moves", () => {
   // The sheet moves by transform, never by left/top.
   for (const b of blocks(".lx-sheet")) assert.ok(!/transition[^;]*\b(left|top)\b/.test(b), b);
   assert.ok(blocks(".lx-sheet-at").some((b) => /transition:\s*transform/.test(b)));
-  // The trail is not displayed between drags.
-  assert.ok(blocks(".lx-trail").some((b) => /display:\s*none/.test(b)));
+  // The trail: one layer for the overlay's life, hidden between drags — a press or a release only
+  // changes its opacity and visibility (never display: no layout, no layer made, nothing repainted).
+  const trail = blocks(".lx-trail");
+  assert.ok(trail.some((b) => /will-change:\s*opacity/.test(b) && /visibility:\s*hidden/.test(b) && /opacity:\s*0/.test(b)), "its own layer, hidden");
+  assert.ok(!trail.some((b) => /display\s*:/.test(b)), "never display none / block");
+  assert.ok(trail.every((b) => !/transition[^;]*\b(display|visibility)\b/.test(b)));
+  // The flying crop's shadow is in its canvas: no CSS shadow on any layer of the flight.
+  for (const b of blocks(".lx-fly").concat(blocks(".lx-fly-y"), blocks(".lx-fly-s"))) assert.ok(!/box-shadow/.test(b), b);
+  const crop = app.split("function cropOf(")[1]?.split("\n}\n")[0] ?? "";
+  assert.ok(crop.includes("shadowBlur") && crop.includes("CROP_SHADOW_PT"), "drawn once, as it is cut");
 });
 
 test("an area on its way to the notch shows no sheet, takes no adjusting, and flies on transforms alone", () => {

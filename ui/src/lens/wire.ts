@@ -438,6 +438,9 @@ export const send = {
   listen: (sel: number) => ({ cmd: "lens_listen", sel }),
   /** Show this area's results in the notch instead of the sheet (`to`: the language Translate uses). */
   handoff: (sel: number, to: string | null) => ({ cmd: "lens_handoff", sel, to: /^[A-Za-z0-9_-]{1,16}$/.test(to ?? "") ? (to as string) : "" }),
+  /** The overlay gave up waiting for the answer to `handoff`: the area stays here (the core closes
+   *  any card it made of it, and sends its results here again). */
+  handoffCancel: (sel: number) => ({ cmd: "lens_handoff", sel, cancel: true }),
 };
 
 /** What NEO's page in the notch sends about a card: each names its cid. */

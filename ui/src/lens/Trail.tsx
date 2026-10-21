@@ -1,7 +1,8 @@
 // The glowing trail while the user circles or drags, and faint brackets round what it encloses so
 // far (a rectangle-dragger sees a rectangle forming). Drawn straight into the SVG — no React render
 // per point — once per animation frame (LensApp coalesces the pointer's moves), faded out on
-// release, and not displayed at all between drags (no idle display-sized layer stays composited).
+// release by the compositor, and hidden between drags on a layer of its own that stays (lens.css: a
+// press or a release never lays out, makes a layer or paints the display's size).
 
 import { forwardRef, useImperativeHandle, useRef } from "react";
 import { bbox, smoothPath, type Box, type Pt } from "./geometry";

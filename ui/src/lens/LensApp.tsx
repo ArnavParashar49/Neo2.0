@@ -87,28 +87,48 @@ const Still = memo(function Still({ src, shown, leaving }: { src: string; shown:
   return <img className={"lx-still" + (shown ? " on" : "") + (leaving ? " leaving" : "")} src={src} alt="" draggable={false} decoding="sync" />;
 });
 
+/** Room round the crop for its shadow (points): the shadow is drawn into the crop's canvas, once, as
+ *  it is cut — no CSS shadow on the flying layer (a blurred box-shadow there makes WebKit paint a
+ *  layer the area's size, the whole display for ⌘A, as the flight starts). */
+const CROP_SHADOW_PT = 48;
+
 /** The area as a small canvas cut from the still (at most 960 px on its long side), with the hole's
- *  rounded corners and a hairline: what flies into the notch. Cut when the hand-off is asked for. */
+ *  rounded corners, a hairline and its shadow: what flies into the notch. Cut when the hand-off is
+ *  asked for. */
 function cropOf(img: HTMLImageElement | null, b: Box, W: number, H: number): HTMLCanvasElement | null {
   if (!img || !img.naturalWidth || !img.naturalHeight || !(W > 0) || !(H > 0) || !(b.w > 0) || !(b.h > 0)) return null;
   const kx = img.naturalWidth / W, ky = img.naturalHeight / H;
   const f = Math.min(1, 960 / Math.max(b.w * kx, b.h * ky));
+  const iw = Math.max(1, Math.round(b.w * kx * f));
+  const ih = Math.max(1, Math.round(b.h * ky * f));
+  const k = iw / b.w, ky2 = ih / b.h; // canvas pixels per point, across and down
+  const m = Math.ceil(CROP_SHADOW_PT * k);
   const c = document.createElement("canvas");
-  c.width = Math.max(1, Math.round(b.w * kx * f));
-  c.height = Math.max(1, Math.round(b.h * ky * f));
+  c.width = iw + 2 * m;
+  c.height = ih + 2 * m;
+  // Placed so the area itself lies exactly over the flying layer; the shadow's room hangs outside it.
+  const mx = m / k, my = m / ky2;
+  Object.assign(c.style, { left: `${-mx}px`, top: `${-my}px`, width: `${b.w + 2 * mx}px`, height: `${b.h + 2 * my}px` });
   const ctx = c.getContext("2d");
   if (!ctx) return null;
-  const k = c.width / b.w; // canvas pixels per point
   const round = (inset: number) => {
     ctx.beginPath();
-    const r = Math.max(0, Math.min(14 * k, c.width / 2, c.height / 2) - inset);
-    if (typeof ctx.roundRect === "function") ctx.roundRect(inset, inset, c.width - 2 * inset, c.height - 2 * inset, r);
-    else ctx.rect(inset, inset, c.width - 2 * inset, c.height - 2 * inset);
+    const r = Math.max(0, Math.min(14 * k, iw / 2, ih / 2) - inset);
+    if (typeof ctx.roundRect === "function") ctx.roundRect(m + inset, m + inset, iw - 2 * inset, ih - 2 * inset, r);
+    else ctx.rect(m + inset, m + inset, iw - 2 * inset, ih - 2 * inset);
   };
+  ctx.save();
+  ctx.shadowColor = "rgba(0, 0, 0, 0.35)";
+  ctx.shadowBlur = 36 * k;
+  ctx.shadowOffsetY = 12 * k;
+  round(0);
+  ctx.fillStyle = "#000";
+  ctx.fill(); // (under the picture: only its shadow shows)
+  ctx.restore();
   round(0);
   ctx.save();
   ctx.clip();
-  ctx.drawImage(img, b.x * kx, b.y * ky, b.w * kx, b.h * ky, 0, 0, c.width, c.height);
+  ctx.drawImage(img, b.x * kx, b.y * ky, b.w * kx, b.h * ky, m, m, iw, ih);
   ctx.restore();
   ctx.lineWidth = Math.max(1, k);
   ctx.strokeStyle = "rgba(255, 255, 255, 0.45)";
@@ -140,7 +160,7 @@ function Fly({ plan, crop }: { plan: FlyPlan; crop: HTMLCanvasElement | null }) 
   return (
     <div className="lx-fly" ref={x} style={{ left: b.x, top: b.y, width: b.w, height: b.h }} aria-hidden="true">
       <div className="lx-fly-y" ref={y}>
-        <div className={"lx-fly-s" + (crop ? "" : " empty")} ref={sc} />
+        <div className="lx-fly-s" ref={sc} />
       </div>
     </div>
   );

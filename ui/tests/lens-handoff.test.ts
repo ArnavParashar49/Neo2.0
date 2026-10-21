@@ -4,7 +4,7 @@
 // it waits; yes → it closes with "notch" and flies; no (or no answer) → the sheet, as before.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { HANDOFF_GIVE_UP_MS, HANDOFF_PICK_MS, FADE_MS, handingOff, initial, reduce, type Action, type Effect, type LensState } from "../src/lens/state.ts";
+import { HANDOFF_GIVE_UP_MS, HANDOFF_PICK_MS, FADE_MS, NOTCH_CHECK_MS, handingOff, initial, reduce, type Action, type Effect, type LensState } from "../src/lens/state.ts";
 import { FLY_RESET_MS, FLY_RESET_REDUCED_MS } from "../src/lens/fly.ts";
 import { DOUBLE_MS } from "../src/lens/pick.ts";
 import { box } from "../src/lens/geometry.ts";
@@ -161,6 +161,13 @@ test("no — or no answer — and the sheet shows here, complete", () => {
   assert.equal(run(again, phase(2, "warm"))[0].notchRefused, false, "a new session asks again");
   const [late] = run(opened(), { t: "select", box: box(100, 100, 300, 200), how: "drag" }, { t: "handoff_late", n: 1 });
   assert.equal(late.sel?.handoff, "no");
+  // Given up while asked: the core hears it (the card it made closes, the results come here again).
+  const [, lfx] = run(opened(), { t: "select", box: box(100, 100, 300, 200), how: "drag" }, { t: "handoff_late", n: 1 });
+  assert.deepEqual(sends(lfx).slice(-1), [{ cmd: "lens_handoff", sel: 1, cancel: true }]);
+  assert.deepEqual(send.handoffCancel(3), { cmd: "lens_handoff", sel: 3, cancel: true });
+  // …but a refusal needs no word back (the core said it).
+  const [, rfx] = run(opened(), { t: "select", box: box(100, 100, 300, 200), how: "drag" }, reply(1, false, { why: "unshown" }));
+  assert.deepEqual(sends(rfx).filter((c) => c.cancel), []);
   // A late "yes" after giving up changes nothing.
   const [after, fx] = run(late, reply(1, true));
   assert.equal(after.sel?.handoff, "no");
@@ -177,7 +184,7 @@ test("live mode (no still): handed off once captured, without coming back; back 
   assert.deepEqual(fx.filter((e) => e.t === "fly_prep"), [], "nothing to fly: the overlay is already out of the way");
   let yes: LensState;
   [yes, fx] = run(s, reply(1, true));
-  assert.deepEqual(fx, [{ t: "close", why: "notch" }]);
+  assert.deepEqual(fx, [{ t: "close", why: "notch" }, { t: "later", ms: NOTCH_CHECK_MS, action: { t: "notch_check", n: 1, tries: 1 } }]);
   assert.equal(yes.fly, null);
   [s, fx] = run(s, reply(1, false, { why: "unshown" }));
   assert.deepEqual(fx, [{ t: "peek", hidden: false }]);
@@ -218,4 +225,57 @@ test("the reset after closing into the notch waits for the flight", () => {
   const [done] = run(run(s, phase(1, "closing", { why: "notch" }))[0], { t: "reset", g: 1 });
   assert.equal(done.fly, null);
   assert.equal(done.sel, null);
+});
+
+test("live mode: the capture's timer never gives up on an area already asked about", () => {
+  let [s, fx] = run(opened({}, false), { t: "select", box: box(10, 10, 200, 100), how: "drag" });
+  const capture = later(fx, "handoff_late");
+  assert.deepEqual(capture.map((e) => e.action), [{ t: "handoff_late", n: 1, whileDue: true }]);
+  [s, fx] = run(s, msg({ t: "lens_captured", data: { sel: 1, ok: true } }));
+  assert.equal(s.sel?.handoff, "waiting");
+  const asked = later(fx, "handoff_late");
+  assert.deepEqual(asked.map((e) => e.action), [{ t: "handoff_late", n: 1 }]);
+  // The capture's 5 s run out first (the capture was slow): the ask keeps its own full wait.
+  [s, fx] = run(s, capture[0].action);
+  assert.equal(s.sel?.handoff, "waiting");
+  assert.deepEqual(fx, []);
+  [s, fx] = run(s, asked[0].action);
+  assert.equal(s.sel?.handoff, "no");
+  assert.deepEqual(sends(fx), [{ cmd: "lens_handoff", sel: 1, cancel: true }]);
+  // Never captured at all: the capture's timer gives up.
+  const [never] = run(opened({}, false), { t: "select", box: box(10, 10, 200, 100), how: "drag" }, capture[0].action);
+  assert.equal(never.sel?.handoff, "no");
+});
+
+test("after a yes the overlay must be closing: asked again, then closed plainly", () => {
+  const [s, fx] = run(opened(), { t: "select", box: box(100, 100, 300, 200), how: "drag" }, reply(1, true));
+  const check = later(fx, "notch_check");
+  assert.deepEqual(check.map((e) => [e.ms, e.action]), [[NOTCH_CHECK_MS, { t: "notch_check", n: 1, tries: 1 }]]);
+  assert.ok(NOTCH_CHECK_MS > 440, "after the shell's own 440 ms");
+  // Closing as it should: the check does nothing.
+  const [closing] = run(s, phase(1, "closing", { why: "notch" }));
+  assert.deepEqual(run(closing, check[0].action)[1], []);
+  // Still open (the shell's close was lost): "notch" again, then a plain close.
+  const [, again] = run(s, check[0].action);
+  assert.deepEqual(again.filter((e) => e.t === "close"), [{ t: "close", why: "notch" }]);
+  const next = later(again, "notch_check");
+  assert.deepEqual(next.map((e) => e.action), [{ t: "notch_check", n: 1, tries: 2 }]);
+  assert.deepEqual(run(s, next[0].action)[1], [{ t: "close", why: "cancel" }]);
+  // An older area's check, or one after the session ended: nothing.
+  assert.deepEqual(run(s, { t: "notch_check", n: 9, tries: 1 })[1], []);
+  assert.deepEqual(run(run(s, phase(1, "closing", { why: "notch" }), { t: "reset", g: 1 })[0], check[0].action)[1], []);
+});
+
+test("the shell's fallback window (no panel) never hands off: the sheet, as in v1", () => {
+  const frozen: CoreMsg = { t: "lens_frozen", data: { ok: true, ms: 100 } };
+  const [s] = run(initial(W, H, "en"), phase(1, "armed", { panel: false }), shell(1, "armed"), { t: "socket", status: "open" },
+    msg({ t: "lens_hello", data: hello() }), msg(frozen), phase(1, "open"));
+  assert.equal(s.panel, false);
+  const [d, fx] = run(s, { t: "select", box: box(100, 100, 300, 200), how: "drag" });
+  assert.deepEqual(handoffs(fx), []);
+  assert.equal(d.sel?.handoff, "none");
+  // The panel (or an older shell that doesn't say): it hands off.
+  assert.equal(opened().panel, true);
+  const [p] = run(initial(W, H, "en"), phase(1, "armed", { panel: true }));
+  assert.equal(p.panel, true);
 });
