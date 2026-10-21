@@ -2,6 +2,9 @@
 // until then), what can be done with it (chips), shopping or place links, the text read on this
 // Mac (and its translation), follow-up questions and their answers, a question box with the mic,
 // "Continue in NEO", and where the area went (the privacy line).
+//
+// It is placed by `transform` (and slides there by one, on the compositor), never by left/top; its
+// thumbnail is the small picture the core makes of the area (never a copy cut from the full still).
 
 import { useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
 import { chipsFor, langName, type Chip } from "./chips";
@@ -26,27 +29,13 @@ interface Props {
   s: LensState;
   sel: Sel;
   dispatch: (a: Action) => void;
-  still: HTMLImageElement | null;
   composer: RefObject<HTMLInputElement | null>;
   q: string;
   setQ: (q: string) => void;
 }
 
-function Thumb({ s, sel, still }: { s: LensState; sel: Sel; still: HTMLImageElement | null }) {
-  const c = useRef<HTMLCanvasElement>(null);
-  const thumb = sel.local?.thumb;
-  useEffect(() => {
-    const cv = c.current;
-    if (!cv || thumb || !still || !still.naturalWidth || !s.W || !s.H) return;
-    const ctx = cv.getContext("2d");
-    if (!ctx) return;
-    const kx = still.naturalWidth / s.W, ky = still.naturalHeight / s.H;
-    const b = sel.searched;
-    const side = Math.max(1, Math.min(b.w, b.h));
-    ctx.clearRect(0, 0, cv.width, cv.height);
-    ctx.drawImage(still, (b.x + (b.w - side) / 2) * kx, (b.y + (b.h - side) / 2) * ky, side * kx, side * ky, 0, 0, cv.width, cv.height);
-  }, [still, sel.searched, s.W, s.H, thumb]);
-  return <div className="lx-thumb" aria-hidden="true">{thumb ? <img src={thumb} alt="" /> : <canvas ref={c} width={88} height={88} />}</div>;
+function Thumb({ thumb }: { thumb?: string }) {
+  return <div className="lx-thumb" aria-hidden="true">{thumb && <img src={thumb} alt="" />}</div>;
 }
 
 function Chips({ s, sel, dispatch }: { s: LensState; sel: Sel; dispatch: (a: Action) => void }) {
@@ -163,7 +152,7 @@ function Thread({ sel }: { sel: Sel }) {
   );
 }
 
-export function Sheet({ s, sel, dispatch, still, composer, q, setQ }: Props) {
+export function Sheet({ s, sel, dispatch, composer, q, setQ }: Props) {
   const ref = useRef<HTMLDivElement>(null);
   const [h, setH] = useState(260);
   const side = useRef<Side | undefined>(undefined);
@@ -194,17 +183,18 @@ export function Sheet({ s, sel, dispatch, still, composer, q, setQ }: Props) {
   const ask = () => { if (q.trim()) { dispatch({ t: "ask", q }); setQ(""); } };
 
   return (
+    <div className="lx-sheet-at" style={{ transform: `translate3d(${place.x}px, ${place.y}px, 0)` }}>
     <div
       ref={ref}
       className="lx-sheet"
       role="dialog"
       aria-label="Search Screen results"
-      style={{ left: place.x, top: place.y, width: place.w, maxHeight: place.maxH }}
+      style={{ width: place.w, maxHeight: place.maxH }}
       onPointerDown={(e) => e.stopPropagation()}
     >
       <div className="lx-sheet-scroll">
         <div className="lx-head">
-          <Thumb s={s} sel={sel} still={still} />
+          <Thumb thumb={sel.local?.thumb} />
           <div className="lx-titles">
             <div className={"lx-title" + (thinking && sel.captured !== "failed" ? " lx-shimmer" : "")}>{title}</div>
             {sub && <div className="lx-sub">{sub}</div>}
@@ -251,6 +241,7 @@ export function Sheet({ s, sel, dispatch, still, composer, q, setQ }: Props) {
         <button className="lx-continue" onClick={() => dispatch({ t: "continue", text: q })}>Continue in NEO →</button>
         <div className="lx-privacy" title={privacyLine(s)}>{privacyLine(s)}</div>
       </div>
+    </div>
     </div>
   );
 }

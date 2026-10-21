@@ -4,16 +4,22 @@
 // decides is ./state.ts's reducer; this file wires the reducer to the shell, the socket, the
 // pointer and the keys, and draws: the still, the glow, the trail, the brackets, the sheet.
 //
+// The pointer never touches React state: a move only updates refs, and its work — the cursor, the
+// trail, a corner being dragged, smart pick's hover outline (./hover.ts) — runs once per animation
+// frame and writes the few elements it moves directly. Nothing display-sized repaints while the
+// mouse moves: the still sits on its own layer and is never rendered again once it is in.
+//
 // Open, the window covers the display and takes every click, so a page that broke must never stay
 // up: a render error (the boundary) or an uncaught one closes it, and the page tells the shell it is
 // alive every second (`painted`) — the shell closes one that falls silent, and the panel's own Esc
 // works with no page at all (lens.rs).
 
-import { Component, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Component, memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { EdgeGlow } from "./EdgeGlow";
 import { Trail, type TrailHandle } from "./Trail";
-import { Hover, Selection } from "./Selection";
+import { SelectionView, type SelectionHandle } from "./Selection";
 import { Sheet } from "./Sheet";
+import { makeHover, type Hover } from "./hover";
 import { Card } from "./Cards";
 import { tauriDoor, type Door } from "./door";
 import { LensSocket, type SocketLike } from "./socket";
@@ -26,7 +32,6 @@ import { wsToken } from "../shell";
 import "./lens.css";
 
 const IDLE_MS = 3 * 60_000;
-const HOVER_REST_MS = 150;
 const ALIVE_MS = 1000; // open: "still here" to the shell this often (it closes a page silent for 5 s)
 const LIVE_SETTLE_MS = 70;
 const LIVE_GIVE_BACK_MS = 2500;
@@ -74,6 +79,16 @@ export function LensApp() {
   return <LensBoundary><Overlay /></LensBoundary>;
 }
 
+/** The screen as it was: on its own composited layer, and never rendered again for the same props
+ *  (whatever else the overlay renders). Mounted, at opacity 0, as soon as its URL is known, so it is
+ *  decoded and uploaded before it shows. */
+const Still = memo(function Still({ src, shown, leaving }: { src: string; shown: boolean; leaving: boolean }) {
+  return <img className={"lx-still" + (shown ? " on" : "") + (leaving ? " leaving" : "")} src={src} alt="" draggable={false} decoding="sync" />;
+});
+
+/** Whether smart pick's hover outline may show now. */
+const hovers = (st: LensState) => st.phase === "open" && !!st.regions && !st.sel && !st.card && st.candidate < 0 && !st.pendingPick;
+
 function Overlay() {
   const [s, setS] = useState<LensState>(() => initial(window.innerWidth, window.innerHeight, readTranslateTo()));
   const sref = useRef(s);
@@ -82,7 +97,9 @@ function Overlay() {
   const timers = useRef(new Set<number>());
   const trail = useRef<TrailHandle>(null);
   const surface = useRef<HTMLDivElement>(null);
-  const stillImg = useRef<HTMLImageElement>(null);
+  const selView = useRef<SelectionHandle>(null);
+  const hoverEl = useRef<HTMLDivElement>(null);
+  const hover = useRef<Hover | null>(null);
   const composer = useRef<HTMLInputElement>(null);
   const drag = useRef<Drag | null>(null);
   const space = useRef(false);
@@ -90,8 +107,9 @@ function Overlay() {
   /** The session (g) the pointer was last seeded for, and whether it has moved since. */
   const seeded = useRef<{ g: number; moved: boolean }>({ g: -1, moved: false });
   const lastClick = useRef<{ t: number; p: Pt } | null>(null);
-  const hoverTimer = useRef<number | undefined>(undefined);
-  const raf = useRef<number | undefined>(undefined);
+  /** The pointer's work for the next animation frame is pending. */
+  const frame = useRef<number | undefined>(undefined);
+  const cursor = useRef("");
   const active = useRef(Date.now());
   const [q, setQ] = useState("");
   const mqReduced = useMedia("(prefers-reduced-motion: reduce)");
@@ -280,7 +298,50 @@ function Overlay() {
   }, [dispatch]);
 
   // ---- the pointer ---------------------------------------------------------------------------
-  const setCursor = (c: string) => { if (surface.current && surface.current.style.cursor !== c) surface.current.style.cursor = c; };
+  // Smart pick's hover outline: one element, written here and nowhere else (never through React).
+  useEffect(() => {
+    let size = "";
+    const write = (b: Box | null) => {
+      const el = hoverEl.current;
+      if (!el) return;
+      if (!b) { el.classList.remove("on"); return; }
+      el.style.transform = `translate3d(${b.x}px, ${b.y}px, 0)`;
+      const wh = `${b.w}x${b.h}`;
+      if (wh !== size) { el.style.width = `${b.w}px`; el.style.height = `${b.h}px`; size = wh; }
+      el.classList.add("on");
+    };
+    const h = makeHover({
+      raf: (cb) => requestAnimationFrame(cb),
+      cancelRaf: (id) => cancelAnimationFrame(id),
+      setTimeout: (cb, ms) => window.setTimeout(cb, ms),
+      clearTimeout: (id) => window.clearTimeout(id),
+      regionAt: (p) => { const st = sref.current; return hovers(st) ? regionAt(st.regions, p, st.W, st.H) : null; },
+      size: () => ({ W: sref.current.W, H: sref.current.H }),
+      write,
+    });
+    hover.current = h;
+    return () => { h.dispose(); hover.current = null; if (frame.current !== undefined) cancelAnimationFrame(frame.current); };
+  }, []);
+  // A selection, a Tab candidate, a card, a pending pick or the end of the session: no hover.
+  const hoverAllowed = hovers(s);
+  useEffect(() => { if (!hoverAllowed) hover.current?.hide(); }, [hoverAllowed]);
+
+  const setCursor = (c: string) => {
+    if (c === cursor.current) return;
+    cursor.current = c;
+    if (surface.current) surface.current.style.cursor = c;
+  };
+
+  /** The pointer's work, once per animation frame: the cursor, the trail, a corner being dragged. */
+  const pointerFrame = () => {
+    frame.current = undefined;
+    const d = drag.current;
+    const st = sref.current;
+    if (!d) { setCursor(st.sel ? CURSOR[hitTest(st.sel.box, pointer.current)] : "crosshair"); return; }
+    if (d.mode === "draw") { trail.current?.draw(d.pts); return; }
+    selView.current?.place(d.box); // (the veil and brackets follow; React hears of it on release)
+  };
+  const nextFrame = () => { if (frame.current === undefined) frame.current = requestAnimationFrame(pointerFrame); };
 
   const onDown = (e: React.PointerEvent<HTMLDivElement>) => {
     active.current = Date.now();
@@ -288,8 +349,7 @@ function Overlay() {
     if (e.button !== 0 || st.phase !== "open" || st.card) return;
     const p = { x: e.clientX, y: e.clientY };
     try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* not capturable */ }
-    window.clearTimeout(hoverTimer.current);
-    if (st.hover) dispatch({ t: "hover", box: null });
+    hover.current?.hide();
     composer.current?.blur();
     const sel = st.sel;
     // The second click of a double-click on what a click just picked (a line): its paragraph —
@@ -314,24 +374,13 @@ function Overlay() {
 
   const onMove = (e: React.PointerEvent<HTMLDivElement>) => {
     const p = { x: e.clientX, y: e.clientY };
-    const moved = Math.hypot(p.x - pointer.current.x, p.y - pointer.current.y);
+    if (Math.hypot(p.x - pointer.current.x, p.y - pointer.current.y) > 2) active.current = Date.now();
     pointer.current = p;
     seeded.current.moved = true;
     const d = drag.current;
-    const st = sref.current;
     if (!d) {
-      if (moved > 2) active.current = Date.now();
-      setCursor(st.sel ? CURSOR[hitTest(st.sel.box, p)] : "crosshair");
-      // Smart pick's hover: once the pointer rests on something.
-      if (!st.sel && st.regions && st.phase === "open" && !st.card && moved > 3) {
-        window.clearTimeout(hoverTimer.current);
-        if (st.hover) dispatch({ t: "hover", box: null });
-        hoverTimer.current = window.setTimeout(() => {
-          const now = sref.current;
-          if (drag.current || now.sel) return;
-          dispatch({ t: "hover", box: regionAt(now.regions, pointer.current, now.W, now.H)?.box ?? null });
-        }, HOVER_REST_MS);
-      }
+      hover.current?.move(p);
+      nextFrame();
       return;
     }
     if (d.mode === "draw") {
@@ -345,17 +394,12 @@ function Overlay() {
         d.pts.push(...pts);
       }
       d.last = p;
-      trail.current?.draw(d.pts);
+      nextFrame();
       return;
     }
+    const st = sref.current;
     d.box = dragBox(d.start, d.hit, p.x - d.p0.x, p.y - d.p0.y, st.W, st.H);
-    if (raf.current === undefined) {
-      raf.current = requestAnimationFrame(() => {
-        raf.current = undefined;
-        const cur = drag.current;
-        if (cur?.mode === "adjust") dispatch({ t: "moving", box: cur.box });
-      });
-    }
+    nextFrame();
   };
 
   const onUp = (e: React.PointerEvent<HTMLDivElement>) => {
@@ -393,7 +437,7 @@ function Overlay() {
 
   return (
     <div className={"lx" + (s.phase === "closing" ? " closing" : "")} data-phase={s.phase}>
-      {s.still && <img ref={stillImg} className={"lx-still" + (showStill ? " on" : "")} src={s.still} alt="" draggable={false} />}
+      {s.still && <Still src={s.still} shown={showStill} leaving={false} />}
       <div className={"lx-layer lx-scrim" + (open && !s.sel && !s.card ? " on" : "")} />
       <EdgeGlow phase={glowPhase} phaseAt={s.phaseAt} toArmMs={s.toArmMs} via={s.via} reduced={reduced} selected={!!s.sel} W={s.W} H={s.H} />
       {open && (
@@ -409,9 +453,9 @@ function Overlay() {
         />
       )}
       <Trail ref={trail} reduced={reduced} />
-      {s.sel && <Selection key={s.sel.n} box={s.sel.box} />}
-      {candidate && !s.sel && <Selection key={`c${s.candidate}`} box={candidate} candidate label={`Region ${s.candidate + 1} of ${stops.length}. Return selects it.`} />}
-      {s.hover && !s.sel && !candidate && <Hover box={s.hover} />}
+      {s.sel && <SelectionView ref={selView} key={s.sel.n} box={s.sel.box} W={s.W} H={s.H} />}
+      {candidate && !s.sel && <SelectionView key={`c${s.candidate}`} box={candidate} W={s.W} H={s.H} candidate label={`Region ${s.candidate + 1} of ${stops.length}. Return selects it.`} />}
+      <div className="lx-hover" ref={hoverEl} aria-hidden="true" />
       {s.pendingPick && <div className="lx-dot" style={{ left: s.pendingPick.at.x, top: s.pendingPick.at.y }} aria-hidden="true" />}
       {pill && (
         <div className="lx-pill" style={{ top: s.safeTop + 14 }} role="status">
@@ -422,7 +466,7 @@ function Overlay() {
         </div>
       )}
       {s.sel && (open || s.phase === "closing") && !s.card && (
-        <Sheet s={s} sel={s.sel} dispatch={dispatch} still={stillImg.current} composer={composer} q={q} setQ={setQ} />
+        <Sheet s={s} sel={s.sel} dispatch={dispatch} composer={composer} q={q} setQ={setQ} />
       )}
       {s.card && (open || s.phase === "closing") && <Card kind={s.card} dispatch={dispatch} />}
     </div>

@@ -1,6 +1,7 @@
 // Search Screen's overlay as one pure reducer: the shell's phases, the core's messages, the user's
-// pointer and keys go in; the next state and what to do about it (send this, close, peek…) come
-// out. LensApp.tsx runs the effects; the tests drive it with fakes.
+// clicks, drags and keys go in; the next state and what to do about it (send this, close, peek…)
+// come out. LensApp.tsx runs the effects; the tests drive it with fakes. The pointer merely moving
+// never comes here (LensApp writes a corner being dragged and smart pick's outline directly).
 
 import { atLeast, box, iou, nudge, toRect, type Box, type Pt } from "./geometry.ts";
 import { pick, regionAt, tabStops, windowAt } from "./pick.ts";
@@ -73,7 +74,6 @@ export interface LensState {
   /** Tab's candidate (an index into tabStops), -1 for none. */
   candidate: number;
   pendingPick: { at: Pt; double: boolean } | null;
-  hover: Box | null;
   /** Bumped by each arrow key / adjustment: only the last one's timer re-asks. */
   moveV: number;
   /** The language the user last translated into (kept by the page across sessions). */
@@ -107,10 +107,8 @@ export type Action =
   | { t: "select"; box: Box; how: How }
   | { t: "click"; at: Pt; double: boolean }
   | { t: "pick_now"; g: number }
-  | { t: "moving"; box: Box }
   | { t: "adjusted"; box: Box }
   | { t: "move_due"; v: number }
-  | { t: "hover"; box: Box | null }
   | { t: "key"; key: KeyInfo }
   | { t: "chip"; kind: string; id?: string; to?: string }
   | { t: "translate_to"; to: string }
@@ -154,7 +152,7 @@ export function initial(W = 0, H = 0, translateTo: string | null = null): LensSt
     g: 0, phase: "idle", phaseAt: 0, toArmMs: 0, via: "hold", why: "", flags: NO_FLAGS, safeTop: 0, W, H,
     ticket: null, core: null, sc: true, socket: "idle", hello: null, frozen: "pending", frozenWhy: "", still: null,
     regions: null, sel: null, nextSel: 1, nextQid: 1, card: null, prefill: null, candidate: -1, pendingPick: null,
-    hover: null, moveV: 0, translateTo, coreState: "",
+    moveV: 0, translateTo, coreState: "",
   };
 }
 
@@ -233,7 +231,7 @@ function newSel(s: LensState, b: Box, how: How): [LensState, Effect[]] {
     local: null, answer: null, links: [], thread: [], translation: null, notes: {},
     question: first ? s.prefill : null, searchedWeb: false, sentTo: [],
   };
-  return flush({ ...s, sel, nextSel: s.nextSel + 1, hover: null, candidate: -1, pendingPick: null });
+  return flush({ ...s, sel, nextSel: s.nextSel + 1, candidate: -1, pendingPick: null });
 }
 
 function withSel(s: LensState, n: number, f: (sel: Sel) => Sel): LensState {
@@ -342,7 +340,7 @@ function onKey(s: LensState, k: KeyInfo): [LensState, Effect[]] {
     if (!all.length) return [s, []];
     const n = all.length;
     const i = s.candidate < 0 ? (k.shift ? n - 1 : 0) : (s.candidate + (k.shift ? -1 : 1) + n) % n;
-    return [{ ...s, candidate: i, hover: null }, []];
+    return [{ ...s, candidate: i }, []];
   }
   if (k.key === "Enter") {
     const all = stops();
@@ -435,8 +433,6 @@ export function reduce(s: LensState, a: Action): [LensState, Effect[]] {
     }
     case "pick_now":
       return a.g === s.g ? doPick(s) : [s, []];
-    case "moving":
-      return s.sel ? [withSel(s, s.sel.n, (x) => ({ ...x, box: atLeast(a.box, s.W, s.H) })), []] : [s, []];
     case "adjusted": {
       if (!s.sel) return [s, []];
       const v = s.moveV + 1;
@@ -448,8 +444,6 @@ export function reduce(s: LensState, a: Action): [LensState, Effect[]] {
       if (iou(s.sel.box, s.sel.searched) >= REASK_IOU) return [s, []];
       return newSel(s, s.sel.box, "adjust");
     }
-    case "hover":
-      return [{ ...s, hover: a.box }, []];
     case "key":
       return onKey(s, a.key);
     case "chip": {

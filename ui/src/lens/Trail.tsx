@@ -1,6 +1,7 @@
 // The glowing trail while the user circles or drags, and faint brackets round what it encloses so
-// far (a rectangle-dragger sees a rectangle forming). Drawn straight into the SVG on each pointer
-// move — no React render per point — and faded out on release.
+// far (a rectangle-dragger sees a rectangle forming). Drawn straight into the SVG — no React render
+// per point — once per animation frame (LensApp coalesces the pointer's moves), faded out on
+// release, and not displayed at all between drags (no idle display-sized layer stays composited).
 
 import { forwardRef, useImperativeHandle, useRef } from "react";
 import { bbox, smoothPath, type Box, type Pt } from "./geometry";
@@ -36,6 +37,7 @@ export const Trail = forwardRef<TrailHandle, { reduced: boolean }>(function Trai
       const s = svg.current;
       if (!s || !pts.length) return;
       s.classList.remove("fading");
+      s.classList.add("on");
       const d = smoothPath(pts);
       for (const p of paths.current) p?.setAttribute("d", d);
       const a = pts[0], z = pts[pts.length - 1];
@@ -55,6 +57,7 @@ export const Trail = forwardRef<TrailHandle, { reduced: boolean }>(function Trai
         for (const p of paths.current) p?.setAttribute("d", "");
         box.current?.setAttribute("d", "");
         head.current?.setAttribute("cx", "-100");
+        svg.current.classList.remove("on", "fading");
       }, 220);
     },
   }), []);
