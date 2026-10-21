@@ -9,6 +9,11 @@
 // the one sentence the card's mic asked for), a browser or a song card opening — and so does anything
 // of the chat's own that must be seen (`needChat`: NEO asking for an OK, a browser's turn for the
 // user), which no card ever hides.
+//
+// A card NotchHub's panel folds away (Esc, the ×, a click elsewhere, an action that opened something —
+// any close but the ones after which the panel stays, as the chat) stays on the page, as it was, until
+// the page is off screen: the island's content fades out with the card in it, as it fades the chat
+// out — never the chat swapped in under the fold, never a new size asked for on the way down.
 
 import { useSyncExternalStore } from "react";
 import { emptyResult, resultAction, resultMsg, type Result, type ResultAction, type ResultHello, type ResultOp } from "./result.ts";
@@ -38,6 +43,18 @@ const realClock: Clock = {
 /** A user's sentence within this long after the mic stopped listening is still the card's own. */
 export const LISTEN_GRACE_MS = 2000;
 
+/** At most this long a card the panel folds away stays on the page. NotchHub's island lets its content
+ *  go within 0.15 s and takes the page off screen (`visibilitychange`) by about 0.2 s; this is only
+ *  the fallback for a host that never does. */
+export const FOLD_HOLD_MS = 600;
+
+/** Closes after which NotchHub keeps its panel, as the chat (Continue in NEO, a chat turn), or never
+ *  opened it for the card: the chat comes back at once. Every other close folds the panel. */
+export const CLOSE_KEEPS_PANEL: ReadonlySet<string> = new Set(["continue", "chat", "unshown"]);
+
+/** Whether the page is on screen (in the notch: NotchHub's panel is open with it). */
+const pageVisible = () => typeof document !== "undefined" && document.visibilityState === "visible";
+
 export class LensCardHub {
   private s: CardSnap | null = null;
   private listeners = new Set<() => void>();
@@ -46,12 +63,16 @@ export class LensCardHub {
   private listenOffAt = -Infinity;
   private notes = new Map<string, number>();
   private chatNeeded = false;
+  /** The card closed and NotchHub's panel is folding it away: the fallback that drops it. */
+  private foldHold: number | null = null;
   readonly inNotch: boolean;
   private clock: Clock;
+  private visible: () => boolean;
 
-  constructor(inNotch: boolean, clock: Clock = realClock) {
+  constructor(inNotch: boolean, clock: Clock = realClock, visible: () => boolean = pageVisible) {
     this.inNotch = inNotch;
     this.clock = clock;
+    this.visible = visible;
   }
 
   // ---- store ----------------------------------------------------------------------------------
@@ -59,6 +80,7 @@ export class LensCardHub {
   getSnapshot = (): CardSnap | null => this.s;
   subscribe = (fn: () => void) => { this.listeners.add(fn); return () => { this.listeners.delete(fn); }; };
   private set(next: CardSnap | null) {
+    this.endHold();
     this.s = next ? { ...next, v: (this.s?.v ?? 0) + 1 } : null;
     if (!next) this.clearNotes();
     for (const l of this.listeners) l();
@@ -69,6 +91,37 @@ export class LensCardHub {
   }
 
   get cid(): string | null { return this.s?.cid ?? null; }
+
+  /** The card on the page is closed, and stays only while NotchHub's panel folds it away: nothing on
+   *  it acts, nothing it hears changes it. */
+  get folding(): boolean { return this.foldHold !== null; }
+
+  // ---- the fold ---------------------------------------------------------------------------------
+  /** The card closed (`why`): in the notch, unless the panel stays (or never opened), it stays as it
+   *  is until the page is off screen — the panel folding takes it away with it. */
+  private gone(why: string) {
+    if (!this.inNotch || CLOSE_KEEPS_PANEL.has(why) || !this.visible()) { this.set(null); return; }
+    if (this.foldHold !== null) return;
+    this.clearNotes(); // (nothing on it changes now)
+    this.foldHold = this.clock.set(() => { this.foldHold = null; this.set(null); }, FOLD_HOLD_MS);
+  }
+
+  private endHold() {
+    if (this.foldHold === null) return;
+    this.clock.clear(this.foldHold);
+    this.foldHold = null;
+  }
+
+  /** The page went off screen (or came back): a card the panel was folding away is gone now. */
+  visibilityChanged() {
+    if (this.foldHold !== null && !this.visible()) this.set(null);
+  }
+
+  /** NotchHub opened its panel (`neo://show`): a card it was folding away gives the page back to the
+   *  chat (the user opened it again at once). A new card has replaced it already. */
+  panelShown() {
+    if (this.foldHold !== null) this.set(null);
+  }
 
   // ---- the connection ---------------------------------------------------------------------------
   setSender(fn: Send) { this.sendFn = fn; }
@@ -94,7 +147,7 @@ export class LensCardHub {
       const m = parseCard(data);
       if (!m) return true;
       if (!m.open) {
-        if (this.s?.cid === m.cid) this.set(null);
+        if (this.s?.cid === m.cid && this.foldHold === null) this.gone(m.why);
         return true;
       }
       if (!m.card) return true;
@@ -112,6 +165,7 @@ export class LensCardHub {
     const s = this.s;
     if (!this.inNotch || typeof d.cid !== "string" || !CID.test(d.cid)) return false;
     if (!s || d.cid !== s.cid) return true; // (another card's: dropped)
+    if (this.foldHold !== null) return true; // (closed, folding away: it stays as it was)
     const m = parseLens(type, data);
     if (!m) return true;
     if (m.t === "lens_listening") {
@@ -153,18 +207,20 @@ export class LensCardHub {
   /** A click or key on the card's results: as the card's own commands. */
   op(a: ResultAction) {
     const s = this.s;
-    if (!s) return;
+    if (!s || this.foldHold !== null) return;
     const out = resultAction(s.r, a, s.nextQid);
     this.set({ ...s, r: out.r, nextQid: out.nextQid, translateTo: out.translateTo ?? s.translateTo });
     for (const o of out.ops) this.sendFn(cardCmd(s.cid, o));
   }
 
-  /** Esc, the ×, or a chat turn: the card closes now (the core tells NotchHub). */
-  close(why: "esc" | "x" | "chat") {
+  /** Esc, the ×, or a chat turn: the card closes now (the core tells NotchHub) — and, but for a chat
+   *  turn, stays on the page while the panel folds it away. Returns whether it closed (once). */
+  close(why: "esc" | "x" | "chat"): boolean {
     const s = this.s;
-    if (!s) return;
+    if (!s || this.foldHold !== null) return false;
     this.sendFn(cardSend.close(s.cid, why));
-    this.set(null);
+    this.gone(why);
+    return true;
   }
 
   /** Something of the chat's own must be seen while `on` — NEO asking for an OK (its confirm card),

@@ -9,6 +9,9 @@
 // text unless something is selected or the box has the keys (as the key, or — when a host sends the
 // key straight to WebKit as its Copy command — as the copy that follows); a printable key goes into
 // the box; Esc closes the card and folds the panel (NotchHub folds on Esc too).
+//
+// Closed, it stays as it was while NotchHub's panel folds it away (./card.ts `folding`): no key, click
+// or copy acts on it, and it never measures itself again — the panel keeps its size to the end.
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { SheetBody } from "./Sheet";
@@ -44,8 +47,9 @@ export function LensCard({ hub, snap, onNatural }: { hub: LensCardHub; snap: Car
   const composer = useRef<HTMLInputElement>(null);
 
   const measure = useCallback(() => {
+    if (hub.folding) return; // (folding away: the panel keeps its size to the end)
     if (root.current && scroll.current) onNatural(natural(root.current, scroll.current));
-  }, [onNatural]);
+  }, [hub, onNatural]);
   // Every change of the results, measured before it paints (the size request reaches NotchHub
   // before its panel opens); later changes of size (a section unfolded, a font in) by observing the
   // column's children — and a child coming or going (the inline language list) re-observes them.
@@ -77,12 +81,12 @@ export function LensCard({ hub, snap, onNatural }: { hub: LensCardHub; snap: Car
 
   useEffect(() => {
     const down = (e: KeyboardEvent) => {
+      if (hub.folding) return; // (closed: the panel is folding it away)
       const inBox = document.activeElement === composer.current && !!composer.current;
       if (e.isComposing || e.keyCode === 229) return; // (the input method's own keys)
       if (e.key === "Escape") {
         e.preventDefault();
-        hub.close("esc");
-        void hideWindow(); // (NotchHub folds its panel on Esc as well)
+        if (hub.close("esc")) void hideWindow(); // (NotchHub folds its panel on Esc as well)
         return;
       }
       if (e.metaKey && !e.shiftKey && !e.altKey && !e.ctrlKey && e.key.toLowerCase() === "c" && copiesArea(composer.current)) {
@@ -100,9 +104,9 @@ export function LensCard({ hub, snap, onNatural }: { hub: LensCardHub; snap: Car
     // A host that sends ⌘C to WebKit as its Copy command (no keydown reaches the page): with nothing
     // selected the command is enabled only when the page says it copies (beforecopy), and the copy
     // itself is the area's text.
-    const beforeCopy = (e: Event) => { if (copiesArea(composer.current)) e.preventDefault(); };
+    const beforeCopy = (e: Event) => { if (!hub.folding && copiesArea(composer.current)) e.preventDefault(); };
     const copy = (e: Event) => {
-      if (!copiesArea(composer.current)) return;
+      if (hub.folding || !copiesArea(composer.current)) return;
       const act = hub.snap()?.r.local?.actions.find((a) => a.kind === "copy_text");
       if (!act) return;
       e.preventDefault();
@@ -128,7 +132,7 @@ export function LensCard({ hub, snap, onNatural }: { hub: LensCardHub; snap: Car
         translateTo={snap.translateTo}
         listening={snap.listening}
         act={(a) => hub.op(a)}
-        onClose={() => { hub.close("x"); void hideWindow(); }}
+        onClose={() => { if (hub.close("x")) void hideWindow(); }}
         closeLabel="Close"
         composer={composer}
         q={q}

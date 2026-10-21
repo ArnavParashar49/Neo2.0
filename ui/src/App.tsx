@@ -535,10 +535,11 @@ export default function App() {
   }, [live, bmode, toggleFocus, toggleMini, popOut, bringBack]);
 
   useEffect(() => {
-    const v = () => { hub.visibilityChanged(); cam.visibilityChanged(); };
+    // (Search Screen's card folding away with NotchHub's panel goes once the page is off screen.)
+    const v = () => { hub.visibilityChanged(); cam.visibilityChanged(); neo.lensCard.visibilityChanged(); };
     document.addEventListener("visibilitychange", v);
     return () => document.removeEventListener("visibilitychange", v);
-  }, [hub, cam]);
+  }, [hub, cam, neo.lensCard]);
 
   // Native summon (hotkey / tray) → expand + arm the voice session.
   useEffect(() => {
@@ -551,9 +552,10 @@ export default function App() {
   // chat is on screen, so the input takes the keyboard as it does when the card expands here.
   useEffect(() => {
     if (!inNotch) return;
-    const un = listen("neo://show", () => expand());
+    // (A Search Screen card the panel was folding away gives way to the chat it opens on.)
+    const un = listen("neo://show", () => { neo.lensCard.panelShown(); expand(); });
     return () => { un.then((f) => f()).catch(() => {}); };
-  }, [expand]);
+  }, [expand, neo.lensCard]);
 
   // A confirmation request always surfaces the card.
   useEffect(() => { if (confirming) expand(); }, [confirming, expand]);

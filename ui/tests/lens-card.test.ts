@@ -2,10 +2,11 @@
 // snapshot becomes the card, another card's messages are dropped, every click is the card's own
 // command naming its cid, close sends once and clears, a chat turn takes the panel back (but never
 // the one sentence the card's mic asked for), the page says lens_card_hello only in the notch — the
-// sheet and the card ask the core for the same things — and the card's size never bounces.
+// sheet and the card ask the core for the same things — and the card's size never bounces. A card the
+// panel folds away stays as it was until the page is off screen.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { CARD_SIZE, LISTEN_GRACE_MS, LensCardHub, cardHeight, cardWidth, naturalHeight, settleHeight, type Clock } from "../src/lens/card.ts";
+import { CARD_SIZE, CLOSE_KEEPS_PANEL, FOLD_HOLD_MS, LISTEN_GRACE_MS, LensCardHub, cardHeight, cardWidth, naturalHeight, settleHeight, type Clock } from "../src/lens/card.ts";
 import { readFileSync } from "node:fs";
 import { initial, reduce, type Action, type Effect, type LensState } from "../src/lens/state.ts";
 import type { CoreMsg, LensHello } from "../src/lens/wire.ts";
@@ -29,12 +30,14 @@ function fakeClock() {
   return { clock, advance, pending: () => due.size };
 }
 
-function hub(inNotch = true) {
+/** `onScreen`: the page is on screen (NotchHub's panel open with it); none here by default, as in node. */
+function hub(inNotch = true, onScreen = false) {
   const c = fakeClock();
-  const h = new LensCardHub(inNotch, c.clock);
+  const screen = { on: onScreen };
+  const h = new LensCardHub(inNotch, c.clock, () => screen.on);
   const sent: Record<string, unknown>[] = [];
   h.setSender((cmd) => { sent.push(cmd); return true; });
-  return { h, sent, ...c };
+  return { h, sent, screen, ...c };
 }
 
 const snapshot = (over: Record<string, unknown> = {}) => ({
@@ -119,6 +122,137 @@ test("close sends once and clears", () => {
   h.close("x");
   assert.deepEqual(sent, [{ cmd: "lens_card_close", cid: CID, why: "esc" }]);
   assert.equal(h.snap(), null);
+});
+
+// ---- the fold: the card stays as it was while NotchHub's panel folds it away ------------------------------
+
+test("Esc or the ×: the card closes, and stays as it was — nothing changes it — until the page is off screen", () => {
+  for (const why of ["esc", "x"] as const) {
+    const { h, sent, screen, pending } = hub(true, true);
+    let renders = 0;
+    h.subscribe(() => { renders++; });
+    h.handle("lens_card", snapshot());
+    const shown = h.snap();
+    renders = 0;
+    assert.equal(h.close(why), true);
+    assert.deepEqual(sent, [{ cmd: "lens_card_close", cid: CID, why }], "the core hears it at once (it tells NotchHub)");
+    assert.equal(h.snap(), shown, "the very same card: the page doesn't render anything new under the fold");
+    assert.equal(h.folding, true);
+    assert.equal(renders, 0);
+    // Closed: a second close, a click, its results, the core's echo — none of it acts or changes it.
+    assert.equal(h.close("x"), false);
+    h.op({ t: "chip", kind: "copy_text", id: "a1" });
+    h.handle("lens_answer", { cid: CID, sel: 7, state: "done", title: "Late", actions: [] });
+    h.handle("lens_listening", { cid: CID, on: true });
+    h.handle("lens_card", { cid: CID, open: false, why: "fold" });
+    h.chat("transcript", { role: "user", text: "Neo, what's the time", final: true });
+    h.needChat(true);
+    h.needChat(false);
+    assert.equal(sent.length, 1, why);
+    assert.equal(h.snap(), shown, why);
+    assert.equal(renders, 0, why);
+    // NotchHub took the page off screen (its panel folded): the card goes — the chat is there next time.
+    h.visibilityChanged();
+    assert.equal(h.snap(), shown, "still on screen: it stays");
+    screen.on = false;
+    h.visibilityChanged();
+    assert.equal(h.snap(), null);
+    assert.equal(h.folding, false);
+    assert.equal(renders, 1);
+    assert.equal(pending(), 0, "no fallback left behind");
+  }
+});
+
+test("the core closes it: the panel folds it away — but Continue in NEO, a chat turn or an unshown card give the chat back at once", () => {
+  assert.deepEqual([...CLOSE_KEEPS_PANEL].sort(), ["chat", "continue", "unshown"]);
+  for (const why of ["fold", "away", "action", "timeout", "stop", "erased", "replaced", "idle", "gone", "done", "esc", "x"]) {
+    const { h } = hub(true, true);
+    h.handle("lens_card", snapshot());
+    const shown = h.snap();
+    h.handle("lens_card", { cid: CID, open: false, why });
+    assert.equal(h.snap(), shown, why);
+    assert.equal(h.folding, true, why);
+  }
+  for (const why of ["continue", "chat", "unshown"]) {
+    const { h } = hub(true, true);
+    h.handle("lens_card", snapshot());
+    h.handle("lens_card", { cid: CID, open: false, why });
+    assert.equal(h.snap(), null, why);
+    assert.equal(h.folding, false, why);
+  }
+  // A chat turn (NotchHub keeps its panel, as the chat): the chat at once, as before.
+  const turn = hub(true, true);
+  turn.h.handle("lens_card", snapshot());
+  turn.h.chat("transcript", { role: "user", text: "Neo, set a timer", final: true });
+  assert.equal(turn.h.snap(), null);
+  // Off screen already (the panel closed, or never opened): nothing to fold away.
+  const off = hub(true, false);
+  off.h.handle("lens_card", snapshot());
+  off.h.handle("lens_card", { cid: CID, open: false, why: "fold" });
+  assert.equal(off.h.snap(), null);
+  off.h.handle("lens_card", snapshot());
+  assert.equal(off.h.close("esc"), true);
+  assert.equal(off.h.snap(), null);
+  // NEO's own window shows no card, and folds nothing.
+  const win = hub(false, true);
+  win.h.handle("lens_card", snapshot());
+  win.h.handle("lens_card", { cid: CID, open: false, why: "fold" });
+  assert.equal(win.h.snap(), null);
+});
+
+test("folding away: the panel opened again gives the page to the chat; a new card replaces it; a host that never folds, FOLD_HOLD_MS", () => {
+  const again = hub(true, true);
+  again.h.handle("lens_card", snapshot());
+  again.h.close("esc");
+  again.h.panelShown();
+  assert.equal(again.h.snap(), null, "neo://show: the chat, at once");
+  again.h.handle("lens_card", snapshot());
+  again.h.panelShown();
+  assert.equal(again.h.snap()?.cid, CID, "a live card's own panel opening keeps it");
+
+  const next = hub(true, true);
+  next.h.handle("lens_card", snapshot());
+  next.h.close("esc");
+  next.h.handle("lens_card", { ...snapshot(), cid: OTHER });
+  assert.equal(next.h.snap()?.cid, OTHER);
+  assert.equal(next.h.folding, false);
+  next.h.handle("lens_answer", { cid: OTHER, sel: 7, state: "done", title: "The new one's", actions: [] });
+  assert.equal(next.h.snap()?.r.answer?.title, "The new one's");
+  assert.equal(next.pending(), 0, "the old card's fallback is gone with it");
+
+  const stuck = hub(true, true);
+  stuck.h.handle("lens_card", snapshot());
+  stuck.h.op({ t: "chip", kind: "copy_text", id: "a1" });
+  stuck.h.handle("lens_done", { cid: CID, sel: 7, id: "a1", ok: true, note: "copied", close: false });
+  const shown = stuck.h.snap();
+  stuck.h.close("x");
+  stuck.advance(FOLD_HOLD_MS - 1);
+  assert.equal(stuck.h.snap(), shown, "its note doesn't clear under the fold either");
+  stuck.advance(1);
+  assert.equal(stuck.h.snap(), null);
+  assert.ok(FOLD_HOLD_MS >= 400 && FOLD_HOLD_MS <= 1000, "past the island's fold (~0.2 s off screen), well short of a stuck card");
+
+  const dropped = hub(true, true);
+  dropped.h.handle("lens_card", snapshot());
+  dropped.h.close("esc");
+  dropped.h.setConnected(false);
+  assert.equal(dropped.h.snap(), null);
+  assert.equal(dropped.pending(), 0);
+});
+
+test("LensCard: closed, it acts on nothing and measures nothing; Esc and the × fold the panel once; App drops it off screen", () => {
+  const card = readFileSync(new URL("../src/lens/LensCard.tsx", import.meta.url), "utf8");
+  const app = readFileSync(new URL("../src/App.tsx", import.meta.url), "utf8");
+  const measure = card.split("const measure = useCallback(() => {")[1]?.split("}, [")[0] ?? "";
+  assert.ok(measure.trimStart().startsWith("if (hub.folding) return;"), measure);
+  const down = card.split("const down = (e: KeyboardEvent) => {")[1]?.split("};")[0] ?? "";
+  assert.ok(down.trimStart().startsWith("if (hub.folding) return;"), down.slice(0, 200));
+  assert.ok(down.includes('if (hub.close("esc")) void hideWindow();'), down);
+  assert.ok(card.includes('onClose={() => { if (hub.close("x")) void hideWindow(); }}'));
+  assert.ok(card.includes("if (!hub.folding && copiesArea(composer.current)) e.preventDefault();"));
+  assert.ok(card.includes("if (hub.folding || !copiesArea(composer.current)) return;"));
+  assert.match(app, /neo\.lensCard\.visibilityChanged\(\)/);
+  assert.match(app, /listen\("neo:\/\/show", \(\) => \{ neo\.lensCard\.panelShown\(\); expand\(\); \}\)/);
 });
 
 test("a chat turn takes the panel back: the user's own words, a browser or a song card", () => {

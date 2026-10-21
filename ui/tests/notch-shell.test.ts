@@ -98,11 +98,12 @@ test("Search Screen's card: opening it posts nothing to the host; its Esc and ×
   assert.deepEqual(posted, [], "NotchHub opens its panel for it on its own (its connection heard the card)");
   assert.deepEqual(sent, [{ cmd: "lens_card_hello" }]);
   // Esc and the ×: the card closes (the core tells NotchHub) and the page folds the panel — through
-  // hideWindow, which in the notch is the host's `collapse` (checked above).
+  // hideWindow, which in the notch is the host's `collapse` (checked above) — once: a card already
+  // closed, folding away, asks for nothing more.
   const card = readFileSync(new URL("../src/lens/LensCard.tsx", import.meta.url), "utf8");
   const esc = card.split('if (e.key === "Escape")')[1]?.split("return;")[0] ?? "";
-  assert.ok(esc.includes('hub.close("esc")') && esc.includes("hideWindow()"), esc);
-  assert.match(card, /onClose=\{\(\) => \{ hub\.close\("x"\); void hideWindow\(\); \}\}/);
+  assert.ok(esc.includes('if (hub.close("esc")) void hideWindow();'), esc);
+  assert.match(card, /onClose=\{\(\) => \{ if \(hub\.close\("x"\)\) void hideWindow\(\); \}\}/);
   assert.equal(tauriTouched, 0);
   await shell.hideWindow();
   assert.deepEqual(posted, [{ type: "collapse" }]);
