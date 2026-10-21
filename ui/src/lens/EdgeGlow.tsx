@@ -47,6 +47,8 @@ export function EdgeGlow({ phase, phaseAt, toArmMs, via, reduced, selected, W, H
   const bands = useRef<Record<Edge, HTMLDivElement | null>>({ top: null, right: null, bottom: null, left: null });
   const flowAnims = useRef<Animation[]>([]);
   const phaseAnims = useRef<Animation[]>([]);
+  /** The colours' speed the phase last set (0: still — Reduce Motion, or no glow). */
+  const rate = useRef(1);
   const last = useRef<{ phase: GlowPhase; at: number; ctx: GlowCtx } | null>(null);
   const geo = useMemo(() => strips(W || 1, H || 1), [W, H]);
 
@@ -61,6 +63,9 @@ export function EdgeGlow({ phase, phaseAt, toArmMs, via, reduced, selected, W, H
       const g = geo[edge];
       const to = `translate${g.axis}(${g.dir * geo.L}px)`;
       const a = el.animate([{ transform: `translate${g.axis}(0px)` }, { transform: to }], { duration: (PERIOD.open * 1000) / 2, iterations: Infinity, easing: "linear" });
+      // Made again (the window moved to another display): at the phase's speed, still under Reduce Motion.
+      if (rate.current === 0) a.pause();
+      else a.playbackRate = rate.current;
       flowAnims.current.push(a);
     }
     return () => { flowAnims.current.forEach((a) => a.cancel()); flowAnims.current = []; };
@@ -91,11 +96,11 @@ export function EdgeGlow({ phase, phaseAt, toArmMs, via, reduced, selected, W, H
       el.style.opacity = String(end.opacity);
     }
     // Still colours under Reduce Motion; otherwise as fast as the phase says.
-    const rate = end.period > 0 ? (PERIOD.open / end.period) : 0;
+    rate.current = end.period > 0 ? (PERIOD.open / end.period) : 0;
     for (const a of flowAnims.current) {
-      if (rate === 0) a.pause();
+      if (rate.current === 0) a.pause();
       else {
-        a.playbackRate = rate; // (keeps its place: the colours speed up, they don't jump)
+        a.playbackRate = rate.current; // (keeps its place: the colours speed up, they don't jump)
         if (a.playState === "paused") a.play();
       }
     }

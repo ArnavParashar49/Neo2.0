@@ -7,6 +7,9 @@ export type Rect = [number, number, number, number]; // x, y, w, h in display-lo
 export type How = "drag" | "lasso" | "pick" | "key" | "adjust" | "all";
 
 export interface Brain { label: string; local: boolean }
+/** Where an area (or what it holds) went: a brain the picture or its text was sent to, or the
+ *  search phrase sent to NEO's web search — every one asked, not only the one that answered. */
+export interface Sent { label: string; local: boolean; what: "picture" | "text" | "query" }
 export interface SearchProvider { word: string; label: string; image: boolean; text: boolean }
 export interface Lang { code: string; name: string }
 
@@ -32,6 +35,8 @@ export interface Regions {
   instances: Rect[];
   windows: Rect[];
   texts: string[];
+  /** False for the first part (lines, paragraphs, windows): the things are still coming. */
+  done?: boolean;
 }
 
 export type ActionKind =
@@ -53,7 +58,7 @@ export interface LocalData {
 }
 
 export type AnswerError =
-  | "no_brain" | "local_only" | "offline" | "timeout" | "failed" | "dark" | "refused" | "off";
+  | "no_brain" | "local_only" | "offline" | "timeout" | "failed" | "dark" | "refused" | "off" | "key" | "busy";
 export interface AnswerData {
   sel: number;
   state: "thinking" | "done" | "failed";
@@ -64,10 +69,11 @@ export interface AnswerData {
   brain?: Brain;
   error?: AnswerError;
   actions: Action[];
+  sentTo?: Sent[];
 }
 export interface LinkRow { id: string; title: string; host: string }
-export interface ReplyData { sel: number; qid: number; state: "thinking" | "done" | "failed"; text?: string; brain?: Brain; error?: string }
-export interface TranslationData { sel: number; to: string; text?: string; error?: string }
+export interface ReplyData { sel: number; qid: number; state: "thinking" | "done" | "failed"; text?: string; brain?: Brain; error?: string; sentTo?: Sent[] }
+export interface TranslationData { sel: number; to: string; text?: string; error?: string; sentTo?: Sent[] }
 export interface DoneData { sel: number; id: string; ok: boolean; note: string; close: boolean }
 
 export type CoreMsg =
@@ -77,11 +83,12 @@ export type CoreMsg =
   | { t: "lens_captured"; data: { sel: number; ok: boolean; error?: string } }
   | { t: "lens_local"; data: LocalData }
   | { t: "lens_answer"; data: AnswerData }
-  | { t: "lens_links"; data: { sel: number; rows: LinkRow[] } }
+  | { t: "lens_links"; data: { sel: number; rows: LinkRow[]; sentTo?: Sent[] } }
   | { t: "lens_reply"; data: ReplyData }
   | { t: "lens_translation"; data: TranslationData }
   | { t: "lens_done"; data: DoneData }
   | { t: "lens_refused"; data: { cmd: string; error: string } }
+  | { t: "lens_listening"; data: { on: boolean } }
   | { t: "state"; data: { state: string } };
 
 // Lengths the page never goes past, whatever arrives.
@@ -117,6 +124,20 @@ function brain(v: unknown): Brain | null {
   const o = obj(v);
   const label = str(o.label, 60).trim();
   return label ? { label, local: bool(o.local) } : null;
+}
+
+const WHATS: readonly Sent["what"][] = ["picture", "text", "query"];
+
+/** `sent_to`, checked (undefined when the message carried none). */
+export function sentTo(v: unknown): Sent[] | undefined {
+  if (!Array.isArray(v)) return undefined;
+  const out: Sent[] = [];
+  for (const x of v.slice(0, 12)) {
+    const b = brain(x);
+    const what = obj(x).what as Sent["what"];
+    if (b && WHATS.includes(what)) out.push({ ...b, what });
+  }
+  return out;
 }
 
 export function action(v: unknown): Action | null {
@@ -181,10 +202,11 @@ export function regions(v: unknown): Regions {
     }
   }
   const texts = Array.isArray(o.texts) ? o.texts.slice(0, MAX_BOXES).map((t) => str(t, 120)) : [];
-  return { lines, blocks: rects(o.blocks), objects: rects(o.objects), instances: rects(o.instances), windows: rects(o.windows), texts };
+  return { lines, blocks: rects(o.blocks), objects: rects(o.objects), instances: rects(o.instances), windows: rects(o.windows), texts, done: o.done !== false };
 }
 
-const ANSWER_ERRORS: readonly AnswerError[] = ["no_brain", "local_only", "offline", "timeout", "failed", "dark", "refused", "off"];
+const ANSWER_ERRORS: readonly AnswerError[] = ["no_brain", "local_only", "offline", "timeout", "failed", "dark", "refused", "off", "key", "busy"];
+const sent = (v: unknown) => { const s = sentTo(v); return s ? { sentTo: s } : {}; };
 
 /** One text message from the core, checked; null for anything that isn't Search Screen's. */
 export function parseMsg(text: string): CoreMsg | null {
@@ -207,6 +229,8 @@ export function parseMsg(text: string): CoreMsg | null {
       return typeof d.state === "string" ? { t: "state", data: { state: d.state.slice(0, 20) } } : null;
     case "lens_refused":
       return { t: "lens_refused", data: { cmd: str(d.cmd, 32), error: str(d.error, 20) } };
+    case "lens_listening":
+      return { t: "lens_listening", data: { on: bool(d.on) } };
   }
   if (sel === null) return null;
   switch (type) {
@@ -245,6 +269,7 @@ export function parseMsg(text: string): CoreMsg | null {
           ...(b ? { brain: b } : {}),
           ...(error ? { error } : {}),
           actions: actions(d.actions),
+          ...sent(d.sent_to),
         },
       };
     }
@@ -257,7 +282,7 @@ export function parseMsg(text: string): CoreMsg | null {
           if (ACTION_ID.test(id) && title && host) rows.push({ id, title, host });
         }
       }
-      return { t: "lens_links", data: { sel, rows } };
+      return { t: "lens_links", data: { sel, rows, ...sent(d.sent_to) } };
     }
     case "lens_reply": {
       const qid = int(d.qid);
@@ -266,11 +291,11 @@ export function parseMsg(text: string): CoreMsg | null {
       const b = brain(d.brain);
       return {
         t: "lens_reply",
-        data: { sel, qid, state, text: str(d.text, MAX.reply).trim() || undefined, ...(b ? { brain: b } : {}), error: str(d.error, 20) || undefined },
+        data: { sel, qid, state, text: str(d.text, MAX.reply).trim() || undefined, ...(b ? { brain: b } : {}), error: str(d.error, 20) || undefined, ...sent(d.sent_to) },
       };
     }
     case "lens_translation":
-      return { t: "lens_translation", data: { sel, to: str(d.to, MAX.lang), text: typeof d.text === "string" ? d.text.slice(0, MAX.text) : undefined, error: str(d.error, 20) || undefined } };
+      return { t: "lens_translation", data: { sel, to: str(d.to, MAX.lang), text: typeof d.text === "string" ? d.text.slice(0, MAX.text) : undefined, error: str(d.error, 20) || undefined, ...sent(d.sent_to) } };
     case "lens_done":
       return { t: "lens_done", data: { sel, id: str(d.id, 8), ok: bool(d.ok), note: str(d.note, 20), close: bool(d.close) } };
   }

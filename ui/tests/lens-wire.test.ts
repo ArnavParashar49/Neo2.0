@@ -86,6 +86,30 @@ test("every Search Screen message parses, cut to its limits", () => {
   assert.deepEqual(msg("lens_refused", { cmd: "lens_act", error: "stale" }), { t: "lens_refused", data: { cmd: "lens_act", error: "stale" } });
 });
 
+test("where an area went, the mic, smart pick in two parts, and the words for a refused key or busy brains", () => {
+  const sent = [{ label: "Gemini", local: false, what: "picture" }, { label: "Groq", local: false, what: "text" },
+    { label: "web search", local: false, what: "query" }, { label: "x", local: false, what: "secrets" }, { local: false, what: "picture" }];
+  const ans = msg("lens_answer", { sel: 1, state: "failed", error: "key", brain: { label: "Claude", local: false }, actions: [], sent_to: sent });
+  if (ans?.t !== "lens_answer") return assert.fail();
+  assert.equal(ans.data.error, "key");
+  assert.deepEqual(ans.data.sentTo, sent.slice(0, 3)); // (only the three kinds, each with a label)
+  const busy = msg("lens_answer", { sel: 1, state: "failed", error: "busy", actions: [] });
+  assert.equal(busy?.t === "lens_answer" && busy.data.error, "busy");
+  assert.equal(busy?.t === "lens_answer" && "sentTo" in busy.data, false); // (none said: none kept)
+  const reply = msg("lens_reply", { sel: 1, qid: 2, state: "done", text: "Yes.", sent_to: sent.slice(0, 1) });
+  assert.deepEqual(reply?.t === "lens_reply" && reply.data.sentTo, sent.slice(0, 1));
+  const tr = msg("lens_translation", { sel: 1, to: "en", text: "Hi", sent_to: sent.slice(1, 2) });
+  assert.deepEqual(tr?.t === "lens_translation" && tr.data.sentTo, sent.slice(1, 2));
+  const links = msg("lens_links", { sel: 1, rows: [], sent_to: sent.slice(2, 3) });
+  assert.deepEqual(links?.t === "lens_links" && links.data.sentTo, sent.slice(2, 3));
+  assert.deepEqual(msg("lens_listening", { on: true }), { t: "lens_listening", data: { on: true } });
+  assert.deepEqual(msg("lens_listening", {}), { t: "lens_listening", data: { on: false } });
+  const first = msg("lens_regions", { lines: [], blocks: [], objects: [], instances: [], windows: [], done: false });
+  assert.equal(first?.t === "lens_regions" && first.data.done, false);
+  const all = msg("lens_regions", { lines: [], blocks: [], objects: [], instances: [], windows: [] });
+  assert.equal(all?.t === "lens_regions" && all.data.done, true); // (an older core sends it whole)
+});
+
 test("anything else is ignored", () => {
   for (const bad of ["", "nope", "[]", JSON.stringify({ type: "transcript", data: { text: "hi" } }), JSON.stringify({ type: "browser_frame", data: {} }),
     JSON.stringify({ type: "lens_local", data: { text: "no sel" } }), JSON.stringify({ type: "lens_answer", data: { sel: "3" } })]) {

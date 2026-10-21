@@ -3,9 +3,9 @@
 // out. LensApp.tsx runs the effects; the tests drive it with fakes.
 
 import { atLeast, box, iou, nudge, toRect, type Box, type Pt } from "./geometry.ts";
-import { pick, tabStops, windowAt } from "./pick.ts";
+import { pick, regionAt, tabStops, windowAt } from "./pick.ts";
 import { doneText } from "./chips.ts";
-import { send, type AnswerData, type CoreMsg, type How, type LensHello, type LinkRow, type LocalData, type Regions } from "./wire.ts";
+import { send, type AnswerData, type CoreMsg, type How, type LensHello, type LinkRow, type LocalData, type Regions, type Sent } from "./wire.ts";
 import type { PhaseEvent, ShellHello } from "./door.ts";
 
 export type Phase = "idle" | "warm" | "preview" | "armed" | "open" | "cancel" | "closing";
@@ -38,6 +38,8 @@ export interface Sel {
   question: string | null;
   /** The area went to the search provider too (the privacy line says so). */
   searchedWeb: boolean;
+  /** Every brain (and the web search) the core says the area or what it holds went to. */
+  sentTo: Sent[];
 }
 
 export interface LensState {
@@ -138,7 +140,8 @@ export type Effect =
 export const REASK_IOU = 0.92;
 export const ADJUST_WAIT_MS = 250;
 export const NUDGE_WAIT_MS = 400;
-export const PICK_WAIT_MS = 500;
+/** A click waits this long at most for smart pick's regions (they come as soon as the still is in). */
+export const PICK_WAIT_MS = 3000;
 export const FADE_MS = 220;
 export const CARD_CLOSE_MS = 3000;
 export const NOTE_MS = 1200;
@@ -228,13 +231,21 @@ function newSel(s: LensState, b: Box, how: How): [LensState, Effect[]] {
   const sel: Sel = {
     n: s.nextSel, box: area, how, searched: area, sent: false, live: false, captured: "none",
     local: null, answer: null, links: [], thread: [], translation: null, notes: {},
-    question: first ? s.prefill : null, searchedWeb: false,
+    question: first ? s.prefill : null, searchedWeb: false, sentTo: [],
   };
   return flush({ ...s, sel, nextSel: s.nextSel + 1, hover: null, candidate: -1, pendingPick: null });
 }
 
 function withSel(s: LensState, n: number, f: (sel: Sel) => Sel): LensState {
   return s.sel && s.sel.n === n ? { ...s, sel: f(s.sel) } : s;
+}
+
+/** Where the area went, as the core said in a message, added to what it said before. */
+function went(sel: Sel, more: Sent[] | undefined): Sel {
+  if (!more?.length) return sel;
+  const all = [...sel.sentTo];
+  for (const w of more) if (!all.some((x) => x.label === w.label && x.what === w.what)) all.push(w);
+  return { ...sel, sentTo: all.slice(0, 24) };
 }
 
 function onMsg(s: LensState, m: CoreMsg): [LensState, Effect[]] {
@@ -253,7 +264,10 @@ function onMsg(s: LensState, m: CoreMsg): [LensState, Effect[]] {
     }
     case "lens_regions": {
       const st = { ...s, regions: m.data };
-      return st.pendingPick ? doPick(st) : [st, []];
+      const pp = st.pendingPick;
+      // The first part (lines, paragraphs) picks a line or paragraph now; anything else waits for
+      // the things (an object, the window), up to PICK_WAIT_MS.
+      return pp && pickable(m.data, pp.at, st, pp.double) ? doPick(st) : [st, []];
     }
     case "lens_captured": {
       if (!s.sel || s.sel.n !== m.data.sel) return [s, []];
@@ -262,9 +276,9 @@ function onMsg(s: LensState, m: CoreMsg): [LensState, Effect[]] {
     case "lens_local":
       return [withSel(s, m.data.sel, (x) => ({ ...x, local: m.data })), []];
     case "lens_answer":
-      return [withSel(s, m.data.sel, (x) => ({ ...x, answer: m.data })), []];
+      return [withSel(s, m.data.sel, (x) => went({ ...x, answer: m.data }, m.data.sentTo)), []];
     case "lens_links":
-      return [withSel(s, m.data.sel, (x) => ({ ...x, links: m.data.rows })), []];
+      return [withSel(s, m.data.sel, (x) => went({ ...x, links: m.data.rows }, m.data.sentTo)), []];
     case "lens_reply": {
       const r = m.data;
       return [withSel(s, r.sel, (x) => {
@@ -272,12 +286,12 @@ function onMsg(s: LensState, m: CoreMsg): [LensState, Effect[]] {
         const i = x.thread.findIndex((t) => t.qid === r.qid);
         // A question asked by voice arrives with its answer only (its words went to the voice).
         const thread = i >= 0 ? x.thread.map((t, k) => (k === i ? { ...t, ...turn, q: t.q } : t)) : [...x.thread, turn];
-        return { ...x, thread: thread.slice(-MAX_THREAD) };
+        return went({ ...x, thread: thread.slice(-MAX_THREAD) }, r.sentTo);
       }), []];
     }
     case "lens_translation": {
       const tr = m.data;
-      return [withSel(s, tr.sel, (x) => ({ ...x, translation: { to: tr.to, text: tr.text, error: tr.error, pending: false } })), []];
+      return [withSel(s, tr.sel, (x) => went({ ...x, translation: { to: tr.to, text: tr.text, error: tr.error, pending: false } }, tr.sentTo)), []];
     }
     case "lens_done": {
       const d = m.data;
@@ -287,10 +301,21 @@ function onMsg(s: LensState, m: CoreMsg): [LensState, Effect[]] {
     }
     case "state":
       return [{ ...s, coreState: m.data.state }, []];
+    case "lens_listening":
+      return [{ ...s, coreState: m.data.on ? "listening" : "" }, []];
     case "lens_refused":
       return [s, []]; // (stale: an older area's; the newer one's answers come)
   }
   return [s, []];
+}
+
+/** Whether a click at `at` can be picked now: all the regions are in, or the first part already
+ *  has the line (or paragraph) under it. */
+function pickable(r: Regions | null, at: Pt, s: LensState, double: boolean): boolean {
+  if (!r) return false;
+  if (r.done !== false) return true;
+  const hit = regionAt(r, at, s.W, s.H, double);
+  return !!hit && (hit.source === "line" || hit.source === "block");
 }
 
 function doPick(s: LensState): [LensState, Effect[]] {
@@ -402,8 +427,8 @@ export function reduce(s: LensState, a: Action): [LensState, Effect[]] {
       return newSel(s, a.box, a.how);
     case "click": {
       if (s.phase !== "open" || s.card) return [s, []];
-      if (!s.regions && s.frozen !== "no") {
-        // Smart pick waits a moment for what the core found in the still (a pulsing dot shows).
+      if (!pickable(s.regions, a.at, s, a.double) && s.frozen !== "no") {
+        // Smart pick waits for what the core found in the still (a pulsing dot shows), at most PICK_WAIT_MS.
         return [{ ...s, pendingPick: { at: a.at, double: a.double } }, [{ t: "later", ms: PICK_WAIT_MS, action: { t: "pick_now", g: s.g } }]];
       }
       return newSel(s, pick(s.regions, a.at, s.W, s.H, a.double).box, "pick");
@@ -479,14 +504,45 @@ export function hint(s: LensState): string | null {
   return "Circle or drag over anything · Click to pick · Esc to close";
 }
 
-/** The privacy line under the sheet. */
+/** "A", "A and B", "A, B and C". */
+const listed = (xs: string[]) => (xs.length < 2 ? xs.join("") : `${xs.slice(0, -1).join(", ")} and ${xs[xs.length - 1]}`);
+
+/** The privacy line under the sheet: every place the area, its text or a search phrase from it
+ *  went (the core says each brain as it is asked, the ones that lost the race or failed too) —
+ *  "Stayed on this Mac" only when nothing left it. */
 export function privacyLine(s: LensState): string {
   const sel = s.sel;
-  const brain = sel?.answer?.brain ?? (sel?.answer?.state === "thinking" ? s.hello?.eyes ?? undefined : undefined);
-  const web = sel?.searchedWeb ? s.hello?.search?.label ?? "the search provider" : null;
-  if (brain && !brain.local) return web ? `Sent to ${brain.label} and ${web}: only this area` : `Sent to ${brain.label}: only this area`;
-  if (web) return `Sent to ${web}: only this area`;
-  return "Stayed on this Mac";
+  if (!sel) return "Stayed on this Mac";
+  const all: Sent[] = [...sel.sentTo];
+  const add = (label: string | undefined, local: boolean, what: Sent["what"]) => {
+    if (label && !all.some((w) => w.label === label && w.what === what)) all.push({ label, local, what });
+  };
+  const a = sel.answer;
+  if (a?.brain && a.state !== "thinking") add(a.brain.label, a.brain.local, "picture");
+  // Asked, not answered yet: the brain it goes to first (its own message names it once it's asked).
+  if (a?.state === "thinking" && s.hello?.eyes) add(s.hello.eyes.label, s.hello.eyes.local, "picture");
+  if (sel.searchedWeb) add(s.hello?.search?.label ?? "the search provider", false, "picture");
+  const cloud = all.filter((w) => !w.local);
+  const names = (what: Sent["what"]) => [...new Set(cloud.filter((w) => w.what === what).map((w) => w.label))];
+  const pics = names("picture");
+  const texts = names("text").filter((l) => !pics.includes(l));
+  const parts: string[] = [];
+  if (pics.length) parts.push(`Sent to ${listed(pics)}: only this area`);
+  if (texts.length) parts.push(parts.length ? `its text to ${listed(texts)}` : `Its text went to ${listed(texts)}`);
+  if (cloud.some((w) => w.what === "query")) parts.push(parts.length ? "a search phrase to the web" : "A search phrase went to the web");
+  return parts.length ? parts.join(" · ") : "Stayed on this Mac";
+}
+
+/** A follow-up's words when it got no answer (lens_reply's error). */
+export function replyProblem(error = ""): string {
+  switch (error) {
+    case "key": return "A brain's key was refused — Brains & Keys can fix that.";
+    case "busy": return "Busy — try again in a minute.";
+    case "offline": return "You're offline.";
+    case "no_brain":
+    case "local_only": return "No brain here can see pictures.";
+    default: return "No answer this time.";
+  }
 }
 
 /** The answer slot's words for a failed answer (design §13). */
@@ -498,6 +554,8 @@ export function answerProblem(a: AnswerData | null, eyesWhy = ""): string | null
     case "offline": return "You're offline — here's what NEO found on this Mac.";
     case "dark": return "This area came out black — protected video can't be captured.";
     case "refused": return `${a.brain?.label ?? "The brain"} wouldn't answer about this.`;
+    case "key": return `${a.brain?.label ?? "A brain"}'s key was refused — Brains & Keys can fix that.`;
+    case "busy": return a.brain ? `${a.brain.label} is busy — try again in a minute.` : "The brains are busy — try again in a minute.";
     case "off": return eyesWhy ? "On-device results only." : "Ask NEO about this area when you're ready.";
     default: return "No answer this time.";
   }

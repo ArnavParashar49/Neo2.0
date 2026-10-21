@@ -4,9 +4,9 @@
 // mode, stale answers dropped, follow-ups, adjustments that re-ask only when they moved enough.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { answerProblem, hint, initial, privacyLine, reduce, type Action, type Effect, type LensState } from "../src/lens/state.ts";
+import { PICK_WAIT_MS, answerProblem, hint, initial, privacyLine, reduce, replyProblem, type Action, type Effect, type LensState } from "../src/lens/state.ts";
 import { box } from "../src/lens/geometry.ts";
-import type { CoreMsg, LensHello } from "../src/lens/wire.ts";
+import type { CoreMsg, LensHello, Regions, Sent } from "../src/lens/wire.ts";
 
 const T = "ab".repeat(32);
 const W = 1512, H = 982;
@@ -228,4 +228,79 @@ test("a line that can't be had: says so, then closes", () => {
   const [s, fx] = run(opened(), { t: "socket", status: "failed" });
   assert.equal(s.card, "unreachable");
   assert.ok(fx.some((e) => e.t === "later" && e.action.t === "close"));
+});
+
+test("the privacy line names every place the area went — the brains that lost the race or failed too", () => {
+  const sel: Action = { t: "select", box: box(10, 10, 200, 100), how: "drag" };
+  const pic = (label: string, local = false): Sent => ({ label, local, what: "picture" });
+  let [s] = run(opened(), sel, msg({ t: "lens_answer", data: { sel: 1, state: "failed", error: "timeout", actions: [], sentTo: [pic("Gemini"), pic("Claude")] } }));
+  assert.equal(privacyLine(s), "Sent to Gemini and Claude: only this area"); // (no answer, but it left)
+  [s] = run(s, msg({ t: "lens_translation", data: { sel: 1, to: "en", text: "Hi", sentTo: [{ label: "Groq", local: false, what: "text" }] } }));
+  assert.equal(privacyLine(s), "Sent to Gemini and Claude: only this area · its text to Groq");
+  [s] = run(s, msg({ t: "lens_links", data: { sel: 1, rows: [], sentTo: [{ label: "web search", local: false, what: "query" }] } }));
+  assert.equal(privacyLine(s), "Sent to Gemini and Claude: only this area · its text to Groq · a search phrase to the web");
+  [s] = run(s, msg({ t: "lens_reply", data: { sel: 1, qid: 1, state: "done", text: "x", sentTo: [pic("Gemini"), pic("OpenAI")] } }));
+  assert.equal(privacyLine(s).split(" · ")[0], "Sent to Gemini, Claude and OpenAI: only this area"); // (each once)
+  // NEO_LENS_ASK off: nothing left until a follow-up asked a brain.
+  let [t] = run(opened({ ask: false }), sel, msg({ t: "lens_answer", data: { sel: 1, state: "failed", error: "off", actions: [], sentTo: [] } }));
+  assert.equal(privacyLine(t), "Stayed on this Mac");
+  [t] = run(t, msg({ t: "lens_reply", data: { sel: 1, qid: 1, state: "failed", error: "timeout", sentTo: [pic("Claude")] } }));
+  assert.equal(privacyLine(t), "Sent to Claude: only this area");
+  // A brain on this Mac never counts; the text alone says so.
+  let [u] = run(opened(), sel, msg({ t: "lens_answer", data: { sel: 1, state: "done", title: "x", brain: { label: "Ollama", local: true }, actions: [], sentTo: [pic("Ollama", true)] } }));
+  assert.equal(privacyLine(u), "Stayed on this Mac");
+  [u] = run(u, msg({ t: "lens_translation", data: { sel: 1, to: "en", text: "Hi", sentTo: [{ label: "Groq", local: false, what: "text" }] } }));
+  assert.equal(privacyLine(u), "Its text went to Groq");
+  // A newer area starts afresh.
+  [u] = run(u, { t: "select", box: box(300, 300, 100, 100), how: "drag" });
+  assert.equal(privacyLine(u), "Stayed on this Mac");
+});
+
+test("a refused key, busy brains, a black area: the words, and what can be pressed", () => {
+  assert.match(answerProblem({ sel: 1, state: "failed", error: "key", brain: { label: "Claude", local: false }, actions: [] }) ?? "", /^Claude's key was refused — Brains & Keys/);
+  assert.equal(answerProblem({ sel: 1, state: "failed", error: "busy", brain: { label: "Gemini", local: false }, actions: [] }), "Gemini is busy — try again in a minute.");
+  assert.equal(answerProblem({ sel: 1, state: "failed", error: "busy", actions: [] }), "The brains are busy — try again in a minute.");
+  assert.match(answerProblem({ sel: 1, state: "failed", error: "dark", actions: [] }) ?? "", /came out black/);
+  assert.match(replyProblem("key"), /key was refused/);
+  assert.match(replyProblem("busy"), /^Busy/);
+  assert.equal(replyProblem("whatever"), "No answer this time.");
+  // "Ask anyway" on a black area asks the brain after all (the core's empty question).
+  const [s] = run(opened(), { t: "select", box: box(10, 10, 200, 100), how: "drag" }, msg({ t: "lens_answer", data: { sel: 1, state: "failed", error: "dark", actions: [] } }));
+  assert.deepEqual(sends(reduce(s, { t: "ask_again" })[1]), [{ cmd: "lens_ask", sel: 1, qid: 0, q: "" }]);
+});
+
+test("a click waits for smart pick: a line from its first part at once, a thing until the rest is in", () => {
+  assert.equal(PICK_WAIT_MS, 3000);
+  const first: Regions = { lines: [{ box: [100, 100, 300, 20], block: 0 }], blocks: [[100, 100, 300, 20]], objects: [], instances: [], windows: [[0, 0, W, H]], texts: [], done: false };
+  const all: Regions = { ...first, objects: [[600, 400, 200, 200]], done: true };
+  // On a line: picked from the first part.
+  let [s, fx] = run(opened(), { t: "click", at: { x: 150, y: 110 }, double: false }, msg({ t: "lens_regions", data: first }));
+  assert.deepEqual(sends(fx), [{ cmd: "lens_select", sel: 1, rect: [96, 96, 308, 28], how: "pick" }]);
+  // On a thing: it waits for the things (never the whole window it would get from the first part)…
+  [s, fx] = run(opened(), { t: "click", at: { x: 700, y: 500 }, double: false }, msg({ t: "lens_regions", data: first }));
+  assert.ok(s.pendingPick);
+  assert.deepEqual(sends(fx), []);
+  [s, fx] = run(s, msg({ t: "lens_regions", data: all }));
+  assert.deepEqual(sends(fx), [{ cmd: "lens_select", sel: 1, rect: [600, 400, 200, 200], how: "pick" }]);
+  // …and a click made after the first part came waits too.
+  [s] = run(opened(), msg({ t: "lens_regions", data: first }), { t: "click", at: { x: 700, y: 500 }, double: false });
+  assert.ok(s.pendingPick);
+  [s] = run(opened(), msg({ t: "lens_regions", data: first }), { t: "click", at: { x: 150, y: 110 }, double: false });
+  assert.equal(s.sel?.how, "pick");
+});
+
+test("a double-click on a picked line takes its paragraph", () => {
+  const r: Regions = { lines: [{ box: [100, 100, 300, 20], block: 0 }, { box: [100, 124, 280, 20], block: 0 }], blocks: [[100, 100, 300, 44]], objects: [], instances: [], windows: [], texts: [] };
+  let [s, fx] = run(opened(), msg({ t: "lens_regions", data: r }), { t: "click", at: { x: 150, y: 110 }, double: false });
+  assert.deepEqual(sends(fx).at(-1), { cmd: "lens_select", sel: 1, rect: [96, 96, 308, 28], how: "pick" });
+  [s, fx] = run(s, { t: "click", at: { x: 151, y: 111 }, double: true });
+  assert.deepEqual(sends(fx), [{ cmd: "lens_select", sel: 2, rect: [96, 96, 308, 52], how: "pick" }]);
+  assert.equal(s.sel?.n, 2);
+});
+
+test("the mic says Listening while the core listens for a question about the area", () => {
+  let [s] = run(opened(), { t: "select", box: box(10, 10, 200, 100), how: "drag" }, msg({ t: "lens_listening", data: { on: true } }));
+  assert.equal(s.coreState, "listening");
+  [s] = run(s, msg({ t: "lens_listening", data: { on: false } }));
+  assert.equal(s.coreState, "");
 });

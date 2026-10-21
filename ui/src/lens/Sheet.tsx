@@ -6,7 +6,7 @@
 import { useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
 import { chipsFor, langName, type Chip } from "./chips";
 import { placeSheet, type Side } from "./place";
-import { answerProblem, privacyLine, type Action, type LensState, type Sel } from "./state";
+import { answerProblem, privacyLine, replyProblem, type Action, type LensState, type Sel } from "./state";
 import { clipboardWrite } from "../shell";
 
 const KIND: Record<string, string> = {
@@ -104,13 +104,15 @@ function AnswerSlot({ s, sel, dispatch }: { s: LensState; sel: Sel; dispatch: (a
   }
   if (a.state === "done") return <div className="lx-answer" aria-live="polite">{a.answer ?? a.title ?? ""}</div>;
   const problem = answerProblem(a, s.hello?.eyesWhy ?? "");
-  const again = a.error === "timeout" || a.error === "failed" || a.error === "offline";
+  const again = a.error === "timeout" || a.error === "failed" || a.error === "offline" || a.error === "busy";
+  // NEO_LENS_ASK off: Ask. Came out black: Ask anyway (a dark page, a black terminal NEO couldn't read).
+  const label = a.error === "off" ? "Ask NEO" : a.error === "dark" ? "Ask anyway" : again ? "Try again" : null;
   return (
     <div className="lx-answer problem" role="status" aria-live="polite">
       {problem}
-      {(again || a.error === "off") && (
+      {label && (
         <div className="lx-row-actions">
-          <button className={"lx-btn" + (a.error === "off" ? " primary" : "")} onClick={() => dispatch({ t: "ask_again" })}>{a.error === "off" ? "Ask NEO" : "Try again"}</button>
+          <button className={"lx-btn" + (a.error === "off" ? " primary" : "")} onClick={() => dispatch({ t: "ask_again" })}>{label}</button>
         </div>
       )}
     </div>
@@ -153,7 +155,7 @@ function Thread({ sel }: { sel: Sel }) {
         <div key={t.qid} style={{ display: "contents" }}>
           {t.q && <div className="lx-q">{t.q}</div>}
           <div className={"lx-a" + (t.state === "thinking" ? " thinking" : "")}>
-            {t.state === "thinking" ? "Thinking…" : t.state === "failed" ? "No answer this time." : t.text}
+            {t.state === "thinking" ? "Thinking…" : t.state === "failed" ? replyProblem(t.error) : t.text}
           </div>
         </div>
       ))}
