@@ -1,0 +1,236 @@
+/* Search Screen (index.html#/lens): a full-screen overlay above everything — the still of the screen,
+ * a glow along its edges in NEO's colours, the trail and the brackets of a selection, and a sheet
+ * of results that follows the Mac's appearance (like #/keys). Every rule is scoped: classes start
+ * with `lx-`, and the page's own surface rules apply only under html[data-surface="lens"].
+ * Everything that moves moves on the compositor (transform, opacity); nothing repaints per frame. */
+
+html[data-surface="lens"] {
+  --lens-1: #6fb6ff; /* sky      (NEO's --glow-1, brighter) */
+  --lens-2: #a58bff; /* lavender (--glow-2) */
+  --lens-3: #ff7ac3; /* rose */
+  --lens-4: #ffb36b; /* apricot */
+  --lens-5: #5fe0c8; /* mint     (--glow-3) */
+  --lens-scrim: rgba(6, 8, 14, 0.18);
+  --lens-scrim-out: rgba(6, 8, 14, 0.40);
+  --lens-bracket: #fff;
+  --lens-bracket-w: 3.5px;
+  --lens-bracket-shadow: drop-shadow(0 0 0.5px rgba(0, 0, 0, 0.55)) drop-shadow(0 2px 6px rgba(0, 0, 0, 0.35));
+  --lens-glass: rgba(18, 18, 22, 0.78);
+  --lens-glass-edge: rgba(255, 255, 255, 0.10);
+  --lens-sheet: rgba(22, 22, 26, 0.86);
+  --lens-sheet-edge: rgba(255, 255, 255, 0.10);
+  --lens-sheet-shadow: 0 18px 50px rgba(0, 0, 0, 0.45), 0 2px 8px rgba(0, 0, 0, 0.25), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  --lens-chip: rgba(255, 255, 255, 0.07);
+  --lens-chip-hover: rgba(255, 255, 255, 0.13);
+  --lens-ease-spring: cubic-bezier(0.34, 1.4, 0.64, 1);
+  color-scheme: dark;
+  cursor: crosshair;
+}
+html[data-surface="lens"][data-theme="light"] {
+  --lens-sheet: rgba(250, 250, 252, 0.88);
+  --lens-sheet-edge: rgba(0, 0, 0, 0.08);
+  --lens-sheet-shadow: 0 18px 50px rgba(0, 0, 0, 0.22), 0 2px 8px rgba(0, 0, 0, 0.10), inset 0 1px 0 rgba(255, 255, 255, 0.7);
+  --lens-chip: rgba(0, 0, 0, 0.05);
+  --lens-chip-hover: rgba(0, 0, 0, 0.09);
+  color-scheme: light;
+}
+/* Reduce Transparency (the shell says so; WebKit has no media query for it): solid glass. */
+html[data-surface="lens"][data-rt] { --lens-glass: #18181c; --lens-sheet: #18181c; --lens-scrim: rgba(6, 8, 14, 0.30); }
+html[data-surface="lens"][data-rt][data-theme="light"] { --lens-sheet: #f5f5f7; }
+html[data-surface="lens"][data-hc] { --lens-bracket-w: 4px; --lens-sheet-edge: rgba(255, 255, 255, 0.35); }
+html[data-surface="lens"][data-hc][data-theme="light"] { --lens-sheet-edge: rgba(0, 0, 0, 0.45); }
+
+html[data-surface="lens"], html[data-surface="lens"] body, html[data-surface="lens"] #root { background: transparent; overflow: hidden; }
+
+.lx { position: fixed; inset: 0; -webkit-user-select: none; user-select: none; }
+.lx-layer { position: fixed; inset: 0; pointer-events: none; }
+
+/* 1. The still: the screen as it was when the hold armed, shown once open (identical pixels). */
+.lx-still { position: fixed; inset: 0; width: 100vw; height: 100vh; object-fit: fill; pointer-events: none; opacity: 0; }
+.lx-still.on { opacity: 1; }
+
+/* 2. The scrim: a faint dark veil once open; with an area, only outside it (the area's shadow). */
+.lx-scrim { background: var(--lens-scrim); opacity: 0; transition: opacity 200ms var(--ease-out); }
+.lx-scrim.on { opacity: 1; }
+
+/* 3. The glow. Four soft bands (scaled across, never resized) and four crisp rims, each a long strip
+ *    of the five colours sliding along its edge so they travel round the screen as one. */
+.lx-glow, .lx-glow-dim, .lx-glow-breathe { position: fixed; inset: 0; pointer-events: none; }
+.lx-glow { opacity: 0; will-change: opacity; }
+.lx-glow-dim { transition: opacity 200ms var(--ease-out); }
+.lx-glow-breathe.on { animation: lx-breathe 3.2s ease-in-out infinite alternate; }
+@keyframes lx-breathe { from { opacity: 1; } to { opacity: 0.85; } }
+
+.lx-band, .lx-rim { position: fixed; overflow: hidden; pointer-events: none; will-change: transform; }
+.lx-band { --b: 56px; }
+.lx-band.top { top: 0; left: 0; right: 0; height: var(--b); transform-origin: 50% 0;
+  -webkit-mask-image: linear-gradient(to bottom, #000 0, rgba(0, 0, 0, 0.62) 14%, rgba(0, 0, 0, 0.22) 50%, transparent 100%); mask-image: linear-gradient(to bottom, #000 0, rgba(0, 0, 0, 0.62) 14%, rgba(0, 0, 0, 0.22) 50%, transparent 100%); }
+.lx-band.bottom { bottom: 0; left: 0; right: 0; height: var(--b); transform-origin: 50% 100%;
+  -webkit-mask-image: linear-gradient(to top, #000 0, rgba(0, 0, 0, 0.62) 14%, rgba(0, 0, 0, 0.22) 50%, transparent 100%); mask-image: linear-gradient(to top, #000 0, rgba(0, 0, 0, 0.62) 14%, rgba(0, 0, 0, 0.22) 50%, transparent 100%); }
+.lx-band.left { top: 0; bottom: 0; left: 0; width: var(--b); transform-origin: 0 50%;
+  -webkit-mask-image: linear-gradient(to right, #000 0, rgba(0, 0, 0, 0.62) 14%, rgba(0, 0, 0, 0.22) 50%, transparent 100%); mask-image: linear-gradient(to right, #000 0, rgba(0, 0, 0, 0.62) 14%, rgba(0, 0, 0, 0.22) 50%, transparent 100%); }
+.lx-band.right { top: 0; bottom: 0; right: 0; width: var(--b); transform-origin: 100% 50%;
+  -webkit-mask-image: linear-gradient(to left, #000 0, rgba(0, 0, 0, 0.62) 14%, rgba(0, 0, 0, 0.22) 50%, transparent 100%); mask-image: linear-gradient(to left, #000 0, rgba(0, 0, 0, 0.62) 14%, rgba(0, 0, 0, 0.22) 50%, transparent 100%); }
+
+.lx-rim { --r: 3px; }
+.lx-rim.top { top: 0; left: 0; right: 0; height: var(--r); }
+.lx-rim.bottom { bottom: 0; left: 0; right: 0; height: var(--r); }
+.lx-rim.left { top: 0; bottom: 0; left: 0; width: var(--r); }
+.lx-rim.right { top: 0; bottom: 0; right: 0; width: var(--r); }
+html[data-hc] .lx-rim { --r: 4px; }
+
+/* The strips themselves: lengths and offsets are set by Glow.tsx from the screen's size. */
+.lx-flow { position: absolute; will-change: transform; background-repeat: repeat; }
+.lx-band.top .lx-flow, .lx-rim.top .lx-flow, .lx-band.bottom .lx-flow, .lx-rim.bottom .lx-flow { top: 0; bottom: 0; }
+.lx-band.left .lx-flow, .lx-rim.left .lx-flow, .lx-band.right .lx-flow, .lx-rim.right .lx-flow { left: 0; right: 0; }
+
+/* 4. The trail while drawing. */
+.lx-trail { position: fixed; inset: 0; width: 100vw; height: 100vh; pointer-events: none; overflow: visible; transition: opacity 200ms var(--ease-out); }
+.lx-trail.fading { opacity: 0; }
+.lx-trail .halo { stroke-width: 18; opacity: 0.25; }
+.lx-trail .body { stroke-width: 6; }
+.lx-trail .core { stroke-width: 2; stroke: #fff; opacity: 0.9; }
+.lx-trail path { fill: none; stroke-linecap: round; stroke-linejoin: round; }
+.lx-trail .live-box { opacity: 0.6; }
+
+/* 5. The selection: the area stays clear, the rest dims (its shadow), white corner brackets. */
+.lx-sel { position: fixed; border-radius: 14px; pointer-events: none; box-shadow: 0 0 0 200vmax var(--lens-scrim-out), inset 0 0 0 1px rgba(255, 255, 255, 0.35);
+  transition: box-shadow 200ms var(--ease-out); }
+.lx-sel.enter { animation: lx-snap 260ms var(--lens-ease-spring); }
+@keyframes lx-snap { from { transform: scale(0.96); } to { transform: scale(1); } }
+.lx-sel.candidate { box-shadow: 0 0 0 200vmax rgba(6, 8, 14, 0.22), inset 0 0 0 1px rgba(255, 255, 255, 0.5); }
+.lx-brackets { position: absolute; inset: -2px; width: calc(100% + 4px); height: calc(100% + 4px); overflow: visible; filter: var(--lens-bracket-shadow); }
+.lx-brackets path { fill: none; stroke: var(--lens-bracket); stroke-width: var(--lens-bracket-w); stroke-linecap: round; stroke-linejoin: round; }
+html[data-hc] .lx-brackets { filter: drop-shadow(0 0 0 #000) drop-shadow(0 0 1.5px #000); }
+
+.lx-hover { position: fixed; border-radius: 6px; border: 1.5px solid rgba(255, 255, 255, 0.55); background: rgba(255, 255, 255, 0.06); pointer-events: none;
+  animation: lx-fade 120ms ease-out; }
+.lx-dot { position: fixed; width: 14px; height: 14px; margin: -7px 0 0 -7px; border-radius: 50%; pointer-events: none;
+  background: radial-gradient(circle, #fff 0, rgba(255, 255, 255, 0.6) 35%, transparent 70%); animation: lx-pulse 0.7s ease-in-out infinite alternate; }
+@keyframes lx-pulse { from { transform: scale(0.7); opacity: 0.6; } to { transform: scale(1.2); opacity: 1; } }
+@keyframes lx-fade { from { opacity: 0; } to { opacity: 1; } }
+
+/* The surface that takes the pointer (under the sheet, the pill and the cards). */
+.lx-surface { position: fixed; inset: 0; cursor: crosshair; touch-action: none; }
+
+/* 6. The hint pill. */
+.lx-pill { position: fixed; left: 50%; transform: translate(-50%, 0); display: flex; align-items: center; gap: 10px; height: 32px; padding: 0 6px 0 16px;
+  border-radius: 16px; background: var(--lens-glass); border: 1px solid var(--lens-glass-edge); color: rgba(255, 255, 255, 0.92); font-size: 13px; white-space: nowrap;
+  -webkit-backdrop-filter: blur(20px) saturate(1.6); backdrop-filter: blur(20px) saturate(1.6); box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+  animation: lx-pill-in 220ms var(--ease-out); cursor: default; }
+html[data-rt] .lx-pill, html[data-rt] .lx-sheet, html[data-rt] .lx-card { -webkit-backdrop-filter: none; backdrop-filter: none; }
+@keyframes lx-pill-in { from { opacity: 0; transform: translate(-50%, -8px); } to { opacity: 1; transform: translate(-50%, 0); } }
+.lx-x { display: inline-grid; place-items: center; width: 22px; height: 22px; border-radius: 11px; border: 0; padding: 0; background: rgba(255, 255, 255, 0.1); color: inherit; cursor: pointer; }
+.lx-x:hover { background: rgba(255, 255, 255, 0.2); }
+.lx-x:focus-visible, .lx button:focus-visible, .lx input:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+
+/* 7. The sheet. */
+.lx-sheet { position: fixed; display: flex; flex-direction: column; border-radius: 18px; background: var(--lens-sheet); border: 1px solid var(--lens-sheet-edge);
+  box-shadow: var(--lens-sheet-shadow); color: var(--fg); -webkit-backdrop-filter: blur(28px) saturate(1.5); backdrop-filter: blur(28px) saturate(1.5);
+  overflow: hidden; cursor: default; animation: lx-sheet-in 220ms var(--ease-out); transition: left 220ms var(--ease-out), top 220ms var(--ease-out); }
+@keyframes lx-sheet-in { from { opacity: 0; transform: translateY(6px) scale(0.985); } to { opacity: 1; transform: none; } }
+.lx-sheet-scroll { overflow-y: auto; overflow-x: hidden; padding: 14px 14px 10px; display: flex; flex-direction: column; gap: 12px; min-height: 0; }
+.lx-sheet-scroll::-webkit-scrollbar { width: 8px; }
+.lx-sheet-scroll::-webkit-scrollbar-thumb { background: var(--edge-2); border-radius: 4px; }
+
+.lx-head { display: flex; gap: 12px; align-items: center; }
+.lx-thumb { flex: none; width: 44px; height: 44px; border-radius: 10px; overflow: hidden; background: var(--bg-3); box-shadow: inset 0 0 0 1px var(--edge); }
+.lx-thumb canvas, .lx-thumb img { width: 44px; height: 44px; display: block; object-fit: cover; }
+.lx-titles { flex: 1; min-width: 0; }
+.lx-title { font-size: 15px; font-weight: 600; line-height: 1.25; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lx-sub { font-size: 12px; color: var(--muted); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lx-head .lx-x { width: 28px; height: 28px; border-radius: 14px; background: var(--lens-chip); color: var(--muted); }
+.lx-head .lx-x:hover { background: var(--lens-chip-hover); color: var(--fg); }
+
+.lx-shimmer { background: linear-gradient(90deg, var(--muted) 0%, var(--fg) 40%, var(--muted) 80%); background-size: 200% 100%; -webkit-background-clip: text; background-clip: text;
+  color: transparent; animation: lx-shimmer 1.4s linear infinite; }
+@keyframes lx-shimmer { from { background-position: 100% 0; } to { background-position: -100% 0; } }
+
+.lx-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.lx-chip { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; height: 28px; padding: 0 11px; border-radius: 14px; border: 1px solid var(--edge);
+  background: var(--lens-chip); color: var(--fg); font: inherit; font-size: 12.5px; cursor: pointer; white-space: nowrap; transition: background 120ms ease-out; }
+.lx-chip:hover { background: var(--lens-chip-hover); }
+.lx-chip .detail { color: var(--muted); overflow: hidden; text-overflow: ellipsis; max-width: 150px; }
+.lx-chip .label { overflow: hidden; text-overflow: ellipsis; }
+.lx-chip.primary { background: var(--accent-bg); border-color: var(--accent-edge); }
+.lx-chip.warn { border-color: var(--warn-edge); background: var(--warn-bg); }
+.lx-chip.warn .detail { color: var(--warn); }
+.lx-chip.done { color: var(--ok); }
+.lx-chip svg { flex: none; }
+.lx-menu { position: relative; display: inline-flex; }
+.lx-menu-list { position: absolute; top: 32px; left: 0; z-index: 3; min-width: 180px; max-height: 240px; overflow-y: auto; padding: 4px; border-radius: 12px;
+  background: var(--lens-sheet); border: 1px solid var(--lens-sheet-edge); box-shadow: var(--lens-sheet-shadow); }
+.lx-menu-list button { display: block; width: 100%; text-align: left; padding: 6px 10px; border: 0; border-radius: 8px; background: transparent; color: var(--fg); font: inherit; font-size: 12.5px; cursor: pointer; }
+.lx-menu-list button:hover, .lx-menu-list button[aria-selected="true"] { background: var(--lens-chip-hover); }
+
+.lx-answer { font-size: 14px; line-height: 1.45; -webkit-user-select: text; user-select: text; white-space: pre-wrap; }
+.lx-answer.problem { color: var(--muted); font-size: 13px; }
+.lx-skel { display: flex; flex-direction: column; gap: 8px; }
+.lx-skel i { display: block; height: 10px; border-radius: 5px; opacity: 0.35;
+  background: linear-gradient(90deg, var(--lens-1), var(--lens-2), var(--lens-3), var(--lens-4), var(--lens-5), var(--lens-1)); background-size: 300% 100%; animation: lx-skel 1.6s linear infinite; }
+.lx-skel i:nth-child(2) { width: 86%; } .lx-skel i:nth-child(3) { width: 58%; }
+@keyframes lx-skel { from { background-position: 0 0; } to { background-position: 150% 0; } }
+.lx-row-actions { display: flex; gap: 8px; margin-top: 8px; }
+.lx-btn { height: 28px; padding: 0 12px; border-radius: 9px; border: 1px solid var(--edge); background: var(--lens-chip); color: var(--fg); font: inherit; font-size: 12.5px; cursor: pointer; }
+.lx-btn:hover { background: var(--lens-chip-hover); }
+.lx-btn.primary { background: var(--solid-bg); color: var(--solid-fg); border-color: transparent; }
+.lx-btn.primary:hover { background: var(--solid-hover); }
+
+.lx-links { display: flex; flex-direction: column; gap: 2px; margin: 0 -6px; }
+.lx-link { display: flex; align-items: center; gap: 10px; padding: 6px; border-radius: 10px; border: 0; background: transparent; color: var(--fg); font: inherit; text-align: left; cursor: pointer; }
+.lx-link:hover { background: var(--lens-chip); }
+.lx-avatar { flex: none; display: grid; place-items: center; width: 26px; height: 26px; border-radius: 8px; background: var(--bg-3); color: var(--muted); font-size: 12px; font-weight: 600; }
+.lx-link .t { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lx-link .h { font-size: 11.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lx-link > div { min-width: 0; }
+
+.lx-text { border-top: 1px solid var(--edge); padding-top: 10px; }
+.lx-text-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.lx-fold { border: 0; background: transparent; color: var(--muted); font: inherit; font-size: 12.5px; padding: 2px 0; cursor: pointer; }
+.lx-fold:hover { color: var(--fg); }
+.lx-seg { display: inline-flex; border-radius: 8px; background: var(--lens-chip); padding: 2px; }
+.lx-seg button { border: 0; background: transparent; color: var(--muted); font: inherit; font-size: 11.5px; padding: 3px 8px; border-radius: 6px; cursor: pointer; }
+.lx-seg button[aria-pressed="true"] { background: var(--lens-chip-hover); color: var(--fg); }
+.lx-text pre { margin: 8px 0 0; max-height: 180px; overflow: auto; font: 12.5px/1.5 -apple-system, "SF Pro Text", system-ui, sans-serif; white-space: pre-wrap;
+  -webkit-user-select: text; user-select: text; color: var(--fg); }
+
+.lx-thread { display: flex; flex-direction: column; gap: 8px; }
+.lx-q { align-self: flex-end; max-width: 88%; padding: 6px 10px; border-radius: 12px 12px 4px 12px; background: var(--accent-bg); font-size: 13px; -webkit-user-select: text; user-select: text; }
+.lx-a { align-self: flex-start; max-width: 96%; font-size: 13.5px; line-height: 1.45; white-space: pre-wrap; -webkit-user-select: text; user-select: text; }
+.lx-a.thinking { color: var(--muted); }
+
+.lx-compose { display: flex; align-items: center; gap: 6px; padding: 8px 10px; border-top: 1px solid var(--edge); }
+.lx-compose input { flex: 1; min-width: 0; height: 32px; padding: 0 12px; border-radius: 16px; border: 1px solid var(--edge); background: var(--bg-2); color: var(--fg); font: inherit; font-size: 13px;
+  outline: none; -webkit-user-select: text; user-select: text; }
+.lx-compose input:focus { border-color: var(--accent-edge); }
+.lx-round { flex: none; display: grid; place-items: center; width: 32px; height: 32px; border-radius: 16px; border: 0; background: var(--lens-chip); color: var(--fg); cursor: pointer; }
+.lx-round:hover { background: var(--lens-chip-hover); }
+.lx-round.live { background: var(--accent-bg); color: var(--accent); }
+.lx-round:disabled { opacity: 0.4; cursor: default; }
+
+.lx-foot { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 14px 12px; }
+.lx-continue { border: 0; background: transparent; color: var(--accent); font: inherit; font-size: 12.5px; font-weight: 600; cursor: pointer; padding: 2px 0; white-space: nowrap; }
+.lx-continue:hover { text-decoration: underline; }
+.lx-privacy { font-size: 11px; color: var(--dim); text-align: right; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Cards in place of a selection: no permission, no core, the core went. */
+.lx-card { position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%); width: min(420px, calc(100vw - 32px)); padding: 22px 22px 18px; border-radius: 20px;
+  background: var(--lens-sheet); border: 1px solid var(--lens-sheet-edge); box-shadow: var(--lens-sheet-shadow); color: var(--fg); cursor: default;
+  -webkit-backdrop-filter: blur(28px) saturate(1.5); backdrop-filter: blur(28px) saturate(1.5); animation: lx-fade 200ms ease-out; }
+.lx-card h1 { margin: 0 0 6px; font-size: 16px; font-weight: 600; }
+.lx-card p { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.5; }
+.lx-card .lx-row-actions { margin-top: 16px; }
+.lx-card .foot { margin-top: 12px; font-size: 11.5px; color: var(--dim); }
+
+/* Closing: everything but the still fades; the still stays until the window is gone. */
+.lx.closing .lx-sheet, .lx.closing .lx-sel, .lx.closing .lx-pill, .lx.closing .lx-card, .lx.closing .lx-scrim, .lx.closing .lx-hover { opacity: 0; transition: opacity 160ms ease-in; }
+.lx.closing .lx-sheet { animation: none; }
+
+@media (prefers-reduced-motion: reduce) {
+  .lx-sel.enter, .lx-pill, .lx-sheet, .lx-card, .lx-dot { animation-duration: 1ms !important; }
+  .lx-glow-breathe.on { animation: none; }
+  .lx-shimmer, .lx-skel i { animation: none; }
+}
+html[data-rm] .lx-sel.enter, html[data-rm] .lx-pill, html[data-rm] .lx-sheet, html[data-rm] .lx-card, html[data-rm] .lx-dot { animation-duration: 1ms !important; }
+html[data-rm] .lx-shimmer, html[data-rm] .lx-skel i { animation: none; }
+html[data-rm] .lx-sheet { transition: opacity 120ms ease-out; }
