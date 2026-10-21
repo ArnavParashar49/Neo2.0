@@ -265,9 +265,9 @@ def windows(sp: Spot) -> list[list[float]]:
     return out[:40]
 
 
-def compute(frame: Any | None, sp: Spot, *, texts: bool = False) -> dict[str, Any]:
-    """Every kind of region the page's smart pick reads (``frame`` None, live mode: windows only).
-    Never raises for a part that can't run: that part is empty."""
+def compute_text(frame: Any | None, sp: Spot, *, texts: bool = False) -> dict[str, Any]:
+    """Smart pick's first part, the quick one: the lines of text, their paragraphs and the windows
+    (``frame`` None, live mode: windows only); objects and instances empty."""
     t0 = time.perf_counter()
     out: dict[str, Any] = {"lines": [], "blocks": [], "objects": [], "instances": [], "windows": windows(sp)}
     if frame is not None:
@@ -275,21 +275,36 @@ def compute(frame: Any | None, sp: Spot, *, texts: bool = False) -> dict[str, An
         out["lines"], out["blocks"] = lines, blocks
         if texts:
             out["texts"] = said
-        small = _small(frame.image)
-        e = engine()
-        try:
-            out["objects"] = _boxes(e.objects(small), sp, MAX_OBJECTS)
-        except Exception as ex:  # noqa: BLE001 — no things from saliency: lines and windows still pick
-            log.info(f"[lens] no objects for smart pick ({type(ex).__name__})")
-        try:
-            out["instances"] = _boxes(e.instances(small), sp, MAX_INSTANCES, most=0.6)
-        except Exception as ex:  # noqa: BLE001
-            log.info(f"[lens] no instances for smart pick ({type(ex).__name__})")
-    log.info(
-        f"[lens] regions in {(time.perf_counter() - t0) * 1000:.0f} ms: {len(out['lines'])} lines, "
-        f"{len(out['objects'])} objects, {len(out['instances'])} things, {len(out['windows'])} windows"
-    )
+    log.info(f"[lens] lines in {(time.perf_counter() - t0) * 1000:.0f} ms: {len(out['lines'])} lines, {len(out['windows'])} windows")
     return out
 
 
-__all__ = ["compute", "group_blocks", "instance_boxes", "set_engine", "windows"]
+def compute_things(frame: Any, sp: Spot) -> dict[str, Any]:
+    """Smart pick's second part: the things — salient objects and foreground instances (each part
+    that can't run is empty)."""
+    t0 = time.perf_counter()
+    out: dict[str, Any] = {"objects": [], "instances": []}
+    small = _small(frame.image)
+    e = engine()
+    try:
+        out["objects"] = _boxes(e.objects(small), sp, MAX_OBJECTS)
+    except Exception as ex:  # noqa: BLE001 — no things from saliency: lines and windows still pick
+        log.info(f"[lens] no objects for smart pick ({type(ex).__name__})")
+    try:
+        out["instances"] = _boxes(e.instances(small), sp, MAX_INSTANCES, most=0.6)
+    except Exception as ex:  # noqa: BLE001
+        log.info(f"[lens] no instances for smart pick ({type(ex).__name__})")
+    log.info(f"[lens] things in {(time.perf_counter() - t0) * 1000:.0f} ms: {len(out['objects'])} objects, {len(out['instances'])} things")
+    return out
+
+
+def compute(frame: Any | None, sp: Spot, *, texts: bool = False) -> dict[str, Any]:
+    """Every kind of region the page's smart pick reads (``frame`` None, live mode: windows only).
+    Never raises for a part that can't run: that part is empty."""
+    out = compute_text(frame, sp, texts=texts)
+    if frame is not None:
+        out.update(compute_things(frame, sp))
+    return out
+
+
+__all__ = ["compute", "compute_text", "compute_things", "group_blocks", "instance_boxes", "set_engine", "windows"]

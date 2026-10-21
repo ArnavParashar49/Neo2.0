@@ -9,8 +9,10 @@ the picture to lens.google.com. NEO does exactly that, in the user's own browser
 1. the area is made smaller (at most 1000 px on its long side, white behind any transparency,
    JPEG q85: the size Chromium sends, text still legible);
 2. a page of NEO's own is written to $TMPDIR/neo-lens/<random>.html (the folder this user's alone,
-   the file too): no outside resource, no referrer, a content policy that lets it post only to the
-   provider, a hidden form and six lines of script that put the picture in it and submit it;
+   the file too): no outside resource, no referrer, a content policy that loads nothing, a hidden
+   form whose one action is the provider's, and six lines of script that put the picture in it and
+   submit it (no form-action in the policy: it would also hold the provider's own redirects after
+   the upload, and the browser would show a blocked page instead of the results);
 3. it is opened in the browser that opens https links on this Mac (the system's own answer: never
    a browser NEO picked by name, never whatever opens .html files);
 4. the file is deleted 90 seconds later, and any left over is swept when the core starts.
@@ -132,7 +134,11 @@ def page(jpeg: bytes, r: Recipe, *, hl: str = "en", st: int | None = None) -> st
     else:
         field = f'<input type="hidden" name="{r.field}" value="{b64}">'
         script = 'document.getElementById("s").submit();'
-    csp = f"default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; form-action https://{r.host}"
+    # Nothing loads from anywhere. No form-action: browsers hold every redirect of the submission to
+    # it (Chromium does), and the provider's upload answers with redirects off its upload host
+    # (lens.google.com → www.google.com/search…) — a blocked page instead of the results. The form
+    # is NEO's own, with its one fixed action: form-action would guard nothing here.
+    csp = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; base-uri 'none'"
     return (
         "<!doctype html><html><head><meta charset=\"utf-8\">"
         '<meta name="referrer" content="no-referrer">'
@@ -250,6 +256,14 @@ def wanted(kind: str, shop: bool) -> int:
     return LINKS_FOR.get(kind, 0)
 
 
+def may_link() -> bool:
+    """Whether :func:`links` can search at all (NEO's [web] extra is installed): only then does the
+    answer's search phrase leave the Mac for it."""
+    from neo2.core.tools import web
+
+    return web._has_ddgs()
+
+
 def links(query: str, n: int) -> list[dict[str, str]]:
     """Up to ``n`` search rows for ``query``, one per host: {title, host, href}. [] offline or when
     the web extra isn't there."""
@@ -284,4 +298,4 @@ def links(query: str, n: int) -> list[dict[str, str]]:
     return out
 
 
-__all__ = ["RECIPES", "folder", "image_search", "links", "page", "provider", "shrink", "sweep", "text_search", "wanted"]
+__all__ = ["RECIPES", "folder", "image_search", "links", "may_link", "page", "provider", "shrink", "sweep", "text_search", "wanted"]

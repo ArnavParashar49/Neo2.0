@@ -69,7 +69,10 @@ def test_google_gets_a_smaller_copy_through_the_https_browser(monkeypatch, opene
     text = p.read_text()
     assert 'action="https://lens.google.com/v3/upload?hl=hi&amp;st=' in text
     assert 'name="encoded_image"' in text and 'enctype="multipart/form-data"' in text
-    assert '<meta name="referrer" content="no-referrer">' in text and "form-action https://lens.google.com" in text
+    assert '<meta name="referrer" content="no-referrer">' in text and "default-src 'none'" in text
+    # No form-action: the provider's redirects after the upload (lens.google.com → www.google.com)
+    # would be blocked by it, in Chrome, Arc and Edge.
+    assert "form-action" not in text and 'action="https://lens.google.com/v3/upload?' in text
     # Nothing on the page loads from anywhere: the only address in it is the form's.
     assert set(re.findall(r"https?://[\w.-]+", text)) == {"https://lens.google.com"}
     assert "<img" not in text and "src=" not in text and "<link" not in text

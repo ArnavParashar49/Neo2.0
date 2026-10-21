@@ -86,8 +86,10 @@ def _world(monkeypatch):
         w["freeze"].append(sp)
         return capture.Freeze(_still(), "", 21.0)
 
-    async def answer(part, *, text="", question="", lang="", order=None):
+    async def answer(part, *, text="", question="", lang="", order=None, sent=None):
         w["asked"].append({"part": part, "text": text, "question": question})
+        if sent is not None:
+            sent("Gemini", False)
         return ask.Answer("done", "product", "Blue bag", "A blue tote bag.", "blue tote bag", True, "gemini", "Gemini", False)
 
     def links(query, n):
@@ -252,7 +254,8 @@ def test_the_still_goes_to_the_overlay_alone_as_kind_4(monkeypatch, _world):
                 await page.send(cmd="lens_hello", v=1)
                 hello = (await page.next("lens_hello"))["data"]
                 frozen = (await page.next("lens_frozen"))["data"]
-                assert await app.quiet() == []
+                # NEO.app's page heard only that Search Screen is opening (nothing in it): no still.
+                assert await app.quiet() == ["lens_opening"]
                 return hello, frozen, page.binary
 
     hello, frozen, binary = _with_server(monkeypatch, body)
@@ -308,7 +311,7 @@ def test_an_area_end_to_end(monkeypatch, _world, capsys, caplog):
             await shell.say(t="lens_commit", ticket=TICKET)
             async with _Lens(port) as page:
                 await page.send(cmd="lens_hello", v=1)
-                out["regions"] = (await page.next("lens_regions"))["data"]
+                out["regions"] = (await page.until("lens_regions", done=True))["data"]
                 await page.send(cmd="lens_select", sel=1, rect=[100, 100, 350, 150], how="lasso")
                 out["local"] = (await page.next("lens_local"))["data"]
                 out["thinking"] = (await page.next("lens_answer"))["data"]
@@ -337,6 +340,8 @@ def test_an_area_end_to_end(monkeypatch, _world, capsys, caplog):
     assert out["thinking"] == {"sel": 1, "state": "thinking"}
     ans = out["answer"]
     assert (ans["state"], ans["kind"], ans["title"], ans["brain"]) == ("done", "product", "Blue bag", {"label": "Gemini", "local": False})
+    assert ans["sent_to"] == [{"label": "Gemini", "local": False, "what": "picture"}]  # (every brain it went to)
+    assert {"label": "web search", "local": False, "what": "query"} in out["links"]["sent_to"]  # (its search phrase)
     assert ans["actions"][0]["kind"] == "text_search" and ans["actions"][0]["label"] == "Search “blue tote bag”"
     assert out["links"]["rows"] == [{"id": out["links"]["rows"][0]["id"], "title": "Blue tote — Shop", "host": "shop.example"}]
     assert w["rows"] == [("blue tote bag", 5)]
@@ -357,7 +362,7 @@ def test_an_area_end_to_end(monkeypatch, _world, capsys, caplog):
 def test_an_older_areas_commands_are_stale_and_a_new_area_calls_it_off(monkeypatch, _world):
     gate = asyncio.Event()
 
-    async def slow_answer(part, *, text="", question="", lang="", order=None):
+    async def slow_answer(part, *, text="", question="", lang="", order=None, sent=None):
         _world["asked"].append(text)
         await gate.wait()
         return ask.Answer("done", "other", "late", "late", "", False, "gemini", "Gemini")
@@ -432,20 +437,47 @@ def test_the_core_closes_it_on_erase_and_on_stop(monkeypatch):
     assert heard == [{"t": "lens_close", "why": "erased"}, {"t": "lens_close", "why": "stop"}]
 
 
-def test_a_hold_let_go_of_early_is_dropped_unanalysed(monkeypatch, _world):
-    computed = []
-    monkeypatch.setattr(regions, "compute", lambda *a, **k: computed.append(1) or {})
-
+def test_a_hold_called_off_after_it_armed_leaves_nothing_behind(monkeypatch, _world):
+    # (A hold let go of before it armed never froze at all: the shell sends no lens_freeze then.)
     async def body(srv, port, seen):
         async with _Shell(srv, monkeypatch) as shell:
             await _open(shell)
             await shell.say(t="lens_closed", ticket=TICKET, why="cancel")
             await asyncio.sleep(0.05)
             await shell.say(t="lens_commit", ticket=TICKET)  # (too late: that ticket is gone)
-            await asyncio.sleep(0.05)
+            await asyncio.sleep(0.1)
 
     _with_server(monkeypatch, body)
-    assert computed == [] and live.lens_live.frame is None and live.lens_live.ticket is None
+    lv = live.lens_live
+    assert lv.frame is None and lv.ticket is None and lv.regions is None and lv._partial is None
+
+
+def test_smart_picks_lines_come_first_and_start_with_the_still(monkeypatch, _world):
+    order: list[str] = []
+    real_things = regions.compute_things
+
+    def things(frame, sp):
+        order.append("things")
+        return real_things(frame, sp)
+
+    def text(frame, sp, texts=False):
+        order.append("lines")
+        return {"lines": [[10.0, 10.0, 100.0, 20.0, 0]], "blocks": [[10.0, 10.0, 100.0, 20.0]], "objects": [], "instances": [],
+                "windows": [[0.0, 0.0, 800.0, 480.0]]}  # fmt: skip
+
+    monkeypatch.setattr(regions, "compute_text", text)
+    monkeypatch.setattr(regions, "compute_things", things)
+
+    async def body(srv, port, seen):
+        async with _Shell(srv, monkeypatch) as shell:
+            await _open(shell)  # (no lens_commit yet: the regions start with the still)
+            async with _Lens(port) as page:
+                await page.send(cmd="lens_hello", v=1)
+                return (await page.until("lens_regions", done=True))["data"]
+
+    got = _with_server(monkeypatch, body)
+    assert order == ["lines", "things"]
+    assert got["lines"] == [[10.0, 10.0, 100.0, 20.0, 0]] and got["objects"] == [[160.0, 100.0, 240.0, 150.0]]
 
 
 def test_the_still_goes_after_ten_minutes(monkeypatch):
@@ -527,3 +559,194 @@ def test_a_restarted_shell_drops_search_screen(monkeypatch):
         return live.lens_live.ticket
 
     assert _with_server(monkeypatch, body) is None
+
+
+# ---- the fixes after review ------------------------------------------------------------------------------
+
+
+def test_mail_and_call_open_their_own_app_never_the_browser(monkeypatch, _world):
+    monkeypatch.setattr(ocr, "_engine", Words("Write to sales@shop.example or call +44 20 7946 0000"))
+
+    class Phones(NoCodes):
+        def detect(self, text):
+            return [*local.detect_plain(text), ("phone", "+44 20 7946 0000")]
+
+    monkeypatch.setattr(local, "_engine", Phones())
+    from neo2.core.tools.computer import apps
+
+    ran: list = []
+
+    async def run(cmd, timeout=30):
+        ran.append(cmd)
+        return 0, "", ""
+
+    monkeypatch.setattr(apps, "_run", run)
+
+    async def body(srv, port, seen):
+        async with _Shell(srv, monkeypatch) as shell:
+            await _open(shell)
+            async with _Lens(port) as page:
+                await page.send(cmd="lens_hello", v=1)
+                await page.next("lens_frozen")
+                await page.send(cmd="lens_select", sel=1, rect=[0, 0, 300, 200])
+                loc = (await page.next("lens_local"))["data"]
+                acts = {a["kind"]: a["id"] for a in loc["actions"]}
+                await page.send(cmd="lens_act", sel=1, id=acts["call"])
+                called = (await page.next("lens_done"))["data"]
+                return acts, called, await shell.read()
+
+    acts, called, said = _with_server(monkeypatch, body)
+    assert {"mail", "call"} <= set(acts)
+    assert called["ok"] and called["note"] == "opened" and called["close"] and said == {"t": "lens_close", "why": "action"}
+    assert ran == [["open", "tel:+442079460000"]] and _world["opened"] == []  # (apps.open_url: never)
+    assert asyncio.run(live.open_handler("mailto:a@b.example")) and ran[-1] == ["open", "mailto:a@b.example"]
+    assert asyncio.run(live.open_handler("https://x.example")) is False and len(ran) == 2  # (only mailto: and tel:)
+
+
+def test_a_page_that_died_and_never_came_back_closes_search_screen(monkeypatch, _world):
+    monkeypatch.setattr(live, "PAGE_GONE_S", 0.15)
+
+    async def body(srv, port, seen):
+        async with _Shell(srv, monkeypatch) as shell:
+            await _open(shell)
+            await shell.say(t="lens_commit", ticket=TICKET)
+            async with _Lens(port) as page:  # (it goes, and a reload brings it back in time)
+                await page.send(cmd="lens_hello", v=1)
+                await page.next("lens_frozen")
+            await asyncio.sleep(0.05)
+            async with _Lens(port) as page:
+                await page.send(cmd="lens_hello", v=1)
+                await page.next("lens_frozen")
+                await asyncio.sleep(0.25)
+                still_open = live.lens_live.ticket == TICKET
+            return still_open, await shell.read()  # (gone for good this time)
+
+    still_open, said = _with_server(monkeypatch, body)
+    assert still_open and said == {"t": "lens_close", "why": "gone"}
+    assert live.lens_live.ticket is None
+
+
+def test_the_mic_says_listening_and_stops(monkeypatch, _world):
+    monkeypatch.setattr(live, "LISTEN_S", 0.15)
+    armed: list = []
+
+    async def listen():
+        armed.append(1)
+
+    live.lens_live.hooks.listen = listen
+
+    async def body(srv, port, seen):
+        async with _Shell(srv, monkeypatch) as shell:
+            await _open(shell)
+            async with _Lens(port) as page:
+                await page.send(cmd="lens_hello", v=1)
+                await page.next("lens_frozen")
+                await page.send(cmd="lens_select", sel=1, rect=[0, 0, 300, 200])
+                await page.until("lens_answer", state="done")
+                await page.send(cmd="lens_listen", sel=1)
+                on = (await page.next("lens_listening"))["data"]
+                off = (await page.next("lens_listening"))["data"]  # (no sentence came: it stops by itself)
+                await page.send(cmd="lens_listen", sel=1)
+                again = (await page.next("lens_listening"))["data"]
+                await live.lens_live.hear("what colour is it")
+                heard = (await page.next("lens_listening"))["data"]
+                return on, off, again, heard
+
+    on, off, again, heard = _with_server(monkeypatch, body)
+    assert (on, off, again, heard) == ({"on": True}, {"on": False}, {"on": True}, {"on": False}) and armed == [1, 1]
+
+
+def test_a_refused_key_offers_brains_and_keys(monkeypatch, _world):
+    async def answer(part, *, text="", question="", lang="", order=None, sent=None):
+        sent("Claude", False)
+        return ask.Answer("failed", brain="claude", label="Claude", error="key")
+
+    monkeypatch.setattr(ask, "answer", answer)
+
+    async def body(srv, port, seen):
+        async with _Shell(srv, monkeypatch) as shell:
+            await _open(shell)
+            async with _Lens(port) as page:
+                await page.send(cmd="lens_hello", v=1)
+                await page.next("lens_frozen")
+                await page.send(cmd="lens_select", sel=1, rect=[0, 0, 300, 200])
+                return (await page.until("lens_answer", state="failed"))["data"]
+
+    got = _with_server(monkeypatch, body)
+    assert got["error"] == "key" and got["brain"] == {"label": "Claude", "local": False}
+    assert [a["kind"] for a in got["actions"]] == ["brains"]
+    assert got["sent_to"] == [{"label": "Claude", "local": False, "what": "picture"}]  # (it went, and failed)
+
+
+def test_the_same_area_picked_again_before_its_answer_is_asked_again(monkeypatch, _world):
+    gate = asyncio.Event()
+    asked: list = []
+
+    async def answer(part, *, text="", question="", lang="", order=None, sent=None):
+        asked.append(1)
+        await gate.wait()  # (area 1 is still thinking when the same box is picked again)
+        return ask.Answer("done", "other", "A bag", "A bag.", "", False, "gemini", "Gemini")
+
+    monkeypatch.setattr(ask, "answer", answer)
+
+    async def body(srv, port, seen):
+        async with _Shell(srv, monkeypatch) as shell:
+            await _open(shell)
+            async with _Lens(port) as page:
+                await page.send(cmd="lens_hello", v=1)
+                await page.next("lens_frozen")
+                await page.send(cmd="lens_select", sel=1, rect=[0, 0, 300, 200])
+                await page.until("lens_answer", state="thinking", sel=1)
+                await page.send(cmd="lens_select", sel=2, rect=[0, 0, 300, 200], how="pick")  # (the same box again)
+                await page.until("lens_answer", state="thinking", sel=2)  # (its own answer is asked for…)
+                gate.set()
+                return (await page.until("lens_answer", state="done", sel=2))["data"]
+
+    got = _with_server(monkeypatch, body)
+    assert got["title"] == "A bag" and asked  # (…and comes: never a skeleton forever)
+
+
+def test_the_hello_never_waits_on_the_brains_and_comes_again_once_they_are_known(monkeypatch, _world):
+    import threading
+
+    let = threading.Event()
+
+    def eyes(order=None):
+        let.wait(2)
+        return {"label": "Gemini", "local": False}
+
+    monkeypatch.setattr(ask, "eyes", eyes)
+
+    async def body(srv, port, seen):
+        async with _Shell(srv, monkeypatch) as shell:
+            await _open(shell)
+            async with _Lens(port) as page:
+                first = page.hello["lens"]
+                await page.send(cmd="lens_hello", v=1)
+                early = (await page.next("lens_hello"))["data"]
+                let.set()
+                late = (await page.next("lens_hello"))["data"]
+                return first, early, late
+
+    first, early, late = _with_server(monkeypatch, body)
+    assert first["eyes"] is None and early["eyes"] is None and early["eyes_why"] == ""  # (not known yet: not "no brain")
+    assert late["eyes"] == {"label": "Gemini", "local": False}
+
+
+def test_a_hold_folds_the_notch_before_its_still(monkeypatch, _world):
+    monkeypatch.setenv("NEO_UI_HOST", "notch")
+    monkeypatch.setattr(config, "_settings", None)
+    monkeypatch.setattr(live, "FOLD_S", 0.2)
+    published: list = []
+    events.bus().subscribe(lambda ev: published.append(ev.type))
+
+    async def body(srv, port, seen):
+        async with _Shell(srv, monkeypatch) as shell:
+            await shell.say(t="lens_freeze", ticket=TICKET, display=DISPLAY, via="hold")
+            await asyncio.sleep(0.1)
+            early = (list(published), len(_world["freeze"]))
+            await asyncio.sleep(0.25)
+            return early, len(_world["freeze"])
+
+    (early_published, early_frozen), frozen = _with_server(monkeypatch, body)
+    assert "lens_opening" in early_published and early_frozen == 0 and frozen == 1

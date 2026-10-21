@@ -3,10 +3,14 @@ the overlay page's commands (see neo2.core.lens for the whole protocol and the p
 
 One session at a time, owned by the ticket NEO.app's shell makes when the hold arms (or the menu,
 the voice or a host opens Search Screen): ``lens_freeze`` brings a new ticket, which replaces any
-earlier one — its still, its areas, its page connection all dropped — and takes the still;
-``lens_commit`` says the overlay is open (smart pick's regions are worked out then, never for a
-hold let go of early); ``lens_closed`` revokes the ticket. The core closes it itself on Erase, on
-Stop, when the shell goes, and 10 minutes after the still was taken (``lens_close`` to the shell).
+earlier one — its still, its areas, its page connection all dropped — and takes the still (NEO's
+page in the notch folds its host's panel first: ``lens_opening``, and a moment's wait there);
+smart pick's regions are worked out as soon as the still is in (a hold is armed by then: one let go
+of early never froze), the lines and paragraphs first, the things after; ``lens_commit`` says the
+overlay is open; ``lens_closed`` revokes the ticket. The core closes it itself on Erase, on Stop,
+when the shell goes, when the overlay's page has been gone for :data:`PAGE_GONE_S` without coming
+back (a page that died leaves nothing to close it from), and 10 minutes after the still was taken
+(``lens_close`` to the shell).
 
 The page is the websocket's ``lens`` client: it connects with the ticket, asks ``lens_hello``, gets
 the still as one binary NBF1 frame of kind 4 (to it alone), and then sends areas. Each area has a
@@ -15,6 +19,11 @@ and a command naming an older one is refused ("stale"). The answers go to the pa
 fields and fixed error words; the bus hears ``lens_opening`` and ``lens_continue``, with nothing in
 them; the log says what ran and how long it took — never a pixel, a word of the area, a question,
 an answer or a link.
+
+Where an area went: every brain the picture or its text was sent to (as it was asked, not only the
+one that answered), and a search phrase sent to NEO's web search for its links, rides each answer
+the page gets as ``sent_to`` — the privacy line names all of them, "Stayed on this Mac" only when
+nothing left.
 """
 
 from __future__ import annotations
@@ -43,6 +52,9 @@ KIND_LENS = 4  # NBF1 kind of Search Screen's still (the browser's are 1 and 2, 
 STILL_QUALITY = 90
 STILL_TTL_S = 600.0  # the still is dropped this long after it was taken, open or not
 FREEZE_WAIT_S = 2.5
+FOLD_S = 0.3  # in the notch: the host's panel folds away before the still is taken
+PAGE_GONE_S = 10.0  # the overlay's page gone this long (no reload brought it back): Search Screen closes
+LISTEN_S = 12.0  # the mic button's "Listening…" ends by itself after this, if no sentence came
 ASK_AFTER_S = 0.35  # the brain is asked once the text is read, or this long after the area, whichever is first
 PREFILL_S = 10.0  # "search my screen for X": X waits this long for the overlay to ask for it
 MAX_Q, MAX_CONTINUE = 500, 2000
@@ -83,6 +95,19 @@ class _Area:
     shown_answer: dict[str, Any] | None = None
     shown_links: dict[str, Any] | None = None
     tasks: set[asyncio.Task] = field(default_factory=set)
+    # where the area (or what it holds) went: (label, what) → {label, local, what}; what: picture | text | query
+    went: dict[tuple[str, str], dict[str, Any]] = field(default_factory=dict)
+
+    def sent(self, what: str) -> Callable[[str, bool], None]:
+        """ask's ``sent`` for this area: each brain it goes to, kept."""
+
+        def note(label: str, local: bool) -> None:
+            self.went.setdefault((label, what), {"label": str(label)[:60], "local": bool(local), "what": what})
+
+        return note
+
+    def sent_to(self) -> list[dict[str, Any]]:
+        return list(self.went.values())[:12]
 
 
 def _jpeg(img: Any, quality: int) -> bytes:
@@ -173,6 +198,11 @@ class LensLive:
         self._prefill: tuple[str, float] | None = None  # ("search my screen for X": X, until when)
         self._ask = ""  # …taken by the session it opened: the first area's question
         self._sent_still: Any = None  # the client the still went to
+        self._partial: dict[str, Any] | None = None  # smart pick's lines before its things are in
+        self._eyes: tuple[dict[str, Any] | None, str] | None = None  # (eyes, eyes_why), worked out off the loop
+        self._hello_owed: Any = None  # a client that got its hello before the eyes were known
+        self._gone_timer: asyncio.TimerHandle | None = None
+        self._listen_timer: asyncio.TimerHandle | None = None
 
     # ---- the ticket ----------------------------------------------------------------------------
 
@@ -225,7 +255,38 @@ class LensLive:
         except RuntimeError:
             return
         self._ttl = loop.call_later(STILL_TTL_S, self._expire, gen)
-        self._freezing = self._spawn(self._take(gen))
+        # NEO's page in the notch folds its host's panel away, so it isn't in the still (a hold and the
+        # menu too, not only the voice and a host: it carries nothing).
+        fold = self._notch()
+        with contextlib.suppress(Exception):
+            loop.create_task(app_bus().publish("lens_opening"))
+        self._freezing = self._spawn(self._take(gen, FOLD_S if fold else 0.0))
+        self._spawn(self._know_eyes(gen))
+
+    @staticmethod
+    def _notch() -> bool:
+        try:
+            from neo2.core.config import settings
+
+            return getattr(settings(), "ui_host", "") == "notch"
+        except Exception:  # noqa: BLE001
+            return False
+
+    async def _know_eyes(self, gen: int) -> None:
+        """Which brain an area goes to first, worked out off the event loop (building the chain may
+        import a provider's SDK): the hello reads it."""
+        try:
+            eyes = await asyncio.to_thread(ask.eyes)
+            why = "" if eyes else await asyncio.to_thread(ask.no_brain_why)
+        except Exception as e:  # noqa: BLE001
+            log.info(f"[lens] no brain for Search Screen ({type(e).__name__})")
+            eyes, why = None, "no_brain"
+        if gen != self._gen:
+            return
+        self._eyes = (eyes, why)
+        cl, self._hello_owed = self._hello_owed, None
+        if cl is not None and cl is self.client:
+            self._send("lens_hello", self.hello(), cl)  # (the page's first hello didn't know them yet)
 
     def _commit(self, ticket: str) -> None:
         if ticket != self.ticket or self.committed:
@@ -235,10 +296,14 @@ class LensLive:
             self._start_regions()
         # (still pending: the regions follow the still)
 
-    async def _take(self, gen: int) -> None:
+    async def _take(self, gen: int, fold: float = 0.0) -> None:
         sp = self.spot
         if sp is None:
             return
+        if fold > 0:
+            await asyncio.sleep(fold)
+            if gen != self._gen:
+                return
         try:
             res = await asyncio.wait_for(asyncio.to_thread(capture.freeze, sp), FREEZE_WAIT_S)
         except TimeoutError:
@@ -264,27 +329,42 @@ class LensLive:
         log.info(f"[lens] still: {self.frozen}{' (' + self.why + ')' if self.why else ''} in {res.ms:.0f} ms")
         if self.client is not None:
             self._send_frozen(self.client)
-        if self.committed:
-            self._start_regions()
+        self._start_regions()  # (on this Mac, from the still already here: ready for the first click)
 
     def _start_regions(self) -> None:
         if self.regions is None and (self._regioning is None or self._regioning.done()):
             self._regioning = self._spawn(self._regions(self._gen))
 
     async def _regions(self, gen: int) -> None:
+        """Smart pick's regions, in two messages: the lines, paragraphs and windows first (``done``
+        false), then everything with the things (saliency, the foreground instances) added."""
         if self.regions is not None or self.spot is None:
             return
         frame, sp = self.frame, self.spot
+        empty = {"lines": [], "blocks": [], "objects": [], "instances": [], "windows": []}
         try:
-            got = await asyncio.to_thread(regions.compute, frame, sp, texts=self.texts)
+            first = await asyncio.to_thread(regions.compute_text, frame, sp, texts=self.texts)
         except Exception as e:  # noqa: BLE001 — no regions: a click picks a box around the point
             log.info(f"[lens] no regions ({type(e).__name__})")
-            got = {"lines": [], "blocks": [], "objects": [], "instances": [], "windows": []}
+            first = dict(empty)
         if gen != self._gen:
             return
-        self.regions = got
+        if frame is not None:
+            self._partial = {**first, "done": False}
+            if self.client is not None:
+                self._send("lens_regions", self._partial)
+            try:
+                things = await asyncio.to_thread(regions.compute_things, frame, sp)
+            except Exception as e:  # noqa: BLE001
+                log.info(f"[lens] no things for smart pick ({type(e).__name__})")
+                things = {}
+            if gen != self._gen:
+                return
+            first = {**first, **things}
+        self.regions = {**empty, **first, "done": True}
+        self._partial = None
         if self.client is not None:
-            self._send("lens_regions", got)
+            self._send("lens_regions", self.regions)
 
     def _expire(self, gen: int) -> None:
         if gen == self._gen and self.ticket is not None:
@@ -319,6 +399,11 @@ class LensLive:
         self.frozen, self.why, self.committed, self.listening, self.texts = "none", "", False, False, False
         self._area, self._sent_still, self._ask = None, None, ""
         self._last_n = self._qid = 0
+        self._eyes, self._hello_owed, self._partial = None, None, None
+        for timer in (self._gone_timer, self._listen_timer):
+            if timer is not None:
+                timer.cancel()
+        self._gone_timer = self._listen_timer = None
         cl, self.client = self.client, None
         ch = self.channel
         if cl is not None and ch is not None:
@@ -344,10 +429,30 @@ class LensLive:
     def attach(self, cl: Any) -> None:
         self.client = cl
         self._sent_still = None
+        if self._gone_timer is not None:
+            self._gone_timer.cancel()  # (back: a reload, a WebContent crash the browser recovered)
+            self._gone_timer = None
 
     def client_gone(self, cl: Any) -> None:
-        if self.client is cl:
-            self.client = None
+        """The overlay's page went. A page that comes back (a reload) carries on; one that doesn't
+        within PAGE_GONE_S leaves an overlay nothing can close from inside: Search Screen closes."""
+        if self.client is not cl:
+            return
+        self.client = None
+        self.listening = False
+        if self.ticket is None:
+            return
+        gen = self._gen
+        with contextlib.suppress(RuntimeError):
+            if self._gone_timer is not None:
+                self._gone_timer.cancel()
+            self._gone_timer = asyncio.get_running_loop().call_later(PAGE_GONE_S, self._page_gone, gen)
+
+    def _page_gone(self, gen: int) -> None:
+        self._gone_timer = None
+        if gen == self._gen and self.ticket is not None and self.client is None:
+            log.info("[lens] the overlay's page is gone and didn't come back: Search Screen closes")
+            self.close("gone")
 
     def _send(self, type_: str, data: dict[str, Any], cl: Any = None) -> None:
         cl = cl if cl is not None else self.client
@@ -370,7 +475,9 @@ class LensLive:
             perms = {"screen": bool(screen.can_capture())}
         except Exception:  # noqa: BLE001
             perms = {"screen": False}
-        eyes = ask.eyes()  # (the footer names it even when NEO_LENS_ASK waits for Ask)
+        # (the footer names it even when NEO_LENS_ASK waits for Ask; worked out off the loop at the
+        # freeze — not known yet, the hello comes again once it is: _know_eyes)
+        eyes, why = self._eyes if self._eyes is not None else (None, "")
         data: dict[str, Any] = {
             "v": V,
             "open": self.ticket is not None,
@@ -379,7 +486,7 @@ class LensLive:
             "via": self.via,
             "perms": perms,
             "eyes": eyes,
-            "eyes_why": "" if eyes else ask.no_brain_why(),
+            "eyes_why": "" if eyes else why,
             "ask": bool(s.lens_ask),
             "search": search.provider(),
             "langs": local.languages(),
@@ -441,7 +548,7 @@ class LensLive:
         a = self._area
         if a is None:
             return ""
-        self.listening = False
+        self._listening(False)
         c = lens_words.control(text)
         if c == "close":
             self.close("done")
@@ -464,10 +571,14 @@ class LensLive:
             if name == "lens_hello":
                 self.texts = cmd.get("texts") is True
                 self._send("lens_hello", self.hello(), cl)
+                if self._eyes is None:
+                    self._hello_owed = cl
                 self._send_frozen(cl)
                 if self.regions is not None:
                     self._send("lens_regions", self.regions, cl)
-                elif self.committed and self.frozen in ("ok", "no"):
+                elif self._partial is not None:
+                    self._send("lens_regions", self._partial, cl)
+                elif self.frozen in ("ok", "no"):
                     self._start_regions()
                 if (a := self._area) is not None:
                     self._resend(a)
@@ -512,12 +623,32 @@ class LensLive:
                 if self.hooks.listen is None:
                     self._refuse(cl, name, "unknown")
                     return
-                self.listening = True
+                self._listening(True)
                 await self.hooks.listen()
             else:
                 self._refuse(cl, name, "unknown")
         finally:
             log.info(f"[lens] {name if re.fullmatch(r'[a-z_]{1,32}', name) else 'a command'}")  # (its name only)
+
+    def _listening(self, on: bool) -> None:
+        """The mic button: the next sentence is a question about the area — and the page is told,
+        to show "Listening…" (it hears nothing of the bus): on when armed, off when the sentence
+        comes or LISTEN_S passed."""
+        was, self.listening = self.listening, on
+        if self._listen_timer is not None:
+            self._listen_timer.cancel()
+            self._listen_timer = None
+        if on:
+            gen = self._gen
+            with contextlib.suppress(RuntimeError):
+                self._listen_timer = asyncio.get_running_loop().call_later(LISTEN_S, self._listen_over, gen)
+        if on or was:
+            self._send("lens_listening", {"on": on})
+
+    def _listen_over(self, gen: int) -> None:
+        self._listen_timer = None
+        if gen == self._gen and self.listening:
+            self._listening(False)
 
     def _spawn(self, coro: Awaitable[Any]) -> asyncio.Task:
         t = asyncio.ensure_future(coro)
@@ -582,13 +713,14 @@ class LensLive:
         a = _Area(sel, rect, how, crop, digest, question)
         self._area = a
         log.info(f"[lens] area {sel} ({how}{', live' if live else ''}): {rect[2]:.0f}×{rect[3]:.0f} pt")
-        if old is not None and old.digest == digest and old.found is not None and not question:
-            self._reuse(old, a)  # the same pixels as the last area: its results again
+        if old is not None and old.digest == digest and old.found is not None and old.answer is not None and not question:
+            self._reuse(old, a)  # the same pixels as the last area: its results again (only once they're in)
             return
         self._area_task(a, self._work(a, live))
 
     def _reuse(self, old: _Area, a: _Area) -> None:
         a.part, a.found, a.answer, a.acts, a.thread = old.part, old.found, old.answer, old.acts, list(old.thread)
+        a.went = dict(old.went)
         a.shown_local = {**old.shown_local, "sel": a.n} if old.shown_local else None
         a.shown_answer = {**old.shown_answer, "sel": a.n} if old.shown_answer else None
         a.shown_links = {**old.shown_links, "sel": a.n} if old.shown_links else None
@@ -616,7 +748,7 @@ class LensLive:
             "text": found.text,
             "lines": found.lines,
             "lang": found.lang,
-            "translate_to": local.translate_to(found.lang),
+            "translate_to": local.translate_to(found.lang, found.guess),
             "dark": found.dark,
             "actions": [a.acts[i].shown(i) for i in shown_acts],
         }
@@ -683,7 +815,7 @@ class LensLive:
 
     def _answered(self, a: _Area, ans: ask.Answer, extra: list[dict[str, Any]] | None = None) -> None:
         a.answer = ans
-        data = {"sel": a.n, **ans.shown(), "actions": extra or []}
+        data = {"sel": a.n, **ans.shown(), "actions": extra or [], "sent_to": a.sent_to()}
         a.shown_answer = data
         self._send("lens_answer", data)
 
@@ -694,7 +826,7 @@ class LensLive:
             return
         if text is None:
             text = a.found.text if a.found else ""
-        ans = await ask.answer(part, text=text, question=a.question, lang=ask.user_lang())
+        ans = await ask.answer(part, text=text, question=a.question, lang=ask.user_lang(), sent=a.sent("picture"))
         if not self._current(a):
             return
         extra: list[dict[str, Any]] = []
@@ -704,11 +836,13 @@ class LensLive:
                 label = f"Search “{ans.query}”" + ("" if provider["image"] else f" on {provider['label']}")
                 act = local.Action("text_search", label[:90], ans.query, detail=provider["label"])
                 extra.append(act.shown(self._act_id(a, act)))
-        elif ans.state == "failed" and ans.error in ("no_brain", "local_only"):
+        elif ans.state == "failed" and ans.error in ("no_brain", "local_only", "key"):
             act = local.Action("brains", "Brains & Keys…", "")
             extra.append(act.shown(self._act_id(a, act)))
         self._answered(a, ans, extra)
         if ans.state == "done" and ans.query and (n := search.wanted(ans.kind, ans.shop)):
+            if search.may_link():
+                a.sent("query")("web search", False)  # (the answer's search phrase, to NEO's web search)
             rows = await asyncio.to_thread(search.links, ans.query, n)
             if not self._current(a) or not rows:
                 return
@@ -716,7 +850,7 @@ class LensLive:
             for r in rows:
                 act = local.Action("open", r["title"], r["href"], detail=r["host"])
                 shown.append({"id": self._act_id(a, act), "title": r["title"], "host": r["host"]})
-            a.shown_links = {"sel": a.n, "rows": shown}
+            a.shown_links = {"sel": a.n, "rows": shown, "sent_to": a.sent_to()}
             self._send("lens_links", a.shown_links)
 
     async def _follow(self, a: _Area, qid: int, q: str) -> str:
@@ -725,39 +859,46 @@ class LensLive:
         if not self._current(a):
             return ""
         first = a.answer.brain if a.answer is not None else ""
-        text, who = await ask.follow_up(part, text=a.found.text if a.found else "", history=a.thread, q=q, first=first)
+        text, who = await ask.follow_up(
+            part, text=a.found.text if a.found else "", history=a.thread, q=q, first=first, sent=a.sent("picture")
+        )
         if not self._current(a):
             return ""
         if text:
             a.thread.append((q, text))
             del a.thread[: -ask.HISTORY]
             self._send("lens_reply", {"sel": a.n, "qid": qid, "state": "done", "text": text,
-                                      "brain": {"label": who.label, "local": who.local}})  # fmt: skip
+                                      "brain": {"label": who.label, "local": who.local}, "sent_to": a.sent_to()})  # fmt: skip
         else:
-            self._send("lens_reply", {"sel": a.n, "qid": qid, "state": "failed", "error": who.error or "failed"})
+            self._send("lens_reply", {"sel": a.n, "qid": qid, "state": "failed", "error": who.error or "failed",
+                                      "sent_to": a.sent_to()})  # fmt: skip
         return text
 
     async def _translate(self, a: _Area, to: str) -> None:
         name = local.language_name(to)
         text = a.found.text if a.found else ""
         if text:
-            out, err = await ask.translate_text(text, name)
+            out, err = await ask.translate_text(text, name, sent=a.sent("text"))
         else:
-            out, err = await ask.translate_picture(await self._picture(a), name)
+            out, err = await ask.translate_picture(await self._picture(a), name, sent=a.sent("picture"))
         if not self._current(a):
             return
         log.info(f"[lens] translation: {'done' if out else err}")
-        self._send("lens_translation", {"sel": a.n, "to": to, **({"text": out} if out else {"error": err or "failed"})})
+        self._send("lens_translation", {"sel": a.n, "to": to, **({"text": out} if out else {"error": err or "failed"}),
+                                        "sent_to": a.sent_to()})  # fmt: skip
 
     async def _act(self, a: _Area, aid: str) -> None:
         act = a.acts[aid]
         note, ok = "failed", False
         try:
-            if act.kind in ("open", "mail", "call"):
+            if act.kind == "open":
                 from neo2.core.tools.computer import apps
 
-                out = await apps.open_url(act.value)
+                out = await apps.open_url(act.value)  # (a web link: the browser comes forward)
                 ok = not str(out).startswith("Error")
+                note = "opened" if ok else "failed"
+            elif act.kind in ("mail", "call"):
+                ok = await open_handler(act.value)  # (Mail or FaceTime — whatever opens it — never the browser)
                 note = "opened" if ok else "failed"
             elif act.kind in ("copy_text", "wifi", "code"):
                 ok = await asyncio.to_thread(copy_text, act.value)
@@ -811,6 +952,17 @@ class LensLive:
         task.add_done_callback(_quiet)
 
 
+async def open_handler(url: str) -> bool:
+    """A mailto: or tel: link, opened by the app this Mac opens it with (LaunchServices brings that
+    app forward itself): never through the browser, never made NEO's target app."""
+    if not re.match(r"^(?:mailto|tel):", url, re.I):
+        return False
+    from neo2.core.tools.computer import apps
+
+    code, _out, _err = await apps._run(["open", url], timeout=10)
+    return code == 0
+
+
 def first_sentence(text: str, most: int = 240) -> str:
     """The first sentence of an answer, for saying aloud (the sheet shows all of it)."""
     t = " ".join(str(text or "").split())
@@ -844,4 +996,4 @@ def reset() -> None:
     lens_live.channel, lens_live.hooks = channel, hooks
 
 
-__all__ = ["KIND_LENS", "Hooks", "LensLive", "copy_image", "copy_text", "first_sentence", "lens_live", "reset"]
+__all__ = ["KIND_LENS", "Hooks", "LensLive", "copy_image", "copy_text", "first_sentence", "lens_live", "open_handler", "reset"]

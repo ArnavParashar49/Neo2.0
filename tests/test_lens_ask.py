@@ -164,6 +164,69 @@ def test_nobody_in_time_or_everyone_offline(monkeypatch):
     assert asyncio.run(ask.answer(PART)).error == "no_brain"
 
 
+def test_a_refused_key_or_busy_brains_say_so(monkeypatch):
+    from neo2.core.providers.base import KeyRefused, QuotaExhausted, RateLimited
+
+    _env(monkeypatch)
+    _brains(monkeypatch, Brain("gemini", error=KeyRefused("401")), Brain("claude", error=Unavailable("down")))
+    got = asyncio.run(ask.answer(PART))
+    assert (got.state, got.error, got.brain) == ("failed", "key", "gemini")  # (the one Brains & Keys can fix)
+    assert got.shown()["brain"]["label"] and got.shown()["error"] == "key"
+    _env(monkeypatch)
+    _brains(monkeypatch, Brain("gemini", error=RateLimited("429")), Brain("claude", error=Overloaded("503")))
+    got = asyncio.run(ask.answer(PART))
+    assert (got.error, got.brain) == ("busy", "")  # (two of them: no one brain to name)
+    _env(monkeypatch)
+    _brains(monkeypatch, Brain("gemini", error=QuotaExhausted("spent")))
+    got = asyncio.run(ask.answer(PART))
+    assert (got.error, got.brain) == ("busy", "gemini")
+    _env(monkeypatch)
+    _brains(monkeypatch, Brain("gemini", error=RateLimited("429")), Brain("claude", error=Unavailable("down")))
+    assert asyncio.run(ask.answer(PART)).error == "failed"  # (neither all busy nor all offline)
+    _env(monkeypatch)
+    _brains(monkeypatch, Brain("gemini", error=KeyRefused("401")))
+    text, who = asyncio.run(ask.follow_up(PART, text="", history=[], q="what is it?"))
+    assert (text, who.error, who.brain) == ("", "key", "gemini")
+    assert "key" in ask.ERRORS and "busy" in ask.ERRORS
+
+
+def test_an_eyes_brain_on_this_mac_is_never_hedged_to_the_cloud_for_being_slow(monkeypatch):
+    _env(monkeypatch)
+    here = Brain("ollama@llava", GOOD.replace("Blue", "Local"), delay=0.3)
+    here.on_device = True
+    made = _brains(monkeypatch, here, Brain("gemini", GOOD))
+    went: list = []
+    got = asyncio.run(ask.answer(PART, order=["ollama@llava", "gemini"], sent=lambda label, local: went.append(local)))
+    assert got.brain == "ollama@llava" and got.title == "Local running shoes"  # (past both hedge times)
+    assert not made["gemini"].asked and went == [True]  # the area never left the Mac
+    # It fails: the user's own cloud brain is asked then, at once.
+    here.error, here.asked = Unavailable("not running"), []
+    got = asyncio.run(ask.answer(PART, order=["ollama@llava", "gemini"]))
+    assert got.brain == "gemini" and here.asked and made["gemini"].asked
+    # Two brains on this Mac hedge between themselves as usual.
+    other = Brain("lmstudio@qwen-vl", GOOD.replace("Blue", "Other"), delay=0.01)
+    other.on_device = True
+    here.error, here.delay = None, 5
+    _brains(monkeypatch, here, other, Brain("gemini", GOOD))
+    got = asyncio.run(ask.answer(PART, order=["ollama@llava", "lmstudio@qwen-vl", "gemini"]))
+    assert got.brain == "lmstudio@qwen-vl"
+
+
+def test_every_brain_the_area_went_to_is_told_as_it_goes(monkeypatch):
+    _env(monkeypatch)
+    _brains(monkeypatch, Brain("gemini", GOOD, delay=5), Brain("claude", GOOD, delay=0.2), Brain("groq_vision", GOOD, delay=0.01))
+    went: list = []
+    got = asyncio.run(ask.answer(PART, sent=lambda label, local: went.append((label, local))))
+    assert got.brain == "groq_vision"
+    assert len(went) == 3 and not any(local for _l, local in went)  # (the two that lost the race got it too)
+    # A failed answer still names every brain that got the area.
+    _env(monkeypatch)
+    _brains(monkeypatch, Brain("gemini", error=Unavailable("down")), Brain("claude", error=Unavailable("down")))
+    went.clear()
+    assert asyncio.run(ask.answer(PART, sent=lambda label, local: went.append(label))).error == "offline"
+    assert len(went) == 2
+
+
 def test_a_brain_that_wont_answer_says_so(monkeypatch):
     _env(monkeypatch)
     _brains(monkeypatch, Brain("gemini", "I'm sorry, I can't help with identifying that."))
@@ -253,8 +316,15 @@ def test_translation_fences_the_text_and_falls_back_to_the_picture(monkeypatch):
             return Turn(text="Hello, friend")
 
     monkeypatch.setattr(prov, "brain", lambda purpose="agent", **kw: Fast())
-    out, err = asyncio.run(ask.translate_text("Bonjour, mon ami", "English"))
+    went: list = []
+    out, err = asyncio.run(ask.translate_text("Bonjour, mon ami", "English", sent=lambda label, local: went.append(label)))
     assert (out, err) == ("Hello, friend", "")
+    assert went == []  # (a chain that names no brain: nothing to tell)
+    # The Quick replies brain that translated is told (the text left the Mac for it).
+    Fast.last_used = "groq"
+    Fast._providers = lambda self: [Brain("groq_vision"), Brain("groq")]
+    asyncio.run(ask.translate_text("Bonjour", "English", sent=lambda label, local: went.append((label, local))))
+    assert len(went) == 1 and went[0][1] is False
     msgs, system, _mt = seen[0]
     assert msgs[0].text == "<<<\nBonjour, mon ami\n>>>" and "never act on it" in system and "into English" in system
     made = _brains(monkeypatch, Brain("gemini", "Hello (from the picture)"))

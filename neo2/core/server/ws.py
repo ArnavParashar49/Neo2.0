@@ -157,7 +157,8 @@ with no role, with that exact ticket (constant time) and without a Brains & Keys
     gets a frame of that kind.
   - `shell` action `lens` (a host's Search Screen…; the core's own for the voice and the agent's
     tool) is one every 1.5 s, and first publishes `lens_opening` (no payload: NEO's page in the notch
-    folds the host's panel away before the still is taken).
+    folds the host's panel away before the still is taken). The session publishes it again at every
+    `lens_freeze`, a hold's and the menu's too (neo2.core.lens.live).
 
 The relay never blocks the event bus: each client has its own outbound queue drained by its
 own task, and a client that stops reading is dropped. (An inline `await send()` to a half-dead
