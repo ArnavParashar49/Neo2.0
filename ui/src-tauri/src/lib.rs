@@ -33,6 +33,8 @@ mod chord;
 mod core;
 #[cfg(target_os = "macos")]
 mod frame;
+#[cfg(target_os = "macos")]
+mod glow;
 mod keys;
 mod lens;
 #[cfg(target_os = "macos")]
@@ -375,6 +377,7 @@ pub fn run() {
             lens::lens_painted,
             lens::lens_close,
             lens::lens_peek,
+            lens::lens_glow,
             lens::lens_allow_sc
         ])
         // A Brains & Keys or Search Screen window the shell didn't create is closed as its page loads.
@@ -585,7 +588,7 @@ mod tests {
         assert!(SHELL_ACTIONS.contains(&"lens"));
         // Right after "Show NEO" in the menu.
         assert!(src.contains("&show_item, &lens_item,"));
-        for cmd in ["lens_hello", "lens_painted", "lens_close", "lens_peek", "lens_allow_sc"] {
+        for cmd in ["lens_hello", "lens_painted", "lens_close", "lens_peek", "lens_glow", "lens_allow_sc"] {
             assert!(src.contains(&format!("lens::{cmd}")), "{cmd}");
         }
         // A lens window the shell didn't create goes as its page loads.

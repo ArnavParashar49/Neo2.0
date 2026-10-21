@@ -55,6 +55,10 @@ export interface LensState {
   safeTop: number;
   W: number;
   H: number;
+  /** Who draws the glow: NEO.app's shell (Core Animation) or, when it can't, this page. */
+  glow: "native" | "web";
+  /** The overlay's display (CGDirectDisplayID), when the shell says. */
+  displayId: number | null;
   ticket: string | null;
   /** The core heard the ticket (null: not known yet). */
   core: boolean | null;
@@ -132,7 +136,9 @@ export type Effect =
   | { t: "shell_hello" }
   | { t: "later"; ms: number; action: Action }
   | { t: "revoke"; url: string }
-  | { t: "focus_composer"; text: string };
+  | { t: "focus_composer"; text: string }
+  /** The shell's glow: an area is selected now (narrow and dim), or not. */
+  | { t: "glow"; selected: boolean };
 
 /** An adjusted area is asked about again only when it changed this much. */
 export const REASK_IOU = 0.92;
@@ -149,7 +155,7 @@ const NO_FLAGS: Flags = { reduceMotion: false, reduceTransparency: false, increa
 
 export function initial(W = 0, H = 0, translateTo: string | null = null): LensState {
   return {
-    g: 0, phase: "idle", phaseAt: 0, toArmMs: 0, via: "hold", why: "", flags: NO_FLAGS, safeTop: 0, W, H,
+    g: 0, phase: "idle", phaseAt: 0, toArmMs: 0, via: "hold", why: "", flags: NO_FLAGS, safeTop: 0, W, H, glow: "web", displayId: null,
     ticket: null, core: null, sc: true, socket: "idle", hello: null, frozen: "pending", frozenWhy: "", still: null,
     regions: null, sel: null, nextSel: 1, nextQid: 1, card: null, prefill: null, candidate: -1, pendingPick: null,
     moveV: 0, translateTo, coreState: "",
@@ -158,7 +164,7 @@ export function initial(W = 0, H = 0, translateTo: string | null = null): LensSt
 
 /** A session's own things gone (its still, its line, its areas); the page's own kept. */
 function fresh(s: LensState, g: number): LensState {
-  return { ...initial(s.W, s.H, s.translateTo), g, flags: s.flags, safeTop: s.safeTop };
+  return { ...initial(s.W, s.H, s.translateTo), g, flags: s.flags, safeTop: s.safeTop, glow: s.glow, displayId: s.displayId };
 }
 
 function teardown(s: LensState): Effect[] {
@@ -202,6 +208,8 @@ function onPhase(s: LensState, ev: PhaseEvent, now: number, sinceMs = 0): [LensS
     why: typeof ev.why === "string" ? ev.why : st.why,
     flags: flagsOf(ev, st.flags),
     safeTop: typeof ev.safe_top === "number" && Number.isFinite(ev.safe_top) ? ev.safe_top : st.safeTop,
+    glow: ev.glow === "native" || ev.glow === "web" ? ev.glow : st.glow,
+    displayId: typeof ev.display?.id === "number" && Number.isInteger(ev.display.id) && ev.display.id >= 0 ? ev.display.id : st.displayId,
   };
   if ((phase === "armed" || phase === "open") && !st.ticket) fx.push({ t: "shell_hello" });
   if (changed && (phase === "cancel" || phase === "closing")) {
@@ -368,7 +376,17 @@ function onKey(s: LensState, k: KeyInfo): [LensState, Effect[]] {
   return [s, []];
 }
 
+/** The reducer: one step, and the shell's glow told whenever an area appears or goes while open. */
 export function reduce(s: LensState, a: Action): [LensState, Effect[]] {
+  const [next, fx] = step(s, a);
+  if (next.glow === "native" && next.phase === "open" && !!s.sel !== !!next.sel) return [next, [...fx, { t: "glow", selected: !!next.sel }]];
+  return [next, fx];
+}
+
+/** Whether this page draws the glow itself (the shell said it couldn't, or an older shell said nothing). */
+export const showsWebGlow = (h: { glow?: string } | null | undefined): boolean => h?.glow !== "native";
+
+function step(s: LensState, a: Action): [LensState, Effect[]] {
   switch (a.t) {
     case "phase":
       return onPhase(s, a.ev, a.now);
@@ -459,7 +477,7 @@ export function reduce(s: LensState, a: Action): [LensState, Effect[]] {
     }
     case "translate_to": {
       const st = { ...s, translateTo: a.to };
-      return s.sel ? reduce(st, { t: "chip", kind: "translate", to: a.to }) : [st, []];
+      return s.sel ? step(st, { t: "chip", kind: "translate", to: a.to }) : [st, []];
     }
     case "ask": {
       const q = a.q.replace(/\s+/g, " ").trim().slice(0, 500);

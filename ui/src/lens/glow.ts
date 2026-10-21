@@ -1,7 +1,9 @@
 // The glow along the screen's edges, as numbers: how wide its soft band is, how bright, and how
-// fast its colours travel round the screen, at each moment of each phase. Glow.tsx samples these
-// curves into the compositor's animations (nothing repaints per frame), so a phase that arrives
-// late starts where the curve already is instead of lagging behind it.
+// fast its colours travel round the screen, at each moment of each phase. NEO.app's shell draws the
+// glow natively with these same curves (ui/src-tauri/src/glow.rs, a verbatim port: the shared
+// fixture ui/tests/fixtures/lens-glow.json pins the two together); EdgeGlow.tsx samples them only
+// when the shell can't (`glow: "web"`). A phase that arrives late starts where the curve already is
+// instead of lagging behind it.
 
 export type GlowPhase = "idle" | "warm" | "preview" | "armed" | "open" | "cancel" | "closing";
 
@@ -22,13 +24,16 @@ export interface GlowCtx {
   via: string;
   /** Where the glow was when this phase began (cancel, closing and open carry on from it). */
   from?: Look;
+  /** Closing because the area went into the notch: a slightly longer fade (the flight's). */
+  notch?: boolean;
 }
 
-export const BAND = { max: 56, preview: [8, 28] as const, armed: [28, 56] as const, open: 36 };
+/** Widths in points. `selected`: the band while an area is selected (dimmed to OPACITY.selected). */
+export const BAND = { max: 56, preview: [8, 28] as const, armed: [28, 56] as const, open: 36, selected: 20 };
 export const OPACITY = { preview: 0.65, armed: 1, selected: 0.55, breatheLow: 0.85 };
 export const PERIOD = { building: 2.4, open: 8 };
 /** Durations, in ms (design §4.3). */
-export const DUR = { armUp: 140, armSettle: 420, bloom: 260, settle: 200, cancel: 140, closing: 160, reduced: 120, breathe: 3200 };
+export const DUR = { armUp: 140, armSettle: 420, bloom: 260, settle: 200, cancel: 140, closing: 160, closingNotch: 200, reduced: 120, breathe: 3200, select: 200 };
 
 const NONE: Look = { band: 0, opacity: 0, period: 0 };
 const clamp01 = (v: number) => Math.min(1, Math.max(0, Number.isFinite(v) ? v : 1));
@@ -49,7 +54,7 @@ export function glowSpan(phase: GlowPhase, ctx: GlowCtx): number {
     case "armed": return DUR.armUp + DUR.armSettle;
     case "open": return ctx.from ? DUR.settle : ctx.via === "hold" ? 0 : DUR.bloom;
     case "cancel": return DUR.cancel;
-    case "closing": return DUR.closing;
+    case "closing": return ctx.notch ? DUR.closingNotch : DUR.closing;
     default: return 0;
   }
 }
@@ -96,7 +101,7 @@ export function glowAt(phase: GlowPhase, ms: number, ctx: GlowCtx): Look {
     }
     case "closing": {
       const f = from ?? { band: BAND.open, opacity: 1, period: PERIOD.open };
-      return { band: f.band, opacity: f.opacity * (1 - clamp01(t / DUR.closing)), period: f.period };
+      return { band: f.band, opacity: f.opacity * (1 - clamp01(t / (ctx.notch ? DUR.closingNotch : DUR.closing))), period: f.period };
     }
     default:
       return NONE;

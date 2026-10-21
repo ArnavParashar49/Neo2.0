@@ -60,15 +60,22 @@ html[data-rm] .lx-still.leaving { transition-duration: 120ms; }
 .lx-scrim { background: var(--lens-scrim); opacity: 0; transition: opacity 200ms var(--ease-out); will-change: opacity; }
 .lx-scrim.on { opacity: 1; }
 
-/* 3. The glow. Four soft bands (scaled across, never resized) and four crisp rims, each a long strip
- *    of the five colours sliding along its edge so they travel round the screen as one. */
-.lx-glow, .lx-glow-dim, .lx-glow-breathe { position: fixed; inset: 0; pointer-events: none; }
-.lx-glow { opacity: 0; will-change: opacity; }
-.lx-glow-dim { transition: opacity 200ms var(--ease-out); }
-.lx-glow-breathe.on { animation: lx-breathe 3.2s ease-in-out infinite alternate; }
+/* 3. The glow, only when the shell can't draw it (EdgeGlow.tsx; the shell's own is Core Animation).
+ *    Four edge-sized groups (the phase's opacity, the dim, the breathing — no full-screen wrapper),
+ *    each holding a soft band (scaled across, never resized) and a crisp rim: a long strip of the
+ *    five colours sliding along its edge so they travel round the screen as one. */
+.lx-glow { pointer-events: none; }
+.lx-edge { position: fixed; pointer-events: none; opacity: 0; will-change: opacity; }
+.lx-edge.top { top: 0; left: 0; right: 0; height: 56px; }
+.lx-edge.bottom { bottom: 0; left: 0; right: 0; height: 56px; }
+.lx-edge.left { top: 0; bottom: 0; left: 0; width: 56px; }
+.lx-edge.right { top: 0; bottom: 0; right: 0; width: 56px; }
+.lx-edge-dim, .lx-edge-breathe { position: absolute; inset: 0; pointer-events: none; }
+.lx-edge-dim { transition: opacity 200ms var(--ease-out); }
+.lx-edge-breathe.on { animation: lx-breathe 3.2s ease-in-out infinite alternate; }
 @keyframes lx-breathe { from { opacity: 1; } to { opacity: 0.85; } }
 
-.lx-band, .lx-rim { position: fixed; overflow: hidden; pointer-events: none; will-change: transform; }
+.lx-band, .lx-rim { position: absolute; overflow: hidden; pointer-events: none; will-change: transform; }
 .lx-band { --b: 56px; }
 .lx-band.top { top: 0; left: 0; right: 0; height: var(--b); transform-origin: 50% 0;
   -webkit-mask-image: linear-gradient(to bottom, #000 0, rgba(0, 0, 0, 0.62) 14%, rgba(0, 0, 0, 0.22) 50%, transparent 100%); mask-image: linear-gradient(to bottom, #000 0, rgba(0, 0, 0, 0.62) 14%, rgba(0, 0, 0, 0.22) 50%, transparent 100%); }
@@ -264,7 +271,7 @@ html[data-rt] .lx-pill, html[data-rt] .lx-sheet, html[data-rt] .lx-card { -webki
 
 @media (prefers-reduced-motion: reduce) {
   .lx-snap.enter, .lx-pill, .lx-sheet, .lx-card, .lx-dot { animation-duration: 1ms !important; }
-  .lx-glow-breathe.on { animation: none; }
+  .lx-edge-breathe.on { animation: none; }
   .lx-shimmer, .lx-skel i::after { animation: none; }
   .lx-sheet-at { transition: none; }
 }

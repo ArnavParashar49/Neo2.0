@@ -26,7 +26,7 @@ import { LensSocket, type SocketLike } from "./socket";
 import { CURSOR, classify, dragBox, hitTest, type Box, type Hit, type Pt } from "./geometry";
 import { isDouble, regionAt, tabStops } from "./pick";
 import type { PhaseEvent } from "./door";
-import { hint, initial, reduce, type Action, type Effect, type LensState } from "./state";
+import { hint, initial, reduce, showsWebGlow, type Action, type Effect, type LensState } from "./state";
 import type { Still } from "./wire";
 import { wsToken } from "../shell";
 import "./lens.css";
@@ -85,6 +85,9 @@ export function LensApp() {
 const Still = memo(function Still({ src, shown, leaving }: { src: string; shown: boolean; leaving: boolean }) {
   return <img className={"lx-still" + (shown ? " on" : "") + (leaving ? " leaving" : "")} src={src} alt="" draggable={false} decoding="sync" />;
 });
+
+/** The hint pill's top: below the notch, and below the glow's band (36 pt open) on any display. */
+const pillTop = (safeTop: number) => Math.max(safeTop + 14, 48);
 
 /** Whether smart pick's hover outline may show now. */
 const hovers = (st: LensState) => st.phase === "open" && !!st.regions && !st.sel && !st.card && st.candidate < 0 && !st.pendingPick;
@@ -166,6 +169,7 @@ function Overlay() {
       case "shell_hello": void askShell(); break;
       case "later": later(() => dispatch(e.action), e.ms); break;
       case "revoke": try { URL.revokeObjectURL(e.url); } catch { /* gone */ } break;
+      case "glow": void door.current?.glow(e.selected); break;
       case "focus_composer": {
         const el = composer.current;
         if (!el) break;
@@ -439,7 +443,9 @@ function Overlay() {
     <div className={"lx" + (s.phase === "closing" ? " closing" : "")} data-phase={s.phase}>
       {s.still && <Still src={s.still} shown={showStill} leaving={false} />}
       <div className={"lx-layer lx-scrim" + (open && !s.sel && !s.card ? " on" : "")} />
-      <EdgeGlow phase={glowPhase} phaseAt={s.phaseAt} toArmMs={s.toArmMs} via={s.via} reduced={reduced} selected={!!s.sel} W={s.W} H={s.H} />
+      {showsWebGlow(s) && (
+        <EdgeGlow phase={glowPhase} phaseAt={s.phaseAt} toArmMs={s.toArmMs} via={s.via} reduced={reduced} selected={!!s.sel} notch={s.why === "notch"} W={s.W} H={s.H} />
+      )}
       {open && (
         <div
           ref={surface}
@@ -458,7 +464,7 @@ function Overlay() {
       <div className="lx-hover" ref={hoverEl} aria-hidden="true" />
       {s.pendingPick && <div className="lx-dot" style={{ left: s.pendingPick.at.x, top: s.pendingPick.at.y }} aria-hidden="true" />}
       {pill && (
-        <div className="lx-pill" style={{ top: s.safeTop + 14 }} role="status">
+        <div className="lx-pill" style={{ top: pillTop(s.safeTop) }} role="status">
           <span>{pill}</span>
           <button className="lx-x" aria-label="Close Search Screen" onClick={() => dispatch({ t: "close", why: "cancel" })}>
             <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round"><path d="M6 6l12 12M18 6L6 18" /></svg>

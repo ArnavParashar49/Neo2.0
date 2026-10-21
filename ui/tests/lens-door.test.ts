@@ -1,5 +1,5 @@
 // Search Screen's doors (src/lens/door.ts, src/lens/socket.ts), with a fake Tauri and a fake
-// socket: the shell is asked exactly its five commands and its phase event; outside NEO.app (the
+// socket: the shell is asked exactly its six commands and its phase event; outside NEO.app (the
 // notch, a plain tab) there is no door at all; the line to the core carries the ticket, reads the
 // still and the messages, tries again at most three times in five seconds, and keeps nothing.
 import { test } from "node:test";
@@ -9,7 +9,7 @@ import { LensSocket, type SocketLike } from "../src/lens/socket.ts";
 
 const T = "cd".repeat(32);
 
-test("the door invokes exactly the shell's five commands, and hears only well-formed phases", async () => {
+test("the door invokes exactly the shell's six commands, and hears only well-formed phases", async () => {
   const calls: [string, unknown][] = [];
   let heard: ((p: unknown) => void) | null = null;
   const door = makeDoor({
@@ -21,9 +21,12 @@ test("the door invokes exactly the shell's five commands, and hears only well-fo
   await door.close("esc");
   await door.peek(true);
   await door.allowSc();
+  await door.glow(true);
   assert.deepEqual(calls.map((c) => c[0]), [...COMMANDS]);
+  assert.equal(COMMANDS.length, 6);
   assert.deepEqual(calls[2][1], { why: "esc" });
   assert.deepEqual(calls[3][1], { hidden: true });
+  assert.deepEqual(calls[5][1], { selected: true }, "lens_glow says only whether an area is selected");
   const got: PhaseEvent[] = [];
   const off = await door.onPhase((e) => got.push(e));
   heard!({ g: 1, phase: "warm" });
@@ -40,6 +43,7 @@ test("a refused command is quiet; a refused hello means nothing to show", async 
   assert.equal(await door.hello(), null);
   await door.close("esc"); // no throw
   await door.peek(false);
+  await door.glow(false);
 });
 
 test("outside NEO.app there is no door (the notch hosts the chat, never this page)", async () => {

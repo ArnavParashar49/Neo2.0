@@ -8,7 +8,8 @@
 //! - Search Screen's overlay (lens.rs): the window made a non-activating panel (it takes the keys
 //!   without making NEO the active app, so the user's app keeps its full-screen Space, its menu bar
 //!   and its playing video), raised above everything, the displays and where the pointer is, a
-//!   trackpad tick, the Mac's accessibility settings, a VoiceOver announcement, a locked screen.
+//!   trackpad tick, the Mac's accessibility settings, a VoiceOver announcement, a locked screen,
+//!   and the view that hosts its glow above the page (glow.rs draws in it; it never takes a click).
 
 use objc2::encode::{Encode, Encoding};
 use objc2::runtime::{AnyClass, AnyObject, Bool, ClassBuilder, Sel};
@@ -329,6 +330,95 @@ unsafe fn find_web_view(view: *mut AnyObject, depth: usize) -> *mut AnyObject {
         }
     }
     std::ptr::null_mut()
+}
+
+// ---- the glow's view (glow.rs) ----------------------------------------------------------------------
+
+/// The glow is above the page but never in the way: every click, move and cursor goes to the page.
+extern "C" fn glow_hit_test(_this: &AnyObject, _sel: Sel, _point: NSPointC) -> *mut AnyObject {
+    std::ptr::null_mut()
+}
+extern "C" fn glow_no(_this: &AnyObject, _sel: Sel) -> Bool {
+    Bool::NO
+}
+
+/// `NeoLensGlowView : NSView`, made once: a layer-hosting view that draws nothing itself.
+fn glow_view_class() -> Option<&'static AnyClass> {
+    static CLASS: OnceLock<usize> = OnceLock::new();
+    let ptr = *CLASS.get_or_init(|| {
+        let name = c"NeoLensGlowView";
+        if let Some(c) = AnyClass::get(name) {
+            return c as *const AnyClass as usize;
+        }
+        let Some(mut b) = ClassBuilder::new(name, class!(NSView)) else { return 0 };
+        unsafe {
+            b.add_method(sel!(hitTest:), glow_hit_test as extern "C" fn(_, _, _) -> _);
+            b.add_method(sel!(isOpaque), glow_no as extern "C" fn(_, _) -> _);
+            b.add_method(sel!(acceptsFirstResponder), glow_no as extern "C" fn(_, _) -> _);
+        }
+        b.register() as *const AnyClass as usize
+    });
+    (ptr != 0).then(|| unsafe { &*(ptr as *const AnyClass) })
+}
+
+/// NSViewWidthSizable | NSViewHeightSizable.
+const SIZABLE: usize = 2 | 16;
+const NS_WINDOW_ABOVE: isize = 1;
+
+/// A view hosting `layer`, filling the window's content view, above its web view. Returns the view
+/// (+1 retained, for `lens_glow_detach`), or null when it can't be made.
+///
+/// # Safety
+/// `ns` must be a live `NSWindow*` and `layer` a live `CALayer*`; main thread.
+pub unsafe fn lens_glow_attach(ns: *mut AnyObject, layer: *mut AnyObject) -> *mut AnyObject {
+    let Some(cls) = glow_view_class() else { return std::ptr::null_mut() };
+    let content: *mut AnyObject = msg_send![ns, contentView];
+    if content.is_null() || layer.is_null() {
+        return std::ptr::null_mut();
+    }
+    let bounds: NSRectC = msg_send![content, bounds];
+    let view: *mut AnyObject = msg_send![cls, alloc];
+    let view: *mut AnyObject = msg_send![view, initWithFrame: bounds];
+    if view.is_null() {
+        return view;
+    }
+    let _: () = msg_send![view, setAutoresizingMask: SIZABLE];
+    // Layer-hosting: the layer first, then wantsLayer (the view never draws into it).
+    let _: () = msg_send![view, setLayer: layer];
+    let _: () = msg_send![view, setWantsLayer: true];
+    let web = find_web_view(content, 0);
+    let parent: *mut AnyObject = if web.is_null() { std::ptr::null_mut() } else { msg_send![web, superview] };
+    if !web.is_null() && parent == content {
+        let _: () = msg_send![content, addSubview: view, positioned: NS_WINDOW_ABOVE, relativeTo: web];
+    } else {
+        let _: () = msg_send![content, addSubview: view];
+    }
+    view
+}
+
+/// The glow's view stays the window's top view (re-added if something went above it).
+///
+/// # Safety
+/// `view` must come from `lens_glow_attach`; main thread.
+pub unsafe fn lens_glow_front(view: *mut AnyObject) {
+    let parent: *mut AnyObject = msg_send![view, superview];
+    if parent.is_null() {
+        return;
+    }
+    let subs: *mut AnyObject = msg_send![parent, subviews];
+    let last: *mut AnyObject = if subs.is_null() { std::ptr::null_mut() } else { msg_send![subs, lastObject] };
+    if last != view {
+        let _: () = msg_send![parent, addSubview: view, positioned: NS_WINDOW_ABOVE, relativeTo: std::ptr::null_mut::<AnyObject>()];
+    }
+}
+
+/// The glow's view goes (its window is going, or the glow is made again).
+///
+/// # Safety
+/// `view` must come from `lens_glow_attach`, released here once; main thread.
+pub unsafe fn lens_glow_detach(view: *mut AnyObject) {
+    let _: () = msg_send![view, removeFromSuperview];
+    let _: () = msg_send![view, release];
 }
 
 /// Off screen, keys given back (the fallback re-activates the app that had them).

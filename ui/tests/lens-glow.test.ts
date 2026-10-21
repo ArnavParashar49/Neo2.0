@@ -3,7 +3,8 @@
 // cancel; with Reduce Motion, still colours and short fades only.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { BAND, DUR, OPACITY, PERIOD, breathes, glowAt, glowFrames, glowSpan, spring, type GlowCtx } from "../src/lens/glow.ts";
+import { readFileSync } from "node:fs";
+import { BAND, DUR, OPACITY, PERIOD, breathes, glowAt, glowFrames, glowSpan, spring, type GlowCtx, type GlowPhase } from "../src/lens/glow.ts";
 
 const ctx: GlowCtx = { toArmMs: 550, reduced: false, via: "hold" };
 
@@ -83,4 +84,33 @@ test("the curve becomes keyframes from where a late phase already is", () => {
   const done = glowFrames("preview", 999, ctx);
   assert.equal(done.ms, 0);
   assert.equal(done.frames[1].opacity, OPACITY.preview);
+});
+
+test("glow.ts matches the shared fixture (the shell's glow.rs is held to the same numbers)", () => {
+  const f = JSON.parse(readFileSync(new URL("./fixtures/lens-glow.json", import.meta.url), "utf8")) as {
+    phases: GlowPhase[]; ctxs: GlowCtx[]; ms: number[]; spans: number[]; looks: [number, number, number][];
+  };
+  let k = 0, s = 0;
+  for (const p of f.phases) {
+    for (const c of f.ctxs) {
+      assert.ok(Math.abs(glowSpan(p, c) - f.spans[s++]) < 1e-9, `span ${p}`);
+      for (const ms of f.ms) {
+        const l = glowAt(p, ms, c), [band, opacity, period] = f.looks[k++];
+        assert.ok(Math.abs(l.band - band) < 1e-9 && Math.abs(l.opacity - opacity) < 1e-9 && Math.abs(l.period - period) < 1e-9, `${p} at ${ms}`);
+      }
+    }
+  }
+  assert.equal(k, f.looks.length);
+  assert.ok(k > 500);
+});
+
+test("an area selected: a 20 pt band in 200 ms; into the notch: a 200 ms fade", () => {
+  assert.equal(BAND.selected, 20);
+  assert.equal(DUR.select, 200);
+  const from = { band: 20, opacity: 1, period: 8 };
+  assert.equal(glowSpan("closing", { ...ctx, from, notch: true }), 200);
+  assert.ok(glowAt("closing", 160, { ...ctx, from, notch: true }).opacity > 0.15, "still fading at 160");
+  assert.equal(glowAt("closing", 200, { ...ctx, from, notch: true }).opacity, 0);
+  assert.equal(glowAt("closing", 100, { ...ctx, from, notch: true }).band, 20, "the band held");
+  assert.equal(glowSpan("closing", { ...ctx, reduced: true, notch: true }), DUR.reduced);
 });

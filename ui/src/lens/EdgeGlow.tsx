@@ -1,8 +1,11 @@
-// The glow along the screen's edges. Four soft bands and four crisp rims, each holding a long strip
-// of NEO's five colours that slides along its edge; with the strips' offsets set from the screen's
-// perimeter, the colours travel round the screen as one ring, clockwise. Only transforms and
-// opacity animate (the compositor's work: nothing repaints per frame), and each phase's curve
-// (./glow.ts) is sampled into keyframes from wherever the phase already is.
+// The glow along the screen's edges, drawn by the page — only when NEO.app's shell can't draw it
+// natively (`glow: "web"`; ui/src-tauri/src/glow.rs is the glow everywhere else). Four soft bands
+// and four crisp rims, each holding a long strip of NEO's five colours that slides along its edge;
+// with the strips' offsets set from the screen's perimeter, the colours travel round the screen as
+// one ring, clockwise. Only transforms and opacity animate, each phase's curve (./glow.ts) is
+// sampled into keyframes from wherever the phase already is, and nothing is display-sized: each
+// edge is its own group (the phase's opacity, the dim over an area and the breathing are carried by
+// the four edge-sized groups, never by a full-screen wrapper).
 
 import { useLayoutEffect, useMemo, useRef } from "react";
 import { BAND, OPACITY, PERIOD, breathes, glowAt, glowFrames, type GlowCtx, type GlowPhase, type Look } from "./glow.ts";
@@ -19,6 +22,8 @@ interface Props {
   via: string;
   reduced: boolean;
   selected: boolean;
+  /** Closing because the area went into the notch (a slightly longer fade). */
+  notch: boolean;
   W: number;
   H: number;
 }
@@ -42,8 +47,9 @@ const scaleFor = (edge: Edge, band: number) => {
   return edge === "top" || edge === "bottom" ? `scaleY(${k})` : `scaleX(${k})`;
 };
 
-export function EdgeGlow({ phase, phaseAt, toArmMs, via, reduced, selected, W, H }: Props) {
+export function EdgeGlow({ phase, phaseAt, toArmMs, via, reduced, selected, notch, W, H }: Props) {
   const root = useRef<HTMLDivElement>(null);
+  const groups = useRef<Record<Edge, HTMLDivElement | null>>({ top: null, right: null, bottom: null, left: null });
   const bands = useRef<Record<Edge, HTMLDivElement | null>>({ top: null, right: null, bottom: null, left: null });
   const flowAnims = useRef<Animation[]>([]);
   const phaseAnims = useRef<Animation[]>([]);
@@ -77,23 +83,20 @@ export function EdgeGlow({ phase, phaseAt, toArmMs, via, reduced, selected, W, H
     const prev = last.current;
     const was = prev ? glowAt(prev.phase, now - prev.at, prev.ctx) : undefined;
     const carry = phase === "cancel" || phase === "closing" || (phase === "open" && prev?.phase === "armed");
-    const ctx: GlowCtx = { toArmMs, reduced, via, ...(carry && was ? { from: was } : {}) };
+    const ctx: GlowCtx = { toArmMs, reduced, via, ...(carry && was ? { from: was } : {}), ...(phase === "closing" && notch ? { notch: true } : {}) };
     last.current = { phase, at: phaseAt, ctx };
     const { frames, ms } = glowFrames(phase, Math.max(0, now - phaseAt), ctx);
     phaseAnims.current.forEach((a) => a.cancel());
     phaseAnims.current = [];
     const end: Look = frames[frames.length - 1];
-    const el = root.current;
-    if (!el) return;
+    if (!root.current) return;
     const opts: KeyframeAnimationOptions = { duration: Math.max(1, ms), fill: "forwards", easing: "linear" };
-    if (typeof el.animate === "function") {
-      phaseAnims.current.push(el.animate(frames.map((f) => ({ opacity: f.opacity, offset: f.offset })), opts));
-      for (const e of EDGES) {
-        const b = bands.current[e];
-        if (b) phaseAnims.current.push(b.animate(frames.map((f) => ({ transform: scaleFor(e, f.band), offset: f.offset })), opts));
-      }
-    } else {
-      el.style.opacity = String(end.opacity);
+    for (const e of EDGES) {
+      const g = groups.current[e], b = bands.current[e];
+      if (!g) continue;
+      if (typeof g.animate !== "function") { g.style.opacity = String(end.opacity); continue; }
+      phaseAnims.current.push(g.animate(frames.map((f) => ({ opacity: f.opacity, offset: f.offset })), opts));
+      if (b) phaseAnims.current.push(b.animate(frames.map((f) => ({ transform: scaleFor(e, f.band), offset: f.offset })), opts));
     }
     // Still colours under Reduce Motion; otherwise as fast as the phase says.
     rate.current = end.period > 0 ? (PERIOD.open / end.period) : 0;
@@ -104,23 +107,22 @@ export function EdgeGlow({ phase, phaseAt, toArmMs, via, reduced, selected, W, H
         if (a.playState === "paused") a.play();
       }
     }
-  }, [phase, phaseAt, toArmMs, reduced, via]);
+  }, [phase, phaseAt, toArmMs, reduced, via, notch]);
 
   const strip = (edge: Edge) => <div className="lx-flow" data-edge={edge} style={geo[edge].style} />;
+  const breathing = breathes(phase, reduced, selected);
   return (
     <div className="lx-glow" ref={root} aria-hidden="true">
-      <div className="lx-glow-dim" style={{ opacity: selected ? OPACITY.selected : 1 }}>
-        <div className={"lx-glow-breathe" + (breathes(phase, reduced, selected) ? " on" : "")}>
-          {EDGES.map((e) => (
-            <div key={`b-${e}`} className={`lx-band ${e}`} ref={(n) => { bands.current[e] = n; }} style={{ transform: scaleFor(e, 0) }}>
-              {strip(e)}
+      {EDGES.map((e) => (
+        <div key={e} className={`lx-edge ${e}`} ref={(n) => { groups.current[e] = n; }}>
+          <div className="lx-edge-dim" style={{ opacity: selected ? OPACITY.selected : 1 }}>
+            <div className={"lx-edge-breathe" + (breathing ? " on" : "")}>
+              <div className={`lx-band ${e}`} ref={(n) => { bands.current[e] = n; }} style={{ transform: scaleFor(e, 0) }}>{strip(e)}</div>
+              <div className={`lx-rim ${e}`}>{strip(e)}</div>
             </div>
-          ))}
-          {EDGES.map((e) => (
-            <div key={`r-${e}`} className={`lx-rim ${e}`}>{strip(e)}</div>
-          ))}
+          </div>
         </div>
-      </div>
+      ))}
     </div>
   );
 }

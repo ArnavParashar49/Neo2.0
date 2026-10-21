@@ -29,6 +29,11 @@
 //! (a key the page didn't take) closes it, and so does the page falling silent (it says
 //! `lens_painted` every second while open; silent for PAGE_SILENT, the watchdog closes it).
 //!
+//! The glow along the screen's edges is the shell's own (glow.rs: Core Animation in a view above the
+//! page): each phase function below starts its curve the moment the phase begins, with no IPC and no
+//! page; the page only says whether an area is selected (`lens_glow`). If the glow's view can't be
+//! made, the phase events say `glow: "web"` and the page draws it as before.
+//!
 //! The ticket (32 bytes from /dev/urandom, 64 lowercase hex) admits the page to the core's websocket
 //! as its one `lens` client. The core hears it over the socket only the two of them share
 //! (`lens_freeze`, revoked by `lens_closed`); the page gets it from `lens_hello`, a command that
@@ -47,6 +52,7 @@ use tauri::webview::{Color, NewWindowResponse};
 use tauri::{AppHandle, Emitter, Manager, Runtime, Url, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent};
 
 use crate::chord::{HoldEvent, LensGate};
+use crate::glow::{self, GlowPhase, PhaseIn};
 use crate::{core, frame, keys, native, perms};
 
 /// The window's label, and the route its page shows.
@@ -256,7 +262,8 @@ fn extras(s: &St) -> serde_json::Value {
         "increase_contrast": contrast,
         "voiceover": voiceover,
         "safe_top": s.display.map(|d| d.safe_top).unwrap_or(0.0),
-        "display": s.display.map(|d| serde_json::json!({"x": d.x, "y": d.y, "w": d.w, "h": d.h, "scale": d.scale})),
+        "display": s.display.map(|d| serde_json::json!({"id": d.id, "x": d.x, "y": d.y, "w": d.w, "h": d.h, "scale": d.scale})),
+        "glow": glow::mode(),
         "pointer": s.pointer.map(|(x, y)| serde_json::json!({"x": x, "y": y})),
     })
 }
@@ -299,6 +306,7 @@ fn place(w: &WebviewWindow, d: &Display) {
     if let Some(ns) = ns(w) {
         let _ = unsafe { frame::apply(ns, d.x, d.y, d.w, d.h) };
     }
+    glow::resize(w.app_handle(), d);
 }
 
 /// The overlay's window, made if there is none (main thread). None: it can't be made now.
@@ -358,16 +366,27 @@ fn window(app: &AppHandle) -> Option<WebviewWindow> {
             destroyed(&handle, id);
         }
     });
-    let panel = match ns(&w) {
+    let (panel, glow) = match ns(&w) {
         Some(ns) => unsafe {
             let panel = native::lens_make_panel(ns);
             native::lens_setup(ns);
-            panel
+            (panel, glow::attach(ns))
         },
-        None => false,
+        None => (false, false),
     };
     if !panel {
         core::log("lens: no panel class — activating instead");
+    }
+    if glow {
+        // Its strips baked now, for the display the pointer is on (the first hold finds them ready).
+        if let Some((d, _)) = display_now() {
+            glow::resize(app, &d);
+        }
+    } else {
+        static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if !SAID.swap(true, Ordering::SeqCst) {
+            core::log("lens: no native glow — the page draws it");
+        }
     }
     if let Some(mut s) = lock(app) {
         s.panel = panel;
@@ -393,6 +412,7 @@ fn destroyed(app: &AppHandle, id: u64) {
     };
     app.state::<Lens>().gate.open.store(false, Ordering::SeqCst);
     native::lens_not_keyable();
+    glow::detach(app);
     if let Some(t) = ticket {
         tell_closed(app, &t, "gone");
     }
@@ -419,6 +439,7 @@ fn end_fade(app: &AppHandle) {
         if let Some(ns) = app.get_webview_window(LABEL).as_ref().and_then(ns) {
             unsafe { native::lens_order_out(ns) };
         }
+        glow::hide(app);
     }
 }
 
@@ -472,6 +493,7 @@ fn warm(app: &AppHandle, g: u64) {
     if let Some(w) = w {
         ready(&w, d.map(|x| x.0), painted);
     }
+    glow::phase(app, PhaseIn::of(GlowPhase::Warm));
 }
 
 fn preview(app: &AppHandle, g: u64, to_arm_ms: u32) {
@@ -493,6 +515,7 @@ fn preview(app: &AppHandle, g: u64, to_arm_ms: u32) {
             ready(&w, display, false);
         }
     }
+    glow::phase(app, PhaseIn { phase: GlowPhase::Preview, to_arm_ms: to_arm_ms as f64, via_hold: true, notch: false });
 }
 
 fn arm(app: &AppHandle, g: u64) {
@@ -527,6 +550,7 @@ fn arm(app: &AppHandle, g: u64) {
             place(&w, &d);
         }
     }
+    glow::phase(app, PhaseIn::of(GlowPhase::Armed));
     unsafe { native::lens_haptic() };
 }
 
@@ -543,13 +567,14 @@ fn show_open(app: &AppHandle) {
         cancel(app, None, "gone");
         return;
     };
-    let (sid, panel, ticket) = {
+    let (sid, panel, ticket, via) = {
         let Some(mut s) = lock(app) else { return };
         s.phase = Phase::Open;
         s.since = Some(Instant::now());
         s.alive = Some(Instant::now()); // (the page's first "alive" is due within PAGE_SILENT)
-        (s.sid, s.panel, s.ticket.clone())
+        (s.sid, s.panel, s.ticket.clone(), s.via)
     };
+    glow::phase(app, PhaseIn { phase: GlowPhase::Open, to_arm_ms: 0.0, via_hold: via == Via::Hold, notch: false });
     app.state::<Lens>().gate.open.store(true, Ordering::SeqCst);
     if let Some(ns) = ns(&w) {
         unsafe { native::lens_make_key(ns, panel) };
@@ -582,6 +607,7 @@ fn cancel(app: &AppHandle, g: Option<u64>, why: &'static str) {
         emit(app, &s, "cancel");
         (s.sid, s.ticket.take())
     };
+    glow::phase(app, PhaseIn::of(GlowPhase::Cancel));
     if let Some(t) = ticket {
         tell_closed(app, &t, "cancel");
     }
@@ -604,6 +630,7 @@ pub fn close(app: &AppHandle, why: &str) {
                 emit(app, &s, "closing");
                 (s.sid, s.ticket.take())
             };
+            glow::phase(app, PhaseIn { phase: GlowPhase::Closing, to_arm_ms: 0.0, via_hold: true, notch: why == "notch" });
             app.state::<Lens>().gate.open.store(false, Ordering::SeqCst);
             native::lens_not_keyable();
             if let Some(ns) = app.get_webview_window(LABEL).as_ref().and_then(ns) {
@@ -636,6 +663,7 @@ fn after_fade(app: &AppHandle, sid: u64) {
                 if let Some(ns) = h.get_webview_window(LABEL).as_ref().and_then(ns) {
                     unsafe { native::lens_order_out(ns) };
                 }
+                glow::hide(&h);
             }
         });
         std::thread::sleep(DESTROY_AFTER);
@@ -930,6 +958,17 @@ pub fn lens_peek(app: AppHandle, window: WebviewWindow, hidden: bool) -> Result<
     Ok(())
 }
 
+/// The page selected an area (true) or let go of it (false): the glow narrows and dims, or comes back.
+/// Only while open; at any other moment it changes nothing.
+#[tauri::command]
+pub fn lens_glow(app: AppHandle, window: WebviewWindow, selected: bool) -> Result<(), String> {
+    check(&app, &window)?;
+    if lock(&app).map(|s| s.phase == Phase::Open).unwrap_or(false) {
+        glow::selected(&app, selected);
+    }
+    Ok(())
+}
+
 /// The permission card's "Open Privacy Settings": System Settings at Screen Recording, and close.
 #[tauri::command]
 pub fn lens_allow_sc(app: AppHandle, window: WebviewWindow) -> Result<(), String> {
@@ -1065,6 +1104,36 @@ mod tests {
         assert!(hello.contains("prepare_soon(app)") && hello.contains("w.destroy()"), "made when on, gone when off");
         let painted = body.split("fn lens_painted(").nth(1).unwrap().split("\n}\n").next().unwrap();
         assert!(painted.contains("s.alive = Some(Instant::now())"));
+    }
+
+    #[test]
+    fn the_shell_drives_the_glow_at_every_phase_and_the_page_only_says_selected() {
+        let src = include_str!("lens.rs");
+        let body = src.split("#[cfg(test)]").next().unwrap();
+        let f = |name: &str| body.split(&format!("fn {name}(")).nth(1).unwrap().split("\n}\n").next().unwrap().to_string();
+        for (name, call) in [
+            ("warm", "GlowPhase::Warm"),
+            ("preview", "GlowPhase::Preview"),
+            ("arm", "GlowPhase::Armed"),
+            ("show_open", "GlowPhase::Open"),
+            ("cancel", "GlowPhase::Cancel"),
+            ("close", "GlowPhase::Closing"),
+        ] {
+            assert!(f(name).contains("glow::phase(app,") && f(name).contains(call), "{name}");
+        }
+        assert!(f("after_fade").contains("glow::hide(&h)"), "nothing ticks once it ordered out");
+        assert!(f("end_fade").contains("glow::hide(app)"));
+        assert!(f("destroyed").contains("glow::detach(app)"));
+        assert!(f("place").contains("glow::resize("));
+        assert!(f("window").contains("glow::attach(ns)"));
+        // The page's one glow command answers only its own window, and only while open.
+        let cmd = f("lens_glow");
+        assert!(cmd.starts_with("app: AppHandle, window: WebviewWindow, selected: bool)"));
+        assert!(cmd.contains("check(&app, &window)?;") && cmd.contains("Phase::Open") && cmd.contains("glow::selected(&app, selected)"));
+        // The phase events say who draws the glow and which display it is on — still never the ticket.
+        let extras = f("extras");
+        assert!(extras.contains("\"glow\": glow::mode()") && extras.contains("\"id\": d.id"));
+        assert!(!extras.contains("ticket"));
     }
 
     #[test]

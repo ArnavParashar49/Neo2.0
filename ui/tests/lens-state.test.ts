@@ -4,7 +4,7 @@
 // mode, stale answers dropped, follow-ups, adjustments that re-ask only when they moved enough.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { PICK_WAIT_MS, answerProblem, hint, initial, privacyLine, reduce, replyProblem, type Action, type Effect, type LensState } from "../src/lens/state.ts";
+import { PICK_WAIT_MS, answerProblem, hint, initial, privacyLine, reduce, replyProblem, showsWebGlow, type Action, type Effect, type LensState } from "../src/lens/state.ts";
 import { box } from "../src/lens/geometry.ts";
 import type { CoreMsg, LensHello, Regions, Sent } from "../src/lens/wire.ts";
 
@@ -303,4 +303,32 @@ test("the mic says Listening while the core listens for a question about the are
   assert.equal(s.coreState, "listening");
   [s] = run(s, msg({ t: "lens_listening", data: { on: false } }));
   assert.equal(s.coreState, "");
+});
+
+test("the shell's glow hears once when an area appears, and only from a page whose glow is native", () => {
+  const native = run(opened(), phase(1, "open", { glow: "native", display: { id: 7, x: 0, y: 0, w: W, h: H, scale: 2 } }))[0];
+  assert.equal(native.glow, "native");
+  assert.equal(native.displayId, 7);
+  let [s, fx] = run(native, { t: "select", box: box(100, 100, 300, 200), how: "drag" });
+  assert.deepEqual(fx.filter((e) => e.t === "glow"), [{ t: "glow", selected: true }]);
+  // A new area replacing it: still selected, nothing more to say.
+  [s, fx] = run(s, { t: "select", box: box(500, 100, 300, 200), how: "drag" });
+  assert.deepEqual(fx.filter((e) => e.t === "glow"), []);
+  // An adjusted area, answers, keys: nothing.
+  [s, fx] = run(s, { t: "adjusted", box: box(520, 100, 300, 200) }, msg({ t: "lens_answer", data: { sel: 2, state: "thinking", actions: [] } }));
+  assert.deepEqual(fx.filter((e) => e.t === "glow"), []);
+  // The page's own glow (the shell couldn't make one): the shell is never asked.
+  const [, wfx] = run(run(opened(), phase(1, "open", { glow: "web" }))[0], { t: "select", box: box(100, 100, 300, 200), how: "drag" });
+  assert.deepEqual(wfx.filter((e) => e.t === "glow"), []);
+  // The glow mode outlives a session (it is the shell's); a phase without the word keeps it.
+  assert.equal(run(native, phase(2, "warm"))[0].glow, "native");
+});
+
+test("a page whose glow is native never draws one itself", () => {
+  assert.equal(showsWebGlow({ glow: "native" }), false);
+  assert.equal(showsWebGlow({ glow: "web" }), true);
+  assert.equal(showsWebGlow({}), true, "an older shell says nothing: the page draws it");
+  assert.equal(showsWebGlow(null), true);
+  assert.equal(showsWebGlow(initial(W, H)), true);
+  assert.equal(showsWebGlow(run(initial(W, H), phase(1, "warm", { glow: "native" }))[0]), false);
 });

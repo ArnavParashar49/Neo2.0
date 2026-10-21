@@ -1,5 +1,5 @@
 // Search Screen's door to NEO.app's shell (ui/src-tauri/src/lens.rs): the phase events of its own
-// window, and five commands that answer only that window. Tauri's modules are loaded lazily and
+// window, and six commands that answer only that window. Tauri's modules are loaded lazily and
 // only inside NEO.app — never in the notch (NotchHub hosts the chat page, not this one), never in
 // a plain browser tab.
 
@@ -17,7 +17,10 @@ export interface PhaseEvent {
   increase_contrast?: boolean;
   voiceover?: boolean;
   safe_top?: number;
-  display?: { x: number; y: number; w: number; h: number; scale: number } | null;
+  /** The overlay's display (`id`: its CGDirectDisplayID — the notch's island may be on another). */
+  display?: { id?: number; x: number; y: number; w: number; h: number; scale: number } | null;
+  /** Who draws the glow: the shell ("native", Core Animation) or this page ("web": the shell couldn't). */
+  glow?: "native" | "web";
   /** Where the pointer was on the display (display-local points): Return picks the window under it. */
   pointer?: { x: number; y: number } | null;
 }
@@ -40,6 +43,8 @@ export interface Door {
   close(why: string): Promise<void>;
   peek(hidden: boolean): Promise<void>;
   allowSc(): Promise<void>;
+  /** An area is selected (or no longer is): the shell's glow narrows and dims, or comes back. */
+  glow(selected: boolean): Promise<void>;
   onPhase(cb: (ev: PhaseEvent) => void): Promise<() => void>;
 }
 
@@ -51,7 +56,7 @@ export interface DoorDeps {
 
 export const PHASE_EVENT = "neo://lens-phase";
 /** Exactly these: lens.rs answers them for this window alone. */
-export const COMMANDS = ["lens_hello", "lens_painted", "lens_close", "lens_peek", "lens_allow_sc"] as const;
+export const COMMANDS = ["lens_hello", "lens_painted", "lens_close", "lens_peek", "lens_allow_sc", "lens_glow"] as const;
 
 const quiet = async (p: Promise<unknown>) => { try { await p; } catch { /* the shell said no, or is gone */ } };
 
@@ -69,6 +74,7 @@ export function makeDoor(deps: DoorDeps): Door {
     close: (why) => quiet(deps.invoke("lens_close", { why: String(why).slice(0, 16) })),
     peek: (hidden) => quiet(deps.invoke("lens_peek", { hidden })),
     allowSc: () => quiet(deps.invoke("lens_allow_sc")),
+    glow: (selected) => quiet(deps.invoke("lens_glow", { selected: !!selected })),
     onPhase: (cb) => deps.listen(PHASE_EVENT, (p) => {
       if (p && typeof p === "object" && typeof (p as PhaseEvent).g === "number" && typeof (p as PhaseEvent).phase === "string") cb(p as PhaseEvent);
     }),
