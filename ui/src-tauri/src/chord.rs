@@ -16,6 +16,10 @@
 //! the same events, never a different handling of them: nothing is swallowed, nothing becomes key
 //! until the user lets go cleanly, and any key, click, scroll, ⇧ or ⌃ during the hold calls it off
 //! (it was a shortcut — ⌥⌘Esc, ⌥⌘D, NotchHub's ⌥⌘V — and the key reaches the app as it always did).
+//! So does a mouse button that was already down: ⌥⌘ pressed in the middle of a drag (Finder's
+//! "make alias", a tab dragged with ⌥⌘) is the drag's, never Search Screen — a button let go during
+//! the hold calls it off, and one still held when it would warm or arm keeps it from doing so. (The
+//! quick tap reads those events exactly as before: a button let go never changes it.)
 //!
 //! What the hold says goes out as `HoldEvent`s: Warm (make the overlay ready, invisible), Preview
 //! (the glow starts building), Arm (held long enough: the still is taken), Commit (let go cleanly:
@@ -130,6 +134,15 @@ pub enum Why {
     Paused,
 }
 
+/// NSEvent's `pressedMouseButtons`: which mouse buttons are down right now, as a bit mask (0: none).
+/// Read by the timer thread only — an AppKit class property any thread may read; it needs no
+/// permission (the window server's own state, not the keyboard's).
+fn mouse_buttons_down() -> bool {
+    use objc2::{class, msg_send};
+    let mask: usize = unsafe { msg_send![class!(NSEvent), pressedMouseButtons] };
+    mask != 0
+}
+
 impl Why {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -165,6 +178,8 @@ pub struct Gate {
     pub secure: bool,
     /// ⌥ and ⌘ are really down (not latched).
     pub physical: bool,
+    /// A mouse button is down (a drag the keys were pressed in the middle of).
+    pub button: bool,
 }
 
 /// What the shell tells the hold (lens.rs sets it from the core's hello; lib.rs owns it).
@@ -271,6 +286,14 @@ fn step_hold(st: &mut State, kind: CGEventType, flags: CGEventFlags, now: Instan
             }
             (false, ev)
         }
+        // A button let go during the gesture was down before it (a drag the keys joined): no hold.
+        // The tap's own reading never changes for it (`dirty` untouched), exactly as before.
+        CGEventType::LeftMouseUp | CGEventType::RightMouseUp | CGEventType::OtherMouseUp => {
+            if !st.active {
+                return (false, None);
+            }
+            (false, st.stop(Why::Click))
+        }
         CGEventType::KeyDown
         | CGEventType::LeftMouseDown
         | CGEventType::RightMouseDown
@@ -302,7 +325,7 @@ fn tick(st: &mut State, now: Instant, gate: &Gate) -> Option<HoldEvent> {
     let held = now.saturating_duration_since(at);
     match st.phase {
         Phase::Held if held >= t.warm => {
-            if gate.on && !gate.secure {
+            if gate.on && !gate.secure && !gate.button {
                 st.phase = Phase::Warm;
                 Some(HoldEvent::Warm(g))
             } else {
@@ -318,6 +341,8 @@ fn tick(st: &mut State, now: Instant, gate: &Gate) -> Option<HoldEvent> {
         Phase::Preview if held >= t.arm => {
             if !gate.on || gate.secure {
                 st.stop(Why::Paused)
+            } else if gate.button {
+                st.stop(Why::Click)
             } else if !gate.physical {
                 st.stop(Why::Sticky)
             } else {
@@ -375,11 +400,12 @@ fn sticky_keys_on() -> bool {
 }
 
 /// ⌥ and ⌘ are really held (the keyboard's own state, not the event's flags). Only Sticky Keys can
-/// make the two differ — it latches a modifier that was let go — so without it the flags are trusted.
+/// make the two differ — it latches a modifier that was let go — so without it the flags are trusted
+/// and the keyboard's state is never read at all.
 fn physically_down() -> bool {
     const HID: i32 = 1; // kCGEventSourceStateHIDSystemState
     let down = |keys: [u16; 2]| keys.iter().any(|k| unsafe { CGEventSourceKeyState(HID, *k) });
-    (down([55, 54]) && down([58, 61])) || !sticky_keys_on() // ⌘ left/right, ⌥ left/right
+    !sticky_keys_on() || (down([55, 54]) && down([58, 61])) // ⌘ left/right, ⌥ left/right
 }
 
 type Shared = Arc<(Mutex<State>, Condvar)>;
@@ -400,6 +426,9 @@ fn install(shared: Shared, gate: Arc<LensGate>, on_chord: Arc<dyn Fn() + Send + 
             CGEventType::LeftMouseDown,
             CGEventType::RightMouseDown,
             CGEventType::OtherMouseDown,
+            CGEventType::LeftMouseUp,
+            CGEventType::RightMouseUp,
+            CGEventType::OtherMouseUp,
             CGEventType::ScrollWheel,
         ],
         move |_proxy, kind, event| {
@@ -420,6 +449,7 @@ fn install(shared: Shared, gate: Arc<LensGate>, on_chord: Arc<dyn Fn() + Send + 
                 _ => {
                     let fresh = gate.timing();
                     if let Ok(mut st) = lock.lock() {
+                        let before = next_deadline(&st);
                         let (tap, ev) = step_hold(&mut st, kind, event.get_flags(), Instant::now(), &fresh);
                         // Said under the lock, so the shell hears the hold's events in the order they
                         // happened (the timer thread says its own under it too). Both only post to the
@@ -430,8 +460,12 @@ fn install(shared: Shared, gate: Arc<LensGate>, on_chord: Arc<dyn Fn() + Send + 
                         if tap {
                             on_chord();
                         }
+                        // The timer thread is woken only when what it waits for changed (a gesture
+                        // began or ended): never for each key, click or scroll of the day.
+                        if next_deadline(&st) != before {
+                            wake.notify_one();
+                        }
                     }
-                    wake.notify_one();
                 }
             }
             CallbackResult::Keep
@@ -472,6 +506,7 @@ fn timer(shared: Shared, gate: Arc<LensGate>, on_hold: OnHold) {
             on: gate.on.load(Ordering::SeqCst) && !gate.open.load(Ordering::SeqCst),
             secure: secure_input(),
             physical: !arming || physically_down(),
+            button: mouse_buttons_down(),
         };
         st = match lock.lock() {
             Ok(g) => g,
@@ -601,9 +636,9 @@ mod tests {
     // ---- Search Screen's hold (step_hold / tick on a fake clock) ----------------------------------
 
     use super::HoldEvent::{Arm, Cancel, Commit, Preview, Warm};
-    use CGEventType::{RightMouseDown as R, ScrollWheel as S};
+    use CGEventType::{LeftMouseUp as MU, OtherMouseUp as OU, RightMouseDown as R, RightMouseUp as RU, ScrollWheel as S};
 
-    const ON: Gate = Gate { on: true, secure: false, physical: true };
+    const ON: Gate = Gate { on: true, secure: false, physical: true, button: false };
 
     #[derive(Debug, PartialEq)]
     enum Out {
@@ -740,6 +775,53 @@ mod tests {
     }
 
     #[test]
+    fn option_command_in_the_middle_of_a_drag_never_opens_search_screen() {
+        // Finder's "make alias": the button went down before the keys (the tap never saw that while
+        // no gesture was on), ⌥⌘ joins mid-drag and is held past the hold time, the file is dropped.
+        let held = Gate { button: true, ..ON };
+        assert_eq!(hold(1000, held, &[(F, ALT | CMD, 0), (MU, ALT | CMD, 1400), (F, 0, 1500)], 9000), []); // never warms
+        // Dropped during the hold (after it warmed): called off, no commit.
+        let out = hold(1000, ON, &[(F, ALT | CMD, 0), (MU, ALT | CMD, 600), (F, 0, 1500)], 9000);
+        assert_eq!(out.last(), Some(&(600, Out::H(Cancel(1, Why::Click)))));
+        assert_eq!(commits(&out), 0);
+        // …after it armed: the same.
+        let out = hold(1000, ON, &[(F, ALT | CMD, 0), (RU, ALT | CMD, 1200), (F, 0, 1500)], 9000);
+        assert_eq!(out.last(), Some(&(1200, Out::H(Cancel(1, Why::Click)))));
+        assert_eq!(commits(&out), 0);
+        // Dropped before it warmed: nothing was shown, nothing to call off, and no hold after it.
+        assert_eq!(hold(1000, ON, &[(F, ALT | CMD, 0), (OU, ALT | CMD, 100), (F, 0, 1500)], 9000), []);
+        // A button pressed while it builds and still down when it would arm: called off there.
+        let (mut st, t0, fresh) = (State::default(), Instant::now(), Timing::for_hold(1000));
+        step_hold(&mut st, F, f(ALT | CMD), t0, &fresh);
+        tick(&mut st, t0 + MS(300), &ON);
+        tick(&mut st, t0 + MS(500), &ON);
+        assert_eq!(tick(&mut st, t0 + MS(1000), &held), Some(Cancel(1, Why::Click)));
+        assert_eq!(step_hold(&mut st, F, f(0), t0 + MS(1500), &fresh), (false, None));
+    }
+
+    #[test]
+    fn a_button_let_go_never_changes_the_quick_tap() {
+        // The tap reads a gesture exactly as before Search Screen: a mouse-up is no key, no click.
+        assert_eq!(run(&[(M, 0, 0), (F, ALT | CMD, 10), (MU, ALT | CMD, 200), (F, 0, 300)]), [false, false, false, true]);
+        assert_eq!(run(&[(F, ALT | CMD, 0), (MU, ALT | CMD, 50), (F, 0, 100)]), [false, false, true]);
+        let out = hold(1000, ON, &[(F, ALT | CMD, 0), (MU, ALT | CMD, 300), (F, 0, 500)], 9000);
+        assert_eq!(taps(&out), 1);
+        assert_eq!(out.last(), Some(&(500, Out::Tap)));
+    }
+
+    #[test]
+    fn the_timer_is_woken_only_when_its_deadline_moves() {
+        let (mut st, t0, fresh) = (State::default(), Instant::now(), Timing::for_hold(1000));
+        let d0 = next_deadline(&st);
+        step_hold(&mut st, S, f(0), t0, &fresh); // a scroll with no gesture on
+        step_hold(&mut st, K, f(0), t0, &fresh);
+        step_hold(&mut st, MU, f(0), t0, &fresh);
+        assert_eq!(next_deadline(&st), d0); // nothing to wake it for
+        step_hold(&mut st, F, f(ALT | CMD), t0, &fresh);
+        assert_ne!(next_deadline(&st), d0); // a gesture began: it is
+    }
+
+    #[test]
     fn holding_too_long_gives_up() {
         let out = hold(1000, ON, &[(F, ALT | CMD, 0), (F, 0, 5200)], 9000);
         assert_eq!(out[3..], [(5000, Out::H(Cancel(1, Why::TooLong)))]);
@@ -759,6 +841,11 @@ mod tests {
         let out = hold(1000, gate, &[(F, ALT | CMD, 0), (F, 0, 1500)], 9000);
         assert_eq!(out.last(), Some(&(1000, Out::H(Cancel(1, Why::Sticky)))));
         assert_eq!(commits(&out), 0);
+        // The keyboard's own state is read only with Sticky Keys on (it may need Input Monitoring).
+        let src = include_str!("chord.rs");
+        let body = src.split("fn physically_down()").nth(1).unwrap().split("\n}\n").next().unwrap();
+        let (sticky, keys) = (body.find("!sticky_keys_on() ||").unwrap(), body.rfind("down([55, 54])").unwrap());
+        assert!(sticky < keys);
     }
 
     #[test]
