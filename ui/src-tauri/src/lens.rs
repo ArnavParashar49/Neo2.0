@@ -780,6 +780,11 @@ pub fn core_hello(app: &AppHandle, cfg: Option<core::LensCfg>) {
     gate.on.store(on, Ordering::SeqCst);
     if on {
         prepare_soon(app);
+    } else if lock(app).map(|s| s.phase == Phase::Hidden).unwrap_or(false) {
+        // Off (or a core from before Search Screen): the window made ahead goes, its web process with it.
+        if let Some(w) = made(app) {
+            let _ = w.destroy();
+        }
     }
     if let Some(c) = cfg {
         gate.hold_ms.store(c.hold_ms, Ordering::SeqCst);
@@ -1057,7 +1062,7 @@ mod tests {
         let after = body.split("fn after_fade(").nth(1).unwrap().split("\n}\n").next().unwrap();
         assert!(after.contains("gate.on.load") && after.contains("!wanted"), "kept while Search Screen is on");
         let hello = body.split("fn core_hello(").nth(1).unwrap().split("\n}\n").next().unwrap();
-        assert!(hello.contains("prepare_soon(app)"));
+        assert!(hello.contains("prepare_soon(app)") && hello.contains("w.destroy()"), "made when on, gone when off");
         let painted = body.split("fn lens_painted(").nth(1).unwrap().split("\n}\n").next().unwrap();
         assert!(painted.contains("s.alive = Some(Instant::now())"));
     }
