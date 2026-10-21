@@ -92,7 +92,11 @@ def _jpeg(img: Any, quality: int) -> bytes:
 
 
 def _digest(img: Any) -> str:
-    return hashlib.blake2b(img.tobytes(), digest_size=16).hexdigest() + f"{img.width}x{img.height}"
+    """The area's pixels, told apart cheaply (a nearest-neighbour sample, never a copy of all of it)."""
+    from PIL import Image
+
+    sample = img.resize((min(img.width, 256), min(img.height, 256)), Image.NEAREST)
+    return hashlib.blake2b(sample.tobytes(), digest_size=16).hexdigest() + f"{img.width}x{img.height}"
 
 
 def _thumb(img: Any) -> str:

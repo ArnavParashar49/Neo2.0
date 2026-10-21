@@ -286,3 +286,18 @@ def test_close_and_continue_while_it_holds_an_area(monkeypatch):
     assert lv.takes_voice()
     assert asyncio.run(lv.hear("never mind")) == "" and closed == ["done"]
     assert asyncio.run(lv.hear("continue in chat")) == "" and handed == [""]
+
+
+def test_what_is_said_aloud_is_the_first_sentence():
+    assert live.first_sentence("That's a Brand X Runner 4. It comes in three colours.") == "That's a Brand X Runner 4."
+    assert live.first_sentence("No. 5 is the answer, see step 2.") == "No. 5 is the answer, see step 2."  # (too short to cut)
+    assert len(live.first_sentence("word " * 200)) == 240
+
+
+def test_the_same_pixels_are_the_same_area():
+    from PIL import Image
+
+    a = Image.new("RGB", (3000, 2000), (10, 20, 30))
+    b = Image.new("RGB", (3000, 2000), (10, 20, 31))
+    assert live._digest(a) == live._digest(a.copy()) and live._digest(a) != live._digest(b)
+    assert live._digest(a) != live._digest(a.resize((300, 200)))

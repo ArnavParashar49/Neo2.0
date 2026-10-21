@@ -401,10 +401,10 @@ class UIServer:
         lens = (query.get("lens") or [None])[0]
         if lens is not None:  # Search Screen's overlay, or something that says it is
             lens_live = _lens()
-            if ticket is not None or lens_live is None:
+            if ticket is not None:
                 print("[ui] a Search Screen connection was refused: it brought two tickets")
                 return connection.respond(403, "Forbidden\n")
-            if not lens_live.ticket_ok(lens):
+            if lens_live is None or not lens_live.ticket_ok(lens):
                 print("[ui] a Search Screen connection was refused: its ticket isn't the shell's")
                 return connection.respond(403, "Forbidden ticket\n")
             if client_kind(origin, role, lens=True) != "lens":
